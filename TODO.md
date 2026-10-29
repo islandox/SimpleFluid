@@ -21,14 +21,24 @@ acceptance contracts remain open regardless of the current work order.
 
 ### Current priorities
 
-1. Qualify Ordinary `SweptPartition` with default cleanup over the scoped
-   full50, independent accuracy/convergence and physical horizons in
-   [Phase 23 Stage 7](#stage-7--general-vof-and-flow-qualification).
-2. Measure cleanup sensitivity and preserve MPI, conservation, accounting,
-   bounded-resource and rejection contracts. Keep explicit zero-cutoff
-   microscopic completion separate as optional strict-mode robustness.
-3. Qualify opt-in backends and coupled AMR/remap as explicit capability extensions;
-   pursue optimizations and performance claims only when selected.
+Work through the [Stage 7 checklist](#stage-7--general-vof-and-flow-qualification)
+in this dependency order:
+
+1. Diagnose shared pressure–velocity projection and pressure-work/energy behavior
+   before choosing a repair; face continuity alone is insufficient.
+2. Replay the failing native reconstruction faithfully and determine whether it
+   remains an independent blocker after the projection repair.
+3. Resolve Q2 storage/accounting blockers and complete the required refinement
+   sequence, separating capacity results from numerical convergence.
+4. Complete required GeometricFace Q3 coupled motion; recheck DonorCell where
+   shared operators change without erasing its displacement failure.
+5. Complete the existing GeometricFace capillary horizon after shared-flow
+   prerequisites pass; defer DonorCell curvature-support expansion.
+
+Use one decisive reproducer, affected regressions and the relevant qualification
+case per repair: short serial development prefixes, then the full serial horizon,
+then required MPI2/MPI4. SweptPartition stays default; its default-policy tasks
+remain separate, not prerequisites for this algebraic repair sequence.
 
 Other foundation, reacting-flow, RANS, demo, documentation and planar-ALE work
 remains in Phases -1–20.1. Reassess whether Phase 14's optional scalar advection/
@@ -629,18 +639,18 @@ sparse ALE and physical-flow qualification are separate gates.
 
 ### Stage 7 — General VoF and flow qualification
 
-The mandatory baseline is **Ordinary `SweptPartition` with automatic cleanup**
-(cutoff `1e-14`, cumulative caps `1e-13` of each original global phase inventory).
-`GeometricFace` also defaults to cleanup in Ordinary; `DonorCell` and non-Ordinary
-modes disable it and reject positive cutoffs. An explicit zero cutoff is a distinct
-strict policy. No backend, arithmetic mode or tolerance changes are implied here.
+`SweptPartition` remains the default; immediate work targets shared numerical
+blockers and opt-in GeometricFace qualification. The
+[maintained regimes and gates](docs/verification/vof_solver_contracts.md#stage-7-scope-and-priorities)
+define the existing mesh, material, Courant, horizon and resource limits. No
+algorithm, test, numerical tolerance or supported backend changes follow from
+this plan; generic reacting integration remains Stage 8.
 
-The [qualification regimes](docs/verification/vof_solver_contracts.md#stage-7-scope-and-priorities)
-define the admitted meshes, fixture density ratios, actual Courant measures,
-cleanup settings, horizons and MPI coverage. The baseline is source-free,
-closed, nonperiodic convex-native flow with fixed geometry within each step;
-individual fixture results do not qualify every convex mesh or a continuous
-density/Courant range. Generic reacting integration remains Stage 8.
+Ordinary SweptPartition/GeometricFace default to cleanup at `1e-14`, with cumulative
+caps `1e-13` of each original global phase inventory. Controlled algebraic fixtures
+explicitly use zero unless their supported cleanup variant is selected. DonorCell
+and non-Ordinary modes reject positive cutoffs. Record actual policy and retain
+raw/cleaned accounting; raw passes do not qualify enabled cleanup or coupled remap.
 
 #### Implemented foundation and recorded evidence
 
@@ -657,96 +667,116 @@ density/Courant range. Generic reacting integration remains Stage 8.
       correction, interned hierarchy payloads and strict swept-face phase proofs.
       These repairs preserve the original gates and do not close long-flow accuracy.
 
-[Recorded results](docs/verification/vof_solver_contracts.md#recorded-stage-7-evidence)
-include cleanup-enabled full50 and raw-policy algebraic motion/cylinder/transaction
-passes with bounded source-specific scope. Current-tree qualification remains open.
-The named swept full50 fixture now uses automatic defaults; its Boolean helper
-argument records balance work, not cleanup. Historical cleanup-disabled MPI failures
-must not be attributed to that policy or relabelled as passes.
+The latest local handoff and stage status are
+`build/gcc/verification/algebraic_vof_repair_20261030/HANDOFF.md` and
+`stage-status.json` in that directory. They record scoped Q0/Q5 serial/MPI2/MPI4,
+reconstruction and ABI/architecture passes, plus GeometricFace's separate `.125 s`
+single-interface and `.02 s` cylinder endpoints. Q2/Q3/Q4 overall remain incomplete.
+These source-pinned passes and the earlier [recorded results](docs/verification/vof_solver_contracts.md#recorded-stage-7-evidence)
+remain valid historical evidence; they do not qualify subsequent shared-operator
+changes. Preserve failed attempts and snapshot differences.
 
-#### Mandatory default-policy qualification
+#### Immediate numerical blockers — priority and dependency order
 
-- [ ] Complete default-policy full50 in serial/MPI2/MPI4: 50-cell skew/coarse-fine
-      extrusion, density ratio 10, ten `.002` steps to `.02`. Keep original phase,
-      momentum, divergence, occupancy and passage gates, plus raw/cleaned accounting.
-- [ ] Establish independent interface-motion accuracy and spatial/time convergence
-      under the declared default regime. Retain the swept eight-step closed-motion
-      oracle/full endpoint; its current explicit-zero fixture remains unqualified
-      and cannot substitute for a default-policy run. Algebraic motion passes do
-      not qualify swept construction. Keep preregistered accuracy thresholds.
-- [ ] Complete relevant pure/homogeneous, hydrostatic, reflected-cylinder capillary
-      and viscous-decay horizons in the [physical matrix](docs/verification/vof_solver_contracts.md#general-native-amr-and-flow-checks),
-      with serial/MPI consistency and mixed/aligned transitions. Claim only the
-      density, boundary and capillary regimes actually exercised.
+- [ ] **1. Shared pressure–velocity projection.** Investigate the actual coupled
+      instability using the retained pressure-work/energy audit. Establish the
+      relationship between canonical face fluxes, cell velocity correction,
+      physical masses, boundary work and stabilization; small face-continuity or
+      transport residuals alone are insufficient. Identify the defect before
+      selecting a repair. Minimum evidence: one decisive reproducer with an
+      independent pressure-work/energy check, directly affected pressure/boundary/
+      mass regressions and the affected coupled case. Development prefixes locate
+      the defect; item 4 supplies full-horizon acceptance.
+- [ ] **2. Faithful native reconstruction replay — reassess after item 1.** Replay
+      the actual failing native cell, preserving geometry/fitting views, ordered
+      stencil, phase amounts, controls and failure diagnostics. The handoff's
+      native-cell-17 capture is inspectable but not yet a certified standalone
+      checkpoint; an affine-box surrogate pass is insufficient. Reproduce the
+      original failure, then determine whether a valid native case still exposes
+      an independent blocker after projection repair. If it does, repair that
+      case under unchanged strict-volume/model/work gates, with affected kernel
+      regressions and its originating flow case; do not expand to a stress matrix.
+- [ ] **3. Q2 refinement capacity and convergence.** On the smallest required
+      failing setup, distinguish unique retained/live storage from duplication,
+      cumulative charges and incorrect accounting before selecting a remedy.
+      N32 hierarchy construction passed but GeneralVoF initialization failed;
+      N64 construction also remains blocked. Unblock the required N16/N32/N64
+      sequence and separate temporal study under existing caps, or report the
+      remaining capacity failure explicitly. Setup success is not convergence.
+      Retain the original N16 model rejection, independent motion oracle, full
+      endpoints and accuracy/order gates; omitting a failed level is not acceptance.
+- [ ] **4. Q3 GeometricFace coupled motion — after the applicable blockers above.**
+      Complete the required eight-second horizon and original displacement,
+      redistribution, limiting and physical gates at the declared timestep
+      fractions; report actual Courant separately. Recheck DonorCell where the
+      shared projection/operators change. Its recorded eight-second completion
+      still fails displacement and must not be relabelled a pass. Minimum evidence:
+      affected coupled regressions, acceptable full serial cases, then their
+      required MPI2/MPI4 counterparts with unchanged accuracy and resource criteria.
+- [ ] **5. GeometricFace capillarity — after shared-flow prerequisites pass.**
+      Complete the existing required Q4 physical horizon for the selected model,
+      rechecking the recorded `.02 s` cylinder endpoint after relevant changes.
+      Use the existing curvature/pressure/spurious-current and continuation
+      contract; a geometry report or prior-source pass cannot qualify new flow
+      operators. Minimum evidence: affected capillary regressions and the required
+      full serial case, then MPI2/MPI4. Defer DonorCell curvature-support expansion
+      and additional curvature models rather than broadening this repair.
+
+#### Minimum validation for each repair
+
+- One decisive faithful reproducer per defect, directly affected regressions and
+  the relevant qualification case. Use short serial prefixes while developing;
+  only the unchanged full serial endpoint establishes horizon acceptance. Run
+  required MPI2/MPI4 after that serial result is acceptable.
+- Repeat passed Q0/Q5, reconstruction, ABI and architecture checks only where
+  changed code can affect their contracts. Select affected shared-path coverage,
+  not blanket suites or unrelated AMR/repartition campaigns.
+- Retain applicable conservation, boundedness, physical residuals, accuracy,
+  cleanup accounting and work/storage limits. Report numerical, capacity and
+  launcher outcomes separately. Preserve failures and existing safe rejection;
+  completion, small continuity residuals or changed source provenance do not
+  replace accuracy. Do not relax thresholds or add exhaustive permutations.
+
+#### Separate SweptPartition default-policy qualification
+
+These tasks remain open for the default backend and do not gate algebraic repair.
+Shared changes still require directly affected default-path regression checks.
+
+- [ ] Qualify automatic-cleanup full50: 50-cell skew/coarse-fine extrusion,
+      density ratio 10, ten `.002` steps to `.02`, with original physical and
+      cleanup-accounting gates; full serial first, then required MPI2/MPI4.
+- [ ] Establish independent default-policy motion accuracy and mesh/time convergence,
+      and applicable hydrostatic, capillary and viscous horizons. Keep extended
+      swept diagnostics and the explicit-zero eight-step probe separate; their
+      incomplete results neither qualify nor block the algebraic family.
 - [ ] Quantify [cleanup sensitivity](docs/modeling/phase_cleanup.md#qualification-and-sensitivity)
-      through matched cutoff/cap and mesh/time studies: original-inventory drift,
-      signed/absolute changes, mass/momentum corrections and interface error.
-      A bounded cleanup ledger alone does not bound subsequent dynamics.
-- [ ] Close the single [FP acceptance matrix](docs/verification/vof_solver_contracts.md#floating-point-acceptance-gates)
-      for the baseline: independent oracles, canonical conservation, positivity,
-      required geometry/moments, MPI/empty owners, mode isolation, bounded work/
-      storage and atomic rejection. Preserve captured strict failures and local
-      replay as rejection/state-preservation checks; successful microscopic
-      zero-cutoff full50 completion is not a prerequisite.
+      with matched cutoff/cap and mesh/time studies under the original inventory,
+      accuracy and resource gates. Small cleanup totals alone do not bound dynamics.
+- [ ] Apply the relevant [FP acceptance invariants](docs/verification/vof_solver_contracts.md#floating-point-acceptance-gates)
+      to affected default paths, preserving independent oracles, MPI consistency,
+      bounded resources and atomic rejection without an exhaustive mode matrix.
 
-#### Capability extensions — qualify before claiming support
+#### Explicitly deferred scope
 
-- [ ] Complete opt-in algebraic [Q0–Q4](docs/verification/vof_solver_contracts.md#algebraic-face-volume-qualification)
-      for the chosen backend and cleanup regime: motion/refinement accuracy,
-      actual Courant, sustained limiting, ratio-1000 coupled motion and capillarity.
-      Retained native-draft resource limits and the common cell/face projection
-      formulation remain blockers; canonical continuity alone does not bound cell
-      pressure work. Keep DonorCell's distributed curvature-support failure visible.
-- [ ] Implement and qualify **cleanup-enabled coupled AMR/remap** before extending
-      the default-policy scope: auxiliary-channel corrections, original cleanup
-      caps/spending, conservation, momentum, replay and collective rollback.
-      Phase-only remap and ownership-only migration already have separate contracts;
-      raw-policy Q5 passes do not qualify cleanup-enabled refine/coarsen.
-- [ ] Qualify wider mesh families, high-contrast curved refinement seams,
-      nonzero-time regrid momentum and automatic refinement/reinitialization,
-      including exhausted/unavailable refinement and unchanged accepted inventory.
-      Track the Release failure in
-      `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`
-      before claiming that balancing path; selected migration passes excluded it.
-- [ ] Extend long-time/static/dynamic capillary claims only after their declared
-      curvature and five-capillary-time/viscous-relaxation gates. Keep reconstructed
-      and filtered models separate; short-cylinder or geometry-only passes are insufficient.
-- [ ] Add open interfaces and multiple streams per face (Q7) only with explicit
-      inflow composition, outflow/backflow and ordered gross counterstream budgets.
-      Periodic transport, within-step ALE, level subcycling and reacting/representation
-      coupling retain their separate implementation and qualification gates.
-
-#### Conditional optimization and performance
-
-- [ ] If replacing donor-complement subtraction or repeated pair/moment work,
-      first prove native-complex containment, non-overlap and complete cavity/halo
-      coverage against the same source/partition. Retain existing checks until
-      the replacement certificate is qualified; evaluate all physically required moments.
-- [ ] If adopting approximate aggregate admission, require conservative bounds
-      and explicit shared face/cell/phase debits, signed streams, independent phases,
-      momentum/replay and separate surface moment/section accuracy. Otherwise reject.
-- [ ] If optimizing Ordinary projection/curvature, remove certification-only work
-      or index pure-cell support only with unchanged numerical/physical gates.
-- [ ] If claiming performance or scaling (Q6), first pass the corresponding numerical
-      regime, then compare matched complete Release cases in serial/MPI2/MPI4:
-      setup/step costs, actual work/retries, rank compute/wait, allocations and
-      process RSS. Separate native imports and reference work. Bounded resources
-      are always mandatory; speedup, lazy evaluation and production scaling are
-      not prerequisites for the scoped default-policy numerical claim.
-
-#### Strict-mode robustness — optional completion, mandatory safe rejection
-
-- [ ] Optionally complete the **explicit zero-cutoff** microscopic full50 horizon.
-      The historical cleanup-disabled serial case completes; MPI2/MPI4 reject attempted step 4 after
-      three accepted steps at `.006` because adjacent offsets cannot fit the tiny
-      minority within its original tolerance. Preserve the
-      [capture and local replay](docs/verification/vof_solver_contracts.md#strict-mode-microscopic-replay),
-      diagnostics, collective rejection and unchanged accepted state; the failed
-      horizon remains failed. Wider plane representations are conditional robustness
-      work, never a prerequisite for the cleanup-enabled default.
-- [ ] Optionally widen finite-polygon reach or explicit BoundedCertification/Exact
-      support. Keep arithmetic/support/resource failures distinct, budgets bounded
-      and modes explicit; no fallback, tolerance relaxation or silent inventory repair.
+- Explicit-zero microscopic full50 completion and wider plane representations.
+  The recorded MPI2/MPI4 step-4 failure after `.006 s` remains failed; preserve its
+  [capture/local replay](docs/verification/vof_solver_contracts.md#strict-mode-microscopic-replay)
+  and safe rejection/state preservation without a new robustness campaign.
+- Exhaustive arithmetic-mode, mesh, density, Courant, boundary and rejection/
+  rollback permutations; unrelated AMR/repartition, balancing and ABI campaigns.
+  The recorded `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`
+  failure remains open for that separately claimed capability.
+- Cleanup-enabled coupled AMR/remap, automatic refinement/reinitialization,
+  wider/high-contrast curved seams and nonzero-time regrid momentum. Keep current
+  coupled-channel rejection; phase-only remap/ownership migration and raw Q5
+  passes do not establish cleanup-enabled coupled support.
+- DonorCell curvature-support expansion, additional curvature models and new
+  long-time/static/dynamic studies beyond the existing selected Q4 requirement.
+- Q6 performance/scaling and Q7 open-boundary/multistream extensions; periodic
+  transport, within-step ALE, subcycling and reacting/representation integration.
+- New coverage certificates, lazy moments, approximate aggregate admission and
+  projection/curvature optimizations unrelated to the diagnosed defects. If later
+  adopted, retain their proof/debit requirements and original numerical gates.
 
 ### Stage 8 — Reacting-gas and representation integration
 
