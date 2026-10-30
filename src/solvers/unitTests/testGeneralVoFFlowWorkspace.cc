@@ -52,6 +52,55 @@ SP<const MeshHandle<>> axial_slab_native(unsigned normal_axis, unsigned rows = 2
     return AMR::assemble_adaptive_native(hierarchy, schema).mesh;
 }
 
+// Prescribed canonical face motion carries physical cell momentum. Form its
+// Gauss cell average directly from native geometry, independently of the
+// projection implementation, so both predictor representations describe the
+// same motion rather than assigning nonzero face rates to stationary cells.
+std::vector<VoF::Vector> gauss_predictor(const MeshHandle<>& mesh, const std::vector<double>& face_normal_velocity)
+{
+    const auto lease = mesh.acquire_execution_view();
+    std::vector<VoF::Vector> result(mesh.num_owned_cells());
+    for (std::size_t c = 0; c < result.size(); ++c)
+    {
+        std::array<long double, 3> moment{};
+        for (const auto f : mesh.faces(LO(c)))
+        {
+            const auto displacement = mesh.face_center_vector(f, LO(c));
+            const long double outward_rate = (mesh.owner_cell(f) == LO(c) ? 1 : -1) *
+                                              static_cast<long double>(mesh.face_area(f)) * face_normal_velocity[f];
+            moment[0] += outward_rate * displacement.x;
+            moment[1] += outward_rate * displacement.y;
+            moment[2] += outward_rate * displacement.z;
+        }
+        for (unsigned a = 0; a < 3; ++a)
+            result[c][a] = double(moment[a] / mesh.cell_volume(LO(c)));
+    }
+    return result;
+}
+
+void expect_unchanged_provenance(const detail::GeneralVoFFiniteProjectionProvenance& actual,
+    const detail::GeneralVoFFiniteProjectionProvenance& original)
+{
+    EXPECT_EQ(actual.arithmetic_mode, original.arithmetic_mode);
+    ASSERT_EQ(bool(actual.transport_readiness), bool(original.transport_readiness));
+    if (actual.transport_readiness)
+    {
+        EXPECT_EQ(actual.transport_readiness->volume_tolerance, original.transport_readiness->volume_tolerance);
+        EXPECT_EQ(actual.transport_readiness->max_courant, original.transport_readiness->max_courant);
+        EXPECT_EQ(actual.transport_readiness->cumulative, original.transport_readiness->cumulative);
+        EXPECT_EQ(actual.transport_readiness->signed_discrepancy, original.transport_readiness->signed_discrepancy);
+        EXPECT_EQ(actual.transport_readiness->volume, original.transport_readiness->volume);
+    }
+    EXPECT_EQ(actual.byte_budget, original.byte_budget);
+    EXPECT_EQ(actual.face_rate, original.face_rate);
+    EXPECT_EQ(actual.face_radius, original.face_radius);
+    EXPECT_EQ(actual.cell_radius, original.cell_radius);
+    EXPECT_EQ(actual.velocity_error, original.velocity_error);
+    EXPECT_EQ(actual.wall_pressure_offset, original.wall_pressure_offset);
+    EXPECT_EQ(actual.maximum_wall_normal_residual, original.maximum_wall_normal_residual);
+    EXPECT_EQ(actual.closure_storage_bytes, original.closure_storage_bytes);
+}
+
 template<ArithmeticMode Mode> void missing_axis_wall_pressure_contract()
 {
     for (unsigned axis = 0; axis < 3; ++axis)
@@ -202,6 +251,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryProjectionKeepsPhysicalThresholdWithou
             face[f] = .02 * std::sin(x.x + 2 * x.y + 3 * x.z);
         }
     face = flow.faces(face);
+    velocity = gauss_predictor(*mesh, face);
     VoFSolverOptions options;
     options.pressure_absolute_tolerance = 1e-11;
     options.pressure_relative_tolerance = 0;
@@ -257,6 +307,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessRefinesBeyondLoosePh
                 normal.x != 0 ? normal.x * (x.y < 1 ? .125 + .01 : -.125) : normal.y * (x.x > 1 ? .125 : -.125);
         }
     initial_face = flow.faces(initial_face);
+    initial_velocity = gauss_predictor(*mesh, initial_face);
     VoFSolverOptions options;
     options.pressure_absolute_tolerance = 10;
     options.pressure_relative_tolerance = 0;
@@ -269,8 +320,8 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessRefinesBeyondLoosePh
     detail::GeneralVoFFiniteProjectionProvenance physical;
     ASSERT_NO_THROW(flow.project(physical_face, physical_velocity, physical_pressure, rho, fraction, curvature, .125, 0,
         options, physical_diagnostics, &physical));
-    EXPECT_EQ(physical_diagnostics.pressure_iterations, 0);
-    EXPECT_GT(physical_diagnostics.maximum_divergence, .009);
+    EXPECT_LE(physical_diagnostics.maximum_divergence, options.divergence_tolerance);
+    EXPECT_LE(physical_diagnostics.maximum_divergence, .125 * options.pressure_absolute_tolerance);
 
     auto face = initial_face;
     auto velocity = initial_velocity;
@@ -305,20 +356,21 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessRefinesBeyondLoosePh
         EXPECT_EQ(limited_velocity, initial_velocity);
         EXPECT_EQ(limited_pressure, old_pressure);
         EXPECT_TRUE(limited_evidence.face_rate.empty());
+        expect_unchanged_provenance(limited_evidence, ready);
     }
     ASSERT_NO_THROW(
         flow.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, options, diagnostics, &ready));
-    EXPECT_GT(diagnostics.pressure_iterations, physical_diagnostics.pressure_iterations);
+    EXPECT_GT(diagnostics.pressure_iterations, 0);
     EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
     EXPECT_EQ(ready.closure_storage_bytes, 0u);
     for (const auto radius : ready.face_radius)
         EXPECT_EQ(radius, 0);
     Q global_mass_change = 0, global_momentum_change = 0;
-    int local_old_failure = 0, old_failure = 0;
+    int local_initial_failure = 0, initial_failure = 0;
     const auto lease = mesh->acquire_execution_view();
     for (std::size_t c = 0; c < n; ++c)
     {
-        Q net = 0, incident = 0, old_net = 0;
+        Q net = 0, incident = 0, initial_net = 0, initial_incident = 0;
         for (auto f : mesh->faces(LO(c)))
         {
             EXPECT_LT(std::size_t(f), ready.face_rate.size());
@@ -327,11 +379,20 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessRefinesBeyondLoosePh
             const Q rate(ready.face_rate[f]);
             const auto sign = mesh->owner_cell(f) == LO(c) ? 1 : -1;
             net += sign * rate;
-            old_net += sign * Q(physical.face_rate[f]);
+            const Q initial_rate = Q(mesh->face_area(f)) * Q(initial_face[f]);
+            initial_net += sign * initial_rate;
+            initial_incident += abs(initial_rate);
             incident += abs(rate);
         }
-        local_old_failure += abs(old_net) > Q(tau) * Q(mesh->cell_volume(LO(c)));
+        // The original prescribed rates are an independent witness that the
+        // loose physical gate alone admits motion that is not transport-ready.
+        // The compatible physical projection may already improve that witness.
+        EXPECT_TRUE(abs(initial_net) <= Q(options.divergence_tolerance) * Q(mesh->cell_volume(LO(c))));
+        EXPECT_TRUE(abs(initial_net) <=
+                    Q(.125) * Q(options.pressure_absolute_tolerance) * Q(mesh->cell_volume(LO(c))));
         const Q cell_volume(mesh->cell_volume(LO(c)));
+        local_initial_failure += abs(initial_net) * (2 * Q(courant)) > Q(tau) * initial_incident &&
+                                 abs(initial_net) * Q(.125) > Q(tau) * cell_volume / 2;
         EXPECT_TRUE(abs(net) * (2 * Q(courant)) <= Q(tau) * incident ||
                     abs(net) * Q(.125) <= Q(tau) * cell_volume / 2);
         EXPECT_TRUE(incident > 0);
@@ -354,8 +415,9 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessRefinesBeyondLoosePh
     }
     EXPECT_EQ(global_mass_change, Q(0));
     EXPECT_EQ(global_momentum_change, Q(0));
-    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_old_failure, &old_failure);
-    EXPECT_GT(old_failure, 0);
+    Teuchos::reduceAll(
+        *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_initial_failure, &initial_failure);
+    EXPECT_GT(initial_failure, 0);
     const int local_empty = n == 0;
     int empty = 0;
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
@@ -376,6 +438,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessAcceptsZeroCirculati
         if (!mesh->is_geometry_exterior_face(LO(f)))
             face[f] = .1 * mesh->face_normal(LO(f)).x;
     face = flow.faces(face);
+    velocity = gauss_predictor(*mesh, face);
     VoFSolverOptions options;
     options.pressure_absolute_tolerance = 10;
     options.pressure_relative_tolerance = 0;
@@ -494,6 +557,230 @@ TEST(GeneralVoFFlowWorkspaceTest, DensityJumpWallPressureRetainsBalancedConstant
         }
 }
 
+TEST(GeneralVoFFlowWorkspaceTest, DensityJumpNonuniformPredictorRetainsClosedColumnPressureWork)
+{
+    // Independently, incompressibility and the two impermeable ends make the
+    // final normal velocity zero throughout this one-dimensional column.
+    // Integrating dp/dx = rho*u_predict/dt over the two half-cell intervals
+    // gives a pressure difference of 31.25 Pa, including either density order.
+    const auto mesh = axial_slab_native(2, 1);
+    const auto n = mesh->num_owned_cells();
+    constexpr double speed = .125, dt = .002;
+    // The compatible physical-mass formulation is currently Ordinary. The
+    // certified/exact operators retain their separate arithmetic qualification.
+    for (const auto mode : {ArithmeticMode::Ordinary})
+        for (const bool reversed : {false, true})
+        {
+            SCOPED_TRACE(::testing::Message() << int(mode) << ", reversed=" << reversed);
+            detail::GeneralVoFFlowWorkspace flow(mesh, mode);
+            std::vector<VoF::Vector> velocity(n);
+            std::vector<double> rho(n), fraction(n), curvature(n), pressure;
+            std::vector<long double> mass(n);
+            long double initial_energy = 0;
+            for (std::size_t c = 0; c < n; ++c)
+            {
+                const bool light = (mesh->cell_centroid(LO(c)).x < 1) != reversed;
+                rho[c] = light ? 1 : 1000;
+                velocity[c][0] = light ? speed : 0;
+                mass[c] = rho[c] * mesh->cell_volume(LO(c));
+                initial_energy += .5L * mass[c] * velocity[c][0] * velocity[c][0];
+            }
+            const auto predictor = velocity;
+            auto face = flow.interpolate(velocity);
+            VoFSolverOptions options;
+            VoFStepDiagnostics diagnostics;
+            detail::GeneralVoFFiniteProjectionProvenance evidence;
+            ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, dt, 0, options,
+                diagnostics, &evidence, std::span<const long double>(mass)));
+            long double final_energy = 0, impulse_work = 0;
+            for (std::size_t c = 0; c < n; ++c)
+                for (unsigned a = 0; a < 3; ++a)
+                {
+                    final_energy += .5L * mass[c] * velocity[c][a] * velocity[c][a];
+                    impulse_work += .5L * mass[c] * (velocity[c][a] + predictor[c][a]) *
+                                    (velocity[c][a] - predictor[c][a]);
+                    EXPECT_NEAR(velocity[c][a], 0, 2e-12);
+                }
+            if (n == 2)
+            {
+                EXPECT_NEAR(pressure[1] - pressure[0], .5 * speed / dt, 1e-9);
+                EXPECT_NEAR(initial_energy, .0078125L, 1e-18L);
+                EXPECT_NEAR(impulse_work, -initial_energy, 2e-12L);
+            }
+            EXPECT_LE(final_energy, 2e-12L);
+            EXPECT_NEAR(final_energy - initial_energy, impulse_work, 2e-15L);
+            for (double value : face)
+                EXPECT_NEAR(value, 0, 2e-12);
+            EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+        }
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CompatibleClosedCirculationIsIdempotentAcrossTimesteps)
+{
+    const auto mesh = axial_slab_native(2, 2);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    const auto n = mesh->num_owned_cells();
+    constexpr double amplitude = .125;
+    std::vector<VoF::Vector> velocity(n);
+    std::vector<double> rho(n, 1), fraction(n), curvature(n), pressure;
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        const auto x = mesh->cell_centroid(LO(c));
+        velocity[c] = {x.y < 1 ? amplitude : -amplitude, x.x < 1 ? -amplitude : amplitude, 0};
+    }
+    const auto original = velocity;
+    auto face = flow.interpolate(velocity);
+    for (const double dt : {.002, .125, .004})
+    {
+        VoFSolverOptions options;
+        VoFStepDiagnostics diagnostics;
+        detail::GeneralVoFFiniteProjectionProvenance evidence;
+        ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, dt, 0,
+            options, diagnostics, &evidence));
+        for (std::size_t c = 0; c < n; ++c)
+            for (unsigned a = 0; a < 3; ++a)
+                EXPECT_NEAR(velocity[c][a], original[c][a], 2e-12);
+        for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+        {
+            const auto x = mesh->face_centroid(LO(f)), normal = mesh->face_normal(LO(f));
+            const double expected = mesh->is_geometry_exterior_face(LO(f)) ? 0 :
+                normal.x != 0 ? normal.x * (x.y < 1 ? 2 * amplitude : -2 * amplitude) :
+                                normal.y * (x.x > 1 ? 2 * amplitude : -2 * amplitude);
+            EXPECT_NEAR(evidence.face_rate[f], expected, 2e-12);
+        }
+        EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+    }
+}
+
+void compatible_circulation_mass_contract(int mass_exponent)
+{
+    const auto mesh = axial_slab_native(2, 2);
+    const auto n = mesh->num_owned_cells();
+    // The four-face cycle has one degree of freedom t. Independent integration
+    // gives cell velocities t*w, w=(+/-1/2,+/-1/2,0), hence the mass-metric
+    // minimizer t=sum(m*w.u*)/(sum(m)/2). No assembled solver matrix is used.
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<VoF::Vector> velocity(n), shape(n);
+    std::vector<double> rho(n, 123), fraction(n), curvature(n), pressure;
+    std::vector<long double> mass(n);
+    long double numerator = 0, denominator = 0;
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        const auto x = mesh->cell_centroid(LO(c));
+        const double weight = 1 + x.x + 3 * x.y;
+        shape[c] = {x.y < 1 ? .5 : -.5, x.x < 1 ? -.5 : .5, 0};
+        velocity[c] = {.2 + .1 * x.x, -.4 + .2 * x.y + .3 * x.x, 0};
+        mass[c] = std::ldexp(static_cast<long double>(weight), mass_exponent);
+        denominator += .5L * weight;
+        for (unsigned a = 0; a < 3; ++a) numerator += weight * shape[c][a] * velocity[c][a];
+    }
+    const long double expected = n ? numerator / denominator : 0;
+    const auto predictor = velocity;
+    auto face = flow.interpolate(velocity);
+    VoFSolverOptions options;
+    VoFStepDiagnostics diagnostics;
+    detail::GeneralVoFFiniteProjectionProvenance evidence;
+    ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .002, 0,
+        options, diagnostics, &evidence, std::span<const long double>(mass)));
+    long double energy_change = 0, impulse_energy = 0;
+    for (std::size_t c = 0; c < n; ++c)
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            EXPECT_NEAR(velocity[c][a], expected * shape[c][a], 2e-12);
+            const long double old = predictor[c][a], next = velocity[c][a];
+            const auto weight = std::ldexp(mass[c], -mass_exponent);
+            energy_change += .5L * weight * (next * next - old * old);
+            impulse_energy += .5L * weight * (next - old) * (next - old);
+        }
+    EXPECT_NEAR(energy_change, -impulse_energy, 2e-12L);
+    EXPECT_LE(energy_change, 2e-12L);
+    EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CompatibleCirculationUsesIndependentPhysicalMassAndPressureWork)
+{
+    compatible_circulation_mass_contract(0);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CompatibleCirculationRetainsMassBelowBinary64Range)
+{
+    if (std::ldexp(1.L, -1200) == 0)
+        GTEST_SKIP() << "This long-double exponent range cannot represent the below-binary64 mass fixture.";
+    compatible_circulation_mass_contract(-1200);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CompatibleProjectionRejectsRankLocalPhysicalControlsBeforePublication)
+{
+    const auto mesh = axial_slab_native(2, 1);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const auto n = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    const std::vector<VoF::Vector> original(n, {.125, 0, 0});
+    const auto original_face = flow.interpolate(original);
+    const std::vector<double> rho(n, 1), fraction(n), curvature(n), original_pressure(n, 17);
+    for (unsigned control = 0; control < 7; ++control)
+    {
+        VoFSolverOptions options;
+        auto velocity = original;
+        auto face = original_face;
+        auto pressure = original_pressure;
+        double dt = .002, sigma = 0;
+        detail::GeneralVoFFiniteProjectionProvenance evidence;
+        if (comm->getRank() == comm->getSize() - 1)
+        {
+            const bool serial = comm->getSize() == 1;
+            switch (control)
+            {
+                case 0: dt = serial ? 0 : .003; break;
+                case 1: sigma = serial ? -1 : 1; break;
+                case 2: options.pressure_absolute_tolerance = serial ? -1 : 2e-13; break;
+                case 3: options.pressure_relative_tolerance = serial ? -1 : 2e-11; break;
+                case 4: options.divergence_tolerance = serial ? 0 : 2e-8; break;
+                case 5: options.max_pressure_iterations = serial ? 0 : 2999; break;
+                case 6: evidence.byte_budget = 1; break;
+            }
+        }
+        VoFStepDiagnostics diagnostics;
+        EXPECT_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, dt, sigma,
+            options, diagnostics, &evidence), std::runtime_error);
+        EXPECT_EQ(velocity, original);
+        EXPECT_EQ(face, original_face);
+        EXPECT_EQ(pressure, original_pressure);
+        EXPECT_TRUE(evidence.face_rate.empty());
+        EXPECT_FALSE(evidence.arithmetic_mode);
+        // A fresh valid attempt after each collective rejection remains usable.
+        options = VoFSolverOptions{};
+        evidence = {};
+        ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .002, 0,
+            options, diagnostics, &evidence));
+        EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+    }
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CompatibleProjectionAdmitsUnequalSufficientLocalBudgets)
+{
+    const auto mesh = axial_slab_native(2, 1);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const auto n = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<VoF::Vector> velocity(n, {.125, 0, 0});
+    auto face = flow.interpolate(velocity);
+    std::vector<double> rho(n, 1), fraction(n), curvature(n), pressure;
+    detail::GeneralVoFFiniteProjectionProvenance evidence;
+    // Resources are local capacities, not a shared numerical control. Empty
+    // owners have enough space for the same collective Krylov protocol.
+    evidence.byte_budget = comm->getRank() == 0 ? 2 * 1024 * 1024 : 1024 * 1024;
+    VoFSolverOptions options;
+    VoFStepDiagnostics diagnostics;
+    ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .002, 0,
+        options, diagnostics, &evidence));
+    for (const auto& row : velocity)
+        for (double value : row) EXPECT_NEAR(value, 0, 2e-12);
+    if (n == 2) EXPECT_NEAR(pressure[1] - pressure[0], 62.5, 2e-12);
+    EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+}
+
 TEST(GeneralVoFFlowWorkspaceTest, OrdinaryAlgebraicReadinessIdentityDoesNotSpendPublicationCapacity)
 {
     const auto mesh = axial_slab_native(2, 1);
@@ -535,6 +822,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryCumulativeOccupancyProjectionRestoresS
             face[f] = normal.x != 0 ? normal.x * (x.y < 1 ? .125 : -.125) : normal.y * (x.x > 1 ? .125 : -.125);
         }
     face = flow.faces(face);
+    velocity = gauss_predictor(*mesh, face);
     VoFSolverOptions options;
     options.max_courant = .25;
     constexpr double dt = .125;
@@ -601,6 +889,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryCumulativeOccupancyProjectionKeepsClos
         if (!mesh->is_geometry_exterior_face(LO(f)))
             face[f] = .1 * mesh->face_normal(LO(f)).x;
     face = flow.faces(face);
+    velocity = gauss_predictor(*mesh, face);
     detail::GeneralVoFFiniteProjectionProvenance evidence;
     evidence.transport_readiness = detail::GeneralVoFFiniteProjectionProvenance::TransportReadiness{8e-15, .25};
     auto& request = *evidence.transport_readiness;
@@ -655,6 +944,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryCumulativeOccupancyProjectionUsesLocal
                                     : normal.y * (psi(x.x - .5, x.y) - psi(x.x + .5, x.y));
         }
     face = flow.faces(face);
+    velocity = gauss_predictor(*mesh, face);
     detail::GeneralVoFFiniteProjectionProvenance evidence;
     evidence.transport_readiness = detail::GeneralVoFFiniteProjectionProvenance::TransportReadiness{8e-15, .25};
     auto& request = *evidence.transport_readiness;
@@ -680,6 +970,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryCumulativeOccupancyProjectionUsesLocal
     // The two-cell tree above intentionally has no such iteration assertion.
     const auto original_face = face, original_pressure = pressure;
     const auto original_velocity = velocity;
+    const auto original_evidence = evidence;
     auto limited = options;
     limited.max_pressure_iterations = 1;
     EXPECT_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, limited,
@@ -688,6 +979,7 @@ TEST(GeneralVoFFlowWorkspaceTest, OrdinaryCumulativeOccupancyProjectionUsesLocal
     EXPECT_EQ(velocity, original_velocity);
     EXPECT_EQ(pressure, original_pressure);
     EXPECT_TRUE(evidence.face_rate.empty());
+    expect_unchanged_provenance(evidence, original_evidence);
     ASSERT_NO_THROW(
         flow.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, options, diagnostics, &evidence));
     for (std::size_t c = 0; c < n; ++c)

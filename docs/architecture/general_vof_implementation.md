@@ -120,3 +120,20 @@ scopes, operation counters, packet lifetimes and geometry leases remain in
 force. Intermediate records borrow pinned data or move owned buffers; additional
 copies or overlapping lifetimes require explicit accounting. Ordinary physical
 allowances must not be relabeled as bounded certificates.
+
+The immutable FVM topology owns each retained native tile once. Surface and
+frontier ranges, construction controls and finite wall identities refer to that
+owner by checked index or canonical face ID. The public owned-incident tile
+order is unchanged. Exact wall records retain their original identity payloads
+without acquiring the finite construction catalog. Adjacency and complete node
+fans borrow full cell keys from one topology-owned intern pool; iteration and
+membership use key values, never pointer ordering. Accepted publications pin
+the topology for every such borrow.
+
+Retained admission charges tile owners, reference capacities, interned keys,
+graph rows and geometry payloads. Temporary growth and encoding buffers retain
+their own admission charges while live. Geometry admission deduplicates shared
+geometry, provenance-support and typed identity owners across retained roots;
+the ledger pins those owners and includes its bookkeeping in admission.
+Allocation measurements report their scope and exclusions separately from these
+conservative admission estimates; neither metric is process RSS.

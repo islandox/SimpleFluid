@@ -119,7 +119,9 @@ enum class GeometryRecordKind : std::uint8_t
     GhostReply,
     GhostNode,
     FrozenPart,
-    FrozenBatch
+    FrozenBatch,
+    ClosureSpanContact, ///< Lossless axis spans replace the original full contact shell.
+    ClosureSpanRequests ///< Framed batches carrying ClosureSpanContact records.
 };
 struct GeometryRecordHeader
 {
@@ -139,7 +141,7 @@ static_assert(std::is_standard_layout_v<BatchHeader> && std::is_trivially_copyab
 inline constexpr std::uint8_t geometry_record_version = 3;
 inline constexpr std::uint8_t batch_version = 7;
 inline constexpr std::size_t geometry_record_header_bytes = sizeof(GeometryRecordHeader);
-inline void write_geometry_record_header(Writer& writer, GeometryRecordKind kind)
+template<class PacketWriter> inline void write_geometry_record_header(PacketWriter& writer, GeometryRecordKind kind)
 {
     std::array<std::uint8_t, geometry_record_header_bytes> bytes{};
     bytes[offsetof(GeometryRecordHeader, family)] = static_cast<std::uint8_t>(PacketFamily::GeometryRecord);

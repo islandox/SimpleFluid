@@ -66,20 +66,30 @@ infinity-norm condition. The angular-fit branch additionally requires observed
 mixed-neighbor support for both angular directions: project normalized neighbor
 centroid displacements onto the weighted-gradient seed's tangent plane and check
 the two-dimensional Gram matrix against the existing rank and `maximum_condition`
-gates. A neighbor contributes only when both phases are positive and its supplied
-geometry is observed mixed. The `GeneralVoF` adapter excludes pure declarations
+gates. A neighbor contributes only when both phases are positive, its supplied
+geometry is observed mixed, and its volume-equivalent minority length meets the
+existing `minimum_optimized_phase_length_ratio`. The `GeneralVoF` adapter excludes pure declarations
 and retained pure capsules from that evidence; independent positive traces do
-not invent interface support. The existing `minimum_optimized_phase_length_ratio`
-exemption remains target-only. The target fixes the offset and adds no
+not invent interface support. The gradient-only exemption remains target-only;
+neighbor eligibility does not delete any fitting sample. The target fixes the offset and adds no
 angular displacement row. Pure neighbors can constrain an explicit plane fit but
 do not prove that the observed interface extends in an independent direction.
 
-Expand by complete rings only when geometric coverage, conditioning, or this
-observed angular support requires it, up to the unchanged configured ring and
+The complete retained context establishes majority-phase availability at the
+unchanged `minimum_phase_support_fraction`. Availability is separate from the
+local fitting objective: additional halo cells needed to establish that both phases are
+resolved do not automatically become residual rows. A target with weak phase
+availability throughout its context retains the existing gradient path and
+model bound. A small target keeps its existing exemption.
+
+Select the first complete local ring with usable geometry and, when angular
+fitting is eligible, adequate observed local tangent support. Expand by complete
+rings when geometric coverage, conditioning, or local angular support requires
+it, up to the unchanged configured ring and
 resource limits. The selection performs no clipping and evaluates no plane-model
 residual. A deficient final ring rejects with a typed support reason; it never
-switches an angular-eligible case to a gradient fallback. Weak-majority and
-subthreshold-target gradient-only policies remain unchanged. A geometry-selected
+switches an angular-eligible case to a gradient fallback. Standalone weak-majority
+and subthreshold-target gradient-only policies remain unchanged. A geometry-selected
 ring with ambiguous phase direction also rejects. The complete halo remains available to curvature,
 contact and other non-reconstruction consumers, including remote owners and all
 canonical coarse/fine covering faces; this does not reduce `support_rings`.
@@ -91,6 +101,16 @@ used to demonstrate a one-plane contradiction. Observed tangent support is a
 preflight requirement, not a certificate of subsequent clipped-volume optimizer
 convergence; the existing angular arithmetic, conditioning and convergence gates
 still apply.
+
+The finite four-argument overloads take `(target, full_context, fitting_cells,
+options)`. The first `fitting_cells` entries of the same context span form the
+objective. All context samples are validated under the existing sample cap;
+only phase-support maxima and angular eligibility use the entire context.
+Gradient estimation, geometry/tangent conditioning, optimizer samples, model
+RMS and diagnostic IDs remain local. `stencil_cells` therefore counts fitting
+rows, while phase-support fractions describe the full context. Outside context
+cannot repair a local missing direction or supply local tangent rows. Legacy
+three-argument calls retain their explicit-stencil and pure-target contracts.
 
 Mixed-cell admission checks the target and stencil before selecting an orientation method:
 
@@ -234,6 +254,26 @@ The target cell supplies the offset constraint; the neighboring cells supply
 the angular objective. Each neighbor can select a different minority phase.
 Residuals are normalized by that neighbor's full cell volume.
 
+Ordinary boundary-measure search conditions this objective on the target-volume
+constraint. A permitted represented-offset error can otherwise change the raw
+objective more than a remaining angular improvement. Let $e_t$ be the measured
+target minority-volume residual, $A_t,A_i$ the plane-section areas, and $s_j$ be
+`+1` for a gas minority and `-1` for a carrier minority. Angular search uses
+
+$$
+\widetilde r_i = r_i - \frac{s_i s_t A_i e_t}{V_i A_t}.
+$$
+
+These are first-order residuals at the locally corrected target offset. Both
+the comparison merit $J_{\mathrm{search}}=\sum_i\widetilde r_i^2$ and its
+finite-difference derivative vector use them; other paths retain $J$.
+The target plane, phase inventories, reported RMS, residual convergence gate
+and final model bound still use the original measured volumes. No tolerance
+or work cap changes. Section areas come from the same clipping query without
+additional clips or polygon buffers; unresolved sensitivities reject.
+This local correction is not an exact volume evaluation across a clipping
+contact. BoundedCertification and Exact retain their existing search metrics.
+
 The optimizer constructs two tangent directions at the current unit normal.
 Centered perturbations of size `1e-4` estimate derivatives of the residual
 vector, including a fresh offset solve at every perturbed direction. A
@@ -244,7 +284,7 @@ After those checks, angular convergence requires either the stencil RMS
 residual to meet `fit_tolerance` or the proposed step norm to meet
 `orientation_tolerance`. Otherwise, a line search tries scales from `1` down to
 `1/128` by successive halving, renormalizes the candidate normal, and accepts
-only a strict decrease in $J$. When the qualified Gauss-Newton step exceeds one,
+only a strict decrease in the comparison merit. When the qualified Gauss-Newton step exceeds one,
 those eight values instead bound a dogleg trial between the Cauchy and
 Gauss-Newton steps. Each smaller radius recomputes the direction from the same
 qualified normal equations. This prevents a poorly directed, oversized step
@@ -269,10 +309,36 @@ clip budget. Fatal geometry errors still propagate. Accepted trials are
 qualified again on the next outer iteration: the original Gauss-Newton step,
 not a shortened trial step, governs convergence and reported evidence.
 
+A finite negative-curvature estimate can instead supply a bounded search
+direction without inverting the indefinite Hessian. Its absolute spectral
+condition must satisfy the same `maximum_condition`. The most-negative
+eigenvector is oriented consistently with descent and phase reversal, then
+tested at the existing radii `1` through `1/128`. Strict search-merit decrease
+and the original trial observability checks remain necessary. Recoverable
+arithmetic or unobservable trials try smaller radii; fatal errors propagate.
+Unsuccessful trials retain the qualified Gauss–Newton search. This avoids slow
+first-order progress near a saddle without adding iterations, probe scales, or
+clip capacity. The positive-definite Newton and consistent-linearized-fit
+branches retain their existing rules.
+
+The context/prefix Ordinary boundary-measure entry also permits one bounded
+restart when a qualified stationary angular solution fails the raw model bound.
+Its predeclared seed bank consists of minority caps at the original target
+faces: the gas normal is opposite the outward face normal for a gas minority,
+and aligned for a carrier minority. Equal phase amounts include both directions.
+Each seed uses the same target-volume constraint and local fitting rows. The
+best observable seed must strictly improve the constrained search merit before
+it can initialize the secondary solve. A seed's model RMS alone never admits it.
+Both solves and seed qualification share the original total iteration and clip
+budgets; the secondary solve must reach the same angular, target-volume and raw
+model gates. Missing direction, current unobservability, nonstationarity and
+work exhaustion do not trigger this restart. Legacy three-argument, bounded,
+exact and constructive-measure paths retain one initialization.
+
 Every probe and optional trial shares the original clip budget; the iteration
 and resource caps are unchanged. Exhausting those scales or the iteration
 budget rejects the fit.
-The nominal squared-residual merit retains wide measured residuals and uses
+The nominal squared-residual merit retains wide search residuals and uses
 compensated accumulation before strict comparison. The derivative vector remains
 binary64. This avoids premature narrowing of near-equal objective totals; it
 does not relax stationarity or provide additional significand bits on platforms
@@ -281,6 +347,10 @@ where `long double` equals `double`.
 finite-difference scale, condition, iterations and clip counts. Nonstationarity
 does not establish plane-model incompatibility. Collective diagnostics label it
 as an optimizer failure and preserve the typed local cause on failing ranks.
+The best entry follows search merit, with raw measured RMS at that plane rather
+than the minimum raw RMS of all trials. If a restart scan fails, best diagnostics
+may identify a qualified lower-merit seed; that seed remains unqualified for
+publication until angular convergence and the final gates succeed.
 
 A converged optimizer must also satisfy `maximum_model_residual`. Curved
 interfaces can have a nonzero plane-model defect even at an angular optimum.
@@ -296,6 +366,18 @@ requires multiple planes. The complete first-ring policy retains the unchanged
 `0.2` model-defect bound. The genuine single-interface closed-shear fixture and
 finite-rectangle `PlanarPatch` stress case have independent polygon oracles and
 remain distinct verification problems.
+
+Transport's observed mixed-neighbor tangent check also applies the existing
+`minimum_optimized_phase_length_ratio` to each neighbor before counting its
+direction as angular support. A neighbor below that scale retains both physical
+inventories, its truthful mixed declaration, and its residual in the selected
+fitting objective. Its centroid direction alone cannot certify information that
+the same small-phase policy does not support for optimizing its own orientation.
+Insufficient eligible directions cause deterministic complete-ring expansion
+before model residuals are measured. Equality remains eligible and zero disables
+this restriction. This is a declared conservative support rule, not a certificate
+of clipped-volume conditioning; the optimizer's original conditioning and
+convergence gates remain necessary.
 
 ### Inner plane-offset solve
 

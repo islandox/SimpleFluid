@@ -61,7 +61,7 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
         writer.word(vertex.incident.size());
         for (const auto& plane : vertex.incident)
             writer.word(plane_ids.at(plane));
-        auto keys = vertex.authorities;
+        std::vector<PlaneAuthority> keys = vertex.authorities.values();
         std::sort(keys.begin(), keys.end());
         writer.authorities(keys);
     }

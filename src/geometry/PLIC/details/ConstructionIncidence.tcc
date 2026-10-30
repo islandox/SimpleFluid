@@ -111,7 +111,7 @@ template<ArithmeticMode Mode> bool directly_on(const Identity& token, const Stor
     for (const auto* point = token.get(); point; point = point->source_origin.get())
         for (const auto& key : plane.authorities)
             if (!key.key.empty())
-                for (const auto& support : point->supports)
+                for (const auto& support : point->supports())
                 {
                     active_work->pair();
                     if (key == support)
@@ -261,7 +261,7 @@ void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<
         point = bounded<Mode>(
             scaled<Mode>(vertex.coordinates, frame.exponent) + certification_kernel::point<Mode>(frame.origin));
     }
-    DynamicGeometryAccess::seal_generated(point, std::move(edges), vertex.authorities, numerical_only);
+    DynamicGeometryAccess::seal_generated(point, std::move(edges), vertex.authorities.values(), numerical_only);
     active_work->charge(DynamicGeometryAccess::identity_bytes(DynamicGeometryAccess::identity(point)), 1);
     vertex.source_identity = DynamicGeometryAccess::identity(point);
 }

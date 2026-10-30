@@ -193,19 +193,22 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                 else if (cell.gid < prior->second->gid)
                     prior->second = &cell;
             };
-            for (const auto* tiles : {&data.topology->surface_tiles, &data.topology->frontier_tiles})
-                for (const auto& tile : *tiles)
+            const auto retain_tile = [&](const AMR::AdaptiveTile& tile)
+            {
+                for (auto node : tile.node_gids)
                 {
-                    for (auto node : tile.node_gids)
-                    {
-                        retain(node, tile.first);
-                        if (tile.second && tile.second_image_identity.is_zero())
-                            retain(node, *tile.second);
-                    }
-                    if (tile.second)
-                        for (auto node : tile.second_node_gids)
-                            retain(node, *tile.second);
+                    retain(node, tile.first);
+                    if (tile.second && tile.second_image_identity.is_zero())
+                        retain(node, *tile.second);
                 }
+                if (tile.second)
+                    for (auto node : tile.second_node_gids)
+                        retain(node, *tile.second);
+            };
+            for (const auto& tile : data.topology->surface_tiles())
+                retain_tile(tile);
+            for (const auto& tile : data.topology->frontier_tiles())
+                retain_tile(tile);
             for (const auto& [node, coordinate] : data.topology->finite_nodes)
                 if (!data.topology->node_fans.contains(node) && !supports.contains(node))
                     throw std::invalid_argument("Retained finite node lacks a full supporting cell.");

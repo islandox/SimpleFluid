@@ -120,15 +120,15 @@ P::ConvexGeometryPtr<Mode> authority_fixture(const P::ConvexCellGeometry<ordinar
         }
         for (auto& vertex : copy->vertices)
         {
+            auto authorities = vertex.authorities.values();
             for (auto& plane : vertex.incident)
             {
                 plane = replacements.at(plane);
-                vertex.authorities.insert(
-                    vertex.authorities.end(), plane->authorities.begin(), plane->authorities.end());
+                authorities.insert(authorities.end(), plane->authorities.begin(), plane->authorities.end());
             }
-            std::sort(vertex.authorities.begin(), vertex.authorities.end());
-            vertex.authorities.erase(
-                std::unique(vertex.authorities.begin(), vertex.authorities.end()), vertex.authorities.end());
+            std::sort(authorities.begin(), authorities.end());
+            authorities.erase(std::unique(authorities.begin(), authorities.end()), authorities.end());
+            vertex.authorities = std::move(authorities);
         }
         result = Cell::from_dynamic(P::DynamicGeometryAccess::geometry(std::move(copy)));
     }

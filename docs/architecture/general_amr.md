@@ -912,6 +912,16 @@ face and incident-cell allowances, using compensated defects and verified forest
 parent/depth relations. Physical pressure/divergence targets and the shared
 iteration budget remain independent gates. An unresolved FP trial rejects.
 
+Ordinary now uses a [compatible physical-mass projection](../modeling/general_vof_projection.md):
+canonical rates and their native cell moments solve one constrained kinetic-energy
+problem. Pressure and capillary work pair with the same incidence operator, and
+the published velocity must satisfy its physical work identity. The predictor
+does not accumulate a historical face/cell pressure discrepancy. This formulation
+retains the original physical, occupancy and transport-readiness gates; its
+component checks do not qualify the original coupled physical endpoints. The
+BoundedCertification and Exact projection paths retain their separate operators
+and arithmetic evidence, outside this Ordinary energy-repair claim.
+
 When cell centers do not sample a coordinate direction, the finite projector
 supports an affine pressure variation across a straight closed slab in that
 direction. Each cell must have opposing axial exterior caps; all other face
@@ -1160,13 +1170,51 @@ comparable-trace closure. Registered incidence and contact provenance define thi
 perform arbitrary spatial search for unregistered embedded contacts. Every
 failure occurs before candidate publication.
 Line authorities intern exact endpoint identities once per line; edge
-subscriptions retain references to those endpoints. Contact closure encodes
-one immutable cell geometry and comparable-trace record per actual destination
-authority, then sends point incidences referring to that record. Authorities
-decode each such record once. Domain, physical point, cell ownership, duplicate
+subscriptions retain references to those endpoints. Contact closure validates
+an owned cell through its original full geometry certificate, extracts the
+Ordinary axis spans from that decoded shell without narrowing, and releases the
+temporary certificate and decoded geometry. It encodes one immutable span and
+comparable-trace record per owned leaf and transmits it at most once to each
+actual destination authority. Point incidences refer to that record;
+authorities decode it once. Packet versions and native scalar representations
+are checked. Comparable traces retain their face geometry whenever physical
+point membership is required. Domain, physical point, cell ownership, duplicate
 incidence, complete replies and malformed-message checks remain independent of
-this sharing. Pair and trace comparisons consume one cumulative work budget
-throughout the closure call.
+this sharing.
+
+Contact construction reuses the authority-certified node catalogue after edge
+propagation. First and second node-GID loops retain their respective physical
+images, including inserted collinear and T-junction points. Complete framed
+node identities bind the domain to the canonical key of the typed physical
+coordinate; display coordinates are never re-encoded to identify contacts.
+Cells retain unique GID references and sort their typed coordinates by native
+identity order before encoding, preserving deterministic contact ordinals across
+authority GID layouts. Packet envelopes remain separate from canonical keys.
+Provider normalization still chooses the contact authority. Every support-node observation, including repeats, increments the cumulative
+`point_observations` diagnostic. The catalogue, lookup, incidence sets and
+ordering capacities enter the request-builder byte lease; the catalogue remains
+alive through all pending references and packet writes, then is destroyed before
+request exchange.
+
+Every original unordered cell pair at each contact point still consumes its
+original work admission. Trace cross-products may reuse a result only when
+neither immutable record contains a point-membership face. The cache keys the
+unordered pair of unique record identities and retains the direction of any
+required refinement. A face in either record preserves evaluation at each
+physical contact point. Performed trace comparisons consume the same cumulative
+work budget; skipped repeated cross-products do not. Cache allocations enter
+the byte budget, and neither work nor allocation counters reset between points.
+After complete request decoding and all ownership/duplicate checks, the completed
+ownership audit and empty received-record vector are destroyed. The authority
+reserves reply capacity from the checked sum of its complete group incidences;
+this count is independent of the rank's owned Expected controls. Point groups
+are compared and replied in their original byte-key order, then physically
+erased before their own admitted storage leases are released. Shared immutable
+record charges remain conservative through the phase. Unique record IDs remain
+stable in cache keys even after their final shared owner expires; trace-cache
+results and work counters last through the phase, and Expected controls remain
+until reply verification. Private diagnostics report the planned reply records
+and completed group retirements.
 
 Consumed owner-message rounds whose destinations are all local transfer packet
 ownership directly after admitting actual vector and payload capacities. Remote
@@ -1174,9 +1222,10 @@ rounds retain the bounded peer transport. Dead support overlays, canonical
 tiles, expanded provider leaves and packed requests are released before later
 decode/response phases; storage is never treated as released while retained.
 The contact builder also destroys each cell's encoding and destination scratch
-before returning its temporary byte lease. Geometry still shared with a source
-keeps its charge. Diagnostics separate the peak admitted live estimate from the
-cumulative admitted byte charges; neither the cumulative object counters nor the
+before returning its temporary byte lease. Geometry and typed identity owners
+pinned by the request ledger keep their charges until that phase ends.
+Diagnostics separate the peak admitted live estimate from the cumulative
+admitted byte charges; neither the cumulative object counters nor the
 pair/trace work budget resets between cells or rounds. The tile-authority input
 retains support faces without materializing unused full cell shells.
 These representation changes retain all configured byte, object, contact and
@@ -1190,10 +1239,22 @@ selections require procedural or lazy draft certificates, or a bounded
 publication design, before they can be qualified under the same limits.
 
 `AdaptiveClosureOptions::statistics` optionally records rank-local counts and
-the completed or rejected prefix. Setting
+the completed or rejected prefix. Its `geometry_records`, transmitted and
+decoded record counters count the compact span/trace records. The
+`decoded_geometry_bytes` counter reports the three retained native scalar spans
+per decoded record; trace-face geometry enters the live byte accounting
+separately. Encoded scratch and decoded record capacities remain charged
+together until the scratch is destroyed. Setting
 `SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS=1` emits compact authority, closure and exchange
 phase records, including planned transport bounds and actual buffer sizes and
-capacities when allocated. These application estimates exclude allocator/MPI
+capacities when allocated. Closure also reports local `catalogue_nodes`, global
+`global_physical_nodes`, and all repeated `point_observations`. Its
+`request_state_peak_bytes` retains the established request-builder admission
+scope: authority tiles are borrowed input outside that lease. The separate
+conservative `tile_input_bytes` baseline and `tile_and_request_peak_bytes`
+overlap estimate expose that retained input alongside the new tracked state;
+passing the phase lease does not assert a combined 64 MiB or process-memory
+bound. These application estimates exclude allocator/MPI
 storage and do not establish process RSS or physical qualification. The explicit
 `DistributedAdaptiveClosure.DISABLED_QualificationSetupOnly` reproduction
 constructs the unchanged Q2 tensor or filtered-sphere geometry and native draft
@@ -1206,6 +1267,15 @@ atomic topology. A sparse native index retains local procedural fragments,
 explicit polyhedral shards and native ordinal routes, not a replicated region
 entry per global active fragment. Full ghost shell packages and outer metric
 neighbors are fetched from authenticated actual owners.
+
+The expanded native-draft APIs retain full cell certificates. The explicit
+compact publication path instead retains procedural recipes and complete support
+faces for originally geometry-null Cartesian/Product records. It constructs and
+validates each full shell transiently before releasing it; supplied certificates,
+Static and Polyhedral records remain retained. Compact draft leaves are not
+migration wire records. Owner, revision, metric and shell-equivalence checks
+remain in force. FVM and the hierarchy-based native publisher select this compact
+path; construction success does not establish physical-flow qualification.
 
 Mixed import retains only needed original-root join capsules, including aliases
 needed by ancestors absent from a current interior leaf's faces. Those capsules
@@ -1522,6 +1592,16 @@ borrowing; retained candidates, edges and ownership-returning APIs still acquire
 strong ownership. Numerical-only, arithmetic-mode and represented-native-source
 checks remain unchanged. Borrowing does not turn matching rounded coordinates
 into construction authority.
+
+Equal immutable support lists may share storage while point provenance records
+remain distinct. Stored vertex authorities borrow a source payload only when
+the complete ordered sequence matches; mutation stages an independently charged
+copy before replacing the draft holder. Published geometry and sibling holders
+remain unchanged on rejection. Fresh support payloads compact spare outer
+capacity by moving authority entries without changing their keys or order.
+Accounting distinguishes provenance owners, shared support owners and temporary
+copy buffers. Sharing is not evidence that independently uncertain points are
+the same source.
 
 The fixed two-term construction sum and four-term barycentric distance sum in
 Ordinary swept aggregation accept already computed contributions under one

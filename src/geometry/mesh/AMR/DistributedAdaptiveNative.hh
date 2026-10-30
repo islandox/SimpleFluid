@@ -23,11 +23,22 @@ struct AdaptiveNativePublication
     Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
 /** Fetch complete owner-authenticated first-ring and explicitly requested full
  * ghost records, plus metric-only outer neighbors. No recursive halo closure or
- * global catalog is constructed. The native publisher uses this identical path. */
+ * global catalog is constructed. This API retains expanded full-cell geometry. */
 [[nodiscard]] AdaptiveNativeDraft fetch_adaptive_native_draft(
     const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
+namespace adaptive_detail
+{
+/** Explicit publication-only representation. Originally geometry-null Cartesian
+ * and Product records retain exact supports and native recipes, with full-cell
+ * geometry regenerated transiently for validation. Other certificates remain
+ * retained. These leaves must not be serialized as migration records. */
+[[nodiscard]] AdaptiveNativeDraft compact_adaptive_native_draft(const DistributedAdaptiveHierarchy&);
+[[nodiscard]] AdaptiveNativeDraft fetch_compact_adaptive_native_draft(
+    const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
+} // namespace adaptive_detail
 /** Owner-authenticated first-ring and caller-declared full ghosts, with outer
- * metric neighbors. Additional keys are bounded by the hierarchy byte budget. */
+ * metric neighbors. Uses the compact procedural publication representation;
+ * additional keys are bounded by the hierarchy byte budget. */
 [[nodiscard]] AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy&,
     std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
 } // namespace SimpleFluid::Meshes::AMR

@@ -1139,6 +1139,46 @@ INSTANTIATE_TEST_SUITE_P(AlgebraicMotion, AlgebraicMotionQualification, testing:
     });
 } // namespace algebraic_motion
 
+namespace
+{
+void required_planar_initialization(unsigned n)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in original Q2 initialization construction gate";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5};
+    const auto f = fixture(c, n);
+    ASSERT_EQ(f.state->options().byte_budget, 64u * 1024u * 1024u);
+    ASSERT_EQ(f.state->options().phase_cleanup.relative_cutoff, 0);
+    const auto comm = Tpetra::getDefaultComm();
+    unsigned long long local_cells = f.state->owned_order().size(), global_cells = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_cells, &global_cells);
+    EXPECT_EQ(global_cells, 2ull * n * n);
+    const auto initial = measure(f, *f.state, c, 0, {}, "initialization_only");
+    EXPECT_LE(initial.shape, 5e-12);
+    EXPECT_GT(f.maximum_rate, 0);
+    testing::Test::RecordProperty("scope", "construction and initial independent inventories only; no physical steps");
+    testing::Test::RecordProperty("required_motion_endpoint", 1);
+    testing::Test::RecordProperty("accepted_time", 0);
+    testing::Test::RecordProperty("accepted_steps", 0);
+    testing::Test::RecordProperty("resolution", n);
+    testing::Test::RecordProperty("global_cells", std::to_string(global_cells));
+    testing::Test::RecordProperty("byte_budget", std::to_string(f.state->options().byte_budget));
+}
+} // namespace
+TEST(GeneralVoFMotionAccuracy, RequiredPlanarPatchN16InitializationOnly)
+{
+    required_planar_initialization(16);
+}
+TEST(GeneralVoFMotionAccuracy, RequiredPlanarPatchN32InitializationOnly)
+{
+    required_planar_initialization(32);
+}
+TEST(GeneralVoFMotionAccuracy, RequiredPlanarPatchN64InitializationOnly)
+{
+    required_planar_initialization(64);
+}
+
 // First endpoint check after reconstruction repair. This preserves the
 // original finite rectangle, N16, C=.5, midpoint and complete T=1 endpoint.
 TEST(GeneralVoFMotionAccuracy, OriginalPlanarPatchN16Endpoint)

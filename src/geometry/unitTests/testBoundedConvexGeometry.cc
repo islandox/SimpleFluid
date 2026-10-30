@@ -1333,7 +1333,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
             token = Access::identity(exported);
         }
         auto vertex = edge_vertex(.5L);
-        vertex.authorities.push_back({{190}});
+        vertex.authorities.append({{190}});
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             auto plane = std::make_shared<ordinary::Plane>();
@@ -1468,7 +1468,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
         auto vertex = second;
         vertex.source_identity.reset();
         vertex.incident = {p, q, query};
-        vertex.authorities = {{{191}}};
+        vertex.authorities = std::vector<SimpleFluid::PLIC::PlaneAuthority>{{{191}}};
         const auto before = vertex;
         if (control == 0)
         {
@@ -1592,7 +1592,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         auto vertex = first;
         vertex.source_identity.reset();
         vertex.incident = {p, q, query};
-        vertex.authorities = {{{192}}};
+        vertex.authorities = std::vector<SimpleFluid::PLIC::PlaneAuthority>{{{192}}};
         const auto before = vertex;
         const int lower_direction =
             ordinary::source_normal_orientation(*p, *q, *context->surfaces[4].plane) * context->surfaces[4].orientation;
@@ -3940,4 +3940,102 @@ TEST(BoundedConvexGeometryTest, CapturedThreeDonorCoverNeedsGeometricCompletenes
     EXPECT_THROW(parent->certify_fragment_partition(gap, 8e-15), std::invalid_argument);
 }
 
+template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
+{
+    namespace PLIC = SimpleFluid::PLIC;
+    namespace detail = PLIC::details;
+    using Access = PLIC::DynamicGeometryAccess;
+    SCOPED_TRACE(static_cast<int>(mode));
+    const auto check_volume = [](const auto& volume, long double expected)
+    {
+        if constexpr (mode == ArithmeticMode::BoundedCertification)
+            encloses(volume, expected);
+        else
+            EXPECT_NEAR(volume.value, expected, 1e-15L);
+    };
+    const auto parent = plic_test::axis_box<mode>({0, 0, 0}, {1, 1, 1});
+    const auto cutter = plic_test::unit_tetrahedron<mode>();
+    const auto storage = detail::checked_geometry_storage<mode>(Access::implementation(*parent->dynamic_geometry()));
+    std::vector<std::vector<PLIC::PlaneAuthority>> original_keys;
+    std::vector<std::shared_ptr<const PLIC::DynamicPointProvenance>> original_sources;
+    for (std::size_t i = 0; i < storage->vertices.size(); ++i)
+    {
+        const auto& vertex = storage->vertices[i];
+        ASSERT_TRUE(vertex.source_identity);
+        EXPECT_EQ(vertex.authorities.shared_payload(), vertex.source_identity->support_payload);
+        EXPECT_EQ(Access::original_source(Access::identity(storage->displayed[i])), vertex.source_identity);
+        EXPECT_NE(Access::identity(storage->displayed[i]), vertex.source_identity);
+        original_keys.push_back(vertex.authorities.values());
+        original_sources.push_back(vertex.source_identity);
+    }
+    const PLIC::GeometryPacketContext context{{71, 2, 3, 11}};
+    PLIC::ConstructionRegistry<mode> registry(context);
+    registry.register_native(1, 0, parent);
+    registry.register_native(2, 0, cutter);
+    const auto parent_packet = parent->encode(registry);
+    const auto parent_numerical_packet = parent->encode(context);
+    const auto split = parent->clip_by_face(*cutter, 3, false);
+    ASSERT_TRUE(split.inside);
+    ASSERT_TRUE(split.outside);
+    check_volume(split.inside->volume(), 1.L / 6);
+    check_volume(split.outside->volume(), 5.L / 6);
+    const auto first_child_packet = split.inside->encode(registry);
+    const auto repeated = parent->clip_by_face(*cutter, 3, false);
+    ASSERT_TRUE(repeated.inside);
+    EXPECT_EQ(split.inside->encode(registry), first_child_packet);
+    EXPECT_EQ(parent->encode(registry), parent_packet);
+    EXPECT_EQ(parent->encode(context), parent_numerical_packet);
+    for (std::size_t i = 0; i < storage->vertices.size(); ++i)
+    {
+        EXPECT_EQ(storage->vertices[i].source_identity, original_sources[i]);
+        EXPECT_EQ(storage->vertices[i].authorities.shared_payload(), original_sources[i]->support_payload);
+        EXPECT_EQ(storage->vertices[i].authorities.values(), original_keys[i]);
+    }
+    const auto child_storage = detail::checked_geometry_storage<mode>(
+        Access::implementation(*split.inside->dynamic_geometry()));
+    bool contact_gained_support = false;
+    for (const auto& child : child_storage->vertices)
+        for (std::size_t i = 0; i < storage->vertices.size(); ++i)
+            if (child.source_identity == original_sources[i] && child.authorities.size() > original_keys[i].size())
+                contact_gained_support = true;
+    EXPECT_TRUE(contact_gained_support);
+    const auto restored = Geometry<mode>::decode(first_child_packet, registry);
+    ASSERT_TRUE(restored);
+    check_volume(restored->volume(), 1.L / 6);
+    EXPECT_EQ(restored->encode(registry), first_child_packet);
+    const auto actual_points = split.inside->points(), restored_points = restored->points();
+    ASSERT_EQ(actual_points.size(), restored_points.size());
+    for (std::size_t i = 0; i < actual_points.size(); ++i)
+    {
+        EXPECT_EQ(restored_points[i].value, actual_points[i].value);
+        EXPECT_EQ(restored_points[i].supports(), actual_points[i].supports());
+    }
+    const auto numerical_packet = split.inside->encode(context);
+    const std::array sources{parent, cutter};
+    const auto numerical = Geometry<mode>::decode(numerical_packet, context, sources);
+    ASSERT_TRUE(numerical);
+    check_volume(numerical->volume(), 1.L / 6);
+    const auto numerical_points = numerical->points();
+    ASSERT_EQ(numerical_points.size(), actual_points.size());
+    for (std::size_t i = 0; i < numerical_points.size(); ++i)
+    {
+        EXPECT_EQ(numerical_points[i].value, actual_points[i].value);
+        if constexpr (mode == ArithmeticMode::BoundedCertification)
+            EXPECT_EQ(numerical_points[i].absolute_error, actual_points[i].absolute_error);
+        EXPECT_TRUE(numerical_points[i].supports().empty());
+        const auto owner = Access::identity(numerical_points[i].dynamic());
+        ASSERT_TRUE(owner);
+        EXPECT_TRUE(owner->numerical_only);
+    }
+    EXPECT_THROW((void) Geometry<mode>::make_points(numerical_points, numerical->faces()), PLIC::GeometryError);
+    EXPECT_EQ(parent->encode(context), parent_numerical_packet);
+}
+
+TEST(BoundedConvexGeometryTest, SharedVertexSupportsDetachDuringAnalyticContactAndPreserveAuthenticatedPackets)
+{
+    if (!SimpleFluid::PLIC::certification_environment())
+        GTEST_SKIP() << "Source witnesses require their supported floating-point environment.";
+    shared_vertex_support_contact_contract<ArithmeticMode::Ordinary>();
+    shared_vertex_support_contact_contract<ArithmeticMode::BoundedCertification>();
+}
 } // namespace

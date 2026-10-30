@@ -244,7 +244,8 @@ TEST(DistributedAdaptivePackets, GeometryRecordHeadersRejectLegacyFramesAndMalfo
             D::GeometryRecordKind::EdgeReply, D::GeometryRecordKind::NodeRequest, D::GeometryRecordKind::NodeReply,
             D::GeometryRecordKind::ClosureContact, D::GeometryRecordKind::ClosureRequests,
             D::GeometryRecordKind::ClosureReply, D::GeometryRecordKind::GhostRequest, D::GeometryRecordKind::GhostReply,
-            D::GeometryRecordKind::GhostNode, D::GeometryRecordKind::FrozenPart, D::GeometryRecordKind::FrozenBatch})
+            D::GeometryRecordKind::GhostNode, D::GeometryRecordKind::FrozenPart, D::GeometryRecordKind::FrozenBatch,
+            D::GeometryRecordKind::ClosureSpanContact, D::GeometryRecordKind::ClosureSpanRequests})
     {
         D::Writer current;
         D::write_geometry_record_header(current, kind);

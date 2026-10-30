@@ -7,14 +7,21 @@
 #include <Teuchos_RCP.hpp>
 namespace SimpleFluid::Meshes::AMR
 {
-/** Rank-local construction diagnostics, including a rejected prefix. Geometry
- * records are encoded once per owned leaf and transmitted at most once to each
- * actual point authority. Bytes are application estimates, distinct from RSS. */
+/** Rank-local construction diagnostics, including a rejected prefix. The
+ * geometry_records counters retain their names for compact records containing
+ * lossless decoded-shell axis spans and comparable traces, including optional
+ * point-membership faces. Records are encoded once per owned leaf and sent at
+ * most once to each actual point authority. Bytes are application estimates,
+ * distinct from RSS; cumulative allocation and work counters never reset.
+ * Request construction admits its node catalogue and GID-incidence storage;
+ * borrowed authority tiles retain their separate input-accounting scope. The
+ * printed diagnostics report their conservative simultaneous baseline. */
 struct AdaptiveClosureStats
 {
     std::size_t cells = 0, faces = 0, contacts = 0, geometry_records = 0, trace_records = 0;
     std::size_t transmitted_geometry_records = 0, decoded_geometry_records = 0;
-    std::size_t unique_record_bytes = 0, replicated_record_bytes = 0, decoded_geometry_bytes = 0;
+    std::size_t unique_record_bytes = 0, replicated_record_bytes = 0;
+    std::size_t decoded_geometry_bytes = 0; ///< Retained axis spans; trace faces enter live byte accounting separately.
     std::size_t cumulative_bytes = 0, live_peak_bytes = 0, input_retained_bytes = 0, retained_geometry_bytes = 0,
                 work = 0;
 };

@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
+#include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include <gtest/gtest.h>
 #include <optional>
 
@@ -231,5 +232,83 @@ TEST(GeometryAllocationLedgerTest, DynamicGeometryUsesTheSameOwnersAndNumericalM
         }
     }
     EXPECT_TRUE(weak.expired());
+}
+
+template<ArithmeticMode Mode> void shared_support_payload_contract()
+{
+    using Access = P::DynamicGeometryAccess;
+    const std::array<P::GeometryPoint, 3> face_points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto face = P::PlanarFace<ArithmeticMode::Ordinary>::make(face_points);
+    const auto support = P::planar_support<ArithmeticMode::Ordinary>(*face);
+    P::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, Mode);
+    Access::seal(source, {{{2, 7, 13}}, {{17, 19}}, P::details::original_support_authority(support)});
+    P::DynamicPoint exported(source.value, source.absolute_error, Mode);
+    const auto root = Access::identity(source);
+    Access::seal_export(exported, root, source.supports());
+    const auto copy = Access::identity(exported);
+    ASSERT_NE(root, copy);
+    ASSERT_EQ(root->support_payload, copy->support_payload);
+
+    auto provenance_bytes = 2 * sizeof(P::DynamicPointProvenance) + sizeof(P::DynamicPointSupportPayload) +
+                            root->supports().capacity() * sizeof(P::PlaneAuthority);
+    for (const auto& authority : root->supports())
+        provenance_bytes += authority.key.capacity() * sizeof(std::uint64_t);
+    EXPECT_EQ(Access::identity_bytes(copy, false), provenance_bytes);
+    EXPECT_EQ(Access::identity_bytes(copy), provenance_bytes + support.payload_bytes());
+
+    enum class VertexSupports
+    {
+        Empty,
+        Owned,
+        Shared
+    };
+    for (const auto vertex_supports : {VertexSupports::Empty, VertexSupports::Owned, VertexSupports::Shared})
+    {
+        SCOPED_TRACE(static_cast<unsigned>(vertex_supports));
+        // Independently enumerate two wrappers, storage, one vertex slot,
+        // two provenance records, one shared support payload and its typed
+        // support attachment. Empty vertex authorities make the attachment
+        // reachable only through the point payload. The owned vertex case
+        // additionally charges its private outer and key buffers.
+        auto storage = std::make_shared<P::details::GeometryStorage<Mode>>();
+        storage->ancestry.reset();
+        storage->moment_cache.reset();
+        storage->displayed = {source, exported};
+        storage->vertices.resize(1);
+        auto& vertex = storage->vertices[0];
+        vertex.source_identity = root;
+        if (vertex_supports != VertexSupports::Empty)
+            vertex.authorities = source.supports();
+        if (vertex_supports == VertexSupports::Shared)
+            vertex.authorities.share_if_equal(root->support_payload);
+        const auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
+        auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
+                        storage->displayed.capacity() * sizeof(P::DynamicPoint) +
+                        storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + provenance_bytes +
+                        support.payload_bytes();
+        if (vertex_supports == VertexSupports::Owned)
+        {
+            const auto& keys = vertex.authorities.values();
+            expected += keys.capacity() * sizeof(P::PlaneAuthority);
+            for (const auto& authority : keys)
+                expected += authority.key.capacity() * sizeof(std::uint64_t);
+        }
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        ledger.retain(geometry, used, byte_limit);
+        EXPECT_EQ(ledger.owner_count(), 7u);
+        EXPECT_EQ(ledger.payload_bytes(), expected);
+        EXPECT_EQ(used, expected + ledger.bookkeeping_bytes());
+        const auto first_used = used;
+        ledger.retain(geometry, used, byte_limit);
+        EXPECT_EQ(used, first_used);
+    }
+}
+
+TEST(GeometryAllocationLedgerTest, SharedPointSupportsAreChargedAsOneSeparateImmutableOwner)
+{
+    shared_support_payload_contract<ArithmeticMode::Ordinary>();
+    if (P::certification_environment())
+        shared_support_payload_contract<ArithmeticMode::BoundedCertification>();
 }
 } // namespace

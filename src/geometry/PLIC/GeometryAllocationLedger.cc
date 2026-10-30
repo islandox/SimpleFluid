@@ -16,6 +16,7 @@ enum class Kind
     Geometry,
     Plane,
     Point,
+    SupportPayload,
     Moment,
     Ancestry,
     Split,
@@ -183,7 +184,8 @@ struct GeometryAllocationLedger::Impl
                     for (const auto& vertex : geometry->vertices)
                     {
                         add_bytes(bytes, vertex.incident.capacity(), sizeof(StoredPlanePtr<Mode>));
-                        bytes = add(bytes, authorities(vertex.authorities));
+                        if (const auto* owned = vertex.authorities.owned_values())
+                            bytes = add(bytes, authorities(*owned));
                     }
                     for (const auto& face : geometry->faces)
                         add_bytes(bytes, face.capacity(), sizeof(std::size_t));
@@ -191,7 +193,8 @@ struct GeometryAllocationLedger::Impl
                         break;
                     for (const auto& vertex : geometry->vertices)
                     {
-                        retain_authorities(vertex.authorities, used, limit);
+                        retain_authorities(vertex.authorities.values(), used, limit);
+                        push(Kind::SupportPayload, vertex.authorities.shared_payload(), used, limit);
                         push(Kind::Point, vertex.source_identity, used, limit);
                         for (const auto& plane : vertex.incident)
                             push(Kind::Plane, plane, used, limit);
@@ -224,11 +227,11 @@ struct GeometryAllocationLedger::Impl
                 }
                 case Kind::Point: {
                     const auto point = std::static_pointer_cast<const DynamicPointProvenance>(item.owner);
-                    auto bytes = add(sizeof(DynamicPointProvenance), authorities(point->supports));
+                    auto bytes = sizeof(DynamicPointProvenance);
                     add_bytes(bytes, point->source_edges.capacity(), sizeof(point->source_edges.front()));
                     if (admit(item, bytes, used, limit))
                     {
-                        retain_authorities(point->supports, used, limit);
+                        push(Kind::SupportPayload, point->support_payload, used, limit);
                         push(Kind::Point, point->source_origin, used, limit);
                         for (const auto& edge : point->source_edges)
                         {
@@ -236,6 +239,13 @@ struct GeometryAllocationLedger::Impl
                             push(Kind::Point, edge[1], used, limit);
                         }
                     }
+                    break;
+                }
+                case Kind::SupportPayload: {
+                    const auto payload = std::static_pointer_cast<const DynamicPointSupportPayload>(item.owner);
+                    if (admit(
+                            item, add(sizeof(DynamicPointSupportPayload), authorities(payload->authorities)), used, limit))
+                        retain_authorities(payload->authorities, used, limit);
                     break;
                 }
                 case Kind::Moment:

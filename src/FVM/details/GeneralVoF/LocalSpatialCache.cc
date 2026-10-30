@@ -311,7 +311,7 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
     if (!data.topology->order.empty() && cache->cells.empty())
         throw std::invalid_argument("Local VoF owned cells have no retained native geometry.");
     std::vector<const AMR::AdaptiveTile*> frontier_tiles;
-    for (const auto& tile : data.topology->frontier_tiles)
+    for (const auto& tile : data.topology->frontier_tiles())
     {
         work.test();
         const bool first = data.cells.contains(tile.first), second = tile.second && data.cells.contains(*tile.second);

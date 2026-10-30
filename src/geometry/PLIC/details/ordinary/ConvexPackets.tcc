@@ -60,7 +60,7 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
         writer.word(vertex.incident.size());
         for (const auto& plane : vertex.incident)
             writer.word(plane_ids.at(plane));
-        auto keys = vertex.authorities;
+        std::vector<PlaneAuthority> keys = vertex.authorities.values();
         std::sort(keys.begin(), keys.end());
         writer.authorities(keys);
     }
@@ -283,21 +283,8 @@ template<ArithmeticMode Mode> void NumericalWriter<Mode>::word(std::uint64_t x)
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::real(long double x)
 {
     static_assert(Mode == kernel_mode);
-    finite(x);
-    word(std::signbit(x) && x != 0 ? 1 : 0);
-    int exponent = 0;
-    auto fraction = std::frexp(std::abs(x), &exponent);
-    word(static_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
-    constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
-    for (unsigned i = 0; i < chunks; ++i)
-    {
-        fraction = std::scalbn(fraction, 32);
-        const auto chunk = static_cast<std::uint64_t>(fraction);
-        word(chunk);
-        fraction -= static_cast<long double>(chunk);
-    }
-    if (fraction != 0)
-        reject("wider-FP significand cannot be serialized losslessly.");
+    for (const auto value : scalar_packet(x))
+        word(value);
 }
 
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::scalar(Scalar x)
@@ -366,27 +353,10 @@ template<ArithmeticMode Mode> std::size_t NumericalReader<Mode>::count(std::size
 template<ArithmeticMode Mode> long double NumericalReader<Mode>::real()
 {
     static_assert(Mode == kernel_mode);
-    const auto negative = word();
-    const auto exponent_word = word();
-    const auto exponent = std::bit_cast<std::int64_t>(exponent_word);
-    const auto minimum_exponent =
-        std::numeric_limits<long double>::min_exponent - std::numeric_limits<long double>::digits;
-    if (negative > 1 || exponent < minimum_exponent || exponent > std::numeric_limits<long double>::max_exponent)
-        reject("invalid numerical packet scalar exponent/sign.");
-    constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
-    long double significand = 0;
-    for (unsigned i = 0; i < chunks; ++i)
-    {
-        const auto chunk = word();
-        if (chunk > std::numeric_limits<std::uint32_t>::max())
-            reject("invalid numerical packet significand.");
-        significand = std::scalbn(significand, 32) + static_cast<long double>(chunk);
-    }
-    const auto value = std::scalbn(significand, static_cast<int>(exponent) - 32 * chunks);
-    finite(value);
-    if (significand != 0 && value == 0)
-        reject("numerical packet loses nonzero coordinates.");
-    return negative ? -value : value;
+    ScalarPacketWords words;
+    for (auto& value : words)
+        value = word();
+    return scalar_from_packet(words);
 }
 
 template<ArithmeticMode Mode> Scalar NumericalReader<Mode>::scalar()

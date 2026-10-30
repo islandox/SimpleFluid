@@ -11,6 +11,14 @@
 #include <optional>
 namespace SimpleFluid::Meshes::AMR
 {
+class DistributedAdaptiveHierarchy;
+namespace adaptive_detail
+{
+/** Internal native-publication representation; not a migration/wire leaf set. */
+[[nodiscard]] AdaptiveNativeDraft compact_adaptive_native_draft(const DistributedAdaptiveHierarchy&);
+[[nodiscard]] std::vector<AdaptiveLeaf> fetch_native_source_leaves(
+    const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey>);
+} // namespace adaptive_detail
 struct AdaptiveBalancePlan;
 struct DistributedAdaptiveOptions
 {
@@ -117,10 +125,17 @@ public:
      * their actual anchor owner. Empty ranks participate in every phase. */
     [[nodiscard]] Plan plan_migration(std::span<const int> destinations) const;
     [[nodiscard]] Plan plan_migration(const AdaptiveBalancePlan&) const;
-    /** Materialize only transient local support data for canonical authorities. */
+    /** Materialize expanded full-cell geometry and local support data for
+     * canonical authorities. The returned leaves retain their wire form. */
     [[nodiscard]] AdaptiveNativeDraft native_draft() const;
 
 private:
+    friend AdaptiveNativeDraft adaptive_detail::compact_adaptive_native_draft(const DistributedAdaptiveHierarchy&);
+    friend std::vector<AdaptiveLeaf> adaptive_detail::fetch_native_source_leaves(
+        const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey>);
+    [[nodiscard]] std::vector<AdaptiveLeaf> fetch_leaves_impl(
+        std::span<const AdaptiveCellKey>, std::optional<std::size_t>, bool preserve_source) const;
+    [[nodiscard]] AdaptiveNativeDraft native_draft_impl(bool compact_procedural) const;
     explicit DistributedAdaptiveHierarchy(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
     std::shared_ptr<const Data> data_;
 };

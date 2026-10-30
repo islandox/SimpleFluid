@@ -225,10 +225,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         result.coordinates = transform<Mode>(
             point<Mode>(DynamicPoint{identity->value, identity->absolute_error}), Frame{}, source->frame);
         result.source_identity = identity;
-        active_work->charge(identity->supports.size(), sizeof(PlaneAuthority));
-        for (const auto& key : identity->supports)
+        active_work->charge(identity->supports().size(), sizeof(PlaneAuthority));
+        for (const auto& key : identity->supports())
             active_work->charge(key.key.size(), sizeof(std::uint64_t));
-        result.authorities = identity->supports;
+        result.authorities = identity->supports();
         return result;
     };
     const auto retained_endpoint_distance = [&](const Vertex& endpoint, const PlanePtr& original)
@@ -629,7 +629,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             for (const auto& key : plane->authorities)
                 if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
                     vertices[i].authorities.end())
-                    vertices[i].authorities.push_back(key);
+                    vertices[i].authorities.append(key);
         }
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
     const auto crossing = [&](std::size_t a, std::size_t b)
@@ -664,10 +664,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         for (const auto& key : vertices[a].authorities)
             if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
                 vertices[b].authorities.end())
-                vertex.authorities.push_back(key);
+                vertex.authorities.append(key);
         for (const auto& key : plane->authorities)
             if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
-                vertex.authorities.push_back(key);
+                vertex.authorities.append(key);
         tighten_incident_coordinates<Mode>(vertex, impl_->frame);
         preserve_crossing_incidence<Mode>(vertex, vertices[a], vertices[b], impl_->frame,
             impl_->numerical_only || source->numerical_only);

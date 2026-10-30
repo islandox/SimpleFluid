@@ -1045,7 +1045,10 @@ TEST(GeneralVoFFinite, ConstructionDependenciesBindDonorRecipientAndAdmittedHalo
     face.first = recipient;
     face.second = donor;
     face.node_gids = {1, 2, 3};
-    topology->construction_faces.emplace(17, face);
+    face.face_gid = 17;
+    topology->tiles.push_back(face);
+    topology->construction_faces.emplace(17,
+        GeneralVoF::Data::Topology::SurfaceTileReference{GeneralVoF::Data::Topology::SurfaceTileOwner::OwnedTiles, 0});
     Root native{Root::Kind::Native, 11, 7, 0, {}};
     Root sweep{Root::Kind::Sweep, 17, 0, 0, {}};
     EXPECT_NO_THROW(controls::admit_root(data, native, 11, 7, recipient));

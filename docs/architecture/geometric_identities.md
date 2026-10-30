@@ -116,6 +116,9 @@ whose optional geometry is absent. Ancestry keys retain their original schema.
 Mixed join capsules carry a new geometry certificate and regenerate the canonical
 key from it. Authority tile packets retain the leading numeric GID
 word for collective ordinal patching, followed by their checked record stamp.
+Compact closure-span contacts and their request batches use distinct record
+kinds from the older full-certificate closure payloads; a matching outer header
+version does not make those payloads interchangeable.
 AMR and FVM geometry record stamps use natural headers of one-byte family,
 version, and kind fields. With their byte alignment these headers occupy three
 bytes; the codecs still initialize and check any compiler-inserted padding.
@@ -164,9 +167,12 @@ distinct owners. Translation retains its parent support without simplifying the
 construction expression. There is no global interner or lazy face cache.
 
 `GeometryAllocationLedger` admits geometry and shared identity owners in the
-same scope, pins them against address reuse, and charges each owner once. Failed
-admission poisons the scope. Standalone footprint queries include reachable
-identity ancestry; `exclusive_storage_bytes()` on a planar face excludes those
+same scope, pins them against address reuse, and charges each owner once.
+Immutable provenance-support vectors have their own allocation owners; copied
+vertices and exported point histories share those buffers while the ledger
+traverses every retained typed authority attachment. Mutation detaches before
+changing a shared support sequence. Failed admission poisons the scope.
+Standalone footprint queries include reachable identity ancestry; `exclusive_storage_bytes()` on a planar face excludes those
 shared identity allocations so a caller can admit them through its ledger.
 Counts cover backing objects, buffer capacities, and ledger bookkeeping, not
 allocator overhead, shared-pointer control blocks, or RSS. Cached full keys and

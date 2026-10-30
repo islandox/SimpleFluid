@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
 #include <set>
@@ -37,13 +38,13 @@ AdaptiveNode node_read(Reader& r, std::size_t limit)
         throw std::invalid_argument("Invalid exact native ghost node display.");
     return node;
 }
-} // namespace
-AdaptiveNativeDraft fetch_adaptive_native_draft(
-    const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveCellKey> additional_full_ghosts)
+AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hierarchy,
+    std::span<const AdaptiveCellKey> additional_full_ghosts, bool compact_procedural)
 {
     const auto comm = hierarchy.communicator();
     const auto limit = hierarchy.options().byte_budget;
-    auto draft = hierarchy.native_draft();
+    auto draft =
+        compact_procedural ? adaptive_detail::compact_adaptive_native_draft(hierarchy) : hierarchy.native_draft();
     std::map<AdaptiveCellKey, const AdaptiveLeaf*> owned;
     std::map<AdaptiveCellKey, std::vector<const AdaptiveTile*>> rows;
     std::map<std::uint64_t, const AdaptiveNode*> local_nodes;
@@ -80,7 +81,8 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 local_nodes.emplace(node.gid, &node);
         });
     const auto owners = hierarchy.lookup_cells(ghost_keys);
-    auto ghosts = hierarchy.fetch_leaves(ghost_keys);
+    auto ghosts = compact_procedural ? adaptive_detail::fetch_native_source_leaves(hierarchy, ghost_keys)
+                                     : hierarchy.fetch_leaves(ghost_keys);
     std::vector<OwnerPacket> requests;
     adaptive_detail::collective(*comm,
         [&]
@@ -217,8 +219,11 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 draft.nodes.push_back(std::move(node));
             for (auto& leaf : ghosts)
             {
+                const bool compact = adaptive_detail::compact_native_geometry(leaf, compact_procedural);
                 leaf.geometry = hierarchy.geometry(leaf);
                 leaf.surfaces = hierarchy.surfaces(leaf);
+                if (compact)
+                    leaf.geometry.reset();
                 draft.ghosts.push_back(std::move(leaf));
             }
         });
@@ -240,7 +245,8 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
             keys.assign(needed.begin(), needed.end());
         });
     const auto locations = hierarchy.lookup_cells(keys);
-    const auto records = hierarchy.fetch_leaves(keys);
+    const auto records = compact_procedural ? adaptive_detail::fetch_native_source_leaves(hierarchy, keys)
+                                            : hierarchy.fetch_leaves(keys);
     adaptive_detail::collective(*comm,
         [&]
         {
@@ -277,6 +283,8 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                     auto full_record = records[i];
                     full_record.geometry = hierarchy.geometry(full_record);
                     full_record.surfaces = hierarchy.surfaces(full_record);
+                    if (adaptive_detail::compact_native_geometry(records[i], compact_procedural))
+                        full_record.geometry.reset();
                     if (binding.owner == comm->getRank())
                         draft.owned.push_back(std::move(full_record));
                     else
@@ -287,10 +295,21 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
         });
     return draft;
 }
+} // namespace
+AdaptiveNativeDraft fetch_adaptive_native_draft(
+    const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveCellKey> additional_full_ghosts)
+{
+    return fetch_native_draft(hierarchy, additional_full_ghosts, false);
+}
+AdaptiveNativeDraft adaptive_detail::fetch_compact_adaptive_native_draft(
+    const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveCellKey> additional_full_ghosts)
+{
+    return fetch_native_draft(hierarchy, additional_full_ghosts, true);
+}
 AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
     std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts)
 {
-    auto draft = fetch_adaptive_native_draft(hierarchy, additional_full_ghosts);
+    auto draft = adaptive_detail::fetch_compact_adaptive_native_draft(hierarchy, additional_full_ghosts);
     return assemble_adaptive_native(
         std::move(draft), root_schema, hierarchy.communicator(), hierarchy.options().byte_budget);
 }

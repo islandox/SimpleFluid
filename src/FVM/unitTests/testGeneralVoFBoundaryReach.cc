@@ -70,7 +70,8 @@ VoF::GeneralVoF::Data retained_data(
             tile.geometry = tile.geometry->reversed();
         }
     }
-    topology->frontier_tiles.push_back(std::move(tile));
+    topology->tiles.push_back(std::move(tile));
+    topology->frontier_tile_references.push_back({decltype(topology)::element_type::SurfaceTileOwner::OwnedTiles, 0});
     data.topology = std::move(topology);
     return data;
 }
@@ -159,9 +160,10 @@ TEST(GeneralVoFBoundaryReach, Face17ReplaysOriginalWallConstructionBeforeDonorCl
     }
     auto data = retained_data(finite[0], 5);
     auto topology = std::make_shared<VoF::GeneralVoF::Data::Topology>();
-    topology->frontier_tiles = data.topology->frontier_tiles;
-    topology->frontier_tiles[0].face_gid = 73;
-    topology->frontier_tiles[0].node_gids = {9, 0, 2, 48};
+    topology->tiles = data.topology->tiles;
+    topology->frontier_tile_references = data.topology->frontier_tile_references;
+    topology->tiles[0].face_gid = 73;
+    topology->tiles[0].node_gids = {9, 0, 2, 48};
     data.topology = topology;
     Trial trial(data);
     const auto recipe = sweep::prepare_sweep<mode>(

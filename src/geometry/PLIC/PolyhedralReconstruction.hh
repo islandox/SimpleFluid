@@ -66,12 +66,16 @@ struct PolyhedralResolutionAssessment
     };
     Reason reason = Reason::Admitted;
     double local_cell_span = 0, requested_cell_span = 0;
+    /** Phase-availability maxima over target and support context. With the
+     * four-argument finite API these describe the full retained span, whereas
+     * stencil_cells and fitting diagnostics describe only its local prefix. */
     double gas_support_fraction = 0, carrier_support_fraction = 0;
     /** Dimensionless LS conditioning and direction strength. Uncertainty is a
      * propagated roundoff estimate, not a certified enclosure. */
     double stencil_condition = 0, directional_strength = 0, directional_uncertainty = 0;
-    /** Transport-only observed mixed-neighbor support in the seed tangent
-     * plane. Not a clipped-volume optimizer convergence certificate. */
+    /** Transport-only mixed-neighbor support in the seed tangent plane,
+     * restricted to neighbors meeting the existing optimized phase-length
+     * eligibility. Not a clipped-volume optimizer convergence certificate. */
     double angular_support_condition = 0;
     std::size_t angular_support_cells = 0;
     /** True only after directional admission and sufficient phase support. */
@@ -117,6 +121,9 @@ struct PolyhedralReconstructionOptions
      * volume-equivalent minority/cell length ratio cbrt(min(G,L))/cbrt(Vcell)
      * is strictly below this value. Only the target offset is then fitted;
      * angular/model-residual gates do not run. Zero disables this exclusion.
+     * Transport support selection also requires an observed mixed neighbor to
+     * meet this length ratio before its direction certifies angular support.
+     * Weak neighbors remain mixed and remain in the selected fitting objective.
      * This provisional scale criterion never changes either phase inventory. */
     double minimum_optimized_phase_length_ratio = .05;
 };
@@ -175,12 +182,33 @@ public:
      * retains its separate optimizer/model contract. */
     [[nodiscard]] static PolyhedralResolutionAssessment assess_transport_support(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
+    /** Separate retained phase availability from the local fitting prefix.
+     * Every full-support sample is validated; phase-support fractions and
+     * angular eligibility use the full span. Direction, conditioning and
+     * observed mixed-neighbor tangent support use only its first fitting_cells
+     * samples. The reported stencil_cells is that prefix count. */
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_transport_support(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
+        PolyhedralReconstructionOptions);
     /** Offset utility for a supplied normal. Physical interface admission
      * belongs to reconstruct()/assess_resolution(). */
     [[nodiscard]] static PolyhedralInterface solve_offset(
         const PolyhedralPhaseSample<Mode>&, GeometryPoint, PolyhedralReconstructionOptions = {});
     [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
+    /** Fit only full_support.first(fitting_cells), using the complete retained
+     * span solely for phase availability. Its total size obeys the existing
+     * maximum_stencil_cells bound; the prefix is not duplicated. Volume-model
+     * residuals, clip work and diagnostic stencil IDs refer only to the prefix.
+     * After primary angular convergence fails the measured model bound, this
+     * Ordinary measure-only entry may initialize one secondary fit from a
+     * qualified, lower-search-merit original-face minority-cap normal. Both
+     * fits and seed queries share the original total iteration/clip budgets.
+     * The three-argument overload uses the whole span for both roles and keeps
+     * its original single-initialization policy. */
+    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
+        PolyhedralReconstructionOptions);
 };
 /** Explicit optional exact backend. The same small-phase orientation policy
  * retains its strict exact offset arithmetic. The finite spatial-resolution

@@ -158,6 +158,8 @@ commands and result manifests. They are historical evidence, not fresh runs.
 | `algebraic_vof_repair_20261029/completion-motion-*` and `completion-capillary-*` | Raw GeometricFace single-interface `.125` motion and native-cylinder `.02` completed serial/MPI2/MPI4. Swept motion timed out; DonorCell distributed cylinder rejected insufficient coherent support. Neither Q2 convergence nor long capillary follow-ons is closed |
 | Same campaign's `frozen-summary.json` and `completion-q3-mpi*` | Long-flow Q3 remains failed: DonorCell can reach `T=8` yet miss displacement; GeometricFace has rejected before the endpoint. Later component repairs do not erase those outcomes |
 | Same campaign's `q5-final-serial` and `qualified-mpi/q5` | Raw coupled transactions passed serial/MPI2/MPI4, including spatial/empty owners; no cleanup-enabled coupled-remap claim |
+| `algebraic_vof_q2_repair_20261030/` | Uniform N32 initialization passed the unchanged 64 MiB cap in serial/MPI2/MPI4. Allocation-union captures establish real storage removal. The original N32 finite-rectangle motion still fails its single-plane model gate before the first accepted step; `native-n32-review/` contains an independent all-plane lower bound. Construction and component passes do not close Q2 endpoints or refinement order |
+| `algebraic_vof_repair_20261031/HANDOFF.md` and `stage-status.json` | Repair checkpoint consolidating scoped preservation passes, original failed endpoints and their source/build provenance. N64 authority/closure completes, while native-draft admission remains open; Q2/Q3/Q4 are not fully qualified |
 
 ### Strict-mode microscopic replay
 
@@ -322,6 +324,15 @@ and [capillarity](../../verification/vof/algebraic_capillary_manifest.json).
 Their criteria are fixed before candidate runs. A registration, skipped opt-in
 test, partial horizon, or successfully rejected transaction is not a physical
 qualification pass.
+
+Changes to Ordinary pressure projection additionally require the independent
+two-cell nonuniform-predictor pressure-work oracle, closed-circulation idempotence,
+and physical-mass circulation oracle described in the
+[projection contract](../modeling/general_vof_projection.md). Prescribed-rate
+workspace fixtures supply matching physical cell moments while retaining their
+original canonical occupancy and readiness assertions. A small face-divergence
+residual alone does not establish a physically compatible cell impulse. Bounded
+and Exact checks retain separately reported scope.
 
 | Gate | Executable evidence and acceptance |
 | --- | --- |

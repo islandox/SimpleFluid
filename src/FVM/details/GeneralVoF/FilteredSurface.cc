@@ -269,14 +269,14 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     reserve_exact(rates, cells.size(), budget);
     rates.resize(cells.size());
     std::vector<const AMR::AdaptiveTile*> canonical_faces;
-    if (data.topology->frontier_tiles.size() >
-        std::numeric_limits<std::size_t>::max() - data.topology->surface_tiles.size())
+    if (data.topology->frontier_tiles().size() >
+        std::numeric_limits<std::size_t>::max() - data.topology->surface_tiles().size())
         reject(Reason::IncompleteSupport, "Filtered canonical face count overflows.");
-    const auto face_capacity = data.topology->surface_tiles.size() + data.topology->frontier_tiles.size();
+    const auto face_capacity = data.topology->surface_tiles().size() + data.topology->frontier_tiles().size();
     reserve_exact(canonical_faces, face_capacity, budget);
-    for (const auto& tile : data.topology->surface_tiles)
+    for (const auto& tile : data.topology->surface_tiles())
         canonical_faces.push_back(&tile);
-    for (const auto& tile : data.topology->frontier_tiles)
+    for (const auto& tile : data.topology->frontier_tiles())
         if (tile.exterior)
             canonical_faces.push_back(&tile);
     std::sort(canonical_faces.begin(), canonical_faces.end(),
@@ -344,7 +344,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     // for every full ghost. Frontier tiles authenticate the actual boundary of
     // retained full geometry. Only unknown interior neighbors truncate support;
     // authenticated exterior faces are retained as a no-flux physical boundary.
-    for (const auto& tile : data.topology->frontier_tiles)
+    for (const auto& tile : data.topology->frontier_tiles())
         if (!tile.exterior)
             for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                 if (key && index.contains(*key))
@@ -442,7 +442,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     }
     std::map<std::uint64_t, std::set<Key>> interior_stars;
     std::set<std::uint64_t> frontier_nodes;
-    for (const auto& tile : data.topology->frontier_tiles)
+    for (const auto& tile : data.topology->frontier_tiles())
     {
         for (auto node : tile.node_gids)
             tracked_insert(frontier_nodes, node, budget);

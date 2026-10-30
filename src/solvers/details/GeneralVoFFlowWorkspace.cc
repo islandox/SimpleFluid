@@ -11,6 +11,7 @@
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "solvers/details/GeneralVoFCompatibleProjection.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -696,6 +697,7 @@ std::vector<Vector> GeneralVoFFlowWorkspace::viscous_force(
     return result;
 }
 #include "solvers/details/GeneralVoFFiniteProjection.tcc"
+#include "solvers/details/GeneralVoFCompatibleFlow.tcc"
 void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
     std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
     const std::vector<double>& kappa, double dt, double sigma, const VoFSolverOptions& options,
@@ -705,7 +707,7 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
     std::optional<std::span<const long double>> physical_mass_error)
 {
     if (arithmetic_mode_ == ArithmeticMode::Ordinary)
-        return project_finite<ArithmeticMode::Ordinary>(face_velocity, velocity, pressure, density, fraction, kappa, dt,
+        return project_compatible(face_velocity, velocity, pressure, density, fraction, kappa, dt,
             sigma, options, diagnostics, provenance, physical_mass, closure_topology, physical_mass_error);
     return project_finite<ArithmeticMode::BoundedCertification>(face_velocity, velocity, pressure, density, fraction,
         kappa, dt, sigma, options, diagnostics, provenance, physical_mass, closure_topology, physical_mass_error);
