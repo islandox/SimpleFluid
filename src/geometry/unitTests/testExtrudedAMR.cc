@@ -2,6 +2,7 @@
  * @brief Whole-product ancestry, exact refinement, inverse families and native contracts.
  */
 #include "geometry/MeshHandle.hh"
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "parallel/MeshPartitioner.hh"
@@ -158,9 +159,12 @@ TEST(ExtrudedAMRTest, OrdinarySharedPacketsRoundTripAndRejectOldVersions)
     {
         auto bad_base = base, bad_axis = axis, bad_view = view;
         auto& bad = part == 0 ? bad_base : part == 1 ? bad_axis : bad_view;
-        ASSERT_GE(bad.size(), 16u);
-        std::fill(bad.begin() + 8, bad.begin() + 16, 0);
-        bad[8] = 1;
+        const std::array tags{
+            PLIC::GeometryTag::ExtrusionBase, PLIC::GeometryTag::AxisDescriptor, PLIC::GeometryTag::ProductView};
+        ASSERT_GE(bad.size(), 2u);
+        EXPECT_EQ(static_cast<std::uint8_t>(bad[0]), static_cast<std::uint8_t>(tags[part]));
+        EXPECT_EQ(static_cast<std::uint8_t>(bad[1]), 2u);
+        bad[1] = 1;
         EXPECT_THROW((void) Construction::decode_shared(topology, bad_base, bad_axis, bad_view), std::invalid_argument);
     }
 }

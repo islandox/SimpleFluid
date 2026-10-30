@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/CertifiedGeometryProperties.hh"
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
@@ -81,6 +82,8 @@ inline GeometryPoint display(WidePoint p)
 struct Writer
 {
     std::vector<char> bytes;
+    void byte(std::uint8_t value) { bytes.push_back(static_cast<char>(value)); }
+    void tag(GeometryTag value) { byte(static_cast<std::uint8_t>(value)); }
     void word(std::uint64_t value)
     {
         for (unsigned i = 0; i < 8; ++i)
@@ -123,6 +126,13 @@ struct Reader
     std::span<const char> bytes;
     std::size_t cursor = 0;
     bool canonical_encoding = false;
+    std::uint8_t byte()
+    {
+        if (cursor >= bytes.size())
+            reject("truncated finite geometry tag.");
+        return static_cast<std::uint8_t>(bytes[cursor++]);
+    }
+    GeometryTag tag() { return static_cast<GeometryTag>(byte()); }
     std::uint64_t word()
     {
         if (bytes.size() - cursor < 8)
@@ -192,19 +202,19 @@ struct Reader
             reject("trailing finite geometry packet bytes.");
     }
 };
-inline constexpr std::uint64_t point_tag = 0x53464650504e5431ULL;
-inline constexpr std::uint64_t displacement_tag = 0x5346465044535031ULL;
+inline constexpr GeometryTag point_tag = GeometryTag::OrdinaryPoint;
+inline constexpr GeometryTag displacement_tag = GeometryTag::OrdinaryDisplacement;
 inline std::vector<char> point_packet(const WidePoint& p)
 {
     Writer w;
-    w.word(point_tag);
+    w.tag(point_tag);
     w.point(p);
     return std::move(w.bytes);
 }
 inline WidePoint read_point(std::span<const char> packet)
 {
     Reader r{packet};
-    if (r.word() != point_tag)
+    if (r.tag() != point_tag)
         reject("foreign point identity arithmetic mode.");
     const auto p = r.point();
     r.finish();
@@ -215,7 +225,7 @@ inline std::vector<char> displacement_packet(const WidePoint& p)
     if (p == WidePoint{})
         return {};
     Writer w;
-    w.word(displacement_tag);
+    w.tag(displacement_tag);
     w.point(p);
     return std::move(w.bytes);
 }
@@ -224,7 +234,7 @@ inline WidePoint read_displacement(std::span<const char> packet)
     if (packet.empty())
         return {};
     Reader r{packet};
-    if (r.word() != displacement_tag)
+    if (r.tag() != displacement_tag)
         reject("foreign displacement arithmetic mode.");
     const auto p = r.point();
     r.finish();
@@ -253,12 +263,7 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> plane_packet(
         canonical[i] = normal[i] / normal[axis];
     const auto location = (dot(normal, anchor) + offset) / normal[axis];
     finite(location);
-    Writer w;
-    w.word(0x5346465053505431ULL);
-    w.word(axis);
-    w.point(canonical);
-    w.real(location);
-    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
+    return details::GeometryIdentityAccess::support_plane(axis, canonical, location);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native
 
@@ -271,12 +276,7 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> source_support_packet(std:
     for (std::size_t axis = 0; axis < 3; ++axis)
         if (std::all_of(source.begin(), source.end(), [&](const auto& p) { return p[axis] == source.front()[axis]; }))
         {
-            Writer w;
-            w.word(0x53464e4158495331ULL);
-            w.word(axis);
-            w.real(source.front()[axis]);
-            return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-                std::move(w.bytes));
+            return details::GeometryIdentityAccess::support_axis(axis, source.front()[axis]);
         }
     std::vector<WidePoint> polygon(source.begin(), source.end());
     bool changed = true;
@@ -293,12 +293,7 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> source_support_packet(std:
             }
     }
     std::sort(polygon.begin(), polygon.end());
-    Writer w;
-    w.word(0x53464e534f555231ULL);
-    w.word(polygon.size());
-    for (const auto& p : polygon)
-        w.point(p);
-    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
+    return details::GeometryIdentityAccess::support_source(std::move(polygon));
 }
 inline PlaneSupportIdentity<ArithmeticMode::Ordinary> input_support_packet(
     GeometryPoint normal, GeometryPoint anchor, double offset)
@@ -316,12 +311,7 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> input_support_packet(
             static_cast<long double>(anchor[axis]) + static_cast<long double>(offset) / normal[axis];
         if ((location - anchor[axis]) * normal[axis] == offset)
         {
-            Writer w;
-            w.word(0x53464e4158495331ULL);
-            w.word(axis);
-            w.real(location);
-            return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-                std::move(w.bytes));
+            return details::GeometryIdentityAccess::support_axis(axis, location);
         }
     }
     int direction = 1;
@@ -331,13 +321,18 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> input_support_packet(
             direction = n < 0 ? -1 : 1;
             break;
         }
-    Writer w;
-    w.word(0x53464e494e505431ULL);
-    for (auto n : normal)
-        w.real(static_cast<long double>(direction) * n);
-    w.point(wide(anchor));
-    w.real(static_cast<long double>(direction) * offset);
-    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
+    WidePoint issued_normal;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        issued_normal[axis] = static_cast<long double>(direction) * normal[axis];
+        finite(issued_normal[axis]);
+    }
+    const auto issued_anchor = wide(anchor);
+    for (auto value : issued_anchor)
+        finite(value);
+    const auto issued_offset = static_cast<long double>(direction) * offset;
+    finite(issued_offset);
+    return details::GeometryIdentityAccess::support_input(issued_normal, issued_anchor, issued_offset);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native
 
@@ -355,13 +350,6 @@ namespace SimpleFluid::PLIC::details::ordinary_native
 inline PlaneSupportIdentity<ArithmeticMode::Ordinary> translated_support_packet(
     const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support, const WidePoint& shift)
 {
-    if (shift == WidePoint{})
-        return support;
-    Writer writer;
-    writer.word(0x53464e5452414e31ULL);
-    writer.packet(details::GeometryIdentityAccess::key(support));
-    writer.point(shift);
-    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-        std::move(writer.bytes), support);
+    return details::GeometryIdentityAccess::translated_support(support, shift);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native

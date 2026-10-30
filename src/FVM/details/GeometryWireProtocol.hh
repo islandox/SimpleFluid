@@ -9,9 +9,9 @@
 namespace SimpleFluid::VoF::geometry_wire
 {
 inline constexpr std::uint64_t magic = 0x5346564f46574952ULL;
-inline constexpr std::uint64_t version = 1;
-inline constexpr std::size_t header_bytes = 3 * sizeof(std::uint64_t);
-enum class Record : std::uint64_t
+inline constexpr std::uint8_t version = 2;
+inline constexpr std::size_t header_bytes = sizeof(std::uint64_t) + 2 * sizeof(std::uint8_t);
+enum class Record : std::uint8_t
 {
     NativeShellRequest = 1,
     NativeShellReply,
@@ -26,12 +26,12 @@ enum class Record : std::uint64_t
 template<class Writer> void write_header(Writer& writer, Record record)
 {
     writer.word(magic);
-    writer.word(version);
-    writer.word(static_cast<std::uint64_t>(record));
+    writer.byte(version);
+    writer.byte(static_cast<std::uint8_t>(record));
 }
 template<class Reader> void read_header(Reader& reader, Record record)
 {
-    if (reader.word() != magic || reader.word() != version || reader.word() != static_cast<std::uint64_t>(record))
+    if (reader.word() != magic || reader.byte() != version || reader.byte() != static_cast<std::uint8_t>(record))
         throw std::invalid_argument("VoF geometry record version or kind differs.");
 }
 } // namespace SimpleFluid::VoF::geometry_wire

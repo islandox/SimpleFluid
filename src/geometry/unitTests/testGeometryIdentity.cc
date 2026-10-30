@@ -3,6 +3,7 @@
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/unitTests/geometry_compact_tag_oracle.hh"
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
@@ -139,15 +140,15 @@ TEST(GeometryIdentityTest, OrdinaryRetainsCheckedExactSupportAncestry)
 {
     const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
     const auto support = planar_support<exact>(*PlanarFace<exact>::make(points));
-    const auto retained = details::GeometryIdentityAccess::make<PlaneSupportIdentity<ordinary>>(canonical_key(support));
+    const auto retained = details::GeometryIdentityAccess::retained_exact_support(support);
     EXPECT_EQ(decode_identity<PlaneSupportIdentity<ordinary>>(encode_identity(retained)), retained);
     EXPECT_EQ(canonical_key(retained), canonical_key(support));
     EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(encode_identity(support))), std::invalid_argument);
     EXPECT_THROW((decode_identity<LineIdentity<ordinary>>(encode_identity(support))), std::invalid_argument);
 }
 
-// Fixed original-key fingerprints. These expected values were captured before
-// the typed migration; transport versions must never change this key schema.
+// Original semantic fingerprints are retained as an independent oracle.
+// Expand only compact category/record tags; numeric payload bytes must match.
 struct KeyFingerprint
 {
     std::size_t bytes;
@@ -196,19 +197,21 @@ template<ArithmeticMode Mode> void check_frozen_key_fixtures()
         for (std::size_t kind = 0; kind < keys.size(); ++kind)
         {
             SCOPED_TRACE(kind);
-            EXPECT_EQ(keys[kind].size(), expected[fixture][kind].bytes);
-            EXPECT_EQ(Meshes::AMR::adaptive_route_hash(keys[kind]), expected[fixture][kind].hash);
+            const auto expanded = compact_tag_oracle::expand(keys[kind]);
+            EXPECT_EQ(expanded.size(), expected[fixture][kind].bytes);
+            EXPECT_EQ(Meshes::AMR::adaptive_route_hash(expanded), expected[fixture][kind].hash);
+            EXPECT_LT(keys[kind].size(), expanded.size());
         }
     }
 }
-TEST(GeometryIdentityTest, OrdinaryCanonicalKeysRetainOriginalFingerprints)
+TEST(GeometryIdentityTest, CompactOrdinaryKeysPreserveOriginalNumericPayloads)
 {
     if constexpr (std::numeric_limits<long double>::digits != 64)
         GTEST_SKIP() << "Original Ordinary key fixtures require the 64-bit "
                         "significand profile.";
     check_frozen_key_fixtures<ordinary>();
 }
-TEST(GeometryIdentityTest, ExactCanonicalKeysRetainOriginalFingerprints)
+TEST(GeometryIdentityTest, CompactExactKeysPreserveOriginalNumericPayloads)
 {
     check_frozen_key_fixtures<exact>();
 }

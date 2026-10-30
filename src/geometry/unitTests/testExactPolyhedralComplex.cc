@@ -1,6 +1,7 @@
 /** @file testExactPolyhedralComplex.cc
  * @brief Exact octants, canonical nonnested seams, sparse topology and parent recovery.
  */
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
@@ -356,6 +357,7 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
         SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right, remote});
     auto packet = complex->encode();
     std::size_t cursor = 0;
+    auto byte = [&]() { return static_cast<std::uint8_t>(static_cast<unsigned char>(packet.at(cursor++))); };
     auto word = [&]()
     {
         ID value = 0;
@@ -373,7 +375,9 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
         for (unsigned b = 0; b < 8; ++b)
             packet.at(offset + b) = static_cast<char>(value >> (8 * b));
     };
-    skip_words(5);
+    ASSERT_EQ(byte(), static_cast<std::uint8_t>(SimpleFluid::PLIC::GeometryTag::ExactComplex));
+    ASSERT_EQ(byte(), 3);
+    skip_words(3);
     const auto cells = word();
     for (ID cell = 0; cell < cells; ++cell)
     {
@@ -381,7 +385,7 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
         const auto path = word();
         skip_words(path);
         skip_words(4);
-        const auto full = word();
+        const auto full = byte();
         if (full)
         {
             const auto bytes = word();
@@ -397,12 +401,14 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
     for (ID face = 0; face < faces; ++face)
     {
         const auto face_id = word();
-        skip_words(3);
+        (void) byte(); // Surface kind.
+        skip_words(2);
         const auto path = word();
         skip_words(path);
-        skip_words(2);
+        skip_words(1); // Surface ordinal.
+        (void) byte(); // Orientation.
         const auto exterior_offset = cursor;
-        const auto exterior = word();
+        const auto exterior = byte();
         const auto length_offset = cursor;
         const auto length = word();
         const auto text_offset = cursor;
@@ -417,7 +423,7 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
             // Turn the owner's y-upper boundary into an interface to a remote
             // full cell. Both closed cell shells remain unchanged; only the
             // forged reverse incidence is missing, and signed visibility fits.
-            put(exterior_offset, 0);
+            packet.at(exterior_offset) = 0;
             put(length_offset, 0);
             put(neighbor_offset, 2);
             packet.erase(packet.begin() + text_offset, packet.begin() + text_offset + length);

@@ -73,6 +73,8 @@ template<ArithmeticMode Mode> struct NumericalWriter
     std::vector<char> bytes;
     std::size_t limit;
     explicit NumericalWriter(std::size_t budget) : limit(budget) {}
+    void byte(std::uint8_t x);
+    void tag(GeometryTag value) { byte(static_cast<std::uint8_t>(value)); }
     void word(std::uint64_t x);
     void real(long double x);
     void scalar(Scalar x);
@@ -86,6 +88,8 @@ template<ArithmeticMode Mode> struct NumericalReader
     std::span<const char> bytes;
     std::size_t cursor = 0;
     explicit NumericalReader(std::span<const char> input) : bytes(input) {}
+    std::uint8_t byte();
+    GeometryTag tag() { return static_cast<GeometryTag>(byte()); }
     std::uint64_t word();
     std::size_t count(std::size_t maximum, std::size_t element);
     long double real();
@@ -343,6 +347,8 @@ template<ArithmeticMode Mode> struct NumericalWriter
     std::vector<char> bytes;
     std::size_t limit;
     explicit NumericalWriter(std::size_t budget) : limit(budget) {}
+    void byte(std::uint8_t x);
+    void tag(GeometryTag value) { byte(static_cast<std::uint8_t>(value)); }
     void word(std::uint64_t x);
     void real(long double x);
     void interval(Interval x);
@@ -356,6 +362,8 @@ template<ArithmeticMode Mode> struct NumericalReader
     std::span<const char> bytes;
     std::size_t cursor = 0;
     explicit NumericalReader(std::span<const char> input) : bytes(input) {}
+    std::uint8_t byte();
+    GeometryTag tag() { return static_cast<GeometryTag>(byte()); }
     std::uint64_t word();
     std::size_t count(std::size_t maximum, std::size_t element);
     long double real();

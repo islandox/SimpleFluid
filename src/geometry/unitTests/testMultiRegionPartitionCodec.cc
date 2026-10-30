@@ -80,7 +80,7 @@ PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
 {
     Cursor r{packet};
     PacketOffsets p;
-    if (r.take<uint64_t>() != 0x5346524547490007ULL)
+    if (r.take<uint64_t>() != 0x5346524547490009ULL)
         throw std::logic_error("Codec test expected native packet format 7.");
     const auto regions = r.take<uint64_t>();
     for (size_t region = 0; region < regions; ++region)

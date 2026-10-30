@@ -24,11 +24,35 @@ void word(std::vector<char>& bytes, std::uint64_t value)
     bytes.resize(offset + 8);
     overwrite(bytes, offset, value);
 }
+void tag(std::vector<char>& bytes, GeometryTag value)
+{
+    bytes.push_back(static_cast<char>(value));
+}
 void integer(std::vector<char>& bytes, unsigned value, unsigned sign = 0)
 {
     word(bytes, sign);
     word(bytes, 1);
     bytes.push_back(static_cast<char>(value));
+}
+TEST(GeometryPacketCodecTest, CategoryTagsUseOneByteWhileNumericWordsKeepTheirWidth)
+{
+    static_assert(sizeof(GeometryTag) == 1 && sizeof(GeometryPacketKind) == 1);
+    static_assert(sizeof(SupportRecipeKind) == 1 && sizeof(AuthorityKeyTag) == 1);
+    details::ordinary_native::Writer writer;
+    writer.tag(GeometryTag::OrdinaryPoint);
+    writer.word(123);
+    EXPECT_EQ(writer.bytes.size(), 9u);
+    writer.real(0);
+    EXPECT_EQ(writer.bytes.size(), 25u); // Canonical numeric zero remains two uint64 words.
+    const auto point = details::GeometryIdentityAccess::point({0, 0, 0});
+    const auto key = canonical_key(point), packet = encode_identity(point);
+    EXPECT_EQ(key.size(), 1 + 3 * 16);
+    EXPECT_EQ(static_cast<std::uint8_t>(key.front()), static_cast<std::uint8_t>(GeometryTag::OrdinaryPoint));
+    EXPECT_EQ(geometry_packet_header_bytes, 27u);
+    EXPECT_EQ(packet.size(), 27 + key.size());
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[8]), 2u);
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[9]), static_cast<std::uint8_t>(GeometryPacketKind::PointIdentity));
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[10]), static_cast<std::uint8_t>(ordinary));
 }
 TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
 {
@@ -39,10 +63,16 @@ TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
     { EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(bytes)), std::invalid_argument); };
     rejects({});
     rejects(canonical_key(point));
-    for (const auto index : {0u, 1u, 2u, 3u, 4u})
+    for (const auto offset : {std::size_t(0), std::size_t(11)})
     {
         auto bytes = original;
-        overwrite(bytes, 8 * index, std::numeric_limits<std::uint64_t>::max());
+        overwrite(bytes, offset, std::numeric_limits<std::uint64_t>::max());
+        rejects(bytes);
+    }
+    for (const auto offset : {8u, 9u, 10u})
+    {
+        auto bytes = original;
+        bytes[offset] = char(0xff);
         rejects(bytes);
     }
     for (std::size_t count = 0; count < original.size(); ++count)
@@ -51,10 +81,10 @@ TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
     bytes.push_back(0);
     rejects(bytes);
     bytes = original;
-    overwrite(bytes, 8, 0);
+    bytes[8] = 1;
     rejects(bytes);
     bytes = original;
-    overwrite(bytes, 5 * 8, std::numeric_limits<std::uint64_t>::max());
+    overwrite(bytes, 19, std::numeric_limits<std::uint64_t>::max());
     rejects(bytes);
     EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(original, original.size() - 1)), std::invalid_argument);
     EXPECT_EQ(decode_identity<PointIdentity<ordinary>>(original, original.size()), point);
@@ -65,10 +95,10 @@ TEST(GeometryPacketCodecTest, CanonicalScalarsAndRationalsAreRequired)
     const auto zero_point = PlanarFace<ordinary>::make(points)->vertex_identities().front();
     auto finite = encode_identity(zero_point);
     overwrite(
-        finite, geometry_packet_header_bytes + 8, 1); // Signed/nonzero descriptor on the finite zero representation.
+        finite, geometry_packet_header_bytes + 1, 1); // Signed/nonzero descriptor on the finite zero representation.
     EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(finite)), std::invalid_argument);
     std::vector<char> body;
-    word(body, 0x5346504f494e5431ULL);
+    tag(body, GeometryTag::ExactPoint);
     integer(body, 2);
     integer(body, 4); // Same value as 1/2, different rational encoding.
     integer(body, 0);
@@ -78,7 +108,7 @@ TEST(GeometryPacketCodecTest, CanonicalScalarsAndRationalsAreRequired)
     auto rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
     EXPECT_THROW((decode_identity<PointIdentity<exact>>(rational)), std::invalid_argument);
     body.clear();
-    word(body, 0x5346504f494e5431ULL);
+    tag(body, GeometryTag::ExactPoint);
     integer(body, 0, 1);
     integer(body, 1); // Negative zero integer.
     integer(body, 0);
@@ -88,7 +118,7 @@ TEST(GeometryPacketCodecTest, CanonicalScalarsAndRationalsAreRequired)
     rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
     EXPECT_THROW((decode_identity<PointIdentity<exact>>(rational)), std::invalid_argument);
     body.clear();
-    word(body, 0x5346504f494e5431ULL);
+    tag(body, GeometryTag::ExactPoint);
     word(body, 0);
     word(body, std::numeric_limits<std::uint64_t>::max());
     rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
@@ -102,13 +132,13 @@ TEST(GeometryPacketCodecTest, ZeroIsAnEnvelopeWithAnEmptyBody)
     EXPECT_TRUE(decode_geometry_packet(packet, ordinary).body.empty());
     EXPECT_TRUE(decode_identity<DisplacementIdentity<ordinary>>(packet).is_zero());
     std::vector<char> body;
-    word(body, 0x5346465044535031ULL);
+    tag(body, GeometryTag::OrdinaryDisplacement);
     for (unsigned i = 0; i < 6; ++i)
         word(body, 0);
     const auto tagged = encode_geometry_packet(GeometryPacketKind::DisplacementIdentity, ordinary, body);
     EXPECT_THROW((decode_identity<DisplacementIdentity<ordinary>>(tagged)), std::invalid_argument);
     body.clear();
-    word(body, 0x5346444953503631ULL);
+    tag(body, GeometryTag::ExactDisplacement);
     for (unsigned i = 0; i < 3; ++i)
     {
         integer(body, 0);
@@ -177,10 +207,10 @@ TEST(GeometryPacketCodecTest, OldEnclosingComplexVersionsRejectBeforeOptionalRec
     EXPECT_THROW((PolyhedralComplex<exact>::decode(exact_packet)), std::invalid_argument);
 }
 
-std::vector<char> exact_tuple(std::uint64_t tag, std::span<const int> values)
+std::vector<char> exact_tuple(GeometryTag category, std::span<const int> values)
 {
     std::vector<char> body;
-    word(body, tag);
+    tag(body, category);
     for (const auto value : values)
     {
         integer(body, value < 0 ? unsigned(-value) : unsigned(value), value < 0);
@@ -193,7 +223,7 @@ TEST(GeometryPacketCodecTest, ExactProviderDirectionAndMomentNormalFormsAreRequi
     const auto line = [](std::array<int, 6> values)
     {
         return encode_geometry_packet(
-            GeometryPacketKind::LineIdentity, exact, exact_tuple(0x53464c494e453631ULL, values));
+            GeometryPacketKind::LineIdentity, exact, exact_tuple(GeometryTag::ExactLine, values));
     };
     EXPECT_NO_THROW((decode_identity<LineIdentity<exact>>(line({1, 0, 0, 0, 2, 3}))));
     EXPECT_THROW((decode_identity<LineIdentity<exact>>(line({0, 0, 0, 0, 0, 0}))), std::invalid_argument);
@@ -203,7 +233,7 @@ TEST(GeometryPacketCodecTest, ExactProviderDirectionAndMomentNormalFormsAreRequi
     const auto support = [](std::array<int, 4> values)
     {
         return encode_geometry_packet(
-            GeometryPacketKind::PlaneSupportIdentity, exact, exact_tuple(0x53464a504c414e36ULL, values));
+            GeometryPacketKind::PlaneSupportIdentity, exact, exact_tuple(GeometryTag::ExactPlaneSupport, values));
     };
     EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, 1, 2, 3}))));
     EXPECT_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, 0, 0, 0}))), std::invalid_argument);
@@ -216,7 +246,7 @@ TEST(GeometryPacketCodecTest, FiniteProviderFormsPreserveRoundedCoefficients)
     const auto line = [](on::WidePoint direction)
     {
         on::Writer writer;
-        writer.word(0x534646504c494e31ULL);
+        writer.tag(GeometryTag::OrdinaryLine);
         writer.word(0);
         writer.point(direction);
         writer.point({.1L, .2L, 0});
@@ -230,7 +260,7 @@ TEST(GeometryPacketCodecTest, FiniteProviderFormsPreserveRoundedCoefficients)
     const auto input = [](on::WidePoint normal)
     {
         on::Writer writer;
-        writer.word(0x53464e494e505431ULL);
+        writer.tag(GeometryTag::OrdinaryInputSupport);
         writer.point(normal);
         writer.point({});
         writer.real(0);
@@ -240,13 +270,13 @@ TEST(GeometryPacketCodecTest, FiniteProviderFormsPreserveRoundedCoefficients)
     EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(input({}))), std::invalid_argument);
     EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(input({0, -1, 2}))), std::invalid_argument);
     on::Writer parent;
-    parent.word(0x53464e4158495331ULL);
+    parent.tag(GeometryTag::OrdinaryAxisSupport);
     parent.word(0);
     parent.real(0);
     const auto translated = [&](on::WidePoint shift)
     {
         on::Writer writer;
-        writer.word(0x53464e5452414e31ULL);
+        writer.tag(GeometryTag::OrdinaryTranslatedSupport);
         writer.packet(parent.bytes);
         writer.point(shift);
         return encode_geometry_packet(GeometryPacketKind::PlaneSupportIdentity, ordinary, writer.bytes);
@@ -256,7 +286,7 @@ TEST(GeometryPacketCodecTest, FiniteProviderFormsPreserveRoundedCoefficients)
     const auto source = [](bool sorted)
     {
         on::Writer writer;
-        writer.word(0x53464e534f555231ULL);
+        writer.tag(GeometryTag::OrdinarySourceSupport);
         writer.word(3);
         const std::array<on::WidePoint, 3> points{{{-1, 0, 1}, {0, 1, 0}, {1, 0, 0}}};
         if (sorted)
@@ -279,18 +309,18 @@ TEST(GeometryPacketCodecTest, ExtrusionDagParentsAndEndpointsKeepTheirCanonicalO
     const auto dag = [](bool sorted_parents, bool sorted_endpoints)
     {
         on::Writer first;
-        first.word(0);
+        first.byte(static_cast<std::uint8_t>(SupportRecipeKind::Original));
         first.point({0, 0, 0});
         on::Writer second;
-        second.word(0);
+        second.byte(static_cast<std::uint8_t>(SupportRecipeKind::Original));
         second.point({1, 1, 0});
         on::Writer derived;
-        derived.word(1);
+        derived.byte(static_cast<std::uint8_t>(SupportRecipeKind::Derived));
         derived.word(2);
         derived.word(sorted_parents ? 0 : 1);
         derived.word(sorted_parents ? 1 : 0);
         on::Writer writer;
-        writer.word(0x5346454441475331ULL);
+        writer.tag(GeometryTag::OrdinaryExtrusionDagSupport);
         writer.word(3);
         writer.packet(first.bytes);
         writer.packet(second.bytes);
@@ -323,7 +353,7 @@ TEST(GeometryPacketCodecTest, CoordinateCountsRejectBeforeDisproportionateReserv
     const auto face = PlanarFace<ordinary>::make(points);
     auto body = canonical_face_key(*face);
     on::Reader reader{body};
-    (void) reader.word();
+    (void) reader.tag();
     (void) reader.packet();
     (void) reader.point();
     const auto count_offset = reader.cursor;
@@ -334,7 +364,7 @@ TEST(GeometryPacketCodecTest, CoordinateCountsRejectBeforeDisproportionateReserv
     const auto cell = ConvexCellGeometry<ordinary>::box({0, 0, 0}, {1, 1, 1});
     body = canonical_cell_key(*cell);
     on::Reader cell_reader{body};
-    (void) cell_reader.word();
+    (void) cell_reader.tag();
     (void) cell_reader.point();
     const auto cell_count_offset = cell_reader.cursor;
     body.resize(cell_count_offset + 8 + 4096, 0);
@@ -342,8 +372,8 @@ TEST(GeometryPacketCodecTest, CoordinateCountsRejectBeforeDisproportionateReserv
     const auto malformed_cell = encode_geometry_packet(GeometryPacketKind::CellCertificate, ordinary, body);
     rejects_coordinates([&] { (void) ConvexCellGeometry<ordinary>::decode_certificate(malformed_cell); });
     body.clear();
-    word(body, 0x5346455841435431ULL);
-    word(body, 1);
+    tag(body, GeometryTag::ExactCell);
+    body.push_back(1);
     for (unsigned i = 0; i < 3; ++i)
         word(body, 0); // Binary64 origin.
     word(body, 512);

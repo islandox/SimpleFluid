@@ -217,7 +217,7 @@ on::WidePoint center(const Polygon& p)
     const auto d = on::display(p);
     return {d[0], d[1], d[2]};
 }
-std::vector<char> line_packet(on::WidePoint a, on::WidePoint b)
+OrdinaryLine line_identity(on::WidePoint a, on::WidePoint b)
 {
     auto d = on::sub(b, a);
     const auto axis = axis_of(d);
@@ -225,12 +225,7 @@ std::vector<char> line_packet(on::WidePoint a, on::WidePoint b)
         on::reject("zero native edge.");
     d = on::mul(d, 1 / d[axis]);
     a = on::sub(a, on::mul(d, a[axis]));
-    on::Writer w;
-    w.word(0x534646504c494e31ULL);
-    w.word(axis);
-    w.point(d);
-    w.point(a);
-    return std::move(w.bytes);
+    return IdentityAccess::line({axis, d, a});
 }
 } // namespace
 OrdinaryFacePtr OrdinaryFace::make(std::span<const GeometryPoint> vertices)
@@ -372,7 +367,7 @@ OrdinaryFacePtr OrdinaryFace::translated(GeometryPoint shift) const
 OrdinaryFacePtr OrdinaryFace::translated(const OrdinaryDisplacement& packet) const
 {
     auto p = impl_->polygon;
-    const auto shift = on::read_displacement(IdentityAccess::key(packet));
+    const auto shift = IdentityAccess::displacement(packet);
     for (auto& v : p)
         v = on::add(v, shift);
     return from_retained_support(p, impl_->normal, on::translated_support_packet(*impl_->support, shift));
@@ -394,7 +389,7 @@ std::vector<OrdinaryPoint> OrdinaryFace::vertex_identities() const
 {
     std::vector<OrdinaryPoint> result;
     for (const auto& p : impl_->polygon)
-        result.push_back(IdentityAccess::make<OrdinaryPoint>(on::point_packet(p)));
+        result.push_back(IdentityAccess::point(p));
     return result;
 }
 std::vector<OrdinaryLine> OrdinaryFace::edge_support_identities() const
@@ -402,7 +397,7 @@ std::vector<OrdinaryLine> OrdinaryFace::edge_support_identities() const
     std::vector<OrdinaryLine> result;
     const auto& p = impl_->polygon;
     for (std::size_t i = 0; i < p.size(); ++i)
-        result.push_back(IdentityAccess::make<OrdinaryLine>(line_packet(p[i], p[(i + 1) % p.size()])));
+        result.push_back(line_identity(p[i], p[(i + 1) % p.size()]));
     return result;
 }
 OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const OrdinaryPoint> points) const
@@ -417,7 +412,7 @@ OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const OrdinaryPoint> 
         std::map<long double, on::WidePoint> interior;
         for (const auto& packet : points)
         {
-            const auto p = on::read_point(IdentityAccess::key(packet)), v = on::sub(p, a);
+            const auto p = IdentityAccess::point(packet), v = on::sub(p, a);
             const auto t = on::dot(v, d);
             if (on::cross(v, d) == on::WidePoint{} && t > 0 && t < length)
                 interior.emplace(t, p);
@@ -434,7 +429,7 @@ bool OrdinaryFace::equivalent(const OrdinaryFace& other) const
 }
 bool OrdinaryFace::contains_point(const OrdinaryPoint& packet) const
 {
-    const auto p = on::read_point(IdentityAccess::key(packet));
+    const auto p = IdentityAccess::point(packet);
     if (std::find(impl_->polygon.begin(), impl_->polygon.end(), p) != impl_->polygon.end())
         return true;
     return point_inside(impl_->polygon, p);
@@ -680,7 +675,7 @@ template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const 
     }
     std::rotate(polygon.begin(), std::min_element(polygon.begin(), polygon.end()), polygon.end());
     on::Writer w;
-    w.word(0x5346465046414332ULL);
+    w.tag(GeometryTag::OrdinaryPlanarFace);
     w.packet(IdentityAccess::key(*face.impl_->support));
     w.point(face.impl_->normal);
     w.word(polygon.size());
@@ -697,7 +692,7 @@ std::vector<char> OrdinaryFace::encode(std::size_t byte_budget) const
 std::vector<char> OrdinaryFace::encode_incidence(std::size_t byte_budget) const
 {
     on::Writer w;
-    w.word(0x5346465046414332ULL);
+    w.tag(GeometryTag::OrdinaryPlanarFace);
     w.packet(IdentityAccess::key(*impl_->support));
     w.point(impl_->normal);
     w.word(impl_->polygon.size());
@@ -728,11 +723,25 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes, std::size_t by
     if (envelope.kind != GeometryPacketKind::PlanarFace && envelope.kind != GeometryPacketKind::PlanarFaceIncidence)
         throw std::invalid_argument("Foreign planar face packet kind.");
     on::Reader r{envelope.body, 0, true};
-    if (r.word() != 0x5346465046414332ULL)
+    if (r.tag() != GeometryTag::OrdinaryPlanarFace)
         on::reject("foreign native planar packet mode.");
     const auto encoded_support = r.packet();
-    auto support = IdentityAccess::make<OrdinarySupport>(
-        details::checked_identity_key(GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary, encoded_support));
+    auto shape = r;
+    (void) shape.point();
+    const auto points = shape.count(vertex_cap);
+    if (points > (shape.bytes.size() - shape.cursor) / 48)
+        on::reject("planar point count exceeds the remaining encoded coordinates.");
+    std::size_t native_used = sizeof(OrdinaryFace) + sizeof(Impl);
+    if (native_used > byte_budget || points > (byte_budget - native_used) / sizeof(WidePoint))
+        on::reject("planar polygon exceeds the native record budget.");
+    native_used += points * sizeof(WidePoint);
+    if (encoded_support.size() > byte_budget - native_used)
+        on::reject("planar support exceeds the remaining native record budget.");
+    auto support = IdentityAccess::decode_key<OrdinarySupport>(
+        details::checked_identity_key(GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary, encoded_support),
+        byte_budget - native_used);
+    GeometryAllocationLedger allocations;
+    allocations.retain(support, native_used, byte_budget);
     const auto normal = r.point();
     const auto n = r.count(vertex_cap);
     if (n > (r.bytes.size() - r.cursor) / 48)
@@ -743,6 +752,10 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes, std::size_t by
         p.push_back(r.point());
     r.finish();
     auto result = from_retained_support(p, normal, std::move(support));
+    const auto actual = sizeof(OrdinaryFace) + result->exclusive_storage_bytes();
+    const auto reserved = sizeof(OrdinaryFace) + sizeof(Impl) + points * sizeof(WidePoint);
+    if (actual > reserved && actual - reserved > byte_budget - native_used)
+        on::reject("planar polygon capacity exceeds the native record budget.");
     const auto canonical = envelope.kind == GeometryPacketKind::PlanarFace ? result->encode(byte_budget)
                                                                            : result->encode_incidence(byte_budget);
     if (canonical.size() != bytes.size() || !std::equal(canonical.begin(), canonical.end(), bytes.begin()))
@@ -791,14 +804,13 @@ EdgePointIndex<ArithmeticMode::Ordinary>::EdgePointIndex(std::span<const Ordinar
 {
     auto impl = std::make_shared<Impl>();
     for (const auto& p : points)
-        impl->points.emplace(on::read_point(IdentityAccess::key(p)), p);
+        impl->points.emplace(IdentityAccess::point(p), p);
     impl_ = std::move(impl);
 }
 std::vector<OrdinaryPoint> EdgePointIndex<ArithmeticMode::Ordinary>::closed_segment(
     const OrdinaryPoint& first, const OrdinaryPoint& second) const
 {
-    const auto a = on::read_point(IdentityAccess::key(first)), b = on::read_point(IdentityAccess::key(second)),
-               d = on::sub(b, a);
+    const auto a = IdentityAccess::point(first), b = IdentityAccess::point(second), d = on::sub(b, a);
     const auto length = on::dot(d, d);
     if (length == 0)
         on::reject("zero finite source edge.");
@@ -824,33 +836,31 @@ std::size_t EdgePointIndex<ArithmeticMode::Ordinary>::storage_bytes() const
 }
 template<> OrdinaryDisplacement displacement<ArithmeticMode::Ordinary>(GeometryPoint from, GeometryPoint to)
 {
-    return IdentityAccess::make<OrdinaryDisplacement>(on::displacement_packet(on::sub(on::wide(to), on::wide(from))));
+    return IdentityAccess::displacement(on::sub(on::wide(to), on::wide(from)));
 }
 template<>
 OrdinaryDisplacement displacement_difference<ArithmeticMode::Ordinary>(
     const OrdinaryDisplacement& a, const OrdinaryDisplacement& b)
 {
-    return IdentityAccess::make<OrdinaryDisplacement>(on::displacement_packet(
-        on::sub(on::read_displacement(IdentityAccess::key(a)), on::read_displacement(IdentityAccess::key(b)))));
+    return IdentityAccess::displacement(on::sub(IdentityAccess::displacement(a), IdentityAccess::displacement(b)));
 }
 template<> GeometryPoint displacement_display<ArithmeticMode::Ordinary>(const OrdinaryDisplacement& p)
 {
-    return on::display(on::read_displacement(IdentityAccess::key(p)));
+    return on::display(IdentityAccess::displacement(p));
 }
 template<>
 OrdinaryPoint point_translated<ArithmeticMode::Ordinary>(const OrdinaryPoint& p, const OrdinaryDisplacement& d)
 {
-    return IdentityAccess::make<OrdinaryPoint>(on::point_packet(
-        on::add(on::read_point(IdentityAccess::key(p)), on::read_displacement(IdentityAccess::key(d)))));
+    return IdentityAccess::point(on::add(IdentityAccess::point(p), IdentityAccess::displacement(d)));
 }
 template<> GeometryPoint point_display<ArithmeticMode::Ordinary>(const OrdinaryPoint& p)
 {
-    return on::display(on::read_point(IdentityAccess::key(p)));
+    return on::display(IdentityAccess::point(p));
 }
 template<>
 std::array<GeometryValue<ArithmeticMode::Ordinary>, 3> numerical_point<ArithmeticMode::Ordinary>(const OrdinaryPoint& p)
 {
-    const auto v = on::read_point(IdentityAccess::key(p));
+    const auto v = IdentityAccess::point(p);
     return {{{v[0]}, {v[1]}, {v[2]}}};
 }
 template<>
@@ -858,13 +868,13 @@ GeometryMeasure<ArithmeticMode::Ordinary> point_projection<ArithmeticMode::Ordin
     const OrdinaryPoint& p, GeometryPoint n, GeometryPoint anchor)
 {
     return GeometryMeasure<ArithmeticMode::Ordinary>::from_nominal(
-        on::dot(on::wide(n), on::sub(on::read_point(IdentityAccess::key(p)), on::wide(anchor))));
+        on::dot(on::wide(n), on::sub(IdentityAccess::point(p), on::wide(anchor))));
 }
 template<>
 OrdinaryPoint periodic_point<ArithmeticMode::Ordinary>(
     const OrdinaryPoint& identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
 {
-    auto p = on::read_point(IdentityAccess::key(identity));
+    auto p = IdentityAccess::point(identity);
     for (std::size_t a = 0; a < 3; ++a)
         if (periodic[a])
         {
@@ -875,7 +885,7 @@ OrdinaryPoint periodic_point<ArithmeticMode::Ordinary>(
             if (!(p[a] >= lower[a] && p[a] < upper[a]))
                 on::reject("finite periodic image outside canonical interval.");
         }
-    return IdentityAccess::make<OrdinaryPoint>(on::point_packet(p));
+    return IdentityAccess::point(p);
 }
 namespace details::ordinary_native
 {

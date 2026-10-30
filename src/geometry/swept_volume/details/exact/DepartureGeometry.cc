@@ -23,7 +23,7 @@ void target_sweep_shell(
             budget.add(2 * sizeof(P));
             budget.retain_identity(trace.point);
             budget.retain_identity(trace.departure);
-            const auto p = authority_point(trace.point), back = authority_point(trace.departure);
+            const auto &p = authority_point(trace.point), &back = authority_point(trace.departure);
             auto [it, inserted] = shared.emplace(p, back);
             if (!inserted && it->second != back)
                 throw std::invalid_argument("Incident sweeps disagree on a shared exact node trajectory.");
@@ -194,7 +194,7 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
         std::map<P, P> mapped;
         for (const auto& trace : face.trajectories())
         {
-            const auto p = authority_point(trace.point), back = authority_point(trace.departure);
+            const auto &p = authority_point(trace.point), &back = authority_point(trace.departure);
             for (unsigned copy = 0; copy < 2; ++copy)
             {
                 departure_charge_point(p, budget);
@@ -221,7 +221,7 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
         departure_charge_point(center, budget);
         const auto encoded = face.corrected_departure_center();
         budget.retain_identity(encoded);
-        const auto backcenter = authority_point(encoded);
+        const auto& backcenter = authority_point(encoded);
         departure_charge_point(backcenter, budget);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
         const auto boundary = swept_boundary(current, previous, center, backcenter, nullptr);
@@ -285,7 +285,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
         std::map<P, P> trajectories;
         for (const auto& trace : face.trajectories())
         {
-            const auto p = authority_point(trace.point), back = authority_point(trace.departure);
+            const auto &p = authority_point(trace.point), &back = authority_point(trace.departure);
             departure_charge_point(p, budget);
             departure_charge_point(back, budget);
             budget.add(4 * sizeof(void*));
@@ -324,7 +324,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
         center = mul(center, Q(1) / current.size());
         const auto encoded = face.corrected_departure_center();
         budget.retain_identity(encoded);
-        const P backcenter = authority_point(encoded);
+        const P& backcenter = authority_point(encoded);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
         const auto boundary = swept_boundary(current, previous, center, backcenter, nullptr);
         for (const auto& triangle : boundary)

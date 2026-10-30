@@ -45,7 +45,7 @@ Part native_view(const std::shared_ptr<const NativeFragmentDescriptor>& recipe)
     // and no per-record copy of a potentially large run view is allocated.
     return recipe ? Part(recipe, &recipe->view) : nullptr;
 }
-constexpr std::uint64_t magic = 0x5346414442410005ULL;
+constexpr std::uint64_t magic = 0x5346414442410006ULL;
 struct PartLess
 {
     bool operator()(const Part& a, const Part& b) const { return *a < *b; }

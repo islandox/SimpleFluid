@@ -173,11 +173,15 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
             DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities, poly.numerical_only);
         else
             DynamicGeometryAccess::seal(displayed, v.authorities);
-        active_work->charge(dynamic_point_storage_bytes(displayed) - sizeof(DynamicPoint), 1);
+        DynamicGeometryAccess::retain_supports(DynamicGeometryAccess::identity(displayed), active_work->allocations,
+            active_work->bytes, active_work->limits.byte_budget);
+        active_work->charge(DynamicGeometryAccess::storage_bytes(displayed, false) - sizeof(DynamicPoint), 1);
         poly.displayed.push_back(std::move(displayed));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
         active_work->charge(v.authorities.size(), sizeof(PlaneAuthority));
-        active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity), 1);
+        DynamicGeometryAccess::retain_supports(
+            v.source_identity, active_work->allocations, active_work->bytes, active_work->limits.byte_budget);
+        active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity, false), 1);
         for (const auto& key : v.authorities)
             active_work->charge(key.key.size(), sizeof(std::uint64_t));
     }

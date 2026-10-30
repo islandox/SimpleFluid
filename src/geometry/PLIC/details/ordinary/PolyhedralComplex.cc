@@ -41,21 +41,21 @@ struct NodeRow
 };
 void write_surface(Writer& w, const PolyhedralSurfaceUse& use)
 {
-    w.word(static_cast<ID>(use.key.kind));
+    w.byte(static_cast<std::uint8_t>(use.key.kind));
     w.word(use.key.region);
     w.word(use.key.creator.root);
     w.word(use.key.creator.path.size());
     for (auto id : use.key.creator.path)
         w.word(id);
     w.word(use.key.ordinal);
-    w.word(use.orientation == 1 ? 1 : 0);
-    w.word(use.exterior);
+    w.byte(use.orientation == 1 ? 1 : 0);
+    w.byte(use.exterior);
     w.packet(std::span<const char>(use.boundary.data(), use.boundary.size()));
 }
 PolyhedralSurfaceUse read_surface(Reader& r)
 {
     PolyhedralSurfaceUse use;
-    const auto kind = r.word();
+    const auto kind = r.byte();
     if (kind > 1)
         reject("invalid native surface kind.");
     use.key.kind = static_cast<PolyhedralSurfaceKey::Kind>(kind);
@@ -65,7 +65,7 @@ PolyhedralSurfaceUse read_surface(Reader& r)
     for (std::size_t i = 0; i < n; ++i)
         use.key.creator.path.push_back(r.word());
     use.key.ordinal = r.word();
-    const auto orientation = r.word(), exterior = r.word();
+    const auto orientation = r.byte(), exterior = r.byte();
     if (orientation > 1 || exterior > 1)
         reject("invalid native surface orientation.");
     use.orientation = orientation ? 1 : -1;
@@ -370,7 +370,7 @@ std::shared_ptr<const Complex> Complex::make(std::vector<PolyhedralComplexCell<A
     for (auto& [key, id] : node_ids)
     {
         id = next++;
-        data->nodes.emplace(id, NodeRow{key.first, read_point(details::GeometryIdentityAccess::key(key.second))});
+        data->nodes.emplace(id, NodeRow{key.first, details::GeometryIdentityAccess::point(key.second)});
     }
     data->global_nodes = next;
     for (std::size_t f = 0; f < tiles.size(); ++f)
@@ -528,8 +528,8 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
         nodes.insert(face.nodes.begin(), face.nodes.end());
     }
     Writer w;
-    w.word(0x53464650434f4d32ULL);
-    w.word(2);
+    w.tag(GeometryTag::OrdinaryComplex);
+    w.byte(3);
     w.word(impl_->global_cells);
     w.word(impl_->global_faces);
     w.word(impl_->global_nodes);
@@ -543,7 +543,7 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
         w.real(cell.center.x);
         w.real(cell.center.y);
         w.real(cell.center.z);
-        w.word(full.contains(c));
+        w.byte(full.contains(c));
         if (full.contains(c))
         {
             w.packet(cell.geometry->encode_certificate());
@@ -580,7 +580,7 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
 std::shared_ptr<const Complex> Complex::decode(std::span<const char> packet)
 {
     Reader r{packet, 0, true};
-    if (r.word() != 0x53464650434f4d32ULL || r.word() != 2)
+    if (r.tag() != GeometryTag::OrdinaryComplex || r.byte() != 3)
         reject("foreign native complex packet mode/version.");
     auto data = std::make_shared<Impl>();
     data->global_cells = r.word();
@@ -597,7 +597,7 @@ std::shared_ptr<const Complex> Complex::decode(std::span<const char> packet)
         cell.volume = GeometryValue<ArithmeticMode::Ordinary>{r.real()}.as_double();
         const auto center = display(r.point());
         cell.center = vector(center);
-        const auto full = r.word();
+        const auto full = r.byte();
         if (full > 1)
             reject("invalid native cell residency flag.");
         if (full)

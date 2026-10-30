@@ -42,14 +42,14 @@ void read_point_recipes(WireReader& r, std::vector<PointRecipe>& points, std::ve
 void read_axis_parts(std::span<const char> packet, std::vector<ScalarRecipe>& roots, std::vector<std::size_t>& active)
 {
     WireReader r{packet};
-    if (r.word() != 0x5346415849534331ULL || r.word() != recipe_packet_version)
+    if (r.tag() != GeometryTag::AxisDescriptor || r.byte() != recipe_packet_version)
         throw std::invalid_argument("Unknown shared axis packet.");
     auto values = r.word();
     if (values > r.bytes.size() - r.cursor)
         throw std::invalid_argument("Invalid axis values length.");
     WireReader v{r.bytes.subspan(r.cursor, values)};
     r.cursor += values;
-    if (v.word() != 0x5346415856414c31ULL || v.word() != recipe_packet_version)
+    if (v.tag() != GeometryTag::AxisValues || v.byte() != recipe_packet_version)
         throw std::invalid_argument("Unknown axis value DAG packet.");
     auto n = v.count();
     for (std::size_t i = 0; i < n; ++i)
@@ -74,8 +74,8 @@ namespace SimpleFluid::PLIC
 std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode_base() const
 {
     WireWriter w;
-    w.word(0x534647454f424131ULL);
-    w.word(recipe_packet_version);
+    w.tag(GeometryTag::ExtrusionBase);
+    w.byte(recipe_packet_version);
     w.word(impl_->base->topology.size());
     w.bytes.insert(w.bytes.end(), impl_->base->topology.begin(), impl_->base->topology.end());
     write_point_recipes(w, *impl_->base);
@@ -85,8 +85,8 @@ std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode_base() 
 std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode_axis_values() const
 {
     WireWriter w;
-    w.word(0x5346415856414c31ULL);
-    w.word(recipe_packet_version);
+    w.tag(GeometryTag::AxisValues);
+    w.byte(recipe_packet_version);
     w.word(impl_->axis->values->zrecipes.size());
     for (const auto& p : impl_->axis->values->zrecipes)
     {
@@ -111,8 +111,8 @@ std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::combine_axis_p
     std::span<const char> values, std::span<const char> selection)
 {
     WireWriter w;
-    w.word(0x5346415849534331ULL);
-    w.word(recipe_packet_version);
+    w.tag(GeometryTag::AxisDescriptor);
+    w.byte(recipe_packet_version);
     w.word(values.size());
     w.bytes.insert(w.bytes.end(), values.begin(), values.end());
     w.bytes.insert(w.bytes.end(), selection.begin(), selection.end());
@@ -127,8 +127,8 @@ std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode_axis() 
 std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode_view() const
 {
     WireWriter w;
-    w.word(0x5346505256494531ULL);
-    w.word(recipe_packet_version);
+    w.tag(GeometryTag::ProductView);
+    w.byte(recipe_packet_version);
     w.word(impl_->begin);
     w.word(impl_->layers);
     return std::move(w.bytes);
@@ -224,7 +224,7 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::decode_shared(std::shared_ptr<co
     if (!topology)
         throw std::invalid_argument("Shared product decoder requires retained topology.");
     WireReader view{view_packet};
-    if (view.word() != 0x5346505256494531ULL || view.word() != recipe_packet_version)
+    if (view.tag() != GeometryTag::ProductView || view.byte() != recipe_packet_version)
         throw std::invalid_argument("Unknown product run view packet.");
     const auto begin = view.word(), layers = view.word();
     view.finish();
@@ -236,7 +236,7 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::decode_shared(std::shared_ptr<co
     if (active.size() < 2 || active.size() > std::numeric_limits<unsigned>::max())
         throw std::invalid_argument("Shared axis selection extent is invalid.");
     WireReader base{base_packet};
-    if (base.word() != 0x534647454f424131ULL || base.word() != recipe_packet_version)
+    if (base.tag() != GeometryTag::ExtrusionBase || base.byte() != recipe_packet_version)
         throw std::invalid_argument("Unknown ordinary product base packet.");
     auto bytes = base.word();
     if (bytes > base.bytes.size() - base.cursor)
@@ -262,8 +262,8 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::decode_shared(std::shared_ptr<co
         const auto expected_values = [&]
         {
             WireWriter w;
-            w.word(0x5346415856414c31ULL);
-            w.word(recipe_packet_version);
+            w.tag(GeometryTag::AxisValues);
+            w.byte(recipe_packet_version);
             w.word(roots.size());
             for (const auto& p : roots)
             {

@@ -16,9 +16,9 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
     if (!(impl_->volume.lo() > 0))
         reject("numerical packet requires a quantitative positive-volume certificate.");
     NumericalWriter<Mode> writer(std::min(byte_budget, impl_->limits.byte_budget));
-    writer.word(0x5346424f554e4431ULL);
-    writer.word(3);
-    writer.word(static_cast<std::uint64_t>(arithmetic_mode()));
+    writer.tag(GeometryTag::FiniteGeometry);
+    writer.byte(4);
+    writer.byte(static_cast<std::uint8_t>(arithmetic_mode()));
     writer.word(std::numeric_limits<long double>::digits);
     writer.word(std::numeric_limits<long double>::max_exponent);
     for (const auto pin : context.publication)
@@ -41,7 +41,7 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
         writer.coordinates(plane->normal);
         writer.coordinates(plane->anchor);
         writer.interval(plane->offset);
-        writer.word(plane->input ? 1 : 0);
+        writer.byte(plane->input ? 1 : 0);
         if (plane->input)
         {
             for (const auto x : plane->input->normal)
@@ -73,7 +73,7 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
         for (const auto index : face)
             writer.word(index);
         writer.word(plane_ids.at(impl_->surfaces[f].plane));
-        writer.word(impl_->surfaces[f].orientation > 0 ? 1 : 0);
+        writer.byte(impl_->surfaces[f].orientation > 0 ? 1 : 0);
     }
     active_work->charge(writer.bytes.size(), sizeof(char));
     return std::move(writer.bytes);
@@ -108,8 +108,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                 }
     }
     NumericalReader<Mode> reader(packet);
-    if (reader.word() != 0x5346424f554e4431ULL || reader.word() != 3 ||
-        reader.word() != static_cast<std::uint64_t>(limits.arithmetic_mode) ||
+    if (reader.tag() != GeometryTag::FiniteGeometry || reader.byte() != 4 ||
+        reader.byte() != static_cast<std::uint8_t>(limits.arithmetic_mode) ||
         reader.word() != std::numeric_limits<long double>::digits ||
         reader.word() != std::numeric_limits<long double>::max_exponent)
         reject("unknown or incompatible numerical geometry packet.");
@@ -135,7 +135,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         plane->offset = reader.interval();
         if (!nonzero<Mode>(plane->normal))
             reject("numerical packet plane normal is unresolved.");
-        const auto has_input = reader.word();
+        const auto has_input = reader.byte();
         if (has_input > 1)
             reject("invalid numerical plane provenance tag.");
         if (has_input)
@@ -236,7 +236,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                 reject("invalid numerical face loop.");
             face.push_back(static_cast<std::size_t>(index));
         }
-        const auto plane = reader.word(), outward = reader.word();
+        const auto plane = reader.word();
+        const auto outward = reader.byte();
         if (plane >= planes.size() || outward > 1)
             reject("invalid numerical face support/orientation.");
         result->surfaces.push_back({planes[plane], outward ? 1 : -1});
@@ -281,6 +282,14 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     }
     finish<Mode>(*result);
     return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
+}
+
+template<ArithmeticMode Mode> void NumericalWriter<Mode>::byte(std::uint8_t value)
+{
+    static_assert(Mode == kernel_mode);
+    if (bytes.size() >= limit)
+        reject("numerical packet exceeds storage cap.");
+    bytes.push_back(static_cast<char>(value));
 }
 
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::word(std::uint64_t x)
@@ -344,6 +353,14 @@ template<ArithmeticMode Mode> void NumericalWriter<Mode>::authorities(const std:
         for (const auto x : key.key)
             word(x);
     }
+}
+
+template<ArithmeticMode Mode> std::uint8_t NumericalReader<Mode>::byte()
+{
+    static_assert(Mode == kernel_mode);
+    if (cursor >= bytes.size())
+        reject("truncated numerical geometry tag.");
+    return static_cast<std::uint8_t>(bytes[cursor++]);
 }
 
 template<ArithmeticMode Mode> std::uint64_t NumericalReader<Mode>::word()
@@ -432,9 +449,13 @@ std::vector<PlaneAuthority> NumericalReader<Mode>::authorities(
             reject("empty numerical support authority.");
         for (std::size_t j = 0; j < words; ++j)
             key.key.push_back(word());
-        if (!registry.contains(key))
+        const auto authenticated = registry.find(key);
+        if (authenticated == registry.end())
             reject("foreign or absent original source support authority.");
-        result.push_back(std::move(key));
+        OriginalSupportAuthorityAccess::validate_boundary(*authenticated);
+        if (const auto* support = OriginalSupportAuthorityAccess::retained(*authenticated))
+            active_work->retain_identity(*support);
+        result.push_back(*authenticated);
     }
     std::sort(result.begin(), result.end());
     if (std::adjacent_find(result.begin(), result.end()) != result.end())
@@ -447,6 +468,8 @@ template std::vector<char> GeometryKernel<kernel_mode>::encode(
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::decode(std::span<const char> packet,
     const GeometryPacketContext& expected, std::span<const DynamicConvexGeometryPtr> authenticated_sources,
     GeometryLimits limits);
+template void NumericalWriter<kernel_mode>::byte(std::uint8_t);
+template std::uint8_t NumericalReader<kernel_mode>::byte();
 template void NumericalWriter<kernel_mode>::word(std::uint64_t x);
 template void NumericalWriter<kernel_mode>::real(long double x);
 template void NumericalWriter<kernel_mode>::interval(Interval x);

@@ -46,7 +46,8 @@ MeshUtils::Vec3 rounded_point(const P& p)
 // A source edge is identified by construction ancestry, not by fitting a plane
 // to its rounded descendants. Each selected recipe is serialized once, using a
 // canonical topological numbering independent of the provider's compact IDs.
-std::vector<char> segment_recipe_key(const std::vector<PointRecipe>& recipes, std::size_t first, std::size_t second)
+PlaneSupportIdentity<ArithmeticMode::Ordinary> segment_recipe_support(
+    const std::vector<PointRecipe>& recipes, std::size_t first, std::size_t second)
 {
     std::set<std::size_t> selected;
     std::vector<std::size_t> pending{first, second};
@@ -67,18 +68,29 @@ std::vector<char> segment_recipe_key(const std::vector<PointRecipe>& recipes, st
         depth[id] = level;
         levels[level].push_back(id);
     }
-    std::vector<std::vector<char>> records;
+    std::vector<details::OrdinarySupportRecipe> records;
     for (const auto& [level, ids] : levels)
     {
-        std::map<std::vector<char>, std::vector<std::size_t>> unique;
+        struct Entry
+        {
+            std::vector<std::size_t> ids;
+            details::OrdinarySupportRecipe recipe;
+        };
+        std::map<std::vector<char>, Entry> unique;
         for (auto id : ids)
         {
             const auto& recipe = recipes.at(id);
             WireWriter signature;
-            signature.word(recipe.parents.empty() ? 0 : 1);
+            details::OrdinarySupportRecipe native;
+            native.original = recipe.parents.empty();
+            signature.byte(static_cast<std::uint8_t>(
+                recipe.parents.empty() ? SupportRecipeKind::Original : SupportRecipeKind::Derived));
             if (recipe.parents.empty())
+            {
+                native.root = details::ordinary_native::wide(recipe.root);
                 for (double value : recipe.root)
                     signature.real(value);
+            }
             else
             {
                 std::vector<std::size_t> parents;
@@ -88,27 +100,24 @@ std::vector<char> segment_recipe_key(const std::vector<PointRecipe>& recipes, st
                 signature.word(parents.size());
                 for (auto parent : parents)
                     signature.word(parent);
+                native.parents = std::move(parents);
             }
-            unique[std::move(signature.bytes)].push_back(id);
+            auto [entry, fresh] = unique.try_emplace(std::move(signature.bytes));
+            if (fresh)
+                entry->second.recipe = std::move(native);
+            entry->second.ids.push_back(id);
         }
-        for (auto& [signature, ids] : unique)
+        for (auto& [signature, entry] : unique)
         {
-            for (auto id : ids)
+            for (auto id : entry.ids)
                 canonical[id] = records.size();
-            records.push_back(signature);
+            records.push_back(std::move(entry.recipe));
         }
     }
-    WireWriter key;
-    key.word(0x5346454441475331ULL);
-    key.word(records.size());
-    for (const auto& record : records)
-        key.packet(record);
     auto a = canonical.at(first), b = canonical.at(second);
     if (a > b)
         std::swap(a, b);
-    key.word(a);
-    key.word(b);
-    return std::move(key.bytes);
+    return details::GeometryIdentityAccess::support_dag(std::move(records), a, b);
 }
 std::pair<PlaneSupportIdentity<ArithmeticMode::Ordinary>, P> ancestral_edge_support(
     const ExtrudedBaseData& base, std::size_t first, std::size_t second)
@@ -159,9 +168,7 @@ std::pair<PlaneSupportIdentity<ArithmeticMode::Ordinary>, P> ancestral_edge_supp
         const std::array source{a, b, upper};
         return {details::ordinary_native::source_support_packet(source), normal};
     }
-    return {details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-                segment_recipe_key(base.recipes, selected.first, selected.second)),
-        normal};
+    return {segment_recipe_support(base.recipes, selected.first, selected.second), normal};
 }
 
 } // namespace ordinary_extrusion_detail
@@ -439,8 +446,8 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode:
 std::vector<char> ExtrudedConstruction<ArithmeticMode::Ordinary>::encode() const
 {
     WireWriter w;
-    w.word(0x5346455854524331ULL);
-    w.word(recipe_packet_version);
+    w.tag(GeometryTag::ExtrudedConstruction);
+    w.byte(recipe_packet_version);
     const auto signature = topology_descriptor(*impl_->topology);
     w.word(signature.size());
     for (auto byte : signature)
@@ -478,7 +485,7 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::decode(
     if (!topology)
         throw std::invalid_argument("Ordinary extrusion decode needs retained topology.");
     WireReader r{packet};
-    if (r.word() != 0x5346455854524331ULL || r.word() != recipe_packet_version)
+    if (r.tag() != GeometryTag::ExtrudedConstruction || r.byte() != recipe_packet_version)
         throw std::invalid_argument("Unknown ordinary extrusion packet.");
     auto n = r.word();
     if (n > r.bytes.size() - r.cursor)

@@ -22,16 +22,101 @@ bool has_any_support(const DynamicPoint& point, std::span<const PlaneAuthority> 
         authorities.begin(), authorities.end(), [&](const auto& authority) { return has_support(point, authority); });
 }
 
-PlaneAuthority details::original_support_authority(std::span<const char> bytes)
+namespace
 {
+PlaneAuthority pack_original_support(const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support)
+{
+    const auto bytes = details::GeometryIdentityAccess::key(support);
     if (bytes.empty())
-        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Empty original support identity.");
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Empty immutable source support.");
+    if (bytes.size() > authority_key_length_mask)
+        throw GeometryError(
+            GeometryErrorCode::ResourceLimit, "Original support key length exceeds its tagged namespace.");
     PlaneAuthority authority;
-    authority.key.push_back(bytes.size());
+    authority.key.push_back(original_support_key_header(bytes.size()));
     authority.key.resize(1 + (bytes.size() + 7) / 8, 0);
     for (std::size_t i = 0; i < bytes.size(); ++i)
-        authority.key[1 + i / 8] |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i])) << (8 * (i % 8));
+        authority.key[1 + i / 8] |= std::uint64_t(static_cast<unsigned char>(bytes[i])) << (8 * (i % 8));
     return authority;
+}
+bool matches_original_support(
+    const PlaneAuthority& authority, const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support)
+{
+    const auto bytes = details::GeometryIdentityAccess::key(support);
+    if (bytes.empty())
+        return false;
+    if (authority.key.size() != 1 + (bytes.size() + 7) / 8 ||
+        authority.key.front() != original_support_key_header(bytes.size()))
+        return false;
+    for (std::size_t word = 1; word < authority.key.size(); ++word)
+    {
+        std::uint64_t expected = 0;
+        for (unsigned byte = 0; byte < 8 && 8 * (word - 1) + byte < bytes.size(); ++byte)
+            expected |= std::uint64_t(static_cast<unsigned char>(bytes[8 * (word - 1) + byte])) << (8 * byte);
+        if (expected != authority.key[word])
+            return false;
+    }
+    return true;
+}
+// Classify source-authority tokens only at acceptance boundaries. This does
+// not import numeric coefficients or create native attachments from key words.
+bool recognized_original_support(const PlaneAuthority& authority)
+{
+    return !authority.key.empty() && static_cast<std::uint8_t>(authority.key.front() >> 56) ==
+                                         static_cast<std::uint8_t>(AuthorityKeyTag::OriginalSupport);
+}
+void accept_authorities(const std::vector<PlaneAuthority>& authorities)
+{
+    for (const auto& authority : authorities)
+    {
+        details::OriginalSupportAuthorityAccess::validate_boundary(authority);
+        if (details::active_work)
+            if (const auto* support = details::OriginalSupportAuthorityAccess::retained(authority))
+                details::active_work->retain_identity(*support);
+    }
+}
+} // namespace
+PlaneAuthority details::OriginalSupportAuthorityAccess::issue(
+    const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support)
+{
+    auto authority = pack_original_support(support);
+    authority.original_support.support_ = support;
+    return authority;
+}
+PlaneAuthority details::OriginalSupportAuthorityAccess::issue(
+    const PlaneSupportIdentity<ArithmeticMode::Exact>& support)
+{
+    return issue(GeometryIdentityAccess::retained_exact_support(support));
+}
+const PlaneSupportIdentity<ArithmeticMode::Ordinary>* details::OriginalSupportAuthorityAccess::retained(
+    const PlaneAuthority& authority) noexcept
+{
+    return authority.original_support.support_ ? &*authority.original_support.support_ : nullptr;
+}
+const PlaneSupportIdentity<ArithmeticMode::Ordinary>* details::OriginalSupportAuthorityAccess::get(
+    const PlaneAuthority& authority)
+{
+    const auto* support = retained(authority);
+    if (support && !matches_original_support(authority, *support))
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch,
+            "Original support attachment does not match its frozen authority key.");
+    return support;
+}
+void details::OriginalSupportAuthorityAccess::validate_boundary(const PlaneAuthority& authority)
+{
+    if (!get(authority) && recognized_original_support(authority))
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch,
+            "Original source authority requires its typed immutable support attachment.");
+}
+void details::OriginalSupportAuthorityAccess::merge(PlaneAuthority& destination, const PlaneAuthority& source)
+{
+    if (destination.key != source.key)
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Cannot merge different source authority keys.");
+    (void) get(destination);
+    validate_boundary(source);
+    if (!retained(destination) && retained(source))
+        destination.original_support = source.original_support;
+    validate_boundary(destination);
 }
 
 PlaneAuthority original_support_authority(const PlanarFace<ArithmeticMode::Ordinary>& face)
@@ -176,11 +261,13 @@ std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::identity(co
 
 namespace SimpleFluid::PLIC
 {
-std::size_t DynamicGeometryAccess::identity_bytes(const std::shared_ptr<const DynamicPointProvenance>& p)
+std::size_t DynamicGeometryAccess::identity_bytes(
+    const std::shared_ptr<const DynamicPointProvenance>& p, bool include_support_payloads)
 {
     if (!p)
         return 0;
-    std::size_t bytes = 0;
+    std::size_t bytes = 0, retained_bytes = 0;
+    GeometryAllocationLedger attachments;
     std::set<const DynamicPointProvenance*> visited;
     std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{p};
     for (std::size_t i = 0; i < pending.size(); ++i)
@@ -191,7 +278,12 @@ std::size_t DynamicGeometryAccess::identity_bytes(const std::shared_ptr<const Dy
         bytes += sizeof(DynamicPointProvenance) + point->supports.capacity() * sizeof(PlaneAuthority) +
                  point->source_edges.capacity() * sizeof(point->source_edges.front());
         for (const auto& key : point->supports)
+        {
             bytes += key.key.capacity() * sizeof(std::uint64_t);
+            if (include_support_payloads)
+                if (const auto* support = details::OriginalSupportAuthorityAccess::retained(key))
+                    attachments.retain(*support, retained_bytes, std::numeric_limits<std::size_t>::max());
+        }
         if (point->source_origin)
             pending.push_back(point->source_origin);
         for (const auto& edge : point->source_edges)
@@ -200,18 +292,43 @@ std::size_t DynamicGeometryAccess::identity_bytes(const std::shared_ptr<const Dy
             pending.push_back(edge[1]);
         }
     }
-    return bytes;
+    return bytes + attachments.payload_bytes();
 }
 } // namespace SimpleFluid::PLIC
 
 namespace SimpleFluid::PLIC
 {
-std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& p)
+void DynamicGeometryAccess::retain_supports(const std::shared_ptr<const DynamicPointProvenance>& root,
+    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    if (!root)
+        return;
+    std::set<const DynamicPointProvenance*> visited;
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{root};
+    for (std::size_t i = 0; i < pending.size(); ++i)
+    {
+        const auto point = pending[i];
+        if (!point || !visited.insert(point.get()).second)
+            continue;
+        for (const auto& authority : point->supports)
+            if (const auto* support = details::OriginalSupportAuthorityAccess::retained(authority))
+                ledger.retain(*support, used, limit);
+        if (point->source_origin)
+            pending.push_back(point->source_origin);
+        for (const auto& edge : point->source_edges)
+        {
+            pending.push_back(edge[0]);
+            pending.push_back(edge[1]);
+        }
+    }
+}
+
+std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& p, bool include_support_payloads)
 {
     std::size_t bytes = sizeof(DynamicPoint);
     if (p.provenance_)
     {
-        bytes += identity_bytes(p.provenance_);
+        bytes += identity_bytes(p.provenance_, include_support_payloads);
     }
     return bytes;
 }
@@ -232,6 +349,7 @@ namespace SimpleFluid::PLIC
 {
 void DynamicGeometryAccess::seal(DynamicPoint& point, std::vector<PlaneAuthority> supports)
 {
+    accept_authorities(supports);
     std::sort(supports.begin(), supports.end());
     supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
     point.provenance_ = std::make_shared<DynamicPointProvenance>(
@@ -271,6 +389,7 @@ void DynamicGeometryAccess::seal_export(DynamicPoint& point,
         seal_numerical(point);
         return;
     }
+    accept_authorities(supports);
     std::sort(supports.begin(), supports.end());
     supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
     auto record = std::make_shared<DynamicPointProvenance>(
@@ -290,6 +409,7 @@ void DynamicGeometryAccess::seal_generated(DynamicPoint& point,
         seal_numerical(point);
         return;
     }
+    accept_authorities(supports);
     auto record = std::make_shared<DynamicPointProvenance>(
         DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
     record->constructed = true;
@@ -396,6 +516,7 @@ void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point)
 }
 void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point, std::vector<PlaneAuthority> supports)
 {
+    accept_authorities(supports);
     std::sort(supports.begin(), supports.end());
     supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
     const bool represented =

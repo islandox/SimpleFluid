@@ -9,7 +9,7 @@ namespace SimpleFluid::PLIC
 {
 struct ConstructionRootKey
 {
-    enum class Kind : std::uint64_t
+    enum class Kind : std::uint8_t
     {
         Native = 1,
         Sweep = 2,

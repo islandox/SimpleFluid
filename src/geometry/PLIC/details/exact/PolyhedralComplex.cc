@@ -91,15 +91,15 @@ P polygon_center(const Polygon& polygon)
 
 void surface_write(WireWriter& w, const PolyhedralSurfaceUse& surface)
 {
-    w.word(static_cast<std::uint64_t>(surface.key.kind));
+    w.byte(static_cast<std::uint8_t>(surface.key.kind));
     w.word(surface.key.region);
     w.word(surface.key.creator.root);
     w.word(surface.key.creator.path.size());
     for (auto v : surface.key.creator.path)
         w.word(v);
     w.word(surface.key.ordinal);
-    w.word(surface.orientation == 1 ? 1 : 0);
-    w.word(surface.exterior);
+    w.byte(surface.orientation == 1 ? 1 : 0);
+    w.byte(surface.exterior);
     w.word(surface.boundary.size());
     for (unsigned char ch : surface.boundary)
         w.data.push_back(static_cast<char>(ch));
@@ -108,7 +108,7 @@ void surface_write(WireWriter& w, const PolyhedralSurfaceUse& surface)
 PolyhedralSurfaceUse surface_read(WireReader& r)
 {
     PolyhedralSurfaceUse surface;
-    auto kind = r.word();
+    auto kind = r.byte();
     if (kind > 1)
         throw std::invalid_argument("Unknown exact surface ancestry kind.");
     surface.key.kind = static_cast<PolyhedralSurfaceKey::Kind>(kind);
@@ -118,7 +118,7 @@ PolyhedralSurfaceUse surface_read(WireReader& r)
     for (std::size_t i = 0; i < n; ++i)
         surface.key.creator.path.push_back(r.word());
     surface.key.ordinal = r.word();
-    auto orientation = r.word(), exterior = r.word();
+    auto orientation = r.byte(), exterior = r.byte();
     if (orientation > 1 || exterior > 1)
         throw std::invalid_argument("Invalid exact surface incidence.");
     surface.orientation = orientation ? 1 : -1;
@@ -699,8 +699,8 @@ std::vector<char> PolyhedralComplex<ArithmeticMode::Exact>::encode(std::span<con
             nodes.insert(n);
     }
     WireWriter w;
-    w.word(0x5346504f4c594331ULL);
-    w.word(2);
+    w.tag(GeometryTag::ExactComplex);
+    w.byte(3);
     w.word(impl_->global_cells);
     w.word(impl_->global_faces);
     w.word(impl_->global_nodes);
@@ -714,7 +714,7 @@ std::vector<char> PolyhedralComplex<ArithmeticMode::Exact>::encode(std::span<con
         w.real(cell.center.x);
         w.real(cell.center.y);
         w.real(cell.center.z);
-        w.word(full.contains(id));
+        w.byte(full.contains(id));
         if (full.contains(id))
         {
             const auto certificate = cell.geometry->encode_certificate();
@@ -756,7 +756,7 @@ std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComple
     std::span<const char> packet)
 {
     WireReader r{packet, 0, true};
-    if (r.word() != 0x5346504f4c594331ULL || r.word() != 2)
+    if (r.tag() != GeometryTag::ExactComplex || r.byte() != 3)
         throw std::invalid_argument("Unknown exact complex packet version/tag.");
     auto impl = std::make_shared<Impl>();
     impl->global_cells = r.word();
@@ -765,6 +765,8 @@ std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComple
     if (!impl->global_cells || !impl->global_faces || !impl->global_nodes)
         throw std::invalid_argument("Exact complex global catalog is empty.");
     auto count = r.count();
+    // ID, convex ancestry, native metrics and one-byte residency flag.
+    r.require_count(count, 8 * sizeof(std::uint64_t) + sizeof(std::uint8_t));
     for (std::size_t i = 0; i < count; ++i)
     {
         auto id = r.word();
@@ -772,7 +774,7 @@ std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComple
         cell.key = cell_key_read(r);
         cell.volume = r.real();
         cell.center = {r.real(), r.real(), r.real()};
-        auto full = r.word();
+        auto full = r.byte();
         if (full > 1)
             throw std::invalid_argument("Invalid exact complex residency flag.");
         if (full)
@@ -799,6 +801,8 @@ std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComple
             throw std::invalid_argument("Repeated exact complex cell ID.");
     }
     count = r.count();
+    // Compact surface metadata plus owner/neighbor and a triangular node loop.
+    r.require_count(count, 12 * sizeof(std::uint64_t) + 3 * sizeof(std::uint8_t));
     for (std::size_t i = 0; i < count; ++i)
     {
         auto id = r.word();
@@ -813,6 +817,7 @@ std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComple
             throw std::invalid_argument("Repeated exact complex face ID.");
     }
     count = r.count();
+    r.require_count(count, 2 * sizeof(std::uint64_t) + minimum_point_bytes);
     for (std::size_t i = 0; i < count; ++i)
     {
         auto id = r.word();

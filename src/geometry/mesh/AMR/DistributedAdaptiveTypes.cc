@@ -221,7 +221,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
     Writer w;
-    header(w, 1, 2);
+    header(w, 1, 3);
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
     w.word(leaf.material);
@@ -261,7 +261,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 1, 2);
+    header(r, 1, 3);
     AdaptiveLeaf leaf;
     leaf.key = decode_adaptive_key(r.bytes());
     leaf.domain = r.bytes();
@@ -339,7 +339,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
     if (family.key.empty() || family.children.empty())
         throw std::invalid_argument("Invalid adaptive family.");
     Writer w;
-    header(w, 2, 2);
+    header(w, 2, 3);
     w.bytes(family.key);
     w.bytes(encode_adaptive_leaf(family.parent));
     w.word(std::uint64_t(family.split));
@@ -358,7 +358,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
 AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 2, 2);
+    header(r, 2, 3);
     AdaptiveFamily family;
     family.key = r.bytes();
     family.parent = decode_adaptive_leaf(r.bytes());

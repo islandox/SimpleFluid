@@ -129,11 +129,15 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
             DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities, poly.numerical_only);
         else
             DynamicGeometryAccess::seal(displayed, v.authorities);
-        active_work->charge(dynamic_point_storage_bytes(displayed) - sizeof(DynamicPoint), 1);
+        DynamicGeometryAccess::retain_supports(DynamicGeometryAccess::identity(displayed), active_work->allocations,
+            active_work->bytes, active_work->limits.byte_budget);
+        active_work->charge(DynamicGeometryAccess::storage_bytes(displayed, false) - sizeof(DynamicPoint), 1);
         poly.displayed.push_back(std::move(displayed));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
         active_work->charge(v.authorities.size(), sizeof(PlaneAuthority));
-        active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity), 1);
+        DynamicGeometryAccess::retain_supports(
+            v.source_identity, active_work->allocations, active_work->bytes, active_work->limits.byte_budget);
+        active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity, false), 1);
         for (const auto& key : v.authorities)
             active_work->charge(key.key.size(), sizeof(std::uint64_t));
     }
@@ -337,18 +341,8 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         if (native_representable)
             plane->native_support = details::ordinary_native::source_support_packet(native_points);
         if (!plane->authorities.empty())
-        {
-            const auto& words = plane->authorities.front().key;
-            if (!words.empty() && words.front() <= (words.size() - 1) * 8)
-            {
-                std::vector<char> native_support(words.front());
-                for (std::size_t i = 0; i < native_support.size(); ++i)
-                    native_support[i] = static_cast<char>((words[1 + i / 8] >> (8 * (i % 8))) & 255);
-                plane->native_support =
-                    details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-                        std::move(native_support));
-            }
-        }
+            if (const auto* support = details::OriginalSupportAuthorityAccess::get(plane->authorities.front()))
+                plane->native_support = *support;
         for (const auto index : face)
         {
             result->vertices[index].incident.push_back(plane);

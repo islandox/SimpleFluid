@@ -48,6 +48,7 @@ struct Budget
 struct Writer
 {
     AdaptiveBytes data;
+    void byte(std::uint8_t value) { data.push_back(static_cast<char>(value)); }
     void word(std::uint64_t n)
     {
         for (unsigned i = 0; i < 8; ++i)
@@ -63,6 +64,12 @@ struct Reader
 {
     std::span<const char> data;
     std::size_t offset = 0;
+    std::uint8_t byte()
+    {
+        if (offset == data.size())
+            throw std::invalid_argument("Truncated distributed adaptive tag.");
+        return static_cast<std::uint8_t>(data[offset++]);
+    }
     std::uint64_t word()
     {
         if (data.size() - offset < 8)
@@ -88,7 +95,7 @@ struct Reader
     }
 };
 /** Wire records have independent versions; canonical keys never use this stamp. */
-enum class GeometryRecordKind : std::uint64_t
+enum class GeometryRecordKind : std::uint8_t
 {
     Tile = 1,
     SurfaceRequest,
@@ -101,20 +108,22 @@ enum class GeometryRecordKind : std::uint64_t
     ClosureReply,
     GhostRequest,
     GhostReply,
-    GhostNode
+    GhostNode,
+    FrozenPart,
+    FrozenBatch
 };
-inline constexpr std::size_t geometry_record_header_bytes = 24;
+inline constexpr std::size_t geometry_record_header_bytes = 10;
 inline constexpr std::uint64_t geometry_record_magic = 0x5346414452454332ULL;
 inline void write_geometry_record_header(Writer& writer, GeometryRecordKind kind)
 {
     writer.word(geometry_record_magic);
-    writer.word(1);
-    writer.word(static_cast<std::uint64_t>(kind));
+    writer.byte(2);
+    writer.byte(static_cast<std::uint8_t>(kind));
 }
 inline void read_geometry_record_header(Reader& reader, GeometryRecordKind kind)
 {
-    if (reader.word() != geometry_record_magic || reader.word() != 1 ||
-        reader.word() != static_cast<std::uint64_t>(kind))
+    if (reader.word() != geometry_record_magic || reader.byte() != 2 ||
+        reader.byte() != static_cast<std::uint8_t>(kind))
         throw std::invalid_argument("Unsupported adaptive geometry record version or kind.");
 }
 template<class F> void collective(const Teuchos::Comm<int>& comm, F&& action)

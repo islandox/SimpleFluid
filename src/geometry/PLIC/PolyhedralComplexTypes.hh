@@ -9,7 +9,7 @@ namespace SimpleFluid::PLIC
 {
 struct PolyhedralSurfaceKey
 {
-    enum class Kind : std::uint64_t
+    enum class Kind : std::uint8_t
     {
         Root,
         Cut
