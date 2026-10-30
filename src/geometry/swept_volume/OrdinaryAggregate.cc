@@ -113,6 +113,21 @@ struct AggregateWork
     std::size_t indirect_calls = 0, indirect_bytes = 0, indirect_reuses = 0;
     OrdinaryAggregateStage stage = OrdinaryAggregateStage::Source;
     std::size_t live_witnesses = 0, live_witness_bytes = 0;
+    GeometryAllocationLedger allocations;
+    template<class Identity> void retain_identity(const Identity& identity)
+    {
+        auto admitted = bytes;
+        try
+        {
+            allocations.retain(identity, admitted, std::min(sweep.byte_budget, geometry.byte_budget));
+        }
+        catch (...)
+        {
+            charge(admitted - bytes);
+            throw;
+        }
+        charge(admitted - bytes);
+    }
     void sync() const
     {
         if (context)
@@ -883,7 +898,8 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         c.native_support = plane.native_support;
         if (c.authorities.empty() && c.native_support.has_value())
             c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(*c.native_support));
-        work.charge((c.native_support ? c.native_support->payload_bytes() : 0));
+        if (c.native_support)
+            work.retain_identity(*c.native_support);
         for (const auto& authority : c.authorities)
             work.charge(sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));
         result.push_back(std::move(c));
@@ -1230,8 +1246,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             {
                 auto [it, fresh] = native_supports.try_emplace(*c.native_support, c.identity);
                 if (fresh)
-                    work.charge(sizeof(decltype(native_supports)::value_type) +
-                                (c.native_support ? c.native_support->payload_bytes() : 0) + 4 * sizeof(void*));
+                    work.charge(sizeof(decltype(native_supports)::value_type) + 4 * sizeof(void*));
                 else
                     parents[root(c.identity)] = root(it->second);
             }
@@ -1253,7 +1268,6 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             if (fresh)
             {
                 work.charge(sizeof(decltype(canonical)::value_type) + 4 * sizeof(void*) +
-                            (selected.native_support ? selected.native_support->payload_bytes() : 0) +
                             selected.authorities.capacity() * sizeof(PlaneAuthority));
                 for (const auto& authority : selected.authorities)
                     work.charge(authority.key.capacity() * sizeof(std::uint64_t));

@@ -2,6 +2,7 @@
  * @brief Optional exact phase transport planning.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 namespace SimpleFluid::VoF
 {
@@ -26,6 +27,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 faces.size() != data.topology->tiles.size())
                 throw std::invalid_argument("General VoF controls do not cover retained nodes/faces.");
             wire::Budget budget{data.options.byte_budget};
+            PLIC::GeometryAllocationLedger identity_allocations;
             for (const auto& node : nodes)
             {
                 for (auto x : node.velocity)
@@ -55,8 +57,9 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 auto trajectory =
                     SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::
                         backtrace_constrained(PLIC::promote_identity(node.coordinate_identity), v, dt, walls, limits);
-                budget.add(
-                    sizeof(trajectory) + trajectory.point.payload_bytes() + trajectory.departure.payload_bytes());
+                budget.add(sizeof(trajectory));
+                identity_allocations.retain(trajectory.point, budget.used, budget.limit);
+                identity_allocations.retain(trajectory.departure, budget.used, budget.limit);
                 const auto coordinate = PLIC::encode_identity(node.coordinate_identity);
                 const auto departure = PLIC::encode_identity(trajectory.departure);
                 budget.add(coordinate.capacity() + departure.capacity());
@@ -254,10 +257,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             [&]
             {
                 wire::Budget budget{limit};
+                PLIC::GeometryAllocationLedger identity_allocations;
                 for (const auto& [node, trajectory] : canonical_trajectories)
                 {
-                    budget.add(sizeof(GeneralVoFNodeTrajectory) + trajectory.point.payload_bytes() +
-                               trajectory.departure.payload_bytes());
+                    budget.add(sizeof(GeneralVoFNodeTrajectory));
+                    identity_allocations.retain(trajectory.point, budget.used, budget.limit);
+                    identity_allocations.retain(trajectory.departure, budget.used, budget.limit);
                     trial.trajectories_.push_back({node, trajectory});
                 }
             });

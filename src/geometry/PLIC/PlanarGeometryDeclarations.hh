@@ -35,4 +35,12 @@ template<ArithmeticMode Mode>
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryMeasure<Mode> point_projection(
     const PointIdentity<Mode>&, GeometryPoint, GeometryPoint);
 template<ArithmeticMode Mode> [[nodiscard]] std::vector<char> canonical_face_key(const PlanarFace<Mode>&);
+/** Shared identity owners retained by this face. Exact faces retain their
+ * arithmetic polygon directly and have no separately cached identity owners. */
+template<ArithmeticMode Mode, class Visitor>
+void visit_identity_allocations(const PlanarFace<Mode>& face, Visitor&& visitor)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        visit_identity_allocations(planar_support<Mode>(face), std::forward<Visitor>(visitor));
+}
 } // namespace SimpleFluid::PLIC

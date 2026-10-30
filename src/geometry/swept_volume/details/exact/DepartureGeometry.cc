@@ -20,7 +20,9 @@ void target_sweep_shell(
         faces.push_back(std::move(face));
         for (const auto& trace : oriented.face->trajectories())
         {
-            budget.add(trace.point.payload_bytes() + trace.departure.payload_bytes() + 2 * sizeof(P));
+            budget.add(2 * sizeof(P));
+            budget.retain_identity(trace.point);
+            budget.retain_identity(trace.departure);
             const auto p = authority_point(trace.point), back = authority_point(trace.departure);
             auto [it, inserted] = shared.emplace(p, back);
             if (!inserted && it->second != back)
@@ -153,7 +155,7 @@ void departure_authenticate_cones(const SweptFace<ArithmeticMode::Exact>& face, 
                 swept_point(boundary[4 * i + a][1]), swept_point(boundary[4 * i + a][2])};
             for (unsigned v = 0; v < 3; ++v)
             {
-                budget.add(side[v].payload_bytes());
+                budget.retain_identity(side[v]);
             }
             sides.push_back(std::move(side));
         }
@@ -218,7 +220,7 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
         center = mul(center, Q(1) / current.size());
         departure_charge_point(center, budget);
         const auto encoded = face.corrected_departure_center();
-        budget.add(encoded.payload_bytes());
+        budget.retain_identity(encoded);
         const auto backcenter = authority_point(encoded);
         departure_charge_point(backcenter, budget);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
@@ -321,7 +323,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
         }
         center = mul(center, Q(1) / current.size());
         const auto encoded = face.corrected_departure_center();
-        budget.add(encoded.payload_bytes());
+        budget.retain_identity(encoded);
         const P backcenter = authority_point(encoded);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
         const auto boundary = swept_boundary(current, previous, center, backcenter, nullptr);

@@ -21,7 +21,8 @@ enum class Kind
     Split,
     Certificate,
     Recipe,
-    Clip
+    Clip,
+    IdentityPayload
 };
 struct Item
 {
@@ -74,7 +75,7 @@ struct GeometryAllocationLedger::Impl
     };
     std::map<allocation_detail::Key, Entry, allocation_detail::Less> owners;
     std::vector<allocation_detail::Item> pending;
-    ArithmeticMode mode = ArithmeticMode::Exact;
+    std::optional<ArithmeticMode> mode;
     std::size_t payload = 0, bookkeeping = 0, last_counter = 0;
     std::size_t scratch_limit = std::numeric_limits<std::size_t>::max();
 
@@ -123,6 +124,17 @@ struct GeometryAllocationLedger::Impl
         account(sizeof(typename decltype(owners)::value_type) + 4 * sizeof(void*), true, used, limit);
         owners.emplace(key, Entry{item.owner, bytes});
         return true;
+    }
+
+    template<GeometryIdentityKind Kind, ArithmeticMode Mode>
+    void retain_identity(const GeometryIdentity<Kind, Mode>& identity, std::size_t& used, std::size_t limit)
+    {
+        visit_identity_allocations(identity,
+            [&](const GeometryIdentityAllocation& allocation)
+            {
+                return admit({allocation_detail::Kind::IdentityPayload, allocation.owner}, allocation.payload_bytes,
+                    used, limit);
+            });
     }
 
     template<ArithmeticMode Mode> void walk(std::size_t& used, std::size_t limit)
@@ -192,10 +204,11 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = add(sizeof(StoredPlane<Mode>), authorities(plane->authorities));
                     add_bytes(
                         bytes, plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
-                    if constexpr (Mode == ArithmeticMode::Ordinary)
-                        add_bytes(bytes, (plane->native_support ? plane->native_support->payload_bytes() : 0), 1);
                     // Weak source references do not retain or pin their pointees.
-                    (void) admit(item, bytes, used, limit);
+                    if (admit(item, bytes, used, limit))
+                        if constexpr (Mode == ArithmeticMode::Ordinary)
+                            if (plane->native_support)
+                                retain_identity(*plane->native_support, used, limit);
                     break;
                 }
                 case Kind::Point: {
@@ -254,6 +267,9 @@ struct GeometryAllocationLedger::Impl
                     }
                     break;
                 }
+                case Kind::IdentityPayload:
+                    throw GeometryError(GeometryErrorCode::InvalidTopology,
+                        "Identity allocations must enter through their owner visitor.");
                 case Kind::Clip: {
                     const auto clip = std::static_pointer_cast<const GeometryClipConstruction>(item.owner);
                     require_mode(clip->mode, Mode);
@@ -291,34 +307,86 @@ std::size_t GeometryAllocationLedger::bookkeeping_bytes() const noexcept
     return impl_ ? impl_->bookkeeping : 0;
 }
 
+void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t limit, bool allocate_state)
+{
+    if (failed_)
+        allocation_detail::exhausted("Geometry allocation ledger cannot resume rejected admission.");
+    if (impl_ && used < impl_->last_counter)
+        allocation_detail::exhausted("Geometry allocation cumulative byte count decreased.");
+    if (used > limit)
+        allocation_detail::exhausted("Geometry allocation byte budget is already exhausted.");
+    if (!impl_ && allocate_state)
+    {
+        if (sizeof(Impl) > limit - used)
+            allocation_detail::exhausted("Geometry allocation ledger byte budget is exhausted.");
+        used += sizeof(Impl);
+        impl_ = std::make_unique<Impl>();
+        impl_->bookkeeping = sizeof(Impl);
+        impl_->last_counter = used;
+    }
+}
+
 template<ArithmeticMode Mode>
 void GeometryAllocationLedger::retain(const ConvexGeometryPtr<Mode>& geometry, std::size_t& used, std::size_t limit)
 {
     static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
     try
     {
-        if (failed_)
-            allocation_detail::exhausted("Geometry allocation ledger cannot resume rejected admission.");
         if (!geometry)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Null geometry allocation admission.");
         details::require_mode(geometry->arithmetic_mode(), Mode);
-        if (impl_ && used < impl_->last_counter)
-            allocation_detail::exhausted("Geometry allocation cumulative byte count decreased.");
-        if (used > limit)
-            allocation_detail::exhausted("Geometry allocation byte budget is already exhausted.");
-        if (!impl_)
-        {
-            if (sizeof(Impl) > limit - used)
-                allocation_detail::exhausted("Geometry allocation ledger byte budget is exhausted.");
-            used += sizeof(Impl);
-            impl_ = std::make_unique<Impl>();
+        begin_admission(used, limit);
+        if (impl_->mode)
+            details::require_mode(*impl_->mode, Mode);
+        else
             impl_->mode = Mode;
-            impl_->bookkeeping = sizeof(Impl);
-            impl_->last_counter = used;
-        }
-        details::require_mode(impl_->mode, Mode);
         impl_->push(allocation_detail::Kind::TypedWrapper, geometry, used, limit);
         impl_->walk<Mode>(used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
+template<ArithmeticMode Mode>
+void GeometryAllocationLedger::retain(const DynamicConvexGeometryPtr& geometry, std::size_t& used, std::size_t limit)
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    try
+    {
+        if (!geometry)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null dynamic geometry allocation admission.");
+        details::require_mode(geometry->arithmetic_mode(), Mode);
+        begin_admission(used, limit);
+        if (impl_->mode)
+            details::require_mode(*impl_->mode, Mode);
+        else
+            impl_->mode = Mode;
+        impl_->push(allocation_detail::Kind::DynamicWrapper, geometry, used, limit);
+        impl_->walk<Mode>(used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
+template<GeometryIdentityKind Kind, ArithmeticMode Mode>
+    requires(GeometryIdentity<Kind, Mode>::shared_storage)
+void GeometryAllocationLedger::retain(
+    const GeometryIdentity<Kind, Mode>& identity, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        begin_admission(used, limit, identity.storage_identity() != nullptr);
+        if (!impl_)
+            return;
+        impl_->retain_identity(identity, used, limit);
         impl_->last_counter = used;
     }
     catch (...)
@@ -332,6 +400,21 @@ template void GeometryAllocationLedger::retain<ArithmeticMode::Ordinary>(
     const ConvexGeometryPtr<ArithmeticMode::Ordinary>&, std::size_t&, std::size_t);
 template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertification>(
     const ConvexGeometryPtr<ArithmeticMode::BoundedCertification>&, std::size_t&, std::size_t);
+
+template void GeometryAllocationLedger::retain<ArithmeticMode::Ordinary>(
+    const DynamicConvexGeometryPtr&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertification>(
+    const DynamicConvexGeometryPtr&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary>(
+    const PlaneSupportIdentity<ArithmeticMode::Ordinary>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<GeometryIdentityKind::Point, ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<GeometryIdentityKind::Line, ArithmeticMode::Exact>(
+    const LineIdentity<ArithmeticMode::Exact>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<GeometryIdentityKind::PlaneSupport, ArithmeticMode::Exact>(
+    const PlaneSupportIdentity<ArithmeticMode::Exact>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<GeometryIdentityKind::Displacement, ArithmeticMode::Exact>(
+    const DisplacementIdentity<ArithmeticMode::Exact>&, std::size_t&, std::size_t);
 
 namespace details
 {

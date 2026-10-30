@@ -9,6 +9,7 @@
  * @brief Policy-specific finite construction storage and structural convex partitions.
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include <algorithm>
@@ -104,7 +105,16 @@ struct Work
 {
     GeometryLimits limits;
     std::size_t operations = 0, bytes = 0, pairs = 0, operation_limit = 0;
+    GeometryAllocationLedger allocations;
     explicit Work(GeometryLimits requested);
+    template<class Identity> void retain_identity(const Identity& identity)
+    {
+        allocations.retain(identity, bytes, limits.byte_budget);
+    }
+    template<ArithmeticMode Mode> void retain_geometry(const DynamicConvexGeometryPtr& geometry)
+    {
+        allocations.retain<Mode>(geometry, bytes, limits.byte_budget);
+    }
     void charge(std::size_t count, std::size_t size);
     void pair();
 };
@@ -309,11 +319,10 @@ std::shared_ptr<const GeometryConstruction> construction_source(
 std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConstruction>&);
 template<ArithmeticMode Mode>
 std::size_t geometry_allocation_footprint(const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
+template<ArithmeticMode Mode> bool construction_edge_incident(const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&);
 template<ArithmeticMode Mode>
-bool construction_edge_incident(const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&);
-template<ArithmeticMode Mode>
-void preserve_crossing_incidence(StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&,
-    const Frame&, bool numerical_only);
+void preserve_crossing_incidence(
+    StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&, const Frame&, bool numerical_only);
 } // namespace details
 
 } // namespace SimpleFluid::PLIC

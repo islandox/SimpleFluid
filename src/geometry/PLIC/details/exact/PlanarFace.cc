@@ -1,3 +1,4 @@
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
 
@@ -295,9 +296,14 @@ std::vector<ExactPointIdentity> EdgePointIndex<ArithmeticMode::Exact>::closed_se
 std::size_t EdgePointIndex<ArithmeticMode::Exact>::storage_bytes() const
 {
     std::size_t bytes = sizeof(*this) + sizeof(Impl);
+    GeometryAllocationLedger allocations;
+    std::size_t admitted = 0;
     for (const auto& [key, value] : impl_->points)
-        bytes += sizeof(key) + sizeof(value) + value.payload_bytes() + 3 * sizeof(void*);
-    return bytes;
+    {
+        bytes += sizeof(key) + sizeof(value) + 3 * sizeof(void*);
+        allocations.retain(value, admitted, std::numeric_limits<std::size_t>::max());
+    }
+    return bytes + allocations.payload_bytes();
 }
 
 PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::intersection(
@@ -592,7 +598,7 @@ std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode() const
     return canonical_face_key(*this);
 }
 
-std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const
+std::size_t PlanarFace<ArithmeticMode::Exact>::exclusive_storage_bytes() const
 {
     std::size_t bytes = sizeof(*this) + sizeof(Impl) + impl_->polygon.capacity() * sizeof(P);
     for (const auto& p : impl_->polygon)
@@ -600,6 +606,11 @@ std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const
             bytes += (q.backend().num().capacity() + q.backend().denom().capacity()) *
                      sizeof(boost::multiprecision::limb_type);
     return bytes;
+}
+
+std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const
+{
+    return exclusive_storage_bytes();
 }
 
 std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode_incidence() const

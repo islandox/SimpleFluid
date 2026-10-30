@@ -2,6 +2,7 @@
  * @brief Owner-authenticated, independently volume-admitted capillary plane witnesses.
  */
 #include "FVM/details/GeneralVoF/CapillaryPlanes.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 
@@ -241,6 +242,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
         return {original_face, initial};
     wire::Budget budget{data.options.byte_budget};
     budget.add(retained_bytes);
+    PLIC::GeometryAllocationLedger retained_identity_allocations;
     std::set<Key> stencil;
     if (!complete_stencil(data, target, stencil, budget))
         throw GeneralVoFSurfaceResolutionError(GeneralVoFSurfaceResolutionReason::IncompleteSupport,
@@ -276,7 +278,8 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
             continue;
         wire::Budget candidate_budget{budget.limit};
         candidate_budget.add(budget.used);
-        candidate_budget.add(candidate->support->payload_bytes());
+        PLIC::GeometryAllocationLedger candidate_identity_allocations;
+        candidate_identity_allocations.retain(*candidate->support, candidate_budget.used, candidate_budget.limit);
         bool valid = true;
         MinorityEvidence evidence;
         long double squared_residual = 0;
@@ -303,7 +306,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
             return {initial_choice, initial};
         if (!selected)
         {
-            budget.add(candidate->support->payload_bytes());
+            retained_identity_allocations.retain(*candidate->support, budget.used, budget.limit);
             selected = *candidate;
             target_evidence = evidence;
             selected_stencil_residual = stencil.size() > 1 ? std::sqrt(squared_residual / (stencil.size() - 1)) : 0;

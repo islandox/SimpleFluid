@@ -2,8 +2,10 @@
  * @brief Sparse authoritative exact explicit-provider bindings and metric validation.
  */
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
 #include <algorithm>
+#include <limits>
 
 namespace SimpleFluid::Meshes
 {
@@ -224,20 +226,24 @@ std::size_t ExplicitRegionProvider::construction_storage_bytes() const
 {
     if (d_construction)
         return d_construction->storage_bytes();
-    std::size_t bytes = 0;
-    std::set<const void*> seen;
+    std::size_t bytes = 0, admitted = 0;
+    PLIC::GeometryAllocationLedger allocations;
+    std::set<const void*> face_objects;
     for (const auto& [id, cell] : d_cell_certificates)
     {
         bytes += sizeof(decltype(d_cell_certificates)::value_type) + 4 * sizeof(void*);
-        if (seen.insert(cell.get()).second)
-            bytes += cell->storage_bytes();
+        allocations.retain<ArithmeticMode::Ordinary>(cell, admitted, std::numeric_limits<std::size_t>::max());
     }
     for (const auto& [id, face] : d_face_certificates)
     {
         bytes += sizeof(decltype(d_face_certificates)::value_type) + 4 * sizeof(void*);
-        if (seen.insert(face.get()).second)
-            bytes += face->encode_incidence().size();
+        if (face_objects.insert(face.get()).second)
+        {
+            bytes += face->exclusive_storage_bytes();
+            allocations.retain(PLIC::planar_support<ArithmeticMode::Ordinary>(*face), admitted,
+                std::numeric_limits<std::size_t>::max());
+        }
     }
-    return bytes;
+    return bytes + allocations.payload_bytes();
 }
 } // namespace SimpleFluid::Meshes

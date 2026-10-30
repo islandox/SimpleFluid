@@ -187,7 +187,7 @@ Frontier make_frontier(
     {
         work.test();
         const auto support = PLIC::planar_support<mode>(*frontier.retained_geometry->face_geometry(face));
-        work.charge(support.payload_bytes());
+        work.allocations.retain(support, work.bytes, work.limits.byte_budget);
         if (support != *frontier.support_identity)
             continue;
         matched = true;
@@ -200,8 +200,8 @@ Frontier make_frontier(
         throw std::invalid_argument("Local VoF retained frontier lacks its original immutable cell support.");
     frontier.original_boundary.emplace(PLIC::FaceConstraint<mode>{frontier.retained_geometry, frontier.retained_face});
     work.charge(frontier.original_boundary->storage_bytes() - sizeof(PLIC::OrdinaryBoundary));
-    work.charge(
-        frontier.tile_identity.capacity() + frontier.support_identity->payload_bytes() + frontier.boundary.capacity());
+    work.allocations.retain(*frontier.support_identity, work.bytes, work.limits.byte_budget);
+    work.charge(frontier.tile_identity.capacity() + frontier.boundary.capacity());
     work.charge(AMR::encode_adaptive_key(frontier.retained_key).size());
     if (frontier.outside_key)
         work.charge(AMR::encode_adaptive_key(*frontier.outside_key).size());

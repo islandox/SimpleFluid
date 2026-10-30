@@ -1112,7 +1112,7 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
             const auto bits = arithmetic.bits(q);
             count += 32 + (bits[0] + 7) / 8 + (bits[1] + 7) / 8 + 2;
         }
-        return 2 * count; // vector growth and zero-integer framing allowance
+        return 2 * count + PLIC::details::geometry_identity_backing_bytes(); // vector growth, owner and integer framing
     };
     arithmetic.charge(encoded_bound(source));
     arithmetic.charge(encoded_bound(departure));
@@ -1152,8 +1152,9 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     std::map<P, P> mapped;
     for (const auto& trace : traces)
     {
-        budget.add(canonical_key_size(trace.point) + canonical_key_size(trace.departure) +
-                   sizeof(NodeTrajectory<ArithmeticMode::Exact>));
+        budget.add(sizeof(NodeTrajectory<ArithmeticMode::Exact>));
+        budget.retain_identity(trace.point);
+        budget.retain_identity(trace.departure);
         if (!mapped.emplace(authority_point(trace.point), authority_point(trace.departure)).second)
             throw std::invalid_argument("Duplicate shared node trajectory.");
     }
@@ -1190,6 +1191,10 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     result->native = SweepAccess<ArithmeticMode::Exact>::retain(face);
     result->traces.assign(traces.begin(), traces.end());
     auto triangles = swept_boundary(current, previous, center, backcenter, &result->edges);
+    budget.array(result->edges.capacity(), sizeof(decltype(result->edges)::value_type));
+    for (const auto& triangle : result->edges)
+        for (const auto& vertex : triangle)
+            budget.retain_identity(vertex);
     Q check = 0;
     for (const auto& triangle : triangles)
         if (auto piece = swept_tetra(center, triangle[0], triangle[1], triangle[2]))

@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
 #include <array>
@@ -75,15 +76,18 @@ AdaptiveBytes point_key(std::span<const char> domain, const PointIdentity& point
     return std::move(w.data);
 }
 AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
-    std::size_t& trace_records, std::size_t& retained_geometry)
+    IdentityBudget& identities, std::size_t& trace_records, std::size_t& retained_geometry)
 {
     auto shape = kernel.geometry(leaf);
     auto trace = kernel.traces(leaf);
     if (trace.key != leaf.key)
         throw std::invalid_argument("Provider trace identifies another leaf.");
     trace_records += trace.faces.size();
-    budget.add(shape->storage_bytes());
-    retained_geometry = shape.use_count() > 1 ? shape->storage_bytes() : 0;
+    const auto before_geometry = budget.used;
+    identities.retain(budget, shape);
+    // All admitted owners and ledger pins survive until the request phase ends,
+    // including generated geometry. Never release these charges as leaf scratch.
+    retained_geometry = budget.used - before_geometry;
     Writer w;
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
@@ -103,6 +107,10 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
         w.word(bool(face.face));
         if (face.face)
         {
+            budget.add(face.face->exclusive_storage_bytes());
+            const auto before_support = budget.used;
+            identities.retain(budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*face.face));
+            retained_geometry += budget.used - before_support;
             budget.add(face.face->encode_incidence().size());
             w.bytes(face.face->encode_incidence());
         }
@@ -176,7 +184,6 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 throw std::invalid_argument("Closure options differ across ranks.");
         });
     std::vector<AdaptiveLeaf> transient;
-    std::size_t source_geometry_bytes = 0;
     collective(*comm,
         [&]
         {
@@ -185,6 +192,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 options.maximum_trace_jump != 1)
                 throw std::invalid_argument("Invalid closed-contact closure bounds.");
             Budget budget{options.byte_budget};
+            IdentityBudget identities;
             BudgetObservation observation{budget, diagnostics};
             std::set<const void*> retained_faces;
             for (const auto& source : owned)
@@ -192,10 +200,10 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 budget.add(sizeof(AdaptiveLeaf));
                 if (source.geometry && retained_faces.insert(source.geometry.get()).second)
                 {
-                    const auto bytes = source.geometry->storage_bytes();
-                    budget.add(bytes + sizeof(const void*) + 4 * sizeof(void*));
-                    source_geometry_bytes += bytes;
-                    diagnostics.input_retained_bytes += bytes;
+                    const auto before_payload = identities.payload_bytes();
+                    identities.retain(budget, source.geometry);
+                    budget.add(sizeof(const void*) + 4 * sizeof(void*));
+                    diagnostics.input_retained_bytes += identities.payload_bytes() - before_payload;
                 }
                 auto leaf = source;
                 // Tile authorities consume support faces, not cell shells.
@@ -213,7 +221,10 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     if (retained_faces.insert(surface.geometry.get()).second)
                     {
                         budget.add(sizeof(const void*) + 4 * sizeof(void*));
-                        diagnostics.input_retained_bytes += surface.geometry->storage_bytes();
+                        const auto before_payload = identities.payload_bytes();
+                        identities.face(budget, *surface.geometry);
+                        diagnostics.input_retained_bytes +=
+                            surface.geometry->exclusive_storage_bytes() + identities.payload_bytes() - before_payload;
                     }
                     budget.add(surface.key.size() + surface.geometry->encode_incidence().size());
                 }
@@ -241,8 +252,11 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
         [&]
         {
             Budget budget{options.byte_budget};
+            IdentityBudget identities;
             BudgetObservation observation{budget, diagnostics};
-            budget.add(source_geometry_bytes);
+            for (const auto& source : owned)
+                if (source.geometry)
+                    identities.retain(budget, source.geometry);
             std::map<AdaptiveCellKey, std::set<PointIdentity>> points;
             for (const auto& tile : tiles)
             {
@@ -282,7 +296,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 {
                     const auto before_leaf = budget.used;
                     std::size_t retained_delta = 0, retained_geometry = 0;
-                    auto record = encode_contact(leaf, kernel, budget, diagnostics.trace_records, retained_geometry);
+                    auto record =
+                        encode_contact(leaf, kernel, budget, identities, diagnostics.trace_records, retained_geometry);
                     ++diagnostics.geometry_records;
                     diagnostics.unique_record_bytes += record.size();
                     struct Pending
@@ -367,8 +382,11 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             };
             std::map<AdaptiveBytes, Group> groups;
             Budget budget{options.byte_budget};
+            IdentityBudget identities;
             BudgetObservation observation{budget, diagnostics};
-            budget.add(source_geometry_bytes);
+            for (const auto& source : owned)
+                if (source.geometry)
+                    identities.retain(budget, source.geometry);
             budget.add(incoming.packets.capacity() * sizeof(OwnerPacket));
             for (const auto& packet : incoming.packets)
                 budget.add(packet.bytes.capacity());
@@ -389,14 +407,15 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     throw std::invalid_argument("Duplicate closed-contact geometry owner.");
                 budget.add(record->domain.capacity() + 2 * encode_adaptive_key(record->key).size() +
                            sizeof(decltype(records)::value_type) + 4 * sizeof(void*));
-                budget.add(record->geometry->storage_bytes());
-                diagnostics.decoded_geometry_bytes += record->geometry->storage_bytes();
+                const auto before_geometry = identities.payload_bytes();
+                identities.retain(budget, record->geometry);
+                diagnostics.decoded_geometry_bytes += identities.payload_bytes() - before_geometry;
                 budget.add(record->traces.capacity() * sizeof(AdaptiveTraceFace));
                 for (const auto& trace : record->traces)
                 {
                     budget.add(trace.stem.capacity());
                     if (trace.face)
-                        budget.add(trace.face->storage_bytes());
+                        identities.face(budget, *trace.face);
                 }
                 const auto count = r.word();
                 if (!count || count > packet.bytes.size() / 32)
@@ -517,8 +536,11 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
         [&]
         {
             Budget budget{options.byte_budget};
+            IdentityBudget identities;
             BudgetObservation observation{budget, diagnostics};
-            budget.add(source_geometry_bytes);
+            for (const auto& source : owned)
+                if (source.geometry)
+                    identities.retain(budget, source.geometry);
             budget.add(expected.size());
             std::vector<bool> seen(expected.size());
             std::map<AdaptiveCellKey, AdaptiveSplit> marks;

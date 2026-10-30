@@ -1,3 +1,4 @@
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/ordinary/ExtrudedConstructionInternal.hh"
 
 namespace SimpleFluid::PLIC
@@ -333,9 +334,11 @@ std::size_t ExtrudedConstruction<ArithmeticMode::Ordinary>::base_storage_bytes()
     bytes += b.areas.capacity() * sizeof(Scalar);
     bytes += b.edge_supports.capacity() * sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>) +
              b.support_normals.capacity() * sizeof(P);
+    GeometryAllocationLedger allocations;
+    std::size_t admitted = 0;
     for (const auto& support : b.edge_supports)
-        bytes += support.payload_bytes();
-    return bytes;
+        allocations.retain(support, admitted, std::numeric_limits<std::size_t>::max());
+    return bytes + allocations.payload_bytes();
 }
 
 std::size_t ExtrudedConstruction<ArithmeticMode::Ordinary>::axis_values_storage_bytes() const

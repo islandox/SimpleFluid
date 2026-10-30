@@ -1,6 +1,7 @@
 /** @file MultiRegionMeshSparse.cc
  * @brief Sparse owner-local routes retaining procedural native interiors.
  */
+#include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
 #include <algorithm>
@@ -45,16 +46,23 @@ std::size_t SparseNativeIndex::storage_bytes() const
                         map_bytes(logical_faces) + map_bytes(boundaries) + map_bytes(flux_signs);
     for (const auto& [face, row] : logical_faces)
         total += row.capacity() * sizeof(std::uint64_t);
+    PLIC::GeometryAllocationLedger allocations;
+    std::size_t admitted = 0;
+    std::set<const void*> face_objects;
     for (const auto& [gid, face] : faces)
     {
         total += (face.override_nodes.capacity() + face.second_node_gids.capacity()) * sizeof(std::uint64_t) +
                  face.second_image_identity.payload_bytes();
-        if (face.override_geometry)
-            total += face.override_geometry->encode_incidence().capacity();
+        if (face.override_geometry && face_objects.insert(face.override_geometry.get()).second)
+        {
+            total += face.override_geometry->exclusive_storage_bytes();
+            allocations.retain(PLIC::planar_support<ArithmeticMode::Ordinary>(*face.override_geometry), admitted,
+                std::numeric_limits<std::size_t>::max());
+        }
     }
     for (const auto& [id, name] : boundaries)
         total += name.capacity();
-    return total;
+    return total + allocations.payload_bytes();
 }
 std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
     SparseNativeMeshInput input, Teuchos::RCP<const Teuchos::Comm<int>> comm)
@@ -106,6 +114,8 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
         [&]
         {
             ::SimpleFluid::Meshes::AMR::adaptive_detail::Budget budget{input.byte_budget};
+            ::SimpleFluid::Meshes::AMR::adaptive_detail::IdentityBudget identities;
+            std::set<const void*> face_objects;
             budget.add(sizeof(*mesh) + sizeof(*index));
             for (const auto& cell : input.cells)
                 budget.add(sizeof(cell) + 8 * sizeof(void*));
@@ -114,8 +124,12 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                 budget.add(sizeof(face) + 16 * sizeof(void*) +
                            (face.override_nodes.size() + face.second_node_gids.size()) * sizeof(ID) +
                            face.second_image_identity.payload_bytes());
-                if (face.override_geometry)
-                    budget.add(face.override_geometry->encode_incidence().size());
+                if (face.override_geometry && !face_objects.contains(face.override_geometry.get()))
+                {
+                    budget.add(sizeof(decltype(face_objects)::value_type) + 4 * sizeof(void*));
+                    face_objects.insert(face.override_geometry.get());
+                    identities.face(budget, *face.override_geometry);
+                }
             }
             for (const auto& node : input.nodes)
                 budget.add(sizeof(node) + 8 * sizeof(void*));

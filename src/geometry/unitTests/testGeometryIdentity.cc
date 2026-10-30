@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include <gtest/gtest.h>
 #include <limits>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 
@@ -196,7 +197,8 @@ template<ArithmeticMode Mode> void check_frozen_key_fixtures()
 TEST(GeometryIdentityTest, OrdinaryCanonicalKeysRetainOriginalFingerprints)
 {
     if constexpr (std::numeric_limits<long double>::digits != 64)
-        GTEST_SKIP() << "Original Ordinary key fixtures require the 64-bit significand profile.";
+        GTEST_SKIP() << "Original Ordinary key fixtures require the 64-bit "
+                        "significand profile.";
     check_frozen_key_fixtures<ordinary>();
 }
 TEST(GeometryIdentityTest, ExactCanonicalKeysRetainOriginalFingerprints)
@@ -204,4 +206,87 @@ TEST(GeometryIdentityTest, ExactCanonicalKeysRetainOriginalFingerprints)
     check_frozen_key_fixtures<exact>();
 }
 
+template<class Identity> void check_shared_owner_contract(const Identity& original)
+{
+    static_assert(Identity::shared_storage);
+    const auto copy = original;
+    ASSERT_NE(original.storage_identity(), nullptr);
+    EXPECT_EQ(copy.storage_identity(), original.storage_identity());
+    EXPECT_EQ(copy.storage_owner().get(), original.storage_owner().get());
+    EXPECT_EQ(copy, original);
+    EXPECT_EQ(copy <=> original, std::strong_ordering::equal);
+    const auto independent = decode_identity<Identity>(encode_identity(original));
+    EXPECT_NE(independent.storage_identity(), original.storage_identity());
+    EXPECT_EQ(independent, original);
+    EXPECT_EQ(independent <=> original, std::strong_ordering::equal);
+    EXPECT_GE(original.payload_bytes(), encoded_identity_size(original));
+}
+TEST(GeometryIdentityTest, CopiesShareOwnersWhileEqualIndependentImportsRemainDistinct)
+{
+    const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto finite = PlanarFace<ordinary>::make(points);
+    const auto rational = PlanarFace<exact>::make(points);
+    check_shared_owner_contract(planar_support<ordinary>(*finite));
+    check_shared_owner_contract(rational->vertex_identities().front());
+    check_shared_owner_contract(rational->edge_support_identities().front());
+    check_shared_owner_contract(planar_support<exact>(*rational));
+    check_shared_owner_contract(displacement<exact>({}, {.25, -.5, 1}));
+    const auto inline_point = finite->vertex_identities().front();
+    static_assert(!decltype(inline_point)::shared_storage);
+    EXPECT_EQ(inline_point.storage_identity(), nullptr);
+    EXPECT_FALSE(inline_point.storage_owner());
+    const DisplacementIdentity<exact> zero;
+    EXPECT_EQ(zero.storage_identity(), nullptr);
+    EXPECT_FALSE(zero.storage_owner());
+    EXPECT_EQ(zero.payload_bytes(), 0u);
+}
+TEST(GeometryIdentityTest, TranslatedSupportsRetainAndVisitTheirSharedAncestry)
+{
+    using Support = PlaneSupportIdentity<ordinary>;
+    std::optional<Support> retained;
+    std::weak_ptr<const void> ancestor;
+    std::size_t expected_bytes = 0;
+    {
+        const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+        const auto face = PlanarFace<ordinary>::make(points);
+        const auto source = planar_support<ordinary>(*face);
+        ancestor = source.storage_owner();
+        const auto unchanged = face->translated(GeometryPoint{});
+        EXPECT_EQ(planar_support<ordinary>(*unchanged).storage_identity(), source.storage_identity());
+        const auto translated = face->translated(GeometryPoint{.25, 0, 0})->translated(GeometryPoint{0, .25, 0});
+        retained = planar_support<ordinary>(*translated);
+        std::vector<const void*> owners;
+        visit_identity_allocations(*translated,
+            [&](const GeometryIdentityAllocation& allocation)
+            {
+                owners.push_back(allocation.owner.get());
+                expected_bytes += allocation.payload_bytes;
+                return true;
+            });
+        ASSERT_EQ(owners.size(), 3u);
+        EXPECT_EQ(owners.back(), source.storage_identity());
+        EXPECT_NE(owners[0], owners[1]);
+        EXPECT_NE(owners[1], owners[2]);
+        EXPECT_EQ(translated->storage_bytes(), translated->exclusive_storage_bytes() + expected_bytes);
+        unsigned stopped = 0;
+        visit_identity_allocations(*retained,
+            [&](const GeometryIdentityAllocation&)
+            {
+                ++stopped;
+                return false;
+            });
+        EXPECT_EQ(stopped, 1u);
+    }
+    EXPECT_FALSE(ancestor.expired());
+    std::size_t retained_bytes = 0;
+    visit_identity_allocations(*retained,
+        [&](const GeometryIdentityAllocation& allocation)
+        {
+            retained_bytes += allocation.payload_bytes;
+            return true;
+        });
+    EXPECT_EQ(retained_bytes, expected_bytes);
+    retained.reset();
+    EXPECT_TRUE(ancestor.expired());
+}
 } // namespace

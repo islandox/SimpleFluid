@@ -5,6 +5,7 @@
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
@@ -35,6 +36,7 @@ struct Budget
 {
     ExactFaceTransferOptions options;
     W::Budget memory;
+    PLIC::GeometryAllocationLedger identity_allocations;
     std::size_t tests = 0, patches = 0, scalar_limit;
     // Retain both the finite source and its explicit exact import. Ownership
     // identity prevents a recycled temporary face address from aliasing a cache entry.
@@ -71,6 +73,10 @@ struct Budget
     }
     void key(const Key& value, std::size_t copies = 1) { records(copies, key_bytes(value)); }
     void blob(const Bytes& value, std::size_t copies = 1) { records(copies, value.capacity()); }
+    void identity(const SupportIdentity& value)
+    {
+        identity_allocations.retain(value, memory.used, options.byte_budget);
+    }
     template<class T> void grow(std::vector<T>& values)
     {
         if (values.size() != values.capacity())
@@ -491,7 +497,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             Facet facet{i, cover[i]->face_geometry(f), {}};
             budget.patch(facet.shape);
             facet.plane = support(facet.shape);
-            budget.records(1, facet.plane->payload_bytes());
+            budget.identity(*facet.plane);
             budget.grow(facets);
             std::vector<Face> pieces;
             for (const auto* tile : boundary)
@@ -526,7 +532,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             if (!supports.contains(*facet.plane))
             {
                 budget.records(1, sizeof(decltype(supports)::value_type) + 4 * sizeof(void*));
-                budget.records(1, facet.plane->payload_bytes());
+                budget.identity(*facet.plane);
             }
             budget.grow(supports[*facet.plane]);
             supports[*facet.plane].push_back(facets.size());
