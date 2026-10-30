@@ -43,6 +43,45 @@ template<>
 template<>
 [[nodiscard]] std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(
     const PlanarFace<ArithmeticMode::Ordinary>&);
+template<> class EdgePointIndex<ArithmeticMode::Ordinary>;
+
+/** Reusable, explicitly bounded Ordinary edge-query storage. Results borrow
+ * immutable index identities until clear(), release(), or the next query. Copy any
+ * published result before reuse. Clear retains allocation; release frees it.
+ * Neither operation resets diagnostics. No query grows the allocation. Moves
+ * transfer the live result and diagnostic history; the source stays reusable.
+ * Byte accounting covers workspace allocations only, excluding the immutable
+ * input index pinned while a result is live; charge that index separately. */
+class OrdinaryEdgeQueryScratch
+{
+public:
+    OrdinaryEdgeQueryScratch();
+    ~OrdinaryEdgeQueryScratch();
+    OrdinaryEdgeQueryScratch(OrdinaryEdgeQueryScratch&&) noexcept;
+    OrdinaryEdgeQueryScratch& operator=(OrdinaryEdgeQueryScratch&&) noexcept;
+    OrdinaryEdgeQueryScratch(const OrdinaryEdgeQueryScratch&) = delete;
+    OrdinaryEdgeQueryScratch& operator=(const OrdinaryEdgeQueryScratch&) = delete;
+    /** Total live bytes required during reserve, including old/new overlap and
+     * opaque bookkeeping. Failure preserves both allocation and logical result. */
+    [[nodiscard]] std::size_t reserve_required_peak(std::size_t capacity) const;
+    void reserve(std::size_t capacity, std::size_t byte_cap);
+    [[nodiscard]] std::size_t capacity() const;
+    [[nodiscard]] std::size_t storage_bytes() const;
+    [[nodiscard]] std::size_t size() const;
+    [[nodiscard]] const PointIdentity<ArithmeticMode::Ordinary>& point(std::size_t index) const;
+    void clear() noexcept;
+    void release() noexcept;
+    [[nodiscard]] std::size_t growths() const;
+    [[nodiscard]] std::size_t queries() const;
+    [[nodiscard]] std::size_t scanned_points() const;
+
+private:
+    friend class EdgePointIndex<ArithmeticMode::Ordinary>;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    std::size_t growths_ = 0, queries_ = 0, scanned_points_ = 0;
+};
+
 template<> class EdgePointIndex<ArithmeticMode::Ordinary>
 {
 public:
@@ -51,6 +90,11 @@ public:
     [[nodiscard]] std::vector<PointIdentity<ArithmeticMode::Ordinary>> closed_segment(
         const PointIdentity<ArithmeticMode::Ordinary>& first,
         const PointIdentity<ArithmeticMode::Ordinary>& second) const;
+    /** Scratch must hold at least the index's unique point count. Failure
+     * empties its logical result; the immutable index remains unchanged. */
+    void closed_segment(
+        const PointIdentity<ArithmeticMode::Ordinary>& first, const PointIdentity<ArithmeticMode::Ordinary>& second,
+        OrdinaryEdgeQueryScratch& scratch) const;
     [[nodiscard]] std::size_t storage_bytes() const;
 
 private:

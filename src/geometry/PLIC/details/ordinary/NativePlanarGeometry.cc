@@ -9,8 +9,11 @@
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include <algorithm>
+#include <limits>
 #include <map>
 #include <set>
+#include <stdexcept>
 
 namespace SimpleFluid::PLIC
 {
@@ -32,6 +35,18 @@ struct OrdinaryFace::Impl
 struct EdgePointIndex<ArithmeticMode::Ordinary>::Impl
 {
     std::map<on::WidePoint, OrdinaryPoint> points;
+};
+struct OrdinaryEdgeQueryScratch::Impl
+{
+    struct Hit
+    {
+        long double projection;
+        std::size_t ordinal;
+        const OrdinaryPoint* identity;
+    };
+    std::unique_ptr<Hit[]> hits;
+    std::shared_ptr<const EdgePointIndex<ArithmeticMode::Ordinary>::Impl> index;
+    std::size_t capacity = 0, size = 0;
 };
 namespace
 {
@@ -806,6 +821,126 @@ EdgePointIndex<ArithmeticMode::Ordinary>::EdgePointIndex(std::span<const Ordinar
     for (const auto& p : points)
         impl->points.emplace(IdentityAccess::point(p), p);
     impl_ = std::move(impl);
+}
+OrdinaryEdgeQueryScratch::OrdinaryEdgeQueryScratch() = default;
+OrdinaryEdgeQueryScratch::~OrdinaryEdgeQueryScratch() = default;
+OrdinaryEdgeQueryScratch::OrdinaryEdgeQueryScratch(OrdinaryEdgeQueryScratch&&) noexcept = default;
+OrdinaryEdgeQueryScratch& OrdinaryEdgeQueryScratch::operator=(OrdinaryEdgeQueryScratch&&) noexcept = default;
+std::size_t OrdinaryEdgeQueryScratch::reserve_required_peak(std::size_t count) const
+{
+    if (count <= capacity())
+        return storage_bytes();
+    const auto old = storage_bytes();
+    const auto bookkeeping = impl_ ? 0 : sizeof(Impl);
+    if (count > (std::numeric_limits<std::size_t>::max() - old - bookkeeping) / sizeof(Impl::Hit))
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary edge-query capacity overflow.");
+    return old + bookkeeping + count * sizeof(Impl::Hit);
+}
+void OrdinaryEdgeQueryScratch::reserve(std::size_t count, std::size_t byte_cap)
+{
+    if (reserve_required_peak(count) > byte_cap)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary edge-query byte cap exhausted.");
+    if (count <= capacity())
+        return;
+    // Admission includes the old allocation until replacement has succeeded.
+    auto hits = std::make_unique<Impl::Hit[]>(count);
+    if (!impl_)
+    {
+        auto next = std::make_unique<Impl>();
+        next->hits = std::move(hits);
+        next->capacity = count;
+        impl_ = std::move(next);
+    }
+    else
+    {
+        std::copy_n(impl_->hits.get(), impl_->size, hits.get());
+        impl_->hits = std::move(hits);
+        impl_->capacity = count;
+    }
+    ++growths_;
+}
+std::size_t OrdinaryEdgeQueryScratch::capacity() const
+{
+    return impl_ ? impl_->capacity : 0;
+}
+std::size_t OrdinaryEdgeQueryScratch::storage_bytes() const
+{
+    return impl_ ? sizeof(Impl) + impl_->capacity * sizeof(Impl::Hit) : 0;
+}
+std::size_t OrdinaryEdgeQueryScratch::size() const
+{
+    return impl_ ? impl_->size : 0;
+}
+const OrdinaryPoint& OrdinaryEdgeQueryScratch::point(std::size_t index) const
+{
+    if (index >= size())
+        throw std::out_of_range("Ordinary edge-query point index.");
+    return *impl_->hits[index].identity;
+}
+void OrdinaryEdgeQueryScratch::clear() noexcept
+{
+    if (impl_)
+    {
+        impl_->size = 0;
+        impl_->index.reset();
+    }
+}
+void OrdinaryEdgeQueryScratch::release() noexcept
+{
+    impl_.reset();
+}
+std::size_t OrdinaryEdgeQueryScratch::growths() const
+{
+    return growths_;
+}
+std::size_t OrdinaryEdgeQueryScratch::queries() const
+{
+    return queries_;
+}
+std::size_t OrdinaryEdgeQueryScratch::scanned_points() const
+{
+    return scanned_points_;
+}
+void EdgePointIndex<ArithmeticMode::Ordinary>::closed_segment(
+    const OrdinaryPoint& first, const OrdinaryPoint& second, OrdinaryEdgeQueryScratch& scratch) const
+{
+    scratch.clear();
+    ++scratch.queries_;
+    try
+    {
+        const auto a = IdentityAccess::point(first), b = IdentityAccess::point(second), d = on::sub(b, a);
+        const auto length = on::dot(d, d);
+        if (length == 0)
+            on::reject("zero finite source edge.");
+        if (scratch.capacity() < impl_->points.size())
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary edge-query capacity exhausted.");
+        if (impl_->points.empty())
+            return;
+        auto& work = *scratch.impl_;
+        work.index = impl_;
+        std::size_t ordinal = 0;
+        for (const auto& [p, id] : impl_->points)
+        {
+            ++scratch.scanned_points_;
+            const auto v = on::sub(p, a);
+            const auto t = on::dot(v, d);
+            if (on::cross(v, d) == on::WidePoint{} && t >= 0 && t <= length)
+                work.hits[work.size++] = {t, ordinal, &id};
+            ++ordinal;
+        }
+        std::sort(work.hits.get(), work.hits.get() + work.size, [](const auto& a, const auto& b)
+            { return a.projection < b.projection || (a.projection == b.projection && a.ordinal < b.ordinal); });
+        std::size_t retained = 0;
+        for (std::size_t i = 0; i < work.size; ++i)
+            if (retained == 0 || work.hits[i].projection != work.hits[retained - 1].projection)
+                work.hits[retained++] = work.hits[i];
+        work.size = retained;
+    }
+    catch (...)
+    {
+        scratch.clear();
+        throw;
+    }
 }
 std::vector<OrdinaryPoint> EdgePointIndex<ArithmeticMode::Ordinary>::closed_segment(
     const OrdinaryPoint& first, const OrdinaryPoint& second) const

@@ -24,15 +24,18 @@ struct AuthorityDiagnostics
     const char* stage = "support_requests";
     std::size_t cells = 0, faces = 0, face_bytes = 0, requests = 0;
     std::size_t edge_subscriptions = 0, endpoint_events = 0, unique_endpoints = 0, endpoint_bytes = 0, edge_work = 0;
+    std::size_t edge_query_calls = 0, edge_query_scanned = 0, edge_query_growths = 0, edge_query_peak_bytes = 0;
     ~AuthorityDiagnostics()
     {
         if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
             std::fprintf(stderr,
                 "ADAPTIVE_AUTHORITY rank=%d stage=%s cells=%zu face_occurrences=%zu "
                 "geometry_record_bytes=%zu requests=%zu edge_subscriptions=%zu "
-                "endpoint_events=%zu unique_line_endpoints=%zu unique_endpoint_bytes=%zu edge_work=%zu\n",
+                "endpoint_events=%zu unique_line_endpoints=%zu unique_endpoint_bytes=%zu edge_work=%zu "
+                "edge_query_calls=%zu edge_query_scanned=%zu edge_query_growths=%zu edge_query_peak_bytes=%zu\n",
                 rank, stage, cells, faces, face_bytes, requests, edge_subscriptions, endpoint_events, unique_endpoints,
-                endpoint_bytes, edge_work);
+                endpoint_bytes, edge_work, edge_query_calls, edge_query_scanned, edge_query_growths,
+                edge_query_peak_bytes);
     }
 };
 std::pair<std::uint64_t, std::uint64_t> entity_range(std::uint64_t local, const Teuchos::Comm<int>& comm)
@@ -59,6 +62,24 @@ struct Occurrence
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> whole_geometry;
     std::string boundary;
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
+};
+struct BudgetLease
+{
+    Budget* allocation;
+    std::size_t bytes = 0;
+    void add(std::size_t capacity)
+    {
+        if (allocation)
+        {
+            allocation->add(capacity);
+            bytes += capacity;
+        }
+    }
+    ~BudgetLease()
+    {
+        if (allocation)
+            allocation->used -= bytes;
+    }
 };
 AdaptiveBytes encode_tile(const AdaptiveTile& tile, std::size_t byte_budget)
 {
@@ -649,16 +670,26 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     for (const auto* point : line.point_order)
                         indexed_points.push_back(*point);
                     PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(indexed_points);
+                    // The lease outlives the workspace and keeps its capacity
+                    // charged across every query, including clear().
+                    BudgetLease query_storage{&allocation};
+                    PLIC::OrdinaryEdgeQueryScratch points;
+                    const auto query_peak = points.reserve_required_peak(line.points.size());
+                    query_storage.add(query_peak);
+                    points.reserve(line.points.size(), query_peak);
+                    diagnostics.edge_query_growths += points.growths();
+                    diagnostics.edge_query_peak_bytes =
+                        std::max(diagnostics.edge_query_peak_bytes, points.storage_bytes());
                     for (const auto& subscriber : line.subscribers)
                     {
                         diagnostics.edge_work += line.points.size();
-                        auto points = index.closed_segment(*subscriber.first, *subscriber.last);
+                        ++diagnostics.edge_query_calls;
+                        const auto scanned_before = points.scanned_points();
+                        index.closed_segment(*subscriber.first, *subscriber.last, points);
+                        diagnostics.edge_query_scanned += points.scanned_points() - scanned_before;
                         std::size_t size = 24 + geometry_record_header_bytes + key.size();
-                        for (const auto& point : points)
-                        {
-                            allocation.add(point.payload_bytes() + sizeof(PointIdentity));
-                            size += 8 + PLIC::encoded_identity_size(point);
-                        }
+                        for (std::size_t p = 0; p < points.size(); ++p)
+                            size += 8 + PLIC::encoded_identity_size(points.point(p));
                         allocation.packet(size);
                         Writer w;
                         w.data.reserve(size);
@@ -666,11 +697,14 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         w.bytes(key);
                         w.word(subscriber.ordinal);
                         w.word(points.size());
-                        for (const auto& point : points)
-                            w.bytes(PLIC::encode_identity(point));
+                        for (std::size_t p = 0; p < points.size(); ++p)
+                            w.bytes(PLIC::encode_identity(points.point(p)));
                         allocation.append_capacity(replies);
                         replies.push_back({subscriber.rank, std::move(w.data)});
+                        // Replies own their bytes before the borrowed hits reset.
+                        points.clear();
                     }
+                    points.release();
                 }
             });
         std::vector<OwnerPacket>().swap(incoming.packets);
