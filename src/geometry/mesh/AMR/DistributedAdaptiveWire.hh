@@ -87,6 +87,36 @@ struct Reader
             throw std::invalid_argument("Trailing distributed adaptive bytes.");
     }
 };
+/** Wire records have independent versions; canonical keys never use this stamp. */
+enum class GeometryRecordKind : std::uint64_t
+{
+    Tile = 1,
+    SurfaceRequest,
+    EdgeRequest,
+    EdgeReply,
+    NodeRequest,
+    NodeReply,
+    ClosureContact,
+    ClosureRequests,
+    ClosureReply,
+    GhostRequest,
+    GhostReply,
+    GhostNode
+};
+inline constexpr std::size_t geometry_record_header_bytes = 24;
+inline constexpr std::uint64_t geometry_record_magic = 0x5346414452454332ULL;
+inline void write_geometry_record_header(Writer& writer, GeometryRecordKind kind)
+{
+    writer.word(geometry_record_magic);
+    writer.word(1);
+    writer.word(static_cast<std::uint64_t>(kind));
+}
+inline void read_geometry_record_header(Reader& reader, GeometryRecordKind kind)
+{
+    if (reader.word() != geometry_record_magic || reader.word() != 1 ||
+        reader.word() != static_cast<std::uint64_t>(kind))
+        throw std::invalid_argument("Unsupported adaptive geometry record version or kind.");
+}
 template<class F> void collective(const Teuchos::Comm<int>& comm, F&& action)
 {
     std::exception_ptr error;

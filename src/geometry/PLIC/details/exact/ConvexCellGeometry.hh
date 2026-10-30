@@ -1,5 +1,6 @@
 #pragma once
 #include "geometry/PLIC/ConvexCellTypes.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 namespace SimpleFluid::PLIC
 {
 template<> struct Section<ArithmeticMode::Exact>
@@ -58,11 +59,12 @@ public:
     [[nodiscard]] CertifiedGeometryValue<ArithmeticMode::Exact> volume() const;
     [[nodiscard]] GeometryMoments<ArithmeticMode::Exact> moments() const;
     [[nodiscard]] GeometryPoint centroid() const;
-    [[nodiscard]] std::vector<char> encode_certificate() const;
+    [[nodiscard]] std::vector<char> encode_certificate(std::size_t byte_budget = geometry_packet_default_budget) const;
     /** Capacity-based allocation estimate including exact arrays/limbs; excludes
      * allocator headers and shared control blocks, and does not measure RSS. */
     [[nodiscard]] std::size_t storage_bytes() const;
-    [[nodiscard]] static ConvexGeometryPtr<ArithmeticMode::Exact> decode_certificate(std::span<const char> packet);
+    [[nodiscard]] static ConvexGeometryPtr<ArithmeticMode::Exact> decode_certificate(
+        std::span<const char> packet, std::size_t byte_budget = geometry_packet_default_budget);
     /** Binary64 value/interval output, also exercising platforms whose native
      * long double has binary64 range. First-moment overflow rejects even when
      * volume itself is representable; first-moment underflow uses an enclosure.
@@ -86,6 +88,7 @@ public:
     [[nodiscard]] bool equivalent(const ConvexCellGeometry& other) const;
 
 private:
+    friend std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Exact>&);
     friend class ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>;
     friend class ExtrudedConstruction<ArithmeticMode::Exact>;
     friend class PolyhedralComplex<ArithmeticMode::Exact>;

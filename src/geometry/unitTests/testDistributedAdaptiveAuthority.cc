@@ -207,4 +207,55 @@ TEST(DistributedAdaptiveAuthority, IncidenceWireRetainsInsertedCollinearNode)
     EXPECT_EQ(restored->encode(), face->encode());
 }
 
+TEST(DistributedAdaptiveAuthority, TileCodecRejectsLegacyWrongKindAndRankLocalCorruption)
+{
+    namespace A = ::SimpleFluid::Meshes::AMR;
+    const auto comm = Tpetra::getDefaultComm();
+    A::AdaptiveTile tile;
+    tile.face_gid = 7;
+    tile.domain = {'d'};
+    tile.surface = {'s'};
+    tile.identity = {'i'};
+    tile.geometry = rectangle(0, 0, 1, 1);
+    tile.first = {0, A::ConvexCellAncestry{0, {}}};
+    tile.first_owner = 0;
+    tile.exterior = true;
+    tile.node_gids = {0, 1, 2, 3};
+    const auto bytes = A::encode_adaptive_tile(tile);
+    EXPECT_EQ(A::decode_adaptive_tile(bytes).node_gids, tile.node_gids);
+    EXPECT_EQ(A::encode_adaptive_tile(A::decode_adaptive_tile(bytes)), bytes);
+    EXPECT_THROW(A::decode_adaptive_tile(bytes, bytes.size() - 1), std::invalid_argument);
+    auto old = bytes;
+    // The leading GID stays first for authority ordinal patching. Old packets
+    // had no stamp following it, even when all optional records were absent.
+    old.erase(old.begin() + 8, old.begin() + 8 + A::adaptive_detail::geometry_record_header_bytes);
+    EXPECT_THROW(A::decode_adaptive_tile(old), std::invalid_argument);
+    auto wrong = bytes;
+    wrong[24] = static_cast<char>(A::adaptive_detail::GeometryRecordKind::SurfaceRequest);
+    EXPECT_THROW(A::decode_adaptive_tile(wrong), std::invalid_argument);
+    auto truncated = bytes;
+    truncated.pop_back();
+    EXPECT_THROW(A::decode_adaptive_tile(truncated), std::invalid_argument);
+    auto trailing = bytes;
+    trailing.push_back(0);
+    EXPECT_THROW(A::decode_adaptive_tile(trailing), std::invalid_argument);
+    std::optional<A::AdaptiveTile> published;
+    const auto prepare = [&]
+    {
+        std::optional<A::AdaptiveTile> candidate;
+        A::adaptive_detail::collective(*comm,
+            [&]
+            {
+                auto incoming = bytes;
+                if (comm->getRank() == 0)
+                    incoming[16] = 2; // Unsupported outer record version on one rank.
+                candidate.emplace(A::decode_adaptive_tile(incoming));
+            });
+        published = std::move(candidate);
+    };
+    EXPECT_THROW(prepare(), std::invalid_argument);
+    EXPECT_FALSE(published);
+    EXPECT_EQ(A::encode_adaptive_tile(tile), bytes);
+}
+
 } // namespace

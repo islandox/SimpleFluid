@@ -65,10 +65,13 @@ template<ArithmeticMode Mode> void check_roundtrips()
     EXPECT_EQ(decode_identity<PointIdentity<Mode>>(encode_identity(point)), point);
     EXPECT_EQ(decode_identity<LineIdentity<Mode>>(encode_identity(line)), line);
     EXPECT_EQ(decode_identity<PlaneSupportIdentity<Mode>>(encode_identity(support)), support);
-    EXPECT_EQ(canonical_key(point), encode_identity(point));
+    EXPECT_NE(canonical_key(point), encode_identity(point));
+    const auto wire = encode_identity(point);
+    const auto body = decode_geometry_packet(wire, Mode).body;
+    EXPECT_EQ(canonical_key(point), std::vector<char>(body.begin(), body.end()));
     EXPECT_EQ(canonical_key_size(point), canonical_key(point).size());
     EXPECT_EQ(encoded_identity_size(point), encode_identity(point).size());
-    EXPECT_EQ(canonical_face_key(*face), face->encode());
+    EXPECT_NE(canonical_face_key(*face), face->encode());
     EXPECT_THROW((decode_identity<PointIdentity<Mode>>(encode_identity(line))), std::invalid_argument);
     EXPECT_THROW((decode_identity<LineIdentity<Mode>>(encode_identity(support))), std::invalid_argument);
     EXPECT_THROW((decode_identity<PlaneSupportIdentity<Mode>>(encode_identity(point))), std::invalid_argument);
@@ -81,18 +84,20 @@ TEST(GeometryIdentityTest, RoundtripsPreserveProviderKeys)
     check_roundtrips<ordinary>();
     check_roundtrips<exact>();
 }
-TEST(GeometryIdentityTest, ZeroDisplacementRetainsEmptyLegacyEncoding)
+TEST(GeometryIdentityTest, ZeroDisplacementHasAnEmptyBodyInsideItsEnvelope)
 {
     const DisplacementIdentity<ordinary> finite;
     const DisplacementIdentity<exact> rational;
     EXPECT_TRUE(finite.is_zero());
     EXPECT_TRUE(rational.is_zero());
-    EXPECT_TRUE(encode_identity(finite).empty());
-    EXPECT_TRUE(encode_identity(rational).empty());
+    EXPECT_EQ(encode_identity(finite).size(), geometry_packet_header_bytes);
+    EXPECT_EQ(encode_identity(rational).size(), geometry_packet_header_bytes);
     EXPECT_EQ(displacement<ordinary>({}, {}), finite);
     EXPECT_EQ(displacement<exact>({}, {}), rational);
-    EXPECT_EQ(decode_identity<DisplacementIdentity<ordinary>>({}), finite);
-    EXPECT_EQ(decode_identity<DisplacementIdentity<exact>>({}), rational);
+    EXPECT_EQ(decode_identity<DisplacementIdentity<ordinary>>(encode_identity(finite)), finite);
+    EXPECT_THROW((decode_identity<DisplacementIdentity<ordinary>>({})), std::invalid_argument);
+    EXPECT_EQ(decode_identity<DisplacementIdentity<exact>>(encode_identity(rational)), rational);
+    EXPECT_THROW((decode_identity<DisplacementIdentity<exact>>({})), std::invalid_argument);
 }
 TEST(GeometryIdentityTest, PromotionIsExplicitAndPreservesRepresentedCoordinates)
 {
@@ -134,8 +139,10 @@ TEST(GeometryIdentityTest, OrdinaryRetainsCheckedExactSupportAncestry)
 {
     const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
     const auto support = planar_support<exact>(*PlanarFace<exact>::make(points));
-    const auto retained = decode_identity<PlaneSupportIdentity<ordinary>>(encode_identity(support));
-    EXPECT_EQ(encode_identity(retained), encode_identity(support));
+    const auto retained = details::GeometryIdentityAccess::make<PlaneSupportIdentity<ordinary>>(canonical_key(support));
+    EXPECT_EQ(decode_identity<PlaneSupportIdentity<ordinary>>(encode_identity(retained)), retained);
+    EXPECT_EQ(canonical_key(retained), canonical_key(support));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(encode_identity(support))), std::invalid_argument);
     EXPECT_THROW((decode_identity<LineIdentity<ordinary>>(encode_identity(support))), std::invalid_argument);
 }
 
@@ -219,7 +226,7 @@ template<class Identity> void check_shared_owner_contract(const Identity& origin
     EXPECT_NE(independent.storage_identity(), original.storage_identity());
     EXPECT_EQ(independent, original);
     EXPECT_EQ(independent <=> original, std::strong_ordering::equal);
-    EXPECT_GE(original.payload_bytes(), encoded_identity_size(original));
+    EXPECT_GE(original.payload_bytes(), canonical_key_size(original));
 }
 TEST(GeometryIdentityTest, CopiesShareOwnersWhileEqualIndependentImportsRemainDistinct)
 {

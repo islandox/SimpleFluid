@@ -7,6 +7,7 @@
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/GeometryBackendTypes.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 namespace SimpleFluid::PLIC
 {
 template<ArithmeticMode Mode>

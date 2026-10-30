@@ -96,13 +96,14 @@ public:
      * budget. The metric allowance never admits a gap in the boundary chain.
      * Work is capped at 65536 tiles, 262144 pair tests, and 64 MiB. */
     void certify_partition(std::span<const PlanarFacePtr<ArithmeticMode::Ordinary>>) const;
-    [[nodiscard]] std::vector<char> encode() const;
-    [[nodiscard]] std::vector<char> encode_incidence() const;
+    [[nodiscard]] std::vector<char> encode(std::size_t byte_budget = geometry_packet_default_budget) const;
+    [[nodiscard]] std::vector<char> encode_incidence(std::size_t byte_budget = geometry_packet_default_budget) const;
     /** Own face buffers only; shared identity owners are visited separately. */
     [[nodiscard]] std::size_t exclusive_storage_bytes() const;
     /** Full standalone footprint, including retained identity ancestry. */
     [[nodiscard]] std::size_t storage_bytes() const;
-    [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Ordinary> decode(std::span<const char>);
+    [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Ordinary> decode(
+        std::span<const char>, std::size_t byte_budget = geometry_packet_default_budget);
     [[nodiscard]] const std::vector<WidePoint>& points() const;
 
 private:

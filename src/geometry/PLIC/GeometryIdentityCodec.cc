@@ -15,12 +15,23 @@ constexpr std::uint64_t exact_support_tag = 0x53464a504c414e36ULL;
 constexpr std::uint64_t exact_displacement_tag = 0x5346444953503631ULL;
 void exact_packet(std::span<const char> packet, std::uint64_t tag, unsigned count)
 {
-    ex::WireReader reader{packet};
+    ex::WireReader reader{packet, 0, true};
     if (reader.word() != tag)
         throw std::invalid_argument("Foreign geometry identity kind or arithmetic mode.");
+    std::array<ex::Q, 6> values;
     for (unsigned i = 0; i < count; ++i)
-        (void) reader.rational();
+        values[i] = reader.rational();
     reader.finish();
+    if (tag == exact_line_tag || tag == exact_support_tag)
+    {
+        unsigned first = 0;
+        while (first < 3 && values[first] == 0)
+            ++first;
+        if (first == 3 || values[first] != 1)
+            throw std::invalid_argument("Exact line/support direction is not in provider normal form.");
+        if (tag == exact_line_tag && values[0] * values[3] + values[1] * values[4] + values[2] * values[5] != 0)
+            throw std::invalid_argument("Exact line moment is not orthogonal to its direction.");
+    }
 }
 /** Ordinary supports retain construction expressions. Exact support bytes can
  * occur as authenticated ancestry after the numerical-shell source bridge;
@@ -29,7 +40,7 @@ void ordinary_support(std::span<const char> packet)
 {
     for (;;)
     {
-        on::Reader reader{packet};
+        on::Reader reader{packet, 0, true};
         switch (reader.word())
         {
             case 0x53464e4158495331ULL:
@@ -41,18 +52,29 @@ void ordinary_support(std::span<const char> packet)
                 const auto count = reader.count(4096);
                 if (count < 3)
                     on::reject("invalid source support count.");
-                for (std::size_t i = 0; i < count; ++i)
-                    (void) reader.point();
+                auto previous = reader.point();
+                for (std::size_t i = 1; i < count; ++i)
+                {
+                    const auto point = reader.point();
+                    if (point < previous)
+                        on::reject("source support points are not sorted.");
+                    previous = point;
+                }
                 break;
             }
-            case 0x53464e494e505431ULL:
-                (void) reader.point();
+            case 0x53464e494e505431ULL: {
+                const auto normal = reader.point();
+                const auto first = std::find_if(normal.begin(), normal.end(), [](auto value) { return value != 0; });
+                if (first == normal.end() || *first < 0)
+                    on::reject("input support normal is zero or has a noncanonical sign.");
                 (void) reader.point();
                 (void) reader.real();
                 break;
+            }
             case 0x53464e5452414e31ULL: {
                 const auto ancestry = reader.packet();
-                (void) reader.point();
+                if (reader.point() == on::WidePoint{})
+                    on::reject("zero support translation must retain its parent key.");
                 reader.finish();
                 packet = ancestry;
                 continue;
@@ -69,7 +91,7 @@ void ordinary_support(std::span<const char> packet)
                     on::reject("empty support construction DAG.");
                 for (std::size_t i = 0; i < count; ++i)
                 {
-                    on::Reader record{reader.packet()};
+                    on::Reader record{reader.packet(), 0, true};
                     const auto kind = record.word();
                     if (kind == 0)
                         (void) record.point();
@@ -78,16 +100,26 @@ void ordinary_support(std::span<const char> packet)
                         const auto parents = record.count(record.bytes.size());
                         if (!parents)
                             on::reject("empty support construction parents.");
+                        std::uint64_t previous = 0;
                         for (std::size_t j = 0; j < parents; ++j)
-                            if (record.word() >= i)
+                        {
+                            const auto parent = record.word();
+                            if (parent >= i)
                                 on::reject("invalid support construction ancestry.");
+                            if (j && parent < previous)
+                                on::reject("support construction parents are not sorted.");
+                            previous = parent;
+                        }
                     }
                     else
                         on::reject("invalid support construction kind.");
                     record.finish();
                 }
-                if (reader.word() >= count || reader.word() >= count)
+                const auto first = reader.word(), second = reader.word();
+                if (first >= count || second >= count)
                     on::reject("invalid support construction endpoints.");
+                if (first > second)
+                    on::reject("support construction endpoints are not sorted.");
                 break;
             }
             case exact_support_tag:
@@ -121,6 +153,8 @@ std::vector<char> details::checked_identity_key(
                 break;
             case GeometryIdentityKind::Displacement:
                 exact_packet(packet, exact_displacement_tag, 3);
+                if (ex::zero(ex::displacement_point(packet)))
+                    throw std::invalid_argument("Zero displacement requires an empty canonical body.");
                 break;
         }
     }
@@ -128,20 +162,36 @@ std::vector<char> details::checked_identity_key(
     {
         switch (kind)
         {
-            case GeometryIdentityKind::Point:
-                (void) on::read_point(packet);
+            case GeometryIdentityKind::Point: {
+                on::Reader reader{packet, 0, true};
+                if (reader.word() != on::point_tag)
+                    on::reject("foreign point identity kind.");
+                (void) reader.point();
+                reader.finish();
                 break;
-            case GeometryIdentityKind::Displacement:
-                (void) on::read_displacement(packet);
+            }
+            case GeometryIdentityKind::Displacement: {
+                on::Reader reader{packet, 0, true};
+                if (reader.word() != on::displacement_tag)
+                    on::reject("foreign displacement identity kind.");
+                if (reader.point() == on::WidePoint{})
+                    on::reject("zero displacement requires an empty canonical body.");
+                reader.finish();
                 break;
+            }
             case GeometryIdentityKind::PlaneSupport:
                 ordinary_support(packet);
                 break;
             case GeometryIdentityKind::Line: {
-                on::Reader reader{packet};
-                if (reader.word() != 0x534646504c494e31ULL || reader.word() > 2)
+                on::Reader reader{packet, 0, true};
+                if (reader.word() != 0x534646504c494e31ULL)
                     on::reject("foreign line identity kind or arithmetic mode.");
-                (void) reader.point();
+                const auto axis = reader.word();
+                if (axis > 2)
+                    on::reject("invalid finite line axis.");
+                const auto direction = reader.point();
+                if (!(direction[axis] > 0))
+                    on::reject("finite line selected component must be positive.");
                 (void) reader.point();
                 reader.finish();
                 break;

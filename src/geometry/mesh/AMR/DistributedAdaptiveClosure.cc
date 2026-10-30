@@ -89,9 +89,10 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
     // including generated geometry. Never release these charges as leaf scratch.
     retained_geometry = budget.used - before_geometry;
     Writer w;
+    write_geometry_record_header(w, GeometryRecordKind::ClosureContact);
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
-    w.bytes(shape->encode_certificate());
+    w.bytes(shape->encode_certificate(budget.limit));
     for (std::size_t a = 0; a < 3; ++a)
         w.word(leaf.provider == AdaptiveProviderKind::Static ? 3 : std::uint64_t(kernel.closure_split(leaf, a)));
     w.word(trace.faces.size());
@@ -111,22 +112,25 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
             const auto before_support = budget.used;
             identities.retain(budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*face.face));
             retained_geometry += budget.used - before_support;
-            budget.add(face.face->encode_incidence().size());
-            w.bytes(face.face->encode_incidence());
+            budget.add(face.face->encode_incidence(budget.limit).size());
+            w.bytes(face.face->encode_incidence(budget.limit));
         }
     }
     budget.add(w.data.capacity());
     return std::move(w.data);
 }
-ContactRecord decode_contact(std::span<const char> bytes)
+ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
 {
+    if (bytes.size() > limit)
+        throw std::invalid_argument("Closure contact exceeds byte budget.");
     Reader r{bytes};
+    read_geometry_record_header(r, GeometryRecordKind::ClosureContact);
     ContactRecord contact;
     contact.key = decode_adaptive_key(r.bytes());
     contact.domain = r.bytes();
     if (contact.domain.empty())
         throw std::invalid_argument("Closure contact requires connected-domain provenance.");
-    contact.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(r.bytes());
+    contact.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(r.bytes(), limit);
     for (auto& factor : contact.factors)
     {
         factor = r.word();
@@ -147,7 +151,7 @@ ContactRecord decode_contact(std::span<const char> bytes)
         face.split = AdaptiveSplit(split);
         face.terminal = terminal;
         if (geometry)
-            face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
+            face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
         contact.traces.push_back(std::move(face));
     }
     r.done();
@@ -329,17 +333,17 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     // irrespective of the number of its closed contact points.
                     for (const auto& [peer, contacts] : destinations)
                     {
-                        std::size_t bytes = 24 + record.size();
+                        std::size_t bytes = 16 + geometry_record_header_bytes + record.size();
                         for (const auto& contact : contacts)
-                            bytes += 32 + contact.key.size() + contact.normalized.payload_bytes() +
-                                     contact.physical->payload_bytes();
+                            bytes += 32 + contact.key.size() + PLIC::encoded_identity_size(contact.normalized) +
+                                     PLIC::encoded_identity_size(*contact.physical);
                         budget.packet(bytes);
                         retained_delta += sizeof(OwnerPacket) + bytes;
                         ++diagnostics.transmitted_geometry_records;
                         diagnostics.replicated_record_bytes += record.size();
                         Writer w;
                         w.data.reserve(bytes);
-                        w.word(1); // Interned-contact packet version.
+                        write_geometry_record_header(w, GeometryRecordKind::ClosureRequests);
                         w.bytes(record);
                         w.word(contacts.size());
                         for (const auto& contact : contacts)
@@ -399,9 +403,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 const auto encoded_capacity = packet.bytes.capacity();
                 budget.add(sizeof(ContactRecord));
                 Reader r{packet.bytes};
-                if (r.word() != 1)
-                    throw std::invalid_argument("Invalid interned closure packet version.");
-                auto record = std::make_shared<const ContactRecord>(decode_contact(r.bytes()));
+                read_geometry_record_header(r, GeometryRecordKind::ClosureRequests);
+                auto record = std::make_shared<const ContactRecord>(decode_contact(r.bytes(), options.byte_budget));
                 ++diagnostics.decoded_geometry_records;
                 if (!records.emplace(record->key, packet.peer).second)
                     throw std::invalid_argument("Duplicate closed-contact geometry owner.");
@@ -424,8 +427,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 {
                     auto ordinal = r.word();
                     auto key = r.bytes();
-                    auto point = PLIC::decode_identity<PointIdentity>(r.bytes());
-                    auto physical_point = PLIC::decode_identity<PointIdentity>(r.bytes());
+                    auto point = PLIC::decode_identity<PointIdentity>(r.bytes(), options.byte_budget);
+                    auto physical_point = PLIC::decode_identity<PointIdentity>(r.bytes(), options.byte_budget);
                     const auto point_metadata = key.capacity() + point.payload_bytes();
                     // Preserve the original conservative per-incidence object
                     // charge in addition to admitted vector capacities.
@@ -510,10 +513,12 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 for (const auto& cell : group.cells)
                 {
                     const auto encoded_key = encode_adaptive_key(cell.record->key);
-                    const auto size = 32 + key.size() + encoded_key.size() + (cell.required ? 8 : 0);
+                    const auto size =
+                        32 + geometry_record_header_bytes + key.size() + encoded_key.size() + (cell.required ? 8 : 0);
                     budget.packet(size);
                     Writer w;
                     w.data.reserve(size);
+                    write_geometry_record_header(w, GeometryRecordKind::ClosureReply);
                     w.word(cell.ordinal);
                     w.bytes(key);
                     w.bytes(encoded_key);
@@ -547,6 +552,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             for (const auto& packet : returned.packets)
             {
                 Reader r{packet.bytes};
+                read_geometry_record_header(r, GeometryRecordKind::ClosureReply);
                 auto ordinal = r.word();
                 auto point = r.bytes();
                 auto cell = decode_adaptive_key(r.bytes());

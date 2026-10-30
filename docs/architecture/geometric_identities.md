@@ -31,9 +31,40 @@ start. Incidence certificates retain inserted vertices and loop order. Consumers
 must choose the representation required by their contract.
 
 The typed API intentionally replaces raw-byte computational overloads. Geometry,
-FVM, solver, and downstream consumers must be rebuilt together. The initial
-typed migration retains the existing packet encoding; subsequent storage and
-codec changes must preserve the independent canonical key contract.
+FVM, solver, and downstream consumers must be rebuilt together.
+
+Identity and geometry packets use a checked 48-byte envelope: six little-endian
+64-bit words containing magic, version, kind, arithmetic mode, finite numeric
+profile, and body length. Exact packets use profile zero; Ordinary packets bind
+the radix, significand precision, and exponent range. Decoders reject foreign
+kinds/modes/profiles, unsupported versions, noncanonical scalar or rational
+representations, truncated/trailing data, and exceeded byte budgets. Zero
+displacement has a complete envelope with an empty body; empty wire data is not
+a displacement packet.
+Canonical support/line checks retain the providers' normalization and ordering
+rules, including Exact direction normalization, nonzero translated supports,
+and ordered source/DAG records. Ordinary line validation preserves finite
+normalization rounding; it does not recompute a chosen axis or demand an exact
+unit component.
+
+Canonical-face and incidence packets have different kinds. Cell certificates
+and convex fragments also have different kinds. Nested canonical support tokens
+inherit their enclosing packet version. Their stable key representation does
+not provide a legacy geometry-packet import path.
+
+Affected AMR and FVM records have their own version stamps, including records
+whose optional geometry is absent. Ancestry keys retain their original schema.
+Mixed join capsules carry a new geometry certificate and regenerate the frozen
+canonical key from it. Authority tile packets retain the leading numeric GID
+word for collective ordinal patching, followed by their checked record stamp.
+Unaffected extrusion recipes, native procedural fragments, and measure formats
+retain their existing schemas.
+
+This is a clean format break: regenerate saved artifacts using affected packet
+formats and rebuild every communicating process. There are no legacy packet
+import paths or automatic migrations. Configuration signatures containing transport
+certificates change; canonical routing keys and entity IDs remain stable for
+the same ABI, partition, and rank count.
 
 `PlaneAuthority`, `DynamicPointProvenance`, and `GeometryAllocationLedger` remain
 separate mechanisms. Identity equality does not establish shared allocation

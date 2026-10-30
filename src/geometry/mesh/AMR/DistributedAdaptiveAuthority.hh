@@ -13,8 +13,8 @@ struct AdaptiveAuthorityStats
     std::uint64_t global_faces = 0, global_nodes = 0;
 };
 /** Lossless owner/ghost tile packet retaining exact image and both physical node loops. */
-[[nodiscard]] AdaptiveBytes encode_adaptive_tile(const AdaptiveTile&);
-[[nodiscard]] AdaptiveTile decode_adaptive_tile(std::span<const char>);
+[[nodiscard]] AdaptiveBytes encode_adaptive_tile(const AdaptiveTile&, std::size_t byte_budget = 64 * 1024 * 1024);
+[[nodiscard]] AdaptiveTile decode_adaptive_tile(std::span<const char>, std::size_t byte_budget = 64 * 1024 * 1024);
 /** All owned leaf support occurrences participate. Authorities require complete
  * opposite interior coverage, never infer exterior from missing remote input.
  * Returned tiles touch a local owned cell and retain exact propagated vertices.

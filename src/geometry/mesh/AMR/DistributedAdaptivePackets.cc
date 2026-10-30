@@ -45,7 +45,7 @@ Part native_view(const std::shared_ptr<const NativeFragmentDescriptor>& recipe)
     // and no per-record copy of a potentially large run view is allocated.
     return recipe ? Part(recipe, &recipe->view) : nullptr;
 }
-constexpr std::uint64_t magic = 0x5346414442410004ULL;
+constexpr std::uint64_t magic = 0x5346414442410005ULL;
 struct PartLess
 {
     bool operator()(const Part& a, const Part& b) const { return *a < *b; }
@@ -116,15 +116,15 @@ void write_leaf(Writer& w, const AdaptiveLeaf& leaf, const Dictionary& dict)
     w.word(leaf.material);
     w.word(leaf.revision);
     w.word(std::uint64_t(leaf.provider));
-    w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
+    w.bytes(leaf.geometry ? leaf.geometry->encode_certificate(w.limit) : AdaptiveBytes{});
     w.word(leaf.surfaces.size());
     for (const auto& s : leaf.surfaces)
     {
         w.bytes(s.key);
-        w.bytes(s.geometry->encode_incidence());
+        w.bytes(s.geometry->encode_incidence(w.limit));
         w.bytes(PLIC::encode_identity(s.authority_image));
         w.word(s.require_native_whole_tile);
-        w.bytes(s.native_whole_geometry ? s.native_whole_geometry->encode_incidence() : AdaptiveBytes{});
+        w.bytes(s.native_whole_geometry ? s.native_whole_geometry->encode_incidence(w.limit) : AdaptiveBytes{});
         w.word(s.native_face);
         w.word(s.orientation == 1);
         w.word(s.exterior);
@@ -151,6 +151,8 @@ void write_leaf(Writer& w, const AdaptiveLeaf& leaf, const Dictionary& dict)
 }
 struct Decoder
 {
+    std::size_t byte_budget;
+    explicit Decoder(std::size_t limit) : byte_budget(limit) {}
     std::vector<Part> parts;
     std::map<AdaptiveBytes, std::shared_ptr<const NativeFragmentDescriptor>> recipes;
     std::map<std::array<std::uint64_t, 3>, std::shared_ptr<const AdaptiveFactorRecipe>> factors;
@@ -173,7 +175,8 @@ struct Decoder
         leaf.provider = AdaptiveProviderKind(provider);
         auto geometry = r.bytes();
         if (!geometry.empty())
-            leaf.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry);
+            leaf.geometry =
+                PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry, byte_budget);
         const auto count = r.word();
         if (count != (leaf.geometry ? leaf.geometry->num_faces() : 0) || count > (r.data.size() - r.offset) / 32)
             throw std::invalid_argument("Invalid adaptive batch surface count.");
@@ -182,15 +185,17 @@ struct Decoder
         {
             AdaptiveSurface s;
             s.key = r.bytes();
-            s.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
-            s.authority_image = PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes());
+            s.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), byte_budget);
+            s.authority_image =
+                PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes(), byte_budget);
             const auto native_whole = r.word();
             if (native_whole > 1)
                 throw std::invalid_argument("Invalid native whole-face declaration.");
             s.require_native_whole_tile = native_whole;
             auto whole_geometry = r.bytes();
             if (!whole_geometry.empty())
-                s.native_whole_geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole_geometry);
+                s.native_whole_geometry =
+                    PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole_geometry, byte_budget);
             if (s.require_native_whole_tile && !s.native_whole_geometry)
                 throw std::invalid_argument("Missing native whole-face certificate.");
             s.native_face = r.word();
@@ -309,7 +314,7 @@ AdaptiveBatch decode_adaptive_batch(std::span<const char> bytes, std::size_t bud
     Reader r{bytes};
     if (r.word() != magic)
         throw std::invalid_argument("Unsupported adaptive batch packet version.");
-    Decoder decoder;
+    Decoder decoder(budget);
     AdaptiveBatch batch;
     auto count = r.word();
     constexpr auto part_metadata = sizeof(Part) + sizeof(AdaptiveBytes) + 6 * sizeof(void*);

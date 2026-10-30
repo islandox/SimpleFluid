@@ -1,4 +1,5 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
 
@@ -593,9 +594,10 @@ template<> std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const Pla
     return std::move(w.data);
 }
 
-std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode() const
+std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
 {
-    return canonical_face_key(*this);
+    return encode_geometry_packet(
+        GeometryPacketKind::PlanarFace, ArithmeticMode::Exact, canonical_face_key(*this), byte_budget);
 }
 
 std::size_t PlanarFace<ArithmeticMode::Exact>::exclusive_storage_bytes() const
@@ -613,7 +615,7 @@ std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const
     return exclusive_storage_bytes();
 }
 
-std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode_incidence() const
+std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode_incidence(std::size_t byte_budget) const
 {
     WireWriter w;
     w.word(0x5346464143454331ULL);
@@ -622,12 +624,16 @@ std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode_incidence() const
     for (const auto& p : impl_->polygon)
         for (const auto& q : p)
             w.rational(q);
-    return std::move(w.data);
+    return encode_geometry_packet(GeometryPacketKind::PlanarFaceIncidence, ArithmeticMode::Exact, w.data, byte_budget);
 }
 
-PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::decode(std::span<const char> packet)
+PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::decode(
+    std::span<const char> packet, std::size_t byte_budget)
 {
-    WireReader r{packet};
+    const auto envelope = decode_geometry_packet(packet, ArithmeticMode::Exact, byte_budget);
+    if (envelope.kind != GeometryPacketKind::PlanarFace && envelope.kind != GeometryPacketKind::PlanarFaceIncidence)
+        throw std::invalid_argument("Foreign planar face packet kind.");
+    WireReader r{envelope.body, 0, true};
     if (r.word() != 0x5346464143454331ULL || r.word() != 1)
         throw std::invalid_argument("Unknown exact face certificate.");
     auto impl = std::make_shared<Impl>();
@@ -641,7 +647,12 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::decode(s
     }
     r.finish();
     validate_planar_polygon(impl->polygon);
-    return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(impl)));
+    auto result = PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(impl)));
+    const auto canonical = envelope.kind == GeometryPacketKind::PlanarFace ? result->encode(byte_budget)
+                                                                           : result->encode_incidence(byte_budget);
+    if (canonical.size() != packet.size() || !std::equal(canonical.begin(), canonical.end(), packet.begin()))
+        throw std::invalid_argument("Noncanonical planar face packet.");
+    return result;
 }
 
 ConvexGeometryPtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::cell_shell(

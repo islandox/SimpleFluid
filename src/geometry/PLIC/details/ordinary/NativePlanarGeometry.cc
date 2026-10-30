@@ -3,6 +3,7 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
@@ -688,11 +689,12 @@ template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const 
     return std::move(w.bytes);
 }
 
-std::vector<char> OrdinaryFace::encode() const
+std::vector<char> OrdinaryFace::encode(std::size_t byte_budget) const
 {
-    return canonical_face_key(*this);
+    return encode_geometry_packet(
+        GeometryPacketKind::PlanarFace, ArithmeticMode::Ordinary, canonical_face_key(*this), byte_budget);
 }
-std::vector<char> OrdinaryFace::encode_incidence() const
+std::vector<char> OrdinaryFace::encode_incidence(std::size_t byte_budget) const
 {
     on::Writer w;
     w.word(0x5346465046414332ULL);
@@ -701,7 +703,8 @@ std::vector<char> OrdinaryFace::encode_incidence() const
     w.word(impl_->polygon.size());
     for (const auto& p : impl_->polygon)
         w.point(p);
-    return std::move(w.bytes);
+    return encode_geometry_packet(
+        GeometryPacketKind::PlanarFaceIncidence, ArithmeticMode::Ordinary, w.bytes, byte_budget);
 }
 
 std::size_t OrdinaryFace::exclusive_storage_bytes() const
@@ -719,21 +722,32 @@ std::size_t OrdinaryFace::storage_bytes() const
         });
     return bytes;
 }
-OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes)
+OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes, std::size_t byte_budget)
 {
-    on::Reader r{bytes};
+    const auto envelope = decode_geometry_packet(bytes, ArithmeticMode::Ordinary, byte_budget);
+    if (envelope.kind != GeometryPacketKind::PlanarFace && envelope.kind != GeometryPacketKind::PlanarFaceIncidence)
+        throw std::invalid_argument("Foreign planar face packet kind.");
+    on::Reader r{envelope.body, 0, true};
     if (r.word() != 0x5346465046414332ULL)
         on::reject("foreign native planar packet mode.");
     const auto encoded_support = r.packet();
-    auto support = decode_identity<OrdinarySupport>(encoded_support);
+    auto support = IdentityAccess::make<OrdinarySupport>(
+        details::checked_identity_key(GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary, encoded_support));
     const auto normal = r.point();
     const auto n = r.count(vertex_cap);
+    if (n > (r.bytes.size() - r.cursor) / 48)
+        on::reject("planar point count exceeds the remaining encoded coordinates.");
     Polygon p;
     p.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
         p.push_back(r.point());
     r.finish();
-    return from_retained_support(p, normal, std::move(support));
+    auto result = from_retained_support(p, normal, std::move(support));
+    const auto canonical = envelope.kind == GeometryPacketKind::PlanarFace ? result->encode(byte_budget)
+                                                                           : result->encode_incidence(byte_budget);
+    if (canonical.size() != bytes.size() || !std::equal(canonical.begin(), canonical.end(), bytes.begin()))
+        throw std::invalid_argument("Noncanonical planar face packet.");
+    return result;
 }
 template<> OrdinarySupport planar_support<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {

@@ -2,6 +2,7 @@
  * @brief Canonical support union, affine fitting and node-authority exchange.
  */
 #include "solvers/details/GeneralVoF/NodeVelocity.hh"
+#include "FVM/details/GeometryWireProtocol.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
@@ -34,6 +35,24 @@ std::uint64_t read_word(const std::vector<char>& bytes, std::size_t offset)
         value |= std::uint64_t(static_cast<unsigned char>(bytes.at(offset + a))) << (8 * a);
     return value;
 }
+struct HeaderWriter
+{
+    std::vector<char>& bytes;
+    void word(std::uint64_t value) { append_word(bytes, value); }
+};
+struct HeaderReader
+{
+    const std::vector<char>& bytes;
+    std::size_t& offset;
+    std::uint64_t word()
+    {
+        if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t))
+            throw std::runtime_error("Truncated general VoF node record header.");
+        const auto value = read_word(bytes, offset);
+        offset += sizeof(std::uint64_t);
+        return value;
+    }
+};
 } // namespace
 std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_view, const VoF::GeneralVoF& phases,
     std::span<const VoF::Vector> owned_velocity, std::size_t byte_budget)
@@ -99,6 +118,8 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
             {
                 OwnerPacket packet;
                 packet.peer = int(node.gid % comm->getSize());
+                HeaderWriter header{packet.bytes};
+                VoF::geometry_wire::write_header(header, VoF::geometry_wire::Record::NodeUnion);
                 append_word(packet.bytes, node.gid);
                 const auto append_identity = [&](const std::vector<char>& identity)
                 {
@@ -152,7 +173,7 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
                     {
                         const auto n = wall->geometry->area_vector();
                         normal = {n.x, n.y, n.z};
-                        certificate = wall->geometry->encode_incidence();
+                        certificate = wall->geometry->encode_incidence(byte_budget);
                     }
                     for (double x : normal)
                         append_word(packet.bytes, std::bit_cast<std::uint64_t>(x));
@@ -185,6 +206,8 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
             for (const auto& packet : gathered.packets)
             {
                 std::size_t offset = 0;
+                HeaderReader header{packet.bytes, offset};
+                VoF::geometry_wire::read_header(header, VoF::geometry_wire::Record::NodeUnion);
                 const auto read = [&]()
                 {
                     if (packet.bytes.size() - offset < 8)
@@ -208,9 +231,9 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
                 if (!node.participants.insert(packet.peer).second)
                     throw std::runtime_error("Duplicate general VoF node union requester.");
                 auto encoded_identity = bytes(read());
-                NodeIdentity identity = finite
-                                            ? NodeIdentity{std::move(encoded_identity)}
-                                            : NodeIdentity{PLIC::decode_identity<CoordinateIdentity>(encoded_identity)};
+                NodeIdentity identity =
+                    finite ? NodeIdentity{std::move(encoded_identity)}
+                           : NodeIdentity{PLIC::decode_identity<CoordinateIdentity>(encoded_identity, byte_budget)};
                 auto coordinate = bytes(24);
                 if (node.participants.size() == 1)
                 {
@@ -350,6 +373,8 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
                 // once, using the complete authenticated incident wall catalog.
                 // Keep this fitted velocity as the physical model input.
                 std::vector<char> result;
+                HeaderWriter header{result};
+                VoF::geometry_wire::write_header(header, VoF::geometry_wire::Record::NodePublication);
                 append_word(result, gid);
                 for (double component : value)
                 {
@@ -369,14 +394,17 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
             std::map<std::uint64_t, Vector> values;
             for (const auto& packet : selected.packets)
             {
-                if (packet.bytes.size() != 32)
+                if (packet.bytes.size() != 32 + VoF::geometry_wire::header_bytes)
                     throw std::runtime_error("Invalid general VoF node publication.");
-                const auto gid = read_word(packet.bytes, 0);
+                std::size_t offset = 0;
+                HeaderReader header{packet.bytes, offset};
+                VoF::geometry_wire::read_header(header, VoF::geometry_wire::Record::NodePublication);
+                const auto gid = read_word(packet.bytes, offset);
                 Vector velocity{};
                 if (packet.peer != int(gid % comm->getSize()))
                     throw std::runtime_error("General VoF node publication has a wrong authority.");
                 for (unsigned a = 0; a < 3; ++a)
-                    velocity[a] = std::bit_cast<double>(read_word(packet.bytes, 8 + 8 * a));
+                    velocity[a] = std::bit_cast<double>(read_word(packet.bytes, offset + 8 + 8 * a));
                 if (!supports.contains(gid) || !values.emplace(gid, velocity).second)
                     throw std::runtime_error("General VoF node publication has a duplicate/foreign node.");
             }

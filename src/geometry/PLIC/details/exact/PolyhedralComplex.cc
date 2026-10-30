@@ -700,7 +700,7 @@ std::vector<char> PolyhedralComplex<ArithmeticMode::Exact>::encode(std::span<con
     }
     WireWriter w;
     w.word(0x5346504f4c594331ULL);
-    w.word(1);
+    w.word(2);
     w.word(impl_->global_cells);
     w.word(impl_->global_faces);
     w.word(impl_->global_nodes);
@@ -755,8 +755,8 @@ std::vector<char> PolyhedralComplex<ArithmeticMode::Exact>::encode(std::span<con
 std::shared_ptr<const PolyhedralComplex<ArithmeticMode::Exact>> PolyhedralComplex<ArithmeticMode::Exact>::decode(
     std::span<const char> packet)
 {
-    WireReader r{packet};
-    if (r.word() != 0x5346504f4c594331ULL || r.word() != 1)
+    WireReader r{packet, 0, true};
+    if (r.word() != 0x5346504f4c594331ULL || r.word() != 2)
         throw std::invalid_argument("Unknown exact complex packet version/tag.");
     auto impl = std::make_shared<Impl>();
     impl->global_cells = r.word();

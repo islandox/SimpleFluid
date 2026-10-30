@@ -1,3 +1,4 @@
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/swept_volume/details/exact/SweptGeometryInternal.hh"
 
 namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
@@ -559,7 +560,7 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
 std::vector<char> ConvexFragment<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
 {
     SweepBudget budget({4096, 65536, 262144, byte_budget});
-    budget.add(56);
+    budget.add(geometry_packet_header_bytes + 56);
     for (const auto& vertex : impl_->poly.get().vertices)
         for (const auto& q : vertex)
             budget.add(40 + (q.backend().num().capacity() + q.backend().denom().capacity()) *
@@ -584,7 +585,7 @@ std::vector<char> ConvexFragment<ArithmeticMode::Exact>::encode(std::size_t byte
     }
     if (w.data.size() > byte_budget)
         throw std::invalid_argument("Exact fragment packet exceeds byte budget.");
-    return std::move(w.data);
+    return encode_geometry_packet(GeometryPacketKind::ConvexFragment, ArithmeticMode::Exact, w.data, byte_budget);
 }
 
 ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::decode(
@@ -593,7 +594,10 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     if (data.size() > byte_budget)
         throw std::invalid_argument("Exact fragment packet exceeds byte budget.");
     SweepBudget budget({4096, 65536, 262144, byte_budget});
-    WireReader r{data};
+    const auto envelope = decode_geometry_packet(data, ArithmeticMode::Exact, byte_budget);
+    if (envelope.kind != GeometryPacketKind::ConvexFragment)
+        throw std::invalid_argument("Foreign exact fragment packet kind.");
+    WireReader r{envelope.body, 0, true};
     if (r.word() != 0x5346455841435431ULL || r.word() != 1)
         throw std::invalid_argument("Unknown exact fragment tag/version.");
     GeometryPoint anchor{};
@@ -602,6 +606,10 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     const auto origin = point(anchor);
     Poly poly;
     auto count = r.count();
+    // Canonical rationals need two 16-byte integer headers and at least one
+    // byte for each magnitude, hence at least 102 bytes per exact point.
+    if (count > (r.data.size() - r.position) / 102)
+        throw std::invalid_argument("Exact fragment point count exceeds its encoded coordinates.");
     budget.array(count, sizeof(P));
     poly.vertices.reserve(count);
     for (std::size_t i = 0; i < count; ++i)
@@ -616,12 +624,16 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
         poly.vertices.push_back(add(p, origin));
     }
     count = r.count();
+    if (count > (r.data.size() - r.position) / 32)
+        throw std::invalid_argument("Exact fragment face count exceeds its encoded face records.");
     budget.array(count, sizeof(Face));
     poly.faces.reserve(count);
     for (std::size_t i = 0; i < count; ++i)
     {
         Face face;
         auto n = r.count();
+        if (n > (r.data.size() - r.position) / 8)
+            throw std::invalid_argument("Exact fragment face index count exceeds its encoded indices.");
         budget.array(n, sizeof(std::size_t));
         face.reserve(n);
         for (std::size_t j = 0; j < n; ++j)
@@ -629,7 +641,11 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
         poly.faces.push_back(std::move(face));
     }
     r.finish();
-    return SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
+    auto result = SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
+    const auto canonical = result->encode(byte_budget);
+    if (canonical.size() != data.size() || !std::equal(canonical.begin(), canonical.end(), data.begin()))
+        throw std::invalid_argument("Noncanonical exact fragment packet.");
+    return result;
 }
 } // namespace SimpleFluid::geometry::swept_volume
 

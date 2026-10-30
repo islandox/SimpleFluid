@@ -12,7 +12,10 @@ namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
+using adaptive_detail::GeometryRecordKind;
+using adaptive_detail::read_geometry_record_header;
 using adaptive_detail::Reader;
+using adaptive_detail::write_geometry_record_header;
 using adaptive_detail::Writer;
 void node_write(Writer& w, const AdaptiveNode& node)
 {
@@ -22,11 +25,11 @@ void node_write(Writer& w, const AdaptiveNode& node)
     for (auto coordinate : node.coordinate)
         w.word(std::bit_cast<std::uint64_t>(coordinate));
 }
-AdaptiveNode node_read(Reader& r)
+AdaptiveNode node_read(Reader& r, std::size_t limit)
 {
     auto gid = r.word();
     auto identity = r.bytes();
-    auto point = PLIC::decode_identity<PLIC::PointIdentity<ArithmeticMode::Ordinary>>(r.bytes());
+    auto point = PLIC::decode_identity<PLIC::PointIdentity<ArithmeticMode::Ordinary>>(r.bytes(), limit);
     AdaptiveNode node{gid, std::move(identity), {}, std::move(point)};
     for (auto& coordinate : node.coordinate)
         coordinate = std::bit_cast<double>(r.word());
@@ -86,6 +89,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
             for (std::size_t i = 0; i < ghost_keys.size(); ++i)
             {
                 Writer w;
+                write_geometry_record_header(w, GeometryRecordKind::GhostRequest);
                 w.word(i);
                 w.bytes(encode_adaptive_key(ghost_keys[i]));
                 w.word(owners[i].revision);
@@ -103,6 +107,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
             for (const auto& packet : incoming.packets)
             {
                 Reader r{packet.bytes};
+                read_geometry_record_header(r, GeometryRecordKind::GhostRequest);
                 const auto ordinal = r.word();
                 auto key_bytes = r.bytes();
                 const auto revision = r.word();
@@ -112,6 +117,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 if (leaf->revision != revision)
                     throw std::invalid_argument("Stale native full-ghost request.");
                 Writer w;
+                write_geometry_record_header(w, GeometryRecordKind::GhostReply);
                 w.word(ordinal);
                 w.bytes(key_bytes);
                 w.word(revision);
@@ -120,7 +126,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 std::set<std::uint64_t> needed;
                 for (const auto* tile : tiles)
                 {
-                    auto bytes = encode_adaptive_tile(*tile);
+                    auto bytes = encode_adaptive_tile(*tile, limit);
                     budget.add(bytes.size() + 8);
                     w.bytes(bytes);
                     needed.insert(tile->node_gids.begin(), tile->node_gids.end());
@@ -130,7 +136,8 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 for (auto gid : needed)
                 {
                     const auto& node = *local_nodes.at(gid);
-                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.payload_bytes());
+                    budget.add(
+                        sizeof(node) + node.identity.size() + PLIC::encoded_identity_size(node.coordinate_identity));
                     node_write(w, node);
                 }
                 budget.packet(w.data.size());
@@ -153,6 +160,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
             for (const auto& packet : returned.packets)
             {
                 Reader r{packet.bytes};
+                read_geometry_record_header(r, GeometryRecordKind::GhostReply);
                 const auto ordinal = r.word();
                 const auto key = decode_adaptive_key(r.bytes());
                 const auto revision = r.word();
@@ -167,13 +175,13 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 {
                     auto bytes = r.bytes();
                     budget.add(bytes.size());
-                    auto tile = decode_adaptive_tile(bytes);
+                    auto tile = decode_adaptive_tile(bytes, limit);
                     if (tile.first != key && (!tile.second || *tile.second != key))
                         throw std::invalid_argument("Nonincident tile in native ghost package.");
                     auto found = tiles.find(tile.face_gid);
                     if (found != tiles.end())
                     {
-                        if (encode_adaptive_tile(found->second) != bytes)
+                        if (encode_adaptive_tile(found->second, limit) != bytes)
                             throw std::invalid_argument("Native ghost canonical tile replicas disagree.");
                     }
                     else
@@ -184,7 +192,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                     throw std::invalid_argument("Invalid native ghost node count.");
                 for (std::uint64_t i = 0; i < node_count; ++i)
                 {
-                    auto node = node_read(r);
+                    auto node = node_read(r, limit);
                     budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.payload_bytes());
                     auto found = nodes.find(node.gid);
                     if (found != nodes.end())

@@ -1,10 +1,12 @@
 // Frozen native-cell Ordinary certificate from full50 MPI2 step 4 at accepted t=.006.
-// Source 19aee262; preserve finite geometry/frame bytes, not rational geometry.
+// Source 19aee262; frozen finite certificate body, wrapped in the versioned Ordinary packet frame.
 #pragma once
 #include "geometry/PLIC/ConvexGeometry.hh"
 inline auto cleanup_captured_geometry()
 {
-    constexpr std::string_view hex = "324c45435046465300000000000000004000000000000000333333f30000000000303333000000000"
+    constexpr std::string_view hex = "31564d4f4547465301000000000000001200000000000000"
+                                     "0000000000000000024003c0004000009807000000000000"
+                                     "324c45435046465300000000000000004000000000000000333333f30000000000303333000000000"
                                      "2000000000000004000000000000000"
                                      "000000800000000000000000000000000000000000000000400000000000000000000080000000000"
                                      "0000000000000000800000000000000"

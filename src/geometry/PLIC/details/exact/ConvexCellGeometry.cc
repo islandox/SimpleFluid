@@ -1,3 +1,4 @@
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
 
 namespace SimpleFluid::PLIC
@@ -581,20 +582,20 @@ NumericalConvexShell<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::E
     return result;
 }
 
-std::vector<char> ConvexCellGeometry<ArithmeticMode::Exact>::encode_certificate() const
+std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
     WireWriter w;
     w.word(0x5346455841435431ULL);
     w.word(1);
-    for (auto v : impl_->origin)
+    for (auto v : cell.impl_->origin)
         w.real(v);
-    w.word(impl_->poly.vertices.size());
-    const auto origin = point(impl_->origin);
-    for (const auto& p : impl_->poly.vertices)
+    w.word(cell.impl_->poly.vertices.size());
+    const auto origin = point(cell.impl_->origin);
+    for (const auto& p : cell.impl_->poly.vertices)
         for (const auto& q : sub(p, origin))
             w.rational(q);
-    w.word(impl_->poly.faces.size());
-    for (const auto& face : impl_->poly.faces)
+    w.word(cell.impl_->poly.faces.size());
+    for (const auto& face : cell.impl_->poly.faces)
     {
         w.word(face.size());
         for (auto id : face)
@@ -603,10 +604,19 @@ std::vector<char> ConvexCellGeometry<ArithmeticMode::Exact>::encode_certificate(
     return std::move(w.data);
 }
 
-ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exact>::decode_certificate(
-    std::span<const char> packet)
+std::vector<char> ConvexCellGeometry<ArithmeticMode::Exact>::encode_certificate(std::size_t byte_budget) const
 {
-    WireReader r{packet};
+    return encode_geometry_packet(
+        GeometryPacketKind::CellCertificate, ArithmeticMode::Exact, canonical_cell_key(*this), byte_budget);
+}
+
+ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exact>::decode_certificate(
+    std::span<const char> packet, std::size_t byte_budget)
+{
+    const auto envelope = decode_geometry_packet(packet, ArithmeticMode::Exact, byte_budget);
+    if (envelope.kind != GeometryPacketKind::CellCertificate)
+        throw std::invalid_argument("Foreign exact cell certificate kind.");
+    WireReader r{envelope.body, 0, true};
     if (r.word() != 0x5346455841435431ULL || r.word() != 1)
         throw std::invalid_argument("Unknown exact geometry certificate version/tag.");
     auto impl = std::make_shared<Impl>();
@@ -633,7 +643,13 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exac
     r.finish();
     validate(impl->poly);
     impl->product = product_description(impl->poly);
-    return ConvexGeometryPtr<ArithmeticMode::Exact>(new ConvexCellGeometry<ArithmeticMode::Exact>(std::move(impl)));
+    auto result =
+        ConvexGeometryPtr<ArithmeticMode::Exact>(new ConvexCellGeometry<ArithmeticMode::Exact>(std::move(impl)));
+    const auto canonical = canonical_cell_key(*result);
+    if (canonical.size() != envelope.body.size() ||
+        !std::equal(canonical.begin(), canonical.end(), envelope.body.begin()))
+        throw std::invalid_argument("Noncanonical exact cell certificate body.");
+    return result;
 }
 
 ConvexCellGeometry<ArithmeticMode::Exact>::ConvexCellGeometry(std::shared_ptr<const Impl> implementation)
@@ -1097,6 +1113,7 @@ double WireReader::real()
 
 I WireReader::integer()
 {
+    const auto start = position;
     auto sign = word(), n = word();
     if (sign > 1 || n > data.size() - position)
         throw std::invalid_argument("Invalid exact geometry integer.");
@@ -1106,15 +1123,37 @@ I WireReader::integer()
         bytes.push_back(static_cast<unsigned char>(data[position++]));
     I value;
     import_bits(value, bytes.begin(), bytes.end(), 8, false);
-    return sign ? -value : value;
+    if (sign)
+        value = -value;
+    if (canonical_encoding)
+    {
+        WireWriter canonical;
+        canonical.integer(value);
+        const auto encoded = data.subspan(start, position - start);
+        if (canonical.data.size() != encoded.size() ||
+            !std::equal(canonical.data.begin(), canonical.data.end(), encoded.begin()))
+            throw std::invalid_argument("Noncanonical exact geometry integer encoding.");
+    }
+    return value;
 }
 
 Q WireReader::rational()
 {
+    const auto start = position;
     I n = integer(), d = integer();
     if (d <= 0)
         throw std::invalid_argument("Exact geometry denominator must be positive.");
-    return Q(n, d);
+    Q value(n, d);
+    if (canonical_encoding)
+    {
+        WireWriter canonical;
+        canonical.rational(value);
+        const auto encoded = data.subspan(start, position - start);
+        if (canonical.data.size() != encoded.size() ||
+            !std::equal(canonical.data.begin(), canonical.data.end(), encoded.begin()))
+            throw std::invalid_argument("Noncanonical exact geometry rational encoding.");
+    }
+    return value;
 }
 
 void WireReader::finish()

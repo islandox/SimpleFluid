@@ -122,6 +122,7 @@ struct Reader
 {
     std::span<const char> bytes;
     std::size_t cursor = 0;
+    bool canonical_encoding = false;
     std::uint64_t word()
     {
         if (bytes.size() - cursor < 8)
@@ -140,6 +141,7 @@ struct Reader
     }
     long double real()
     {
+        const auto start = cursor;
         const auto descriptor = word(), bits = word();
         if (bits == 0)
         {
@@ -164,7 +166,17 @@ struct Reader
         finite(v);
         if (v == 0)
             reject("finite coordinate packet underflows.");
-        return descriptor & 1 ? -v : v;
+        v = descriptor & 1 ? -v : v;
+        if (canonical_encoding)
+        {
+            Writer canonical;
+            canonical.real(v);
+            const auto encoded = bytes.subspan(start, cursor - start);
+            if (canonical.bytes.size() != encoded.size() ||
+                !std::equal(canonical.bytes.begin(), canonical.bytes.end(), encoded.begin()))
+                reject("noncanonical finite scalar encoding.");
+        }
+        return v;
     }
     WidePoint point() { return {real(), real(), real()}; }
     std::span<const char> packet()

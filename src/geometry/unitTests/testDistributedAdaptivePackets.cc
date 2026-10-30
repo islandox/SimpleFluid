@@ -3,6 +3,8 @@
  */
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "utils/testing_environment.hh"
 #include <gtest/gtest.h>
 #include <map>
@@ -152,4 +154,39 @@ TEST(DistributedAdaptivePackets, MalformedAndBudgetFailuresLeaveAcceptedBatchUnt
     EXPECT_THROW(::SimpleFluid::Meshes::AMR::encode_adaptive_batch({}, {}, empty.size() - 1), std::invalid_argument);
     EXPECT_TRUE(accepted.leaves.empty());
 }
+TEST(DistributedAdaptivePackets, NewContainingVersionsRejectLegacyEmptyRecordsAndKeepAncestryKeys)
+{
+    namespace A = ::SimpleFluid::Meshes::AMR;
+    const A::AdaptiveCellKey key{7, A::ConvexCellAncestry{9, {1, 3}}};
+    const auto key_bytes = A::encode_adaptive_key(key);
+    A::adaptive_detail::Reader key_reader{key_bytes};
+    EXPECT_EQ(key_reader.word(), 0x5346414450543631ULL);
+    EXPECT_EQ(key_reader.word(), 1u);
+    EXPECT_EQ(key_reader.word(), 0u);
+    EXPECT_EQ(A::decode_adaptive_key(key_bytes), key);
+    const auto batch = A::encode_adaptive_batch({}, {}, budget);
+    EXPECT_TRUE(A::decode_adaptive_batch(batch, budget).leaves.empty());
+    auto old_batch = batch;
+    old_batch[0] = 4; // Previous batch magic, including a zero-record batch.
+    EXPECT_THROW(A::decode_adaptive_batch(old_batch, budget), std::invalid_argument);
+    A::AdaptiveJoinCapsule capsule;
+    capsule.route = 2;
+    const auto join = A::encode_join_capsule(capsule, budget);
+    EXPECT_TRUE(A::decode_join_capsule(join, budget).rules.empty());
+    auto old_join = join;
+    old_join[8] = 2; // Old join schema, with no nested geometry to detect it.
+    EXPECT_THROW(A::decode_join_capsule(old_join, budget), std::invalid_argument);
+    A::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    A::CartesianAMR source(grid);
+    const std::array<std::uint64_t, 1> selected{0};
+    const auto detached = source.detach_owned(selected, {'d'});
+    ASSERT_EQ(detached.owned.size(), 1u);
+    const auto leaf = A::encode_adaptive_leaf(detached.owned.front());
+    EXPECT_EQ(A::decode_adaptive_leaf(leaf).key, detached.owned.front().key);
+    auto old_leaf = leaf;
+    old_leaf[8] = 1;
+    EXPECT_THROW(A::decode_adaptive_leaf(old_leaf), std::invalid_argument);
+}
+
 } // namespace
