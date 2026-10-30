@@ -176,7 +176,7 @@ template<ArithmeticMode Mode> void replay_and_reject()
     for (const auto& child : {split.inside, split.outside})
     {
         const auto packet = child->encode(registry);
-        EXPECT_EQ(word(packet, 8), 4u);
+        EXPECT_EQ(static_cast<std::uint8_t>(packet[1]), 5u);
         const auto roots = P::ConstructionRegistry<Mode>::required_roots(packet, pins);
         EXPECT_EQ(roots.size(), 2u);
         const auto decoded = Geometry<Mode>::decode(packet, registry);
@@ -184,10 +184,10 @@ template<ArithmeticMode Mode> void replay_and_reject()
         EXPECT_TRUE(registry.derived_from(*decoded, native_key));
         EXPECT_EQ(decoded->encode(registry), packet);
         auto stale = packet;
-        word(stale, 8 * 8, pins.publication[3] + 1);
+        word(stale, 19 + 3 * 8, pins.publication[3] + 1);
         provenance_failure([&] { (void) Geometry<Mode>::decode(stale, registry); });
         auto mixed = packet;
-        word(mixed, 2 * 8, Mode == ArithmeticMode::Ordinary ? 1 : 0);
+        mixed[2] = static_cast<char>(Mode == ArithmeticMode::Ordinary ? 1 : 0);
         provenance_failure([&] { (void) Geometry<Mode>::decode(mixed, registry); });
         P::ConstructionRegistry<Mode> missing(pins);
         missing.register_native(0, 0, donor);
@@ -196,26 +196,27 @@ template<ArithmeticMode Mode> void replay_and_reject()
         changed.back() ^= 1;
         provenance_failure([&] { (void) Geometry<Mode>::decode(changed, registry); });
         auto cycle = packet;
-        std::size_t cursor = 10 * 8;
-        for (std::size_t root = 0; root < word(packet, 9 * 8); ++root)
+        constexpr std::size_t root_count_offset = 19 + 4 * 8;
+        std::size_t cursor = root_count_offset + 8;
+        for (std::size_t root = 0; root < word(packet, root_count_offset); ++root)
         {
-            cursor += 4 * 8;
+            cursor += 1 + 3 * 8;
             const auto bytes = word(packet, cursor);
             cursor += 8 + static_cast<std::size_t>(bytes);
         }
         auto unused = packet;
-        std::vector<char> extra_root(5 * 8, 0);
-        word(extra_root, 0, static_cast<std::uint64_t>(P::ConstructionRootKey::Kind::Native));
-        word(extra_root, 8, 1);
+        std::vector<char> extra_root(1 + 4 * 8, 0);
+        extra_root[0] = static_cast<char>(P::ConstructionRootKey::Kind::Native);
+        word(extra_root, 1, 1);
         unused.insert(unused.begin() + cursor, extra_root.begin(), extra_root.end());
-        word(unused, 9 * 8, word(packet, 9 * 8) + 1);
+        word(unused, root_count_offset, word(packet, root_count_offset) + 1);
         provenance_failure([&] { (void) Geometry<Mode>::decode(unused, registry); });
         ASSERT_EQ(word(packet, cursor), 2u);
         cursor += 8;
-        ASSERT_EQ(word(packet, cursor), 1u);
-        cursor += 2 * 8;
-        ASSERT_EQ(word(packet, cursor), 2u);
-        word(cycle, cursor + 8, 1);
+        ASSERT_EQ(static_cast<std::uint8_t>(packet[cursor]), 1u);
+        cursor += 1 + 8;
+        ASSERT_EQ(static_cast<std::uint8_t>(packet[cursor]), 2u);
+        word(cycle, cursor + 1, 1);
         provenance_failure([&] { (void) Geometry<Mode>::decode(cycle, registry); });
         P::GeometryLimits capped;
         capped.byte_budget = packet.size() - 1;

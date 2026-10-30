@@ -140,6 +140,7 @@ void agree(std::span<const char> bytes, const Teuchos::Comm<int>& comm, std::siz
 AdaptiveBytes encode_frozen_part(const FrozenPart& p)
 {
     Writer w;
+    write_geometry_record_header(w, GeometryRecordKind::FrozenPart);
     w.word(p.source);
     w.word(p.node_prefix);
     w.word(bool(p.procedural));
@@ -184,6 +185,7 @@ AdaptiveBytes encode_frozen_part(const FrozenPart& p)
 std::shared_ptr<const FrozenPart> decode_frozen_part(std::span<const char> bytes)
 {
     Reader r{bytes};
+    read_geometry_record_header(r, GeometryRecordKind::FrozenPart);
     auto p = std::make_shared<FrozenPart>();
     p->source = r.word();
     p->node_prefix = r.word();
@@ -248,7 +250,7 @@ using BundleData = FrozenNativeBundle::Data;
 AdaptiveBytes encode_batch(std::span<const std::shared_ptr<const BundleData>> bundles, std::size_t limit)
 {
     Budget budget{limit};
-    budget.add(32);
+    budget.add(24 + geometry_record_header_bytes);
     std::map<AdaptiveBytes, ID> explicit_dictionary, chunk_dictionary;
     std::map<ID, std::pair<ID, std::shared_ptr<const NativeFragmentDescriptor>>> procedural_dictionary;
     std::vector<AdaptiveBytes> parts, chunks;
@@ -376,6 +378,8 @@ AdaptiveBytes encode_batch(std::span<const std::shared_ptr<const BundleData>> bu
         records.push_back(std::move(w.data));
     }
     Writer result;
+    result.data.reserve(24 + geometry_record_header_bytes);
+    write_geometry_record_header(result, GeometryRecordKind::FrozenBatch);
     result.word(chunks.size());
     for (const auto& chunk : chunks)
         result.bytes(chunk);
@@ -394,6 +398,7 @@ std::vector<std::shared_ptr<const BundleData>> decode_batch(std::span<const char
     Budget budget{limit};
     budget.add(bytes.size());
     Reader r{bytes};
+    read_geometry_record_header(r, GeometryRecordKind::FrozenBatch);
     auto n = r.word();
     if (n > bytes.size() / 8)
         throw std::invalid_argument("Frozen chunk dictionary exceeds packet.");

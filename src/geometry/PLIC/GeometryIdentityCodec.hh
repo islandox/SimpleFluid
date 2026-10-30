@@ -45,7 +45,7 @@ template<class Identity> [[nodiscard]] Identity decode_identity(std::span<const 
     const auto envelope = decode_geometry_packet(packet, Identity::mode, byte_budget);
     if (envelope.kind != identity_packet_kind(Identity::kind))
         throw std::invalid_argument("Foreign geometry identity kind.");
-    return Identity(details::checked_identity_key(Identity::kind, Identity::mode, envelope.body));
+    return Identity(details::checked_identity_key(Identity::kind, Identity::mode, envelope.body), byte_budget);
 }
 template<class Identity> [[nodiscard]] Identity decode_identity(std::span<const char> packet)
 {

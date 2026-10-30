@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -19,6 +20,7 @@ template<ArithmeticMode> class ConstructionRegistry;
 namespace details
 {
 class NativeSupportAccess;
+class OriginalSupportAuthorityAccess;
 namespace ordinary_kernel
 {
 template<ArithmeticMode> class GeometryKernel;
@@ -53,11 +55,23 @@ struct DynamicGeometryValue
 /** Collision-free opaque original geometric support identity. Only immutable
  * source authority export issues these keys; they are never geometric numbers
  * or ownership/revision credentials. The caller authenticates those separately. */
+/** Opaque source-support sidecar. Public authority words remain the identity;
+ * only immutable source issuance/authenticated imports may seal this value. */
+class OriginalSupportAttachment
+{
+public:
+    OriginalSupportAttachment() = default;
+
+private:
+    friend class details::OriginalSupportAuthorityAccess;
+    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> support_;
+};
 struct PlaneAuthority
 {
     std::vector<std::uint64_t> key;
-    bool operator==(const PlaneAuthority&) const = default;
-    auto operator<=>(const PlaneAuthority&) const = default;
+    OriginalSupportAttachment original_support;
+    bool operator==(const PlaneAuthority& other) const { return key == other.key; }
+    auto operator<=>(const PlaneAuthority& other) const { return key <=> other.key; }
 };
 struct DynamicPointProvenance;
 class DynamicGeometryAccess;

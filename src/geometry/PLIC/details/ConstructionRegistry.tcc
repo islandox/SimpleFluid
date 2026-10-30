@@ -1,11 +1,11 @@
 /** @file ConstructionRegistry.tcc
- * @brief Version 4 finite construction replay, rooted in independent authority.
+ * @brief Compact version 5 finite construction replay, rooted in independent authority.
  */
 namespace SimpleFluid::PLIC
 {
 namespace construction_detail SIMPLEFLUID_LOCAL
 {
-constexpr std::uint64_t magic = 0x5346424f554e4431ULL;
+constexpr GeometryTag category = GeometryTag::ConstructionRegistry;
 [[noreturn]] void fail(GeometryErrorCode code, const char* message)
 {
     ++details::statistics.rejections;
@@ -46,9 +46,9 @@ template<class T> void append(std::vector<T>& values, T value)
 }
 template<ArithmeticMode Mode> void write_header(Writer<Mode>& writer, const GeometryPacketContext& context)
 {
-    writer.word(magic);
-    writer.word(4);
-    writer.word(static_cast<std::uint64_t>(Mode));
+    writer.tag(category);
+    writer.byte(5);
+    writer.byte(static_cast<std::uint8_t>(Mode));
     writer.word(std::numeric_limits<long double>::digits);
     writer.word(std::numeric_limits<long double>::max_exponent);
     for (const auto pin : context.publication)
@@ -56,7 +56,7 @@ template<ArithmeticMode Mode> void write_header(Writer<Mode>& writer, const Geom
 }
 template<ArithmeticMode Mode> void read_header(Reader<Mode>& reader, const GeometryPacketContext& expected)
 {
-    if (reader.word() != magic || reader.word() != 4 || reader.word() != static_cast<std::uint64_t>(Mode) ||
+    if (reader.tag() != category || reader.byte() != 5 || reader.byte() != static_cast<std::uint8_t>(Mode) ||
         reader.word() != std::numeric_limits<long double>::digits ||
         reader.word() != std::numeric_limits<long double>::max_exponent)
         fail(GeometryErrorCode::ProvenanceMismatch, "Incompatible construction packet mode or floating-point format.");
@@ -82,7 +82,7 @@ template<ArithmeticMode Mode> std::vector<char> read_blob(Reader<Mode>& reader, 
 }
 template<ArithmeticMode Mode> void write_key(Writer<Mode>& writer, const ConstructionRootKey& key)
 {
-    writer.word(static_cast<std::uint64_t>(key.kind));
+    writer.byte(static_cast<std::uint8_t>(key.kind));
     writer.word(key.entity);
     writer.word(key.revision);
     writer.word(key.slot);
@@ -90,7 +90,7 @@ template<ArithmeticMode Mode> void write_key(Writer<Mode>& writer, const Constru
 }
 template<ArithmeticMode Mode> ConstructionRootKey read_key(Reader<Mode>& reader, std::size_t cap)
 {
-    const auto kind = reader.word();
+    const auto kind = reader.byte();
     if (kind < 1 || kind > 4)
         fail(GeometryErrorCode::ProvenanceMismatch, "Unknown construction root kind.");
     ConstructionRootKey key{static_cast<ConstructionRootKey::Kind>(kind), reader.word(), reader.word(), reader.word(),
@@ -124,7 +124,7 @@ struct PlaneReference
 };
 struct Record
 {
-    enum class Kind : std::uint64_t
+    enum class Kind : std::uint8_t
     {
         Root = 1,
         Clip = 2,
@@ -140,11 +140,12 @@ struct Record
 template<ArithmeticMode Mode> void write_reference(Writer<Mode>& writer, Reference reference)
 {
     writer.word(reference.node);
-    writer.word(reference.side);
+    writer.byte(static_cast<std::uint8_t>(reference.side));
 }
 template<ArithmeticMode Mode> Reference read_reference(Reader<Mode>& reader, std::size_t before)
 {
-    const auto node = reader.word(), side = reader.word();
+    const auto node = reader.word();
+    const auto side = reader.byte();
     if (node >= before || side > 1)
         fail(GeometryErrorCode::ProvenanceMismatch, "Forward, cyclic or invalid construction dependency.");
     return {static_cast<std::size_t>(node), static_cast<unsigned>(side)};
@@ -607,7 +608,7 @@ std::vector<char> ConvexCellGeometry<Mode>::encode(
     writer.word(plan.records.size());
     for (const auto& record : plan.records)
     {
-        writer.word(static_cast<std::uint64_t>(record.kind));
+        writer.byte(static_cast<std::uint8_t>(record.kind));
         if (record.kind == Record::Kind::Root)
             writer.word(root_ids.at(record.root));
         else if (record.kind == Record::Kind::Rebase)
@@ -618,14 +619,14 @@ std::vector<char> ConvexCellGeometry<Mode>::encode(
         else
         {
             write_reference<Mode>(writer, record.parent);
-            writer.word(record.plane.input ? 1 : 0);
+            writer.byte(record.plane.input ? 1 : 0);
             writer.word(root_ids.at(record.plane.key));
             if (record.plane.input)
                 writer.frame(record.plane.frame);
             else
                 writer.word(record.plane.face);
-            writer.word(record.orientation > 0 ? 1 : 0);
-            writer.word((record.measure_section ? 1 : 0) | (record.construct_outside ? 2 : 0) |
+            writer.byte(record.orientation > 0 ? 1 : 0);
+            writer.byte((record.measure_section ? 1 : 0) | (record.construct_outside ? 2 : 0) |
                         (record.partition_proof ? 4 : 0));
         }
     }
@@ -686,7 +687,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
     };
     const auto count = reader.word();
     if (!count || count > limits.byte_budget / (sizeof(Parsed) + sizeof(Outputs)) ||
-        count > (reader.bytes.size() - reader.cursor) / (2 * sizeof(std::uint64_t)))
+        count > (reader.bytes.size() - reader.cursor) / (sizeof(std::uint64_t) + 1))
         fail(GeometryErrorCode::ResourceLimit, "Construction dependency count exceeds packet or allocation limits.");
     const auto node_count = static_cast<std::size_t>(count);
     details::active_work->charge(node_count, sizeof(Parsed) + sizeof(Outputs) + sizeof(unsigned char));
@@ -710,7 +711,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
     {
         details::active_work->pair();
         Parsed record;
-        const auto kind = reader.word();
+        const auto kind = reader.byte();
         if (kind < 1 || kind > 3)
             fail(GeometryErrorCode::ProvenanceMismatch, "Unknown construction dependency operation.");
         record.kind = static_cast<Record::Kind>(kind);
@@ -731,7 +732,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
         else
         {
             record.parent = parent_reference(i);
-            const auto input = reader.word();
+            const auto input = reader.byte();
             record.root = root_reference();
             if (input == 1)
             {
@@ -750,7 +751,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
             }
             else
                 fail(GeometryErrorCode::ProvenanceMismatch, "Invalid construction cutting-plane kind.");
-            const auto orientation = reader.word(), flags = reader.word();
+            const auto orientation = reader.byte(), flags = reader.byte();
             if (orientation > 1 || flags > 7)
                 fail(GeometryErrorCode::ProvenanceMismatch, "Invalid construction side or operation flags.");
             record.orientation = orientation ? 1 : -1;

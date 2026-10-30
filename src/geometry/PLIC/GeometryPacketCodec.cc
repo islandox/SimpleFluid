@@ -41,9 +41,9 @@ std::vector<char> encode_geometry_packet(
             bytes.push_back(static_cast<char>(value >> (8 * i)));
     };
     word(geometry_packet_magic);
-    word(geometry_packet_version);
-    word(static_cast<std::uint64_t>(kind));
-    word(static_cast<std::uint64_t>(mode));
+    bytes.push_back(static_cast<char>(geometry_packet_version));
+    bytes.push_back(static_cast<char>(kind));
+    bytes.push_back(static_cast<char>(mode));
     word(geometry_packet_profile(mode));
     word(body.size());
     bytes.insert(bytes.end(), body.begin(), body.end());
@@ -62,10 +62,11 @@ GeometryPacketView decode_geometry_packet(std::span<const char> bytes, Arithmeti
             value |= std::uint64_t(static_cast<unsigned char>(bytes[cursor++])) << (8 * i);
         return value;
     };
-    if (word() != geometry_packet_magic || word() != geometry_packet_version)
+    const auto byte = [&]() { return static_cast<std::uint8_t>(bytes[cursor++]); };
+    if (word() != geometry_packet_magic || byte() != geometry_packet_version)
         throw std::invalid_argument("Unknown geometry packet magic or version.");
-    const auto kind = static_cast<GeometryPacketKind>(word());
-    if (!supported(kind) || word() != static_cast<std::uint64_t>(mode) || word() != geometry_packet_profile(mode))
+    const auto kind = static_cast<GeometryPacketKind>(byte());
+    if (!supported(kind) || byte() != static_cast<std::uint8_t>(mode) || word() != geometry_packet_profile(mode))
         throw std::invalid_argument("Foreign geometry packet kind, arithmetic mode or finite profile.");
     const auto length = word();
     if (length != bytes.size() - geometry_packet_header_bytes)

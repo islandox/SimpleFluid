@@ -5,12 +5,7 @@ namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 {
 PLIC::PointIdentity<ArithmeticMode::Exact> swept_point(const P& point)
 {
-    WireWriter writer;
-    writer.word(0x5346504f494e5431ULL);
-    for (const auto& q : point)
-        writer.rational(q);
-    return PLIC::details::GeometryIdentityAccess::make<PLIC::PointIdentity<ArithmeticMode::Exact>>(
-        std::move(writer.data));
+    return make_point_identity(point);
 }
 } // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 
@@ -394,7 +389,9 @@ std::vector<SweptTriangle> swept_boundary(const Polygon& current, const Polygon&
         result.push_back({center, current[i], current[j]});
         result.push_back({backcenter, previous[j], previous[i]});
         std::array<SweptTriangle, 2> edge;
-        if (swept_point(current[i]) < swept_point(current[j]))
+        // Native current-point lexicographic order chooses the shared edge's
+        // diagonal; reversed incident traversal retains the same physical split.
+        if (current[i] < current[j])
             edge = {SweptTriangle{current[i], previous[i], previous[j]},
                 SweptTriangle{current[i], previous[j], current[j]}};
         else
@@ -546,7 +543,7 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     const PLIC::DisplacementIdentity<ArithmeticMode::Exact>& displacement) const
 {
     auto poly = impl_->poly.get();
-    const auto shift = displacement_point(displacement);
+    const auto& shift = displacement_point(displacement);
     for (auto& p : poly.vertices)
         p = add(p, shift);
     return SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
@@ -560,7 +557,9 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
 std::vector<char> ConvexFragment<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
 {
     SweepBudget budget({4096, 65536, 262144, byte_budget});
-    budget.add(geometry_packet_header_bytes + 56);
+    // Byte kind/version, three origin scalars, and two 64-bit counts.
+    constexpr auto fixed_body_bytes = 2 * sizeof(std::uint8_t) + 5 * sizeof(std::uint64_t);
+    budget.add(geometry_packet_header_bytes + fixed_body_bytes);
     for (const auto& vertex : impl_->poly.get().vertices)
         for (const auto& q : vertex)
             budget.add(40 + (q.backend().num().capacity() + q.backend().denom().capacity()) *
@@ -568,8 +567,8 @@ std::vector<char> ConvexFragment<ArithmeticMode::Exact>::encode(std::size_t byte
     for (const auto& face : impl_->poly.get().faces)
         budget.add(8 + face.size() * 8);
     WireWriter w;
-    w.word(0x5346455841435431ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExactCell);
+    w.byte(1);
     for (unsigned a = 0; a < 3; ++a)
         w.real(0);
     w.word(impl_->poly.get().vertices.size());
@@ -598,7 +597,7 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     if (envelope.kind != GeometryPacketKind::ConvexFragment)
         throw std::invalid_argument("Foreign exact fragment packet kind.");
     WireReader r{envelope.body, 0, true};
-    if (r.word() != 0x5346455841435431ULL || r.word() != 1)
+    if (r.tag() != GeometryTag::ExactCell || r.byte() != 1)
         throw std::invalid_argument("Unknown exact fragment tag/version.");
     GeometryPoint anchor{};
     for (auto& q : anchor)
@@ -608,7 +607,7 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     auto count = r.count();
     // Canonical rationals need two 16-byte integer headers and at least one
     // byte for each magnitude, hence at least 102 bytes per exact point.
-    if (count > (r.data.size() - r.position) / 102)
+    if (count > (r.data.size() - r.position) / minimum_point_bytes)
         throw std::invalid_argument("Exact fragment point count exceeds its encoded coordinates.");
     budget.array(count, sizeof(P));
     poly.vertices.reserve(count);
@@ -721,11 +720,13 @@ std::vector<char> GeometryMeasure<ArithmeticMode::Exact>::encode(std::size_t byt
 {
     const auto& q = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this);
     const auto limbs = q.backend().num().capacity() + q.backend().denom().capacity();
-    if (byte_budget < 56 || limbs > (byte_budget - 56) / sizeof(boost::multiprecision::limb_type))
+    // Compact kind/version plus unchanged integer framing and growth lease.
+    constexpr auto fixed_bytes = 2 * sizeof(std::uint8_t) + 5 * sizeof(std::uint64_t);
+    if (byte_budget < fixed_bytes || limbs > (byte_budget - fixed_bytes) / sizeof(boost::multiprecision::limb_type))
         throw std::invalid_argument("Exact measure certificate exceeds byte budget.");
     WireWriter w;
-    w.word(0x53464d4541533731ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExactMeasure);
+    w.byte(1);
     w.rational(q);
     if (w.data.size() > byte_budget)
         throw std::invalid_argument("Exact measure certificate exceeds byte budget.");
@@ -738,7 +739,7 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::d
     if (data.size() > byte_budget)
         throw std::invalid_argument("Exact measure certificate exceeds byte budget.");
     WireReader r{data};
-    if (r.word() != 0x53464d4541533731ULL || r.word() != 1)
+    if (r.tag() != GeometryTag::ExactMeasure || r.byte() != 1)
         throw std::invalid_argument("Unknown exact measure tag/version.");
     auto value = r.rational();
     r.finish();
@@ -973,10 +974,10 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
 {
     if (!(timestep >= 0) || !std::isfinite(timestep))
         throw std::invalid_argument("Backward trajectory needs finite nonnegative timestep.");
-    const auto p = authority_point(identity);
+    const auto& p = authority_point(identity);
     const P exact_velocity{exact(velocity[0]), exact(velocity[1]), exact(velocity[2])};
     const auto back = sub(p, mul(exact_velocity, exact(timestep)));
-    return {swept_point(p), swept_point(back)};
+    return {identity, swept_point(back)};
 }
 } // namespace SimpleFluid::geometry::swept_volume
 
@@ -1059,8 +1060,8 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
     TrajectoryArithmetic arithmetic(limits);
     if (!std::isfinite(timestep) || timestep < 0 || walls.size() > limits.maximum_constraints)
         throw std::invalid_argument("Invalid exact wall trajectory timestep or constraint count.");
-    arithmetic.charge(canonical_key_size(identity));
-    const auto source = authority_point(identity);
+    arithmetic.charge(identity.payload_bytes());
+    const auto& source = authority_point(identity);
     for (const auto& q : source)
         (void) arithmetic.bits(q);
     const P exact_velocity{arithmetic.retain(exact(velocity[0])), arithmetic.retain(exact(velocity[1])),
@@ -1120,28 +1121,17 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
     if (arithmetic.inner(displacement, displacement) > arithmetic.inner(original, original))
         throw std::logic_error("Exact constrained trajectory increased displacement norm.");
     const auto departure = arithmetic.subtract(source, displacement);
-    const auto encoded_bound = [&](const P& value)
-    {
-        std::size_t count = 8;
-        for (const auto& q : value)
-        {
-            const auto bits = arithmetic.bits(q);
-            count += 32 + (bits[0] + 7) / 8 + (bits[1] + 7) / 8 + 2;
-        }
-        return 2 * count + PLIC::details::geometry_identity_backing_bytes(); // vector growth, owner and integer framing
-    };
-    arithmetic.charge(encoded_bound(source));
-    arithmetic.charge(encoded_bound(departure));
-    auto start_bytes = swept_point(source), end_bytes = swept_point(departure);
-    return {std::move(start_bytes), std::move(end_bytes)};
+    arithmetic.charge(point_identity_storage_bound(departure));
+    return {identity, swept_point(departure)};
 }
 
 GeometryMeasure<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::displacement_squared(
     TrajectoryLimits limits) const
 {
     TrajectoryArithmetic arithmetic(limits);
-    arithmetic.charge(canonical_key_size(point));
-    arithmetic.charge(canonical_key_size(departure));
+    PLIC::GeometryAllocationLedger allocations;
+    allocations.retain(point, arithmetic.bytes, limits.byte_budget);
+    allocations.retain(departure, arithmetic.bytes, limits.byte_budget);
     const auto displacement = arithmetic.subtract(authority_point(point), authority_point(departure));
     return SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(displacement, displacement));
 }

@@ -4,6 +4,7 @@
  */
 
 #pragma once
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 
 #include "SimpleFluidExport.hh"
@@ -407,9 +408,14 @@ Moments product_moments(const Product& product, const P& origin);
 Poly product_poly(const Product& product);
 std::optional<Product> product_intersection(const Product& a, const Product& b);
 
+inline constexpr std::size_t minimum_rational_bytes = 2 * (2 * sizeof(std::uint64_t) + sizeof(std::uint8_t));
+inline constexpr std::size_t minimum_point_bytes = 3 * minimum_rational_bytes;
+
 struct WireWriter
 {
     std::vector<char> data;
+    void byte(std::uint8_t value);
+    void tag(GeometryTag value) { byte(static_cast<std::uint8_t>(value)); }
     void word(std::uint64_t value);
     void real(double value);
     void integer(I value);
@@ -421,8 +427,16 @@ struct WireReader
     std::span<const char> data;
     std::size_t position = 0;
     bool canonical_encoding = false;
+    std::uint8_t byte();
+    GeometryTag tag() { return static_cast<GeometryTag>(byte()); }
     std::uint64_t word();
     std::size_t count();
+    void require_count(std::size_t count, std::size_t minimum_element_bytes) const
+    {
+        if (!minimum_element_bytes || position > data.size() ||
+            count > (data.size() - position) / minimum_element_bytes)
+            throw std::invalid_argument("Exact geometry count exceeds its encoded records.");
+    }
     double real();
     I integer();
     Q rational();
@@ -574,14 +588,8 @@ namespace exact_geometry_detail SIMPLEFLUID_LOCAL
 void validate_planar_polygon(const Polygon& polygon);
 P authority_point(std::span<const char> packet);
 P displacement_point(std::span<const char> packet);
-inline P authority_point(const PointIdentity<ArithmeticMode::Exact>& identity)
-{
-    return authority_point(details::GeometryIdentityAccess::key(identity));
-}
-inline P displacement_point(const DisplacementIdentity<ArithmeticMode::Exact>& identity)
-{
-    return displacement_point(details::GeometryIdentityAccess::key(identity));
-}
+const P& authority_point(const PointIdentity<ArithmeticMode::Exact>& identity);
+const P& displacement_point(const DisplacementIdentity<ArithmeticMode::Exact>& identity);
 std::vector<char> displacement_packet(const P& p);
 std::vector<char> point_packet(const P& p);
 } // namespace exact_geometry_detail SIMPLEFLUID_LOCAL

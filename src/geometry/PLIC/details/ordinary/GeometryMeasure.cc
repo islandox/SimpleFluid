@@ -1,5 +1,6 @@
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include <array>
 #include <charconv>
 #include <cmath>
@@ -17,7 +18,8 @@ void admit_bytes(std::size_t bytes)
     if (bytes < sizeof(Measure))
         throw std::length_error("Ordinary FP geometry: measure storage cap exhausted.");
 }
-constexpr std::string_view measure_tag = "SFMV1O:";
+constexpr std::size_t measure_header_bytes = 2;
+constexpr std::uint8_t measure_version = 1;
 } // namespace
 
 GeometryMeasure<ArithmeticMode::Ordinary> GeometryMeasure<ArithmeticMode::Ordinary>::from_nominal(long double value)
@@ -92,23 +94,25 @@ std::vector<char> GeometryMeasure<ArithmeticMode::Ordinary>::encode(std::size_t 
     if (result.ec != std::errc{})
         throw std::invalid_argument("Ordinary FP geometry: retained measure encoding failed.");
     const auto count = static_cast<std::size_t>(result.ptr - text.data());
-    if (budget < measure_tag.size() || count > budget - measure_tag.size())
+    if (budget < measure_header_bytes || count > budget - measure_header_bytes)
         throw std::length_error("Ordinary FP geometry: retained measure packet cap exhausted.");
     std::vector<char> packet;
-    packet.reserve(measure_tag.size() + count);
-    packet.insert(packet.end(), measure_tag.begin(), measure_tag.end());
+    packet.reserve(measure_header_bytes + count);
+    packet.push_back(static_cast<char>(GeometryTag::OrdinaryMeasure));
+    packet.push_back(static_cast<char>(measure_version));
     packet.insert(packet.end(), text.data(), result.ptr);
     return packet;
 }
 GeometryMeasure<ArithmeticMode::Ordinary> GeometryMeasure<ArithmeticMode::Ordinary>::decode(
     std::span<const char> packet, std::size_t budget)
 {
-    if (packet.size() > budget || packet.size() <= measure_tag.size() ||
-        std::string_view(packet.data(), measure_tag.size()) != measure_tag)
+    if (packet.size() > budget || packet.size() <= measure_header_bytes ||
+        static_cast<GeometryTag>(static_cast<std::uint8_t>(packet[0])) != GeometryTag::OrdinaryMeasure ||
+        static_cast<std::uint8_t>(packet[1]) != measure_version)
         throw std::invalid_argument("Ordinary FP geometry: invalid retained measure packet.");
     long double value;
     const auto result = std::from_chars(
-        packet.data() + measure_tag.size(), packet.data() + packet.size(), value, std::chars_format::scientific);
+        packet.data() + measure_header_bytes, packet.data() + packet.size(), value, std::chars_format::scientific);
     if (result.ec != std::errc{} || result.ptr != packet.data() + packet.size())
         throw std::invalid_argument("Ordinary FP geometry: malformed retained measure.");
     return from_nominal(value);

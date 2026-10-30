@@ -137,6 +137,13 @@ struct GeometryAllocationLedger::Impl
             });
     }
 
+    void retain_authorities(const std::vector<PlaneAuthority>& authorities, std::size_t& used, std::size_t limit)
+    {
+        for (const auto& authority : authorities)
+            if (const auto* support = details::OriginalSupportAuthorityAccess::retained(authority))
+                retain_identity(*support, used, limit);
+    }
+
     template<ArithmeticMode Mode> void walk(std::size_t& used, std::size_t limit)
     {
         using namespace allocation_detail;
@@ -184,6 +191,7 @@ struct GeometryAllocationLedger::Impl
                         break;
                     for (const auto& vertex : geometry->vertices)
                     {
+                        retain_authorities(vertex.authorities, used, limit);
                         push(Kind::Point, vertex.source_identity, used, limit);
                         for (const auto& plane : vertex.incident)
                             push(Kind::Plane, plane, used, limit);
@@ -206,9 +214,12 @@ struct GeometryAllocationLedger::Impl
                         bytes, plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
                     // Weak source references do not retain or pin their pointees.
                     if (admit(item, bytes, used, limit))
+                    {
+                        retain_authorities(plane->authorities, used, limit);
                         if constexpr (Mode == ArithmeticMode::Ordinary)
                             if (plane->native_support)
                                 retain_identity(*plane->native_support, used, limit);
+                    }
                     break;
                 }
                 case Kind::Point: {
@@ -217,6 +228,7 @@ struct GeometryAllocationLedger::Impl
                     add_bytes(bytes, point->source_edges.capacity(), sizeof(point->source_edges.front()));
                     if (admit(item, bytes, used, limit))
                     {
+                        retain_authorities(point->supports, used, limit);
                         push(Kind::Point, point->source_origin, used, limit);
                         for (const auto& edge : point->source_edges)
                         {

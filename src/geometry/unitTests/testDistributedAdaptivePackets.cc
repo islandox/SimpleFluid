@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
+#include "geometry/mesh/AMR/FrozenNativeDetails.hh"
 #include "utils/testing_environment.hh"
 #include <gtest/gtest.h>
 #include <map>
@@ -167,14 +168,14 @@ TEST(DistributedAdaptivePackets, NewContainingVersionsRejectLegacyEmptyRecordsAn
     const auto batch = A::encode_adaptive_batch({}, {}, budget);
     EXPECT_TRUE(A::decode_adaptive_batch(batch, budget).leaves.empty());
     auto old_batch = batch;
-    old_batch[0] = 4; // Previous batch magic, including a zero-record batch.
+    old_batch[0] = 5; // Previous batch magic, including a zero-record batch.
     EXPECT_THROW(A::decode_adaptive_batch(old_batch, budget), std::invalid_argument);
     A::AdaptiveJoinCapsule capsule;
     capsule.route = 2;
     const auto join = A::encode_join_capsule(capsule, budget);
     EXPECT_TRUE(A::decode_join_capsule(join, budget).rules.empty());
     auto old_join = join;
-    old_join[8] = 2; // Old join schema, with no nested geometry to detect it.
+    old_join[8] = 3; // Old join schema, with no nested geometry to detect it.
     EXPECT_THROW(A::decode_join_capsule(old_join, budget), std::invalid_argument);
     A::AMRGrid grid;
     grid.block_cells = {2, 2, 2};
@@ -185,8 +186,37 @@ TEST(DistributedAdaptivePackets, NewContainingVersionsRejectLegacyEmptyRecordsAn
     const auto leaf = A::encode_adaptive_leaf(detached.owned.front());
     EXPECT_EQ(A::decode_adaptive_leaf(leaf).key, detached.owned.front().key);
     auto old_leaf = leaf;
-    old_leaf[8] = 1;
+    old_leaf[8] = 2;
     EXPECT_THROW(A::decode_adaptive_leaf(old_leaf), std::invalid_argument);
+}
+
+TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
+{
+    namespace A = ::SimpleFluid::Meshes::AMR;
+    A::FrozenPart part;
+    part.source = 7;
+    part.layout.family = RegionLayout::Family::Explicit;
+    const auto packet = A::encode_frozen_part(part);
+    const auto restored = A::decode_frozen_part(packet);
+    EXPECT_EQ(restored->source, part.source);
+    EXPECT_EQ(A::encode_frozen_part(*restored), packet);
+    const A::AdaptiveBytes old_part(packet.begin() + A::adaptive_detail::geometry_record_header_bytes, packet.end());
+    EXPECT_THROW(A::decode_frozen_part(old_part), std::invalid_argument);
+    const auto empty = A::encode_frozen_batch({}, budget);
+    EXPECT_EQ(empty.size(), A::adaptive_detail::geometry_record_header_bytes + 3 * sizeof(std::uint64_t));
+    A::adaptive_detail::Reader reader{empty};
+    EXPECT_NO_THROW(
+        A::adaptive_detail::read_geometry_record_header(reader, A::adaptive_detail::GeometryRecordKind::FrozenBatch));
+    EXPECT_EQ(reader.word(), 0u);
+    EXPECT_EQ(reader.word(), 0u);
+    EXPECT_EQ(reader.word(), 0u);
+    EXPECT_NO_THROW(reader.done());
+    const A::AdaptiveBytes old_empty(3 * sizeof(std::uint64_t), 0);
+    A::adaptive_detail::Reader legacy{old_empty};
+    EXPECT_THROW(
+        A::adaptive_detail::read_geometry_record_header(legacy, A::adaptive_detail::GeometryRecordKind::FrozenBatch),
+        std::invalid_argument);
+    EXPECT_THROW(A::encode_frozen_batch({}, empty.size() - 1), std::invalid_argument);
 }
 
 } // namespace

@@ -1,6 +1,8 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/OrdinaryIdentitySupport.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 
 namespace SimpleFluid::PLIC
@@ -9,14 +11,14 @@ namespace
 {
 namespace on = details::ordinary_native;
 namespace ex = exact_geometry_detail;
-constexpr std::uint64_t exact_point_tag = 0x5346504f494e5431ULL;
-constexpr std::uint64_t exact_line_tag = 0x53464c494e453631ULL;
-constexpr std::uint64_t exact_support_tag = 0x53464a504c414e36ULL;
-constexpr std::uint64_t exact_displacement_tag = 0x5346444953503631ULL;
-void exact_packet(std::span<const char> packet, std::uint64_t tag, unsigned count)
+constexpr GeometryTag exact_point_tag = GeometryTag::ExactPoint;
+constexpr GeometryTag exact_line_tag = GeometryTag::ExactLine;
+constexpr GeometryTag exact_support_tag = GeometryTag::ExactPlaneSupport;
+constexpr GeometryTag exact_displacement_tag = GeometryTag::ExactDisplacement;
+void exact_packet(std::span<const char> packet, GeometryTag tag, unsigned count)
 {
     ex::WireReader reader{packet, 0, true};
-    if (reader.word() != tag)
+    if (reader.tag() != tag)
         throw std::invalid_argument("Foreign geometry identity kind or arithmetic mode.");
     std::array<ex::Q, 6> values;
     for (unsigned i = 0; i < count; ++i)
@@ -41,14 +43,14 @@ void ordinary_support(std::span<const char> packet)
     for (;;)
     {
         on::Reader reader{packet, 0, true};
-        switch (reader.word())
+        switch (reader.tag())
         {
-            case 0x53464e4158495331ULL:
+            case GeometryTag::OrdinaryAxisSupport:
                 if (reader.word() > 2)
                     on::reject("invalid support axis.");
                 (void) reader.real();
                 break;
-            case 0x53464e534f555231ULL: {
+            case GeometryTag::OrdinarySourceSupport: {
                 const auto count = reader.count(4096);
                 if (count < 3)
                     on::reject("invalid source support count.");
@@ -62,7 +64,7 @@ void ordinary_support(std::span<const char> packet)
                 }
                 break;
             }
-            case 0x53464e494e505431ULL: {
+            case GeometryTag::OrdinaryInputSupport: {
                 const auto normal = reader.point();
                 const auto first = std::find_if(normal.begin(), normal.end(), [](auto value) { return value != 0; });
                 if (first == normal.end() || *first < 0)
@@ -71,7 +73,7 @@ void ordinary_support(std::span<const char> packet)
                 (void) reader.real();
                 break;
             }
-            case 0x53464e5452414e31ULL: {
+            case GeometryTag::OrdinaryTranslatedSupport: {
                 const auto ancestry = reader.packet();
                 if (reader.point() == on::WidePoint{})
                     on::reject("zero support translation must retain its parent key.");
@@ -79,23 +81,23 @@ void ordinary_support(std::span<const char> packet)
                 packet = ancestry;
                 continue;
             }
-            case 0x5346465053505431ULL:
+            case GeometryTag::OrdinaryPlaneSupport:
                 if (reader.word() > 2)
                     on::reject("invalid support axis.");
                 (void) reader.point();
                 (void) reader.real();
                 break;
-            case 0x5346454441475331ULL: {
+            case GeometryTag::OrdinaryExtrusionDagSupport: {
                 const auto count = reader.count(packet.size());
                 if (!count)
                     on::reject("empty support construction DAG.");
                 for (std::size_t i = 0; i < count; ++i)
                 {
                     on::Reader record{reader.packet(), 0, true};
-                    const auto kind = record.word();
-                    if (kind == 0)
+                    const auto kind = static_cast<SupportRecipeKind>(record.byte());
+                    if (kind == SupportRecipeKind::Original)
                         (void) record.point();
-                    else if (kind == 1)
+                    else if (kind == SupportRecipeKind::Derived)
                     {
                         const auto parents = record.count(record.bytes.size());
                         if (!parents)
@@ -164,7 +166,7 @@ std::vector<char> details::checked_identity_key(
         {
             case GeometryIdentityKind::Point: {
                 on::Reader reader{packet, 0, true};
-                if (reader.word() != on::point_tag)
+                if (reader.tag() != on::point_tag)
                     on::reject("foreign point identity kind.");
                 (void) reader.point();
                 reader.finish();
@@ -172,7 +174,7 @@ std::vector<char> details::checked_identity_key(
             }
             case GeometryIdentityKind::Displacement: {
                 on::Reader reader{packet, 0, true};
-                if (reader.word() != on::displacement_tag)
+                if (reader.tag() != on::displacement_tag)
                     on::reject("foreign displacement identity kind.");
                 if (reader.point() == on::WidePoint{})
                     on::reject("zero displacement requires an empty canonical body.");
@@ -184,7 +186,7 @@ std::vector<char> details::checked_identity_key(
                 break;
             case GeometryIdentityKind::Line: {
                 on::Reader reader{packet, 0, true};
-                if (reader.word() != 0x534646504c494e31ULL)
+                if (reader.tag() != GeometryTag::OrdinaryLine)
                     on::reject("foreign line identity kind or arithmetic mode.");
                 const auto axis = reader.word();
                 if (axis > 2)
@@ -204,15 +206,48 @@ std::vector<char> details::checked_identity_key(
 }
 PointIdentity<ArithmeticMode::Exact> promote_identity(const PointIdentity<ArithmeticMode::Ordinary>& identity)
 {
-    const auto source = on::read_point(details::GeometryIdentityAccess::key(identity));
-    return details::GeometryIdentityAccess::make<PointIdentity<ArithmeticMode::Exact>>(
-        ex::point_packet({ex::exact_wide(source[0]), ex::exact_wide(source[1]), ex::exact_wide(source[2])}));
+    const auto source = details::GeometryIdentityAccess::point(identity);
+    return ex::make_point_identity({ex::exact_wide(source[0]), ex::exact_wide(source[1]), ex::exact_wide(source[2])});
 }
 DisplacementIdentity<ArithmeticMode::Exact> promote_identity(
     const DisplacementIdentity<ArithmeticMode::Ordinary>& identity)
 {
-    const auto source = on::read_displacement(details::GeometryIdentityAccess::key(identity));
-    return details::GeometryIdentityAccess::make<DisplacementIdentity<ArithmeticMode::Exact>>(
-        ex::displacement_packet({ex::exact_wide(source[0]), ex::exact_wide(source[1]), ex::exact_wide(source[2])}));
+    const auto source = details::GeometryIdentityAccess::displacement(identity);
+    return ex::make_displacement_identity(
+        {ex::exact_wide(source[0]), ex::exact_wide(source[1]), ex::exact_wide(source[2])});
 }
+namespace details
+{
+OrdinaryIdentityPoint import_ordinary_identity_point(GeometryIdentityKind kind, std::span<const char> key)
+{
+    if (kind == GeometryIdentityKind::Displacement && key.empty())
+        return {};
+    on::Reader reader{key};
+    const auto tag = reader.tag();
+    if (tag != (kind == GeometryIdentityKind::Point ? on::point_tag : on::displacement_tag))
+        on::reject("foreign native point/displacement import kind.");
+    auto value = reader.point();
+    reader.finish();
+    return value;
+}
+OrdinaryIdentityLine import_ordinary_identity_line(std::span<const char> key)
+{
+    on::Reader reader{key};
+    if (reader.tag() != GeometryTag::OrdinaryLine)
+        on::reject("foreign native line import kind.");
+    const auto axis = reader.word();
+    const auto direction = reader.point(), anchor = reader.point();
+    reader.finish();
+    return {axis, direction, anchor};
+}
+GeometryIdentityBackingPtr import_geometry_identity_backing(
+    GeometryIdentityKind kind, ArithmeticMode mode, std::vector<char> checked_key, std::size_t budget)
+{
+    if (mode == ArithmeticMode::Exact)
+        return import_exact_identity_backing(kind, std::move(checked_key), budget);
+    if (mode == ArithmeticMode::Ordinary && kind == GeometryIdentityKind::PlaneSupport)
+        return import_ordinary_support_backing(std::move(checked_key), budget);
+    throw std::invalid_argument("Unsupported native identity import kind or mode.");
+}
+} // namespace details
 } // namespace SimpleFluid::PLIC

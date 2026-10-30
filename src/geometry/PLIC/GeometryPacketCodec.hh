@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "geometry/PLIC/GeometryCodecTags.hh"
 #include "utils/ArithmeticMode.hh"
 #include <cstddef>
 #include <cstdint>
@@ -11,10 +12,10 @@
 #include <vector>
 namespace SimpleFluid::PLIC
 {
-/** Envelope fields are six little-endian uint64 words: magic, version, kind,
- * arithmetic mode (Ordinary=0, Exact=2), finite profile and body byte length.
- * Framing validates metadata only; owning decoders validate canonical bodies. */
-enum class GeometryPacketKind : std::uint64_t
+/** One family signature (8 bytes), then version/kind/mode bytes, finite
+ * profile (8 bytes) and body length (8 bytes), all words little endian.
+ * Framing validates metadata only; owning decoders validate bodies. */
+enum class GeometryPacketKind : std::uint8_t
 {
     PointIdentity = 1,
     LineIdentity = 2,
@@ -25,10 +26,10 @@ enum class GeometryPacketKind : std::uint64_t
     CellCertificate = 18,
     ConvexFragment = 19
 };
-inline constexpr std::size_t geometry_packet_header_bytes = 6 * sizeof(std::uint64_t);
+inline constexpr std::size_t geometry_packet_header_bytes = 3 * sizeof(std::uint64_t) + 3;
 inline constexpr std::size_t geometry_packet_default_budget = 64 * 1024 * 1024;
 inline constexpr std::uint64_t geometry_packet_magic = 0x534647454f4d5631ULL;
-inline constexpr std::uint64_t geometry_packet_version = 1;
+inline constexpr std::uint8_t geometry_packet_version = 2;
 [[nodiscard]] constexpr std::uint64_t geometry_packet_profile(ArithmeticMode mode) noexcept
 {
     if (mode == ArithmeticMode::Exact)

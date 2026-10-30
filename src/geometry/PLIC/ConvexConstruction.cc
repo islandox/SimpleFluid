@@ -24,7 +24,14 @@ std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint
         if (!key.key.empty() &&
             std::all_of(points.begin() + 1, points.end(), [&](const auto& p)
                 { return has_support(p, key); }))
-            result.push_back(key);
+        {
+            auto attached = key;
+            for (const auto& point : points)
+                for (const auto& candidate : point.supports())
+                    if (candidate.key == key.key)
+                        details::OriginalSupportAuthorityAccess::merge(attached, candidate);
+            result.push_back(std::move(attached));
+        }
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
     return result;

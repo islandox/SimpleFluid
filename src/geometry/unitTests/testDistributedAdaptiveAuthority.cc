@@ -231,7 +231,7 @@ TEST(DistributedAdaptiveAuthority, TileCodecRejectsLegacyWrongKindAndRankLocalCo
     old.erase(old.begin() + 8, old.begin() + 8 + A::adaptive_detail::geometry_record_header_bytes);
     EXPECT_THROW(A::decode_adaptive_tile(old), std::invalid_argument);
     auto wrong = bytes;
-    wrong[24] = static_cast<char>(A::adaptive_detail::GeometryRecordKind::SurfaceRequest);
+    wrong[17] = static_cast<char>(A::adaptive_detail::GeometryRecordKind::SurfaceRequest);
     EXPECT_THROW(A::decode_adaptive_tile(wrong), std::invalid_argument);
     auto truncated = bytes;
     truncated.pop_back();
@@ -248,7 +248,7 @@ TEST(DistributedAdaptiveAuthority, TileCodecRejectsLegacyWrongKindAndRankLocalCo
             {
                 auto incoming = bytes;
                 if (comm->getRank() == 0)
-                    incoming[16] = 2; // Unsupported outer record version on one rank.
+                    incoming[16] = 3; // Unsupported outer record version on one rank.
                 candidate.emplace(A::decode_adaptive_tile(incoming));
             });
         published = std::move(candidate);

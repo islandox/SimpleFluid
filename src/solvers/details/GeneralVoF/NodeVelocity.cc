@@ -39,11 +39,18 @@ struct HeaderWriter
 {
     std::vector<char>& bytes;
     void word(std::uint64_t value) { append_word(bytes, value); }
+    void byte(std::uint8_t value) { bytes.push_back(static_cast<char>(value)); }
 };
 struct HeaderReader
 {
     const std::vector<char>& bytes;
     std::size_t& offset;
+    std::uint8_t byte()
+    {
+        if (offset == bytes.size())
+            throw std::runtime_error("Truncated general VoF geometry record tag.");
+        return static_cast<std::uint8_t>(bytes[offset++]);
+    }
     std::uint64_t word()
     {
         if (offset > bytes.size() || bytes.size() - offset < sizeof(std::uint64_t))

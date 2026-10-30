@@ -12,6 +12,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include <algorithm>
 #include <bit>
 #include <cfenv>
@@ -57,8 +58,11 @@ class SIMPLEFLUID_LOCAL DynamicGeometryAccess
 {
 public:
     static std::shared_ptr<const DynamicPointProvenance> identity(const DynamicPoint& p);
-    static std::size_t identity_bytes(const std::shared_ptr<const DynamicPointProvenance>& p);
-    static std::size_t storage_bytes(const DynamicPoint& p);
+    static std::size_t identity_bytes(
+        const std::shared_ptr<const DynamicPointProvenance>& p, bool include_support_payloads = true);
+    static void retain_supports(
+        const std::shared_ptr<const DynamicPointProvenance>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
+    static std::size_t storage_bytes(const DynamicPoint& p, bool include_support_payloads = true);
     static bool same_source(const DynamicPoint& a, const DynamicPoint& b);
     static void seal(DynamicPoint& point, std::vector<PlaneAuthority> supports);
     static void seal_represented_source(DynamicPoint& point);
@@ -91,11 +95,10 @@ namespace SimpleFluid::PLIC
 
 namespace details SIMPLEFLUID_LOCAL
 {
-[[nodiscard]] PlaneAuthority original_support_authority(std::span<const char>);
 template<ArithmeticMode Mode>
 [[nodiscard]] PlaneAuthority original_support_authority(const PlaneSupportIdentity<Mode>& identity)
 {
-    return original_support_authority(GeometryIdentityAccess::key(identity));
+    return OriginalSupportAuthorityAccess::issue(identity);
 }
 extern constinit thread_local GeometryStatistics statistics;
 [[noreturn]] void reject(std::string_view reason);

@@ -585,8 +585,8 @@ NumericalConvexShell<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::E
 std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
     WireWriter w;
-    w.word(0x5346455841435431ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExactCell);
+    w.byte(1);
     for (auto v : cell.impl_->origin)
         w.real(v);
     w.word(cell.impl_->poly.vertices.size());
@@ -617,13 +617,14 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exac
     if (envelope.kind != GeometryPacketKind::CellCertificate)
         throw std::invalid_argument("Foreign exact cell certificate kind.");
     WireReader r{envelope.body, 0, true};
-    if (r.word() != 0x5346455841435431ULL || r.word() != 1)
+    if (r.tag() != GeometryTag::ExactCell || r.byte() != 1)
         throw std::invalid_argument("Unknown exact geometry certificate version/tag.");
     auto impl = std::make_shared<Impl>();
     for (auto& v : impl->origin)
         v = r.real();
     const auto origin = point(impl->origin);
     auto n = r.count();
+    r.require_count(n, minimum_point_bytes);
     for (std::size_t i = 0; i < n; ++i)
     {
         P p;
@@ -632,10 +633,12 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exac
         impl->poly.vertices.push_back(add(p, origin));
     }
     n = r.count();
+    r.require_count(n, 4 * sizeof(std::uint64_t));
     for (std::size_t i = 0; i < n; ++i)
     {
         Face face;
         auto m = r.count();
+        r.require_count(m, sizeof(std::uint64_t));
         for (std::size_t j = 0; j < m; ++j)
             face.push_back(r.word());
         impl->poly.faces.push_back(std::move(face));
@@ -1056,6 +1059,11 @@ void CachedPlaneDistances::append(int sign)
     output_signs.push_back(sign);
 }
 
+void WireWriter::byte(std::uint8_t value)
+{
+    data.push_back(static_cast<char>(value));
+}
+
 void WireWriter::word(std::uint64_t value)
 {
     for (unsigned b = 0; b < 8; ++b)
@@ -1084,6 +1092,13 @@ void WireWriter::rational(const Q& value)
 {
     integer(boost::multiprecision::numerator(value));
     integer(boost::multiprecision::denominator(value));
+}
+
+std::uint8_t WireReader::byte()
+{
+    if (position >= data.size())
+        throw std::invalid_argument("Truncated exact geometry metadata.");
+    return static_cast<std::uint8_t>(static_cast<unsigned char>(data[position++]));
 }
 
 std::uint64_t WireReader::word()

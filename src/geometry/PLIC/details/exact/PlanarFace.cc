@@ -1,11 +1,10 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
-#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 
 namespace SimpleFluid::PLIC
 {
-using IdentityAccess = details::GeometryIdentityAccess;
 using ExactPointIdentity = PointIdentity<ArithmeticMode::Exact>;
 using ExactLineIdentity = LineIdentity<ArithmeticMode::Exact>;
 using ExactSupportIdentity = PlaneSupportIdentity<ArithmeticMode::Exact>;
@@ -119,88 +118,24 @@ bool PlanarFace<ArithmeticMode::Exact>::oppositely_oriented(const PlanarFace<Ari
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
-namespace exact_geometry_detail
-{
-P authority_point(std::span<const char> packet)
-{
-    WireReader r{packet};
-    const auto tag = r.word();
-    if (tag == details::ordinary_native::point_tag)
-    {
-        const auto source = details::ordinary_native::read_point(packet);
-        return {exact_wide(source[0]), exact_wide(source[1]), exact_wide(source[2])};
-    }
-    if (tag != 0x5346504f494e5431ULL)
-        throw std::invalid_argument("Invalid exact authority point.");
-    P p;
-    for (auto& q : p)
-        q = r.rational();
-    r.finish();
-    return p;
-}
-
-P displacement_point(std::span<const char> packet)
-{
-    if (packet.empty())
-        return {};
-    WireReader r{packet};
-    const auto tag = r.word();
-    if (tag == details::ordinary_native::displacement_tag)
-    {
-        const auto source = details::ordinary_native::read_displacement(packet);
-        return {exact_wide(source[0]), exact_wide(source[1]), exact_wide(source[2])};
-    }
-    if (tag != 0x5346444953503631ULL)
-        throw std::invalid_argument("Invalid exact displacement certificate.");
-    P p;
-    for (auto& q : p)
-        q = r.rational();
-    r.finish();
-    return p;
-}
-
-std::vector<char> displacement_packet(const P& p)
-{
-    if (zero(p))
-        return {};
-    WireWriter w;
-    w.word(0x5346444953503631ULL);
-    for (const auto& q : p)
-        w.rational(q);
-    return std::move(w.data);
-}
-
-std::vector<char> point_packet(const P& p)
-{
-    WireWriter w;
-    w.word(0x5346504f494e5431ULL);
-    for (const auto& q : p)
-        w.rational(q);
-    return std::move(w.data);
-}
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
 template<> ExactDisplacementIdentity displacement<ArithmeticMode::Exact>(GeometryPoint from, GeometryPoint to)
 {
     for (unsigned a = 0; a < 3; ++a)
         if (!std::isfinite(from[a]) || !std::isfinite(to[a]))
             throw std::invalid_argument("Exact displacement needs finite represented endpoints.");
-    return IdentityAccess::make<ExactDisplacementIdentity>(displacement_packet(sub(point(to), point(from))));
+    return make_displacement_identity(sub(point(to), point(from)));
 }
 
 template<>
 ExactDisplacementIdentity displacement_difference<ArithmeticMode::Exact>(
     const ExactDisplacementIdentity& first, const ExactDisplacementIdentity& second)
 {
-    return IdentityAccess::make<ExactDisplacementIdentity>(displacement_packet(
-        sub(displacement_point(IdentityAccess::key(first)), displacement_point(IdentityAccess::key(second)))));
+    return make_displacement_identity(sub(displacement_point(first), displacement_point(second)));
 }
 
 template<> GeometryPoint displacement_display<ArithmeticMode::Exact>(const ExactDisplacementIdentity& packet)
 {
-    const auto p = rounded_point(displacement_point(IdentityAccess::key(packet)));
+    const auto p = rounded_point(displacement_point(packet));
     return {p.x, p.y, p.z};
 }
 
@@ -208,15 +143,14 @@ template<>
 ExactPointIdentity point_translated<ArithmeticMode::Exact>(
     const ExactPointIdentity& identity, const ExactDisplacementIdentity& displacement)
 {
-    return IdentityAccess::make<ExactPointIdentity>(point_packet(
-        add(authority_point(IdentityAccess::key(identity)), displacement_point(IdentityAccess::key(displacement)))));
+    return make_point_identity(add(authority_point(identity), displacement_point(displacement)));
 }
 
 template<>
 ExactPointIdentity periodic_point<ArithmeticMode::Exact>(
     const ExactPointIdentity& identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
 {
-    auto p = authority_point(IdentityAccess::key(identity));
+    auto p = authority_point(identity);
     for (unsigned a = 0; a < 3; ++a)
         if (periodic[a])
         {
@@ -225,14 +159,14 @@ ExactPointIdentity periodic_point<ArithmeticMode::Exact>(
             if (p[a] == exact(upper[a]))
                 p[a] = exact(lower[a]);
         }
-    return IdentityAccess::make<ExactPointIdentity>(point_packet(p));
+    return make_point_identity(p);
 }
 
 PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::translated(
     const ExactDisplacementIdentity& displacement) const
 {
     auto translated = std::make_shared<Impl>();
-    const auto shift = displacement_point(IdentityAccess::key(displacement));
+    const auto& shift = displacement_point(displacement);
     for (const auto& p : impl_->polygon)
         translated->polygon.push_back(add(p, shift));
     return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(translated)));
@@ -240,7 +174,7 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::translat
 
 template<> GeometryPoint point_display<ArithmeticMode::Exact>(const ExactPointIdentity& identity)
 {
-    const auto point = rounded_point(authority_point(IdentityAccess::key(identity)));
+    const auto point = rounded_point(authority_point(identity));
     return {point.x, point.y, point.z};
 }
 
@@ -250,7 +184,7 @@ std::array<GeometryValue<ArithmeticMode::Exact>, 3> numerical_point<ArithmeticMo
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.source_coordinate_exports;
-    const auto point = authority_point(IdentityAccess::key(identity));
+    const auto& point = authority_point(identity);
     std::array<GeometryValue<ArithmeticMode::Exact>, 3> result;
     for (std::size_t axis = 0; axis < 3; ++axis)
         result[axis] = measured(point[axis], true);
@@ -262,7 +196,7 @@ EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const ExactPoint
     auto index = std::make_shared<Impl>();
     std::set<P> unique;
     for (const auto& point : points)
-        unique.insert(authority_point(IdentityAccess::key(point)));
+        unique.insert(authority_point(point));
     if (unique.size() < 2)
         throw std::invalid_argument("Exact edge index needs distinct segment endpoints.");
     index->origin = *unique.begin();
@@ -271,7 +205,7 @@ EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const ExactPoint
         ++index->axis;
     for (const auto& packet : points)
     {
-        const auto p = authority_point(IdentityAccess::key(packet));
+        const auto& p = authority_point(packet);
         if (!zero(cross(sub(p, index->origin), index->direction)))
             throw std::invalid_argument("Edge authority point lies off its exact line.");
         index->points.emplace(p[index->axis], packet);
@@ -282,7 +216,7 @@ EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const ExactPoint
 std::vector<ExactPointIdentity> EdgePointIndex<ArithmeticMode::Exact>::closed_segment(
     const ExactPointIdentity& a, const ExactPointIdentity& b) const
 {
-    const auto first = authority_point(IdentityAccess::key(a)), second = authority_point(IdentityAccess::key(b));
+    const auto &first = authority_point(a), &second = authority_point(b);
     if (first == second || !zero(cross(sub(first, impl_->origin), impl_->direction)) ||
         !zero(cross(sub(second, impl_->origin), impl_->direction)))
         throw std::invalid_argument("Invalid authority segment query.");
@@ -330,11 +264,7 @@ std::vector<ExactPointIdentity> PlanarFace<ArithmeticMode::Exact>::vertex_identi
     std::vector<ExactPointIdentity> result;
     for (const auto& p : impl_->polygon)
     {
-        WireWriter w;
-        w.word(0x5346504f494e5431ULL);
-        for (const auto& q : p)
-            w.rational(q);
-        result.push_back(IdentityAccess::make<ExactPointIdentity>(std::move(w.data)));
+        result.push_back(make_point_identity(p));
     }
     return result;
 }
@@ -353,13 +283,7 @@ std::vector<ExactLineIdentity> PlanarFace<ArithmeticMode::Exact>::edge_support_i
         for (auto& q : d)
             q /= factor;
         const auto moment = cross(p, d);
-        WireWriter w;
-        w.word(0x53464c494e453631ULL);
-        for (const auto& q : d)
-            w.rational(q);
-        for (const auto& q : moment)
-            w.rational(q);
-        result.push_back(IdentityAccess::make<ExactLineIdentity>(std::move(w.data)));
+        result.push_back(make_line_identity(d, moment));
     }
     return result;
 }
@@ -370,14 +294,7 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::with_edg
     std::set<P> candidates;
     for (const auto& packet : points)
     {
-        WireReader r{IdentityAccess::key(packet)};
-        if (r.word() != 0x5346504f494e5431ULL)
-            throw std::invalid_argument("Invalid exact authority point.");
-        P p;
-        for (auto& q : p)
-            q = r.rational();
-        r.finish();
-        candidates.insert(p);
+        candidates.insert(authority_point(packet));
     }
     auto result = std::make_shared<Impl>();
     for (std::size_t i = 0; i < impl_->polygon.size(); ++i)
@@ -412,12 +329,7 @@ template<> ExactSupportIdentity planar_support<ArithmeticMode::Exact>(const Plan
     const Q divisor = normal[axis];
     for (auto& q : normal)
         q /= divisor;
-    WireWriter w;
-    w.word(0x53464a504c414e36ULL);
-    for (const auto& q : normal)
-        w.rational(q);
-    w.rational(dot(normal, face.impl_->polygon[0]));
-    return IdentityAccess::make<ExactSupportIdentity>(std::move(w.data));
+    return make_support_identity({normal[0], normal[1], normal[2], dot(normal, face.impl_->polygon[0])});
 }
 
 template<> int planar_orientation<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
@@ -497,7 +409,8 @@ bool PlanarFace<ArithmeticMode::Exact>::contains_point(const ExactPointIdentity&
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.source_membership_predicates;
-    const auto p = authority_point(IdentityAccess::key(identity)), normal = polygon_vector(impl_->polygon);
+    const auto& p = authority_point(identity);
+    const auto normal = polygon_vector(impl_->polygon);
     if (dot(normal, sub(p, impl_->polygon[0])) != 0)
         return false;
     for (std::size_t e = 0; e < impl_->polygon.size(); ++e)
@@ -584,8 +497,8 @@ void PlanarFace<ArithmeticMode::Exact>::certify_partition(
 template<> std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
 {
     WireWriter w;
-    w.word(0x5346464143454331ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExactPlanarFace);
+    w.byte(1);
     auto polygon = minimal_polygon(face.impl_->polygon);
     w.word(polygon.size());
     for (const auto& p : polygon)
@@ -618,8 +531,8 @@ std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const
 std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode_incidence(std::size_t byte_budget) const
 {
     WireWriter w;
-    w.word(0x5346464143454331ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExactPlanarFace);
+    w.byte(1);
     w.word(impl_->polygon.size());
     for (const auto& p : impl_->polygon)
         for (const auto& q : p)
@@ -634,10 +547,11 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::decode(
     if (envelope.kind != GeometryPacketKind::PlanarFace && envelope.kind != GeometryPacketKind::PlanarFaceIncidence)
         throw std::invalid_argument("Foreign planar face packet kind.");
     WireReader r{envelope.body, 0, true};
-    if (r.word() != 0x5346464143454331ULL || r.word() != 1)
+    if (r.tag() != GeometryTag::ExactPlanarFace || r.byte() != 1)
         throw std::invalid_argument("Unknown exact face certificate.");
     auto impl = std::make_shared<Impl>();
     auto n = r.count();
+    r.require_count(n, minimum_point_bytes);
     for (std::size_t i = 0; i < n; ++i)
     {
         P p;

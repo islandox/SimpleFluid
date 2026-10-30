@@ -285,7 +285,7 @@ std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Or
     constexpr auto Mode = ArithmeticMode::Ordinary;
     namespace on = details::ordinary_native;
     on::Writer w;
-    w.word(0x5346465043454c32ULL);
+    w.tag(GeometryTag::OrdinaryCell);
     w.point(on::wide(cell.origin()));
     const auto vertices = cell.local_points();
     w.word(vertices.size());
@@ -323,29 +323,70 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
     if (envelope.kind != GeometryPacketKind::CellCertificate)
         on::reject("foreign cell certificate kind.");
     on::Reader r{envelope.body, 0, true};
-    if (r.word() != 0x5346465043454c32ULL)
+    if (r.tag() != GeometryTag::OrdinaryCell)
         on::reject("foreign finite cell packet mode.");
     const auto origin = on::display(r.point());
+    GeometryLimits record_limits;
+    record_limits.arithmetic_mode = Mode;
+    record_limits.byte_budget = byte_budget;
+    details::Operation record_operation(record_limits);
+    auto& work = *details::active_work;
+    if (work.bytes > work.limits.byte_budget)
+        on::reject("cell construction budget is already exhausted.");
+    const auto allowance = std::min(byte_budget, work.limits.byte_budget - work.bytes);
+    const auto record_cap = work.bytes + allowance;
+    struct RestoreBudget
+    {
+        details::Work& work;
+        std::size_t previous;
+        ~RestoreBudget() { work.limits.byte_budget = previous; }
+    } restore{work, work.limits.byte_budget};
+    work.limits.byte_budget = record_cap;
+    auto& native_used = work.bytes;
+    auto& allocations = work.allocations;
+    const auto charge = [&](std::size_t count, std::size_t size)
+    {
+        if (native_used > record_cap || (size && count > (record_cap - native_used) / size))
+            on::reject("cell record exceeds its native decoding budget.");
+        native_used += count * size;
+    };
+    charge(1, sizeof(ConvexCellGeometry<Mode>) + sizeof(DynamicConvexGeometry));
     const auto n = r.count(4096);
     if (n > (r.bytes.size() - r.cursor) / 48)
         on::reject("cell point count exceeds the remaining encoded coordinates.");
+    charge(n, sizeof(Point<Mode>) + sizeof(DynamicPointProvenance));
     std::vector<Point<Mode>> p;
     p.reserve(n);
+    if (p.capacity() > n)
+        charge(p.capacity() - n, sizeof(Point<Mode>));
     for (std::size_t i = 0; i < n; ++i)
         p.emplace_back(r.point());
     const auto nf = r.count(4096);
-    if (nf > (r.bytes.size() - r.cursor) / 72)
+    constexpr auto minimum_face_bytes = (1 + 3 + 1 + 1 + 2) * sizeof(std::uint64_t) + sizeof(GeometryTag);
+    // Count, triangle indices, blob length, axis-support tag/index and zero scalar.
+    if (nf > (r.bytes.size() - r.cursor) / minimum_face_bytes)
         on::reject("cell face count exceeds the remaining encoded face records.");
+    charge(nf, sizeof(std::vector<std::size_t>) + sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>));
     std::vector<std::vector<std::size_t>> faces;
     faces.reserve(nf);
     std::vector<PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports;
+    supports.reserve(nf);
+    std::size_t index_count = 0;
+    if (faces.capacity() > nf)
+        charge(faces.capacity() - nf, sizeof(std::vector<std::size_t>));
+    if (supports.capacity() > nf)
+        charge(supports.capacity() - nf, sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>));
     for (std::size_t f = 0; f < nf; ++f)
     {
         const auto count = r.count(n);
         if (count > (r.bytes.size() - r.cursor) / 8)
             on::reject("cell face index count exceeds the remaining encoded indices.");
+        charge(count, sizeof(std::size_t));
+        index_count += count;
         std::vector<std::size_t> face;
         face.reserve(count);
+        if (face.capacity() > count)
+            charge(face.capacity() - count, sizeof(std::size_t));
         for (std::size_t j = 0; j < count; ++j)
         {
             const auto i = r.word();
@@ -357,11 +398,34 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
         const auto support = r.packet();
         if (support.empty())
             on::reject("finite cell packet lost its source support.");
-        supports.push_back(details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-            details::checked_identity_key(GeometryIdentityKind::PlaneSupport, Mode, support)));
+        if (support.size() > record_cap - native_used)
+            on::reject("cell support exceeds the remaining native record budget.");
+        auto identity = details::GeometryIdentityAccess::decode_key<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+            details::checked_identity_key(GeometryIdentityKind::PlaneSupport, Mode, support), record_cap - native_used);
+        allocations.retain(identity, native_used, record_cap);
+        supports.push_back(std::move(identity));
     }
     r.finish();
-    auto result = make_local(origin, p, faces)->with_native_supports(supports);
+    // These arrays/planes are unavoidably new during reconstruction. Check
+    // this lower bound before make_local allocates any output graph. The
+    // shared Work/ledger then enforces the remaining cumulative requests.
+    std::size_t reconstruction = 0;
+    const auto require = [&](std::size_t count, std::size_t size)
+    {
+        const auto remaining = record_cap - native_used;
+        if (reconstruction > remaining || (size && count > (remaining - reconstruction) / size))
+            on::reject("cell reconstruction exceeds the remaining native record budget.");
+        reconstruction += count * size;
+    };
+    require(1, sizeof(details::GeometryStorage<Mode>));
+    require(n, sizeof(details::StoredVertex<Mode>) + sizeof(DynamicPoint));
+    require(nf,
+        sizeof(details::StoredPlane<Mode>) + sizeof(details::StoredSurface<Mode>) + sizeof(std::vector<std::size_t>));
+    require(index_count, sizeof(std::size_t));
+    auto construction_limits = work.limits;
+    construction_limits.byte_budget = allowance;
+    auto result = make_local(origin, p, faces, construction_limits)->with_native_supports(supports);
+    allocations.retain(result, native_used, record_cap);
     const auto canonical = canonical_cell_key(*result);
     if (canonical.size() != envelope.body.size() ||
         !std::equal(canonical.begin(), canonical.end(), envelope.body.begin()))

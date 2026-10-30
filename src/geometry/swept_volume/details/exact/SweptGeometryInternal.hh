@@ -5,6 +5,7 @@
 
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 
 namespace SimpleFluid::PLIC

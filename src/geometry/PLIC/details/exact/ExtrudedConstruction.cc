@@ -314,8 +314,8 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ExtrudedConstruction<ArithmeticMode::Ex
 std::vector<char> ExtrudedConstruction<ArithmeticMode::Exact>::encode() const
 {
     WireWriter w;
-    w.word(0x5346455854524331ULL);
-    w.word(1);
+    w.tag(GeometryTag::ExtrudedConstruction);
+    w.byte(1);
     const auto signature = topology_descriptor(*impl_->topology);
     w.word(signature.size());
     for (auto byte : signature)
@@ -352,7 +352,7 @@ std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Exact>> ExtrudedConst
     if (!topology)
         throw std::invalid_argument("Exact extrusion decode needs retained topology.");
     WireReader r{packet};
-    if (r.word() != 0x5346455854524331ULL || r.word() != 1)
+    if (r.tag() != GeometryTag::ExtrudedConstruction || r.byte() != 1)
         throw std::invalid_argument("Unknown exact extrusion packet.");
     auto n = r.word();
     if (n > r.data.size() - r.position)
@@ -365,6 +365,7 @@ std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Exact>> ExtrudedConst
     std::vector<ScalarRecipe> z;
     std::vector<std::size_t> active, zactive;
     n = r.count();
+    r.require_count(n, 4 * sizeof(std::uint64_t));
     for (std::size_t i = 0; i < n; ++i)
     {
         PointRecipe p;
@@ -379,6 +380,7 @@ std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Exact>> ExtrudedConst
     for (std::size_t i = 0; i < n; ++i)
         active.push_back(r.word());
     n = r.count();
+    r.require_count(n, 2 * sizeof(std::uint64_t));
     for (std::size_t i = 0; i < n; ++i)
     {
         ScalarRecipe p;

@@ -18,7 +18,7 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490008ULL;
+constexpr uint64_t partition_magic = 0x5346524547490009ULL;
 struct Writer
 {
     std::vector<char> data;
@@ -710,7 +710,7 @@ std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
 NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor& descriptor)
 {
     Writer w;
-    w.value(std::uint64_t{0x53464e4154520001ULL});
+    w.value(std::uint64_t{0x53464e4154520002ULL});
     w.value(static_cast<std::uint64_t>(descriptor.kind));
     w.value(std::uint64_t(descriptor.parts.size()));
     for (const auto& part : descriptor.parts)
@@ -726,7 +726,7 @@ std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descripto
     std::span<const char> bytes, NativeFragmentCache& cache)
 {
     Reader r{bytes};
-    if (r.value<std::uint64_t>() != 0x53464e4154520001ULL)
+    if (r.value<std::uint64_t>() != 0x53464e4154520002ULL)
         throw std::invalid_argument("Unsupported native fragment recipe version.");
     NativeFragmentDescriptor d;
     const auto kind = r.value<std::uint64_t>();
