@@ -7,12 +7,12 @@ namespace ordinary_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
-    std::span<const char> identity, ArithmeticMode mode)
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
     Operation scope(mode_limits(mode));
     ++statistics.source_imports;
-    if (sources.empty() || identity.size() > active_work->limits.byte_budget)
+    if (sources.empty() || canonical_key_size(identity) > active_work->limits.byte_budget)
         reject("source point export requires a capped authenticated source fan.");
     std::size_t faces = 0;
     for (const auto* source : sources)
@@ -51,8 +51,8 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
 }
 
 template<ArithmeticMode Mode>
-DynamicPoint dynamic_source_point(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity, ArithmeticMode mode)
+DynamicPoint dynamic_source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>& source,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
     const std::array<const ConvexCellGeometry<ArithmeticMode::Ordinary>*, 1> sources{&source};
@@ -61,7 +61,7 @@ DynamicPoint dynamic_source_point(
 
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
-    std::span<const char> identity, ArithmeticMode mode)
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
     Operation scope(mode_limits(mode));
@@ -144,9 +144,9 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
         PlaneAuthority native_authority;
         std::span<const PlaneAuthority> authorities = plane->authorities;
-        if (authorities.empty() && !plane->native_support.empty())
+        if (authorities.empty() && plane->native_support.has_value())
         {
-            native_authority = details::original_support_authority(plane->native_support);
+            native_authority = details::original_support_authority(*plane->native_support);
             active_work->charge(native_authority.key.size(), sizeof(std::uint64_t));
             authorities = {&native_authority, 1};
         }
@@ -237,13 +237,13 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
 }
 
 template DynamicPoint source_point_fan<kernel_mode>(
-    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources, std::span<const char> identity,
-    ArithmeticMode mode);
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
+template DynamicPoint dynamic_source_point<kernel_mode>(const ConvexCellGeometry<ArithmeticMode::Ordinary>& source,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template DynamicPoint dynamic_source_point<kernel_mode>(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity, ArithmeticMode mode);
-template DynamicPoint dynamic_source_point<kernel_mode>(
-    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources, std::span<const char> identity,
-    ArithmeticMode mode);
+    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template DynamicPoint dynamic_point_displaced<kernel_mode>(
     const DynamicPoint& source, const DynamicPoint& displacement);
 template DynamicPoint GeometryKernel<kernel_mode>::backtrace(const DynamicPoint& source, GeometryPoint velocity,

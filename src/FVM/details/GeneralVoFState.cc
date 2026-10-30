@@ -400,7 +400,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         }
     }
     for (const auto& node : data.topology->nodes)
-        budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.capacity());
+        budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.payload_bytes());
     for (const auto& [id, point] : data.topology->finite_nodes)
         budget.add(sizeof(id) + 4 * sizeof(void*) + PLIC::dynamic_point_storage_bytes(point));
     for (const auto& [id, identity] : data.topology->construction_nodes)
@@ -430,7 +430,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         budget.add(sizeof(tile) +
                    (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
                    tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
-                   tile.boundary.capacity() + tile.second_image_identity.capacity() +
+                   tile.boundary.capacity() + tile.second_image_identity.payload_bytes() +
                    AMR::encode_adaptive_key(tile.first).size() +
                    (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
         if (geometry.insert(tile.geometry.get()).second)

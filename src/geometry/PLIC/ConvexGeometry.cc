@@ -46,8 +46,8 @@ OrdinaryBoundary::OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary> boun
     const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
         DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
     const auto& plane = *storage->surfaces.at(boundary_.face).plane;
-    if (plane.authorities.empty() && !plane.native_support.empty())
-        native_authority_ = details::original_support_authority(plane.native_support);
+    if (plane.authorities.empty() && plane.native_support.has_value())
+        native_authority_ = details::original_support_authority(*plane.native_support);
 }
 
 std::span<const PlaneAuthority> OrdinaryBoundary::authorities() const

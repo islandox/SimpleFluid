@@ -5,7 +5,7 @@ namespace SimpleFluid::PLIC
 namespace MeshUtils = ::SimpleFluid::MeshUtils;
 /** Exact planar support and subtraction helpers; independent of AMR ancestry. */
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> planar_support<ArithmeticMode::Exact>(
+[[nodiscard]] SIMPLEFLUID_LOCAL PlaneSupportIdentity<ArithmeticMode::Exact> planar_support<ArithmeticMode::Exact>(
     const PlanarFace<ArithmeticMode::Exact>&);
 template<>
 [[nodiscard]] SIMPLEFLUID_LOCAL int planar_orientation<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>&);
@@ -14,44 +14,49 @@ template<>
 subtract_planar_faces<ArithmeticMode::Exact>(
     const PlanarFace<ArithmeticMode::Exact>&, std::span<const PlanarFacePtr<ArithmeticMode::Exact>>);
 
+template<>
+[[nodiscard]] std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>&);
 /** Sorted exact points on one nondegenerate line; no public rational types.
  * Query work is logarithmic plus returned segment points, never all-line fanout. */
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> displacement<ArithmeticMode::Exact>(
+[[nodiscard]] SIMPLEFLUID_LOCAL DisplacementIdentity<ArithmeticMode::Exact> displacement<ArithmeticMode::Exact>(
     GeometryPoint from, GeometryPoint to);
 
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> displacement_difference<ArithmeticMode::Exact>(
-    std::span<const char> first, std::span<const char> second);
+[[nodiscard]] SIMPLEFLUID_LOCAL DisplacementIdentity<ArithmeticMode::Exact>
+displacement_difference<ArithmeticMode::Exact>(const DisplacementIdentity<ArithmeticMode::Exact>& first,
+    const DisplacementIdentity<ArithmeticMode::Exact>& second);
 template<>
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint displacement_display<ArithmeticMode::Exact>(
-    std::span<const char> displacement);
+    const DisplacementIdentity<ArithmeticMode::Exact>& displacement);
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> point_translated<ArithmeticMode::Exact>(
-    std::span<const char> point, std::span<const char> displacement);
+[[nodiscard]] SIMPLEFLUID_LOCAL PointIdentity<ArithmeticMode::Exact> point_translated<ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>& point, const DisplacementIdentity<ArithmeticMode::Exact>& displacement);
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> periodic_point<ArithmeticMode::Exact>(
-    std::span<const char> point, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic);
+[[nodiscard]] SIMPLEFLUID_LOCAL PointIdentity<ArithmeticMode::Exact> periodic_point<ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>& point, GeometryPoint lower, GeometryPoint upper,
+    std::array<bool, 3> periodic);
 template<>
-[[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint point_display<ArithmeticMode::Exact>(std::span<const char> identity);
+[[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint point_display<ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>& identity);
 
 /** Enclose a source authority point for a finite cache. Coordinate conversion
  * only; the returned values are not an exact construction certificate. */
 template<>
 [[nodiscard]] SIMPLEFLUID_LOCAL std::array<GeometryValue<ArithmeticMode::Exact>, 3>
-numerical_point<ArithmeticMode::Exact>(std::span<const char> identity);
+numerical_point<ArithmeticMode::Exact>(const PointIdentity<ArithmeticMode::Exact>& identity);
 
 /** Exact signed normal dot (point-anchor), retaining rational support locations. */
 template<>
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryMeasure<ArithmeticMode::Exact> point_projection<ArithmeticMode::Exact>(
-    std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor);
+    const PointIdentity<ArithmeticMode::Exact>& identity, GeometryPoint normal, GeometryPoint anchor);
 template<> class EdgePointIndex<ArithmeticMode::Exact>
 {
 public:
     struct Impl;
-    explicit EdgePointIndex(std::span<const std::vector<char>> points);
-    [[nodiscard]] std::vector<std::vector<char>> closed_segment(
-        std::span<const char> first, std::span<const char> second) const;
+    explicit EdgePointIndex(std::span<const PointIdentity<ArithmeticMode::Exact>> points);
+    [[nodiscard]] std::vector<PointIdentity<ArithmeticMode::Exact>> closed_segment(
+        const PointIdentity<ArithmeticMode::Exact>& first, const PointIdentity<ArithmeticMode::Exact>& second) const;
     [[nodiscard]] std::size_t storage_bytes() const;
 
 private:
@@ -79,17 +84,18 @@ public:
         GeometryPoint velocity, std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> reversed() const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> translated(GeometryPoint displacement) const;
-    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> translated_packet(std::span<const char> displacement) const;
+    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> translated(
+        const DisplacementIdentity<ArithmeticMode::Exact>& displacement) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> oriented_like(GeometryPoint area_vector) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> intersection(const PlanarFace<ArithmeticMode::Exact>&) const;
     /** Lossless exact point and infinite-line certificates for sparse edge
      * authority. Identities do not depend on loop start or collinear inserts. */
-    [[nodiscard]] std::vector<std::vector<char>> vertex_identities() const;
-    [[nodiscard]] std::vector<std::vector<char>> edge_support_identities() const;
+    [[nodiscard]] std::vector<PointIdentity<ArithmeticMode::Exact>> vertex_identities() const;
+    [[nodiscard]] std::vector<LineIdentity<ArithmeticMode::Exact>> edge_support_identities() const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Exact> with_edge_vertices(
-        std::span<const std::vector<char>> exact_points) const;
+        std::span<const PointIdentity<ArithmeticMode::Exact>> exact_points) const;
     [[nodiscard]] bool equivalent(const PlanarFace<ArithmeticMode::Exact>&) const;
-    [[nodiscard]] bool contains_point(std::span<const char> identity) const;
+    [[nodiscard]] bool contains_point(const PointIdentity<ArithmeticMode::Exact>& identity) const;
     [[nodiscard]] bool cell_bounds_overlap(const ConvexCellGeometry<ArithmeticMode::Exact>&) const;
     [[nodiscard]] bool contains(const PlanarFace<ArithmeticMode::Exact>&) const;
     [[nodiscard]] bool oppositely_oriented(const PlanarFace<ArithmeticMode::Exact>&) const;
@@ -104,7 +110,9 @@ public:
     [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Exact> decode(std::span<const char>);
 
 private:
-    friend std::vector<char> planar_support<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>&);
+    friend std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const PlanarFace&);
+    friend PlaneSupportIdentity<ArithmeticMode::Exact> planar_support<ArithmeticMode::Exact>(
+        const PlanarFace<ArithmeticMode::Exact>&);
     friend int planar_orientation<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>&);
     friend std::vector<PlanarFacePtr<ArithmeticMode::Exact>> subtract_planar_faces<ArithmeticMode::Exact>(
         const PlanarFace<ArithmeticMode::Exact>&, std::span<const PlanarFacePtr<ArithmeticMode::Exact>>);

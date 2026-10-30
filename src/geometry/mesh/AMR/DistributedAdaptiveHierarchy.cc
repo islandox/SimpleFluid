@@ -737,7 +737,7 @@ void fetch_copy_charge(Budget& budget, const AdaptiveLeaf& leaf)
     {
         budget.add(face.key.capacity());
         budget.add(face.boundary.capacity());
-        budget.add(face.authority_image.capacity());
+        budget.add(face.authority_image.payload_bytes());
     }
 }
 void fetch_copy_charge(Budget& budget, const AdaptiveFamily& family)
@@ -1276,7 +1276,7 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
             bytes += value.geometry->storage_bytes();
         for (const auto& face : value.surfaces)
         {
-            bytes += face.key.capacity() + face.boundary.capacity() + face.authority_image.capacity();
+            bytes += face.key.capacity() + face.boundary.capacity() + face.authority_image.payload_bytes();
             if (face.geometry && geometry.insert(face.geometry.get()).second)
                 bytes += face.geometry->storage_bytes();
         }
@@ -1891,9 +1891,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft() const
             {
                 incidence[tile.first].push_back(tile.geometry);
                 if (tile.second)
-                    incidence[*tile.second].push_back(tile.second_image_identity.empty()
+                    incidence[*tile.second].push_back(tile.second_image_identity.is_zero()
                                                           ? tile.geometry->reversed()
-                                                          : tile.geometry->reversed()->translated_packet(
+                                                          : tile.geometry->reversed()->translated(
                                                                 PLIC::displacement_difference<ArithmeticMode::Ordinary>(
                                                                     {}, tile.second_image_identity)));
             }

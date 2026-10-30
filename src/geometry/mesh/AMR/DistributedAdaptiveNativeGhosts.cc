@@ -1,6 +1,7 @@
 /** @file DistributedAdaptiveNativeGhosts.cc
  * @brief Owner-authenticated complete native halos with metric-only outer cells.
  */
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
@@ -17,16 +18,16 @@ void node_write(Writer& w, const AdaptiveNode& node)
 {
     w.word(node.gid);
     w.bytes(node.identity);
-    w.bytes(node.coordinate_identity);
+    w.bytes(PLIC::encode_identity(node.coordinate_identity));
     for (auto coordinate : node.coordinate)
         w.word(std::bit_cast<std::uint64_t>(coordinate));
 }
 AdaptiveNode node_read(Reader& r)
 {
-    AdaptiveNode node;
-    node.gid = r.word();
-    node.identity = r.bytes();
-    node.coordinate_identity = r.bytes();
+    auto gid = r.word();
+    auto identity = r.bytes();
+    auto point = PLIC::decode_identity<PLIC::PointIdentity<ArithmeticMode::Ordinary>>(r.bytes());
+    AdaptiveNode node{gid, std::move(identity), {}, std::move(point)};
     for (auto& coordinate : node.coordinate)
         coordinate = std::bit_cast<double>(r.word());
     if (node.coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(node.coordinate_identity))
@@ -129,7 +130,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 for (auto gid : needed)
                 {
                     const auto& node = *local_nodes.at(gid);
-                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.size());
+                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.payload_bytes());
                     node_write(w, node);
                 }
                 budget.packet(w.data.size());
@@ -184,7 +185,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 for (std::uint64_t i = 0; i < node_count; ++i)
                 {
                     auto node = node_read(r);
-                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.size());
+                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.payload_bytes());
                     auto found = nodes.find(node.gid);
                     if (found != nodes.end())
                     {

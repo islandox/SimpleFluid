@@ -1,7 +1,13 @@
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
 
 namespace SimpleFluid::PLIC
 {
+using IdentityAccess = details::GeometryIdentityAccess;
+using ExactPointIdentity = PointIdentity<ArithmeticMode::Exact>;
+using ExactLineIdentity = LineIdentity<ArithmeticMode::Exact>;
+using ExactSupportIdentity = PlaneSupportIdentity<ArithmeticMode::Exact>;
+using ExactDisplacementIdentity = DisplacementIdentity<ArithmeticMode::Exact>;
 PlanarFacePtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exact>::face_geometry(std::size_t face) const
 {
     auto result = std::make_shared<PlanarFace<ArithmeticMode::Exact>::Impl>();
@@ -174,39 +180,41 @@ std::vector<char> point_packet(const P& p)
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
-template<> std::vector<char> displacement<ArithmeticMode::Exact>(GeometryPoint from, GeometryPoint to)
+template<> ExactDisplacementIdentity displacement<ArithmeticMode::Exact>(GeometryPoint from, GeometryPoint to)
 {
     for (unsigned a = 0; a < 3; ++a)
         if (!std::isfinite(from[a]) || !std::isfinite(to[a]))
             throw std::invalid_argument("Exact displacement needs finite represented endpoints.");
-    return displacement_packet(sub(point(to), point(from)));
+    return IdentityAccess::make<ExactDisplacementIdentity>(displacement_packet(sub(point(to), point(from))));
 }
 
 template<>
-std::vector<char> displacement_difference<ArithmeticMode::Exact>(
-    std::span<const char> first, std::span<const char> second)
+ExactDisplacementIdentity displacement_difference<ArithmeticMode::Exact>(
+    const ExactDisplacementIdentity& first, const ExactDisplacementIdentity& second)
 {
-    return displacement_packet(sub(displacement_point(first), displacement_point(second)));
+    return IdentityAccess::make<ExactDisplacementIdentity>(displacement_packet(
+        sub(displacement_point(IdentityAccess::key(first)), displacement_point(IdentityAccess::key(second)))));
 }
 
-template<> GeometryPoint displacement_display<ArithmeticMode::Exact>(std::span<const char> packet)
+template<> GeometryPoint displacement_display<ArithmeticMode::Exact>(const ExactDisplacementIdentity& packet)
 {
-    const auto p = rounded_point(displacement_point(packet));
+    const auto p = rounded_point(displacement_point(IdentityAccess::key(packet)));
     return {p.x, p.y, p.z};
 }
 
 template<>
-std::vector<char> point_translated<ArithmeticMode::Exact>(
-    std::span<const char> identity, std::span<const char> displacement)
+ExactPointIdentity point_translated<ArithmeticMode::Exact>(
+    const ExactPointIdentity& identity, const ExactDisplacementIdentity& displacement)
 {
-    return point_packet(add(authority_point(identity), displacement_point(displacement)));
+    return IdentityAccess::make<ExactPointIdentity>(point_packet(
+        add(authority_point(IdentityAccess::key(identity)), displacement_point(IdentityAccess::key(displacement)))));
 }
 
 template<>
-std::vector<char> periodic_point<ArithmeticMode::Exact>(
-    std::span<const char> identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
+ExactPointIdentity periodic_point<ArithmeticMode::Exact>(
+    const ExactPointIdentity& identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
 {
-    auto p = authority_point(identity);
+    auto p = authority_point(IdentityAccess::key(identity));
     for (unsigned a = 0; a < 3; ++a)
         if (periodic[a])
         {
@@ -215,44 +223,44 @@ std::vector<char> periodic_point<ArithmeticMode::Exact>(
             if (p[a] == exact(upper[a]))
                 p[a] = exact(lower[a]);
         }
-    return point_packet(p);
+    return IdentityAccess::make<ExactPointIdentity>(point_packet(p));
 }
 
-PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::translated_packet(
-    std::span<const char> displacement) const
+PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::translated(
+    const ExactDisplacementIdentity& displacement) const
 {
     auto translated = std::make_shared<Impl>();
-    const auto shift = displacement_point(displacement);
+    const auto shift = displacement_point(IdentityAccess::key(displacement));
     for (const auto& p : impl_->polygon)
         translated->polygon.push_back(add(p, shift));
     return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(translated)));
 }
 
-template<> GeometryPoint point_display<ArithmeticMode::Exact>(std::span<const char> identity)
+template<> GeometryPoint point_display<ArithmeticMode::Exact>(const ExactPointIdentity& identity)
 {
-    const auto point = rounded_point(authority_point(identity));
+    const auto point = rounded_point(authority_point(IdentityAccess::key(identity)));
     return {point.x, point.y, point.z};
 }
 
 template<>
 std::array<GeometryValue<ArithmeticMode::Exact>, 3> numerical_point<ArithmeticMode::Exact>(
-    std::span<const char> identity)
+    const ExactPointIdentity& identity)
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.source_coordinate_exports;
-    const auto point = authority_point(identity);
+    const auto point = authority_point(IdentityAccess::key(identity));
     std::array<GeometryValue<ArithmeticMode::Exact>, 3> result;
     for (std::size_t axis = 0; axis < 3; ++axis)
         result[axis] = measured(point[axis], true);
     return result;
 }
 
-EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const std::vector<char>> points)
+EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const ExactPointIdentity> points)
 {
     auto index = std::make_shared<Impl>();
     std::set<P> unique;
     for (const auto& point : points)
-        unique.insert(authority_point(point));
+        unique.insert(authority_point(IdentityAccess::key(point)));
     if (unique.size() < 2)
         throw std::invalid_argument("Exact edge index needs distinct segment endpoints.");
     index->origin = *unique.begin();
@@ -261,7 +269,7 @@ EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const std::vecto
         ++index->axis;
     for (const auto& packet : points)
     {
-        const auto p = authority_point(packet);
+        const auto p = authority_point(IdentityAccess::key(packet));
         if (!zero(cross(sub(p, index->origin), index->direction)))
             throw std::invalid_argument("Edge authority point lies off its exact line.");
         index->points.emplace(p[index->axis], packet);
@@ -269,16 +277,16 @@ EdgePointIndex<ArithmeticMode::Exact>::EdgePointIndex(std::span<const std::vecto
     impl_ = std::move(index);
 }
 
-std::vector<std::vector<char>> EdgePointIndex<ArithmeticMode::Exact>::closed_segment(
-    std::span<const char> a, std::span<const char> b) const
+std::vector<ExactPointIdentity> EdgePointIndex<ArithmeticMode::Exact>::closed_segment(
+    const ExactPointIdentity& a, const ExactPointIdentity& b) const
 {
-    const auto first = authority_point(a), second = authority_point(b);
+    const auto first = authority_point(IdentityAccess::key(a)), second = authority_point(IdentityAccess::key(b));
     if (first == second || !zero(cross(sub(first, impl_->origin), impl_->direction)) ||
         !zero(cross(sub(second, impl_->origin), impl_->direction)))
         throw std::invalid_argument("Invalid authority segment query.");
     const Q lo = std::min(first[impl_->axis], second[impl_->axis]),
             hi = std::max(first[impl_->axis], second[impl_->axis]);
-    std::vector<std::vector<char>> result;
+    std::vector<ExactPointIdentity> result;
     for (auto it = impl_->points.lower_bound(lo); it != impl_->points.end() && it->first <= hi; ++it)
         result.push_back(it->second);
     return result;
@@ -288,7 +296,7 @@ std::size_t EdgePointIndex<ArithmeticMode::Exact>::storage_bytes() const
 {
     std::size_t bytes = sizeof(*this) + sizeof(Impl);
     for (const auto& [key, value] : impl_->points)
-        bytes += sizeof(key) + sizeof(value) + value.capacity() + 3 * sizeof(void*);
+        bytes += sizeof(key) + sizeof(value) + value.payload_bytes() + 3 * sizeof(void*);
     return bytes;
 }
 
@@ -310,23 +318,23 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::intersec
     return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(result)));
 }
 
-std::vector<std::vector<char>> PlanarFace<ArithmeticMode::Exact>::vertex_identities() const
+std::vector<ExactPointIdentity> PlanarFace<ArithmeticMode::Exact>::vertex_identities() const
 {
-    std::vector<std::vector<char>> result;
+    std::vector<ExactPointIdentity> result;
     for (const auto& p : impl_->polygon)
     {
         WireWriter w;
         w.word(0x5346504f494e5431ULL);
         for (const auto& q : p)
             w.rational(q);
-        result.push_back(std::move(w.data));
+        result.push_back(IdentityAccess::make<ExactPointIdentity>(std::move(w.data)));
     }
     return result;
 }
 
-std::vector<std::vector<char>> PlanarFace<ArithmeticMode::Exact>::edge_support_identities() const
+std::vector<ExactLineIdentity> PlanarFace<ArithmeticMode::Exact>::edge_support_identities() const
 {
-    std::vector<std::vector<char>> result;
+    std::vector<ExactLineIdentity> result;
     for (std::size_t i = 0; i < impl_->polygon.size(); ++i)
     {
         const auto& p = impl_->polygon[i];
@@ -344,18 +352,18 @@ std::vector<std::vector<char>> PlanarFace<ArithmeticMode::Exact>::edge_support_i
             w.rational(q);
         for (const auto& q : moment)
             w.rational(q);
-        result.push_back(std::move(w.data));
+        result.push_back(IdentityAccess::make<ExactLineIdentity>(std::move(w.data)));
     }
     return result;
 }
 
 PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::with_edge_vertices(
-    std::span<const std::vector<char>> points) const
+    std::span<const ExactPointIdentity> points) const
 {
     std::set<P> candidates;
     for (const auto& packet : points)
     {
-        WireReader r{packet};
+        WireReader r{IdentityAccess::key(packet)};
         if (r.word() != 0x5346504f494e5431ULL)
             throw std::invalid_argument("Invalid exact authority point.");
         P p;
@@ -386,7 +394,7 @@ PlanarFacePtr<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::with_edg
     return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(std::move(result)));
 }
 
-template<> std::vector<char> planar_support<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
+template<> ExactSupportIdentity planar_support<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.source_support_exports;
@@ -402,7 +410,7 @@ template<> std::vector<char> planar_support<ArithmeticMode::Exact>(const PlanarF
     for (const auto& q : normal)
         w.rational(q);
     w.rational(dot(normal, face.impl_->polygon[0]));
-    return std::move(w.data);
+    return IdentityAccess::make<ExactSupportIdentity>(std::move(w.data));
 }
 
 template<> int planar_orientation<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
@@ -478,11 +486,11 @@ std::vector<PlanarFacePtr<ArithmeticMode::Exact>> subtract_planar_faces<Arithmet
     return result;
 }
 
-bool PlanarFace<ArithmeticMode::Exact>::contains_point(std::span<const char> identity) const
+bool PlanarFace<ArithmeticMode::Exact>::contains_point(const ExactPointIdentity& identity) const
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.source_membership_predicates;
-    const auto p = authority_point(identity), normal = polygon_vector(impl_->polygon);
+    const auto p = authority_point(IdentityAccess::key(identity)), normal = polygon_vector(impl_->polygon);
     if (dot(normal, sub(p, impl_->polygon[0])) != 0)
         return false;
     for (std::size_t e = 0; e < impl_->polygon.size(); ++e)
@@ -566,17 +574,22 @@ void PlanarFace<ArithmeticMode::Exact>::certify_partition(
         throw std::invalid_argument("Exact nested face tiles have a represented coverage gap.");
 }
 
-std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode() const
+template<> std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face)
 {
     WireWriter w;
     w.word(0x5346464143454331ULL);
     w.word(1);
-    auto polygon = minimal_polygon(impl_->polygon);
+    auto polygon = minimal_polygon(face.impl_->polygon);
     w.word(polygon.size());
     for (const auto& p : polygon)
         for (const auto& q : p)
             w.rational(q);
     return std::move(w.data);
+}
+
+std::vector<char> PlanarFace<ArithmeticMode::Exact>::encode() const
+{
+    return canonical_face_key(*this);
 }
 
 std::size_t PlanarFace<ArithmeticMode::Exact>::storage_bytes() const

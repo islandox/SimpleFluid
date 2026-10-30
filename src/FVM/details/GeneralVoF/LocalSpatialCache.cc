@@ -187,8 +187,8 @@ Frontier make_frontier(
     {
         work.test();
         const auto support = PLIC::planar_support<mode>(*frontier.retained_geometry->face_geometry(face));
-        work.charge(support.capacity());
-        if (support != frontier.support_identity)
+        work.charge(support.payload_bytes());
+        if (support != *frontier.support_identity)
             continue;
         matched = true;
         frontier.retained_face = face;
@@ -201,7 +201,7 @@ Frontier make_frontier(
     frontier.original_boundary.emplace(PLIC::FaceConstraint<mode>{frontier.retained_geometry, frontier.retained_face});
     work.charge(frontier.original_boundary->storage_bytes() - sizeof(PLIC::OrdinaryBoundary));
     work.charge(
-        frontier.tile_identity.capacity() + frontier.support_identity.capacity() + frontier.boundary.capacity());
+        frontier.tile_identity.capacity() + frontier.support_identity->payload_bytes() + frontier.boundary.capacity());
     work.charge(AMR::encode_adaptive_key(frontier.retained_key).size());
     if (frontier.outside_key)
         work.charge(AMR::encode_adaptive_key(*frontier.outside_key).size());
@@ -326,7 +326,7 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
         });
     for (const auto* tile : frontier_tiles)
     {
-        if (!tile->second_image_identity.empty())
+        if (!tile->second_image_identity.is_zero())
             throw std::invalid_argument("Local VoF retained frontier has an unsupported periodic image.");
         auto frontier = make_frontier(data, *tile, work);
         Box box;

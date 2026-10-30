@@ -135,11 +135,11 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
     }
     return result;
 }
-void validate_native_point_membership(
-    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources, std::span<const char> identity)
+void validate_native_point_membership(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity)
 {
     const GeometryLimits limits;
-    if (sources.empty() || identity.size() > limits.byte_budget)
+    if (sources.empty() || canonical_key_size(identity) > limits.byte_budget)
         throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Native point requires a capped source fan.");
     std::size_t faces = 0;
     for (const auto* source : sources)
@@ -464,7 +464,8 @@ template<ArithmeticMode Mode> Point<Mode> point_displaced(const Point<Mode>& a, 
             details::certification_kernel::dynamic_point_displaced<Mode>(input[0], input[1]), input));
 }
 template<ArithmeticMode Mode>
-Point<Mode> source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity)
+Point<Mode> source_point(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, const PointIdentity<ArithmeticMode::Ordinary>& identity)
 {
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
     {
@@ -477,8 +478,8 @@ Point<Mode> source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>& sou
         return Point<Mode>(details::certification_kernel::dynamic_source_point<Mode>(source, identity, Mode));
 }
 template<ArithmeticMode Mode>
-Point<Mode> source_point(
-    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources, std::span<const char> identity)
+Point<Mode> source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity)
 {
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
     {

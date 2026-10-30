@@ -106,7 +106,7 @@ struct ReconstructionGeometry
     Vector center{};
     double volume = 0;
     GeometryMeasure<ArithmeticMode::Exact> exact_volume;
-    std::vector<std::vector<char>> vertices;
+    std::vector<PointIdentity<ArithmeticMode::Exact>> vertices;
     std::shared_ptr<const geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>> fragment;
 };
 ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, bool vertices,

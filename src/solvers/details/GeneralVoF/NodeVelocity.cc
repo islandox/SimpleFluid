@@ -2,6 +2,7 @@
  * @brief Canonical support union, affine fitting and node-authority exchange.
  */
 #include "solvers/details/GeneralVoF/NodeVelocity.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <variant>
 
 namespace SimpleFluid::detail::general_vof
 {
@@ -98,9 +100,15 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
                 OwnerPacket packet;
                 packet.peer = int(node.gid % comm->getSize());
                 append_word(packet.bytes, node.gid);
-                const auto& node_identity = finite ? node.identity : node.coordinate_identity;
-                append_word(packet.bytes, node_identity.size());
-                packet.bytes.insert(packet.bytes.end(), node_identity.begin(), node_identity.end());
+                const auto append_identity = [&](const std::vector<char>& identity)
+                {
+                    append_word(packet.bytes, identity.size());
+                    packet.bytes.insert(packet.bytes.end(), identity.begin(), identity.end());
+                };
+                if (finite)
+                    append_identity(node.identity);
+                else
+                    append_identity(PLIC::encode_identity(node.coordinate_identity));
                 for (double x : node.coordinate)
                     append_word(packet.bytes, std::bit_cast<std::uint64_t>(x));
                 const auto& support = supports.at(node.gid);
@@ -160,9 +168,12 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
         });
     auto gathered = exchange_owner_packets(packets, comm, byte_budget);
     packets.clear();
+    using CoordinateIdentity = PLIC::PointIdentity<ArithmeticMode::Ordinary>;
+    using NodeIdentity = std::variant<std::vector<char>, CoordinateIdentity>;
     struct NodeUnion
     {
-        std::vector<char> identity, coordinate_bytes;
+        NodeIdentity identity;
+        std::vector<char> coordinate_bytes;
         Vector coordinate{};
         std::map<std::vector<char>, std::vector<char>> cells, walls;
         std::set<int> participants;
@@ -196,7 +207,11 @@ std::vector<VoF::GeneralVoFNodeVelocity> node_velocity(const MeshHandle<>& mesh_
                 auto& node = nodes[gid];
                 if (!node.participants.insert(packet.peer).second)
                     throw std::runtime_error("Duplicate general VoF node union requester.");
-                auto identity = bytes(read()), coordinate = bytes(24);
+                auto encoded_identity = bytes(read());
+                NodeIdentity identity = finite
+                                            ? NodeIdentity{std::move(encoded_identity)}
+                                            : NodeIdentity{PLIC::decode_identity<CoordinateIdentity>(encoded_identity)};
+                auto coordinate = bytes(24);
                 if (node.participants.size() == 1)
                 {
                     node.identity = identity;

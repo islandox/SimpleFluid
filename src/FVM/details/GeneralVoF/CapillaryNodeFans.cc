@@ -199,7 +199,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                     for (auto node : tile.node_gids)
                     {
                         retain(node, tile.first);
-                        if (tile.second && tile.second_image_identity.empty())
+                        if (tile.second && tile.second_image_identity.is_zero())
                             retain(node, *tile.second);
                     }
                     if (tile.second)

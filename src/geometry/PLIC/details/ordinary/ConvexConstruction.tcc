@@ -143,7 +143,7 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
     for (const auto& plane : retained_planes)
     {
         active_work->charge(1, sizeof(Plane));
-        active_work->charge(plane->native_support.capacity(), 1);
+        active_work->charge((plane->native_support ? plane->native_support->payload_bytes() : 0), 1);
         active_work->charge(plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
         active_work->charge(plane->authorities.size(), sizeof(PlaneAuthority));
         for (const auto& key : plane->authorities)
@@ -340,9 +340,12 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
             const auto& words = plane->authorities.front().key;
             if (!words.empty() && words.front() <= (words.size() - 1) * 8)
             {
-                plane->native_support.resize(words.front());
-                for (std::size_t i = 0; i < plane->native_support.size(); ++i)
-                    plane->native_support[i] = static_cast<char>((words[1 + i / 8] >> (8 * (i % 8))) & 255);
+                std::vector<char> native_support(words.front());
+                for (std::size_t i = 0; i < native_support.size(); ++i)
+                    native_support[i] = static_cast<char>((words[1 + i / 8] >> (8 * (i % 8))) & 255);
+                plane->native_support =
+                    details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+                        std::move(native_support));
             }
         }
         for (const auto index : face)
@@ -598,8 +601,6 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
     for (std::size_t f = 0; f < shell.outward_faces.size(); ++f)
     {
         const auto& bytes = shell.face_support_identities[f];
-        if (bytes.empty())
-            reject("empty original source support authority.");
         auto authority = details::original_support_authority(bytes);
         active_work->charge(authority.key.size(), sizeof(std::uint64_t));
         for (const auto index : shell.outward_faces[f])

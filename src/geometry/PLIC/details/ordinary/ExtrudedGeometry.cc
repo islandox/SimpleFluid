@@ -331,9 +331,10 @@ std::size_t ExtrudedConstruction<ArithmeticMode::Ordinary>::base_storage_bytes()
         bytes += values->capacity() * sizeof(P);
     }
     bytes += b.areas.capacity() * sizeof(Scalar);
-    bytes += b.edge_supports.capacity() * sizeof(std::vector<char>) + b.support_normals.capacity() * sizeof(P);
+    bytes += b.edge_supports.capacity() * sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>) +
+             b.support_normals.capacity() * sizeof(P);
     for (const auto& support : b.edge_supports)
-        bytes += support.capacity();
+        bytes += support.payload_bytes();
     return bytes;
 }
 

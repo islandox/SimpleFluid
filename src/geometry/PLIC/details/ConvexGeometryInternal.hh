@@ -1,5 +1,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "utils/BoundedInterval.hh"
 #include "utils/OrdinaryScalar.hh"
 #include <type_traits>
@@ -89,6 +91,11 @@ namespace SimpleFluid::PLIC
 namespace details SIMPLEFLUID_LOCAL
 {
 [[nodiscard]] PlaneAuthority original_support_authority(std::span<const char>);
+template<ArithmeticMode Mode>
+[[nodiscard]] PlaneAuthority original_support_authority(const PlaneSupportIdentity<Mode>& identity)
+{
+    return original_support_authority(GeometryIdentityAccess::key(identity));
+}
 extern constinit thread_local GeometryStatistics statistics;
 [[noreturn]] void reject(std::string_view reason);
 [[noreturn]] void reject(ArithmeticMode mode, std::string_view reason);
@@ -193,7 +200,8 @@ template<> struct PlaneNormalWitness<ArithmeticMode::Ordinary>
     // Optional absolute component error for the original constructed normal.
     // This supports source-identity rank proofs, not geometric admission.
     std::optional<long double> normal_error;
-    std::vector<char> native_support; ///< Retained source support identity, separate from numerical coefficients.
+    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>>
+        native_support; ///< Retained source support identity, separate from numerical coefficients.
 };
 
 template<ArithmeticMode Mode> struct StoredPlane : PlaneNormalWitness<Mode>

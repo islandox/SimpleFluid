@@ -338,7 +338,8 @@ public:
 private:
     template<ArithmeticMode> friend class PlanarFace;
     friend class details::NativeSupportAccess;
-    [[nodiscard]] ConvexGeometryPtr<Mode> with_native_supports(std::span<const std::vector<char>>) const
+    [[nodiscard]] ConvexGeometryPtr<Mode> with_native_supports(
+        std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>>) const
         requires(Mode == ArithmeticMode::Ordinary);
     explicit ConvexCellGeometry(DynamicConvexGeometryPtr);
     DynamicConvexGeometryPtr geometry_;
@@ -373,10 +374,10 @@ template<ArithmeticMode Mode> [[nodiscard]] bool points_identical(const Point<Mo
 template<ArithmeticMode Mode> [[nodiscard]] Point<Mode> point_displaced(const Point<Mode>&, const Point<Mode>&);
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> source_point(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>&, std::span<const char> point_identity);
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>&, const PointIdentity<ArithmeticMode::Ordinary>& point_identity);
 template<ArithmeticMode Mode>
-[[nodiscard]] Point<Mode> source_point(
-    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const char> point_identity);
+[[nodiscard]] Point<Mode> source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>,
+    const PointIdentity<ArithmeticMode::Ordinary>& point_identity);
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> backtrace_constrained(const Point<Mode>&, GeometryPoint velocity, double timestep,
     std::span<const FaceConstraint<Mode>>, GeometryLimits = {});

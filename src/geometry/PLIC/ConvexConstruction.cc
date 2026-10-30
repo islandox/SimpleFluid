@@ -213,11 +213,12 @@ GeometrySourceSnapshot prepare_source_geometry(
     snapshot.shell = source.numerical_shell();
     active_work->charge(snapshot.shell.relative_vertices.capacity(), sizeof(snapshot.shell.relative_vertices.front()));
     active_work->charge(snapshot.shell.outward_faces.capacity(), sizeof(std::vector<std::size_t>));
-    active_work->charge(snapshot.shell.face_support_identities.capacity(), sizeof(std::vector<char>));
+    active_work->charge(
+        snapshot.shell.face_support_identities.capacity(), sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>));
     for (const auto& face : snapshot.shell.outward_faces)
         active_work->charge(face.capacity(), sizeof(std::size_t));
     for (const auto& support : snapshot.shell.face_support_identities)
-        active_work->charge(support.capacity(), 1);
+        active_work->charge(support.payload_bytes(), 1);
     snapshot.preparation_bytes = active_work->bytes - bytes;
     snapshot.preparation_operations = active_work->operations - operations;
     snapshot.preparation_pairs = active_work->pairs - pairs;
@@ -255,9 +256,10 @@ template class ConvexPartition<ArithmeticMode::BoundedCertification>;
     template GeometryValue<mode> orientation(const std::array<Point<mode>, 4>&);                                       \
     template bool points_identical(const Point<mode>&, const Point<mode>&);                                            \
     template Point<mode> point_displaced(const Point<mode>&, const Point<mode>&);                                      \
-    template Point<mode> source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>&, std::span<const char>);     \
     template Point<mode> source_point(                                                                                 \
-        std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const char>);                          \
+        const ConvexCellGeometry<ArithmeticMode::Ordinary>&, const PointIdentity<ArithmeticMode::Ordinary>&);          \
+    template Point<mode> source_point(                                                                                 \
+        std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, const PointIdentity<ArithmeticMode::Ordinary>&); \
     template Point<mode> backtrace_constrained(                                                                        \
         const Point<mode>&, GeometryPoint, double, std::span<const FaceConstraint<mode>>, GeometryLimits);
 SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::Ordinary)

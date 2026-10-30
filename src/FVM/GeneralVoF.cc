@@ -263,7 +263,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 }
             for (const auto& tile : topology->draft.tiles)
             {
-                if (!tile.second_image_identity.empty())
+                if (!tile.second_image_identity.is_zero())
                     throw std::invalid_argument("General VoF periodic image sweeps are not qualified.");
                 if constexpr (Mode == ArithmeticMode::Ordinary)
                 {
@@ -288,7 +288,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         budget.add(
                             (tile.node_gids.size() + tile.second_node_gids.size()) * sizeof(std::uint64_t) +
                             tile.domain.size() + tile.surface.size() + tile.identity.size() + tile.boundary.size() +
-                            tile.second_image_identity.size() + AMR::encode_adaptive_key(tile.first).size() +
+                            tile.second_image_identity.payload_bytes() + AMR::encode_adaptive_key(tile.first).size() +
                             (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
                         topology->frontier_tiles.push_back(tile);
                     }

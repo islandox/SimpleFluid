@@ -2,13 +2,14 @@
 
 namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 {
-std::vector<char> swept_point(const P& point)
+PLIC::PointIdentity<ArithmeticMode::Exact> swept_point(const P& point)
 {
     WireWriter writer;
     writer.word(0x5346504f494e5431ULL);
     for (const auto& q : point)
         writer.rational(q);
-    return std::move(writer.data);
+    return PLIC::details::GeometryIdentityAccess::make<PLIC::PointIdentity<ArithmeticMode::Exact>>(
+        std::move(writer.data));
 }
 } // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 
@@ -382,7 +383,7 @@ std::optional<SignedSweepSimplex<ArithmeticMode::Exact>> swept_tetra(
 }
 
 std::vector<SweptTriangle> swept_boundary(const Polygon& current, const Polygon& previous, const P& center,
-    const P& backcenter, std::vector<std::array<std::vector<char>, 3>>* sides)
+    const P& backcenter, std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>>* sides)
 {
     std::vector<SweptTriangle> result;
     result.reserve(4 * current.size());
@@ -540,8 +541,8 @@ PhaseMeasures<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::phas
     return sweep_phases(fragment, plane);
 }
 
-ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::translated_packet(
-    std::span<const char> displacement) const
+ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::translated(
+    const PLIC::DisplacementIdentity<ArithmeticMode::Exact>& displacement) const
 {
     auto poly = impl_->poly.get();
     const auto shift = displacement_point(displacement);
@@ -643,7 +644,7 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::f
 
 template<>
 GeometryMeasure<ArithmeticMode::Exact> point_projection<ArithmeticMode::Exact>(
-    std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor)
+    const PointIdentity<ArithmeticMode::Exact>& identity, GeometryPoint normal, GeometryPoint anchor)
 {
     return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
         dot(point(normal), sub(authority_point(identity), point(anchor))));
@@ -952,7 +953,7 @@ std::size_t ConvexFragment<ArithmeticMode::Exact>::storage_bytes() const
 }
 
 NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::backtrace(
-    std::span<const char> identity, GeometryPoint velocity, double timestep)
+    const PLIC::PointIdentity<ArithmeticMode::Exact>& identity, GeometryPoint velocity, double timestep)
 {
     if (!(timestep >= 0) || !std::isfinite(timestep))
         throw std::invalid_argument("Backward trajectory needs finite nonnegative timestep.");
@@ -1036,13 +1037,13 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::area_v
 namespace SimpleFluid::geometry::swept_volume
 {
 NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::backtrace_constrained(
-    std::span<const char> identity, GeometryPoint velocity, double timestep,
+    const PLIC::PointIdentity<ArithmeticMode::Exact>& identity, GeometryPoint velocity, double timestep,
     std::span<const PlanarFacePtr<ArithmeticMode::Exact>> walls, TrajectoryLimits limits)
 {
     TrajectoryArithmetic arithmetic(limits);
     if (!std::isfinite(timestep) || timestep < 0 || walls.size() > limits.maximum_constraints)
         throw std::invalid_argument("Invalid exact wall trajectory timestep or constraint count.");
-    arithmetic.charge(identity.size());
+    arithmetic.charge(canonical_key_size(identity));
     const auto source = authority_point(identity);
     for (const auto& q : source)
         (void) arithmetic.bits(q);
@@ -1123,8 +1124,8 @@ GeometryMeasure<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::di
     TrajectoryLimits limits) const
 {
     TrajectoryArithmetic arithmetic(limits);
-    arithmetic.charge(point.size());
-    arithmetic.charge(departure.size());
+    arithmetic.charge(canonical_key_size(point));
+    arithmetic.charge(canonical_key_size(departure));
     const auto displacement = arithmetic.subtract(authority_point(point), authority_point(departure));
     return SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(displacement, displacement));
 }
@@ -1151,7 +1152,8 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     std::map<P, P> mapped;
     for (const auto& trace : traces)
     {
-        budget.add(trace.point.size() + trace.departure.size() + sizeof(NodeTrajectory<ArithmeticMode::Exact>));
+        budget.add(canonical_key_size(trace.point) + canonical_key_size(trace.departure) +
+                   sizeof(NodeTrajectory<ArithmeticMode::Exact>));
         if (!mapped.emplace(authority_point(trace.point), authority_point(trace.departure)).second)
             throw std::invalid_argument("Duplicate shared node trajectory.");
     }
@@ -1229,12 +1231,12 @@ GeometryMeasure<ArithmeticMode::Exact> SweptFace<ArithmeticMode::Exact>::uncorre
     return SweepAccess<ArithmeticMode::Exact>::measure(impl_->original);
 }
 
-std::vector<char> SweptFace<ArithmeticMode::Exact>::corrected_departure_center() const
+PLIC::PointIdentity<ArithmeticMode::Exact> SweptFace<ArithmeticMode::Exact>::corrected_departure_center() const
 {
     return swept_point(impl_->center);
 }
 
-const std::vector<std::array<std::vector<char>, 3>>&
+const std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>>&
 SweptFace<ArithmeticMode::Exact>::edge_time_triangles() const noexcept
 {
     return impl_->edges;

@@ -45,8 +45,8 @@ public:
     [[nodiscard]] std::vector<char> encode(std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] PLIC::GeometryMeasure<ArithmeticMode::Exact> volume() const;
     [[nodiscard]] PLIC::PhaseMeasures<ArithmeticMode::Exact> phases(const PLIC::GeometryHalfspace& gas) const;
-    [[nodiscard]] std::shared_ptr<const ConvexFragment<ArithmeticMode::Exact>> translated_packet(
-        std::span<const char>) const;
+    [[nodiscard]] std::shared_ptr<const ConvexFragment<ArithmeticMode::Exact>> translated(
+        const PLIC::DisplacementIdentity<ArithmeticMode::Exact>&) const;
     /** Explicitly enforce the ordinary PLIC::ConvexCellGeometry<ArithmeticMode::Exact> output contract.
      * Individual checked metric/narrowing queries may still reject. */
     [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Exact> as_geometry() const;
@@ -63,20 +63,20 @@ private:
  * cumulative admitted intermediates, not allocator/process peak memory. */
 template<> struct NodeTrajectory<ArithmeticMode::Exact>
 {
-    std::vector<char> point, departure;
+    PLIC::PointIdentity<ArithmeticMode::Exact> point, departure;
     /** A shared backward trajectory. Multiplication/subtraction remain exact
      * on represented inputs; no globally rounded departure node is constructed. */
     [[nodiscard]] static NodeTrajectory<ArithmeticMode::Exact> backtrace(
-        std::span<const char> point, PLIC::GeometryPoint velocity, double timestep);
+        const PLIC::PointIdentity<ArithmeticMode::Exact>& point, PLIC::GeometryPoint velocity, double timestep);
     /** Orthogonally project the represented displacement into the exact common
      * wall tangent space. The source must lie in every closed wall polygon.
      * Callers authenticate and complete the incident-wall catalog; this local
      * geometry primitive cannot establish native boundary ownership. Exactly
      * dependent constraints are redundant; nearly parallel constraints remain.
      * Empty walls preserve ordinary backtrace, and rank-three corners stay fixed. */
-    [[nodiscard]] static NodeTrajectory<ArithmeticMode::Exact> backtrace_constrained(std::span<const char> point,
-        PLIC::GeometryPoint velocity, double timestep, std::span<const PLIC::PlanarFacePtr<ArithmeticMode::Exact>> walls,
-        TrajectoryLimits = {});
+    [[nodiscard]] static NodeTrajectory<ArithmeticMode::Exact> backtrace_constrained(
+        const PLIC::PointIdentity<ArithmeticMode::Exact>& point, PLIC::GeometryPoint velocity, double timestep,
+        std::span<const PLIC::PlanarFacePtr<ArithmeticMode::Exact>> walls, TrajectoryLimits = {});
     /** Exact squared physical displacement (m^2), including below-output-range
      * components. Compare directly with an exact CFL length-squared bound. */
     [[nodiscard]] PLIC::GeometryMeasure<ArithmeticMode::Exact> displacement_squared(TrajectoryLimits = {}) const;
@@ -100,10 +100,11 @@ public:
     [[nodiscard]] const std::vector<NodeTrajectory<ArithmeticMode::Exact>>& trajectories() const noexcept;
     [[nodiscard]] PLIC::GeometryMeasure<ArithmeticMode::Exact> volume() const;
     [[nodiscard]] PLIC::GeometryMeasure<ArithmeticMode::Exact> uncorrected_volume() const;
-    [[nodiscard]] std::vector<char> corrected_departure_center() const;
+    [[nodiscard]] PLIC::PointIdentity<ArithmeticMode::Exact> corrected_departure_center() const;
     /** Exact point triples for side triangles. Adjacent incident faces receive
      * identical unoriented triangles when they supply identical node traces. */
-    [[nodiscard]] const std::vector<std::array<std::vector<char>, 3>>& edge_time_triangles() const noexcept;
+    [[nodiscard]] const std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>>&
+    edge_time_triangles() const noexcept;
     /** Every positive simplex is covered exactly by disjoint actual donors.
      * Missing donors or overlapping donor interiors reject before return. */
     [[nodiscard]] std::vector<SweepIntersection<ArithmeticMode::Exact>> partition(

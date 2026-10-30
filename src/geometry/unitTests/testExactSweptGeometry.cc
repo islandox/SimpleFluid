@@ -392,7 +392,7 @@ TEST(ExactSweptGeometry, PrivateVolumeCorrectionPreservesSharedEdgeTimeTriangles
                   SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.055)),
         0);
     EXPECT_NE(first->volume().compare(first->uncorrected_volume()), 0);
-    using Triangle = std::array<std::vector<char>, 3>;
+    using Triangle = std::array<SimpleFluid::PLIC::PointIdentity<SimpleFluid::ArithmeticMode::Exact>, 3>;
     std::vector<Triangle> left, right;
     for (auto t : first->edge_time_triangles())
     {
@@ -448,7 +448,8 @@ Loop circulation(double phi)
         for (std::size_t f = 0; f < cell->num_faces(); ++f)
         {
             auto face = cell->face_geometry(f);
-            auto key = std::min(face->encode(), face->reversed()->encode());
+            auto key = std::min(
+                SimpleFluid::PLIC::canonical_face_key(*face), SimpleFluid::PLIC::canonical_face_key(*face->reversed()));
             auto found = shared.find(key);
             int orientation = 1;
             if (found == shared.end())

@@ -10,37 +10,47 @@ namespace details
 class NativeSupportAccess;
 }
 template<>
-[[nodiscard]] std::vector<char> planar_support<ArithmeticMode::Ordinary>(const PlanarFace<ArithmeticMode::Ordinary>&);
+[[nodiscard]] PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(
+    const PlanarFace<ArithmeticMode::Ordinary>&);
 template<> [[nodiscard]] int planar_orientation<ArithmeticMode::Ordinary>(const PlanarFace<ArithmeticMode::Ordinary>&);
 template<>
 [[nodiscard]] std::vector<PlanarFacePtr<ArithmeticMode::Ordinary>> subtract_planar_faces<ArithmeticMode::Ordinary>(
     const PlanarFace<ArithmeticMode::Ordinary>&, std::span<const PlanarFacePtr<ArithmeticMode::Ordinary>>);
-template<> [[nodiscard]] std::vector<char> displacement<ArithmeticMode::Ordinary>(GeometryPoint, GeometryPoint);
 template<>
-[[nodiscard]] std::vector<char> displacement_difference<ArithmeticMode::Ordinary>(
-    std::span<const char>, std::span<const char>);
-template<> [[nodiscard]] GeometryPoint displacement_display<ArithmeticMode::Ordinary>(std::span<const char>);
+[[nodiscard]] DisplacementIdentity<ArithmeticMode::Ordinary> displacement<ArithmeticMode::Ordinary>(
+    GeometryPoint, GeometryPoint);
 template<>
-[[nodiscard]] std::vector<char> point_translated<ArithmeticMode::Ordinary>(
-    std::span<const char>, std::span<const char>);
+[[nodiscard]] DisplacementIdentity<ArithmeticMode::Ordinary> displacement_difference<ArithmeticMode::Ordinary>(
+    const DisplacementIdentity<ArithmeticMode::Ordinary>&, const DisplacementIdentity<ArithmeticMode::Ordinary>&);
 template<>
-[[nodiscard]] std::vector<char> periodic_point<ArithmeticMode::Ordinary>(
-    std::span<const char>, GeometryPoint, GeometryPoint, std::array<bool, 3>);
-template<> [[nodiscard]] GeometryPoint point_display<ArithmeticMode::Ordinary>(std::span<const char>);
+[[nodiscard]] GeometryPoint displacement_display<ArithmeticMode::Ordinary>(
+    const DisplacementIdentity<ArithmeticMode::Ordinary>&);
+template<>
+[[nodiscard]] PointIdentity<ArithmeticMode::Ordinary> point_translated<ArithmeticMode::Ordinary>(
+    const PointIdentity<ArithmeticMode::Ordinary>&, const DisplacementIdentity<ArithmeticMode::Ordinary>&);
+template<>
+[[nodiscard]] PointIdentity<ArithmeticMode::Ordinary> periodic_point<ArithmeticMode::Ordinary>(
+    const PointIdentity<ArithmeticMode::Ordinary>&, GeometryPoint, GeometryPoint, std::array<bool, 3>);
+template<>
+[[nodiscard]] GeometryPoint point_display<ArithmeticMode::Ordinary>(const PointIdentity<ArithmeticMode::Ordinary>&);
 template<>
 [[nodiscard]] std::array<GeometryValue<ArithmeticMode::Ordinary>, 3> numerical_point<ArithmeticMode::Ordinary>(
-    std::span<const char>);
+    const PointIdentity<ArithmeticMode::Ordinary>&);
 template<>
 [[nodiscard]] GeometryMeasure<ArithmeticMode::Ordinary> point_projection<ArithmeticMode::Ordinary>(
-    std::span<const char>, GeometryPoint, GeometryPoint);
+    const PointIdentity<ArithmeticMode::Ordinary>&, GeometryPoint, GeometryPoint);
 
+template<>
+[[nodiscard]] std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(
+    const PlanarFace<ArithmeticMode::Ordinary>&);
 template<> class EdgePointIndex<ArithmeticMode::Ordinary>
 {
 public:
     struct Impl;
-    explicit EdgePointIndex(std::span<const std::vector<char>> points);
-    [[nodiscard]] std::vector<std::vector<char>> closed_segment(
-        std::span<const char> first, std::span<const char> second) const;
+    explicit EdgePointIndex(std::span<const PointIdentity<ArithmeticMode::Ordinary>> points);
+    [[nodiscard]] std::vector<PointIdentity<ArithmeticMode::Ordinary>> closed_segment(
+        const PointIdentity<ArithmeticMode::Ordinary>& first,
+        const PointIdentity<ArithmeticMode::Ordinary>& second) const;
     [[nodiscard]] std::size_t storage_bytes() const;
 
 private:
@@ -65,14 +75,16 @@ public:
         GeometryPoint, std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> reversed() const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> translated(GeometryPoint) const;
-    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> translated_packet(std::span<const char>) const;
+    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> translated(
+        const DisplacementIdentity<ArithmeticMode::Ordinary>&) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> oriented_like(GeometryPoint) const;
     [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> intersection(const PlanarFace&) const;
-    [[nodiscard]] std::vector<std::vector<char>> vertex_identities() const;
-    [[nodiscard]] std::vector<std::vector<char>> edge_support_identities() const;
-    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> with_edge_vertices(std::span<const std::vector<char>>) const;
+    [[nodiscard]] std::vector<PointIdentity<ArithmeticMode::Ordinary>> vertex_identities() const;
+    [[nodiscard]] std::vector<LineIdentity<ArithmeticMode::Ordinary>> edge_support_identities() const;
+    [[nodiscard]] PlanarFacePtr<ArithmeticMode::Ordinary> with_edge_vertices(
+        std::span<const PointIdentity<ArithmeticMode::Ordinary>>) const;
     [[nodiscard]] bool equivalent(const PlanarFace&) const;
-    [[nodiscard]] bool contains_point(std::span<const char>) const;
+    [[nodiscard]] bool contains_point(const PointIdentity<ArithmeticMode::Ordinary>&) const;
     [[nodiscard]] bool cell_bounds_overlap(const ConvexCellGeometry<ArithmeticMode::Ordinary>&) const;
     [[nodiscard]] bool contains(const PlanarFace&) const;
     [[nodiscard]] bool oppositely_oriented(const PlanarFace&) const;
@@ -91,14 +103,15 @@ public:
     [[nodiscard]] const std::vector<WidePoint>& points() const;
 
 private:
+    friend std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend class details::NativeSupportAccess;
-    friend std::vector<char> planar_support<ArithmeticMode::Ordinary>(const PlanarFace&);
+    friend PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend int planar_orientation<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend std::vector<PlanarFacePtr<ArithmeticMode::Ordinary>> subtract_planar_faces<ArithmeticMode::Ordinary>(
         const PlanarFace&, std::span<const PlanarFacePtr<ArithmeticMode::Ordinary>>);
     template<ArithmeticMode> friend class ConvexCellGeometry;
     [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Ordinary> from_retained_support(
-        std::span<const WidePoint>, WidePoint normal, std::vector<char> support);
+        std::span<const WidePoint>, WidePoint normal, PlaneSupportIdentity<ArithmeticMode::Ordinary> support);
     explicit PlanarFace(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
     std::shared_ptr<const Impl> impl_;
 };

@@ -223,9 +223,9 @@ PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) co
     for (std::size_t axis = 0; axis < 3; ++axis)
         normal[axis] = surface.orientation * surface.plane->normal[axis].value;
     auto support = surface.plane->native_support;
-    if (support.empty())
+    if (!support)
         support = details::ordinary_native::source_support_packet(loop);
-    return PlanarFace<Mode>::from_retained_support(loop, normal, std::move(support));
+    return PlanarFace<Mode>::from_retained_support(loop, normal, std::move(*support));
 }
 template<ArithmeticMode Mode> bool ConvexCellGeometry<Mode>::quality_above(double minimum) const
 {
@@ -301,9 +301,9 @@ std::vector<char> ConvexCellGeometry<Mode>::encode_certificate() const
         for (auto i : f)
             w.word(i);
         auto support = stored->surfaces.at(index).plane->native_support;
-        if (support.empty())
+        if (!support)
             support = planar_support<Mode>(*face_geometry(index));
-        w.packet(support);
+        w.packet(details::GeometryIdentityAccess::key(*support));
     }
     return std::move(w.bytes);
 }
@@ -324,7 +324,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(std::span<c
     const auto nf = r.count(4096);
     std::vector<std::vector<std::size_t>> faces;
     faces.reserve(nf);
-    std::vector<std::vector<char>> supports;
+    std::vector<PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports;
     for (std::size_t f = 0; f < nf; ++f)
     {
         const auto count = r.count(n);
@@ -341,14 +341,14 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(std::span<c
         const auto support = r.packet();
         if (support.empty())
             on::reject("finite cell packet lost its source support.");
-        supports.emplace_back(support.begin(), support.end());
+        supports.push_back(decode_identity<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(support));
     }
     r.finish();
     return make_local(origin, p, faces)->with_native_supports(supports);
 }
 template<ArithmeticMode Mode>
 ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
-    std::span<const std::vector<char>> supports) const
+    std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports) const
     requires(Mode == ArithmeticMode::Ordinary)
 {
     const auto old = details::checked_geometry_storage<Mode>(geometry_->impl_);
@@ -360,11 +360,9 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
     std::map<details::StoredPlanePtr<Mode>, details::StoredPlanePtr<Mode>> replacement;
     for (std::size_t f = 0; f < copy->surfaces.size(); ++f)
     {
-        if (supports[f].empty())
-            details::reject(Mode, "native cell lost its source support.");
         const auto source = copy->surfaces[f].plane;
         auto plane = std::make_shared<details::StoredPlane<Mode>>(*source);
-        details::active_work->charge(supports[f].size(), 1);
+        details::active_work->charge(supports[f].payload_bytes(), 1);
         plane->native_support = supports[f];
         replacement[source] = plane;
         copy->surfaces[f].plane = std::move(plane);

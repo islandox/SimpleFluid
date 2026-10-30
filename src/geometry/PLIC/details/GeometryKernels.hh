@@ -242,13 +242,13 @@ bool structural_cover(
     const std::shared_ptr<const Ancestry>& root, const std::vector<std::shared_ptr<const Ancestry>>& leaves);
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
-    std::span<const char> identity, ArithmeticMode mode);
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
-DynamicPoint dynamic_source_point(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity, ArithmeticMode mode);
+DynamicPoint dynamic_source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>& source,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
-    std::span<const char> identity, ArithmeticMode mode);
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_point_displaced(const DynamicPoint& source, const DynamicPoint& displacement);
 template<ArithmeticMode Mode>
@@ -498,13 +498,13 @@ bool structural_cover(
     const std::shared_ptr<const Ancestry>& root, const std::vector<std::shared_ptr<const Ancestry>>& leaves);
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
-    std::span<const char> identity, ArithmeticMode mode);
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
-DynamicPoint dynamic_source_point(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity, ArithmeticMode mode);
+DynamicPoint dynamic_source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>& source,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
-    std::span<const char> identity, ArithmeticMode mode);
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_point_displaced(const DynamicPoint& source, const DynamicPoint& displacement);
 template<ArithmeticMode Mode>

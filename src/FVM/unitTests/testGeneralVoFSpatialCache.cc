@@ -173,7 +173,8 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     EXPECT_EQ(frontier.retained_gid, data.cells.begin()->second.gid);
     EXPECT_EQ(frontier.retained_owner, tile.first_owner);
     EXPECT_EQ(frontier.retained_geometry->dynamic_geometry(), data.cells.begin()->second.finite_geometry);
-    EXPECT_EQ(frontier.support_identity, PLIC::planar_support<ArithmeticMode::Ordinary>(*retained->face_geometry(0)));
+    ASSERT_TRUE(frontier.support_identity);
+    EXPECT_EQ(*frontier.support_identity, PLIC::planar_support<ArithmeticMode::Ordinary>(*retained->face_geometry(0)));
     ASSERT_TRUE(frontier.original_boundary);
     EXPECT_FALSE(frontier.outside_key);
     local::local_spatial_detail::Box bounds;

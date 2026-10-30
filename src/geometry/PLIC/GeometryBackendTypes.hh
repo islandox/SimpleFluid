@@ -2,8 +2,9 @@
  * @brief Arithmetic-policy declarations and shared geometry resource limits.
  */
 #pragma once
-#include "utils/ArithmeticMode.hh"
+#include "geometry/PLIC/GeometryIdentity.hh"
 #include "geometry/swept_volume/SweptVolumeDeclarations.hh"
+#include "utils/ArithmeticMode.hh"
 #include <cstddef>
 #include <memory>
 #include <utility>

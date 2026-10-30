@@ -2,6 +2,7 @@
  * @brief Point-authority closed-neighbor proofs without global leaf catalogs.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <set>
 namespace SimpleFluid::Meshes::AMR
 {
+using PointIdentity = PLIC::PointIdentity<ArithmeticMode::Ordinary>;
 namespace
 {
 using namespace adaptive_detail;
@@ -60,16 +62,16 @@ struct ContactRecord
 struct Contact
 {
     std::shared_ptr<const ContactRecord> record;
-    AdaptiveBytes physical_point;
+    PointIdentity physical_point;
     int owner = -1;
     std::uint64_t ordinal = 0;
     std::optional<AdaptiveSplit> required;
 };
-AdaptiveBytes point_key(std::span<const char> domain, std::span<const char> point)
+AdaptiveBytes point_key(std::span<const char> domain, const PointIdentity& point)
 {
     Writer w;
     w.bytes(domain);
-    w.bytes(point);
+    w.bytes(PLIC::canonical_key(point));
     return std::move(w.data);
 }
 AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
@@ -207,7 +209,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 for (const auto& surface : leaf.surfaces)
                 {
                     diagnostics.input_retained_bytes +=
-                        surface.key.capacity() + surface.boundary.capacity() + surface.authority_image.capacity();
+                        surface.key.capacity() + surface.boundary.capacity() + surface.authority_image.payload_bytes();
                     if (retained_faces.insert(surface.geometry.get()).second)
                     {
                         budget.add(sizeof(const void*) + 4 * sizeof(void*));
@@ -241,7 +243,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             Budget budget{options.byte_budget};
             BudgetObservation observation{budget, diagnostics};
             budget.add(source_geometry_bytes);
-            std::map<AdaptiveCellKey, std::set<AdaptiveBytes>> points;
+            std::map<AdaptiveCellKey, std::set<PointIdentity>> points;
             for (const auto& tile : tiles)
             {
                 auto record_points =
@@ -252,7 +254,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         auto& incidence = points[cell];
                         // Retain the original cumulative point-admission charge,
                         // including repeated observations of an existing point.
-                        budget.add(point.size() + sizeof(AdaptiveBytes) + 3 * sizeof(void*));
+                        budget.add(point.payload_bytes() + sizeof(PointIdentity) + 3 * sizeof(void*));
                         if (!incidence.contains(point))
                         {
                             incidence.insert(point);
@@ -263,7 +265,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     record_points(tile.first, tile.geometry);
                 if (tile.second_owner == comm->getRank())
                     record_points(*tile.second,
-                        tile.geometry->translated_packet(
+                        tile.geometry->translated(
                             PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)));
             }
             std::vector<AdaptiveTile>().swap(tiles);
@@ -285,8 +287,9 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     diagnostics.unique_record_bytes += record.size();
                     struct Pending
                     {
-                        const AdaptiveBytes* physical;
-                        AdaptiveBytes normalized, key;
+                        const PointIdentity* physical;
+                        PointIdentity normalized;
+                        AdaptiveBytes key;
                         std::uint64_t ordinal;
                     };
                     std::map<int, std::vector<Pending>> destinations;
@@ -295,7 +298,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         auto normalized = kernel.contact_point(leaf, point);
                         auto key = point_key(leaf.domain, normalized);
                         ++diagnostics.contacts;
-                        budget.add(key.size() + normalized.size());
+                        budget.add(key.size() + normalized.payload_bytes());
                         budget.add(key.size());
                         retained_delta += key.size();
                         const auto peer = authority(key, comm->getSize());
@@ -313,7 +316,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     {
                         std::size_t bytes = 24 + record.size();
                         for (const auto& contact : contacts)
-                            bytes += 32 + contact.key.size() + contact.normalized.size() + contact.physical->size();
+                            bytes += 32 + contact.key.size() + contact.normalized.payload_bytes() +
+                                     contact.physical->payload_bytes();
                         budget.packet(bytes);
                         retained_delta += sizeof(OwnerPacket) + bytes;
                         ++diagnostics.transmitted_geometry_records;
@@ -327,8 +331,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         {
                             w.word(contact.ordinal);
                             w.bytes(contact.key);
-                            w.bytes(contact.normalized);
-                            w.bytes(*contact.physical);
+                            w.bytes(PLIC::encode_identity(contact.normalized));
+                            w.bytes(PLIC::encode_identity(*contact.physical));
                         }
                         const auto before_requests = budget.used;
                         budget.append_capacity(requests);
@@ -358,7 +362,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
         {
             struct Group
             {
-                AdaptiveBytes point;
+                PointIdentity point;
                 std::vector<Contact> cells;
             };
             std::map<AdaptiveBytes, Group> groups;
@@ -400,18 +404,20 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 for (std::uint64_t i = 0; i < count; ++i)
                 {
                     auto ordinal = r.word();
-                    auto key = r.bytes(), point = r.bytes(), physical_point = r.bytes();
-                    const auto point_metadata = key.capacity() + point.capacity();
+                    auto key = r.bytes();
+                    auto point = PLIC::decode_identity<PointIdentity>(r.bytes());
+                    auto physical_point = PLIC::decode_identity<PointIdentity>(r.bytes());
+                    const auto point_metadata = key.capacity() + point.payload_bytes();
                     // Preserve the original conservative per-incidence object
                     // charge in addition to admitted vector capacities.
                     budget.add(sizeof(Contact) + sizeof(Group) + 6 * sizeof(void*) + point_metadata +
-                               physical_point.capacity());
+                               physical_point.payload_bytes());
                     if (key != point_key(record->domain, point) || authority(key, comm->getSize()) != comm->getRank())
                         throw std::invalid_argument("Foreign closed-contact request.");
                     Contact contact{record, std::move(physical_point), packet.peer, ordinal, {}};
-                    auto [position, inserted] = groups.try_emplace(std::move(key));
+                    auto [position, inserted] = groups.try_emplace(std::move(key), Group{point, {}});
                     auto& group = position->second;
-                    if (!group.point.empty() && group.point != point)
+                    if (group.point != point)
                         throw std::invalid_argument("Closure point key disagreement.");
                     if (inserted)
                     {
@@ -428,7 +434,6 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         // The existing group retains its one key and normalized
                         // point. These reader copies are no longer needed.
                         std::vector<char>().swap(key);
-                        std::vector<char>().swap(point);
                         budget.used -= point_metadata;
                     }
                 }

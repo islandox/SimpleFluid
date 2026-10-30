@@ -76,7 +76,7 @@ TEST(DistributedAdaptiveAuthority, CrossedOverlayIsOwnershipIndependent)
                 ASSERT_NE(node, by_gid.end());
                 ::SimpleFluid::Meshes::AMR::adaptive_detail::Reader key{node->second->identity};
                 EXPECT_EQ(key.bytes(), tile.domain);
-                EXPECT_EQ(key.bytes(), vertices[v]);
+                EXPECT_EQ(key.bytes(), SimpleFluid::PLIC::canonical_key(vertices[v]));
                 key.done();
                 EXPECT_EQ(node->second->coordinate,
                     SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(vertices[v]));
@@ -156,7 +156,7 @@ TEST(DistributedAdaptiveAuthority, RankLocalBudgetFailureRejectsCollectively)
 }
 TEST(DistributedAdaptiveAuthority, LongLineRepliesContainOnlyClosedSegment)
 {
-    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> points;
+    std::vector<SimpleFluid::PLIC::PointIdentity<SimpleFluid::ArithmeticMode::Ordinary>> points;
     for (int i = 0; i <= 256; ++i)
     {
         auto vertices = rectangle(0, i, 1, i + 1)->vertex_identities();
@@ -198,7 +198,7 @@ TEST(DistributedAdaptiveAuthority, IncidenceWireRetainsInsertedCollinearNode)
 {
     auto face = rectangle(0, 0, 1, 1);
     auto midpoint = rectangle(.5, 0, 1, 1)->vertex_identities().front();
-    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> inserted{midpoint};
+    std::vector<SimpleFluid::PLIC::PointIdentity<SimpleFluid::ArithmeticMode::Ordinary>> inserted{midpoint};
     auto enriched = face->with_edge_vertices(inserted);
     ASSERT_EQ(enriched->vertex_identities().size(), 5);
     auto restored =

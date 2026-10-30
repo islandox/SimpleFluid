@@ -9,25 +9,30 @@
 #include "geometry/PLIC/GeometryMeasure.hh"
 namespace SimpleFluid::PLIC
 {
-template<ArithmeticMode Mode> [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> planar_support(const PlanarFace<Mode>&);
+template<ArithmeticMode Mode>
+[[nodiscard]] SIMPLEFLUID_LOCAL PlaneSupportIdentity<Mode> planar_support(const PlanarFace<Mode>&);
 template<ArithmeticMode Mode> [[nodiscard]] SIMPLEFLUID_LOCAL int planar_orientation(const PlanarFace<Mode>&);
 template<ArithmeticMode Mode>
 [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<PlanarFacePtr<Mode>> subtract_planar_faces(
     const PlanarFace<Mode>&, std::span<const PlanarFacePtr<Mode>>);
 template<ArithmeticMode Mode>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> displacement(GeometryPoint, GeometryPoint);
+[[nodiscard]] SIMPLEFLUID_LOCAL DisplacementIdentity<Mode> displacement(GeometryPoint, GeometryPoint);
 template<ArithmeticMode Mode>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> displacement_difference(std::span<const char>, std::span<const char>);
-template<ArithmeticMode Mode> [[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint displacement_display(std::span<const char>);
+[[nodiscard]] SIMPLEFLUID_LOCAL DisplacementIdentity<Mode> displacement_difference(
+    const DisplacementIdentity<Mode>&, const DisplacementIdentity<Mode>&);
 template<ArithmeticMode Mode>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> point_translated(std::span<const char>, std::span<const char>);
+[[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint displacement_display(const DisplacementIdentity<Mode>&);
 template<ArithmeticMode Mode>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> periodic_point(
-    std::span<const char>, GeometryPoint, GeometryPoint, std::array<bool, 3>);
-template<ArithmeticMode Mode> [[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint point_display(std::span<const char>);
+[[nodiscard]] SIMPLEFLUID_LOCAL PointIdentity<Mode> point_translated(
+    const PointIdentity<Mode>&, const DisplacementIdentity<Mode>&);
 template<ArithmeticMode Mode>
-[[nodiscard]] SIMPLEFLUID_LOCAL std::array<GeometryValue<Mode>, 3> numerical_point(std::span<const char>);
+[[nodiscard]] SIMPLEFLUID_LOCAL PointIdentity<Mode> periodic_point(
+    const PointIdentity<Mode>&, GeometryPoint, GeometryPoint, std::array<bool, 3>);
+template<ArithmeticMode Mode> [[nodiscard]] SIMPLEFLUID_LOCAL GeometryPoint point_display(const PointIdentity<Mode>&);
+template<ArithmeticMode Mode>
+[[nodiscard]] SIMPLEFLUID_LOCAL std::array<GeometryValue<Mode>, 3> numerical_point(const PointIdentity<Mode>&);
 template<ArithmeticMode Mode>
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryMeasure<Mode> point_projection(
-    std::span<const char>, GeometryPoint, GeometryPoint);
+    const PointIdentity<Mode>&, GeometryPoint, GeometryPoint);
+template<ArithmeticMode Mode> [[nodiscard]] std::vector<char> canonical_face_key(const PlanarFace<Mode>&);
 } // namespace SimpleFluid::PLIC

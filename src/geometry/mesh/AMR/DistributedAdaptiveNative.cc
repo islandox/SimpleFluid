@@ -145,9 +145,8 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
             for (const auto& node : draft.nodes)
             {
                 allocation.add(
-                    sizeof(node) + node.identity.size() + node.coordinate_identity.size() + 8 * sizeof(void*));
-                if (node.coordinate_identity.empty() ||
-                    node.coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(node.coordinate_identity) ||
+                    sizeof(node) + node.identity.size() + node.coordinate_identity.payload_bytes() + 8 * sizeof(void*));
+                if (node.coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(node.coordinate_identity) ||
                     !nodes.emplace(node.gid, &node).second)
                     throw std::invalid_argument("Adaptive native node lacks its exact physical point proof.");
                 input.nodes.push_back({node.gid, {}, node.coordinate});
@@ -193,7 +192,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 for (const auto& tile : draft.tiles)
                     if (poly_full.contains(tile.first) || (tile.second && poly_full.contains(*tile.second)))
                     {
-                        if (!tile.second_image_identity.empty())
+                        if (!tile.second_image_identity.is_zero())
                             throw std::invalid_argument(
                                 "Periodic explicit polyhedral native fragments are not qualified.");
                         poly_faces.emplace(tile.face_gid, poly_faces.size());
@@ -209,7 +208,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 std::vector<ExplicitRegionProvider::Node> points;
                 std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_proofs;
                 std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_proofs;
-                std::map<ID, std::vector<char>> point_proofs;
+                std::map<ID, PLIC::PointIdentity<ArithmeticMode::Ordinary>> point_proofs;
                 for (const auto& [key, id] : poly_cells)
                 {
                     const auto& binding = *bindings.at(key);
@@ -306,7 +305,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                                     throw std::invalid_argument("Native adaptive face lacks exact display node.");
                                 adaptive_detail::Writer identity;
                                 identity.bytes(leaf->domain);
-                                identity.bytes(point);
+                                identity.bytes(PLIC::canonical_key(point));
                                 const auto gid = point_ids.at(identity.data);
                                 auto [it, inserted] =
                                     input.native_nodes.emplace(std::pair{address.first, *native}, gid);
@@ -341,7 +340,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                     const auto& binding = *bindings.at(key);
                     auto physical = tile.geometry;
                     if (second)
-                        physical = physical->reversed()->translated_packet(
+                        physical = physical->reversed()->translated(
                             PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity));
                     // Support identity belongs to physical ancestry. Native face
                     // ordinals in tile transport belong to the owner's recipe,

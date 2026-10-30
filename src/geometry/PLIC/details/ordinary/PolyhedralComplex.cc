@@ -349,17 +349,17 @@ std::shared_ptr<const Complex> Complex::make(std::vector<PolyhedralComplexCell<A
         {
             if (a.surface.key != b.surface.key)
                 return a.surface.key < b.surface.key;
-            return a.canonical->encode() < b.canonical->encode();
+            return canonical_face_key(*a.canonical) < canonical_face_key(*b.canonical);
         });
-    std::map<ID, std::set<std::vector<char>>> candidates;
+    std::map<ID, std::set<PointIdentity<ArithmeticMode::Ordinary>>> candidates;
     for (const auto& tile : tiles)
         for (auto point : tile.canonical->vertex_identities())
             candidates[tile.surface.key.region].insert(std::move(point));
-    std::map<std::pair<ID, std::vector<char>>, ID> node_ids;
+    std::map<std::pair<ID, PointIdentity<ArithmeticMode::Ordinary>>, ID> node_ids;
     for (auto& tile : tiles)
     {
         const auto& points = candidates.at(tile.surface.key.region);
-        const std::vector<std::vector<char>> all(points.begin(), points.end());
+        const std::vector<PointIdentity<ArithmeticMode::Ordinary>> all(points.begin(), points.end());
         tile.canonical = tile.canonical->with_edge_vertices(all);
         if (tile.surface.orientation < 0)
             tile.canonical = tile.canonical->reversed();
@@ -370,7 +370,7 @@ std::shared_ptr<const Complex> Complex::make(std::vector<PolyhedralComplexCell<A
     for (auto& [key, id] : node_ids)
     {
         id = next++;
-        data->nodes.emplace(id, NodeRow{key.first, read_point(key.second)});
+        data->nodes.emplace(id, NodeRow{key.first, read_point(details::GeometryIdentityAccess::key(key.second))});
     }
     data->global_nodes = next;
     for (std::size_t f = 0; f < tiles.size(); ++f)
@@ -502,7 +502,7 @@ std::vector<char> Complex::face_identity(ID id) const
     auto use = face.surface;
     use.orientation = 1;
     write_surface(w, use);
-    w.packet((face.surface.orientation == 1 ? face.geometry : face.geometry->reversed())->encode());
+    w.packet(canonical_face_key(*(face.surface.orientation == 1 ? face.geometry : face.geometry->reversed())));
     return std::move(w.bytes);
 }
 std::vector<char> Complex::encode() const

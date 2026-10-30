@@ -20,7 +20,7 @@ void target_sweep_shell(
         faces.push_back(std::move(face));
         for (const auto& trace : oriented.face->trajectories())
         {
-            budget.add(trace.point.size() + trace.departure.size() + 2 * sizeof(P));
+            budget.add(trace.point.payload_bytes() + trace.departure.payload_bytes() + 2 * sizeof(P));
             const auto p = authority_point(trace.point), back = authority_point(trace.departure);
             auto [it, inserted] = shared.emplace(p, back);
             if (!inserted && it->second != back)
@@ -143,17 +143,17 @@ void departure_authenticate_cones(const SweptFace<ArithmeticMode::Exact>& face, 
         throw std::invalid_argument("Original signed sweep volume differs from its prescribed exact control.");
     if (expected != observed)
         throw std::invalid_argument("Original signed sweep differs from its exact closed-boundary cones.");
-    std::vector<std::array<std::vector<char>, 3>> sides;
+    std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>> sides;
     budget.array(2 * current.size(), sizeof(decltype(sides)::value_type));
     sides.reserve(2 * current.size());
     for (std::size_t i = 0; i < current.size(); ++i)
         for (unsigned a = 2; a < 4; ++a)
         {
-            std::array<std::vector<char>, 3> side;
+            std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3> side{swept_point(boundary[4 * i + a][0]),
+                swept_point(boundary[4 * i + a][1]), swept_point(boundary[4 * i + a][2])};
             for (unsigned v = 0; v < 3; ++v)
             {
-                side[v] = swept_point(boundary[4 * i + a][v]);
-                budget.add(side[v].capacity());
+                budget.add(side[v].payload_bytes());
             }
             sides.push_back(std::move(side));
         }
@@ -218,7 +218,7 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
         center = mul(center, Q(1) / current.size());
         departure_charge_point(center, budget);
         const auto encoded = face.corrected_departure_center();
-        budget.add(encoded.capacity());
+        budget.add(encoded.payload_bytes());
         const auto backcenter = authority_point(encoded);
         departure_charge_point(backcenter, budget);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
@@ -321,7 +321,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
         }
         center = mul(center, Q(1) / current.size());
         const auto encoded = face.corrected_departure_center();
-        budget.add(encoded.capacity());
+        budget.add(encoded.payload_bytes());
         const P backcenter = authority_point(encoded);
         departure_admit_boundary_storage(current, previous, center, backcenter, budget);
         const auto boundary = swept_boundary(current, previous, center, backcenter, nullptr);
