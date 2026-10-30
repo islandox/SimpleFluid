@@ -1251,6 +1251,17 @@ correctness and memory/work-accounting gates leave production scaling open.
 This capability makes no application,
 centimeter-bubble, general-flow or scalable speedup claim. The qualification table above and focused gates below define its support boundary.
 
+Ordinary edge authority queries reuse a bounded scratch buffer across all
+subscribers of one complete line. The immutable point index remains separate;
+query hits borrow its identities and are copied into owned reply packets before
+reuse. Projection ties retain the original coordinate-map traversal order.
+Clearing hits preserves charged capacity; explicit release destroys the buffer
+before its lease expires. Growth admits old and replacement buffers together,
+and no query grows storage implicitly. Query and scan counters remain cumulative
+when hits are cleared or storage is released. The existing owning query API is
+unchanged. This removes repeated temporary map and point-payload construction;
+it does not pool mutable published geometry or merge provenance identities.
+
 ## Certified nonconvex extension
 
 Certified nonconvex union geometry alone does not qualify flow. The current

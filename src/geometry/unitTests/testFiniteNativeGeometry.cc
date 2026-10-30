@@ -4,6 +4,7 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryInstrumentation.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -23,6 +24,7 @@ namespace PLIC = SimpleFluid::PLIC;
 constexpr auto ordinary = ArithmeticMode::Ordinary;
 using Cell = PLIC::ConvexCellGeometry<ordinary>;
 using Face = PLIC::PlanarFace<ordinary>;
+using PointIdentity = PLIC::PointIdentity<ordinary>;
 
 TEST(FiniteNativeGeometryTest, NativeShellAndCellPacketUseOrdinaryGeometry)
 {
@@ -109,6 +111,219 @@ TEST(FiniteNativeGeometryTest, PointIdentityAndEdgePropagationRetainFiniteCoordi
     PLIC::EdgePointIndex<ordinary> index(propagated->vertex_identities());
     const auto ids = face->vertex_identities();
     EXPECT_EQ(index.closed_segment(ids[0], ids[1]).size(), 3u);
+}
+
+std::vector<PointIdentity> edge_query_points()
+{
+    const std::array<PLIC::GeometryPoint, 7> vertices{
+        {{0, 0, 0}, {.25, 0, 0}, {.5, 0, 0}, {.75, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    return Face::make(vertices)->vertex_identities();
+}
+std::vector<PointIdentity> copy_edge_query(const PLIC::OrdinaryEdgeQueryScratch& scratch)
+{
+    std::vector<PointIdentity> result;
+    for (std::size_t i = 0; i < scratch.size(); ++i)
+    {
+        result.push_back(scratch.point(i));
+    }
+    return result;
+}
+TEST(FiniteNativeGeometryTest, EdgeQueryScratchReusesCapacityAndPreservesOwningResults)
+{
+    const auto ids = edge_query_points();
+    auto input = ids;
+    std::reverse(input.begin(), input.end());
+    input.push_back(ids[2]);
+    PLIC::EdgePointIndex<ordinary> index(input);
+    PLIC::OrdinaryEdgeQueryScratch scratch;
+    EXPECT_EQ(scratch.storage_bytes(), 0u);
+    const auto peak = scratch.reserve_required_peak(input.size());
+    scratch.reserve(input.size(), peak);
+    EXPECT_EQ(scratch.capacity(), input.size());
+    EXPECT_EQ(scratch.storage_bytes(), peak);
+    const auto storage = scratch.storage_bytes();
+    const std::vector<PointIdentity> forward(ids.begin(), ids.begin() + 5);
+    const std::vector<PointIdentity> backward(forward.rbegin(), forward.rend());
+    const auto owning = index.closed_segment(ids[0], ids[4]);
+    EXPECT_EQ(owning, forward);
+    index.closed_segment(ids[0], ids[4], scratch);
+    EXPECT_EQ(copy_edge_query(scratch), forward);
+    index.closed_segment(ids[4], ids[0], scratch);
+    EXPECT_EQ(copy_edge_query(scratch), backward);
+    EXPECT_EQ(owning, forward);
+    EXPECT_EQ(scratch.capacity(), input.size());
+    EXPECT_EQ(scratch.storage_bytes(), storage);
+    EXPECT_EQ(scratch.growths(), 1u);
+    EXPECT_EQ(scratch.queries(), 2u);
+    EXPECT_EQ(scratch.scanned_points(), 2 * ids.size());
+    scratch.clear();
+    EXPECT_EQ(scratch.size(), 0u);
+    EXPECT_EQ(scratch.storage_bytes(), storage);
+    EXPECT_EQ(scratch.capacity(), input.size());
+    EXPECT_EQ(scratch.queries(), 2u);
+    // The scratch pins the immutable index while its borrowed hits are live.
+    {
+        PLIC::EdgePointIndex<ordinary> temporary(input);
+        temporary.closed_segment(ids[0], ids[4], scratch);
+    }
+    EXPECT_EQ(copy_edge_query(scratch), forward);
+    scratch.release();
+    EXPECT_EQ(scratch.storage_bytes(), 0u);
+    EXPECT_EQ(scratch.capacity(), 0u);
+    EXPECT_EQ(scratch.size(), 0u);
+    EXPECT_EQ(scratch.growths(), 1u);
+    EXPECT_EQ(scratch.queries(), 3u);
+    EXPECT_EQ(scratch.scanned_points(), 3 * ids.size());
+    EXPECT_EQ(owning, forward);
+}
+TEST(FiniteNativeGeometryTest, EdgeQueryScratchAdmissionIsAtomicAndFailedQueriesRecover)
+{
+    const auto ids = edge_query_points();
+    PLIC::EdgePointIndex<ordinary> index(ids);
+    PLIC::OrdinaryEdgeQueryScratch scratch;
+    const auto first_peak = scratch.reserve_required_peak(2);
+    EXPECT_THROW(scratch.reserve(2, first_peak - 1), PLIC::GeometryError);
+    EXPECT_EQ(scratch.storage_bytes(), 0u);
+    EXPECT_EQ(scratch.growths(), 0u);
+    scratch.reserve(2, first_peak);
+    EXPECT_THROW(index.closed_segment(ids[0], ids[4], scratch), PLIC::GeometryError);
+    EXPECT_EQ(scratch.size(), 0u);
+    EXPECT_EQ(scratch.scanned_points(), 0u);
+    const auto grow_peak = scratch.reserve_required_peak(ids.size());
+    EXPECT_GT(grow_peak, first_peak);
+    EXPECT_THROW(scratch.reserve(ids.size(), grow_peak - 1), PLIC::GeometryError);
+    EXPECT_EQ(scratch.capacity(), 2u);
+    EXPECT_EQ(scratch.storage_bytes(), first_peak);
+    scratch.reserve(ids.size(), grow_peak);
+    EXPECT_EQ(scratch.capacity(), ids.size());
+    EXPECT_LT(scratch.storage_bytes(), grow_peak); // Old/new overlap was admitted.
+    index.closed_segment(ids[0], ids[4], scratch);
+    const auto expected = copy_edge_query(scratch);
+    const auto old_storage = scratch.storage_bytes();
+    const auto next_peak = scratch.reserve_required_peak(ids.size() + 1);
+    EXPECT_THROW(scratch.reserve(ids.size() + 1, next_peak - 1), PLIC::GeometryError);
+    EXPECT_EQ(copy_edge_query(scratch), expected);
+    EXPECT_EQ(scratch.storage_bytes(), old_storage);
+    EXPECT_EQ(scratch.growths(), 2u);
+    EXPECT_THROW(scratch.reserve_required_peak(std::numeric_limits<std::size_t>::max()), PLIC::GeometryError);
+    const std::vector<char> malformed{'x'};
+    EXPECT_THROW(PLIC::decode_identity<PointIdentity>(malformed), std::invalid_argument);
+    EXPECT_EQ(copy_edge_query(scratch), expected);
+    index.closed_segment(ids[0], ids[4], scratch);
+    EXPECT_THROW(index.closed_segment(ids[0], ids[0], scratch), std::invalid_argument);
+    EXPECT_EQ(scratch.size(), 0u);
+    index.closed_segment(ids[0], ids[4], scratch);
+    EXPECT_EQ(copy_edge_query(scratch), expected);
+    EXPECT_EQ(index.closed_segment(ids[0], ids[4]), expected);
+    EXPECT_EQ(scratch.queries(), 5u);
+    EXPECT_EQ(scratch.scanned_points(), 3 * ids.size());
+    scratch.release();
+    EXPECT_EQ(scratch.storage_bytes(), 0u);
+    EXPECT_EQ(scratch.queries(), 5u);
+    EXPECT_EQ(scratch.scanned_points(), 3 * ids.size());
+    const auto recovered_peak = scratch.reserve_required_peak(ids.size());
+    scratch.reserve(ids.size(), recovered_peak);
+    index.closed_segment(ids[0], ids[4], scratch);
+    EXPECT_EQ(copy_edge_query(scratch), expected);
+    EXPECT_EQ(scratch.growths(), 3u);
+}
+TEST(FiniteNativeGeometryTest, EdgeQueryScratchMovesKeepResultPinAndDiagnosticHistory)
+{
+    const auto ids = edge_query_points();
+    const std::vector<PointIdentity> expected(ids.begin(), ids.begin() + 5);
+    const std::vector<PointIdentity> no_points;
+    PLIC::EdgePointIndex<ordinary> empty_index(no_points);
+    PLIC::OrdinaryEdgeQueryScratch source;
+    empty_index.closed_segment(ids[0], ids[4], source);
+    EXPECT_EQ(source.size(), 0u);
+    EXPECT_EQ(source.storage_bytes(), 0u);
+    EXPECT_EQ(source.growths(), 0u);
+    EXPECT_EQ(source.queries(), 1u);
+    EXPECT_EQ(source.scanned_points(), 0u);
+    source.reserve(ids.size(), source.reserve_required_peak(ids.size()));
+    {
+        PLIC::EdgePointIndex<ordinary> index(ids);
+        index.closed_segment(ids[0], ids[4], source);
+    }
+    const auto bytes = source.storage_bytes();
+    PLIC::OrdinaryEdgeQueryScratch moved(std::move(source));
+    EXPECT_EQ(source.storage_bytes(), 0u);
+    EXPECT_EQ(source.size(), 0u);
+    EXPECT_EQ(copy_edge_query(moved), expected);
+    EXPECT_EQ(moved.storage_bytes(), bytes);
+    EXPECT_EQ(moved.queries(), 2u);
+    EXPECT_EQ(moved.scanned_points(), ids.size());
+    EXPECT_EQ(moved.growths(), 1u);
+    source.release();
+    // Assignment replaces an existing buffer while retaining the source pin.
+    PLIC::OrdinaryEdgeQueryScratch assigned;
+    assigned.reserve(1, assigned.reserve_required_peak(1));
+    assigned = std::move(moved);
+    moved.release();
+    EXPECT_EQ(copy_edge_query(assigned), expected);
+    EXPECT_EQ(assigned.storage_bytes(), bytes);
+    EXPECT_EQ(assigned.queries(), 2u);
+    EXPECT_EQ(assigned.scanned_points(), ids.size());
+    EXPECT_EQ(assigned.growths(), 1u);
+    empty_index.closed_segment(ids[0], ids[4], assigned);
+    EXPECT_EQ(assigned.size(), 0u);
+    EXPECT_EQ(assigned.storage_bytes(), bytes);
+    EXPECT_EQ(assigned.queries(), 3u);
+    EXPECT_EQ(assigned.scanned_points(), ids.size());
+    assigned.release();
+    EXPECT_EQ(assigned.storage_bytes(), 0u);
+    EXPECT_EQ(assigned.queries(), 3u);
+    EXPECT_EQ(assigned.growths(), 1u);
+    EXPECT_NO_THROW(empty_index.closed_segment(ids[0], ids[4], source));
+    EXPECT_EQ(source.storage_bytes(), 0u);
+}
+TEST(FiniteNativeGeometryTest, EdgeQueryProjectionTiesRetainCoordinateTraversalOrder)
+{
+    // Multiplying adjacent represented coordinates by .75 can round to one
+    // projection. Find an explicit pair within eight steps for this platform.
+    std::array<long double, 9> steps{};
+    steps[0] = .75L;
+    for (std::size_t i = 1; i < steps.size(); ++i)
+        steps[i] = std::nextafter(steps[i - 1], 0.L);
+    std::size_t tied = 0;
+    volatile long double direction = .75L;
+    for (std::size_t i = 1; i + 1 < steps.size(); ++i)
+    {
+        volatile long double first_projection = steps[i] * direction;
+        volatile long double second_projection = steps[i + 1] * direction;
+        if (first_projection == second_projection)
+        {
+            tied = i;
+            break;
+        }
+    }
+    ASSERT_NE(tied, 0u);
+    const auto low = steps[tied + 1], high = steps[tied];
+    ASSERT_LT(low, high);
+    const auto box = Cell::box({0, 0, 0}, {1, 1, 1});
+    PLIC::PlanarFacePtr<ordinary> support;
+    for (std::size_t i = 0; i < box->num_faces(); ++i)
+    {
+        const auto face = box->face_geometry(i);
+        if (std::all_of(face->points().begin(), face->points().end(), [](const auto& p) { return p[2] == 1; }))
+            support = face;
+    }
+    ASSERT_TRUE(support);
+    const std::array<Face::WidePoint, 7> vertices{
+        {{0, 0, 1}, {low, 0, 1}, {high, 0, 1}, {.75L, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}};
+    const auto face =
+        PLIC::details::NativeSupportAccess::face_support(vertices, {0, 0, 1}, PLIC::planar_support<ordinary>(*support));
+    const auto ids = face->vertex_identities();
+    // Higher coordinate arrives first; native coordinate order visits low first.
+    const std::vector<PointIdentity> input{ids[2], ids[1], ids[3], ids[0], ids[1], ids[5]};
+    const std::vector<PointIdentity> expected{ids[0], ids[1], ids[3]};
+    PLIC::EdgePointIndex<ordinary> index(input);
+    PLIC::OrdinaryEdgeQueryScratch scratch;
+    scratch.reserve(input.size(), scratch.reserve_required_peak(input.size()));
+    index.closed_segment(ids[0], ids[3], scratch);
+    EXPECT_EQ(copy_edge_query(scratch), expected);
+    EXPECT_EQ(index.closed_segment(ids[0], ids[3]), expected);
+    EXPECT_EQ(scratch.scanned_points(), 5u);
 }
 
 TEST(FiniteNativeGeometryTest, RetainedNativeBoundaryVerticesHaveStructuralIncidence)
