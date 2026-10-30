@@ -1,13 +1,14 @@
 /** @file GeneralVoFState.cc
  * @brief Shared accepted-state validation, codecs, reconstruction and halo support.
  */
-#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
-#include "FVM/details/GeneralVoF/WorkCapture.hh"
-#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
-#include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
+#include "FVM/details/GeneralVoF/WorkCapture.hh"
+#include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include <chrono>
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -370,6 +371,12 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         if (data.topology->spatial_cache)
             budget.add(data.topology->spatial_cache->bytes);
     }
+    PLIC::GeometryAllocationLedger native_allocations, finite_allocations;
+    const auto retain_face = [&](const auto& face)
+    {
+        budget.add(face->exclusive_storage_bytes());
+        native_allocations.retain(PLIC::planar_support<ArithmeticMode::Ordinary>(*face), budget.used, budget.limit);
+    };
     std::set<const void*> exact_payloads;
     const auto charge_exact = [&](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
     {
@@ -384,10 +391,15 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
     {
         budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
         if (geometry.insert(cell.phase.geometry.get()).second)
-            budget.add(cell.phase.geometry->storage_bytes());
+            native_allocations.retain(cell.phase.geometry, budget.used, budget.limit);
         if constexpr (Mode != ArithmeticMode::Exact)
             if (cell.finite_geometry && geometry.insert(cell.finite_geometry.get()).second)
-                budget.add(cell.finite_geometry->storage_bytes<Mode>());
+            {
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                    native_allocations.retain<Mode>(cell.finite_geometry, budget.used, budget.limit);
+                else
+                    finite_allocations.retain<Mode>(cell.finite_geometry, budget.used, budget.limit);
+            }
         if (cell.experimental_exact)
         {
             budget.add(sizeof(ExperimentalPhaseInventory));
@@ -414,14 +426,15 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
         if (geometry.insert(tile.geometry.get()).second)
-            budget.add(tile.geometry->storage_bytes());
+            retain_face(tile.geometry);
     }
     for (const auto& tile : data.topology->surface_tiles)
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t) + tile.domain.capacity() +
             tile.surface.capacity() + tile.identity.capacity() + tile.boundary.capacity() +
             AMR::encode_adaptive_key(tile.first).size() + (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
-        if (geometry.insert(tile.geometry.get()).second) budget.add(tile.geometry->storage_bytes());
+        if (geometry.insert(tile.geometry.get()).second)
+            retain_face(tile.geometry);
     }
     budget.add((data.topology->frontier_tiles.capacity() - data.topology->frontier_tiles.size()) *
                sizeof(AMR::AdaptiveTile));
@@ -434,7 +447,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                    AMR::encode_adaptive_key(tile.first).size() +
                    (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
         if (geometry.insert(tile.geometry.get()).second)
-            budget.add(tile.geometry->storage_bytes());
+            retain_face(tile.geometry);
     }
     auto graph = [&](const auto& entries)
     {
@@ -468,7 +481,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         {
             budget.add(wall.identity.capacity());
             if (geometry.insert(wall.geometry.get()).second)
-                budget.add(wall.geometry->storage_bytes());
+                retain_face(wall.geometry);
         }
     }
     if (remaining_bytes)

@@ -106,6 +106,9 @@ public:
     void certify_partition(std::span<const PlanarFacePtr<ArithmeticMode::Exact>> tiles) const;
     [[nodiscard]] std::vector<char> encode() const;
     [[nodiscard]] std::vector<char> encode_incidence() const;
+    /** Own face buffers only; shared identity owners are visited separately. */
+    [[nodiscard]] std::size_t exclusive_storage_bytes() const;
+    /** Full standalone footprint, including retained identity ancestry. */
     [[nodiscard]] std::size_t storage_bytes() const;
     [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Exact> decode(std::span<const char>);
 

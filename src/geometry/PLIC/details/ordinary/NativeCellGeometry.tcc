@@ -355,14 +355,14 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
     if (supports.size() != old->surfaces.size())
         details::reject(Mode, "native support count differs from cell faces.");
     details::Operation scope(old->limits);
-    details::active_work->charge(geometry_->template storage_bytes<Mode>(), 1);
+    details::active_work->retain_geometry<Mode>(geometry_);
     auto copy = std::make_shared<details::GeometryStorage<Mode>>(*old);
     std::map<details::StoredPlanePtr<Mode>, details::StoredPlanePtr<Mode>> replacement;
     for (std::size_t f = 0; f < copy->surfaces.size(); ++f)
     {
         const auto source = copy->surfaces[f].plane;
         auto plane = std::make_shared<details::StoredPlane<Mode>>(*source);
-        details::active_work->charge(supports[f].payload_bytes(), 1);
+        details::active_work->retain_identity(supports[f]);
         plane->native_support = supports[f];
         replacement[source] = plane;
         copy->surfaces[f].plane = std::move(plane);
@@ -371,7 +371,10 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
         for (auto& plane : vertex.incident)
             if (replacement.contains(plane))
                 plane = replacement.at(plane);
-    return from_dynamic(DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(copy))));
+    auto result = from_dynamic(DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(copy))));
+    details::active_work->allocations.retain(
+        result, details::active_work->bytes, details::active_work->limits.byte_budget);
+    return result;
 }
 
 template<ArithmeticMode Mode>

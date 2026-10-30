@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <algorithm>
@@ -417,6 +418,7 @@ class MixedKernel final : public AdaptiveProviderKernel
         const auto raw = original(leaf);
         std::vector<AdaptiveSurface> result;
         Budget allocation{budget_};
+        adaptive_detail::IdentityBudget identities;
         for (const auto& source : provider.kernel->surfaces(raw))
         {
             std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> covered;
@@ -443,7 +445,8 @@ class MixedKernel final : public AdaptiveProviderKernel
                         }
                     if (duplicate)
                         continue;
-                    allocation.add(piece->storage_bytes() + alias.canonical_support.size());
+                    identities.face(allocation, *piece);
+                    allocation.add(alias.canonical_support.size());
                     covered.push_back(piece);
                     joined.emplace_back(alias.canonical_support, piece);
                     auto use = source;
@@ -484,8 +487,8 @@ class MixedKernel final : public AdaptiveProviderKernel
                             identity.bytes(canonical_face(alias.original_root_selection));
                             identity.bytes(std::span(alias.boundary));
                             use.key = std::move(identity.data);
-                            allocation.add(piece->storage_bytes() + use.key.size() + use.boundary.size() +
-                                           sizeof(AdaptiveSurface));
+                            identities.face(allocation, *piece);
+                            allocation.add(use.key.size() + use.boundary.size() + sizeof(AdaptiveSurface));
                             physical.push_back(piece);
                             result.push_back(std::move(use));
                         }

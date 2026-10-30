@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
 #include <cstdio>
@@ -203,6 +204,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         [&]
         {
             Budget allocation{budget};
+            IdentityBudget identities;
             allocation.add(incoming.packets.capacity() * sizeof(OwnerPacket));
             for (const auto& packet : incoming.packets)
                 allocation.add(packet.bytes.capacity());
@@ -243,9 +245,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 if (entry.whole_geometry && !entry.whole_geometry->contains(*entry.face))
                     throw std::invalid_argument("Rewritten join lies outside its actual native face.");
                 r.done();
-                allocation.add(entry.face->storage_bytes());
+                identities.face(allocation, *entry.face);
                 if (entry.whole_geometry && entry.whole_geometry != entry.face)
-                    allocation.add(entry.whole_geometry->storage_bytes());
+                    identities.face(allocation, *entry.whole_geometry);
                 allocation.add(entry.domain.capacity() + entry.image.payload_bytes() + entry.boundary.capacity() +
                                encode_adaptive_key(entry.cell).size());
                 auto [position, inserted] = groups.try_emplace(std::move(support));

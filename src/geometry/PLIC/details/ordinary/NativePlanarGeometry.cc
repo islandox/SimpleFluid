@@ -1,4 +1,5 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
@@ -168,7 +169,8 @@ Polygon clip_loop(
             append(p);
         if ((dp < 0 && dq > 0) || (dp > 0 && dq < 0))
         {
-            // Identical endpoint order gives neighboring polygons identical intersections.
+            // Identical endpoint order gives neighboring polygons identical
+            // intersections.
             const auto& lo = p < q ? p : q;
             const auto& hi = p < q ? q : p;
             const auto dl = distance(lo), dh = distance(hi);
@@ -531,6 +533,7 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
     if (tiles.empty() || tiles.size() > tile_cap)
         on::reject("native planar partition tile cap exhausted.");
     std::size_t bytes = 0, pairs = 0;
+    GeometryAllocationLedger allocations;
     const auto charge = [&](std::size_t count, std::size_t size)
     {
         if (size && count > (byte_budget - bytes) / size)
@@ -701,9 +704,20 @@ std::vector<char> OrdinaryFace::encode_incidence() const
     return std::move(w.bytes);
 }
 
+std::size_t OrdinaryFace::exclusive_storage_bytes() const
+{
+    return sizeof(Impl) + impl_->polygon.capacity() * sizeof(WidePoint);
+}
 std::size_t OrdinaryFace::storage_bytes() const
 {
-    return sizeof(Impl) + impl_->polygon.capacity() * sizeof(WidePoint) + impl_->support->payload_bytes();
+    auto bytes = exclusive_storage_bytes();
+    visit_identity_allocations(*this,
+        [&](const GeometryIdentityAllocation& allocation)
+        {
+            bytes += allocation.payload_bytes;
+            return true;
+        });
+    return bytes;
 }
 OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes)
 {
@@ -858,6 +872,7 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
         reject("invalid finite cell partition request.");
     constexpr std::size_t byte_cap = 64 * 1024 * 1024, pair_cap = 262144;
     std::size_t bytes = 0, pairs = 0;
+    GeometryAllocationLedger allocations;
     const auto charge = [&](std::size_t n, std::size_t size)
     {
         if (size && n > (byte_cap - bytes) / size)
@@ -874,7 +889,7 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
             auto face = cell.face_geometry(f);
             auto support = planar_support<ArithmeticMode::Ordinary>(*face);
             charge(1, sizeof(std::pair<FacePtr, int>) + 4 * sizeof(void*));
-            charge(support.payload_bytes(), 1);
+            allocations.retain(support, bytes, byte_cap);
             groups[std::move(support)].emplace_back(std::move(face), sign);
         }
     };

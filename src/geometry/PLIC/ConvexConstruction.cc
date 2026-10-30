@@ -217,9 +217,9 @@ GeometrySourceSnapshot prepare_source_geometry(
         snapshot.shell.face_support_identities.capacity(), sizeof(PlaneSupportIdentity<ArithmeticMode::Ordinary>));
     for (const auto& face : snapshot.shell.outward_faces)
         active_work->charge(face.capacity(), sizeof(std::size_t));
-    for (const auto& support : snapshot.shell.face_support_identities)
-        active_work->charge(support.payload_bytes(), 1);
     snapshot.preparation_bytes = active_work->bytes - bytes;
+    for (const auto& support : snapshot.shell.face_support_identities)
+        active_work->retain_identity(support);
     snapshot.preparation_operations = active_work->operations - operations;
     snapshot.preparation_pairs = active_work->pairs - pairs;
     snapshot.charged_work = preparation.previous ? active_work : nullptr;
@@ -230,6 +230,8 @@ void charge_source_preparation(const GeometrySourceSnapshot& source)
     if (source.charged_work == active_work)
         return;
     active_work->charge(source.preparation_bytes, 1);
+    for (const auto& support : source.shell.face_support_identities)
+        active_work->retain_identity(support);
     if (source.preparation_operations >
         active_work->operation_limit - std::min(active_work->operations, active_work->operation_limit))
         reject("source preparation exhausts the geometry operation cap.");

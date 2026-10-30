@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <Tpetra_Map.hpp>
@@ -759,6 +760,7 @@ std::size_t fetch_retention(std::span<const AdaptiveLeaf> leaves, std::span<cons
     std::size_t limit, bool reserve_growth)
 {
     Budget bytes{limit};
+    adaptive_detail::IdentityBudget identities(reserve_growth);
     std::set<const void*> objects;
     auto charge = [&](std::size_t n)
     {
@@ -804,13 +806,13 @@ std::size_t fetch_retention(std::span<const AdaptiveLeaf> leaves, std::span<cons
             part(value.factor_recipe->axis);
         }
         if (value.geometry)
-            charge(value.geometry->storage_bytes());
+            identities.retain(bytes, value.geometry);
         for (const auto& face : value.surfaces)
         {
             if (face.geometry)
-                charge(face.geometry->storage_bytes());
+                identities.face(bytes, *face.geometry);
             if (face.native_whole_geometry)
-                charge(face.native_whole_geometry->storage_bytes());
+                identities.face(bytes, *face.native_whole_geometry);
         }
     };
     for (const auto& value : leaves)
@@ -1252,6 +1254,20 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
         if (value && parts.insert(value.get()).second)
             result.procedural_bytes += sizeof(AdaptiveBytes) + value->capacity();
     };
+    PLIC::GeometryAllocationLedger identity_allocations;
+    std::size_t identity_counter = 0;
+    const auto payload_delta = [&](const auto& value)
+    {
+        const auto before = identity_allocations.payload_bytes();
+        identity_allocations.retain(value, identity_counter, std::numeric_limits<std::size_t>::max());
+        return identity_allocations.payload_bytes() - before;
+    };
+    const auto face_bytes = [&](const auto& face) -> std::size_t
+    {
+        if (!face || !geometry.insert(face.get()).second)
+            return 0;
+        return face->exclusive_storage_bytes() + payload_delta(PLIC::planar_support<ArithmeticMode::Ordinary>(*face));
+    };
     auto leaf = [&](const AdaptiveLeaf& value, std::size_t& bytes)
     {
         bytes += key_dynamic(value.key) + value.domain.capacity() + value.parent_family.capacity() +
@@ -1273,12 +1289,12 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
             part(value.factor_recipe->axis);
         }
         if (value.geometry && geometry.insert(value.geometry.get()).second)
-            bytes += value.geometry->storage_bytes();
+            bytes += payload_delta(value.geometry);
         for (const auto& face : value.surfaces)
         {
             bytes += face.key.capacity() + face.boundary.capacity() + face.authority_image.payload_bytes();
-            if (face.geometry && geometry.insert(face.geometry.get()).second)
-                bytes += face.geometry->storage_bytes();
+            bytes += face_bytes(face.geometry);
+            bytes += face_bytes(face.native_whole_geometry);
         }
     };
     for (const auto& [key, value] : data_->owned)

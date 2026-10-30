@@ -28,6 +28,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
     swept_volume/OrdinaryAggregate.cc
+    PLIC/GeometryIdentity.cc
     PLIC/GeometryIdentityCodec.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
@@ -176,6 +177,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
     swept_volume/OrdinaryAggregate.cc
+    PLIC/GeometryIdentity.cc
     PLIC/GeometryIdentityCodec.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc

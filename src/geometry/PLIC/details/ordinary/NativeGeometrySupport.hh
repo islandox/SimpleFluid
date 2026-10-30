@@ -350,6 +350,6 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> translated_support_packet(
     writer.packet(details::GeometryIdentityAccess::key(support));
     writer.point(shift);
     return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
-        std::move(writer.bytes));
+        std::move(writer.bytes), support);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native

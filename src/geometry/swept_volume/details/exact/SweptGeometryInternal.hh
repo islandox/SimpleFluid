@@ -3,8 +3,9 @@
  */
 #pragma once
 
-#include "geometry/swept_volume/SweptGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 
 namespace SimpleFluid::PLIC
 {
@@ -132,7 +133,12 @@ struct SweepBudget
     SweepLimits limits;
     std::size_t bytes = 0, tests = 0;
     std::size_t cache_peak = 0, cache_simultaneous_peak = 0, cache_fallbacks = 0;
+    GeometryAllocationLedger allocations;
     explicit SweepBudget(SweepLimits l);
+    template<class Identity> void retain_identity(const Identity& identity)
+    {
+        allocations.retain(identity, bytes, limits.byte_budget);
+    }
     void add(std::size_t n);
     void cache(const ClipScratch& scratch);
     void array(std::size_t n, std::size_t size);

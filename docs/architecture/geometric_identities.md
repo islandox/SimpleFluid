@@ -38,3 +38,25 @@ codec changes must preserve the independent canonical key contract.
 `PlaneAuthority`, `DynamicPointProvenance`, and `GeometryAllocationLedger` remain
 separate mechanisms. Identity equality does not establish shared allocation
 ownership, and shared ownership does not establish geometric incidence.
+
+Ordinary supports and Exact identities share immutable backing allocations.
+Copies retain the same owner; separately decoded equal identities remain
+distinct owners. Translation retains its parent support without simplifying the
+construction expression. There is no global interner or lazy face cache.
+
+`GeometryAllocationLedger` admits geometry and shared identity owners in the
+same scope, pins them against address reuse, and charges each owner once. Failed
+admission poisons the scope. Standalone footprint queries include reachable
+identity ancestry; `exclusive_storage_bytes()` on a planar face excludes those
+shared identity allocations so a caller can admit them through its ledger.
+Counts cover backing objects, buffer capacities, and ledger bookkeeping, not
+allocator overhead, shared-pointer control blocks, or RSS. Cached full keys and
+retained parent owners can increase the footprint of nested translations.
+
+Packet length, exclusive retained capacity, and shared-owner admission are
+separate quantities. In AMR, released packet storage may decrease the live
+budget; an identity ledger keeps its own monotonic counter and transfers only
+new admission charges into that live budget.
+Closure request preparation pins admitted geometry until that request phase
+ends. Per-leaf scratch release excludes every surviving ledger charge. Storage
+reports count unique payloads and exclude their temporary reporting ledgers.

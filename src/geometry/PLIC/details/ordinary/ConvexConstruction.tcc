@@ -1,9 +1,9 @@
 /** @file ordinary/ConvexConstruction.tcc
  * @brief Ordinary convex construction and compensated nominal integration.
  */
-#include <sstream>
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
+#include <sstream>
 
 namespace SimpleFluid::PLIC::details
 {
@@ -143,7 +143,8 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
     for (const auto& plane : retained_planes)
     {
         active_work->charge(1, sizeof(Plane));
-        active_work->charge((plane->native_support ? plane->native_support->payload_bytes() : 0), 1);
+        if (plane->native_support)
+            active_work->retain_identity(*plane->native_support);
         active_work->charge(plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
         active_work->charge(plane->authorities.size(), sizeof(PlaneAuthority));
         for (const auto& key : plane->authorities)
