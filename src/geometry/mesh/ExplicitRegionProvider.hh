@@ -159,7 +159,7 @@ public:
         std::map<int, std::string> boundaries,
         std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_certificates,
         std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_certificates,
-        const std::map<ID, std::vector<char>>& node_certificates);
+        const std::map<ID, PLIC::PointIdentity<ArithmeticMode::Ordinary>>& node_certificates);
     bool has_construction() const noexcept { return bool(d_construction) || !d_cell_certificates.empty(); }
     bool has_local_certificates() const noexcept { return !d_cell_certificates.empty(); }
     const std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>& construction() const noexcept

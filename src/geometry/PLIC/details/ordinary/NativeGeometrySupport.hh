@@ -3,6 +3,8 @@
  */
 #pragma once
 #include "geometry/PLIC/CertifiedGeometryProperties.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -225,7 +227,8 @@ inline WidePoint polygon_vector(std::span<const WidePoint> points)
         sum = add(sum, cross(sub(points[i], points[0]), sub(points[i + 1], points[0])));
     return mul(sum, .5L);
 }
-inline std::vector<char> plane_packet(const WidePoint& normal, const WidePoint& anchor, long double offset = 0)
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> plane_packet(
+    const WidePoint& normal, const WidePoint& anchor, long double offset = 0)
 {
     std::size_t axis = 0;
     for (std::size_t i = 1; i < 3; ++i)
@@ -243,13 +246,13 @@ inline std::vector<char> plane_packet(const WidePoint& normal, const WidePoint& 
     w.word(axis);
     w.point(canonical);
     w.real(location);
-    return std::move(w.bytes);
+    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native
 
 namespace SimpleFluid::PLIC::details::ordinary_native
 {
-inline std::vector<char> source_support_packet(std::span<const WidePoint> source)
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> source_support_packet(std::span<const WidePoint> source)
 {
     if (source.size() < 3)
         reject("native support needs a face source.");
@@ -260,7 +263,8 @@ inline std::vector<char> source_support_packet(std::span<const WidePoint> source
             w.word(0x53464e4158495331ULL);
             w.word(axis);
             w.real(source.front()[axis]);
-            return std::move(w.bytes);
+            return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+                std::move(w.bytes));
         }
     std::vector<WidePoint> polygon(source.begin(), source.end());
     bool changed = true;
@@ -282,9 +286,10 @@ inline std::vector<char> source_support_packet(std::span<const WidePoint> source
     w.word(polygon.size());
     for (const auto& p : polygon)
         w.point(p);
-    return std::move(w.bytes);
+    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
 }
-inline std::vector<char> input_support_packet(GeometryPoint normal, GeometryPoint anchor, double offset)
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> input_support_packet(
+    GeometryPoint normal, GeometryPoint anchor, double offset)
 {
     std::size_t nonzero = 0, axis = 0;
     for (std::size_t i = 0; i < 3; ++i)
@@ -303,7 +308,8 @@ inline std::vector<char> input_support_packet(GeometryPoint normal, GeometryPoin
             w.word(0x53464e4158495331ULL);
             w.word(axis);
             w.real(location);
-            return std::move(w.bytes);
+            return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+                std::move(w.bytes));
         }
     }
     int direction = 1;
@@ -319,7 +325,7 @@ inline std::vector<char> input_support_packet(GeometryPoint normal, GeometryPoin
         w.real(static_cast<long double>(direction) * n);
     w.point(wide(anchor));
     w.real(static_cast<long double>(direction) * offset);
-    return std::move(w.bytes);
+    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(std::move(w.bytes));
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native
 
@@ -334,14 +340,16 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>&,
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC::details::ordinary_native
 {
-inline std::vector<char> translated_support_packet(std::span<const char> support, const WidePoint& shift)
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> translated_support_packet(
+    const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support, const WidePoint& shift)
 {
     if (shift == WidePoint{})
-        return {support.begin(), support.end()};
+        return support;
     Writer writer;
     writer.word(0x53464e5452414e31ULL);
-    writer.packet(support);
+    writer.packet(details::GeometryIdentityAccess::key(support));
     writer.point(shift);
-    return std::move(writer.bytes);
+    return details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+        std::move(writer.bytes));
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_native

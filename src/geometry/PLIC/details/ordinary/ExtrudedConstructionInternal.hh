@@ -131,7 +131,7 @@ struct ExtrudedBaseData
     std::vector<std::size_t> active;
     std::vector<P> points, centers, deltas, edge_centers;
     std::vector<Scalar> areas;
-    std::vector<std::vector<char>> edge_supports;
+    std::vector<PlaneSupportIdentity<ArithmeticMode::Ordinary>> edge_supports;
     std::vector<P> support_normals;
     std::vector<MeshUtils::Vec3> display;
     std::vector<char> topology;

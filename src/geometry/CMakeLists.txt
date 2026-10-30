@@ -28,6 +28,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
     swept_volume/OrdinaryAggregate.cc
+    PLIC/GeometryIdentityCodec.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
@@ -108,7 +109,7 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
-    set_source_files_properties(PLIC/PlaneMeasure.cc swept_volume/OrdinaryAggregate.cc PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
+    set_source_files_properties(PLIC/GeometryIdentityCodec.cc PLIC/PlaneMeasure.cc swept_volume/OrdinaryAggregate.cc PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
         PLIC/ConstructionRegistry.cc
         PLIC/GeometryAllocationLedger.cc
         PLIC/CertifiedGeometryProperties.cc
@@ -175,6 +176,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
     swept_volume/OrdinaryAggregate.cc
+    PLIC/GeometryIdentityCodec.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc

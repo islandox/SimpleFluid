@@ -49,7 +49,8 @@ struct Frontier
     };
     PLIC::PlanarFacePtr<mode> geometry;
     std::uint64_t face_gid = 0;
-    AMR::AdaptiveBytes tile_identity, support_identity;
+    AMR::AdaptiveBytes tile_identity;
+    std::optional<PLIC::PlaneSupportIdentity<mode>> support_identity;
     std::string boundary;
     Kind kind = Kind::PhysicalBoundary;
     Key retained_key;

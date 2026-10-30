@@ -52,7 +52,8 @@ public:
     [[nodiscard]] virtual AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf&) const = 0;
     [[nodiscard]] virtual std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const = 0;
-    [[nodiscard]] virtual AdaptiveBytes contact_point(const AdaptiveLeaf&, std::span<const char>) const;
+    [[nodiscard]] virtual PLIC::PointIdentity<ArithmeticMode::Ordinary> contact_point(
+        const AdaptiveLeaf&, const PLIC::PointIdentity<ArithmeticMode::Ordinary>&) const;
     [[nodiscard]] virtual std::vector<AdaptiveCellKey> matching_partners(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual AdaptiveTrace traces(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual AdaptiveSplit closure_split(const AdaptiveLeaf&, std::size_t axis) const;

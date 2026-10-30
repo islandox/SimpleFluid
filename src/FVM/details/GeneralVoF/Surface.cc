@@ -88,7 +88,7 @@ void physical_scale(GeneralVoFSurfacePatch& patch, const Cell& cell)
 }
 GeneralVoFFaceInterface face_interface(const AMR::AdaptiveTile& tile, const Cell& first, const Cell& second, int a)
 {
-    if (!tile.second_image_identity.empty())
+    if (!tile.second_image_identity.is_zero())
         throw std::invalid_argument("Periodic face-interface surfaces are not qualified.");
     const auto centroid = tile.geometry->centroid();
     const auto area_vector = tile.geometry->area_vector();

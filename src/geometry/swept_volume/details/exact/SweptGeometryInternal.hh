@@ -55,7 +55,7 @@ struct SIMPLEFLUID_LOCAL ConvexFragment<ArithmeticMode::Exact>::Impl
 struct SIMPLEFLUID_LOCAL SweptFace<ArithmeticMode::Exact>::Impl
 {
     std::vector<SignedSweepSimplex<ArithmeticMode::Exact>> pieces;
-    std::vector<std::array<std::vector<char>, 3>> edges;
+    std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>> edges;
     Q volume, original;
     P center;
     PlanarFacePtr<ArithmeticMode::Exact> native;
@@ -125,7 +125,7 @@ public:
 
 namespace exact_swept_detail SIMPLEFLUID_LOCAL
 {
-std::vector<char> swept_point(const P& point);
+PLIC::PointIdentity<ArithmeticMode::Exact> swept_point(const P& point);
 
 struct SweepBudget
 {
@@ -202,7 +202,7 @@ std::optional<SignedSweepSimplex<ArithmeticMode::Exact>> swept_tetra(
 
 using SweptTriangle = std::array<P, 3>;
 std::vector<SweptTriangle> swept_boundary(const Polygon& current, const Polygon& previous, const P& center,
-    const P& backcenter, std::vector<std::array<std::vector<char>, 3>>* sides);
+    const P& backcenter, std::vector<std::array<PLIC::PointIdentity<ArithmeticMode::Exact>, 3>>* sides);
 Q signed_boundary_volume(const P& origin, const std::vector<SweptTriangle>& triangles);
 void sweep_donors(std::span<const SweepDonor<ArithmeticMode::Exact>> donors, SweepBudget& budget);
 

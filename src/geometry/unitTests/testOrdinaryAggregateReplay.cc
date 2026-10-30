@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <numeric>
+#include <optional>
 
 namespace
 {
@@ -79,7 +80,7 @@ std::shared_ptr<const AMR::DistributedAdaptiveHierarchy> native_fifty_cells()
 
 Point native_point(std::span<const PLIC::ConvexGeometryPtr<mode>> cells, PLIC::GeometryPoint position)
 {
-    std::vector<char> identity;
+    std::optional<PLIC::PointIdentity<mode>> identity;
     std::vector<PLIC::ConvexGeometryPtr<mode>> fan;
     for (const auto& cell : cells)
     {
@@ -92,25 +93,25 @@ Point native_point(std::span<const PLIC::ConvexGeometryPtr<mode>> cells, PLIC::G
                 if (PLIC::GeometryPoint{static_cast<double>(points[i][0]), static_cast<double>(points[i][1]),
                         static_cast<double>(points[i][2])} == position)
                 {
-                    if (identity.empty())
+                    if (!identity)
                         identity = ids.at(i);
-                    else if (identity != ids.at(i))
+                    else if (*identity != ids.at(i))
                         throw std::logic_error("Captured native point has inconsistent identities.");
                 }
         }
     }
-    if (identity.empty())
+    if (!identity)
         throw std::logic_error("Captured native point is absent from the native hierarchy.");
     // Include coarse faces containing a hanging node even when that node is
     // not one of the coarse face's original polygon vertices.
     for (const auto& cell : cells)
         for (std::size_t f = 0; f < cell->num_faces(); ++f)
-            if (cell->face_geometry(f)->contains_point(identity))
+            if (cell->face_geometry(f)->contains_point(*identity))
             {
                 fan.push_back(cell);
                 break;
             }
-    return PLIC::source_point<mode>(fan, identity);
+    return PLIC::source_point<mode>(fan, *identity);
 }
 
 struct CapturedFace20

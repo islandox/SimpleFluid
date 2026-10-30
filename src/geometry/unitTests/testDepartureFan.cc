@@ -225,7 +225,7 @@ TEST(DepartureFan, CoarseFineCanonicalSubfacesAndEdgeNodesRouteExactDonorVolumes
     auto native = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
     std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{0, native}};
     std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>> boundary;
-    std::vector<std::vector<char>> nodes;
+    std::vector<SimpleFluid::PLIC::PointIdentity<SimpleFluid::ArithmeticMode::Exact>> nodes;
     for (unsigned y = 0; y < 2; ++y)
         for (unsigned z = 0; z < 2; ++z)
         {

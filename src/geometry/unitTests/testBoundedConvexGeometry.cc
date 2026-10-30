@@ -1,12 +1,12 @@
 /** @file testBoundedConvexGeometry.cc
  * @brief Independent analytic/reference tests of bounded finite geometry.
  */
-#include "geometry/unitTests/plic_analytic_test_geometry.hh"
-#include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/ConstructionRegistry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/unitTests/plic_analytic_test_geometry.hh"
 #include <algorithm>
 #include <cfenv>
 #include <cmath>
@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <type_traits>
@@ -2956,29 +2957,27 @@ TEST(BoundedConvexGeometryTest, HangingSourcePointCarriesTheCompleteIncidentFanS
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     const auto fine =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {.5, .5, .5});
-    std::vector<char> point_identity;
+    std::optional<SimpleFluid::PLIC::PointIdentity<ArithmeticMode::Ordinary>> point_identity;
     for (const auto& identity : fine->face_geometry(4)->vertex_identities())
     {
         const auto p = SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(identity);
         if (p == SimpleFluid::PLIC::GeometryPoint{.5, .5, 0})
             point_identity = identity;
     }
-    ASSERT_FALSE(point_identity.empty());
-    const auto coarse_only =
-        SimpleFluid::PLIC::source_point<ArithmeticMode::Ordinary>(*coarse, point_identity);
+    ASSERT_TRUE(point_identity);
+    const auto coarse_only = SimpleFluid::PLIC::source_point<ArithmeticMode::Ordinary>(*coarse, *point_identity);
     const std::array sources{coarse, fine};
-    const auto complete =
-        SimpleFluid::PLIC::source_point<ArithmeticMode::Ordinary>(sources, point_identity);
+    const auto complete = SimpleFluid::PLIC::source_point<ArithmeticMode::Ordinary>(sources, *point_identity);
     EXPECT_GT(complete.supports().size(), coarse_only.supports().size());
     EXPECT_EQ(complete.value, coarse_only.value);
     const auto bounded =
-        SimpleFluid::PLIC::source_point<ArithmeticMode::BoundedCertification>(sources, point_identity);
+        SimpleFluid::PLIC::source_point<ArithmeticMode::BoundedCertification>(sources, *point_identity);
     EXPECT_EQ(bounded.value, complete.value);
     EXPECT_TRUE(bounded.supports().empty());
     EXPECT_EQ(bounded.absolute_error, (std::array<long double, 3>{}));
     EXPECT_THROW((void) SimpleFluid::PLIC::source_point<ArithmeticMode::Ordinary>(
                      std::span<const SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>{},
-                     point_identity),
+                     *point_identity),
         std::invalid_argument);
 }
 
@@ -3073,19 +3072,19 @@ TEST(BoundedConvexGeometryTest, AllAuthenticatedCornerWallsRemainSatisfiedAfterP
     const auto source =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::make(vertices, faces);
     const auto finite = Geometry<ArithmeticMode::BoundedCertification>::from_geometry(*source);
-    std::vector<char> identity;
+    std::optional<SimpleFluid::PLIC::PointIdentity<ArithmeticMode::Ordinary>> identity;
     for (const auto& point : source->face_geometry(0)->vertex_identities())
         if (SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(point) ==
             SimpleFluid::PLIC::GeometryPoint{0, 0, 1})
             identity = point;
-    ASSERT_FALSE(identity.empty());
+    ASSERT_TRUE(identity);
     std::vector<SimpleFluid::PLIC::FaceConstraint<ArithmeticMode::BoundedCertification>> walls;
     for (std::size_t f = 0; f < source->num_faces(); ++f)
-        if (source->face_geometry(f)->contains_point(identity))
+        if (source->face_geometry(f)->contains_point(*identity))
             walls.push_back({finite, f});
     ASSERT_EQ(walls.size(), 4u);
     const auto point =
-        SimpleFluid::PLIC::source_point<ArithmeticMode::BoundedCertification>(*source, identity).dynamic();
+        SimpleFluid::PLIC::source_point<ArithmeticMode::BoundedCertification>(*source, *identity).dynamic();
     const auto departure =
         selected_backtrace_constrained<ArithmeticMode::BoundedCertification>(point, {.1, .2, .3}, .01, walls);
     EXPECT_TRUE(selected_points_identical<>(point, departure));

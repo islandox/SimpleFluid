@@ -4,6 +4,7 @@
  */
 
 #pragma once
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 
 #include "SimpleFluidExport.hh"
 #include "utils/ExactRational.hh"
@@ -572,6 +573,14 @@ namespace exact_geometry_detail SIMPLEFLUID_LOCAL
 void validate_planar_polygon(const Polygon& polygon);
 P authority_point(std::span<const char> packet);
 P displacement_point(std::span<const char> packet);
+inline P authority_point(const PointIdentity<ArithmeticMode::Exact>& identity)
+{
+    return authority_point(details::GeometryIdentityAccess::key(identity));
+}
+inline P displacement_point(const DisplacementIdentity<ArithmeticMode::Exact>& identity)
+{
+    return displacement_point(details::GeometryIdentityAccess::key(identity));
+}
 std::vector<char> displacement_packet(const P& p);
 std::vector<char> point_packet(const P& p);
 } // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
@@ -579,29 +588,36 @@ std::vector<char> point_packet(const P& p);
 namespace SimpleFluid::PLIC
 {
 
-template<> std::vector<char> displacement<ArithmeticMode::Exact>(GeometryPoint from, GeometryPoint to);
 template<>
-std::vector<char> displacement_difference<ArithmeticMode::Exact>(
-    std::span<const char> first, std::span<const char> second);
-template<> GeometryPoint displacement_display<ArithmeticMode::Exact>(std::span<const char> packet);
+DisplacementIdentity<ArithmeticMode::Exact> displacement<ArithmeticMode::Exact>(GeometryPoint from, GeometryPoint to);
 template<>
-std::vector<char> point_translated<ArithmeticMode::Exact>(
-    std::span<const char> identity, std::span<const char> displacement);
+DisplacementIdentity<ArithmeticMode::Exact> displacement_difference<ArithmeticMode::Exact>(
+    const DisplacementIdentity<ArithmeticMode::Exact>& first,
+    const DisplacementIdentity<ArithmeticMode::Exact>& second);
 template<>
-std::vector<char> periodic_point<ArithmeticMode::Exact>(
-    std::span<const char> identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic);
-template<> GeometryPoint point_display<ArithmeticMode::Exact>(std::span<const char> identity);
+GeometryPoint displacement_display<ArithmeticMode::Exact>(const DisplacementIdentity<ArithmeticMode::Exact>& packet);
+template<>
+PointIdentity<ArithmeticMode::Exact> point_translated<ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>& identity,
+    const DisplacementIdentity<ArithmeticMode::Exact>& displacement);
+template<>
+PointIdentity<ArithmeticMode::Exact> periodic_point<ArithmeticMode::Exact>(
+    const PointIdentity<ArithmeticMode::Exact>& identity, GeometryPoint lower, GeometryPoint upper,
+    std::array<bool, 3> periodic);
+template<> GeometryPoint point_display<ArithmeticMode::Exact>(const PointIdentity<ArithmeticMode::Exact>& identity);
 template<>
 std::array<GeometryValue<ArithmeticMode::Exact>, 3> numerical_point<ArithmeticMode::Exact>(
-    std::span<const char> identity);
+    const PointIdentity<ArithmeticMode::Exact>& identity);
 
 struct SIMPLEFLUID_LOCAL EdgePointIndex<ArithmeticMode::Exact>::Impl
 {
     P origin, direction;
     std::size_t axis = 0;
-    std::map<Q, std::vector<char>> points;
+    std::map<Q, PointIdentity<ArithmeticMode::Exact>> points;
 };
-template<> std::vector<char> planar_support<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face);
+template<>
+PlaneSupportIdentity<ArithmeticMode::Exact> planar_support<ArithmeticMode::Exact>(
+    const PlanarFace<ArithmeticMode::Exact>& face);
 template<> int planar_orientation<ArithmeticMode::Exact>(const PlanarFace<ArithmeticMode::Exact>& face);
 template<>
 std::vector<PlanarFacePtr<ArithmeticMode::Exact>> subtract_planar_faces<ArithmeticMode::Exact>(

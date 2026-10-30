@@ -42,9 +42,10 @@ void AdaptiveProviderKernel::validate(const AdaptiveLeaf& leaf) const
     if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(outward)->equivalent(*shape))
         throw std::invalid_argument("Provider surfaces differ from exact cell.");
 }
-AdaptiveBytes AdaptiveProviderKernel::contact_point(const AdaptiveLeaf&, std::span<const char> point) const
+PLIC::PointIdentity<ArithmeticMode::Ordinary> AdaptiveProviderKernel::contact_point(
+    const AdaptiveLeaf&, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& point) const
 {
-    return {point.begin(), point.end()};
+    return point;
 }
 std::vector<AdaptiveCellKey> AdaptiveProviderKernel::matching_partners(const AdaptiveLeaf&) const
 {

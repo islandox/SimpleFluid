@@ -321,7 +321,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         }
         if (!tile.second || !index.contains(tile.first) || !index.contains(*tile.second))
             continue;
-        if (!tile.second_image_identity.empty())
+        if (!tile.second_image_identity.is_zero())
             reject(Reason::IncompleteSupport, "Periodic filtered support is unqualified.");
         const auto a = index.at(tile.first), b = index.at(*tile.second);
         const auto distance = norm(sub(wide(cells[a].source->centroid), wide(cells[b].source->centroid)));

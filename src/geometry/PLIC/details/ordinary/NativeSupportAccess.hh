@@ -13,12 +13,13 @@ class NativeSupportAccess
 {
 public:
     static ConvexGeometryPtr<ArithmeticMode::Ordinary> cell_supports(
-        const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, std::span<const std::vector<char>> supports)
+        const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell,
+        std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports)
     {
         return cell.with_native_supports(supports);
     }
     static PlanarFacePtr<ArithmeticMode::Ordinary> face_support(std::span<const std::array<long double, 3>> points,
-        std::array<long double, 3> normal, std::vector<char> support)
+        std::array<long double, 3> normal, PlaneSupportIdentity<ArithmeticMode::Ordinary> support)
     {
         return PlanarFace<ArithmeticMode::Ordinary>::from_retained_support(points, normal, std::move(support));
     }

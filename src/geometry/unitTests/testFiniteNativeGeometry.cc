@@ -7,6 +7,7 @@
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include <algorithm>
 #include <cmath>
@@ -121,7 +122,8 @@ TEST(FiniteNativeGeometryTest, RetainedNativeBoundaryVerticesHaveStructuralIncid
     const std::array<Face::WidePoint, 4> side_points{
         {{ax, ay, 0}, {bx, by, 0}, {bx, by, height}, {ax, ay, height}}};
     const Face::WidePoint normal{by - ay, ax - bx, 0};
-    const auto side = PLIC::details::NativeSupportAccess::face_support(side_points, normal, {'s', 'i', 'd', 'e'});
+    const auto side = PLIC::details::NativeSupportAccess::face_support(side_points, normal,
+        PLIC::details::GeometryIdentityAccess::make<PLIC::PlaneSupportIdentity<ordinary>>({'s', 'i', 'd', 'e'}));
     const std::array<Face::WidePoint, 4> cap_points{{{ax, ay, height}, {bx, by, height},
         {.945253957014124512881L, -.0948417458144867470127L, height},
         {.796003332222420700859L, -.0798667333174625238001L, height}}};
@@ -151,8 +153,9 @@ TEST(FiniteNativeGeometryTest, RetainedNativeBoundaryVerticesHaveStructuralIncid
                 for (auto& value : reordered_normal)
                     value = -value;
             }
-            const auto equivalent = PLIC::details::NativeSupportAccess::face_support(
-                reordered, reordered_normal, {'r', 'e', 'o', 'r', 'd', 'e', 'r'});
+            const auto equivalent = PLIC::details::NativeSupportAccess::face_support(reordered, reordered_normal,
+                PLIC::details::GeometryIdentityAccess::make<PLIC::PlaneSupportIdentity<ordinary>>(
+                    {'r', 'e', 'o', 'r', 'd', 'e', 'r'}));
             EXPECT_TRUE(side->contains(*equivalent));
             EXPECT_TRUE(equivalent->contains(*side));
             EXPECT_TRUE(side->equivalent(*equivalent));

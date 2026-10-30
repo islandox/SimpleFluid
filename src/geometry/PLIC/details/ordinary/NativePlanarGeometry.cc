@@ -1,7 +1,9 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -11,18 +13,23 @@
 namespace SimpleFluid::PLIC
 {
 namespace on = details::ordinary_native;
+using IdentityAccess = details::GeometryIdentityAccess;
+using OrdinaryPoint = PointIdentity<ArithmeticMode::Ordinary>;
+using OrdinaryLine = LineIdentity<ArithmeticMode::Ordinary>;
+using OrdinarySupport = PlaneSupportIdentity<ArithmeticMode::Ordinary>;
+using OrdinaryDisplacement = DisplacementIdentity<ArithmeticMode::Ordinary>;
 using OrdinaryFace = PlanarFace<ArithmeticMode::Ordinary>;
 using OrdinaryFacePtr = PlanarFacePtr<ArithmeticMode::Ordinary>;
 struct OrdinaryFace::Impl
 {
     std::vector<on::WidePoint> polygon;
     on::WidePoint normal{};
-    std::vector<char> support;
+    std::optional<OrdinarySupport> support;
     bool retained_support = false;
 };
 struct EdgePointIndex<ArithmeticMode::Ordinary>::Impl
 {
-    std::map<on::WidePoint, std::vector<char>> points;
+    std::map<on::WidePoint, OrdinaryPoint> points;
 };
 namespace
 {
@@ -245,9 +252,9 @@ OrdinaryFacePtr OrdinaryFace::make_wide(std::span<const WidePoint> vertices)
     return OrdinaryFacePtr(new OrdinaryFace(std::move(impl)));
 }
 OrdinaryFacePtr OrdinaryFace::from_retained_support(
-    std::span<const WidePoint> vertices, WidePoint normal, std::vector<char> support)
+    std::span<const WidePoint> vertices, WidePoint normal, OrdinarySupport support)
 {
-    if (vertices.size() < 3 || vertices.size() > vertex_cap || support.empty() || !(norm(normal) > 0))
+    if (vertices.size() < 3 || vertices.size() > vertex_cap || !(norm(normal) > 0))
         on::reject("invalid retained native face support.");
     auto impl = std::make_shared<Impl>();
     impl->polygon.assign(vertices.begin(), vertices.end());
@@ -331,7 +338,7 @@ GeometryMeasure<ArithmeticMode::Ordinary> OrdinaryFace::coplanar_area_ratio(
 {
     if (storage_bytes() > budget || denominator.storage_bytes() > budget - storage_bytes())
         on::reject("native face measure byte cap exhausted.");
-    if (impl_->support != denominator.impl_->support && !coplanar(impl_->polygon, denominator.impl_->polygon))
+    if (*impl_->support != *denominator.impl_->support && !coplanar(impl_->polygon, denominator.impl_->polygon))
         on::reject("native face area ratio has distinct supports.");
     const auto a = on::polygon_vector(impl_->polygon), b = on::polygon_vector(denominator.impl_->polygon);
     const auto axis = axis_of(b);
@@ -349,7 +356,7 @@ OrdinaryFacePtr OrdinaryFace::reversed() const
 {
     auto p = impl_->polygon;
     std::reverse(p.begin(), p.end());
-    return from_retained_support(p, impl_->normal, impl_->support);
+    return from_retained_support(p, impl_->normal, *impl_->support);
 }
 OrdinaryFacePtr OrdinaryFace::translated(GeometryPoint shift) const
 {
@@ -357,15 +364,15 @@ OrdinaryFacePtr OrdinaryFace::translated(GeometryPoint shift) const
     const auto delta = on::wide(shift);
     for (auto& v : p)
         v = on::add(v, delta);
-    return from_retained_support(p, impl_->normal, on::translated_support_packet(impl_->support, delta));
+    return from_retained_support(p, impl_->normal, on::translated_support_packet(*impl_->support, delta));
 }
-OrdinaryFacePtr OrdinaryFace::translated_packet(std::span<const char> packet) const
+OrdinaryFacePtr OrdinaryFace::translated(const OrdinaryDisplacement& packet) const
 {
     auto p = impl_->polygon;
-    const auto shift = on::read_displacement(packet);
+    const auto shift = on::read_displacement(IdentityAccess::key(packet));
     for (auto& v : p)
         v = on::add(v, shift);
-    return from_retained_support(p, impl_->normal, on::translated_support_packet(impl_->support, shift));
+    return from_retained_support(p, impl_->normal, on::translated_support_packet(*impl_->support, shift));
 }
 OrdinaryFacePtr OrdinaryFace::oriented_like(GeometryPoint direction) const
 {
@@ -376,26 +383,26 @@ OrdinaryFacePtr OrdinaryFace::oriented_like(GeometryPoint direction) const
 }
 OrdinaryFacePtr OrdinaryFace::intersection(const OrdinaryFace& other) const
 {
-    const bool common = impl_->support == other.impl_->support;
+    const bool common = *impl_->support == *other.impl_->support;
     auto p = intersect_loop(impl_->polygon, other.impl_->polygon, common);
-    return p.empty() ? OrdinaryFacePtr{} : from_retained_support(p, impl_->normal, impl_->support);
+    return p.empty() ? OrdinaryFacePtr{} : from_retained_support(p, impl_->normal, *impl_->support);
 }
-std::vector<std::vector<char>> OrdinaryFace::vertex_identities() const
+std::vector<OrdinaryPoint> OrdinaryFace::vertex_identities() const
 {
-    std::vector<std::vector<char>> result;
+    std::vector<OrdinaryPoint> result;
     for (const auto& p : impl_->polygon)
-        result.push_back(on::point_packet(p));
+        result.push_back(IdentityAccess::make<OrdinaryPoint>(on::point_packet(p)));
     return result;
 }
-std::vector<std::vector<char>> OrdinaryFace::edge_support_identities() const
+std::vector<OrdinaryLine> OrdinaryFace::edge_support_identities() const
 {
-    std::vector<std::vector<char>> result;
+    std::vector<OrdinaryLine> result;
     const auto& p = impl_->polygon;
     for (std::size_t i = 0; i < p.size(); ++i)
-        result.push_back(line_packet(p[i], p[(i + 1) % p.size()]));
+        result.push_back(IdentityAccess::make<OrdinaryLine>(line_packet(p[i], p[(i + 1) % p.size()])));
     return result;
 }
-OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const std::vector<char>> points) const
+OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const OrdinaryPoint> points) const
 {
     Polygon result;
     for (std::size_t i = 0; i < impl_->polygon.size(); ++i)
@@ -407,7 +414,7 @@ OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const std::vector<cha
         std::map<long double, on::WidePoint> interior;
         for (const auto& packet : points)
         {
-            const auto p = on::read_point(packet), v = on::sub(p, a);
+            const auto p = on::read_point(IdentityAccess::key(packet)), v = on::sub(p, a);
             const auto t = on::dot(v, d);
             if (on::cross(v, d) == on::WidePoint{} && t > 0 && t < length)
                 interior.emplace(t, p);
@@ -416,15 +423,15 @@ OrdinaryFacePtr OrdinaryFace::with_edge_vertices(std::span<const std::vector<cha
         for (const auto& [t, p] : interior)
             result.push_back(p);
     }
-    return from_retained_support(result, impl_->normal, impl_->support);
+    return from_retained_support(result, impl_->normal, *impl_->support);
 }
 bool OrdinaryFace::equivalent(const OrdinaryFace& other) const
 {
     return contains(other) && other.contains(*this);
 }
-bool OrdinaryFace::contains_point(std::span<const char> packet) const
+bool OrdinaryFace::contains_point(const OrdinaryPoint& packet) const
 {
-    const auto p = on::read_point(packet);
+    const auto p = on::read_point(IdentityAccess::key(packet));
     if (std::find(impl_->polygon.begin(), impl_->polygon.end(), p) != impl_->polygon.end())
         return true;
     return point_inside(impl_->polygon, p);
@@ -432,7 +439,7 @@ bool OrdinaryFace::contains_point(std::span<const char> packet) const
 bool OrdinaryFace::contains(const OrdinaryFace& other) const
 {
     return std::all_of(other.impl_->polygon.begin(), other.impl_->polygon.end(),
-        [&](const auto& p) { return point_inside(impl_->polygon, p, impl_->support != other.impl_->support); });
+        [&](const auto& p) { return point_inside(impl_->polygon, p, *impl_->support != *other.impl_->support); });
 }
 bool OrdinaryFace::oppositely_oriented(const OrdinaryFace& other) const
 {
@@ -512,9 +519,9 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> OrdinaryFace::cell_shell(std::span<c
         }
         face = std::move(propagated);
     }
-    std::vector<std::vector<char>> supports;
+    std::vector<OrdinarySupport> supports;
     for (const auto& face : faces)
-        supports.push_back(face->impl_->support);
+        supports.push_back(*face->impl_->support);
     return ConvexCellGeometry<ArithmeticMode::Ordinary>::make_points(points, loops)->with_native_supports(supports);
 }
 void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) const
@@ -647,9 +654,9 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
     }
 }
 
-std::vector<char> OrdinaryFace::encode() const
+template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
-    auto polygon = impl_->polygon;
+    auto polygon = face.impl_->polygon;
     bool changed = true;
     while (changed && polygon.size() > 3)
     {
@@ -670,18 +677,23 @@ std::vector<char> OrdinaryFace::encode() const
     std::rotate(polygon.begin(), std::min_element(polygon.begin(), polygon.end()), polygon.end());
     on::Writer w;
     w.word(0x5346465046414332ULL);
-    w.packet(impl_->support);
-    w.point(impl_->normal);
+    w.packet(IdentityAccess::key(*face.impl_->support));
+    w.point(face.impl_->normal);
     w.word(polygon.size());
     for (const auto& p : polygon)
         w.point(p);
     return std::move(w.bytes);
 }
+
+std::vector<char> OrdinaryFace::encode() const
+{
+    return canonical_face_key(*this);
+}
 std::vector<char> OrdinaryFace::encode_incidence() const
 {
     on::Writer w;
     w.word(0x5346465046414332ULL);
-    w.packet(impl_->support);
+    w.packet(IdentityAccess::key(*impl_->support));
     w.point(impl_->normal);
     w.word(impl_->polygon.size());
     for (const auto& p : impl_->polygon)
@@ -691,7 +703,7 @@ std::vector<char> OrdinaryFace::encode_incidence() const
 
 std::size_t OrdinaryFace::storage_bytes() const
 {
-    return sizeof(Impl) + impl_->polygon.capacity() * sizeof(WidePoint) + impl_->support.capacity();
+    return sizeof(Impl) + impl_->polygon.capacity() * sizeof(WidePoint) + impl_->support->payload_bytes();
 }
 OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes)
 {
@@ -699,7 +711,7 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes)
     if (r.word() != 0x5346465046414332ULL)
         on::reject("foreign native planar packet mode.");
     const auto encoded_support = r.packet();
-    std::vector<char> support(encoded_support.begin(), encoded_support.end());
+    auto support = decode_identity<OrdinarySupport>(encoded_support);
     const auto normal = r.point();
     const auto n = r.count(vertex_cap);
     Polygon p;
@@ -709,9 +721,9 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes)
     r.finish();
     return from_retained_support(p, normal, std::move(support));
 }
-template<> std::vector<char> planar_support<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
+template<> OrdinarySupport planar_support<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
-    return face.impl_->support;
+    return *face.impl_->support;
 }
 template<> int planar_orientation<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
@@ -725,7 +737,7 @@ std::vector<OrdinaryFacePtr> subtract_planar_faces<ArithmeticMode::Ordinary>(
     std::vector<Polygon> remains{source.points()};
     for (const auto& face : removed)
     {
-        if (!face || (source.impl_->support != face->impl_->support && !coplanar(source.points(), face->points())))
+        if (!face || (*source.impl_->support != *face->impl_->support && !coplanar(source.points(), face->points())))
             on::reject("native face subtraction has foreign support.");
         std::vector<Polygon> next;
         const auto& clip = face->points();
@@ -744,24 +756,25 @@ std::vector<OrdinaryFacePtr> subtract_planar_faces<ArithmeticMode::Ordinary>(
     }
     std::vector<OrdinaryFacePtr> result;
     for (const auto& p : remains)
-        result.push_back(OrdinaryFace::from_retained_support(p, source.impl_->normal, source.impl_->support));
+        result.push_back(OrdinaryFace::from_retained_support(p, source.impl_->normal, *source.impl_->support));
     return result;
 }
-EdgePointIndex<ArithmeticMode::Ordinary>::EdgePointIndex(std::span<const std::vector<char>> points)
+EdgePointIndex<ArithmeticMode::Ordinary>::EdgePointIndex(std::span<const OrdinaryPoint> points)
 {
     auto impl = std::make_shared<Impl>();
     for (const auto& p : points)
-        impl->points.emplace(on::read_point(p), p);
+        impl->points.emplace(on::read_point(IdentityAccess::key(p)), p);
     impl_ = std::move(impl);
 }
-std::vector<std::vector<char>> EdgePointIndex<ArithmeticMode::Ordinary>::closed_segment(
-    std::span<const char> first, std::span<const char> second) const
+std::vector<OrdinaryPoint> EdgePointIndex<ArithmeticMode::Ordinary>::closed_segment(
+    const OrdinaryPoint& first, const OrdinaryPoint& second) const
 {
-    const auto a = on::read_point(first), b = on::read_point(second), d = on::sub(b, a);
+    const auto a = on::read_point(IdentityAccess::key(first)), b = on::read_point(IdentityAccess::key(second)),
+               d = on::sub(b, a);
     const auto length = on::dot(d, d);
     if (length == 0)
         on::reject("zero finite source edge.");
-    std::map<long double, std::vector<char>> result;
+    std::map<long double, OrdinaryPoint> result;
     for (const auto& [p, id] : impl_->points)
     {
         const auto v = on::sub(p, a);
@@ -769,7 +782,7 @@ std::vector<std::vector<char>> EdgePointIndex<ArithmeticMode::Ordinary>::closed_
         if (on::cross(v, d) == on::WidePoint{} && t >= 0 && t <= length)
             result.emplace(t, id);
     }
-    std::vector<std::vector<char>> output;
+    std::vector<OrdinaryPoint> output;
     for (auto& [t, id] : result)
         output.push_back(std::move(id));
     return output;
@@ -778,50 +791,52 @@ std::size_t EdgePointIndex<ArithmeticMode::Ordinary>::storage_bytes() const
 {
     std::size_t size = sizeof(Impl);
     for (const auto& [p, id] : impl_->points)
-        size += sizeof(p) + sizeof(id) + id.capacity() + 4 * sizeof(void*);
+        size += sizeof(p) + sizeof(id) + id.payload_bytes() + 4 * sizeof(void*);
     return size;
 }
-template<> std::vector<char> displacement<ArithmeticMode::Ordinary>(GeometryPoint from, GeometryPoint to)
+template<> OrdinaryDisplacement displacement<ArithmeticMode::Ordinary>(GeometryPoint from, GeometryPoint to)
 {
-    return on::displacement_packet(on::sub(on::wide(to), on::wide(from)));
+    return IdentityAccess::make<OrdinaryDisplacement>(on::displacement_packet(on::sub(on::wide(to), on::wide(from))));
 }
 template<>
-std::vector<char> displacement_difference<ArithmeticMode::Ordinary>(std::span<const char> a, std::span<const char> b)
+OrdinaryDisplacement displacement_difference<ArithmeticMode::Ordinary>(
+    const OrdinaryDisplacement& a, const OrdinaryDisplacement& b)
 {
-    return on::displacement_packet(on::sub(on::read_displacement(a), on::read_displacement(b)));
+    return IdentityAccess::make<OrdinaryDisplacement>(on::displacement_packet(
+        on::sub(on::read_displacement(IdentityAccess::key(a)), on::read_displacement(IdentityAccess::key(b)))));
 }
-template<> GeometryPoint displacement_display<ArithmeticMode::Ordinary>(std::span<const char> p)
+template<> GeometryPoint displacement_display<ArithmeticMode::Ordinary>(const OrdinaryDisplacement& p)
 {
-    return on::display(on::read_displacement(p));
-}
-template<>
-std::vector<char> point_translated<ArithmeticMode::Ordinary>(std::span<const char> p, std::span<const char> d)
-{
-    return on::point_packet(on::add(on::read_point(p), on::read_displacement(d)));
-}
-template<> GeometryPoint point_display<ArithmeticMode::Ordinary>(std::span<const char> p)
-{
-    return on::display(on::read_point(p));
+    return on::display(on::read_displacement(IdentityAccess::key(p)));
 }
 template<>
-std::array<GeometryValue<ArithmeticMode::Ordinary>, 3> numerical_point<ArithmeticMode::Ordinary>(
-    std::span<const char> p)
+OrdinaryPoint point_translated<ArithmeticMode::Ordinary>(const OrdinaryPoint& p, const OrdinaryDisplacement& d)
 {
-    const auto v = on::read_point(p);
+    return IdentityAccess::make<OrdinaryPoint>(on::point_packet(
+        on::add(on::read_point(IdentityAccess::key(p)), on::read_displacement(IdentityAccess::key(d)))));
+}
+template<> GeometryPoint point_display<ArithmeticMode::Ordinary>(const OrdinaryPoint& p)
+{
+    return on::display(on::read_point(IdentityAccess::key(p)));
+}
+template<>
+std::array<GeometryValue<ArithmeticMode::Ordinary>, 3> numerical_point<ArithmeticMode::Ordinary>(const OrdinaryPoint& p)
+{
+    const auto v = on::read_point(IdentityAccess::key(p));
     return {{{v[0]}, {v[1]}, {v[2]}}};
 }
 template<>
 GeometryMeasure<ArithmeticMode::Ordinary> point_projection<ArithmeticMode::Ordinary>(
-    std::span<const char> p, GeometryPoint n, GeometryPoint anchor)
+    const OrdinaryPoint& p, GeometryPoint n, GeometryPoint anchor)
 {
     return GeometryMeasure<ArithmeticMode::Ordinary>::from_nominal(
-        on::dot(on::wide(n), on::sub(on::read_point(p), on::wide(anchor))));
+        on::dot(on::wide(n), on::sub(on::read_point(IdentityAccess::key(p)), on::wide(anchor))));
 }
 template<>
-std::vector<char> periodic_point<ArithmeticMode::Ordinary>(
-    std::span<const char> identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
+OrdinaryPoint periodic_point<ArithmeticMode::Ordinary>(
+    const OrdinaryPoint& identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
 {
-    auto p = on::read_point(identity);
+    auto p = on::read_point(IdentityAccess::key(identity));
     for (std::size_t a = 0; a < 3; ++a)
         if (periodic[a])
         {
@@ -832,7 +847,7 @@ std::vector<char> periodic_point<ArithmeticMode::Ordinary>(
             if (!(p[a] >= lower[a] && p[a] < upper[a]))
                 on::reject("finite periodic image outside canonical interval.");
         }
-    return on::point_packet(p);
+    return IdentityAccess::make<OrdinaryPoint>(on::point_packet(p));
 }
 namespace details::ordinary_native
 {
@@ -851,7 +866,7 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
     };
     using FacePtr = PlanarFacePtr<ArithmeticMode::Ordinary>;
     using Edge = std::pair<WidePoint, WidePoint>;
-    std::map<std::vector<char>, std::vector<std::pair<FacePtr, int>>> groups;
+    std::map<OrdinarySupport, std::vector<std::pair<FacePtr, int>>> groups;
     const auto add_cell = [&](const auto& cell, int sign)
     {
         for (std::size_t f = 0; f < cell.num_faces(); ++f)
@@ -859,7 +874,7 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
             auto face = cell.face_geometry(f);
             auto support = planar_support<ArithmeticMode::Ordinary>(*face);
             charge(1, sizeof(std::pair<FacePtr, int>) + 4 * sizeof(void*));
-            charge(support.size(), 1);
+            charge(support.payload_bytes(), 1);
             groups[std::move(support)].emplace_back(std::move(face), sign);
         }
     };

@@ -133,7 +133,7 @@ bool GeneralVoF::homogeneous_transport_eligible() const
                     local_eligible = 0;
             }
             for (const auto& tile : data_->topology->tiles)
-                if (!tile.second_image_identity.empty() ||
+                if (!tile.second_image_identity.is_zero() ||
                     (tile.second &&
                         data_->cells.at(tile.first).declaration != data_->cells.at(*tile.second).declaration))
                     local_eligible = 0;

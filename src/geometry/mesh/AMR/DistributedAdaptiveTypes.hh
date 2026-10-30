@@ -34,7 +34,7 @@ struct AdaptiveSurface
     bool exterior = false;
     std::string boundary;
     std::uint64_t native_face = std::numeric_limits<std::uint64_t>::max();
-    AdaptiveBytes authority_image;
+    PLIC::DisplacementIdentity<ArithmeticMode::Ordinary> authority_image;
     bool require_native_whole_tile = false;
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
         native_whole_geometry; ///< Finite physical-to-canonical periodic displacement.
@@ -99,7 +99,8 @@ struct AdaptiveTile
     std::uint64_t face_gid = std::numeric_limits<std::uint64_t>::max();
     std::vector<std::uint64_t> node_gids;
     std::vector<std::uint64_t> second_node_gids; ///< Same loop order, in the second cell physical image.
-    AdaptiveBytes second_image_identity;         ///< Finite neighbor-physical to first-physical displacement.
+    PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>
+        second_image_identity;                   ///< Finite neighbor-physical to first-physical displacement.
     PLIC::GeometryPoint second_image{};          ///< Checked display of second_image_identity for FVM geometry.
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> geometry;
     AdaptiveCellKey first;
@@ -131,7 +132,8 @@ struct AdaptiveNode
     std::uint64_t gid = 0;
     AdaptiveBytes identity;
     PLIC::GeometryPoint coordinate{};
-    AdaptiveBytes coordinate_identity; ///< Finite physical coordinate identity, independent of image aliases.
+    PLIC::PointIdentity<ArithmeticMode::Ordinary>
+        coordinate_identity; ///< Finite physical coordinate identity, independent of image aliases.
 };
 /** Complete authority-certified boundary tiles; full owned cells, reconstruction
  * ghosts and metric-only neighbors are separate. Remote cuts remain interior. */

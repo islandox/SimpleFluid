@@ -55,7 +55,7 @@ template<ArithmeticMode Mode> struct NumericalConvexShell
     std::vector<std::vector<std::size_t>> outward_faces;
     /** Collision-free opaque source support identities. The numerical importer
      * may use equality for authenticated incidence, never as FP coefficients. */
-    std::vector<std::vector<char>> face_support_identities;
+    std::vector<PlaneSupportIdentity<Mode>> face_support_identities;
 };
 
 template<ArithmeticMode Mode> class ConvexCellGeometry;

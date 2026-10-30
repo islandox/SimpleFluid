@@ -1312,9 +1312,9 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
                 shifted->anchor = shifted->anchor + scaled<Mode>(point<Mode>(displacement), -shifted->frame.exponent);
                 shifted->input.reset();
                 shifted->normal_error.reset();
-                if (!shifted->native_support.empty())
+                if (shifted->native_support.has_value())
                     shifted->native_support = details::ordinary_native::translated_support_packet(
-                        shifted->native_support, details::ordinary_native::wide(displacement));
+                        *shifted->native_support, details::ordinary_native::wide(displacement));
                 shifted->authorities.clear();
                 shifted->source_vertices.clear();
                 planes.emplace(plane, shifted);

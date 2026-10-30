@@ -1819,7 +1819,8 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                     canonical.bytes(encode_adaptive_key(left.second));
                     canonical.bytes(af.key);
                 }
-                auto forward = common->encode(), reverse = common->reversed()->encode();
+                auto forward = PLIC::canonical_face_key(*common),
+                     reverse = PLIC::canonical_face_key(*common->reversed());
                 canonical.bytes(std::min(forward, reverse));
                 auto id = std::move(canonical.data);
                 auto add = [&](const Root& root, const AdaptiveSurface& source)

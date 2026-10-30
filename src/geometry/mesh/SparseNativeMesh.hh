@@ -26,7 +26,8 @@ struct SparseNativeFace
     RegionFace native;
     std::optional<RegionFace> second_native;
     PLIC::GeometryPoint second_image{};          ///< Checked neighbor-to-first displacement for numeric FVM distances.
-    std::vector<char> second_image_identity;     ///< Finite neighbor-to-first displacement certificate.
+    PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>
+        second_image_identity;                   ///< Finite neighbor-to-first displacement certificate.
     std::vector<std::uint64_t> second_node_gids; ///< First loop order, in the second physical image.
     bool native_is_second = false;               ///< Primary native address represents the second incident image.
     bool cut_incidence = true; ///< Derived by the factory; a physical image override alone is not a cut.
@@ -50,7 +51,7 @@ struct SparseNativeMeshInput
     std::vector<SparseNativeNode> nodes;
     /** Transient authority point proofs. Discarded after exact route validation;
      * procedural native node geometry is never expanded in retained storage. */
-    std::map<std::uint64_t, std::vector<char>> node_certificates;
+    std::map<std::uint64_t, PLIC::PointIdentity<ArithmeticMode::Ordinary>> node_certificates;
     /** Every native node used by local full cells has an authenticated route. */
     std::map<std::pair<std::size_t, std::uint64_t>, std::uint64_t> native_nodes;
     std::uint64_t global_cells = 0, global_faces = 0, global_nodes = 0;

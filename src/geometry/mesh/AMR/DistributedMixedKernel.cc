@@ -19,7 +19,7 @@ AdaptiveBytes canonical_face(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
 {
     if (!face)
         throw std::invalid_argument("Join alias lacks original-root geometry.");
-    const auto forward = face->encode(), backward = face->reversed()->encode();
+    const auto forward = PLIC::canonical_face_key(*face), backward = PLIC::canonical_face_key(*face->reversed());
     return std::min(forward, backward);
 }
 AdaptiveBytes rule_identity(const AdaptiveJoinRule& rule)
@@ -214,7 +214,7 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
                 {
                     std::map<std::uint64_t, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_proofs;
                     std::map<std::uint64_t, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_proofs;
-                    std::map<std::uint64_t, AdaptiveBytes> node_proofs;
+                    std::map<std::uint64_t, PLIC::PointIdentity<ArithmeticMode::Ordinary>> node_proofs;
                     for (auto c : full)
                     {
                         if constexpr (requires { r.geometry().certified_cell_geometry(c); })
@@ -227,7 +227,7 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
                         for (auto n : r.topology().face_nodes(f))
                         {
                             const auto p = r.geometry().node_coordinates(n);
-                            std::optional<AdaptiveBytes> match;
+                            std::optional<PLIC::PointIdentity<ArithmeticMode::Ordinary>> match;
                             for (const auto& identity : identities)
                             {
                                 const auto display = PLIC::point_display<ArithmeticMode::Ordinary>(identity);

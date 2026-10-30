@@ -189,7 +189,7 @@ FaceLedger build_face_ledger(const GeneralVoF::Data& data, std::span<const Gener
             for (const auto& tile : data.topology->tiles)
             {
                 tiles.emplace(tile.face_gid, &tile);
-                if (!tile.second_image_identity.empty())
+                if (!tile.second_image_identity.is_zero())
                     throw std::invalid_argument("Face transport periodic images are not qualified.");
             }
             for (const auto& c : controls)

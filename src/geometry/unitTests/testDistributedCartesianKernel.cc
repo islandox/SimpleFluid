@@ -513,14 +513,14 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
         ASSERT_TRUE(tile.second);
         ASSERT_EQ(tile.node_gids.size(), tile.geometry->vertex_identities().size());
         ASSERT_EQ(tile.second_node_gids.size(), tile.node_gids.size());
-        auto second = tile.geometry->reversed()->translated_packet(
+        auto second = tile.geometry->reversed()->translated(
             SimpleFluid::PLIC::displacement_difference<SimpleFluid::ArithmeticMode::Ordinary>(
                 {}, tile.second_image_identity));
         if (tile.first_owner == comm->getRank())
             shells[tile.first].push_back(tile.geometry);
         if (tile.second_owner == comm->getRank())
             shells[*tile.second].push_back(second);
-        if (!tile.second_image_identity.empty())
+        if (!tile.second_image_identity.is_zero())
         {
             local_periodic += tile.first_owner == comm->getRank();
             EXPECT_NE(tile.node_gids, tile.second_node_gids);

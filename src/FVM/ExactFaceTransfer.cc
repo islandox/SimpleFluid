@@ -30,6 +30,7 @@ using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>
 using GO = DefaultTpetraTypes::global_ordinal_type;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 using Bytes = A::AdaptiveBytes;
+using SupportIdentity = PLIC::PlaneSupportIdentity<ArithmeticMode::Exact>;
 struct Budget
 {
     ExactFaceTransferOptions options;
@@ -97,7 +98,7 @@ struct Budget
         blob(value.domain);
         blob(value.surface);
         blob(value.identity);
-        blob(value.second_image_identity);
+        records(1, value.second_image_identity.payload_bytes());
         records(value.node_gids.capacity() + value.second_node_gids.capacity(), sizeof(std::uint64_t));
     }
     void test()
@@ -164,7 +165,7 @@ Bytes identity(const Tile& tile)
         w.bytes(A::encode_adaptive_key(*tile.second));
     return std::move(w.data);
 }
-Bytes support(const Face& p)
+SupportIdentity support(const Face& p)
 {
     return SimpleFluid::PLIC::planar_support<SimpleFluid::ArithmeticMode::Exact>(*p);
 }
@@ -318,7 +319,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                     const auto tile_identity = identity(tile);
                     budget.blob(tile_identity, 2);
                     budget.records(1, sizeof(Bytes) + 4 * sizeof(void*));
-                    if (!tile.second_image_identity.empty() || !seen.insert(tile_identity).second)
+                    if (!tile.second_image_identity.is_zero() || !seen.insert(tile_identity).second)
                         throw std::invalid_argument("Periodic or duplicate target native tile.");
                     budget.memory.add(sizeof(Tile) + A::encode_adaptive_tile(tile).size());
                     tiles.push_back(std::move(tile));
@@ -432,7 +433,7 @@ struct Facet
     Face shape;
     std::vector<Part> parts;
     bool inherited = false;
-    Bytes plane;
+    std::optional<SupportIdentity> plane;
 };
 struct Common
 {
@@ -482,7 +483,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
     if (old_divergence.sign())
         throw std::invalid_argument("Accepted source face rate is not exactly divergence-free.");
     std::vector<Facet> facets;
-    std::map<Bytes, std::vector<std::size_t>> supports;
+    std::map<SupportIdentity, std::vector<std::size_t>> supports;
     std::map<std::uint64_t, std::vector<Face>> old_cover;
     for (std::size_t i = 0; i < cells.size(); ++i)
         for (std::size_t f = 0; f < cells[i].geometry->num_faces(); ++f)
@@ -490,7 +491,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             Facet facet{i, cover[i]->face_geometry(f), {}};
             budget.patch(facet.shape);
             facet.plane = support(facet.shape);
-            budget.blob(facet.plane);
+            budget.records(1, facet.plane->payload_bytes());
             budget.grow(facets);
             std::vector<Face> pieces;
             for (const auto* tile : boundary)
@@ -522,13 +523,13 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             }
             budget.grow(cells[i].facets);
             cells[i].facets.push_back(facets.size());
-            if (!supports.contains(facet.plane))
+            if (!supports.contains(*facet.plane))
             {
                 budget.records(1, sizeof(decltype(supports)::value_type) + 4 * sizeof(void*));
-                budget.blob(facet.plane);
+                budget.records(1, facet.plane->payload_bytes());
             }
-            budget.grow(supports[facet.plane]);
-            supports[facet.plane].push_back(facets.size());
+            budget.grow(supports[*facet.plane]);
+            supports[*facet.plane].push_back(facets.size());
             facets.push_back(std::move(facet));
         }
     for (const auto* tile : boundary)
@@ -540,7 +541,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
         if (face.inherited)
             continue;
         std::vector<Face> pieces;
-        for (const auto g : supports.at(face.plane))
+        for (const auto g : supports.at(*face.plane))
         {
             if (g == f || facets[g].cell == face.cell)
                 continue;
@@ -559,7 +560,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
                 budget.grow(internal);
                 budget.grow(face.parts);
                 budget.grow(facets[g].parts);
-                auto a = piece->encode(), b = piece->reversed()->encode();
+                auto a = PLIC::canonical_face_key(*piece), b = PLIC::canonical_face_key(*piece->reversed());
                 auto shape_identity = std::min(a, b);
                 budget.blob(shape_identity);
                 internal.push_back({face.cell, facets[g].cell, piece,
@@ -816,7 +817,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 }
             for (const auto& tile : source.tiles())
             {
-                if (!tile.second_image_identity.empty())
+                if (!tile.second_image_identity.is_zero())
                     throw std::invalid_argument("General face transfer periodic images remain unqualified.");
                 if (source.hierarchy()->owned().contains(tile.first) ||
                     (tile.second && source.hierarchy()->owned().contains(*tile.second)))
@@ -948,7 +949,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 if (owner.owner != decoded[i].peer || owner.revision != item.source_revision ||
                     tile.first != item.target || identity(tile) != item.face_identity ||
                     item.shape->oppositely_oriented(*target_face) || !target_face->contains(*item.shape) ||
-                    !seen.emplace(item.face, item.shape->encode()).second)
+                    !seen.emplace(item.face, PLIC::canonical_face_key(*item.shape)).second)
                     throw std::invalid_argument("Foreign, overlapping or duplicate target face proof.");
                 budget->grow(cover[item.face]);
                 cover[item.face].push_back(item.shape);

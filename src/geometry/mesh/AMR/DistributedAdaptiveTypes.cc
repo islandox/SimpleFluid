@@ -2,6 +2,7 @@
  * @brief Versioned bounded lossless ancestry and owner-record encoding.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -239,7 +240,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
         w.word(s.exterior);
         w.bytes(std::span(s.boundary));
         w.word(s.native_face);
-        w.bytes(s.authority_image);
+        w.bytes(PLIC::encode_identity(s.authority_image));
         w.word(s.require_native_whole_tile);
         w.word(bool(s.native_whole_geometry));
         if (s.native_whole_geometry)
@@ -289,7 +290,7 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
         auto name = r.bytes();
         s.boundary.assign(name.begin(), name.end());
         s.native_face = r.word();
-        s.authority_image = r.bytes();
+        s.authority_image = PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes());
         auto whole = r.word(), proof = r.word();
         if (whole > 1 || proof > 1)
             throw std::invalid_argument("Invalid native face nesting proof flags.");

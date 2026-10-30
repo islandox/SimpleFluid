@@ -155,7 +155,8 @@ public:
         const auto& cell = ancestry(grid_, leaf.key);
         return {leaf.key, {{descriptor(), cell.level, AdaptiveSplit::Isotropic, {}}}};
     }
-    AdaptiveBytes contact_point(const AdaptiveLeaf& leaf, std::span<const char> point) const override
+    PLIC::PointIdentity<ArithmeticMode::Ordinary> contact_point(
+        const AdaptiveLeaf& leaf, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& point) const override
     {
         (void) ancestry(grid_, leaf.key);
         const auto [lower, upper] = root_bounds(grid_);

@@ -816,7 +816,7 @@ struct Cut
     int exponent = 0, orientation = 1;
     long double offset = 0;
     std::vector<PlaneAuthority> authorities;
-    std::vector<char> native_support;
+    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> native_support;
     const void* identity = nullptr;
 };
 Distances source_distances(
@@ -881,9 +881,9 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         c.orientation = surface.orientation;
         c.authorities = plane.authorities;
         c.native_support = plane.native_support;
-        if (c.authorities.empty() && !c.native_support.empty())
-            c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(c.native_support));
-        work.charge(c.native_support.size());
+        if (c.authorities.empty() && c.native_support.has_value())
+            c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(*c.native_support));
+        work.charge((c.native_support ? c.native_support->payload_bytes() : 0));
         for (const auto& authority : c.authorities)
             work.charge(sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));
         result.push_back(std::move(c));
@@ -1205,7 +1205,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     // numerical coplanarity, so complementary donor cuts retain dependency.
     std::map<const void*, const void*> parents;
     std::map<PlaneAuthority, const void*> authorities;
-    std::map<std::vector<char>, const void*> native_supports;
+    std::map<PlaneSupportIdentity<ArithmeticMode::Ordinary>, const void*> native_supports;
     const auto root = [&](const void* id)
     {
         while (parents.at(id) != id)
@@ -1226,12 +1226,12 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                 else
                     parents[root(c.identity)] = root(it->second);
             }
-            if (!c.native_support.empty())
+            if (c.native_support.has_value())
             {
-                auto [it, fresh] = native_supports.try_emplace(c.native_support, c.identity);
+                auto [it, fresh] = native_supports.try_emplace(*c.native_support, c.identity);
                 if (fresh)
-                    work.charge(
-                        sizeof(decltype(native_supports)::value_type) + c.native_support.size() + 4 * sizeof(void*));
+                    work.charge(sizeof(decltype(native_supports)::value_type) +
+                                (c.native_support ? c.native_support->payload_bytes() : 0) + 4 * sizeof(void*));
                 else
                     parents[root(c.identity)] = root(it->second);
             }
@@ -1253,7 +1253,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             if (fresh)
             {
                 work.charge(sizeof(decltype(canonical)::value_type) + 4 * sizeof(void*) +
-                            selected.native_support.capacity() +
+                            (selected.native_support ? selected.native_support->payload_bytes() : 0) +
                             selected.authorities.capacity() * sizeof(PlaneAuthority));
                 for (const auto& authority : selected.authorities)
                     work.charge(authority.key.capacity() * sizeof(std::uint64_t));

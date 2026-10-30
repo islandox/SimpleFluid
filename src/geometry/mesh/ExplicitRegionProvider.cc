@@ -105,7 +105,7 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
     std::vector<Cell> cells, std::vector<Face> faces, std::vector<Node> nodes, std::map<int, std::string> boundaries,
     std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_certificates,
     std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_certificates,
-    const std::map<ID, std::vector<char>>& node_certificates)
+    const std::map<ID, PLIC::PointIdentity<ArithmeticMode::Ordinary>>& node_certificates)
 {
     auto provider = std::make_shared<ExplicitRegionProvider>(
         layout, std::move(cells), std::move(faces), std::move(nodes), std::move(boundaries));

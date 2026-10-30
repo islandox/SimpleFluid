@@ -110,7 +110,7 @@ std::vector<char> segment_recipe_key(const std::vector<PointRecipe>& recipes, st
     key.word(b);
     return std::move(key.bytes);
 }
-std::pair<std::vector<char>, P> ancestral_edge_support(
+std::pair<PlaneSupportIdentity<ArithmeticMode::Ordinary>, P> ancestral_edge_support(
     const ExtrudedBaseData& base, std::size_t first, std::size_t second)
 {
     std::set<std::size_t> ancestry;
@@ -159,7 +159,9 @@ std::pair<std::vector<char>, P> ancestral_edge_support(
         const std::array source{a, b, upper};
         return {details::ordinary_native::source_support_packet(source), normal};
     }
-    return {segment_recipe_key(base.recipes, selected.first, selected.second), normal};
+    return {details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+                segment_recipe_key(base.recipes, selected.first, selected.second)),
+        normal};
 }
 
 } // namespace ordinary_extrusion_detail
@@ -421,7 +423,7 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode:
     product.lower = impl_->axis->values->z[impl_->axis->zactive.at(impl_->begin + id.k)];
     product.upper = impl_->axis->values->z[impl_->axis->zactive.at(impl_->begin + id.k + 1)];
     auto geometry = product_geometry(product);
-    std::vector<std::vector<char>> supports;
+    std::vector<PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports;
     for (const auto z : {product.lower, product.upper})
     {
         auto cap = product.base;
@@ -641,7 +643,7 @@ PlanarFacePtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ord
     const auto outward = face_area_vector(face);
     const auto id = impl_->topology->indexer().face_id(face);
     P normal{outward.x, outward.y, outward.z};
-    std::vector<char> support;
+    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> support;
     if (id.orientation == SemiStructuredIndexer::AXIAL)
         support = details::ordinary_native::source_support_packet(points);
     else
@@ -653,7 +655,7 @@ PlanarFacePtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ord
     }
     if (dot(details::ordinary_native::polygon_vector(points), normal) < 0)
         std::reverse(points.begin(), points.end());
-    return details::NativeSupportAccess::face_support(points, normal, std::move(support));
+    return details::NativeSupportAccess::face_support(points, normal, std::move(*support));
 }
 ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ordinary>::atomic_cell_geometry(
     std::size_t cell) const

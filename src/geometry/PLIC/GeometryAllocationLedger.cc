@@ -193,7 +193,7 @@ struct GeometryAllocationLedger::Impl
                     add_bytes(
                         bytes, plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
                     if constexpr (Mode == ArithmeticMode::Ordinary)
-                        add_bytes(bytes, plane->native_support.capacity(), 1);
+                        add_bytes(bytes, (plane->native_support ? plane->native_support->payload_bytes() : 0), 1);
                     // Weak source references do not retain or pin their pointees.
                     (void) admit(item, bytes, used, limit);
                     break;

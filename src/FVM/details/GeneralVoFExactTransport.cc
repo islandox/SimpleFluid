@@ -2,6 +2,7 @@
  * @brief Optional exact phase transport planning.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 namespace SimpleFluid::VoF
 {
 namespace Exact
@@ -52,19 +53,23 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
                 limits.byte_budget = data.options.byte_budget;
                 auto trajectory =
-                    SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
-                        node.coordinate_identity, v, dt, walls, limits);
-                budget.add(sizeof(trajectory) + trajectory.point.size() + trajectory.departure.size());
-                budget.packet(56 + node.coordinate_identity.size());
+                    SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::
+                        backtrace_constrained(PLIC::promote_identity(node.coordinate_identity), v, dt, walls, limits);
+                budget.add(
+                    sizeof(trajectory) + trajectory.point.payload_bytes() + trajectory.departure.payload_bytes());
+                const auto coordinate = PLIC::encode_identity(node.coordinate_identity);
+                const auto departure = PLIC::encode_identity(trajectory.departure);
+                budget.add(coordinate.capacity() + departure.capacity());
+                budget.packet(56 + coordinate.size());
                 wire::Writer w;
                 w.word(0);
                 w.word(node.gid);
-                w.bytes(node.coordinate_identity);
+                w.bytes(coordinate);
                 for (auto x : v)
                     real(w, x);
                 real(w, dt);
-                budget.add(16 + trajectory.departure.size());
-                w.bytes(trajectory.departure);
+                budget.add(16 + departure.size());
+                w.bytes(departure);
                 w.word(catalog.size());
                 for (const auto& wall : catalog)
                 {
@@ -251,8 +256,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 wire::Budget budget{limit};
                 for (const auto& [node, trajectory] : canonical_trajectories)
                 {
-                    budget.add(
-                        sizeof(GeneralVoFNodeTrajectory) + trajectory.point.size() + trajectory.departure.size());
+                    budget.add(sizeof(GeneralVoFNodeTrajectory) + trajectory.point.payload_bytes() +
+                               trajectory.departure.payload_bytes());
                     trial.trajectories_.push_back({node, trajectory});
                 }
             });
@@ -453,7 +458,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         {
                             const auto& tile = data.topology->tiles[index];
                             std::uint64_t hash = 1469598103934665603ULL;
-                            for (unsigned char byte : tile.geometry->encode())
+                            for (unsigned char byte : PLIC::canonical_face_key(*tile.geometry))
                                 hash = (hash ^ byte) * 1099511628211ULL;
                             context << tile.face_gid << ':' << hash << ',';
                         }

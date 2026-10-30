@@ -20,7 +20,7 @@ struct Candidate
 {
     const AMR::AdaptiveTile* tile = nullptr;
     PLIC::GeometryHalfspace gas;
-    AMR::AdaptiveBytes support;
+    std::optional<PLIC::PlaneSupportIdentity<mode>> support;
 };
 int geometric_phase(const Cell& cell, const PLIC::PolyhedralInterface& original)
 {
@@ -114,7 +114,7 @@ bool pure_side(const Geometry& geometry, const PLIC::GeometryHalfspace& gas, int
 std::optional<Candidate> native_candidate(
     const GeneralVoF::Data& data, const Planes& original, const AMR::AdaptiveTile& tile, std::size_t& evaluations)
 {
-    if (tile.exterior || !tile.second || !tile.second_image_identity.empty() || !data.cells.contains(tile.first) ||
+    if (tile.exterior || !tile.second || !tile.second_image_identity.is_zero() || !data.cells.contains(tile.first) ||
         !data.cells.contains(*tile.second))
         return {};
     const auto& first = data.cells.at(tile.first);
@@ -276,7 +276,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
             continue;
         wire::Budget candidate_budget{budget.limit};
         candidate_budget.add(budget.used);
-        candidate_budget.add(candidate->support.size());
+        candidate_budget.add(candidate->support->payload_bytes());
         bool valid = true;
         MinorityEvidence evidence;
         long double squared_residual = 0;
@@ -303,7 +303,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
             return {initial_choice, initial};
         if (!selected)
         {
-            budget.add(candidate->support.size());
+            budget.add(candidate->support->payload_bytes());
             selected = *candidate;
             target_evidence = evidence;
             selected_stencil_residual = stencil.size() > 1 ? std::sqrt(squared_residual / (stencil.size() - 1)) : 0;

@@ -2,6 +2,7 @@
  * @brief Versioned shared-part packets for owner migration and family exchanges.
  */
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
 #include <limits>
@@ -121,7 +122,7 @@ void write_leaf(Writer& w, const AdaptiveLeaf& leaf, const Dictionary& dict)
     {
         w.bytes(s.key);
         w.bytes(s.geometry->encode_incidence());
-        w.bytes(s.authority_image);
+        w.bytes(PLIC::encode_identity(s.authority_image));
         w.word(s.require_native_whole_tile);
         w.bytes(s.native_whole_geometry ? s.native_whole_geometry->encode_incidence() : AdaptiveBytes{});
         w.word(s.native_face);
@@ -182,7 +183,7 @@ struct Decoder
             AdaptiveSurface s;
             s.key = r.bytes();
             s.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
-            s.authority_image = r.bytes();
+            s.authority_image = PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes());
             const auto native_whole = r.word();
             if (native_whole > 1)
                 throw std::invalid_argument("Invalid native whole-face declaration.");
