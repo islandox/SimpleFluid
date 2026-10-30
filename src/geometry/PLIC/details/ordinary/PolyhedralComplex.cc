@@ -529,7 +529,7 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
     }
     Writer w;
     w.word(0x53464650434f4d32ULL);
-    w.word(1);
+    w.word(2);
     w.word(impl_->global_cells);
     w.word(impl_->global_faces);
     w.word(impl_->global_nodes);
@@ -579,8 +579,8 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
 }
 std::shared_ptr<const Complex> Complex::decode(std::span<const char> packet)
 {
-    Reader r{packet};
-    if (r.word() != 0x53464650434f4d32ULL || r.word() != 1)
+    Reader r{packet, 0, true};
+    if (r.word() != 0x53464650434f4d32ULL || r.word() != 2)
         reject("foreign native complex packet mode/version.");
     auto data = std::make_shared<Impl>();
     data->global_cells = r.word();

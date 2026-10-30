@@ -18,7 +18,7 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490007ULL;
+constexpr uint64_t partition_magic = 0x5346524547490008ULL;
 struct Writer
 {
     std::vector<char> data;

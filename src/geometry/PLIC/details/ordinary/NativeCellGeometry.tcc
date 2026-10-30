@@ -280,54 +280,70 @@ template<ArithmeticMode Mode> bool ConvexCellGeometry<Mode>::equivalent(const Co
     }
 }
 
-template<ArithmeticMode Mode>
-std::vector<char> ConvexCellGeometry<Mode>::encode_certificate() const
-    requires(Mode == ArithmeticMode::Ordinary)
+std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
 {
+    constexpr auto Mode = ArithmeticMode::Ordinary;
     namespace on = details::ordinary_native;
     on::Writer w;
     w.word(0x5346465043454c32ULL);
-    w.point(on::wide(origin()));
-    const auto vertices = local_points();
+    w.point(on::wide(cell.origin()));
+    const auto vertices = cell.local_points();
     w.word(vertices.size());
     for (const auto& p : vertices)
         w.point(p.value);
-    w.word(faces().size());
-    const auto stored = details::checked_geometry_storage<Mode>(geometry_->impl_);
-    for (std::size_t index = 0; index < faces().size(); ++index)
+    w.word(cell.faces().size());
+    const auto stored = details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*cell.geometry_));
+    for (std::size_t index = 0; index < cell.faces().size(); ++index)
     {
-        const auto& f = faces()[index];
+        const auto& f = cell.faces()[index];
         w.word(f.size());
         for (auto i : f)
             w.word(i);
         auto support = stored->surfaces.at(index).plane->native_support;
         if (!support)
-            support = planar_support<Mode>(*face_geometry(index));
+            support = planar_support<Mode>(*cell.face_geometry(index));
         w.packet(details::GeometryIdentityAccess::key(*support));
     }
     return std::move(w.bytes);
 }
+
 template<ArithmeticMode Mode>
-ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(std::span<const char> bytes)
+std::vector<char> ConvexCellGeometry<Mode>::encode_certificate(std::size_t byte_budget) const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    return encode_geometry_packet(GeometryPacketKind::CellCertificate, Mode, canonical_cell_key(*this), byte_budget);
+}
+template<ArithmeticMode Mode>
+ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
+    std::span<const char> bytes, std::size_t byte_budget)
     requires(Mode == ArithmeticMode::Ordinary)
 {
     namespace on = details::ordinary_native;
-    on::Reader r{bytes};
+    const auto envelope = decode_geometry_packet(bytes, Mode, byte_budget);
+    if (envelope.kind != GeometryPacketKind::CellCertificate)
+        on::reject("foreign cell certificate kind.");
+    on::Reader r{envelope.body, 0, true};
     if (r.word() != 0x5346465043454c32ULL)
         on::reject("foreign finite cell packet mode.");
     const auto origin = on::display(r.point());
     const auto n = r.count(4096);
+    if (n > (r.bytes.size() - r.cursor) / 48)
+        on::reject("cell point count exceeds the remaining encoded coordinates.");
     std::vector<Point<Mode>> p;
     p.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
         p.emplace_back(r.point());
     const auto nf = r.count(4096);
+    if (nf > (r.bytes.size() - r.cursor) / 72)
+        on::reject("cell face count exceeds the remaining encoded face records.");
     std::vector<std::vector<std::size_t>> faces;
     faces.reserve(nf);
     std::vector<PlaneSupportIdentity<ArithmeticMode::Ordinary>> supports;
     for (std::size_t f = 0; f < nf; ++f)
     {
         const auto count = r.count(n);
+        if (count > (r.bytes.size() - r.cursor) / 8)
+            on::reject("cell face index count exceeds the remaining encoded indices.");
         std::vector<std::size_t> face;
         face.reserve(count);
         for (std::size_t j = 0; j < count; ++j)
@@ -341,10 +357,16 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(std::span<c
         const auto support = r.packet();
         if (support.empty())
             on::reject("finite cell packet lost its source support.");
-        supports.push_back(decode_identity<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(support));
+        supports.push_back(details::GeometryIdentityAccess::make<PlaneSupportIdentity<ArithmeticMode::Ordinary>>(
+            details::checked_identity_key(GeometryIdentityKind::PlaneSupport, Mode, support)));
     }
     r.finish();
-    return make_local(origin, p, faces)->with_native_supports(supports);
+    auto result = make_local(origin, p, faces)->with_native_supports(supports);
+    const auto canonical = canonical_cell_key(*result);
+    if (canonical.size() != envelope.body.size() ||
+        !std::equal(canonical.begin(), canonical.end(), envelope.body.begin()))
+        on::reject("noncanonical cell certificate body.");
+    return result;
 }
 template<ArithmeticMode Mode>
 ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(

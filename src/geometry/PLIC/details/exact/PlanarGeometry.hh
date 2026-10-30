@@ -104,13 +104,14 @@ public:
     /** Opposite winding is accepted; every tile must be whole and contained.
      * Exact coplanarity, disjointness, area and first moments are mandatory. */
     void certify_partition(std::span<const PlanarFacePtr<ArithmeticMode::Exact>> tiles) const;
-    [[nodiscard]] std::vector<char> encode() const;
-    [[nodiscard]] std::vector<char> encode_incidence() const;
+    [[nodiscard]] std::vector<char> encode(std::size_t byte_budget = geometry_packet_default_budget) const;
+    [[nodiscard]] std::vector<char> encode_incidence(std::size_t byte_budget = geometry_packet_default_budget) const;
     /** Own face buffers only; shared identity owners are visited separately. */
     [[nodiscard]] std::size_t exclusive_storage_bytes() const;
     /** Full standalone footprint, including retained identity ancestry. */
     [[nodiscard]] std::size_t storage_bytes() const;
-    [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Exact> decode(std::span<const char>);
+    [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Exact> decode(
+        std::span<const char>, std::size_t byte_budget = geometry_packet_default_budget);
 
 private:
     friend std::vector<char> canonical_face_key<ArithmeticMode::Exact>(const PlanarFace&);

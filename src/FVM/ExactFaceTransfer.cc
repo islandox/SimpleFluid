@@ -5,6 +5,7 @@
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
+#include "FVM/details/GeometryWireProtocol.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
@@ -255,6 +256,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
             for (std::size_t i = 0; i < keys.size(); ++i)
             {
                 W::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactTileRequest);
                 w.bytes(A::encode_adaptive_key(keys[i]));
                 w.word(located[i].revision);
                 arena.packet(w.data.size());
@@ -272,6 +274,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
             for (const auto& p : incoming.packets)
             {
                 W::Reader r{p.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactTileRequest);
                 auto key = A::decode_adaptive_key(r.bytes());
                 const auto revision = r.word();
                 r.done();
@@ -279,6 +282,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                 if (leaf.revision != revision || !seen.emplace(p.peer, key).second)
                     throw std::invalid_argument("Invalid target native tile request.");
                 W::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactTileReply);
                 w.bytes(A::encode_adaptive_key(key));
                 w.word(revision);
                 std::vector<const Tile*> tiles;
@@ -287,7 +291,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                         tiles.push_back(&tile);
                 w.word(tiles.size());
                 for (const auto* tile : tiles)
-                    w.bytes(A::encode_adaptive_tile(*tile));
+                    w.bytes(A::encode_adaptive_tile(*tile, communication.codec));
                 arena.packet(w.data.size());
                 replies.push_back({p.peer, std::move(w.data)});
             }
@@ -305,6 +309,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
             for (const auto& p : received.packets)
             {
                 W::Reader r{p.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactTileReply);
                 const auto key = A::decode_adaptive_key(r.bytes());
                 const auto revision = r.word();
                 const auto& owner = expected.at(key);
@@ -319,7 +324,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                 {
                     const auto encoded = r.bytes();
                     budget.records(4, encoded.size());
-                    auto tile = A::decode_adaptive_tile(encoded);
+                    auto tile = A::decode_adaptive_tile(encoded, communication.codec);
                     if (tile.first != key && (!tile.second || *tile.second != key))
                         throw std::invalid_argument("Target native package has foreign incidence.");
                     const auto tile_identity = identity(tile);
@@ -327,7 +332,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                     budget.records(1, sizeof(Bytes) + 4 * sizeof(void*));
                     if (!tile.second_image_identity.is_zero() || !seen.insert(tile_identity).second)
                         throw std::invalid_argument("Periodic or duplicate target native tile.");
-                    budget.memory.add(sizeof(Tile) + A::encode_adaptive_tile(tile).size());
+                    budget.memory.add(sizeof(Tile) + A::encode_adaptive_tile(tile, budget.options.byte_budget).size());
                     tiles.push_back(std::move(tile));
                 }
                 r.done();
@@ -832,7 +837,8 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                     budget->tile(tile);
                     if (!old_tiles.emplace(tile.face_gid, tile).second)
                         throw std::invalid_argument("Duplicate source native tile publication.");
-                    budget->memory.add(sizeof(Tile) + A::encode_adaptive_tile(tile).size());
+                    budget->memory.add(
+                        sizeof(Tile) + A::encode_adaptive_tile(tile, budget->options.byte_budget).size());
                 }
             }
         });
@@ -880,12 +886,13 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
             for (const auto& item : outputs)
             {
                 W::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactFaceOutput);
                 w.bytes(A::encode_adaptive_key(item.source));
                 w.word(item.source_revision);
                 w.bytes(A::encode_adaptive_key(item.target));
                 w.word(item.face);
                 w.bytes(item.face_identity);
-                w.bytes(item.shape->encode());
+                w.bytes(item.shape->encode(communication.codec));
                 w.bytes(item.rate.encode(budget->scalar_limit));
                 arena.packet(w.data.size());
                 packets.push_back({destinations.at(GO(item.face)), std::move(w.data)});
@@ -910,13 +917,15 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 budget->grow(decoded);
                 budget->grow(source_keys);
                 W::Reader r{p.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactFaceOutput);
                 Output item;
                 item.source = A::decode_adaptive_key(r.bytes());
                 item.source_revision = r.word();
                 item.target = A::decode_adaptive_key(r.bytes());
                 item.face = r.word();
                 item.face_identity = r.bytes();
-                item.shape = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::decode(r.bytes());
+                item.shape = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::decode(
+                    r.bytes(), communication.codec);
                 item.rate = budget->keep(M::decode(r.bytes(), budget->scalar_limit));
                 r.done();
                 budget->patch(item.shape);

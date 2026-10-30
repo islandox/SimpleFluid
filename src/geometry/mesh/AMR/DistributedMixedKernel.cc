@@ -23,6 +23,14 @@ AdaptiveBytes canonical_face(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
     const auto forward = PLIC::canonical_face_key(*face), backward = PLIC::canonical_face_key(*face->reversed());
     return std::min(forward, backward);
 }
+AdaptiveBytes face_certificate(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face, std::size_t limit)
+{
+    if (!face)
+        throw std::invalid_argument("Join alias lacks original-root geometry.");
+    const auto reversed = face->reversed();
+    const auto& selected = PLIC::canonical_face_key(*reversed) < PLIC::canonical_face_key(*face) ? reversed : face;
+    return selected->encode(limit);
+}
 AdaptiveBytes rule_identity(const AdaptiveJoinRule& rule)
 {
     Writer w;
@@ -38,7 +46,7 @@ AdaptiveBytes encode_join_capsule(const AdaptiveJoinCapsule& capsule, std::size_
     Budget budget{limit};
     budget.add(40);
     w.word(0x53464a4f494e3631ULL);
-    w.word(2);
+    w.word(3);
     w.word(capsule.route);
     w.word(capsule.rules.size());
     std::set<AdaptiveBytes> unique;
@@ -52,7 +60,7 @@ AdaptiveBytes encode_join_capsule(const AdaptiveJoinCapsule& capsule, std::size_
             throw std::invalid_argument("Duplicate original-root join alias.");
         w.bytes(rule.original_support);
         w.bytes(rule.canonical_support);
-        w.bytes(canonical_face(rule.original_root_selection));
+        w.bytes(face_certificate(rule.original_root_selection, limit));
     }
     w.word(capsule.boundaries.size());
     std::set<AdaptiveBytes> physical;
@@ -69,9 +77,11 @@ AdaptiveBytes encode_join_capsule(const AdaptiveJoinCapsule& capsule, std::size_
         if (!physical.insert(identity.data).second)
             throw std::invalid_argument("Duplicate physical boundary alias.");
         w.bytes(rule.original_support);
-        w.bytes(shape);
+        w.bytes(face_certificate(rule.original_root_selection, limit));
         w.bytes(std::span(rule.boundary));
     }
+    if (w.data.size() > limit)
+        throw std::invalid_argument("Mixed join capsule exceeds byte budget.");
     return std::move(w.data);
 }
 AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t limit)
@@ -79,7 +89,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
     if (bytes.size() > limit)
         throw std::invalid_argument("Mixed join capsule exceeds byte budget.");
     Reader r{bytes};
-    if (r.word() != 0x53464a4f494e3631ULL || r.word() != 2)
+    if (r.word() != 0x53464a4f494e3631ULL || r.word() != 3)
         throw std::invalid_argument("Unknown mixed join capsule version.");
     AdaptiveJoinCapsule capsule;
     capsule.route = r.word();
@@ -91,7 +101,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
         AdaptiveJoinRule rule;
         rule.original_support = r.bytes();
         rule.canonical_support = r.bytes();
-        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
+        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
         capsule.rules.push_back(std::move(rule));
     }
     count = r.word();
@@ -101,7 +111,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
     {
         AdaptiveBoundaryRule rule;
         rule.original_support = r.bytes();
-        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
+        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
         auto name = r.bytes();
         rule.boundary.assign(name.begin(), name.end());
         capsule.boundaries.push_back(std::move(rule));

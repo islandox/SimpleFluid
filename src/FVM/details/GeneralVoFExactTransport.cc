@@ -2,6 +2,7 @@
  * @brief Optional exact phase transport planning.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/GeometryWireProtocol.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 namespace SimpleFluid::VoF
@@ -63,8 +64,9 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 const auto coordinate = PLIC::encode_identity(node.coordinate_identity);
                 const auto departure = PLIC::encode_identity(trajectory.departure);
                 budget.add(coordinate.capacity() + departure.capacity());
-                budget.packet(56 + coordinate.size());
+                budget.packet(56 + geometry_wire::header_bytes + coordinate.size());
                 wire::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
                 w.word(0);
                 w.word(node.gid);
                 w.bytes(coordinate);
@@ -76,7 +78,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 w.word(catalog.size());
                 for (const auto& wall : catalog)
                 {
-                    const auto certificate = wall.geometry->encode_incidence();
+                    const auto certificate = wall.geometry->encode_incidence(data.options.byte_budget);
                     budget.add(16 + wall.identity.size() + certificate.size());
                     w.bytes(wall.identity);
                     w.bytes(certificate);
@@ -89,18 +91,20 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 const auto phi = flux.at(tile.face_gid);
                 if ((tile.exterior || dt == 0) && phi.sign() != 0)
                     throw std::invalid_argument("General VoF physical boundary has nonzero flux.");
-                auto face = tile.geometry->encode_incidence();
+                auto face = tile.geometry->encode_incidence(data.options.byte_budget);
                 auto exact_phi = phi.encode(data.options.byte_budget);
-                budget.packet(face.size() + exact_phi.size() + 32);
+                budget.packet(face.size() + exact_phi.size() + 32 + geometry_wire::header_bytes);
                 wire::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
                 w.word(1);
                 w.word(tile.face_gid);
                 w.bytes(face);
                 w.bytes(exact_phi);
                 packets.push_back({int(tile.face_gid % comm->getSize()), std::move(w.data)});
             }
-            budget.packet(32);
+            budget.packet(32 + geometry_wire::header_bytes);
             wire::Writer w;
+            geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
             w.word(2);
             w.word(0);
             real(w, dt);
@@ -116,6 +120,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactControls);
                 auto type = r.word(), id = r.word();
                 if (type > 2 || int(id % comm->getSize()) != comm->getRank())
                     throw std::invalid_argument("General VoF control reached wrong authority.");
@@ -631,8 +636,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 std::vector<char> geometry;
                 if (!local)
                     geometry = atom.geometry->encode(limit);
-                budget.packet(dk.size() + rk.size() + geometry.size() + 64);
+                budget.packet(dk.size() + rk.size() + geometry.size() + 64 + geometry_wire::header_bytes);
                 wire::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::ExactAtomRoute);
                 w.bytes(dk);
                 w.word(donor.revision);
                 w.word(donor.gid);
@@ -664,6 +670,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader r{packet.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactAtomRoute);
                 auto dk = AMR::decode_adaptive_key(r.bytes());
                 auto revision = r.word(), gid = r.word();
                 auto rk = AMR::decode_adaptive_key(r.bytes());

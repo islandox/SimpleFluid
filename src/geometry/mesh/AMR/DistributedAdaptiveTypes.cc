@@ -96,22 +96,22 @@ AxialIntervalKey axial(Reader& r)
     key.path = r.path();
     return key;
 }
-void header(Writer& w, std::uint64_t kind)
+void header(Writer& w, std::uint64_t kind, std::uint64_t version)
 {
     w.word(0x5346414450543631ULL);
-    w.word(1);
+    w.word(version);
     w.word(kind);
 }
-void header(Reader& r, std::uint64_t kind)
+void header(Reader& r, std::uint64_t kind, std::uint64_t version)
 {
-    if (r.word() != 0x5346414450543631ULL || r.word() != 1 || r.word() != kind)
+    if (r.word() != 0x5346414450543631ULL || r.word() != version || r.word() != kind)
         throw std::invalid_argument("Invalid adaptive packet version/type.");
 }
 } // namespace
 AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
 {
     Writer w;
-    header(w, 0);
+    header(w, 0, 1);
     w.word(key.region);
     w.word(key.ancestry.index());
     std::visit(
@@ -146,7 +146,7 @@ AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
 AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 0);
+    header(r, 0, 1);
     AdaptiveCellKey key;
     key.region = r.word();
     const auto tag = r.word();
@@ -221,7 +221,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
     Writer w;
-    header(w, 1);
+    header(w, 1, 2);
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
     w.word(leaf.material);
@@ -261,7 +261,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 1);
+    header(r, 1, 2);
     AdaptiveLeaf leaf;
     leaf.key = decode_adaptive_key(r.bytes());
     leaf.domain = r.bytes();
@@ -339,7 +339,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
     if (family.key.empty() || family.children.empty())
         throw std::invalid_argument("Invalid adaptive family.");
     Writer w;
-    header(w, 2);
+    header(w, 2, 2);
     w.bytes(family.key);
     w.bytes(encode_adaptive_leaf(family.parent));
     w.word(std::uint64_t(family.split));
@@ -358,7 +358,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
 AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 2);
+    header(r, 2, 2);
     AdaptiveFamily family;
     family.key = r.bytes();
     family.parent = decode_adaptive_leaf(r.bytes());

@@ -1,8 +1,9 @@
 /** @file testGeneralVoFFinite.cc */
-#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
+#include "FVM/details/GeometryWireProtocol.hh"
 #include "general_vof_finite_test_helpers.hh"
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -1121,3 +1122,36 @@ TEST(GeneralVoFFinite, MovingConstructionReplayPreservesControlsWithRankLocalByt
 }
 
 } // namespace
+
+TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKinds)
+{
+    namespace protocol = SimpleFluid::VoF::geometry_wire;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    for (const auto record :
+        {protocol::Record::NativeShellRequest, protocol::Record::NativeShellReply, protocol::Record::ExactTileRequest,
+            protocol::Record::ExactTileReply, protocol::Record::ExactFaceOutput, protocol::Record::ExactControls,
+            protocol::Record::NodeUnion, protocol::Record::NodePublication, protocol::Record::ExactAtomRoute})
+    {
+        wire::Writer current;
+        protocol::write_header(current, record);
+        wire::Reader accepted{current.data};
+        EXPECT_NO_THROW(protocol::read_header(accepted, record));
+        EXPECT_EQ(accepted.offset, protocol::header_bytes);
+        wire::Writer legacy;
+        legacy.word(0);
+        legacy.word(0);
+        legacy.word(0);
+        wire::Reader old{legacy.data};
+        EXPECT_THROW(protocol::read_header(old, record), std::invalid_argument);
+        wire::Reader truncated{std::span<const char>(current.data).first(protocol::header_bytes - 1)};
+        EXPECT_THROW(protocol::read_header(truncated, record), std::invalid_argument);
+        auto changed = current.data;
+        changed[sizeof(std::uint64_t)] = char(protocol::version + 1);
+        wire::Reader future{changed};
+        EXPECT_THROW(protocol::read_header(future, record), std::invalid_argument);
+        wire::Reader foreign{current.data};
+        const auto other =
+            record == protocol::Record::NodeUnion ? protocol::Record::NodePublication : protocol::Record::NodeUnion;
+        EXPECT_THROW(protocol::read_header(foreign, other), std::invalid_argument);
+    }
+}

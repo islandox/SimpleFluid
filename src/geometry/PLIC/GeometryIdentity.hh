@@ -82,8 +82,7 @@ public:
         else
             return {};
     }
-    /** The legacy empty zero marker remains distinct from a tagged zero key
-     * until canonical packet admission is introduced by the codec migration. */
+    /** Zero displacement has an empty canonical body and no backing owner. */
     [[nodiscard]] bool is_zero() const noexcept
         requires(Kind == GeometryIdentityKind::Displacement)
     {
@@ -109,7 +108,7 @@ public:
 
 private:
     friend class details::GeometryIdentityAccess;
-    template<class Identity> friend Identity decode_identity(std::span<const char>);
+    template<class Identity> friend Identity decode_identity(std::span<const char>, std::size_t);
     template<GeometryIdentityKind K, ArithmeticMode M>
         requires(M == ArithmeticMode::Ordinary || M == ArithmeticMode::Exact)
     friend std::vector<char> canonical_key(const GeometryIdentity<K, M>&);

@@ -59,6 +59,9 @@ template<ArithmeticMode Mode> struct NumericalConvexShell
 };
 
 template<ArithmeticMode Mode> class ConvexCellGeometry;
+/** Frozen canonical source/cell key material; independent of wire envelopes. */
+[[nodiscard]] std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
+[[nodiscard]] std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Exact>&);
 
 template<ArithmeticMode Mode> using ConvexGeometryPtr = std::shared_ptr<const ConvexCellGeometry<Mode>>;
 

@@ -3,6 +3,7 @@
  */
 #include "FVM/ConservativeAMRRemap.hh"
 #include "FVM/details/AMRRemapBudget.hh"
+#include "FVM/details/GeometryWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "utils/CompensatedSum.hh"
@@ -98,6 +99,7 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
             for (std::size_t i = 0; i < requested.size(); ++i)
             {
                 wire::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::NativeShellRequest);
                 w.word(i);
                 w.word(static_cast<std::uint64_t>(requested[i]));
                 budget.packet(w.data.size());
@@ -118,6 +120,7 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader r{packet.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::NativeShellRequest);
                 const auto ordinal = r.word(), gid = r.word();
                 r.done();
                 if (gid > static_cast<std::uint64_t>(std::numeric_limits<GO>::max()))
@@ -126,12 +129,13 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
                 auto& certificate = certificates[static_cast<GO>(gid)];
                 if (!certificate)
                 {
-                    auto bytes =
-                        owner_geometry(mesh, owned_map->getLocalElement(static_cast<GO>(gid)))->encode_certificate();
+                    auto bytes = owner_geometry(mesh, owned_map->getLocalElement(static_cast<GO>(gid)))
+                                     ->encode_certificate(byte_budget);
                     budget.add(bytes.size());
                     certificate = std::make_shared<const std::vector<char>>(std::move(bytes));
                 }
                 wire::Writer w;
+                geometry_wire::write_header(w, geometry_wire::Record::NativeShellReply);
                 w.word(ordinal);
                 w.word(gid);
                 w.bytes(SimpleFluid::Meshes::AMR::encode_adaptive_key(binding->key));
@@ -151,6 +155,7 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
             for (const auto& packet : returned.packets)
             {
                 wire::Reader r{packet.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::NativeShellReply);
                 const auto ordinal = r.word(), gid = r.word();
                 if (ordinal >= catalog.size() || seen[ordinal] || packet.peer != owners[ordinal] ||
                     gid != catalog[ordinal].gid)
@@ -163,7 +168,7 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
                         "Catalog GID " + std::to_string(gid) + " ancestry/material differs from its owner binding.");
                 const auto geometry =
                     SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::decode_certificate(
-                        r.bytes());
+                        r.bytes(), byte_budget);
                 r.done();
                 if (!expected.geometry->equivalent(*geometry))
                     throw std::invalid_argument(

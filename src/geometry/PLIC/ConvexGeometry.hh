@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/GeometryBackendTypes.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "utils/ArithmeticMode.hh"
 #include <array>
 #include <cstddef>
@@ -289,9 +290,10 @@ public:
     [[nodiscard]] bool quality_above(double minimum_scaled_volume) const;
     [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&, std::size_t axis, double ratio) const;
     [[nodiscard]] bool equivalent(const ConvexCellGeometry&) const;
-    [[nodiscard]] std::vector<char> encode_certificate() const
+    [[nodiscard]] std::vector<char> encode_certificate(std::size_t byte_budget = geometry_packet_default_budget) const
         requires(Mode == ArithmeticMode::Ordinary);
-    [[nodiscard]] static ConvexGeometryPtr<Mode> decode_certificate(std::span<const char>)
+    [[nodiscard]] static ConvexGeometryPtr<Mode> decode_certificate(
+        std::span<const char>, std::size_t byte_budget = geometry_packet_default_budget)
         requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] GeometryValue<Mode> volume() const;
     [[nodiscard]] GeometryMoments<Mode> moments() const { return moments(origin()); }
@@ -338,6 +340,7 @@ public:
 private:
     template<ArithmeticMode> friend class PlanarFace;
     friend class details::NativeSupportAccess;
+    friend std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
     [[nodiscard]] ConvexGeometryPtr<Mode> with_native_supports(
         std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>>) const
         requires(Mode == ArithmeticMode::Ordinary);

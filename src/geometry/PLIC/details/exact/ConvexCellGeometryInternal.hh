@@ -420,6 +420,7 @@ struct WireReader
 {
     std::span<const char> data;
     std::size_t position = 0;
+    bool canonical_encoding = false;
     std::uint64_t word();
     std::size_t count();
     double real();

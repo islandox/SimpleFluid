@@ -1,0 +1,354 @@
+#include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
+#include <cmath>
+#include <gtest/gtest.h>
+#include <limits>
+
+namespace
+{
+using namespace SimpleFluid;
+using namespace SimpleFluid::PLIC;
+constexpr auto ordinary = ArithmeticMode::Ordinary;
+constexpr auto exact = ArithmeticMode::Exact;
+void overwrite(std::vector<char>& bytes, std::size_t offset, std::uint64_t value)
+{
+    for (unsigned i = 0; i < 8; ++i)
+        bytes.at(offset + i) = static_cast<char>(value >> (8 * i));
+}
+void word(std::vector<char>& bytes, std::uint64_t value)
+{
+    const auto offset = bytes.size();
+    bytes.resize(offset + 8);
+    overwrite(bytes, offset, value);
+}
+void integer(std::vector<char>& bytes, unsigned value, unsigned sign = 0)
+{
+    word(bytes, sign);
+    word(bytes, 1);
+    bytes.push_back(static_cast<char>(value));
+}
+TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
+{
+    const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto point = PlanarFace<ordinary>::make(points)->vertex_identities().front();
+    const auto original = encode_identity(point);
+    const auto rejects = [&](const std::vector<char>& bytes)
+    { EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(bytes)), std::invalid_argument); };
+    rejects({});
+    rejects(canonical_key(point));
+    for (const auto index : {0u, 1u, 2u, 3u, 4u})
+    {
+        auto bytes = original;
+        overwrite(bytes, 8 * index, std::numeric_limits<std::uint64_t>::max());
+        rejects(bytes);
+    }
+    for (std::size_t count = 0; count < original.size(); ++count)
+        rejects(std::vector<char>(original.begin(), original.begin() + count));
+    auto bytes = original;
+    bytes.push_back(0);
+    rejects(bytes);
+    bytes = original;
+    overwrite(bytes, 8, 0);
+    rejects(bytes);
+    bytes = original;
+    overwrite(bytes, 5 * 8, std::numeric_limits<std::uint64_t>::max());
+    rejects(bytes);
+    EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(original, original.size() - 1)), std::invalid_argument);
+    EXPECT_EQ(decode_identity<PointIdentity<ordinary>>(original, original.size()), point);
+}
+TEST(GeometryPacketCodecTest, CanonicalScalarsAndRationalsAreRequired)
+{
+    const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto zero_point = PlanarFace<ordinary>::make(points)->vertex_identities().front();
+    auto finite = encode_identity(zero_point);
+    overwrite(
+        finite, geometry_packet_header_bytes + 8, 1); // Signed/nonzero descriptor on the finite zero representation.
+    EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(finite)), std::invalid_argument);
+    std::vector<char> body;
+    word(body, 0x5346504f494e5431ULL);
+    integer(body, 2);
+    integer(body, 4); // Same value as 1/2, different rational encoding.
+    integer(body, 0);
+    integer(body, 1);
+    integer(body, 0);
+    integer(body, 1);
+    auto rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
+    EXPECT_THROW((decode_identity<PointIdentity<exact>>(rational)), std::invalid_argument);
+    body.clear();
+    word(body, 0x5346504f494e5431ULL);
+    integer(body, 0, 1);
+    integer(body, 1); // Negative zero integer.
+    integer(body, 0);
+    integer(body, 1);
+    integer(body, 0);
+    integer(body, 1);
+    rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
+    EXPECT_THROW((decode_identity<PointIdentity<exact>>(rational)), std::invalid_argument);
+    body.clear();
+    word(body, 0x5346504f494e5431ULL);
+    word(body, 0);
+    word(body, std::numeric_limits<std::uint64_t>::max());
+    rational = encode_geometry_packet(GeometryPacketKind::PointIdentity, exact, body);
+    EXPECT_THROW((decode_identity<PointIdentity<exact>>(rational)), std::invalid_argument);
+}
+TEST(GeometryPacketCodecTest, ZeroIsAnEnvelopeWithAnEmptyBody)
+{
+    const DisplacementIdentity<ordinary> zero;
+    const auto packet = encode_identity(zero);
+    ASSERT_EQ(packet.size(), geometry_packet_header_bytes);
+    EXPECT_TRUE(decode_geometry_packet(packet, ordinary).body.empty());
+    EXPECT_TRUE(decode_identity<DisplacementIdentity<ordinary>>(packet).is_zero());
+    std::vector<char> body;
+    word(body, 0x5346465044535031ULL);
+    for (unsigned i = 0; i < 6; ++i)
+        word(body, 0);
+    const auto tagged = encode_geometry_packet(GeometryPacketKind::DisplacementIdentity, ordinary, body);
+    EXPECT_THROW((decode_identity<DisplacementIdentity<ordinary>>(tagged)), std::invalid_argument);
+    body.clear();
+    word(body, 0x5346444953503631ULL);
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        integer(body, 0);
+        integer(body, 1);
+    }
+    EXPECT_THROW((decode_identity<DisplacementIdentity<exact>>(
+                     encode_geometry_packet(GeometryPacketKind::DisplacementIdentity, exact, body))),
+        std::invalid_argument);
+}
+template<ArithmeticMode Mode> void check_geometry_records()
+{
+    const std::array<GeometryPoint, 5> points{{{0, 0, 0}, {.5, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    const auto face = PlanarFace<Mode>::make(points);
+    const auto canonical = face->encode(), incidence = face->encode_incidence();
+    EXPECT_EQ(PlanarFace<Mode>::decode(incidence)->vertex_identities().size(), 5u);
+    EXPECT_EQ(PlanarFace<Mode>::decode(canonical)->vertex_identities().size(), 4u);
+    EXPECT_THROW((PlanarFace<Mode>::decode(canonical_face_key(*face))), std::invalid_argument);
+    auto body = decode_geometry_packet(canonical, Mode).body;
+    EXPECT_EQ(std::vector<char>(body.begin(), body.end()), canonical_face_key(*face));
+    const auto cell = ConvexCellGeometry<Mode>::box({0, 0, 0}, {1, 1, 1});
+    const auto certificate = cell->encode_certificate();
+    EXPECT_THROW((PlanarFace<Mode>::decode(canonical, canonical.size() - 1)), std::invalid_argument);
+    EXPECT_THROW((face->encode(canonical.size() - 1)), std::invalid_argument);
+    EXPECT_THROW(
+        (ConvexCellGeometry<Mode>::decode_certificate(certificate, certificate.size() - 1)), std::invalid_argument);
+    EXPECT_THROW((cell->encode_certificate(certificate.size() - 1)), std::invalid_argument);
+    EXPECT_EQ(
+        canonical_cell_key(*ConvexCellGeometry<Mode>::decode_certificate(certificate)), canonical_cell_key(*cell));
+    EXPECT_THROW((ConvexCellGeometry<Mode>::decode_certificate(canonical_cell_key(*cell))), std::invalid_argument);
+    const auto wrong = encode_geometry_packet(GeometryPacketKind::PlanarFace, Mode, canonical_cell_key(*cell));
+    EXPECT_THROW((ConvexCellGeometry<Mode>::decode_certificate(wrong)), std::invalid_argument);
+}
+TEST(GeometryPacketCodecTest, GeometryKindsPreserveIncidenceAndFrozenKeys)
+{
+    check_geometry_records<ordinary>();
+    check_geometry_records<exact>();
+}
+TEST(GeometryPacketCodecTest, RoundedFiniteLineKeysRemainValid)
+{
+    const std::array<GeometryPoint, 3> points{{{.1, -.2, 0}, {.3, .7, 0}, {-1, 2, 0}}};
+    const auto face = PlanarFace<ordinary>::make(points);
+    for (const auto& line : face->edge_support_identities())
+        EXPECT_EQ(decode_identity<LineIdentity<ordinary>>(encode_identity(line)), line);
+}
+TEST(GeometryPacketCodecTest, OldEnclosingComplexVersionsRejectBeforeOptionalRecords)
+{
+    std::vector<char> ordinary_packet;
+    word(ordinary_packet, 0x53464650434f4d32ULL);
+    word(ordinary_packet, 1);
+    std::vector<char> exact_packet;
+    word(exact_packet, 0x5346504f4c594331ULL);
+    word(exact_packet, 1);
+    // This was a valid sparse empty local catalog under the previous version:
+    // nonempty global catalogs, with zero resident cell/face/node records.
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        word(ordinary_packet, 1);
+        word(exact_packet, 1);
+    }
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        word(ordinary_packet, 0);
+        word(exact_packet, 0);
+    }
+    EXPECT_THROW((PolyhedralComplex<ordinary>::decode(ordinary_packet)), std::invalid_argument);
+    EXPECT_THROW((PolyhedralComplex<exact>::decode(exact_packet)), std::invalid_argument);
+}
+
+std::vector<char> exact_tuple(std::uint64_t tag, std::span<const int> values)
+{
+    std::vector<char> body;
+    word(body, tag);
+    for (const auto value : values)
+    {
+        integer(body, value < 0 ? unsigned(-value) : unsigned(value), value < 0);
+        integer(body, 1);
+    }
+    return body;
+}
+TEST(GeometryPacketCodecTest, ExactProviderDirectionAndMomentNormalFormsAreRequired)
+{
+    const auto line = [](std::array<int, 6> values)
+    {
+        return encode_geometry_packet(
+            GeometryPacketKind::LineIdentity, exact, exact_tuple(0x53464c494e453631ULL, values));
+    };
+    EXPECT_NO_THROW((decode_identity<LineIdentity<exact>>(line({1, 0, 0, 0, 2, 3}))));
+    EXPECT_THROW((decode_identity<LineIdentity<exact>>(line({0, 0, 0, 0, 0, 0}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<LineIdentity<exact>>(line({2, 0, 0, 0, 2, 3}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<LineIdentity<exact>>(line({-1, 0, 0, 0, 2, 3}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<LineIdentity<exact>>(line({1, 0, 0, 1, 2, 3}))), std::invalid_argument);
+    const auto support = [](std::array<int, 4> values)
+    {
+        return encode_geometry_packet(
+            GeometryPacketKind::PlaneSupportIdentity, exact, exact_tuple(0x53464a504c414e36ULL, values));
+    };
+    EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, 1, 2, 3}))));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, 0, 0, 0}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, 2, 0, 3}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<exact>>(support({0, -1, 0, 3}))), std::invalid_argument);
+}
+TEST(GeometryPacketCodecTest, FiniteProviderFormsPreserveRoundedCoefficients)
+{
+    namespace on = details::ordinary_native;
+    const auto line = [](on::WidePoint direction)
+    {
+        on::Writer writer;
+        writer.word(0x534646504c494e31ULL);
+        writer.word(0);
+        writer.point(direction);
+        writer.point({.1L, .2L, 0});
+        return encode_geometry_packet(GeometryPacketKind::LineIdentity, ordinary, writer.bytes);
+    };
+    // The selected component is positive but not exactly one or the largest.
+    // Neither reciprocal-rounding normalization nor axis selection is replayed.
+    EXPECT_NO_THROW((decode_identity<LineIdentity<ordinary>>(line({std::nextafter(1.L, 0.L), 1, 0}))));
+    EXPECT_THROW((decode_identity<LineIdentity<ordinary>>(line({0, 1, 0}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<LineIdentity<ordinary>>(line({-1, 0, 0}))), std::invalid_argument);
+    const auto input = [](on::WidePoint normal)
+    {
+        on::Writer writer;
+        writer.word(0x53464e494e505431ULL);
+        writer.point(normal);
+        writer.point({});
+        writer.real(0);
+        return encode_geometry_packet(GeometryPacketKind::PlaneSupportIdentity, ordinary, writer.bytes);
+    };
+    EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(input({0, 2, -1}))));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(input({}))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(input({0, -1, 2}))), std::invalid_argument);
+    on::Writer parent;
+    parent.word(0x53464e4158495331ULL);
+    parent.word(0);
+    parent.real(0);
+    const auto translated = [&](on::WidePoint shift)
+    {
+        on::Writer writer;
+        writer.word(0x53464e5452414e31ULL);
+        writer.packet(parent.bytes);
+        writer.point(shift);
+        return encode_geometry_packet(GeometryPacketKind::PlaneSupportIdentity, ordinary, writer.bytes);
+    };
+    EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(translated({1, 0, 0}))));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(translated({}))), std::invalid_argument);
+    const auto source = [](bool sorted)
+    {
+        on::Writer writer;
+        writer.word(0x53464e534f555231ULL);
+        writer.word(3);
+        const std::array<on::WidePoint, 3> points{{{-1, 0, 1}, {0, 1, 0}, {1, 0, 0}}};
+        if (sorted)
+            for (const auto& point : points)
+                writer.point(point);
+        else
+        {
+            writer.point(points[2]);
+            writer.point(points[0]);
+            writer.point(points[1]);
+        }
+        return encode_geometry_packet(GeometryPacketKind::PlaneSupportIdentity, ordinary, writer.bytes);
+    };
+    EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(source(true))));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(source(false))), std::invalid_argument);
+}
+TEST(GeometryPacketCodecTest, ExtrusionDagParentsAndEndpointsKeepTheirCanonicalOrdering)
+{
+    namespace on = details::ordinary_native;
+    const auto dag = [](bool sorted_parents, bool sorted_endpoints)
+    {
+        on::Writer first;
+        first.word(0);
+        first.point({0, 0, 0});
+        on::Writer second;
+        second.word(0);
+        second.point({1, 1, 0});
+        on::Writer derived;
+        derived.word(1);
+        derived.word(2);
+        derived.word(sorted_parents ? 0 : 1);
+        derived.word(sorted_parents ? 1 : 0);
+        on::Writer writer;
+        writer.word(0x5346454441475331ULL);
+        writer.word(3);
+        writer.packet(first.bytes);
+        writer.packet(second.bytes);
+        writer.packet(derived.bytes);
+        writer.word(sorted_endpoints ? 0 : 2);
+        writer.word(sorted_endpoints ? 2 : 0);
+        return encode_geometry_packet(GeometryPacketKind::PlaneSupportIdentity, ordinary, writer.bytes);
+    };
+    EXPECT_NO_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(dag(true, true))));
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(dag(false, true))), std::invalid_argument);
+    EXPECT_THROW((decode_identity<PlaneSupportIdentity<ordinary>>(dag(true, false))), std::invalid_argument);
+}
+
+TEST(GeometryPacketCodecTest, CoordinateCountsRejectBeforeDisproportionateReservations)
+{
+    namespace on = details::ordinary_native;
+    const auto rejects_coordinates = [](auto&& decode)
+    {
+        try
+        {
+            decode();
+            FAIL() << "Truncated coordinate count was accepted.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            EXPECT_NE(std::string(error.what()).find("encoded coordinates"), std::string::npos);
+        }
+    };
+    const std::array<GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto face = PlanarFace<ordinary>::make(points);
+    auto body = canonical_face_key(*face);
+    on::Reader reader{body};
+    (void) reader.word();
+    (void) reader.packet();
+    (void) reader.point();
+    const auto count_offset = reader.cursor;
+    body.resize(count_offset + 8 + 4096, 0);
+    overwrite(body, count_offset, 4096);
+    const auto malformed_face = encode_geometry_packet(GeometryPacketKind::PlanarFace, ordinary, body);
+    rejects_coordinates([&] { (void) PlanarFace<ordinary>::decode(malformed_face); });
+    const auto cell = ConvexCellGeometry<ordinary>::box({0, 0, 0}, {1, 1, 1});
+    body = canonical_cell_key(*cell);
+    on::Reader cell_reader{body};
+    (void) cell_reader.word();
+    (void) cell_reader.point();
+    const auto cell_count_offset = cell_reader.cursor;
+    body.resize(cell_count_offset + 8 + 4096, 0);
+    overwrite(body, cell_count_offset, 4096);
+    const auto malformed_cell = encode_geometry_packet(GeometryPacketKind::CellCertificate, ordinary, body);
+    rejects_coordinates([&] { (void) ConvexCellGeometry<ordinary>::decode_certificate(malformed_cell); });
+    body.clear();
+    word(body, 0x5346455841435431ULL);
+    word(body, 1);
+    for (unsigned i = 0; i < 3; ++i)
+        word(body, 0); // Binary64 origin.
+    word(body, 512);
+    body.resize(body.size() + 4096, 0);
+    const auto malformed_fragment = encode_geometry_packet(GeometryPacketKind::ConvexFragment, exact, body);
+    rejects_coordinates([&] { (void) geometry::swept_volume::ConvexFragment<exact>::decode(malformed_fragment); });
+}
+} // namespace
