@@ -186,7 +186,7 @@ const std::vector<PlaneAuthority>& DynamicPoint::supports() const
     if (!provenance_ || provenance_->value != value || provenance_->absolute_error != absolute_error ||
         provenance_->arithmetic_mode != arithmetic_mode)
         return empty;
-    return provenance_->supports;
+    return provenance_->supports();
 }
 } // namespace SimpleFluid::PLIC
 
@@ -269,20 +269,24 @@ std::size_t DynamicGeometryAccess::identity_bytes(
     std::size_t bytes = 0, retained_bytes = 0;
     GeometryAllocationLedger attachments;
     std::set<const DynamicPointProvenance*> visited;
+    std::set<const DynamicPointSupportPayload*> visited_supports;
     std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{p};
     for (std::size_t i = 0; i < pending.size(); ++i)
     {
         const auto point = pending[i];
         if (!point || !visited.insert(point.get()).second)
             continue;
-        bytes += sizeof(DynamicPointProvenance) + point->supports.capacity() * sizeof(PlaneAuthority) +
-                 point->source_edges.capacity() * sizeof(point->source_edges.front());
-        for (const auto& key : point->supports)
+        bytes += sizeof(DynamicPointProvenance) + point->source_edges.capacity() * sizeof(point->source_edges.front());
+        if (const auto& payload = point->support_payload; payload && visited_supports.insert(payload.get()).second)
         {
-            bytes += key.key.capacity() * sizeof(std::uint64_t);
-            if (include_support_payloads)
-                if (const auto* support = details::OriginalSupportAuthorityAccess::retained(key))
-                    attachments.retain(*support, retained_bytes, std::numeric_limits<std::size_t>::max());
+            bytes += sizeof(DynamicPointSupportPayload) + payload->authorities.capacity() * sizeof(PlaneAuthority);
+            for (const auto& key : payload->authorities)
+            {
+                bytes += key.key.capacity() * sizeof(std::uint64_t);
+                if (include_support_payloads)
+                    if (const auto* support = details::OriginalSupportAuthorityAccess::retained(key))
+                        attachments.retain(*support, retained_bytes, std::numeric_limits<std::size_t>::max());
+            }
         }
         if (point->source_origin)
             pending.push_back(point->source_origin);
@@ -310,7 +314,7 @@ void DynamicGeometryAccess::retain_supports(const std::shared_ptr<const DynamicP
         const auto point = pending[i];
         if (!point || !visited.insert(point.get()).second)
             continue;
-        for (const auto& authority : point->supports)
+        for (const auto& authority : point->supports())
             if (const auto* support = details::OriginalSupportAuthorityAccess::retained(authority))
                 ledger.retain(*support, used, limit);
         if (point->source_origin)
@@ -347,13 +351,35 @@ bool DynamicGeometryAccess::same_source(const DynamicPoint& a, const DynamicPoin
 
 namespace SimpleFluid::PLIC
 {
+namespace
+{
+std::shared_ptr<const DynamicPointSupportPayload> support_payload(std::vector<PlaneAuthority> supports)
+{
+    if (supports.empty())
+        return {};
+    if (details::active_work)
+        details::active_work->charge(1, sizeof(DynamicPointSupportPayload));
+    if (supports.capacity() > supports.size())
+    {
+        // Account the replacement while the old outer buffer remains alive.
+        // Moving authorities retains each key buffer and its original capacity.
+        if (details::active_work)
+            details::active_work->charge(supports.size(), sizeof(PlaneAuthority));
+        std::vector<PlaneAuthority> compact(supports.size());
+        std::move(supports.begin(), supports.end(), compact.begin());
+        supports = std::move(compact);
+    }
+    return std::make_shared<DynamicPointSupportPayload>(std::move(supports));
+}
+} // namespace
+
 void DynamicGeometryAccess::seal(DynamicPoint& point, std::vector<PlaneAuthority> supports)
 {
     accept_authorities(supports);
     std::sort(supports.begin(), supports.end());
     supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
-    point.provenance_ = std::make_shared<DynamicPointProvenance>(
-        DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
+    point.provenance_ = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
+        point.value, point.absolute_error, support_payload(std::move(supports)), point.arithmetic_mode});
 }
 
 const std::shared_ptr<const DynamicPointProvenance>& DynamicGeometryAccess::borrowed_original_source(
@@ -392,8 +418,12 @@ void DynamicGeometryAccess::seal_export(DynamicPoint& point,
     accept_authorities(supports);
     std::sort(supports.begin(), supports.end());
     supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
+    // Identical immutable support sequences may share storage. Point identity,
+    // numerical enclosures and source ancestry remain separate records.
+    auto payload = source && source->supports() == supports ? source->support_payload
+                                                          : support_payload(std::move(supports));
     auto record = std::make_shared<DynamicPointProvenance>(
-        DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
+        DynamicPointProvenance{point.value, point.absolute_error, std::move(payload), point.arithmetic_mode});
     record->constructed = !source || source->constructed || source->value != point.value ||
                           source->absolute_error != point.absolute_error;
     record->source_origin = source;
@@ -410,8 +440,8 @@ void DynamicGeometryAccess::seal_generated(DynamicPoint& point,
         return;
     }
     accept_authorities(supports);
-    auto record = std::make_shared<DynamicPointProvenance>(
-        DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
+    auto record = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
+        point.value, point.absolute_error, support_payload(std::move(supports)), point.arithmetic_mode});
     record->constructed = true;
     record->source_edges = std::move(edges);
     point.provenance_ = std::move(record);
@@ -524,7 +554,7 @@ void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point, std::ve
         point.absolute_error == std::array<long double, 3>{} &&
         std::all_of(point.value.begin(), point.value.end(), [](long double x) { return std::isfinite(x); });
     point.provenance_ = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
-        point.value, point.absolute_error, std::move(supports), point.arithmetic_mode, represented});
+        point.value, point.absolute_error, support_payload(std::move(supports)), point.arithmetic_mode, represented});
 }
 bool DynamicGeometryAccess::same_represented_source(
     const std::shared_ptr<const DynamicPointProvenance>& a, const std::shared_ptr<const DynamicPointProvenance>& b)
@@ -545,3 +575,67 @@ bool DynamicGeometryAccess::same_represented_source(
                                    second->absolute_error == std::array<long double, 3>{} && first->value == second->value));
 }
 } // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC::details
+{
+namespace
+{
+std::vector<PlaneAuthority> copied_vertex_authorities(
+    const std::vector<PlaneAuthority>& source, const PlaneAuthority* appended = nullptr)
+{
+    // Precharge every new buffer before allocating. The immutable owner stays
+    // pinned by the caller, including when appended aliases one of its keys.
+    if (active_work)
+    {
+        active_work->charge(source.size(), sizeof(PlaneAuthority));
+        if (appended)
+            active_work->charge(1, sizeof(PlaneAuthority));
+        for (const auto& authority : source)
+            active_work->charge(authority.key.size(), sizeof(std::uint64_t));
+        if (appended)
+            active_work->charge(appended->key.size(), sizeof(std::uint64_t));
+    }
+    std::vector<PlaneAuthority> result;
+    result.reserve(source.size() + (appended ? 1 : 0));
+    for (const auto& authority : source)
+        result.push_back(authority);
+    if (appended)
+        result.push_back(*appended);
+    return result;
+}
+} // namespace
+
+void StoredVertexAuthorities::share_if_equal(const std::shared_ptr<const DynamicPointSupportPayload>& payload)
+{
+    if (payload && values() == payload->authorities)
+        storage_ = payload;
+}
+
+void StoredVertexAuthorities::detach()
+{
+    if (const auto& shared = shared_payload())
+    {
+        const auto owner = shared;
+        storage_ = copied_vertex_authorities(owner->authorities);
+    }
+}
+
+void StoredVertexAuthorities::append(const PlaneAuthority& authority)
+{
+    if (auto* owned = std::get_if<std::vector<PlaneAuthority>>(&storage_))
+        owned->push_back(authority);
+    else
+    {
+        const auto owner = shared_payload();
+        storage_ = copied_vertex_authorities(owner ? owner->authorities : values(), &authority);
+    }
+}
+
+void StoredVertexAuthorities::clear()
+{
+    if (auto* owned = std::get_if<std::vector<PlaneAuthority>>(&storage_))
+        owned->clear();
+    else
+        storage_ = std::vector<PlaneAuthority>{};
+}
+} // namespace SimpleFluid::PLIC::details

@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <Tpetra_Map.hpp>
@@ -827,7 +828,7 @@ std::size_t fetch_retention(std::span<const AdaptiveLeaf> leaves, std::span<cons
     return bytes.used;
 }
 AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std::span<const AdaptiveBytes> keys,
-    bool family, std::size_t cap, bool leased)
+    bool family, std::size_t cap, bool leased, bool preserve_source = false)
 {
     const auto& directory = family ? state.family_directory : state.cells;
     const auto packet_cap = leased ? cap / 8 : cap;
@@ -945,7 +946,10 @@ AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std
                         leaves.push_back(it->second);
                     }
                 }
-                if (!family && !leased)
+                // Publication-only compact drafts must inspect the original
+                // certificate presence and keep its native ordinal/recipe pair.
+                // Repacking can erase supplied geometry or remap ordinals.
+                if (!family && !leased && !preserve_source)
                 {
                     std::map<AdaptiveCellKey, AdaptiveLeaf> unique;
                     for (const auto& leaf : leaves)
@@ -1163,6 +1167,16 @@ AdaptiveBytes DistributedAdaptiveHierarchy::configuration_descriptor() const
 std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves(
     std::span<const AdaptiveCellKey> keys, std::optional<std::size_t> transient_cap) const
 {
+    return fetch_leaves_impl(keys, transient_cap, false);
+}
+std::vector<AdaptiveLeaf> adaptive_detail::fetch_native_source_leaves(
+    const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveCellKey> keys)
+{
+    return hierarchy.fetch_leaves_impl(keys, {}, true);
+}
+std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves_impl(
+    std::span<const AdaptiveCellKey> keys, std::optional<std::size_t> transient_cap, bool preserve_source) const
+{
     const auto cap = transient_cap.value_or(data_->options.byte_budget);
     collective(*data_->comm,
         [&]
@@ -1204,7 +1218,9 @@ std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves(
                 encoded.push_back(std::move(bytes));
             }
         });
-    return fetch_records(*data_, encoded, false, transient_cap ? cap - cap / 8 : cap, transient_cap.has_value()).leaves;
+    return fetch_records(
+        *data_, encoded, false, transient_cap ? cap - cap / 8 : cap, transient_cap.has_value(), preserve_source)
+        .leaves;
 }
 std::vector<AdaptiveFamily> DistributedAdaptiveHierarchy::fetch_families(
     std::span<const AdaptiveBytes> keys, std::optional<std::size_t> transient_cap) const
@@ -1850,6 +1866,14 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
 }
 AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft() const
 {
+    return native_draft_impl(false);
+}
+AdaptiveNativeDraft adaptive_detail::compact_adaptive_native_draft(const DistributedAdaptiveHierarchy& hierarchy)
+{
+    return hierarchy.native_draft_impl(true);
+}
+AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact_procedural) const
+{
     collective(*data_->comm,
         [&]
         {
@@ -1866,7 +1890,11 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft() const
                 auto transient = leaf;
                 transient.geometry = data_->kernel->geometry(leaf);
                 transient.surfaces = data_->kernel->surfaces(leaf);
+                // Preserve the expanded wire admission and its geometry/surface
+                // invariant before selecting publication-only retention.
                 budget.add(encode_adaptive_leaf(transient).size());
+                if (adaptive_detail::compact_native_geometry(leaf, compact_procedural))
+                    transient.geometry.reset();
                 result.owned.push_back(std::move(transient));
             }
         });
@@ -1915,8 +1943,12 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft() const
             }
             for (const auto& leaf : result.owned)
             {
+                // Regenerate from the original provider record, never from an
+                // expanded draft that could remap a procedural cell ordinal.
+                const auto geometry =
+                    leaf.geometry ? leaf.geometry : data_->kernel->geometry(data_->owned.at(leaf.key));
                 if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(incidence.at(leaf.key))
-                        ->equivalent(*leaf.geometry))
+                        ->equivalent(*geometry))
                     throw std::invalid_argument("Authority tiles do not form complete exact local shell.");
             }
         });

@@ -260,7 +260,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
             reconstruction_sample<mode>(target_cell), support, data.options.reconstruction);
     }
     std::vector<const AMR::AdaptiveTile*> faces;
-    for (const auto& tile : data.topology->surface_tiles)
+    for (const auto& tile : data.topology->surface_tiles())
         if (stencil.contains(tile.first) || (tile.second && stencil.contains(*tile.second)))
         {
             budget.add(2 * sizeof(void*));

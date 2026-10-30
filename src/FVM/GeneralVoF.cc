@@ -148,7 +148,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
         data->adopted_transaction = transfer->transaction();
         data->adopted_target_control = data->control;
     }
-    topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy);
+    topology->draft = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*hierarchy);
     complete_node_fans(*data, *topology);
     // Canonical node fans can include diagonal cells outside the initial
     // face halo. Fetch their full shells before expanding the physical support
@@ -170,7 +170,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     }
             fan_seeds.assign(seeds.begin(), seeds.end());
         });
-    topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy, fan_seeds);
+    topology->draft = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*hierarchy, fan_seeds);
     std::vector<Key>().swap(fan_seeds);
     for (unsigned ring = 1; ring <= options.support_rings; ++ring)
     {
@@ -218,13 +218,22 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     if (!hierarchy->owned().contains(key))
                         additional.push_back(key);
             });
-        topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy, additional);
+        topology->draft = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*hierarchy, additional);
     }
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{options.byte_budget};
             budget.add(topology->draft.cell_bindings.size() * (sizeof(Cell) + sizeof(Key)));
+            for (const auto& key : topology->graph_keys)
+            {
+                const auto bytes = topology_key_wire_bytes(key);
+                budget.add(sizeof(Key) + 4 * sizeof(void*));
+                budget.add(bytes);
+                budget.add(bytes);
+            }
+            for (const auto& [node, fan] : topology->node_fans)
+                budget.add(sizeof(node) + sizeof(fan) + 4 * sizeof(void*) + fan.storage_bytes());
             std::map<Key, const AMR::AdaptiveLeaf*> leaves;
             for (const auto& leaf : topology->draft.owned)
                 leaves.emplace(leaf.key, &leaf);
@@ -261,67 +270,100 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     if (!topology->by_gid.emplace(binding.gid, binding.key).second)
                         throw std::invalid_argument("General VoF duplicate native cell GID.");
                 }
+            // One retained tile owns each native authority. Surface, frontier,
+            // construction and wall catalogs reference these stable owner indices.
+            const auto retain_extra = [&](const auto& tile)
+            {
+                return Mode != ArithmeticMode::Exact ||
+                       (options.transport_backend != GeneralVoFTransportBackend::SweptPartition && tile.second &&
+                           data->cells.contains(tile.first) && data->cells.contains(*tile.second));
+            };
+            std::size_t owned_count = 0, extra_count = 0;
+            for (const auto& tile : topology->draft.tiles)
+                if (hierarchy->owned().contains(tile.first) ||
+                    (tile.second && hierarchy->owned().contains(*tile.second)))
+                    ++owned_count;
+                else if (retain_extra(tile))
+                    ++extra_count;
+            const auto reserve_tiles = [&](auto& entries, std::size_t count)
+            {
+                if (count > (budget.limit - budget.used) / sizeof(AMR::AdaptiveTile))
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                        "General VoF retained tile owners exceed the byte budget.");
+                entries.reserve(count);
+                budget.add(entries.capacity() * sizeof(AMR::AdaptiveTile));
+            };
+            reserve_tiles(topology->tiles, owned_count);
+            reserve_tiles(topology->extra_surface_tiles, extra_count);
+            const auto append_reference = [&](auto& entries, const auto reference)
+            {
+                if (entries.size() == entries.capacity())
+                {
+                    const auto capacity = entries.capacity();
+                    if (capacity > std::numeric_limits<std::size_t>::max() / 2)
+                        throw std::invalid_argument("General VoF tile reference capacity overflows.");
+                    const auto next = capacity ? 2 * capacity : 1;
+                    budget.add((next - capacity) * sizeof(reference));
+                    entries.reserve(next);
+                }
+                entries.push_back(reference);
+            };
+            const auto graph_row = [&](auto& entries, const auto& key) -> KeySet&
+            {
+                if (!entries.contains(key))
+                {
+                    budget.add(sizeof(typename std::decay_t<decltype(entries)>::value_type) + 4 * sizeof(void*));
+                    if constexpr (std::is_same_v<std::decay_t<decltype(key)>, Key>)
+                    {
+                        const auto bytes = topology_key_wire_bytes(key);
+                        budget.add(bytes);
+                        budget.add(bytes);
+                    }
+                }
+                return entries[key];
+            };
             for (const auto& tile : topology->draft.tiles)
             {
                 if (!tile.second_image_identity.is_zero())
                     throw std::invalid_argument("General VoF periodic image sweeps are not qualified.");
+                const bool first_full = data->cells.contains(tile.first);
+                const bool second_full = tile.second && data->cells.contains(*tile.second);
                 if constexpr (Mode == ArithmeticMode::Ordinary)
-                {
-                    const bool first_full = data->cells.contains(tile.first);
-                    const bool second_full = tile.second && data->cells.contains(*tile.second);
                     if (!first_full && !second_full)
                         throw std::invalid_argument("General VoF native tile has no full retained endpoint.");
-                    if (first_full != second_full)
-                    {
-                        if (topology->frontier_tiles.size() == topology->frontier_tiles.capacity())
-                        {
-                            const auto capacity = topology->frontier_tiles.capacity();
-                            if (capacity > std::numeric_limits<std::size_t>::max() / 2)
-                                throw std::invalid_argument("General VoF frontier capacity overflows.");
-                            const auto next = capacity ? 2 * capacity : 1;
-                            if (next - capacity > (budget.limit - budget.used) / sizeof(AMR::AdaptiveTile))
-                                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
-                                    "General VoF frontier exceeds its byte budget.");
-                            budget.add((next - capacity) * sizeof(AMR::AdaptiveTile));
-                            topology->frontier_tiles.reserve(next);
-                        }
-                        budget.add(
-                            (tile.node_gids.size() + tile.second_node_gids.size()) * sizeof(std::uint64_t) +
-                            tile.domain.size() + tile.surface.size() + tile.identity.size() + tile.boundary.size() +
-                            tile.second_image_identity.payload_bytes() + AMR::encode_adaptive_key(tile.first).size() +
-                            (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
-                        topology->frontier_tiles.push_back(tile);
-                    }
-                }
                 if (tile.second)
                 {
-                    topology->adjacency[tile.first].insert(*tile.second);
-                    topology->adjacency[*tile.second].insert(tile.first);
+                    graph_row(topology->adjacency, tile.first).insert(*tile.second, topology->graph_keys, &budget);
+                    graph_row(topology->adjacency, *tile.second).insert(tile.first, topology->graph_keys, &budget);
                 }
-                if (hierarchy->owned().contains(tile.first) ||
-                    (tile.second && hierarchy->owned().contains(*tile.second)))
-                    topology->tiles.push_back(tile);
+                const bool owned_incident = hierarchy->owned().contains(tile.first) ||
+                                            (tile.second && hierarchy->owned().contains(*tile.second));
+                if (!owned_incident && !retain_extra(tile))
+                    continue;
+                auto& owner = owned_incident ? topology->tiles : topology->extra_surface_tiles;
+                owner.push_back(tile);
+                const auto& retained = owner.back();
+                budget.add(
+                    (retained.node_gids.capacity() + retained.second_node_gids.capacity()) * sizeof(std::uint64_t) +
+                    retained.domain.capacity() + retained.surface.capacity() + retained.identity.capacity() +
+                    retained.boundary.capacity() + retained.second_image_identity.payload_bytes() +
+                    AMR::encode_adaptive_key(retained.first).size() +
+                    (retained.second ? AMR::encode_adaptive_key(*retained.second).size() : 0));
+                using Owner = Data::Topology::SurfaceTileOwner;
+                const Data::Topology::SurfaceTileReference reference{
+                    owned_incident ? Owner::OwnedTiles : Owner::ExtraSurfaceTiles, owner.size() - 1};
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                    if (first_full != second_full)
+                        append_reference(topology->frontier_tile_references, reference);
                 if ((Mode == ArithmeticMode::Ordinary ||
                         options.transport_backend != GeneralVoFTransportBackend::SweptPartition) &&
-                    tile.second && data->cells.contains(tile.first) && data->cells.contains(*tile.second))
-                {
-                    budget.add(sizeof(AMR::AdaptiveTile) + tile.node_gids.size() * sizeof(std::uint64_t) +
-                        tile.domain.size() + tile.surface.size() + tile.identity.size() + tile.boundary.size() +
-                        AMR::encode_adaptive_key(tile.first).size() + AMR::encode_adaptive_key(*tile.second).size());
-                    topology->surface_tiles.push_back(tile);
-                }
+                    tile.second && first_full && second_full)
+                    append_reference(topology->surface_tile_references, reference);
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
-                    budget.add(sizeof(Data::FaceAuthority) + sizeof(std::uint64_t) + 4 * sizeof(void*) +
-                               tile.domain.size() + tile.surface.size() + tile.identity.size() +
-                               tile.node_gids.size() * sizeof(std::uint64_t) +
-                               AMR::encode_adaptive_key(tile.first).size() +
-                               (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
-                    if (!topology->construction_faces
-                            .emplace(tile.face_gid, Data::FaceAuthority{tile.domain, tile.surface, tile.identity,
-                                                        tile.node_gids, tile.first, tile.second, tile.exterior})
-                            .second)
-                        throw std::invalid_argument("Finite VoF construction face identity is duplicated.");
+                    budget.add(sizeof(typename decltype(topology->construction_faces)::value_type) + 4 * sizeof(void*));
+                    if (!topology->construction_faces.emplace(tile.face_gid, reference).second)
+                        throw std::invalid_argument("General VoF construction face identity is duplicated.");
                 }
             }
             // Preserve canonical tile order in every incidence row. Transport
@@ -364,8 +406,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 {
                     const auto volume = std::min(static_cast<long double>(cell.native_volume),
                         PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume().value);
-                    cell.ordinary_quota_scale = std::nextafter(
-                        volume / static_cast<long double>(cell.canonical_face_count), 0.L);
+                    cell.ordinary_quota_scale =
+                        std::nextafter(volume / static_cast<long double>(cell.canonical_face_count), 0.L);
                     if (!(cell.ordinary_quota_scale > 0) || !std::isfinite(cell.ordinary_quota_scale))
                         throw std::invalid_argument("General VoF ordinary face quota has invalid capacity.");
                 }
@@ -376,7 +418,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             for (const auto& node : topology->draft.nodes)
                 if (control_nodes.contains(node.gid))
                     topology->nodes.push_back(node);
-            std::map<std::uint64_t, std::set<Key>> node_source_cells;
+            std::map<std::uint64_t, KeySet> node_source_cells;
             std::map<AMR::AdaptiveBytes, const AMR::AdaptiveTile*> wall_tiles;
             if constexpr (Mode != ArithmeticMode::Exact)
                 for (const auto& tile : topology->draft.tiles)
@@ -384,8 +426,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                         if (key && data->cells.contains(*key))
                             for (auto node : tile.node_gids)
-                                if (node_source_cells[node].insert(*key).second)
-                                    budget.add(sizeof(Key) + AMR::encode_adaptive_key(*key).size() + 8 * sizeof(void*));
+                                graph_row(node_source_cells, node).insert(*key, topology->graph_keys, &budget);
                     if (tile.exterior)
                         wall_tiles.try_emplace(tile.identity, &tile);
                 }
@@ -410,15 +451,13 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     if (!topology->construction_nodes.emplace(node.gid, node.identity).second)
                         throw std::invalid_argument("Finite VoF construction node identity is duplicated.");
                 }
-            const auto node_sources = [&](std::uint64_t node) -> const std::set<Key>&
+            const auto node_sources = [&](std::uint64_t node) -> const KeySet&
             {
                 if (const auto complete = topology->node_fans.find(node); complete != topology->node_fans.end())
                     return complete->second;
                 return node_source_cells.at(node);
             };
-            std::map<std::uint64_t,
-                std::map<AMR::AdaptiveBytes, SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>>>
-                walls;
+            std::map<std::uint64_t, std::map<AMR::AdaptiveBytes, const AMR::AdaptiveTile*>> walls;
             std::map<std::uint64_t, std::set<Key>> incident;
             for (const auto& tile : topology->draft.tiles)
                 for (auto node : tile.node_gids)
@@ -437,9 +476,9 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                             if (found == catalog.end())
                             {
                                 budget.add(sizeof(Data::Wall) + tile.identity.size() + 4 * sizeof(void*));
-                                catalog.emplace(tile.identity, tile.geometry);
+                                catalog.emplace(tile.identity, &tile);
                             }
-                            else if (found->second->encode_incidence() != tile.geometry->encode_incidence())
+                            else if (found->second->geometry->encode_incidence() != tile.geometry->encode_incidence())
                                 throw std::invalid_argument("General VoF canonical wall certificates differ.");
                         }
                     }
@@ -452,14 +491,17 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             }();
             for (const auto& node : wall_nodes)
             {
-                if (control_nodes.contains(node.gid) && incident[node.gid] != topology->node_fans.at(node.gid))
+                if (control_nodes.contains(node.gid) &&
+                    (incident[node.gid].size() != topology->node_fans.at(node.gid).size() ||
+                        !std::equal(incident[node.gid].begin(), incident[node.gid].end(),
+                            topology->node_fans.at(node.gid).begin())))
                     throw std::invalid_argument(
                         "General VoF wall catalog lacks a complete authenticated incident fan.");
                 for (const auto& key : node_sources(node.gid))
                     if (!leaves.contains(key))
                         throw std::invalid_argument("General VoF wall catalog requires full incident native shells.");
                 auto& retained = topology->node_walls[node.gid];
-                for (const auto& [identity, geometry] : walls[node.gid])
+                for (const auto& [identity, wall_tile] : walls[node.gid])
                 {
                     PLIC::DynamicPoint normal;
                     normal.arithmetic_mode = options.arithmetic_mode;
@@ -489,7 +531,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                                 normal, Math::cross(Math::subtract(topology->finite_nodes.at(face->node_gids[i]), a),
                                             Math::subtract(topology->finite_nodes.at(face->node_gids[i + 1]), a)));
                     }
-                    retained.push_back({identity, geometry, normal, constraint});
+                    if constexpr (Mode == ArithmeticMode::Exact)
+                        retained.push_back({identity, wall_tile->geometry, normal, constraint});
+                    else
+                        retained.push_back({wall_tile->face_gid, wall_tile->geometry, normal, constraint});
                 }
             }
             for (const auto& [key, leaf] : hierarchy->owned())
@@ -539,6 +584,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
     wire::collective(*comm,
         [&]
         {
+            topology->validate_surface_tiles();
             retained_budget<Mode>(*data);
             current(*data);
         });
@@ -708,31 +754,33 @@ const std::vector<PhaseError>& GeneralVoF::initial_occupancy_errors() const noex
 std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
 {
     std::vector<GeneralVoFResolutionRequest> result;
-    wire::collective(*data_->hierarchy->communicator(), [&]
-    {
-        current(*data_);
-        if (inventory_policy() != PhaseInventoryPolicy::Finite)
-            return;
-        const auto evaluate = [&]<ArithmeticMode Mode>()
+    wire::collective(*data_->hierarchy->communicator(),
+        [&]
         {
-            for (const auto& key : data_->topology->order)
+            current(*data_);
+            if (inventory_policy() != PhaseInventoryPolicy::Finite)
+                return;
+            const auto evaluate = [&]<ArithmeticMode Mode>()
             {
-                const auto& cell = data_->cells.at(key);
-                if (cell.declaration != GeneralVoFPhaseGeometry::Infer || cell.phase.gas_volume == 0 ||
-                    cell.phase.carrier_volume == 0)
-                    continue;
-                auto assessment =
-                    PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(reconstruction_sample<Mode>(cell),
-                        reconstruction_stencil<Mode>(*data_, key), data_->options.reconstruction);
-                if (!assessment.admitted())
-                    result.push_back({cell.gid, key, assessment});
-            }
-        };
-        if (arithmetic_mode() == ArithmeticMode::Ordinary)
-            evaluate.template operator()<ArithmeticMode::Ordinary>();
-        else
-            evaluate.template operator()<ArithmeticMode::BoundedCertification>();
-    });
+                for (const auto& key : data_->topology->order)
+                {
+                    const auto& cell = data_->cells.at(key);
+                    if (cell.declaration != GeneralVoFPhaseGeometry::Infer || cell.phase.gas_volume == 0 ||
+                        cell.phase.carrier_volume == 0)
+                        continue;
+                    std::size_t fitting_cells = 0;
+                    const auto stencil = reconstruction_stencil<Mode>(*data_, key, false, &fitting_cells);
+                    auto assessment = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
+                        reconstruction_sample<Mode>(cell), stencil, fitting_cells, data_->options.reconstruction);
+                    if (!assessment.admitted())
+                        result.push_back({cell.gid, key, assessment});
+                }
+            };
+            if (arithmetic_mode() == ArithmeticMode::Ordinary)
+                evaluate.template operator()<ArithmeticMode::Ordinary>();
+            else
+                evaluate.template operator()<ArithmeticMode::BoundedCertification>();
+        });
     return result;
 }
 std::vector<PLIC::PolyhedralInterface> GeneralVoF::reconstruct() const
@@ -841,7 +889,7 @@ std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
 {
     std::set<std::uint64_t> cells;
     const auto& fan = data_->topology->node_fans.at(node);
-    std::set<Key> seen = fan, front = fan;
+    std::set<Key> seen(fan.begin(), fan.end()), front(fan.begin(), fan.end());
     for (const auto& key : fan)
         cells.insert(data_->cells.at(key).gid);
     for (unsigned ring = 0; ring < data_->options.support_rings; ++ring)
@@ -974,4 +1022,4 @@ Meshes::GeometryStatisticsSnapshot GeneralVoF::geometry_statistics()
         PLIC::geometry_statistics_domain(), SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>(),
         PLIC::geometry_statistics()};
 }
-}
+} // namespace SimpleFluid::VoF

@@ -156,7 +156,8 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     tile.boundary = "wall";
     const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
     tile.geometry = retained->face_geometry(0);
-    topology->frontier_tiles.push_back(tile);
+    topology->tiles.push_back(tile);
+    topology->frontier_tile_references.push_back({decltype(topology)::element_type::SurfaceTileOwner::OwnedTiles, 0});
     data.topology = topology;
     const CacheTrial first(data);
     CacheTrial next(data);
@@ -198,7 +199,8 @@ TEST(GeneralVoFSpatialCache, HaloFrontierBindsRetainedSecondCellAndOutsideAuthor
     tile.identity = {'h', 'a', 'l', 'o'};
     const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
     tile.geometry = retained->face_geometry(1);
-    topology->frontier_tiles.push_back(tile);
+    topology->tiles.push_back(tile);
+    topology->frontier_tile_references.push_back({decltype(topology)::element_type::SurfaceTileOwner::OwnedTiles, 0});
     data.topology = topology;
     const CacheTrial trial(data);
     ASSERT_EQ(trial.cache->frontiers.size(), 1u);

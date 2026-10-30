@@ -60,8 +60,8 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
     if constexpr (Mode != ArithmeticMode::Exact)
     {
         using namespace finite_detail;
-        const auto actual =
-            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto actual = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(
+            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
         const auto conversion =
             fp::Arithmetic<Mode>::subtract(fp::Arithmetic<Mode>::make_value(cell.native_volume), actual);
         const auto defect = finite_cell_defect<Mode>(cell, actual);
@@ -73,8 +73,8 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
         cell.occupancy.difference = static_cast<double>(defect.value);
         cell.occupancy.native_conversion = static_cast<double>(conversion.value);
         cell.occupancy.phase_input_bound = upper_double(upward(input + defect.absolute_error));
-        cell.occupancy.admitted_bound = upper_double(upward(std::abs(conversion.value) + input +
-            conversion.absolute_error + defect.absolute_error));
+        cell.occupancy.admitted_bound = upper_double(
+            upward(std::abs(conversion.value) + input + conversion.absolute_error + defect.absolute_error));
         return;
     }
     if (!std::isfinite(cell.native_volume) || !(cell.native_volume > 0))
@@ -116,14 +116,14 @@ template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const General
         using namespace finite_detail;
         if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != options.arithmetic_mode)
             throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
-        const auto actual =
-            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto actual = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(
+            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
         const auto defect = finite_cell_defect<Mode>(cell, actual);
         const auto& e = cell.occupancy;
         bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
-            std::isfinite(cell.phase.carrier_volume) && cell.phase.carrier_volume >= 0 &&
-            std::isfinite(e.difference) && std::isfinite(e.native_conversion) &&
-            std::abs(defect.value) <= e.admitted_bound + defect.absolute_error;
+                     std::isfinite(cell.phase.carrier_volume) && cell.phase.carrier_volume >= 0 &&
+                     std::isfinite(e.difference) && std::isfinite(e.native_conversion) &&
+                     std::abs(defect.value) <= e.admitted_bound + defect.absolute_error;
         for (double bound :
             {e.admitted_bound, e.phase_input_bound, e.fit_bound, e.transferred_bound, e.fit_allocation_bound,
                 cell.roundoff.gas, cell.roundoff.carrier, cell.finite_history.gas, cell.finite_history.carrier})
@@ -133,10 +133,11 @@ template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const General
         PLIC::PolyhedralReconstruction<Mode>::validate(reconstruction_sample<Mode>(cell), options.reconstruction);
         if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
         {
-            const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ?
-                cell.phase.carrier_volume : cell.phase.gas_volume;
-            const auto bound = cell.inherited ? std::max(e.admitted_bound, e.fit_bound) :
-                actual.absolute_error + 8 * std::numeric_limits<double>::epsilon() * actual.value;
+            const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ? cell.phase.carrier_volume
+                                                                                       : cell.phase.gas_volume;
+            const auto bound = cell.inherited
+                                   ? std::max(e.admitted_bound, e.fit_bound)
+                                   : actual.absolute_error + 8 * std::numeric_limits<double>::epsilon() * actual.value;
             if (minority > bound)
                 throw std::invalid_argument("General VoF pure declaration contradicts finite inventory.");
         }
@@ -352,7 +353,52 @@ template<ArithmeticMode Mode>
 void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes,
     std::size_t extra_retained_bytes, std::size_t* remaining_bytes)
 {
-    wire::Budget budget{data.options.byte_budget};
+    // Complete the audit before admission so a rejection reports the entire
+    // requirement, rather than whichever category first crossed the limit.
+    // Shared geometry and typed identity owners are charged once across roots;
+    // ledger bookkeeping remains part of the retained admission requirement.
+    data.topology->validate_surface_tiles();
+    wire::Budget budget{std::numeric_limits<std::size_t>::max()};
+    std::array<std::pair<const char*, std::size_t>, 12> categories{};
+    std::size_t category_count = 0, checkpoint = 0;
+    const auto category = [&](const char* name)
+    {
+        categories.at(category_count++) = {name, budget.used - checkpoint};
+        checkpoint = budget.used;
+    };
+    std::size_t geometry_root_bytes = 0, key_allowance_bytes = 0, map_link_allowance_bytes = 0;
+    std::size_t tile_vector_bytes = 0, tile_metadata_bytes = 0;
+    std::size_t tile_owned_vector_capacity_bytes = 0, tile_owned_vector_size_bytes = 0;
+    const auto key_vector_bytes = [](const Key& key, bool capacity)
+    {
+        return std::visit(
+            [&](const auto& ancestry) -> std::size_t
+            {
+                using Ancestry = std::decay_t<decltype(ancestry)>;
+                if constexpr (std::is_same_v<Ancestry, AMR::ConvexCellAncestry>)
+                    return (capacity ? ancestry.path.capacity() : ancestry.path.size()) * sizeof(std::uint64_t);
+                else if constexpr (std::is_same_v<Ancestry, AMR::ProductCellAncestry>)
+                    return ((capacity ? ancestry.base.path.capacity() : ancestry.base.path.size()) +
+                               (capacity ? ancestry.axial.path.capacity() : ancestry.axial.path.size())) *
+                           sizeof(std::uint64_t);
+                else
+                    return 0;
+            },
+            key.ancestry);
+    };
+    const auto key_allowance = [&](const Key& key)
+    {
+        const auto bytes = AMR::encode_adaptive_key(key).size();
+        key_allowance_bytes += bytes;
+        budget.add(bytes);
+        return bytes;
+    };
+    const auto links = [&](std::size_t count)
+    {
+        const auto bytes = count * sizeof(void*);
+        map_link_allowance_bytes += bytes;
+        budget.add(bytes);
+    };
     budget.add(extra_retained_bytes);
     std::set<const void*> geometry;
     budget.add(data.latest_phase_cleanup.capacity() * sizeof(GeneralVoFPhaseCleanupDelta));
@@ -374,9 +420,12 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
     PLIC::GeometryAllocationLedger native_allocations, finite_allocations;
     const auto retain_face = [&](const auto& face)
     {
+        const auto before = budget.used;
         budget.add(face->exclusive_storage_bytes());
         native_allocations.retain(PLIC::planar_support<ArithmeticMode::Ordinary>(*face), budget.used, budget.limit);
+        geometry_root_bytes += budget.used - before;
     };
+    category("state_and_cache");
     std::set<const void*> exact_payloads;
     const auto charge_exact = [&](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
     {
@@ -389,7 +438,10 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                        sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>));
     for (const auto& [key, cell] : data.cells)
     {
-        budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
+        budget.add(sizeof(Cell) + sizeof(Key));
+        links(8);
+        key_allowance(key);
+        const auto before_geometry = budget.used;
         if (geometry.insert(cell.phase.geometry.get()).second)
             native_allocations.retain(cell.phase.geometry, budget.used, budget.limit);
         if constexpr (Mode != ArithmeticMode::Exact)
@@ -400,6 +452,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                 else
                     finite_allocations.retain<Mode>(cell.finite_geometry, budget.used, budget.limit);
             }
+        geometry_root_bytes += budget.used - before_geometry;
         if (cell.experimental_exact)
         {
             budget.add(sizeof(ExperimentalPhaseInventory));
@@ -411,81 +464,162 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                 charge_exact(*q);
         }
     }
+    category("cells_and_geometry_roots");
     for (const auto& node : data.topology->nodes)
         budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.payload_bytes());
     for (const auto& [id, point] : data.topology->finite_nodes)
-        budget.add(sizeof(id) + 4 * sizeof(void*) + PLIC::dynamic_point_storage_bytes(point));
+    {
+        budget.add(sizeof(id) + PLIC::dynamic_point_storage_bytes(point));
+        links(4);
+    }
     for (const auto& [id, identity] : data.topology->construction_nodes)
-        budget.add(sizeof(id) + sizeof(identity) + 4 * sizeof(void*) + identity.capacity());
+    {
+        budget.add(sizeof(id) + sizeof(identity) + identity.capacity());
+        links(4);
+    }
     for (const auto& [id, face] : data.topology->construction_faces)
-        budget.add(sizeof(id) + sizeof(face) + 4 * sizeof(void*) + face.domain.capacity() + face.surface.capacity() +
-                   face.identity.capacity() + face.node_gids.capacity() * sizeof(std::uint64_t) +
-                   AMR::encode_adaptive_key(face.first).size() +
-                   (face.second ? AMR::encode_adaptive_key(*face.second).size() : 0));
-    for (const auto& tile : data.topology->tiles)
     {
-        budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
-        if (geometry.insert(tile.geometry.get()).second)
-            retain_face(tile.geometry);
+        budget.add(sizeof(id) + sizeof(face));
+        links(4);
     }
-    for (const auto& tile : data.topology->surface_tiles)
+    category("nodes_and_authorities");
+    // Each actual tile owner pays for all allocated element slots and every
+    // copied metadata vector. The surface catalog itself owns only references.
+    const auto tiles = [&](const auto& entries)
     {
-        budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t) + tile.domain.capacity() +
-            tile.surface.capacity() + tile.identity.capacity() + tile.boundary.capacity() +
-            AMR::encode_adaptive_key(tile.first).size() + (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
-        if (geometry.insert(tile.geometry.get()).second)
-            retain_face(tile.geometry);
-    }
-    budget.add((data.topology->frontier_tiles.capacity() - data.topology->frontier_tiles.size()) *
-               sizeof(AMR::AdaptiveTile));
-    for (const auto& tile : data.topology->frontier_tiles)
+        const auto allocation = entries.capacity() * sizeof(AMR::AdaptiveTile);
+        budget.add(allocation);
+        tile_vector_bytes += allocation;
+        tile_owned_vector_capacity_bytes += allocation;
+        tile_owned_vector_size_bytes += entries.size() * sizeof(AMR::AdaptiveTile);
+        for (const auto& tile : entries)
+        {
+            const auto vectors =
+                (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
+                tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
+                tile.second_image_identity.payload_bytes();
+            const auto metadata = vectors + tile.boundary.capacity();
+            budget.add(metadata);
+            tile_metadata_bytes += metadata;
+            tile_owned_vector_capacity_bytes += vectors;
+            tile_owned_vector_size_bytes +=
+                (tile.node_gids.size() + tile.second_node_gids.size()) * sizeof(std::uint64_t) + tile.domain.size() +
+                tile.surface.size() + tile.identity.size() + tile.second_image_identity.payload_bytes();
+            const auto tile_key = [&](const Key& key)
+            {
+                const auto capacity = key_vector_bytes(key, true);
+                tile_owned_vector_capacity_bytes += capacity;
+                tile_owned_vector_size_bytes += key_vector_bytes(key, false);
+                const auto encoded = key_allowance(key);
+                if (capacity > encoded)
+                    budget.add(capacity - encoded);
+            };
+            tile_key(tile.first);
+            if (tile.second)
+                tile_key(*tile.second);
+            if (geometry.insert(tile.geometry.get()).second)
+                retain_face(tile.geometry);
+        }
+    };
+    tiles(data.topology->tiles);
+    category("owned_tiles");
+    tiles(data.topology->extra_surface_tiles);
+    const auto reference_bytes =
+        data.topology->surface_tile_references.capacity() * sizeof(GeneralVoF::Data::Topology::SurfaceTileReference);
+    budget.add(reference_bytes);
+    tile_owned_vector_capacity_bytes += reference_bytes;
+    tile_owned_vector_size_bytes +=
+        data.topology->surface_tile_references.size() * sizeof(GeneralVoF::Data::Topology::SurfaceTileReference);
+    category("surface_extras_and_references");
+    budget.add(
+        data.topology->frontier_tile_references.capacity() * sizeof(GeneralVoF::Data::Topology::SurfaceTileReference));
+    category("frontier_references");
+    for (const auto& key : data.topology->graph_keys)
     {
-        budget.add(sizeof(tile) +
-                   (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
-                   tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
-                   tile.boundary.capacity() + tile.second_image_identity.payload_bytes() +
-                   AMR::encode_adaptive_key(tile.first).size() +
-                   (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
-        if (geometry.insert(tile.geometry.get()).second)
-            retain_face(tile.geometry);
+        budget.add(sizeof(Key) + key_vector_bytes(key, true));
+        links(4);
+        key_allowance(key);
     }
     auto graph = [&](const auto& entries)
     {
         for (const auto& [key, values] : entries)
         {
-            budget.add(sizeof(key) + sizeof(values) + 8 * sizeof(void*));
-            for (const auto& value : values)
-                budget.add(sizeof(value) + 4 * sizeof(void*) + AMR::encode_adaptive_key(value).size());
+            budget.add(sizeof(key) + sizeof(values));
+            links(4);
+            if constexpr (std::is_same_v<std::decay_t<decltype(key)>, Key>)
+            {
+                budget.add(key_vector_bytes(key, true));
+                key_allowance(key);
+            }
+            budget.add(values.storage_bytes());
         }
     };
     graph(data.topology->adjacency);
     graph(data.topology->node_fans);
     for (const auto& [gid, key] : data.topology->by_gid)
-        budget.add(sizeof(gid) + sizeof(Key) + 4 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
+    {
+        budget.add(sizeof(gid) + sizeof(Key));
+        links(4);
+        key_allowance(key);
+    }
+    category("graphs_and_ids");
     const auto incidence = [&](const auto& entries)
     {
         for (const auto& [key, indices] : entries)
         {
-            budget.add(sizeof(key) + sizeof(indices) + 4 * sizeof(void*) +
-                       indices.capacity() * sizeof(std::size_t));
+            budget.add(sizeof(key) + sizeof(indices) + indices.capacity() * sizeof(std::size_t));
+            links(4);
             if constexpr (std::is_same_v<std::decay_t<decltype(key)>, Key>)
-                budget.add(AMR::encode_adaptive_key(key).size());
+                key_allowance(key);
         }
     };
     incidence(data.topology->cell_tiles);
     incidence(data.topology->node_tiles);
+    category("incidence");
     for (const auto& [node, walls] : data.topology->node_walls)
     {
         budget.add(sizeof(node) + sizeof(walls) + walls.capacity() * sizeof(GeneralVoF::Data::Wall));
         for (const auto& wall : walls)
         {
-            budget.add(wall.identity.capacity());
+            if (const auto* identity = std::get_if<AMR::AdaptiveBytes>(&wall.authority))
+                budget.add(identity->capacity());
             if (geometry.insert(wall.geometry.get()).second)
                 retain_face(wall.geometry);
         }
     }
+    category("walls");
+    if (budget.used > data.options.byte_budget)
+    {
+        namespace failure = ::SimpleFluid::detail::vof_failure;
+        failure::Scope context("retained_storage_admission");
+        context.record.arithmetic_mode = Mode;
+        context.record.mark(failure::Field::Arithmetic);
+        context.record.byte_budget = data.options.byte_budget;
+        context.record.mark(failure::Field::ByteBudget);
+        context.record.bytes_used = budget.used;
+        context.record.mark(failure::Field::BytesUsed);
+        std::ostringstream message;
+        message << "General VoF retained payload byte budget exhausted: accounted_requirement=" << budget.used
+                << " limit=" << data.options.byte_budget;
+        for (std::size_t i = 0; i < category_count; ++i)
+            message << ' ' << categories[i].first << '=' << categories[i].second;
+        const auto vector_shape = [&](const char* name, const auto& entries)
+        { message << ' ' << name << "_size=" << entries.size() << ' ' << name << "_capacity=" << entries.capacity(); };
+        vector_shape("owned_tiles", data.topology->tiles);
+        vector_shape("surface_extras", data.topology->extra_surface_tiles);
+        vector_shape("surface_references", data.topology->surface_tile_references);
+        vector_shape("frontier_references", data.topology->frontier_tile_references);
+        message << " tile_vector_bytes=" << tile_vector_bytes << " tile_metadata_bytes=" << tile_metadata_bytes
+                << " tile_owned_vector_capacity_bytes=" << tile_owned_vector_capacity_bytes
+                << " tile_owned_vector_size_bytes=" << tile_owned_vector_size_bytes
+                << " geometry_owner_bytes=" << geometry_root_bytes << " geometry_root_count=" << geometry.size()
+                << " encoded_key_allowance_bytes=" << key_allowance_bytes
+                << " map_link_allowance_bytes=" << map_link_allowance_bytes
+                << " geometry_accounting=unique_shared_owners_with_ledger";
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, message.str());
+    }
     if (remaining_bytes)
-        *remaining_bytes = budget.limit - budget.used;
+        *remaining_bytes = data.options.byte_budget - budget.used;
 }
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
@@ -531,7 +665,8 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                     w.word(data.hierarchy->owned().at(key).revision);
                 }
                 requests.push_back({int(node % std::uint64_t(comm->getSize())), std::move(w.data)});
-                topology.node_fans.emplace(node, std::set<Key>{});
+                budget.add(sizeof(decltype(topology.node_fans)::value_type) + 4 * sizeof(void*));
+                topology.node_fans.emplace(node, KeySet{});
             }
         });
     auto received = exchange_owner_packets(requests, comm, limit);
@@ -615,6 +750,8 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
         {
             wire::Budget budget{limit};
             budget.add(native_nodes.size() * (sizeof(decltype(native_nodes)::value_type) + 4 * sizeof(void*)));
+            budget.add(
+                topology.node_fans.size() * (sizeof(decltype(topology.node_fans)::value_type) + 4 * sizeof(void*)));
             std::set<std::uint64_t> seen;
             for (const auto& packet : returned.packets)
             {
@@ -634,7 +771,9 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                 {
                     const auto bytes = r.bytes();
                     budget.add(bytes.size() + sizeof(Key) + 8 * sizeof(void*));
-                    if (!topology.node_fans.at(node).insert(AMR::decode_adaptive_key(bytes)).second)
+                    if (!topology.node_fans.at(node)
+                            .insert(AMR::decode_adaptive_key(bytes), topology.graph_keys, &budget)
+                            .second)
                         throw std::invalid_argument("General VoF duplicate node fan member.");
                 }
                 r.done();
@@ -860,7 +999,8 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
 }
 template<ArithmeticMode Mode> PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell)
 {
-    const bool observed_mixed = cell.declaration == GeneralVoFPhaseGeometry::Infer &&
+    const bool observed_mixed =
+        cell.declaration == GeneralVoFPhaseGeometry::Infer &&
         (!cell.retained_interface || (!cell.retained_interface->pure_gas && !cell.retained_interface->pure_carrier));
     if constexpr (Mode == ArithmeticMode::Exact)
     {
@@ -878,17 +1018,18 @@ template<ArithmeticMode Mode> PLIC::PolyhedralPhaseSample<Mode> reconstruction_s
         const long double dominant = bulk.value - minority;
         if (dominant < 0)
             throw std::invalid_argument("Finite VoF minority exceeds actual cell geometry.");
-        return {
-            geometry, gas ? minority : static_cast<double>(dominant), gas ? static_cast<double>(dominant) : minority,
-            cell.gid, observed_mixed};
+        return {geometry, gas ? minority : static_cast<double>(dominant),
+            gas ? static_cast<double>(dominant) : minority, cell.gid, observed_mixed};
     }
 }
 template<ArithmeticMode Mode>
 std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
-    const GeneralVoF::Data& data, const Key& key, bool complete_support)
+    const GeneralVoF::Data& data, const Key& key, bool complete_support, std::size_t* fitting_cells)
 {
     std::set<Key> visited{key}, front{key};
     std::vector<PLIC::PolyhedralPhaseSample<Mode>> result;
+    std::vector<std::size_t> ring_ends;
+    ring_ends.reserve(std::min(std::size_t(data.options.support_rings), data.options.maximum_stencil_cells));
     for (unsigned ring = 0; ring < data.options.support_rings; ++ring)
     {
         std::set<Key> next;
@@ -910,29 +1051,54 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
                 {
                     if (result.size() == data.options.maximum_stencil_cells)
                         throw std::invalid_argument("General VoF reconstruction stencil budget exhausted.");
+                    if constexpr (Mode != ArithmeticMode::Exact)
+                        if (result.size() == data.options.reconstruction.maximum_stencil_cells)
+                            throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
                     result.push_back(reconstruction_sample<Mode>(data.cells.at(neighbor)));
                     next.insert(neighbor);
                 }
             }
         }
         front = std::move(next);
-        // Select a complete canonical-face ring before measuring any plane
-        // residual. Keep the separately retained full halo for other consumers.
-        if constexpr (Mode != ArithmeticMode::Exact)
-        {
-            const auto geometry = PLIC::PolyhedralReconstruction<Mode>::assess_stencil_geometry(
-                reconstruction_sample<Mode>(data.cells.at(key)), result, data.options.reconstruction);
-            if (!complete_support && geometry.admitted())
+        ring_ends.push_back(result.size());
+        if (front.empty())
+            break;
+    }
+    // Gather the complete configured context before selecting a fitting ring.
+    // The full span supplies phase availability; only a prefix supplies local
+    // direction and tangent support. Selection never clips or inspects fit RMS.
+    std::size_t selected = result.size();
+    if constexpr (Mode != ArithmeticMode::Exact)
+    {
+        const auto target = reconstruction_sample<Mode>(data.cells.at(key));
+        if (complete_support)
+            (void) PLIC::PolyhedralReconstruction<Mode>::assess_stencil_geometry(
+                target, result, data.options.reconstruction);
+        else
+            for (const auto count : ring_ends)
             {
+                const std::span<const PLIC::PolyhedralPhaseSample<Mode>> prefix(result.data(), count);
+                const auto geometry = PLIC::PolyhedralReconstruction<Mode>::assess_stencil_geometry(
+                    target, prefix, data.options.reconstruction);
+                if (!geometry.admitted())
+                    continue;
                 const auto support = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
-                    reconstruction_sample<Mode>(data.cells.at(key)), result, data.options.reconstruction);
+                    target, result, count, data.options.reconstruction);
                 using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
                 if (support.reason != Reason::RankDeficientAngularSupport &&
                     support.reason != Reason::IllConditionedAngularSupport)
+                {
+                    // NoDirectionalSignal deliberately keeps this first local
+                    // ring and its rejection. A larger ring cannot mask it.
+                    selected = count;
                     break;
+                }
             }
-        }
     }
+    if (fitting_cells)
+        *fitting_cells = selected;
+    else if (!complete_support)
+        result.resize(selected);
     return result;
 }
 namespace
@@ -982,9 +1148,8 @@ struct OwnerReconstructionObservation
     }
 };
 template<ArithmeticMode Mode>
-PLIC::PolyhedralInterface reconstruct_cell_impl(
-    const GeneralVoF::Data& data, const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics,
-    GeneralVoFWorkCell* row = nullptr)
+PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, const Key& key,
+    GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics, GeneralVoFWorkCell* row = nullptr)
 {
     OwnerReconstructionObservation observation(diagnostics, row);
     const auto& cell = data.cells.at(key);
@@ -1050,14 +1215,16 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(
     if (diagnostics)
         ++diagnostics->mixed_cell_fits;
     const auto target = reconstruction_sample<Mode>(cell);
-    const auto stencil = reconstruction_stencil<Mode>(data, key);
+    std::size_t fitting_cells = 0;
+    const auto stencil = reconstruction_stencil<Mode>(data, key, false, &fitting_cells);
     if constexpr (Mode != ArithmeticMode::Exact)
     {
         const auto support = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
-            target, stencil, data.options.reconstruction);
+            target, stencil, fitting_cells, data.options.reconstruction);
         if (!support.admitted())
             throw PLIC::PolyhedralResolutionRequired(support);
-        auto result = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, data.options.reconstruction);
+        auto result = PLIC::PolyhedralReconstruction<Mode>::reconstruct(
+            target, stencil, fitting_cells, data.options.reconstruction);
         result.resolution = support;
         return result;
     }
@@ -1149,8 +1316,9 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
-                auto fitted = plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ?
-                    std::optional<ArithmeticMode>{} : data.options.arithmetic_mode);
+                auto fitted =
+                    plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
+                                                                                   : data.options.arithmetic_mode);
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
                     if (!fitted.finite_geometry)
@@ -1170,10 +1338,9 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 else if (!fitted.pure_gas && !fitted.pure_carrier)
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
-                    const auto measures =
-                        SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
-                            *cell.phase.geometry)
-                            ->phases(fitted.gas);
+                    const auto measures = SimpleFluid::geometry::swept_volume::ConvexFragment<
+                        SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell.phase.geometry)
+                                              ->phases(fitted.gas);
                     const auto residual = (gas ? measures.gas : measures.carrier) -
                                           Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
                     fitted.target_volume_difference = residual.enclosure();
@@ -1414,7 +1581,7 @@ template std::map<Key, PLIC::PolyhedralInterface> import_planes<ArithmeticMode::
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> reconstruction_sample<ArithmeticMode::Ordinary>(
     const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary>>
-reconstruction_stencil<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&, bool);
+reconstruction_stencil<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&);
 template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
 template void occupancy<ArithmeticMode::BoundedCertification>(Cell&);
@@ -1424,14 +1591,14 @@ template std::map<Key, PLIC::PolyhedralInterface> import_planes<ArithmeticMode::
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>
 reconstruction_sample<ArithmeticMode::BoundedCertification>(const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>>
-reconstruction_stencil<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, const Key&, bool);
+reconstruction_stencil<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::BoundedCertification>(
     const GeneralVoF::Data&, const Key&);
 template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::BoundedCertification>(
     const GeneralVoF::Data&);
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> reconstruction_sample<ArithmeticMode::Exact>(const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> reconstruction_stencil<ArithmeticMode::Exact>(
-    const GeneralVoF::Data&, const Key&, bool);
+    const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::Exact>(const GeneralVoF::Data&, const Key&);
 template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::Exact>(const GeneralVoF::Data&);
 template void occupancy<ArithmeticMode::Exact>(Cell&);

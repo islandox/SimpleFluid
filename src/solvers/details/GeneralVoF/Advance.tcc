@@ -515,10 +515,20 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
                     change[c][a] = next->velocity[c][a] - old.velocity[c][a];
                 }
         });
-    next->face_velocity = old.face_velocity;
-    const auto face_change = flow.interpolate(change);
-    for (std::size_t f = 0; f < next->face_velocity.size(); ++f)
-        next->face_velocity[f] += face_change[f];
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        // The compatible projection derives the new canonical rates from the
+        // physical momentum predictor. This face estimate sets the original
+        // residual scale; no historical face/cell pressure mismatch is forcing.
+        next->face_velocity = flow.interpolate(next->velocity);
+    }
+    else
+    {
+        next->face_velocity = old.face_velocity;
+        const auto face_change = flow.interpolate(change);
+        for (std::size_t f = 0; f < next->face_velocity.size(); ++f)
+            next->face_velocity[f] += face_change[f];
+    }
     trace_state("before_projection", *next);
     next->curvature = Curvature<Mode>::assemble(*resources.mesh, resources.flow, *next->phases,
         resources.material.surface_tension, resources.options.byte_budget, resources.options.capillary,

@@ -120,7 +120,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         }
         for (const auto& key : plane->authorities)
             if (!key.key.empty())
-                for (const auto& original : candidate->supports)
+                for (const auto& original : candidate->supports())
                 {
                     active_work->pair();
                     if (key == original)
@@ -382,7 +382,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         }
         coordinates[axis] = StorageScalar(placed.value);
     }
-    for (const auto& key : unique->supports)
+    for (const auto& key : unique->supports())
     {
         bool retained = false;
         for (const auto& current : vertex.authorities)
@@ -398,7 +398,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         {
             active_work->charge(1, sizeof(PlaneAuthority));
             active_work->charge(key.key.size(), sizeof(std::uint64_t));
-            vertex.authorities.push_back(key);
+            vertex.authorities.append(key);
         }
     }
     vertex.coordinates = coordinates;
@@ -697,7 +697,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 for (const auto& key : plane->authorities)
                     if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
                         vertices[i].authorities.end())
-                        vertices[i].authorities.push_back(key);
+                        vertices[i].authorities.append(key);
             }
         std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
         const auto crossing = [&](std::size_t a, std::size_t b)
@@ -733,10 +733,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             for (const auto& key : vertices[a].authorities)
                 if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
                     vertices[b].authorities.end())
-                    vertex.authorities.push_back(key);
+                    vertex.authorities.append(key);
             for (const auto& key : plane->authorities)
                 if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
-                    vertex.authorities.push_back(key);
+                    vertex.authorities.append(key);
             const bool recovered_source =
                 recover_source_identity(vertex, frame, impl_.get(), &impl_->vertices[a], &impl_->vertices[b]);
             preserve_crossing_incidence<Mode>(
@@ -759,7 +759,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                     for (const auto& authority : vertex.authorities)
                         if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), authority) ==
                             vertices[i].authorities.end())
-                            vertices[i].authorities.push_back(authority);
+                            vertices[i].authorities.append(authority);
                     crossings.emplace(key, i);
                     return i;
                 }

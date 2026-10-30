@@ -79,8 +79,8 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 for (const auto& wall : catalog)
                 {
                     const auto certificate = wall.geometry->encode_incidence(data.options.byte_budget);
-                    budget.add(16 + wall.identity.size() + certificate.size());
-                    w.bytes(wall.identity);
+                    budget.add(16 + data.topology->wall_identity(wall).size() + certificate.size());
+                    w.bytes(data.topology->wall_identity(wall));
                     w.bytes(certificate);
                 }
                 trajectories.emplace(node.gid, std::move(trajectory));

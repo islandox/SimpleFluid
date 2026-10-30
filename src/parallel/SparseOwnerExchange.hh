@@ -25,8 +25,11 @@ struct OwnerExchange
 };
 /** Collective, including empty ranks. One packed stream per actual peer uses a
  * Tpetra Distributor; packet sizes never pad another packet's payload. The byte
- * budget bounds packed buffers, output and explicit framing/route metadata before
- * allocations. Stats count these buffers, not MPI/allocator/control-block RSS.
+ * budget bounds the maximum live phase of packed buffers, output and explicit
+ * framing/route metadata before allocations. Packed sends are destroyed after
+ * transfer and before decoding; received bytes coexist with decoded output.
+ * Stats count these buffers, not MPI/allocator/control-block RSS. Borrowed input
+ * is excluded; diagnostics report its packet range and payload capacities.
  * Duplicate peers and zero-byte records are supported; decoding is collective.
  * A call rejects packed byte/record counts above INT_MAX before payload exchange;
  * callers requiring larger transfers must schedule bounded collective rounds. */
@@ -34,8 +37,9 @@ struct OwnerExchange
     std::span<const OwnerPacket>, Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
 /** Consumes packet storage. Collective rounds containing only local deliveries
  * move their authenticated packets directly, admitting actual vector/payload
- * capacities before transfer. Remote rounds retain the transport above and
- * release consumed source storage before returning. */
+ * capacities before transfer. Remote rounds borrow the input through the
+ * transport above, excluding its retained capacities from the transport scratch
+ * budget, and release consumed source storage before returning. */
 [[nodiscard]] OwnerExchange consume_owner_packets(
     std::vector<OwnerPacket>&&, Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
 } // namespace SimpleFluid

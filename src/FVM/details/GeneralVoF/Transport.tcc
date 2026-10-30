@@ -4,8 +4,8 @@
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "FVM/details/GeneralVoF/LocalTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
-#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -330,8 +330,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 face_context.record.pair_budget = work.limits.maximum_pair_tests;
                 face_context.record.mark(failure::Field::PairBudget);
                 work.pair_tests = 0; // Existing face-partition work-cap scope.
-                auto sweep = SimpleFluid::geometry::swept_volume::make_sweep<Mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid), work,
-                    face_budgets.at(tile.face_gid));
+                auto sweep = SimpleFluid::geometry::swept_volume::make_sweep<Mode>(tile.face_gid, tile.node_gids,
+                    traces, flux.at(tile.face_gid), work, face_budgets.at(tile.face_gid));
                 for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
                 {
                     const auto before = registry.storage_bytes();
@@ -566,7 +566,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 if (!flux.emplace(face, control).second || !face_budgets.emplace(face, allowance).second)
                     throw std::invalid_argument("Finite VoF source-sweep control was "
                                                 "already retained without its root.");
-                for (const auto node : data.topology->construction_faces.at(face).node_gids)
+                for (const auto node : data.topology->construction_face(face).node_gids)
                 {
                     if (!data.topology->construction_nodes.contains(node) ||
                         !data.topology->finite_nodes.contains(node) || !data.topology->node_walls.contains(node))
@@ -604,7 +604,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             {
                 reconstruction.pair_tests = 0;
                 reconstruction.charge(sizeof(typename decltype(sweeps)::value_type) + 4 * sizeof(void*));
-                const auto& native = data.topology->construction_faces.at(face);
+                const auto& native = data.topology->construction_face(face);
                 auto sweep = SimpleFluid::geometry::swept_volume::make_sweep<Mode>(
                     face, native.node_gids, traces, flux.at(face), reconstruction, face_budgets.at(face));
                 for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)

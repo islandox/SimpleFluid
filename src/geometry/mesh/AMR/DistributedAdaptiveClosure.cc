@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/PLIC/ScalarPacket.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
@@ -12,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <set>
 namespace SimpleFluid::Meshes::AMR
@@ -25,6 +27,10 @@ struct ClosureDiagnostics : AdaptiveClosureStats
     int rank;
     AdaptiveClosureStats* output;
     const char* stage = "input";
+    std::size_t point_observations = 0, catalogue_nodes = 0, global_physical_nodes = 0;
+    std::size_t tile_input_bytes = 0, request_state_peak_bytes = 0, tile_and_request_peak_bytes = 0;
+    bool tile_input_live = false;
+    std::size_t planned_reply_records = 0, retired_groups = 0, retired_group_bytes = 0;
     ClosureDiagnostics(int rank_, AdaptiveClosureStats* output_) : rank(rank_), output(output_) {}
     ~ClosureDiagnostics()
     {
@@ -36,29 +42,42 @@ struct ClosureDiagnostics : AdaptiveClosureStats
                 "trace_records=%zu unique_record_bytes=%zu replicated_record_bytes=%zu "
                 "transmitted_geometry_records=%zu decoded_geometry_records=%zu decoded_geometry_bytes=%zu "
                 "cumulative_bytes=%zu live_peak_bytes=%zu input_retained_bytes=%zu retained_geometry_bytes=%zu "
-                "work=%zu\n",
+                "work=%zu point_observations=%zu catalogue_nodes=%zu global_physical_nodes=%zu "
+                "tile_input_bytes=%zu request_state_peak_bytes=%zu tile_and_request_peak_bytes=%zu "
+                "planned_reply_records=%zu retired_groups=%zu retired_group_bytes=%zu\n",
                 rank, stage, cells, faces, contacts, geometry_records, trace_records, unique_record_bytes,
                 replicated_record_bytes, transmitted_geometry_records, decoded_geometry_records, decoded_geometry_bytes,
-                cumulative_bytes, live_peak_bytes, input_retained_bytes, retained_geometry_bytes, work);
+                cumulative_bytes, live_peak_bytes, input_retained_bytes, retained_geometry_bytes, work,
+                point_observations, catalogue_nodes, global_physical_nodes, tile_input_bytes, request_state_peak_bytes,
+                tile_and_request_peak_bytes, planned_reply_records, retired_groups, retired_group_bytes);
     }
 };
 struct BudgetObservation
 {
     const Budget& budget;
     ClosureDiagnostics& diagnostics;
+    bool request_phase = false;
     ~BudgetObservation()
     {
         diagnostics.cumulative_bytes += budget.cumulative;
         diagnostics.live_peak_bytes = std::max(diagnostics.live_peak_bytes, budget.peak);
+        if (request_phase)
+        {
+            diagnostics.request_state_peak_bytes = budget.peak;
+            diagnostics.tile_and_request_peak_bytes = std::max(diagnostics.tile_and_request_peak_bytes,
+                budget.peak + (diagnostics.tile_input_live ? diagnostics.tile_input_bytes : 0));
+        }
     }
 };
 struct ContactRecord
 {
     AdaptiveCellKey key;
+    std::size_t identity = 0;
     AdaptiveBytes domain;
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
+    std::array<long double, 3> spans{};
     std::array<std::uint64_t, 3> factors{};
     std::vector<AdaptiveTraceFace> traces;
+    bool traces_point_independent = true;
 };
 struct Contact
 {
@@ -75,6 +94,46 @@ AdaptiveBytes point_key(std::span<const char> domain, const PointIdentity& point
     w.bytes(PLIC::canonical_key(point));
     return std::move(w.data);
 }
+std::size_t key_capacity(const AdaptiveCellKey& key)
+{
+    return std::visit(
+        [](const auto& value) -> std::size_t
+        {
+            if constexpr (requires { value.path; })
+                return value.path.capacity() * sizeof(std::uint64_t);
+            else if constexpr (requires {
+                                   value.base;
+                                   value.axial;
+                               })
+                return (value.base.path.capacity() + value.axial.path.capacity()) * sizeof(std::uint64_t);
+            else
+                return 0;
+        },
+        key.ancestry);
+}
+struct NodeIdentity
+{
+    std::span<const char> domain, physical;
+};
+NodeIdentity node_identity(const AdaptiveNode& node)
+{
+    Reader reader{node.identity};
+    auto field = [&]()
+    {
+        const auto size = reader.word();
+        if (size > reader.data.size() - reader.offset)
+            throw std::invalid_argument("Invalid closure catalogue identity length.");
+        const auto value = reader.data.subspan(reader.offset, size);
+        reader.offset += size;
+        return value;
+    };
+    const auto domain = field(), physical = field();
+    reader.done();
+    if (domain.empty() || physical.empty() ||
+        !std::ranges::equal(physical, PLIC::canonical_key(node.coordinate_identity)))
+        throw std::invalid_argument("Invalid closure catalogue physical identity.");
+    return {domain, physical};
+}
 AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
     IdentityBudget& identities, std::size_t& trace_records, std::size_t& retained_geometry)
 {
@@ -83,16 +142,37 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
     if (trace.key != leaf.key)
         throw std::invalid_argument("Provider trace identifies another leaf.");
     trace_records += trace.faces.size();
-    const auto before_geometry = budget.used;
+    const auto before_shape = budget.used;
     identities.retain(budget, shape);
-    // All admitted owners and ledger pins survive until the request phase ends,
-    // including generated geometry. Never release these charges as leaf scratch.
-    retained_geometry = budget.used - before_geometry;
+    retained_geometry = budget.used - before_shape;
+    std::array<long double, 3> spans;
+    {
+        // Preserve the original receiver's certificate validation and its
+        // decoded coordinate frame before discarding the transient shell.
+        // Closure authorities need only these lossless physical axis spans.
+        auto certificate = shape->encode_certificate(budget.limit);
+        budget.add(certificate.capacity());
+        auto decoded =
+            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(certificate, budget.limit);
+        const auto decoded_bytes = decoded->storage_bytes();
+        budget.add(decoded_bytes);
+        const auto measures = decoded->axis_spans();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            spans[axis] = measures[axis].value;
+        const auto released = certificate.capacity() + decoded_bytes;
+        decoded.reset();
+        AdaptiveBytes().swap(certificate);
+        budget.used -= released;
+    }
     Writer w;
-    write_geometry_record_header(w, GeometryRecordKind::ClosureContact);
+    write_geometry_record_header(w, GeometryRecordKind::ClosureSpanContact);
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
-    w.bytes(shape->encode_certificate(budget.limit));
+    w.word(std::numeric_limits<long double>::digits);
+    w.word(std::numeric_limits<long double>::max_exponent);
+    for (const auto span : spans)
+        for (const auto word : PLIC::scalar_packet(span))
+            w.word(word);
     for (std::size_t a = 0; a < 3; ++a)
         w.word(leaf.provider == AdaptiveProviderKind::Static ? 3 : std::uint64_t(kernel.closure_split(leaf, a)));
     w.word(trace.faces.size());
@@ -124,13 +204,24 @@ ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Closure contact exceeds byte budget.");
     Reader r{bytes};
-    read_geometry_record_header(r, GeometryRecordKind::ClosureContact);
+    read_geometry_record_header(r, GeometryRecordKind::ClosureSpanContact);
     ContactRecord contact;
     contact.key = decode_adaptive_key(r.bytes());
     contact.domain = r.bytes();
     if (contact.domain.empty())
         throw std::invalid_argument("Closure contact requires connected-domain provenance.");
-    contact.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(r.bytes(), limit);
+    if (r.word() != std::numeric_limits<long double>::digits ||
+        r.word() != std::numeric_limits<long double>::max_exponent)
+        throw std::invalid_argument("Incompatible closure span scalar representation.");
+    for (auto& span : contact.spans)
+    {
+        PLIC::ScalarPacketWords words;
+        for (auto& word : words)
+            word = r.word();
+        span = PLIC::scalar_from_packet(words);
+        if (!(span > 0))
+            throw std::invalid_argument("Invalid closure physical axis span.");
+    }
     for (auto& factor : contact.factors)
     {
         factor = r.word();
@@ -151,7 +242,10 @@ ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
         face.split = AdaptiveSplit(split);
         face.terminal = terminal;
         if (geometry)
+        {
             face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
+            contact.traces_point_independent = false;
+        }
         contact.traces.push_back(std::move(face));
     }
     r.done();
@@ -242,7 +336,12 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             diagnostics.input_retained_bytes += (transient.capacity() - transient.size()) * sizeof(AdaptiveLeaf);
         });
     diagnostics.stage = "canonical_tiles";
-    auto tiles = decide_adaptive_tiles(transient, comm, options.byte_budget, options.tile_budget);
+    std::vector<AdaptiveNode> native_nodes;
+    AdaptiveAuthorityStats authority_statistics;
+    auto tiles = decide_adaptive_tiles(
+        transient, comm, options.byte_budget, options.tile_budget, &authority_statistics, &native_nodes);
+    diagnostics.catalogue_nodes = native_nodes.size();
+    diagnostics.global_physical_nodes = authority_statistics.global_nodes;
     std::vector<AdaptiveLeaf>().swap(transient);
     diagnostics.stage = "contact_requests";
     std::vector<OwnerPacket> requests;
@@ -257,36 +356,84 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
         {
             Budget budget{options.byte_budget};
             IdentityBudget identities;
-            BudgetObservation observation{budget, diagnostics};
+            BudgetObservation observation{budget, diagnostics, true};
             for (const auto& source : owned)
                 if (source.geometry)
                     identities.retain(budget, source.geometry);
-            std::map<AdaptiveCellKey, std::set<PointIdentity>> points;
+            // Returned tiles retain the established borrowed-input scope. Report
+            // their conservative baseline separately from the admitted builder
+            // state, and measure their actual overlap before destroying them.
+            diagnostics.tile_input_bytes = tiles.capacity() * sizeof(AdaptiveTile);
             for (const auto& tile : tiles)
             {
-                auto record_points =
-                    [&](const AdaptiveCellKey& cell, const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face)
+                diagnostics.tile_input_bytes +=
+                    tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
+                    tile.second_image_identity.payload_bytes() + tile.boundary.capacity() + 1 +
+                    (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
+                    key_capacity(tile.first) + (tile.second ? key_capacity(*tile.second) : 0);
+                if (tile.geometry)
+                    diagnostics.tile_input_bytes +=
+                        tile.geometry->storage_bytes() + sizeof(*tile.geometry) + 8 * sizeof(void*);
+            }
+            diagnostics.tile_input_live = true;
+            struct CataloguedNode
+            {
+                const AdaptiveNode* node;
+                std::span<const char> domain;
+            };
+            std::map<std::uint64_t, CataloguedNode> catalogue;
+            std::map<AdaptiveCellKey, std::set<std::uint64_t>> points;
+            budget.add(native_nodes.capacity() * sizeof(AdaptiveNode) + sizeof(catalogue) + sizeof(points));
+            for (const auto& node : native_nodes)
+            {
+                budget.add(node.identity.capacity() + node.coordinate_identity.payload_bytes());
+                const auto identity = node_identity(node);
+                budget.add(sizeof(decltype(catalogue)::value_type) + 4 * sizeof(void*));
+                if (!catalogue.emplace(node.gid, CataloguedNode{&node, identity.domain}).second)
+                    throw std::invalid_argument("Duplicate closure catalogue node GID.");
+            }
+            for (const auto& tile : tiles)
+            {
+                if (!tile.geometry)
+                    throw std::invalid_argument("Closure tile has no physical geometry.");
+                const auto count = tile.geometry->points().size();
+                if (tile.node_gids.size() != count || (tile.second && tile.second_node_gids.size() != count) ||
+                    (!tile.second && !tile.second_node_gids.empty()))
+                    throw std::invalid_argument("Incomplete closure tile node incidence.");
+                auto record_points = [&](const AdaptiveCellKey& cell, const std::vector<std::uint64_t>& gids)
                 {
-                    for (const auto& point : face->vertex_identities())
+                    auto found = points.find(cell);
+                    if (found == points.end())
                     {
-                        auto& incidence = points[cell];
-                        // Retain the original cumulative point-admission charge,
-                        // including repeated observations of an existing point.
-                        budget.add(point.payload_bytes() + sizeof(PointIdentity) + 3 * sizeof(void*));
-                        if (!incidence.contains(point))
+                        budget.add(sizeof(decltype(points)::value_type) + 4 * sizeof(void*) + key_capacity(cell));
+                        found = points.try_emplace(cell).first;
+                    }
+                    for (const auto gid : gids)
+                    {
+                        ++diagnostics.point_observations;
+                        const auto node = catalogue.find(gid);
+                        if (node == catalogue.end() || !std::ranges::equal(node->second.domain, tile.domain))
+                            throw std::invalid_argument("Foreign closure tile node identity.");
+                        auto& incidence = found->second;
+                        if (!incidence.contains(gid))
                         {
-                            incidence.insert(point);
+                            budget.add(sizeof(std::uint64_t) + 4 * sizeof(void*));
+                            incidence.insert(gid);
                         }
                     }
                 };
                 if (tile.first_owner == comm->getRank())
-                    record_points(tile.first, tile.geometry);
+                    record_points(tile.first, tile.node_gids);
                 if (tile.second_owner == comm->getRank())
-                    record_points(*tile.second,
-                        tile.geometry->translated(
-                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)));
+                {
+                    if (!tile.second)
+                        throw std::invalid_argument("Closure tile second owner lacks its cell.");
+                    record_points(*tile.second, tile.second_node_gids);
+                }
             }
+            diagnostics.tile_and_request_peak_bytes = diagnostics.tile_input_bytes + budget.peak;
             std::vector<AdaptiveTile>().swap(tiles);
+            diagnostics.tile_input_live = false;
             // Provider queries consume retained provider records, not the
             // canonical authority copies above. A Mixed retained polyhedron
             // stores original support keys; mapping its already-rewritten
@@ -312,8 +459,20 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         std::uint64_t ordinal;
                     };
                     std::map<int, std::vector<Pending>> destinations;
-                    for (const auto& point : found->second)
+                    std::vector<const AdaptiveNode*> ordered;
+                    for (const auto gid : found->second)
                     {
+                        const auto node = catalogue.find(gid);
+                        if (node == catalogue.end() || !std::ranges::equal(node->second.domain, leaf.domain))
+                            throw std::invalid_argument("Foreign closure cell node identity.");
+                        budget.append_capacity(ordered);
+                        ordered.push_back(node->second.node);
+                    }
+                    std::sort(ordered.begin(), ordered.end(), [](const auto* first, const auto* second)
+                        { return first->coordinate_identity < second->coordinate_identity; });
+                    for (const auto* node : ordered)
+                    {
+                        const auto& point = node->coordinate_identity;
                         auto normalized = kernel.contact_point(leaf, point);
                         auto key = point_key(leaf.domain, normalized);
                         ++diagnostics.contacts;
@@ -343,7 +502,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         diagnostics.replicated_record_bytes += record.size();
                         Writer w;
                         w.data.reserve(bytes);
-                        write_geometry_record_header(w, GeometryRecordKind::ClosureRequests);
+                        write_geometry_record_header(w, GeometryRecordKind::ClosureSpanRequests);
                         w.bytes(record);
                         w.word(contacts.size());
                         for (const auto& contact : contacts)
@@ -367,6 +526,9 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 budget.used -= released;
             }
         });
+    // All Pending references, incidence rows and catalogue lookup nodes are now
+    // dead. Destroy the coordinate packet owner before entering the exchange.
+    std::vector<AdaptiveNode>().swap(native_nodes);
     diagnostics.stage = "contact_exchange";
     // Canonical tiles and provider-expanded leaves are no longer needed once
     // their complete closed point incidence has been authenticated and packed.
@@ -401,18 +563,23 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             for (auto& packet : incoming.packets)
             {
                 const auto encoded_capacity = packet.bytes.capacity();
-                budget.add(sizeof(ContactRecord));
+                budget.add(sizeof(ContactRecord) + 2 * sizeof(void*));
                 Reader r{packet.bytes};
-                read_geometry_record_header(r, GeometryRecordKind::ClosureRequests);
-                auto record = std::make_shared<const ContactRecord>(decode_contact(r.bytes(), options.byte_budget));
+                read_geometry_record_header(r, GeometryRecordKind::ClosureSpanRequests);
+                auto encoded_record = r.bytes();
+                budget.add(encoded_record.capacity());
+                auto decoded = decode_contact(encoded_record, options.byte_budget);
+                const auto record_capacity = encoded_record.capacity();
+                decoded.identity = records.size();
+                auto record = std::make_shared<const ContactRecord>(std::move(decoded));
                 ++diagnostics.decoded_geometry_records;
                 if (!records.emplace(record->key, packet.peer).second)
                     throw std::invalid_argument("Duplicate closed-contact geometry owner.");
                 budget.add(record->domain.capacity() + 2 * encode_adaptive_key(record->key).size() +
                            sizeof(decltype(records)::value_type) + 4 * sizeof(void*));
-                const auto before_geometry = identities.payload_bytes();
-                identities.retain(budget, record->geometry);
-                diagnostics.decoded_geometry_bytes += identities.payload_bytes() - before_geometry;
+                // The geometry record now retains only three decoded scalar
+                // spans. Face payloads below retain point-membership geometry.
+                diagnostics.decoded_geometry_bytes += sizeof(record->spans);
                 budget.add(record->traces.capacity() * sizeof(AdaptiveTraceFace));
                 for (const auto& trace : record->traces)
                 {
@@ -420,6 +587,10 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     if (trace.face)
                         identities.face(budget, *trace.face);
                 }
+                // Encoded scratch and decoded record capacities coexist until
+                // every retained allocation above has been admitted together.
+                AdaptiveBytes().swap(encoded_record);
+                budget.used -= record_capacity;
                 const auto count = r.word();
                 if (!count || count > packet.bytes.size() / 32)
                     throw std::invalid_argument("Invalid interned closure contact count.");
@@ -463,9 +634,50 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 std::vector<char>().swap(packet.bytes);
                 budget.used -= encoded_capacity;
             }
-            std::size_t pairs = 0;
-            for (auto& [key, group] : groups)
+            // The ownership audit is complete only after every packet's final
+            // byte and every incidence have passed validation. Immutable record
+            // identities survive independently of these audit-map nodes.
+            const auto audit_node_bytes = sizeof(decltype(records)::value_type) + 4 * sizeof(void*);
+            if (records.size() > budget.used / audit_node_bytes)
+                throw std::invalid_argument("Closure audit lease accounting disagreement.");
+            const auto audit_bytes = records.size() * audit_node_bytes;
+            records.clear();
+            budget.used -= audit_bytes;
+            const auto incoming_bytes = incoming.packets.capacity() * sizeof(OwnerPacket);
+            std::vector<OwnerPacket>().swap(incoming.packets);
+            budget.used -= incoming_bytes;
+            std::size_t reply_count = 0;
+            for (const auto& [key, group] : groups)
             {
+                if (group.cells.size() > std::numeric_limits<std::size_t>::max() - reply_count)
+                    throw std::invalid_argument("Closure reply count exceeds its represented range.");
+                reply_count += group.cells.size();
+            }
+            if (reply_count > options.byte_budget / sizeof(OwnerPacket))
+                throw std::invalid_argument("Closure reply record capacity exceeds byte budget.");
+            diagnostics.planned_reply_records = reply_count;
+            // The fresh reply vector has no old allocation. Admit its complete
+            // authority-local incidence count once, rather than overlapping
+            // growing allocations while every decoded group is still live.
+            budget.add(reply_count * sizeof(OwnerPacket));
+            replies.reserve(reply_count);
+            if (replies.capacity() > reply_count)
+                budget.add((replies.capacity() - reply_count) * sizeof(OwnerPacket));
+            // Trace comparisons are point-independent only when neither record
+            // carries a face membership predicate. Immutable record identities
+            // make repeated edge/face contacts safe to memoize in that case.
+            struct TraceRequirements
+            {
+                std::optional<AdaptiveSplit> first, second;
+            };
+            std::map<std::pair<std::size_t, std::size_t>, TraceRequirements> trace_requirements;
+            budget.add(sizeof(trace_requirements));
+            std::size_t pairs = 0;
+            while (!groups.empty())
+            {
+                const auto position = groups.begin();
+                const auto& key = position->first;
+                auto& group = position->second;
                 const auto n = group.cells.size();
                 std::size_t left = n, right = n ? n - 1 : 0;
                 if (left % 2 == 0)
@@ -483,18 +695,41 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         auto& b = group.cells[j];
                         for (std::size_t axis = 0; axis < 3; ++axis)
                         {
-                            if (a.record->geometry->axis_span_exceeds(
-                                    *b.record->geometry, axis, options.maximum_span_ratio))
+                            if (a.record->spans[axis] > options.maximum_span_ratio * b.record->spans[axis])
                                 require(a, a.record->factors[axis]);
-                            if (b.record->geometry->axis_span_exceeds(
-                                    *a.record->geometry, axis, options.maximum_span_ratio))
+                            if (b.record->spans[axis] > options.maximum_span_ratio * a.record->spans[axis])
                                 require(b, b.record->factors[axis]);
                         }
+                        const bool point_independent =
+                            a.record->traces_point_independent && b.record->traces_point_independent;
+                        const bool a_first = a.record->identity < b.record->identity;
+                        const auto identities = std::minmax(a.record->identity, b.record->identity);
+                        const std::pair<std::size_t, std::size_t> cache_key{identities.first, identities.second};
+                        if (point_independent)
+                            if (auto cached = trace_requirements.find(cache_key); cached != trace_requirements.end())
+                            {
+                                const auto& requirements = cached->second;
+                                const auto& for_a = a_first ? requirements.first : requirements.second;
+                                const auto& for_b = a_first ? requirements.second : requirements.first;
+                                if (for_a)
+                                    require(a, std::uint64_t(*for_a));
+                                if (for_b)
+                                    require(b, std::uint64_t(*for_b));
+                                continue;
+                            }
                         if (!b.record->traces.empty() &&
                             a.record->traces.size() > (options.contact_budget - pairs) / b.record->traces.size())
                             throw std::invalid_argument("Closure trace work budget exhausted.");
                         pairs += a.record->traces.size() * b.record->traces.size();
                         diagnostics.work = pairs;
+                        TraceRequirements requirements;
+                        auto record_requirement = [](std::optional<AdaptiveSplit>& target, AdaptiveSplit split)
+                        {
+                            if (!target)
+                                target = split;
+                            else if (*target != split)
+                                target = AdaptiveSplit::Isotropic;
+                        };
                         for (const auto& first : a.record->traces)
                             for (const auto& second : b.record->traces)
                             {
@@ -504,15 +739,29 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                                     continue;
                                 if (first.depth < second.depth &&
                                     second.depth - first.depth > options.maximum_trace_jump)
+                                {
                                     require(a, std::uint64_t(first.split));
+                                    record_requirement(a_first ? requirements.first : requirements.second, first.split);
+                                }
                                 if (second.depth < first.depth &&
                                     first.depth - second.depth > options.maximum_trace_jump)
+                                {
                                     require(b, std::uint64_t(second.split));
+                                    record_requirement(
+                                        a_first ? requirements.second : requirements.first, second.split);
+                                }
                             }
+                        if (point_independent && !a.record->traces.empty() && !b.record->traces.empty())
+                        {
+                            budget.add(sizeof(decltype(trace_requirements)::value_type) + 4 * sizeof(void*));
+                            trace_requirements.emplace(cache_key, requirements);
+                        }
                     }
                 for (const auto& cell : group.cells)
                 {
-                    const auto encoded_key = encode_adaptive_key(cell.record->key);
+                    auto encoded_key = encode_adaptive_key(cell.record->key);
+                    const auto encoded_key_bytes = encoded_key.capacity();
+                    budget.add(encoded_key_bytes);
                     const auto size =
                         32 + geometry_record_header_bytes + key.size() + encoded_key.size() + (cell.required ? 8 : 0);
                     budget.packet(size);
@@ -527,13 +776,35 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         w.word(std::uint64_t(*cell.required));
                     budget.append_capacity(replies);
                     replies.push_back({cell.owner, std::move(w.data)});
+                    AdaptiveBytes().swap(encoded_key);
+                    budget.used -= encoded_key_bytes;
                 }
+                // Every comparison and reply for this complete byte-ordered
+                // point group has finished. Retire only its own admitted leases;
+                // shared immutable record charges stay conservative to the end.
+                std::size_t group_bytes = 0;
+                auto add_lease = [&](std::size_t count, std::size_t bytes)
+                {
+                    if (count && bytes > (budget.used - group_bytes) / count)
+                        throw std::invalid_argument("Closure point-group lease accounting disagreement.");
+                    group_bytes += count * bytes;
+                };
+                add_lease(1, sizeof(decltype(groups)::value_type) + 4 * sizeof(void*));
+                add_lease(1, key.capacity());
+                add_lease(1, group.point.payload_bytes());
+                add_lease(group.cells.capacity(), sizeof(Contact));
+                add_lease(n, sizeof(Contact) + sizeof(Group) + 6 * sizeof(void*));
+                for (const auto& cell : group.cells)
+                    add_lease(1, cell.physical_point.payload_bytes());
+                groups.erase(position);
+                budget.used -= group_bytes;
+                ++diagnostics.retired_groups;
+                diagnostics.retired_group_bytes += group_bytes;
             }
         });
     diagnostics.stage = "contact_reply_exchange";
-    // Decoded authority groups have been destroyed by the collective lambda.
-    // Release received request storage before packing the authority replies.
-    std::vector<OwnerPacket>().swap(incoming.packets);
+    // Complete point groups and consumed request storage have been destroyed;
+    // only the detached replies and Expected controls cross this handoff.
     auto returned = consume_owner_packets(std::move(replies), comm, options.byte_budget);
     std::vector<OwnerPacket>().swap(replies);
     std::vector<AdaptiveMark> result;

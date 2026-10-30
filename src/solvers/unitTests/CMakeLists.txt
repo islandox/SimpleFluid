@@ -36,7 +36,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace" OR TEST_NAME STREQUAL "testExactGeneralVoFFlowWorkspace")
-    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/GeneralVoFExactProjection.cc ../details/VoFProjectionWorkspace.cc
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/GeneralVoFCompatibleProjection.cc ../details/GeneralVoF/Execution.cc ../details/GeneralVoFExactProjection.cc ../details/VoFProjectionWorkspace.cc
       ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFExactPhiClosure.cc ../details/GeneralVoFPhiClosureSupport.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFExactPressure")
@@ -767,6 +767,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           ../details/ConservativeVoFTransport.cc
           ../details/ConservativeVoFExactTransport.cc
           ../details/GeneralVoFFlowWorkspace.cc
+          ../details/GeneralVoFCompatibleProjection.cc
           ../details/GeneralVoFExactProjection.cc
           ../details/GeneralVoFPhiClosure.cc
           ../details/GeneralVoFExactPhiClosure.cc
@@ -871,6 +872,10 @@ foreach(PROCS 2 4)
     TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.DensityJumpWallPressure*:GeneralVoFFlowWorkspaceTest.InactiveCapillarityDoesNotRequireUnusedBoundaryGradientSupport"
     LABELS "mpi;vof;projection;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFCompatibleProjection_${PROCS}procs
+    TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.DensityJumpNonuniformPredictorRetainsClosedColumnPressureWork:GeneralVoFFlowWorkspaceTest.Compatible*"
+    LABELS "mpi;vof;projection;energy;collective;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicLimitedMomentum_${PROCS}procs
     TARGET testConservativeVoFTransport PROCS ${PROCS}
     ARGS "--gtest_filter=ConservativeVoFTransportTest.ActiveGeometricFaceLimiterUsesFinalPhaseMassForConstantMomentum"

@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/unitTests/adaptive_native_draft_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -60,6 +61,25 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
     EXPECT_TRUE(weak.expired());
     return std::make_shared<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy>(
         std::move(detached.owned), std::move(detached.families), detached.kernel, comm);
+}
+TEST(DistributedProductKernel, CompactNativeDraftPreservesExactProductSupports)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    auto state = source();
+    test::compare_native_drafts(state->native_draft(), AMR::adaptive_detail::compact_adaptive_native_draft(*state));
+    auto expanded = AMR::fetch_adaptive_native_draft(*state);
+    auto compact = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*state);
+    test::compare_native_drafts(expanded, compact);
+    for (const auto* records : {&compact.owned, &compact.ghosts})
+        for (const auto& leaf : *records)
+        {
+            EXPECT_FALSE(leaf.geometry);
+            ASSERT_TRUE(leaf.native_recipe);
+            EXPECT_FALSE(leaf.surfaces.empty());
+        }
+    auto publication = AMR::assemble_adaptive_native(
+        std::move(compact), state->configuration_descriptor(), state->communicator(), state->options().byte_budget);
+    EXPECT_EQ(publication.owned_gids.size(), state->owned().size());
 }
 TEST(DistributedProductKernel, IndependentFactorParentsSurviveNewOtherFactorAndExactInverse)
 {

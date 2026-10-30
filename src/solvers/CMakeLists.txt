@@ -27,6 +27,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_SOLVER_SOURCES
     ${SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES}
     details/GeneralVoF/SolverImpl.cc
     details/GeneralVoFFiniteProjection.tcc
+    details/GeneralVoFCompatibleFlow.tcc
     details/ConservativeVoFFiniteTransport.tcc
     details/GeneralVoFPhiClosure.cc
     details/GeneralVoFExactPhiClosure.cc
@@ -34,6 +35,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_SOLVER_SOURCES
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
+    details/GeneralVoFCompatibleProjection.cc
     details/GeneralVoFExactProjection.cc
     details/GeneralVoFFiniteProjectionArithmetic.hh
     details/GeneralVoFCurvature.cc
@@ -132,6 +134,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     simplefluid_exclude_from_pgo_sources(details/ConservativeVoFTransport.cc)
     simplefluid_exclude_from_pgo_sources(details/VoFProjectionWorkspace.cc)
     simplefluid_exclude_from_pgo_sources(details/GeneralVoFFlowWorkspace.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFCompatibleProjection.cc)
     simplefluid_exclude_from_pgo_sources(details/GeneralVoFCurvature.cc details/GeneralVoF/OrdinaryCurvature.cc)
     simplefluid_exclude_from_pgo_sources(details/ConservativeVoFExactArithmetic.cc)
     simplefluid_exclude_from_pgo_sources(details/GeneralVoFTransferBinding.cc)
@@ -152,9 +155,11 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
             GeneralVoFSolver.cc
             details/GeneralVoF/SolverImpl.cc
             details/GeneralVoFFiniteProjection.tcc
+            details/GeneralVoFCompatibleFlow.tcc
             details/ConservativeVoFFiniteTransport.tcc
             details/ConservativeVoFTransport.cc
             details/GeneralVoFFlowWorkspace.cc
+            details/GeneralVoFCompatibleProjection.cc
             details/GeneralVoFPhiClosure.cc
             details/GeneralVoFCurvature.cc
             details/GeneralVoF/OrdinaryCurvature.cc

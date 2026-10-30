@@ -92,4 +92,82 @@ TEST(SparseOwnerExchange, ConsumedLocalDeliveryMovesPayloadAndAdmitsRetainedCapa
     EXPECT_EQ(result.stats.peak_scratch_bytes, capacity);
     EXPECT_TRUE(consume_owner_packets({}, comm, 0).packets.empty());
 }
+TEST(SparseOwnerExchange, TransferAndDecodePhasesShareBudgetAfterPackedSendRelease)
+{
+    auto comm = Tpetra::getDefaultComm();
+    const auto rank = comm->getRank(), last = comm->getSize() - 1;
+    constexpr std::size_t payload_size = 32 * 1024;
+    // Two equal packets are sent and received by each active owner. Either live
+    // phase needs roughly four payloads, whereas all three buffers need six.
+    // The extra payload allowance covers framing without copying its layout.
+    constexpr std::size_t phase_budget = 5 * payload_size;
+    auto payload = [](int source, bool local)
+    {
+        std::vector<char> bytes(payload_size);
+        for (std::size_t i = 0; i < bytes.size(); ++i)
+            bytes[i] = static_cast<char>((i + 17 * source + (local ? 31 : 67)) % 127);
+        return bytes;
+    };
+    auto make_packets = [&]
+    {
+        std::vector<OwnerPacket> packets;
+        if (rank == 0 || rank == last)
+        {
+            packets.push_back({rank, payload(rank, true)});
+            packets.push_back({rank == 0 ? last : 0, payload(rank, false)});
+        }
+        return packets;
+    };
+    auto check = [&](const OwnerExchange& result, bool transported)
+    {
+        if (rank == 0 || rank == last)
+        {
+            ASSERT_EQ(result.packets.size(), 2);
+            EXPECT_EQ(result.stats.sent_bytes, 2 * payload_size);
+            EXPECT_EQ(result.stats.received_bytes, 2 * payload_size);
+            if (transported)
+                EXPECT_GE(result.stats.peak_scratch_bytes, 4 * payload_size);
+            // Independently show why retaining packed sends through decode
+            // cannot meet this budget, even before counting record framing.
+            EXPECT_GT(result.stats.sent_bytes + 2 * result.stats.received_bytes, phase_budget);
+            const int other = rank == 0 ? last : 0;
+            const auto local_payload = payload(rank, true), remote_payload = payload(other, false);
+            std::size_t local_matches = 0, remote_matches = 0;
+            for (const auto& packet : result.packets)
+            {
+                local_matches += packet.peer == rank && packet.bytes == local_payload;
+                remote_matches += packet.peer == other && packet.bytes == remote_payload;
+            }
+            EXPECT_EQ(local_matches, 1);
+            EXPECT_EQ(remote_matches, 1);
+        }
+        else
+            EXPECT_TRUE(result.packets.empty());
+        EXPECT_LE(result.stats.peak_scratch_bytes, phase_budget);
+    };
+    auto packets = make_packets();
+    check(exchange_owner_packets(packets, comm, phase_budget), true);
+    // The borrowed input remains intact, independently of temporary lifetimes.
+    ASSERT_EQ(packets.size(), make_packets().size());
+    if (!packets.empty())
+    {
+        EXPECT_EQ(packets[0].bytes, payload(rank, true));
+        EXPECT_EQ(packets[1].bytes, payload(rank, false));
+    }
+    EXPECT_THROW(exchange_owner_packets(packets, comm, rank == 0 ? 3 * payload_size : phase_budget), std::length_error);
+    check(consume_owner_packets(std::move(packets), comm, phase_budget), comm->getSize() > 1);
+    EXPECT_TRUE(packets.empty());
+    // A later valid round has empty sending ranks, including an owner that
+    // receives a packet but contributes no export stream.
+    if (rank == 0)
+        packets.push_back({last, payload(0, false)});
+    auto reused = exchange_owner_packets(packets, comm, phase_budget);
+    ASSERT_EQ(reused.packets.size(), rank == last ? 1 : 0);
+    if (rank == last)
+    {
+        EXPECT_EQ(reused.packets.front().peer, 0);
+        EXPECT_EQ(reused.packets.front().bytes, payload(0, false));
+    }
+    EXPECT_TRUE(exchange_owner_packets({}, comm, 0).packets.empty());
+}
 } // namespace

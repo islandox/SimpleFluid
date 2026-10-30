@@ -8,16 +8,17 @@
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
-#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "utils/CompensatedSum.hh"
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -36,8 +37,8 @@ struct SIMPLEFLUID_FVM_LOCAL GeneralVoF
     using Data = State::Data;
     using Trial = State::Trial;
     using Key = State::Key;
-    static Trial plan_transport(const State&, std::span<const GeneralVoFNodeVelocity>,
-        std::span<const GeneralVoFFaceVolume>, double);
+    static Trial plan_transport(
+        const State&, std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double);
     static void validate_transfer_target(const State&, const ExactPhaseTransferResult&);
     static ExactPhaseTransferSource export_transfer_source(const State&, bool);
     static std::shared_ptr<const State> adopt_transfer(const State&, const ExactPhaseTransferResult&);
@@ -55,8 +56,8 @@ struct Budget : AMR::adaptive_detail::Budget
     void add(std::size_t bytes)
     {
         if (bytes > limit - std::min(used, limit))
-            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
-                "General VoF payload byte budget exhausted.");
+            throw PLIC::GeometryError(
+                PLIC::GeometryErrorCode::ResourceLimit, "General VoF payload byte budget exhausted.");
         used += bytes;
     }
     void packet(std::size_t payload)
@@ -71,6 +72,126 @@ template<class Work> void collective(const Teuchos::Comm<int>& comm, Work&& acti
 }
 } // namespace wire
 using Key = AMR::AdaptiveCellKey;
+/** Canonical encoded size for construction preflight, without encoding storage. */
+inline std::size_t topology_key_wire_bytes(const Key& key)
+{
+    wire::Budget bytes{std::numeric_limits<std::size_t>::max()};
+    bytes.add(5 * sizeof(std::uint64_t));
+    const auto path = [&](const auto& entries)
+    {
+        if (entries.size() > bytes.limit / sizeof(std::uint64_t))
+            throw PLIC::GeometryError(
+                PLIC::GeometryErrorCode::ResourceLimit, "General VoF key ancestry byte size overflows.");
+        bytes.add(entries.size() * sizeof(std::uint64_t));
+    };
+    std::visit(
+        [&](const auto& ancestry)
+        {
+            using T = std::decay_t<decltype(ancestry)>;
+            if constexpr (std::is_same_v<T, AMR::CartesianCellAncestry>)
+                bytes.add(4 * sizeof(std::uint64_t));
+            else if constexpr (std::is_same_v<T, AMR::ConvexCellAncestry>)
+            {
+                bytes.add(2 * sizeof(std::uint64_t));
+                path(ancestry.path);
+            }
+            else if constexpr (std::is_same_v<T, AMR::ProductCellAncestry>)
+            {
+                bytes.add(5 * sizeof(std::uint64_t));
+                path(ancestry.base.path);
+                path(ancestry.axial.path);
+            }
+            else
+                bytes.add(2 * sizeof(std::uint64_t));
+        },
+        key.ancestry);
+    return bytes.used;
+}
+/** Sorted immutable-key rows borrow one stable topology-owned intern pool. */
+class KeySet
+{
+    using Storage = std::vector<const Key*>;
+
+public:
+    class Iterator
+    {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Key;
+        using difference_type = std::ptrdiff_t;
+        using pointer = const Key*;
+        using reference = const Key&;
+        Iterator() = default;
+        explicit Iterator(Storage::const_iterator position) : position_(position) {}
+        reference operator*() const { return **position_; }
+        pointer operator->() const { return *position_; }
+        Iterator& operator++()
+        {
+            ++position_;
+            return *this;
+        }
+        Iterator operator++(int)
+        {
+            auto previous = *this;
+            ++*this;
+            return previous;
+        }
+        bool operator==(const Iterator&) const = default;
+
+    private:
+        Storage::const_iterator position_;
+    };
+    [[nodiscard]] Iterator begin() const { return Iterator(keys_.begin()); }
+    [[nodiscard]] Iterator end() const { return Iterator(keys_.end()); }
+    [[nodiscard]] std::size_t size() const { return keys_.size(); }
+    [[nodiscard]] bool empty() const { return keys_.empty(); }
+    [[nodiscard]] std::size_t storage_bytes() const { return keys_.capacity() * sizeof(const Key*); }
+    [[nodiscard]] bool contains(const Key& key) const
+    {
+        const auto found = lower_bound(key);
+        return found != keys_.end() && **found == key;
+    }
+    std::pair<Iterator, bool> insert(const Key& key, std::set<Key>& pool, wire::Budget* budget = nullptr)
+    {
+        const auto position = lower_bound(key);
+        if (position != keys_.end() && **position == key)
+            return {Iterator(position), false};
+        const auto index = position - keys_.begin();
+        const auto pooled = pool.find(key);
+        const auto capacity = keys_.capacity();
+        if (keys_.size() == capacity && capacity > keys_.max_size() / 2)
+            throw std::invalid_argument("General VoF key row capacity overflows.");
+        const auto next = keys_.size() == capacity ? (capacity ? 2 * capacity : 1) : capacity;
+        if (budget)
+        {
+            // Encoding bounds ancestry vector storage; retain the existing
+            // independent encoded-key allowance as well as the pool allocation.
+            if (pooled == pool.end())
+            {
+                const auto bytes = topology_key_wire_bytes(key);
+                budget->add(sizeof(Key) + 4 * sizeof(void*));
+                budget->add(bytes);
+                budget->add(bytes);
+            }
+            // Charge both buffers during growth, while reserve retains the old one.
+            if (next != capacity)
+                budget->add(next * sizeof(const Key*));
+        }
+        const auto canonical = pooled == pool.end() ? pool.insert(key).first : pooled;
+        if (next != capacity)
+            keys_.reserve(next);
+        const auto inserted = keys_.insert(keys_.begin() + index, &*canonical);
+        return {Iterator(inserted), true};
+    }
+
+private:
+    [[nodiscard]] Storage::const_iterator lower_bound(const Key& key) const
+    {
+        return std::lower_bound(
+            keys_.begin(), keys_.end(), key, [](const Key* stored, const Key& sought) { return *stored < sought; });
+    }
+    Storage keys_;
+};
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 namespace fp = finite_detail;
 struct LocalSpatialCache;
@@ -101,35 +222,118 @@ struct GeneralVoF::Data
     /** Immutable identity metadata from the already admitted native draft.
      * This catalog authorizes dependency lookups; it does not enlarge the
      * caller-visible owned-incident face or node controls. */
-    struct FaceAuthority
-    {
-        AMR::AdaptiveBytes domain, surface, identity;
-        std::vector<std::uint64_t> node_gids;
-        Key first;
-        std::optional<Key> second;
-        bool exterior = false;
-    };
+    using FaceAuthority = AMR::AdaptiveTile;
     struct Wall
     {
-        AMR::AdaptiveBytes identity;
+        std::variant<std::uint64_t, AMR::AdaptiveBytes> authority;
         SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
         PLIC::DynamicPoint finite_normal;
         PLIC::DynamicFaceConstraint finite_constraint;
     };
     struct Topology
     {
+        enum class SurfaceTileOwner
+        {
+            OwnedTiles,
+            ExtraSurfaceTiles
+        };
+        struct SurfaceTileReference
+        {
+            SurfaceTileOwner owner;
+            std::size_t index;
+        };
         AMR::AdaptiveNativePublication native;
         AMR::AdaptiveNativeDraft draft;
-        std::vector<AMR::AdaptiveTile> tiles, surface_tiles;
+        std::vector<AMR::AdaptiveTile> tiles, extra_surface_tiles;
+        // Draft order, borrowing owned-incident tiles and owning only the
+        // additional full-halo support. Indices survive either owner's growth.
+        std::vector<SurfaceTileReference> surface_tile_references, frontier_tile_references;
+        [[nodiscard]] const AMR::AdaptiveTile& surface_tile(const SurfaceTileReference& reference) const
+        {
+            switch (reference.owner)
+            {
+                case SurfaceTileOwner::OwnedTiles:
+                    if (reference.index < tiles.size())
+                        return tiles[reference.index];
+                    break;
+                case SurfaceTileOwner::ExtraSurfaceTiles:
+                    if (reference.index < extra_surface_tiles.size())
+                        return extra_surface_tiles[reference.index];
+                    break;
+            }
+            throw std::invalid_argument("General VoF surface tile owner or index is invalid.");
+        }
+        void validate_surface_tiles() const
+        {
+            for (const auto& reference : surface_tile_references)
+                (void) surface_tile(reference);
+            for (const auto& reference : frontier_tile_references)
+                (void) surface_tile(reference);
+            for (const auto& [id, reference] : construction_faces)
+                (void) construction_face(id);
+            for (const auto& [node, walls] : node_walls)
+                for (const auto& wall : walls)
+                    if (const auto* id = std::get_if<std::uint64_t>(&wall.authority))
+                    {
+                        const auto& face = construction_face(*id);
+                        if (!face.exterior || face.geometry != wall.geometry)
+                            throw std::invalid_argument("General VoF wall authority differs from its native face.");
+                    }
+        }
+        [[nodiscard]] const FaceAuthority& construction_face(std::uint64_t id) const
+        {
+            const auto& tile = surface_tile(construction_faces.at(id));
+            if (tile.face_gid != id)
+                throw std::invalid_argument("General VoF construction face identity differs from its catalog key.");
+            return tile;
+        }
+        [[nodiscard]] const AMR::AdaptiveBytes& wall_identity(const Wall& wall) const
+        {
+            if (const auto* id = std::get_if<std::uint64_t>(&wall.authority))
+                return construction_face(*id).identity;
+            return std::get<AMR::AdaptiveBytes>(wall.authority);
+        }
+        class SurfaceTiles
+        {
+        public:
+            struct Iterator
+            {
+                const Topology* topology;
+                const std::vector<SurfaceTileReference>* references;
+                std::size_t index;
+                const AMR::AdaptiveTile& operator*() const { return topology->surface_tile(references->at(index)); }
+                Iterator& operator++()
+                {
+                    ++index;
+                    return *this;
+                }
+                bool operator==(const Iterator&) const = default;
+            };
+            SurfaceTiles(const Topology& topology, const std::vector<SurfaceTileReference>& references)
+                : topology_(&topology), references_(&references)
+            {
+            }
+            [[nodiscard]] Iterator begin() const { return {topology_, references_, 0}; }
+            [[nodiscard]] Iterator end() const { return {topology_, references_, size()}; }
+            [[nodiscard]] std::size_t size() const { return references_->size(); }
+            [[nodiscard]] bool empty() const { return size() == 0; }
+
+        private:
+            const Topology* topology_;
+            const std::vector<SurfaceTileReference>* references_;
+        };
+        [[nodiscard]] SurfaceTiles surface_tiles() const { return SurfaceTiles(*this, surface_tile_references); }
         // Full-shell boundary evidence survives moving draft into the native publication.
-        std::vector<AMR::AdaptiveTile> frontier_tiles;
+        [[nodiscard]] SurfaceTiles frontier_tiles() const { return SurfaceTiles(*this, frontier_tile_references); }
         std::vector<AMR::AdaptiveNode> nodes;
         std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
-        std::map<std::uint64_t, FaceAuthority> construction_faces;
+        std::map<std::uint64_t, SurfaceTileReference> construction_faces;
         std::map<std::uint64_t, AMR::AdaptiveBytes> construction_nodes;
         std::map<std::uint64_t, Key> by_gid;
-        std::map<Key, std::set<Key>> adjacency;
-        std::map<std::uint64_t, std::set<Key>> node_fans;
+        // Declared before the borrowed rows so it also outlives their destruction.
+        std::set<Key> graph_keys;
+        std::map<Key, KeySet> adjacency;
+        std::map<std::uint64_t, KeySet> node_fans;
         std::map<std::uint64_t, std::vector<Wall>> node_walls;
         std::vector<Key> order;
         std::map<Key, std::vector<std::size_t>> cell_tiles;
@@ -190,9 +394,9 @@ SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMo
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL void retained_budget(
-    const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes = {},
-    std::size_t extra_retained_bytes = 0, std::size_t* remaining_bytes = nullptr);
+SIMPLEFLUID_FVM_LOCAL void retained_budget(const GeneralVoF::Data& data,
+    std::optional<std::size_t> proposed_spatial_bytes = {}, std::size_t extra_retained_bytes = 0,
+    std::size_t* remaining_bytes = nullptr);
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
 // geometric coincidence and whichever ghost rows happen to be resident play no
@@ -206,7 +410,7 @@ template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
-    const GeneralVoF::Data& data, const Key& key, bool complete_support = false);
+    const GeneralVoF::Data& data, const Key& key, bool complete_support = false, std::size_t* fitting_cells = nullptr);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key);
 template<ArithmeticMode Mode>

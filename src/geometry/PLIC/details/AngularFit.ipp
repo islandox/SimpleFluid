@@ -2,6 +2,7 @@
  * @brief Callback-dependent finite PLIC trial orchestration.
  */
 #pragma once
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -165,7 +166,7 @@ inline std::array<double, 2> dogleg(const Qualification& q, double radius)
     return {static_cast<double>(a), static_cast<double>(b)};
 }
 
-// Optional local Newton correction. The axial samples and the GN gate remain
+// Optional local curvature search. The axial samples and the GN gate remain
 // those of the current qualification; all additional evaluations are charged.
 template<class Evaluation, class Evaluate, class Normalize>
 std::optional<Evaluation> curvature_trial(const Vector& normal, const Vector& tangent, const Vector& second,
@@ -200,6 +201,115 @@ std::optional<Evaluation> curvature_trial(const Vector& normal, const Vector& ta
                                     mm.residual[i]) / (4 * h2);
             ga += r * da;
             gb += r * db;
+        }
+        if (!std::isfinite(aa) || !std::isfinite(ab) || !std::isfinite(bb) ||
+            !std::isfinite(ga) || !std::isfinite(gb))
+            return std::nullopt;
+        const long double magnitude = std::max({std::abs(aa), std::abs(ab), std::abs(bb)});
+        if (!(magnitude > 0))
+            return std::nullopt;
+        // Scaling retains the eigenspaces and absolute spectral condition.
+        // Recover the other eigenvalue from the determinant rather than
+        // subtracting nearly equal trace/radius terms.
+        const long double ha = aa / magnitude, hab = ab / magnitude, hb = bb / magnitude;
+        const long double trace = (ha + hb) / 2, radius = std::hypot((ha - hb) / 2, hab);
+        const long double outer = trace + std::copysign(radius, trace);
+        const long double inner = outer != 0 ? std::fma(ha, hb, -hab * hab) / outer : 0;
+        const long double minimum = std::min(outer, inner), maximum = std::max(outer, inner);
+        if (!std::isfinite(minimum) || !std::isfinite(maximum))
+            return std::nullopt;
+        if (minimum < 0)
+        {
+            const long double least = std::min(std::abs(minimum), std::abs(maximum));
+            const long double greatest = std::max(std::abs(minimum), std::abs(maximum));
+            if (!(least > 0) || greatest / least > maximum_condition)
+                return std::nullopt;
+            long double a = 0, b = 0;
+            if (radius == 0)
+            {
+                // The negative isotropic eigenspace has no preferred axis.
+                const long double gradient = std::hypot(ga, gb);
+                if (!std::isfinite(gradient))
+                    return std::nullopt;
+                a = gradient > 0 ? -ga / gradient : 1;
+                b = gradient > 0 ? -gb / gradient : 0;
+            }
+            else
+            {
+                a = hab;
+                b = minimum - ha;
+                const long double other_a = minimum - hb, other_b = hab;
+                if (std::hypot(other_a, other_b) > std::hypot(a, b))
+                {
+                    a = other_a;
+                    b = other_b;
+                }
+                const long double length = std::hypot(a, b);
+                if (!std::isfinite(length) || !(length > 0))
+                    return std::nullopt;
+                a /= length;
+                b /= length;
+            }
+            // Fix an exactly gradient-orthogonal eigenvector's otherwise
+            // arbitrary sign in physical coordinates. Both this direction and
+            // the normal reverse on phase exchange; a tangent-coordinate sign
+            // alone would privilege one phase. Gradient descent takes priority.
+            std::array<long double, 3> direction{};
+            unsigned direction_axis = 0, normal_axis = 0;
+            for (unsigned i = 0; i < 3; ++i)
+            {
+                direction[i] = a * tangent[i] + b * second[i];
+                if (std::abs(direction[i]) > std::abs(direction[direction_axis]))
+                    direction_axis = i;
+                if (std::abs(normal[i]) > std::abs(normal[normal_axis]))
+                    normal_axis = i;
+            }
+            if (std::signbit(direction[direction_axis]) != std::signbit(normal[normal_axis]))
+            {
+                a = -a;
+                b = -b;
+            }
+            const long double slope = ga * a + gb * b;
+            if (!std::isfinite(slope))
+                return std::nullopt;
+            if (slope > 0)
+            {
+                a = -a;
+                b = -b;
+            }
+            // Do not invert or shift an indefinite Hessian. Actual merit and
+            // the unchanged trial-Jacobian qualification decide acceptance at
+            // the same bounded dyadic radii as the qualified GN fallback.
+            for (double scale = 1; scale >= 1. / 128; scale *= .5)
+            {
+                try
+                {
+                    Vector trial = normal;
+                    for (unsigned i = 0; i < 3; ++i)
+                        trial[i] += static_cast<double>(scale * (a * tangent[i] + b * second[i]));
+                    trial = normalize(trial);
+                    auto next = evaluate(trial);
+                    if (next.residual.size() != current.residual.size())
+                        throw GeometryError(GeometryErrorCode::InvalidInput,
+                            "PLIC angular trial residual shape differs.");
+                    if (next.objective < current.objective &&
+                        observable_trial(trial, next, current.residual.size(), maximum_condition, evaluate, normalize))
+                    {
+                        accepted_normal = trial;
+                        return next;
+                    }
+                }
+                catch (const Unobservable&)
+                {
+                    // A smaller radius can retain the observed angular rank.
+                }
+                catch (const GeometryError& error)
+                {
+                    if (!error.recoverable_trial())
+                        throw;
+                }
+            }
+            return std::nullopt;
         }
         const long double det = aa * bb - ab * ab;
         const long double largest = (aa + bb + std::hypot(aa - bb, 2 * ab)) / 2;

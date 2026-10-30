@@ -21,10 +21,13 @@ struct GeneralVoFSolverOptions
      * cumulative admission, with shared opaque storage deduplicated per ledger.
      * Nested face binding conservatively reserves its own input accounting;
      * aliases already retained by the outer solve may therefore reduce usable
-     * headroom. Backend/Krylov allocations and allocator overhead are excluded.
+     * headroom. Momentum backend/Krylov allocations and allocator overhead are excluded.
      * Projection/forest reserve cumulative payload slots, explicit buffers and
      * bounded sparse packet arenas before arithmetic/communication. Conservative
      * per-scalar slot admission can reject before all byte capacity is consumed.
+     * Ordinary compatible projection additionally bounds a conservative
+     * matrix/Krylov payload estimate within the same rank-local cap; opaque
+     * backend allocator overhead remains outside that estimate.
      * Resource exhaustion rejects; it never changes physical tolerances.
      */
     std::size_t byte_budget = 64 * 1024 * 1024;
@@ -94,6 +97,9 @@ public:
     /** Owned cell velocities [m/s]; optional canonical overlap normal velocities.
      * Omitted cell values are reconstructed from supplied faces; omitting both
      * arrays selects zero flow. Supplied cell/face values retain their native order.
+     * Ordinary projects the physical cell momentum into compatible closed
+     * canonical rates and cell moments. Supplied faces are a predictor estimate,
+     * not independent prescribed forcing when cell velocities are supplied.
      */
     void initialize(
         const std::vector<VoF::Vector>& owned_velocity = {}, const std::vector<double>& overlap_face_velocity = {});

@@ -29,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__)
 #include <xmmintrin.h>
 #endif
@@ -39,10 +40,16 @@ namespace details
 {
 }
 using namespace details;
+struct SIMPLEFLUID_LOCAL DynamicPointSupportPayload
+{
+    const std::vector<PlaneAuthority> authorities;
+    explicit DynamicPointSupportPayload(std::vector<PlaneAuthority> values) : authorities(std::move(values)) {}
+};
+
 struct SIMPLEFLUID_LOCAL DynamicPointProvenance
 {
     std::array<long double, 3> value, absolute_error;
-    std::vector<PlaneAuthority> supports;
+    std::shared_ptr<const DynamicPointSupportPayload> support_payload;
     ArithmeticMode arithmetic_mode;
     /** Explicit represented global-input identity in the selected finite mode.
      * This is not native support, ownership or trial authority. Rounded or
@@ -52,6 +59,12 @@ struct SIMPLEFLUID_LOCAL DynamicPointProvenance
     bool numerical_only = false;
     std::shared_ptr<const DynamicPointProvenance> source_origin;
     std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> source_edges;
+
+    [[nodiscard]] const std::vector<PlaneAuthority>& supports() const
+    {
+        static const std::vector<PlaneAuthority> empty;
+        return support_payload ? support_payload->authorities : empty;
+    }
 };
 
 class SIMPLEFLUID_LOCAL DynamicGeometryAccess
@@ -229,11 +242,55 @@ template<ArithmeticMode Mode> struct StoredPlane : PlaneNormalWitness<Mode>
 
 template<ArithmeticMode Mode> using StoredPlanePtr = std::shared_ptr<const StoredPlane<Mode>>;
 
+/** Mutable draft support storage, frozen only against an exact source sequence.
+ * Reads never detach. Shared storage is immutable; append stages a deep copy. */
+class SIMPLEFLUID_LOCAL StoredVertexAuthorities
+{
+public:
+    StoredVertexAuthorities() = default;
+    StoredVertexAuthorities(std::vector<PlaneAuthority> values) : storage_(std::move(values)) {}
+    StoredVertexAuthorities& operator=(std::vector<PlaneAuthority> values)
+    {
+        storage_ = std::move(values);
+        return *this;
+    }
+    [[nodiscard]] const std::vector<PlaneAuthority>& values() const
+    {
+        if (const auto* owned = owned_values())
+            return *owned;
+        static const std::vector<PlaneAuthority> empty;
+        const auto& shared = shared_payload();
+        return shared ? shared->authorities : empty;
+    }
+    [[nodiscard]] const std::vector<PlaneAuthority>* owned_values() const
+    {
+        return std::get_if<std::vector<PlaneAuthority>>(&storage_);
+    }
+    [[nodiscard]] const std::shared_ptr<const DynamicPointSupportPayload>& shared_payload() const
+    {
+        static const std::shared_ptr<const DynamicPointSupportPayload> empty;
+        const auto* shared = std::get_if<std::shared_ptr<const DynamicPointSupportPayload>>(&storage_);
+        return shared ? *shared : empty;
+    }
+    [[nodiscard]] auto begin() const { return values().begin(); }
+    [[nodiscard]] auto end() const { return values().end(); }
+    [[nodiscard]] std::size_t size() const { return values().size(); }
+    [[nodiscard]] bool empty() const { return values().empty(); }
+    [[nodiscard]] bool operator==(const StoredVertexAuthorities& other) const { return values() == other.values(); }
+    void share_if_equal(const std::shared_ptr<const DynamicPointSupportPayload>&);
+    void detach();
+    void append(const PlaneAuthority&);
+    void clear();
+
+private:
+    std::variant<std::vector<PlaneAuthority>, std::shared_ptr<const DynamicPointSupportPayload>> storage_;
+};
+
 template<ArithmeticMode Mode> struct StoredVertex
 {
     StoredPoint<Mode> coordinates;
     std::vector<StoredPlanePtr<Mode>> incident;
-    std::vector<PlaneAuthority> authorities;
+    StoredVertexAuthorities authorities;
     std::shared_ptr<const DynamicPointProvenance> source_identity;
     bool numerical_only = false;
 };

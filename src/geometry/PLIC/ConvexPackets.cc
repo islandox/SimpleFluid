@@ -1,3 +1,4 @@
+#include "geometry/PLIC/ScalarPacket.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 
 #include "geometry/PLIC/details/bounded/ConvexPackets.tcc"

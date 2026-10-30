@@ -9,6 +9,12 @@
 #include <iomanip>
 #include <iostream>
 #include "plic_algebraic_planar_corner_fixture.hh"
+#include "plic_algebraic_native_cell17_fixture.hh"
+#include "plic_algebraic_native_cell8_fixture.hh"
+#include "plic_algebraic_native_cell34_fixture.hh"
+#include "plic_algebraic_native_cell37_fixture.hh"
+#include "plic_algebraic_native_cell33_fixture.hh"
+#include "plic_algebraic_native_cell36_fixture.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "plic_full50_step3_fixture.hh"
@@ -1166,31 +1172,270 @@ TEST(PolyhedralReconstruction, AngularCurvatureRejectsMalformedOrNondecreasingOp
     }
 }
 
-TEST(PolyhedralReconstruction, AngularIndefiniteOptionalCurvatureUsesQualifiedGaussNewtonSearch)
+AngularEvaluation angular_indefinite_model(AngularVector normal)
+{
+    const double x = normal[1] / normal[0], y = normal[2] / normal[0];
+    AngularEvaluation value{{x, y, -1 + .5 * (x + y) * (x + y)}};
+    for (const auto residual : value.residual)
+        value.objective += residual * residual;
+    value.objective_upper = value.objective;
+    return value;
+}
+
+double angular_tangent_radius(const AngularVector& origin, const AngularVector& candidate)
+{
+    const auto projection = origin[0] * candidate[0] + origin[1] * candidate[1] + origin[2] * candidate[2];
+    AngularVector tangent{};
+    for (unsigned axis = 0; axis < 3; ++axis)
+        tangent[axis] = candidate[axis] - projection * origin[axis];
+    return std::hypot(tangent[0], tangent[1], tangent[2]) / std::abs(projection);
+}
+
+TEST(PolyhedralReconstruction, AngularIndefiniteResidualCurvatureConvergesWithinOriginalIterationCap)
 {
     namespace angular = PLIC::angular_detail;
     AngularVector normal = angular_unit({1, 1e-5, 1e-5});
-    unsigned calls = 0;
+    auto current = angular_indefinite_model(normal);
+    unsigned evaluations = 1, iterations = 0;
     const auto evaluate = [&](AngularVector candidate)
     {
-        ++calls;
+        if (++evaluations > 32768)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        return angular_indefinite_model(candidate);
+    };
+    angular::Qualification qualification;
+    bool converged = false;
+    for (unsigned iteration = 0; iteration < 24; ++iteration)
+    {
+        ++iterations;
+        const auto previous = current.objective;
+        const auto status = angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+        ASSERT_NE(status, angular::IterationResult::Stalled);
+        EXPECT_LE(current.objective, previous);
+        if (status == angular::IterationResult::Converged)
+        {
+            converged = true;
+            break;
+        }
+        EXPECT_LT(current.objective, previous); // Actual merit, not just a local quadratic model.
+    }
+    EXPECT_TRUE(converged);
+    EXPECT_LE(qualification.step, 2e-8);
+    EXPECT_LE(qualification.condition, 1e8);
+    EXPECT_GT(evaluations, 1u);
+    EXPECT_LE(evaluations, 32768u);
+    const long double x = static_cast<long double>(normal[1]) / normal[0];
+    const long double y = static_cast<long double>(normal[2]) / normal[0];
+    const auto sum = x + y, difference = x - y;
+    // Independent identity: J=.75+.25*((x+y)^2-1)^2+.5*(x-y)^2.
+    // Its positive-seed minimum is x=y=.5, with three-residual RMS=.5.
+    const auto constraint = sum * sum - 1;
+    const auto identity = .75L + .25L * constraint * constraint + .5L * difference * difference;
+    EXPECT_GE(identity, .75L);
+    EXPECT_NEAR(current.objective, identity, 16 * std::numeric_limits<double>::epsilon());
+    EXPECT_NEAR(x, .5L, 4e-8L);
+    EXPECT_NEAR(y, .5L, 4e-8L);
+    EXPECT_NEAR(std::sqrt(current.objective / 3), .5, 1e-12);
+    std::ostringstream evidence;
+    evidence << std::setprecision(17) << "normal=" << normal[0] << ',' << normal[1] << ',' << normal[2]
+             << " rms=" << std::sqrt(current.objective / 3) << " step=" << qualification.step
+             << " condition=" << qualification.condition << " iterations=" << iterations
+             << " evaluations=" << evaluations;
+    RecordProperty("angular_indefinite_convergence", evidence.str());
+}
+
+TEST(PolyhedralReconstruction, AngularNegativeCurvatureBacktracksRecoverableAndUnobservableLargeRadius)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const bool unobservable : {false, true})
+    {
+        SCOPED_TRACE(unobservable);
+        AngularVector normal = angular_unit({1, 1e-5, 1e-5});
+        const auto initial_normal = normal;
+        auto current = angular_indefinite_model(normal);
+        const auto initial = current;
+        unsigned evaluations = 0, large_radius_calls = 0;
+        double first_large_radius = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations > 32768)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+            EXPECT_EQ(normal, initial_normal);
+            EXPECT_EQ(current.objective, initial.objective);
+            const auto radius = angular_tangent_radius(initial_normal, candidate);
+            if (radius > .9)
+            {
+                if (++large_radius_calls == 1)
+                    first_large_radius = radius;
+                if (!unobservable)
+                    throw PLIC::GeometryError(
+                        PLIC::GeometryErrorCode::UnresolvedArithmetic, "unavailable first negative-curvature radius");
+                // An apparently improving candidate and its neighborhood have
+                // zero Jacobian rank. It must not be published on merit alone.
+                return AngularEvaluation{{0, 0, 0}, 0, 0, evaluations};
+            }
+            auto value = angular_indefinite_model(candidate);
+            value.stamp = evaluations;
+            return value;
+        };
+        angular::Qualification qualification;
+        EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+            angular::IterationResult::Advanced);
+        if (unobservable)
+            EXPECT_GE(large_radius_calls, 5u); // Candidate plus the required rank probes.
+        else
+            EXPECT_EQ(large_radius_calls, 1u);
+        EXPECT_NEAR(first_large_radius, 1., 1e-12);
+        EXPECT_LE(evaluations, 32768u);
+        EXPECT_GT(current.stamp, 0u);
+        EXPECT_LT(current.objective, initial.objective);
+        EXPECT_EQ(current.residual, angular_indefinite_model(normal).residual);
+        EXPECT_EQ(current.objective, angular_indefinite_model(normal).objective);
+        EXPECT_NEAR(angular_tangent_radius(initial_normal, normal), .5, 1e-12);
+    }
+}
+
+TEST(PolyhedralReconstruction, AngularNegativeCurvaturePropagatesFatalOrMalformedFirstTrialAtomically)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const bool malformed : {false, true})
+    {
+        SCOPED_TRACE(malformed);
+        AngularVector normal = angular_unit({1, 1e-5, 1e-5});
+        const auto initial_normal = normal;
+        auto current = angular_indefinite_model(normal);
+        const auto initial = current;
+        unsigned evaluations = 0, failed_call = 0;
+        double failed_radius = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations > 32768)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+            EXPECT_EQ(normal, initial_normal);
+            EXPECT_EQ(current.objective, initial.objective);
+            auto value = angular_indefinite_model(candidate);
+            const auto radius = angular_tangent_radius(initial_normal, candidate);
+            if (radius > .9)
+            {
+                failed_call = evaluations;
+                failed_radius = radius;
+                if (!malformed)
+                    throw PLIC::GeometryError(
+                        PLIC::GeometryErrorCode::ResourceLimit, "fatal first negative-curvature radius");
+                value.residual.pop_back();
+            }
+            return value;
+        };
+        angular::Qualification qualification;
+        try
+        {
+            (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+            ADD_FAILURE() << "A fatal or malformed negative-curvature candidate was swallowed.";
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            EXPECT_EQ(error.code(),
+                malformed ? PLIC::GeometryErrorCode::InvalidInput : PLIC::GeometryErrorCode::ResourceLimit);
+        }
+        EXPECT_GT(failed_call, 0u);
+        EXPECT_NEAR(failed_radius, 1., 1e-12);
+        EXPECT_EQ(evaluations, failed_call); // Propagation prevents all smaller-radius work.
+        EXPECT_LE(evaluations, 32768u);
+        EXPECT_EQ(normal, initial_normal);
+        EXPECT_EQ(current.residual, initial.residual);
+        EXPECT_EQ(current.objective, initial.objective);
+        EXPECT_EQ(current.objective_upper, initial.objective_upper);
+        EXPECT_EQ(current.stamp, initial.stamp);
+    }
+}
+
+TEST(PolyhedralReconstruction, AngularNegativeCurvatureConditionGuardRetainsQualifiedGaussNewton)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal = angular_unit({1, .001, .001});
+    const auto initial_normal = normal;
+    unsigned evaluations = 0;
+    double largest_radius = 0;
+    const auto evaluate = [&](AngularVector candidate)
+    {
+        if (++evaluations > 32768)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        largest_radius = std::max(largest_radius, angular_tangent_radius(initial_normal, candidate));
         const double x = candidate[1] / candidate[0], y = candidate[2] / candidate[0];
-        AngularEvaluation value{{x, y, -1 + .5 * (x + y) * (x + y)}};
-        for (const double r : value.residual)
-            value.objective += r * r;
+        AngularEvaluation value{{x, y, -1 + x * x, -1 + .5 * y * y}};
+        for (const auto residual : value.residual)
+            value.objective += residual * residual;
         value.objective_upper = value.objective;
         return value;
     };
     auto current = evaluate(normal);
-    const auto objective = current.objective;
-    calls = 0;
+    const auto initial_objective = current.objective;
+    const long double x = normal[1] / normal[0], y = normal[2] / normal[0];
+    // Chart residual-curvature eigenvalues are -1+6*x^2 and1.5*y^2,
+    // whereas J^T J has diagonal1+4*x^2,1+y^2. The nonzero small
+    // eigenvalue stays far above cancellation noise and still exceeds cap100.
+    EXPECT_GT(std::abs(-1 + 6 * x * x) / (1.5L * y * y), 1e5L);
+    EXPECT_LT((1 + 4 * x * x) / (1 + y * y), 2);
     angular::Qualification qualification;
-    EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+    EXPECT_EQ(angular::advance(normal, current, 100., 2e-9, 2e-8, evaluate, angular_unit, qualification),
         angular::IterationResult::Advanced);
-    EXPECT_EQ(calls, 21u); // Twelve axial, four mixed, GN trial and its qualification.
-    EXPECT_LT(current.objective, objective);
-    EXPECT_GT(normal[1], 1e-5);
-    EXPECT_GT(normal[2], 1e-5);
+    EXPECT_LT(qualification.condition, 100);
+    EXPECT_LT(current.objective, initial_objective);
+    EXPECT_GT(evaluations, 1u);
+    EXPECT_LE(evaluations, 32768u);
+    EXPECT_LT(largest_radius, .01); // No bounded negative-curvature candidate was attempted.
+    AngularVector tangent{0, 1, 0};
+    const auto projection = initial_normal[1];
+    for (unsigned axis = 0; axis < 3; ++axis)
+        tangent[axis] -= projection * initial_normal[axis];
+    tangent = angular_unit(tangent);
+    const AngularVector second{initial_normal[1] * tangent[2] - initial_normal[2] * tangent[1],
+        initial_normal[2] * tangent[0] - initial_normal[0] * tangent[2],
+        initial_normal[0] * tangent[1] - initial_normal[1] * tangent[0]};
+    auto expected = initial_normal;
+    for (unsigned axis = 0; axis < 3; ++axis)
+        expected[axis] += qualification.first_step * tangent[axis] + qualification.second_step * second[axis];
+    expected = angular_unit(expected);
+    for (unsigned axis = 0; axis < 3; ++axis)
+        EXPECT_NEAR(normal[axis], expected[axis], 8 * std::numeric_limits<double>::epsilon());
+}
+
+TEST(PolyhedralReconstruction, AngularNegativeCurvatureSignTieIsCovariantUnderNormalReversal)
+{
+    namespace angular = PLIC::angular_detail;
+    std::array<AngularVector, 2> accepted;
+    for (unsigned phase = 0; phase < 2; ++phase)
+    {
+        AngularVector normal = angular_unit({1, 0, .001});
+        if (phase)
+            for (auto& component : normal)
+                component = -component;
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations > 32768)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+            const double x = candidate[1] / candidate[0], y = candidate[2] / candidate[0];
+            AngularEvaluation value{{x, y, -1 + x * x}};
+            for (const auto residual : value.residual)
+                value.objective += residual * residual;
+            value.objective_upper = value.objective;
+            return value;
+        };
+        auto current = evaluate(normal);
+        const auto initial_objective = current.objective;
+        angular::Qualification qualification;
+        EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+            angular::IterationResult::Advanced);
+        EXPECT_EQ(qualification.gradient_a, 0); // Gradient is exactly orthogonal to the negative eigendirection.
+        EXPECT_LT(current.objective, initial_objective);
+        EXPECT_LE(evaluations, 32768u);
+        accepted[phase] = normal;
+    }
+    EXPECT_GT(accepted[0][1], 0);
+    EXPECT_LT(accepted[1][1], 0);
+    for (unsigned axis = 0; axis < 3; ++axis)
+        EXPECT_NEAR(accepted[0][axis], -accepted[1][axis], 8 * std::numeric_limits<double>::epsilon());
 }
 
 TEST(PolyhedralReconstruction, AngularOptionalUnresolvedTrialUsesSmallerStepWithoutChangingCurrent)
@@ -1785,6 +2030,1052 @@ TEST(PolyhedralReconstruction, OrdinaryMeasureOffsetSolvesTinyPhasesWithoutCutCe
     }
 }
 
+TEST(PolyhedralReconstruction, CapturedNativeCell17RetainsRepresentedShellAndFittingInputs)
+{
+    namespace fixture = captured_native_cell17;
+    ASSERT_EQ(fixture::rows.front().id, 17u);
+    EXPECT_EQ(fixture::support_keys.size(), 15u); // 42 face entries, with shared native identities.
+    for (std::size_t i = 0; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        SCOPED_TRACE(row.id);
+        const auto sample = fixture::sample(row);
+        const auto& cell = *sample.geometry;
+        ASSERT_EQ(sample.id, i == 0 ? 17u : fixture::stencil_ids[i - 1]);
+        EXPECT_TRUE(sample.observed_mixed);
+        EXPECT_EQ(sample.gas_volume, row.gas);
+        EXPECT_EQ(sample.carrier_volume, row.carrier);
+        EXPECT_EQ(cell.origin(), row.origin);
+        EXPECT_EQ(cell.faces(), fixture::faces);
+        // The raw capture has reference_origin == frame.origin on all rows.
+        // Compare ordered public relative coordinates to the captured normalized
+        // storage scaled by its exact power-of-two frame, without double rounding.
+        const auto relative = cell.local_points();
+        const auto physical = cell.points();
+        ASSERT_EQ(relative.size(), row.stored_vertices.size());
+        ASSERT_EQ(physical.size(), row.stored_vertices.size());
+        fixture::WidePoint center{}, lower{}, upper{};
+        for (unsigned vertex = 0; vertex < row.stored_vertices.size(); ++vertex)
+            for (unsigned axis = 0; axis < 3; ++axis)
+            {
+                const auto coordinate = std::ldexp(row.stored_vertices[vertex][axis], row.frame_exponent);
+                EXPECT_EQ(relative[vertex].value[axis], coordinate);
+                EXPECT_EQ(physical[vertex].value[axis], static_cast<long double>(row.origin[axis]) + coordinate);
+                center[axis] += coordinate / 8;
+                lower[axis] = vertex == 0 ? coordinate : std::min(lower[axis], coordinate);
+                upper[axis] = vertex == 0 ? coordinate : std::max(upper[axis], coordinate);
+            }
+        const auto centroid = cell.centroid();
+        const auto spans = cell.axis_spans();
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            EXPECT_EQ(centroid[axis], static_cast<double>(row.origin[axis] + center[axis]));
+            EXPECT_EQ(spans[axis].value, upper[axis] - lower[axis]);
+        }
+        // Independent determinant of the captured native parallelepiped.
+        EXPECT_EQ(cell.volume().value, row.id == 2 ? 0x1p-4L : 0x1p-7L);
+        // Includes every source support packet and ordered face/vertex entry.
+        EXPECT_EQ(cell.encode_certificate(), fixture::certificate(row));
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell17RetainedPlaneMatchesIndependentVolumeOracle)
+{
+    namespace fixture = captured_native_cell17;
+    const auto options = fixture::options();
+    long double squared = 0;
+    for (std::size_t i = 0; i < fixture::rows.size(); ++i)
+    {
+        const auto sample = fixture::sample(fixture::rows[i]);
+        SCOPED_TRACE(sample.id);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(fixture::retained_plane);
+        ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
+        const auto volume = sample.id == 2 ? 0x1p-4L : 0x1p-7L;
+        const auto residual = (measured.volume - sample.gas_volume) / volume;
+        const auto oracle = fixture::gas_fraction_residuals[i];
+        EXPECT_LE(std::abs(residual - oracle), measured.numerical_error_estimate / volume +
+                                                   4 * std::numeric_limits<long double>::epsilon() * std::abs(oracle));
+        if (i == 0)
+        {
+            const auto allowance = static_cast<long double>(sample.gas_volume) * options.volume_tolerance;
+            EXPECT_LT(std::abs(fixture::target_gas_residual), allowance);
+            EXPECT_LE(std::abs(measured.volume - sample.gas_volume) + measured.numerical_error_estimate, allowance);
+            EXPECT_NEAR(allowance, 3.0580774613083187e-17L, 1e-32L);
+        }
+        else
+            squared += residual * residual;
+    }
+    EXPECT_NEAR(std::sqrt(squared / 6), fixture::retained_rms, 2e-16L);
+    EXPECT_LT(fixture::retained_rms, options.maximum_model_residual);
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell17ConstrainedTargetMeritConverges)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell17 representation was qualified with a 64-bit long-double significand; "
+                     << "this ABI has " << std::numeric_limits<long double>::digits << " bits.";
+    namespace fixture = captured_native_cell17;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto options = fixture::options();
+    ASSERT_EQ(options.maximum_fit_iterations, 24u);
+    ASSERT_EQ(options.maximum_clip_evaluations, 32768u);
+    ASSERT_EQ(options.maximum_condition, 1e8);
+    ASSERT_EQ(options.maximum_model_residual, .2);
+    ASSERT_EQ(options.volume_tolerance, 8e-15);
+    ASSERT_EQ(options.orientation_tolerance, 2e-8);
+    // Independent high-precision constrained Newton witness, binary64 normal
+    // from native-replay/refinement-review/constrained_merit.json new.normal.
+    // The frozen pre-conditioning Nonstationary capture remains baseline evidence.
+    constexpr PLIC::GeometryPoint optimum{0x1.e39e9c79a0fc4p-1, 0x1.456581def9eebp-2, 0x1.5207ca179dcb0p-4};
+    for (const bool swapped : {false, true})
+    {
+        SCOPED_TRACE(swapped);
+        auto target = fixture::sample(fixture::rows.front());
+        std::vector<OrdinarySample> stencil;
+        for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+            stencil.push_back(fixture::sample(fixture::rows[i]));
+        if (swapped)
+        {
+            std::swap(target.gas_volume, target.carrier_volume);
+            for (auto& sample : stencil)
+                std::swap(sample.gas_volume, sample.carrier_volume);
+        }
+        const auto original_target = target;
+        const auto original = stencil;
+        const auto assessment = Kernel::assess_resolution(target, stencil, options);
+        ASSERT_TRUE(assessment.admitted());
+        ASSERT_TRUE(assessment.angular_fit_eligible);
+        ASSERT_EQ(assessment.stencil_cells, 6u);
+        const std::string prefix = swapped ? "native_cell17_phase_swapped_" : "native_cell17_original_";
+        try
+        {
+            const auto fit = Kernel::reconstruct(target, stencil, options);
+            EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+            EXPECT_TRUE(fit.fit_converged);
+            EXPECT_TRUE(fit.stencil_volume_residual_measured);
+            EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
+            EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+            EXPECT_LE(fit.stencil_condition, options.maximum_condition);
+            EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+                static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) *
+                    options.volume_tolerance);
+            long double chord_squared = 0;
+            for (unsigned axis = 0; axis < 3; ++axis)
+            {
+                const auto difference =
+                    static_cast<long double>(fit.gas.normal[axis]) - (swapped ? -optimum[axis] : optimum[axis]);
+                chord_squared += difference * difference;
+            }
+            EXPECT_LE(std::sqrt(chord_squared), options.orientation_tolerance);
+            const auto record = [&](const char* name, auto value)
+            {
+                std::ostringstream text;
+                text << std::setprecision(std::is_same_v<decltype(value), long double> ? 21 : 17) << value;
+                RecordProperty(prefix + name, text.str());
+            };
+            for (const auto& [name, point] : std::array<std::pair<const char*, PLIC::GeometryPoint>, 2>{
+                     {{"normal", fit.gas.normal}, {"anchor", fit.gas.anchor}}})
+            {
+                std::ostringstream text;
+                text << std::setprecision(17) << point[0] << ',' << point[1] << ',' << point[2];
+                RecordProperty(prefix + name, text.str());
+            }
+            record("offset", fit.gas.offset);
+            record("rms", fit.stencil_volume_residual);
+            record("step", fit.orientation_step);
+            record("condition", fit.stencil_condition);
+            record("iterations", fit.fit_iterations);
+            record("target_residual", fit.finite_target_volume_difference.value);
+            record("numerical_indicator", fit.target_volume_numerical_error_estimate);
+            record("target_residual_with_indicator",
+                std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+            record("optimum_chord_distance", std::sqrt(chord_squared));
+        }
+        catch (const PLIC::PolyhedralFitFailure& error)
+        {
+            const auto& d = error.diagnostics();
+            ADD_FAILURE() << "Constrained-target merit did not qualify the frozen native input: " << error.what()
+                          << " reason=" << int(error.reason()) << " rms=" << std::setprecision(17) << d.rms
+                          << " step=" << d.angular_step << " condition=" << d.condition
+                          << " iterations=" << d.iterations << " clips=" << d.clip_evaluations;
+        }
+        EXPECT_EQ(target.gas_volume, original_target.gas_volume);
+        EXPECT_EQ(target.carrier_volume, original_target.carrier_volume);
+        EXPECT_EQ(target.geometry, original_target.geometry);
+        EXPECT_EQ(target.id, original_target.id);
+        EXPECT_EQ(target.observed_mixed, original_target.observed_mixed);
+        for (std::size_t i = 0; i < stencil.size(); ++i)
+        {
+            EXPECT_EQ(stencil[i].gas_volume, original[i].gas_volume);
+            EXPECT_EQ(stencil[i].carrier_volume, original[i].carrier_volume);
+            EXPECT_EQ(stencil[i].geometry, original[i].geometry);
+            EXPECT_EQ(stencil[i].id, fixture::stencil_ids[i]);
+            EXPECT_EQ(stencil[i].observed_mixed, original[i].observed_mixed);
+        }
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell8RetainsActualCandidateShellAndFittingInputs)
+{
+    namespace fixture = captured_native_cell8;
+    ASSERT_EQ(fixture::rows.front().id, 8u);
+    EXPECT_EQ(fixture::support_keys.size(), 11u); // All 30 native face packet entries.
+    for (std::size_t i = 0; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        SCOPED_TRACE(row.id);
+        const auto sample = fixture::sample(row);
+        const auto& cell = *sample.geometry;
+        ASSERT_EQ(sample.id, i == 0 ? 8u : fixture::stencil_ids[i - 1]);
+        EXPECT_EQ(sample.observed_mixed, row.observed_mixed);
+        EXPECT_EQ(sample.gas_volume, row.gas);
+        EXPECT_EQ(sample.carrier_volume, row.carrier);
+        EXPECT_EQ(cell.origin(), row.origin);
+        EXPECT_EQ(cell.faces(), fixture::faces);
+        const auto relative = cell.local_points();
+        const auto physical = cell.points();
+        ASSERT_EQ(relative.size(), row.stored_vertices.size());
+        ASSERT_EQ(physical.size(), row.stored_vertices.size());
+        fixture::WidePoint lower{}, upper{};
+        for (unsigned vertex = 0; vertex < row.stored_vertices.size(); ++vertex)
+            for (unsigned axis = 0; axis < 3; ++axis)
+            {
+                const auto coordinate = std::ldexp(row.stored_vertices[vertex][axis], row.frame_exponent);
+                EXPECT_EQ(relative[vertex].value[axis], coordinate);
+                EXPECT_EQ(physical[vertex].value[axis], static_cast<long double>(row.origin[axis]) + coordinate);
+                lower[axis] = vertex == 0 ? coordinate : std::min(lower[axis], coordinate);
+                upper[axis] = vertex == 0 ? coordinate : std::max(upper[axis], coordinate);
+            }
+        EXPECT_EQ(cell.centroid(), fixture::centroids[i]); // Independent rational boundary moments.
+        const auto spans = cell.axis_spans();
+        for (unsigned axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(spans[axis].value, upper[axis] - lower[axis]);
+        // Rational boundary integration reproduces these exact stored volumes,
+        // including cell20's slightly non-parallelogram quadrilateral extrusion.
+        EXPECT_EQ(cell.volume().value, row.stored_volume);
+        EXPECT_EQ(cell.encode_certificate(), fixture::certificate(row));
+    }
+    EXPECT_FALSE(fixture::rows[3].observed_mixed);
+    EXPECT_FALSE(fixture::rows[4].observed_mixed);
+    EXPECT_GT(fixture::rows[4].stored_vertices[2][0],
+        fixture::rows[4].stored_vertices[1][0] + fixture::rows[4].stored_vertices[3][0]);
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell8RetainedPlanePassesIndependentTargetAndModelMeasures)
+{
+    namespace fixture = captured_native_cell8;
+    const auto options = fixture::options();
+    long double squared = 0;
+    for (std::size_t i = 0; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        const auto sample = fixture::sample(row);
+        SCOPED_TRACE(sample.id);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(fixture::retained_plane);
+        ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
+        const auto residual = (measured.volume - sample.gas_volume) / row.stored_volume;
+        const auto oracle = fixture::gas_fraction_residuals[i];
+        EXPECT_LE(std::abs(residual - oracle), measured.numerical_error_estimate / row.stored_volume +
+                                                   4 * std::numeric_limits<long double>::epsilon() * std::abs(oracle));
+        if (i == 0)
+        {
+            const auto allowance = static_cast<long double>(sample.gas_volume) * options.volume_tolerance;
+            EXPECT_LT(std::abs(fixture::target_gas_residual), allowance);
+            EXPECT_LE(std::abs(measured.volume - sample.gas_volume) + measured.numerical_error_estimate, allowance);
+        }
+        else
+            squared += residual * residual;
+        if (!row.observed_mixed)
+            EXPECT_EQ(measured.volume, 0);
+    }
+    EXPECT_NEAR(std::sqrt(squared / 4), fixture::retained_rms, 2e-17L);
+    EXPECT_LT(fixture::retained_rms, options.maximum_model_residual);
+    // These are physical volume/model witnesses. A low RMS does not prove that
+    // the fitted orientation has observable, adequately conditioned derivatives.
+}
+
+// The exact golden trajectory was captured before objective conditioning and
+// remains in native-cell8/failure.json. Merit and curvature improvements may
+// change the trajectory and its rejection cause. Current coverage requires a
+// strict optimizer rejection under the original gates, not model incompatibility.
+void expect_native_cell8_optimizer_rejection(
+    const PLIC::PolyhedralFitFailure& error, const PLIC::PolyhedralReconstructionOptions& options, const char* property)
+{
+    namespace fixture = captured_native_cell8;
+    using Reason = PLIC::PolyhedralFitFailure::Reason;
+    const auto reason = error.reason();
+    const auto& d = error.diagnostics();
+    EXPECT_TRUE(reason == Reason::Nonstationary || reason == Reason::Unobservable);
+    EXPECT_EQ(d.stencil_ids, std::vector<std::uint64_t>(fixture::stencil_ids.begin(), fixture::stencil_ids.end()));
+    for (const auto component : d.normal)
+        EXPECT_TRUE(std::isfinite(component));
+    EXPECT_NEAR(std::hypot(d.normal[0], d.normal[1], d.normal[2]), 1., 8 * std::numeric_limits<double>::epsilon());
+    EXPECT_TRUE(std::isfinite(d.rms)); // Diagnostics retain the raw measured volume-model RMS.
+    EXPECT_GE(d.rms, 0);
+    EXPECT_LT(d.rms, options.maximum_model_residual);
+    EXPECT_TRUE(
+        d.finite_difference_scale == 1e-4 || d.finite_difference_scale == 5e-5 || d.finite_difference_scale == 2.5e-5);
+    EXPECT_EQ(options.maximum_condition, 1e8);
+    EXPECT_EQ(options.maximum_model_residual, .2);
+    EXPECT_EQ(options.maximum_fit_iterations, 24u);
+    EXPECT_EQ(options.maximum_clip_evaluations, 32768u);
+    EXPECT_EQ(options.orientation_tolerance, 2e-8);
+    if (reason == Reason::Nonstationary)
+    {
+        EXPECT_TRUE(std::isfinite(d.angular_step));
+        EXPECT_GT(d.angular_step, options.orientation_tolerance);
+        EXPECT_TRUE(std::isfinite(d.condition));
+        EXPECT_LE(d.condition, options.maximum_condition);
+    }
+    else if (reason == Reason::Unobservable)
+    {
+        EXPECT_EQ(d.angular_step, std::numeric_limits<double>::infinity());
+        EXPECT_GT(d.condition, options.maximum_condition);
+    }
+    EXPECT_GT(d.iterations, 0u);
+    EXPECT_LE(d.iterations, options.maximum_fit_iterations);
+    EXPECT_GT(d.clip_evaluations, 0u);
+    EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+    EXPECT_EQ(d.normal, d.best_normal);
+    EXPECT_EQ(d.rms, d.best_rms);
+    const auto reason_name = reason == Reason::Nonstationary    ? "Nonstationary"
+                             : reason == Reason::Unobservable   ? "Unobservable"
+                             : reason == Reason::IterationLimit ? "IterationLimit"
+                                                                : "Geometry";
+    std::ostringstream evidence;
+    evidence << std::setprecision(17) << "reason=" << reason_name << " reason_code=" << int(reason)
+             << " normal=" << d.normal[0] << ',' << d.normal[1] << ',' << d.normal[2] << " rms=" << d.rms
+             << " step=" << d.angular_step << " fd=" << d.finite_difference_scale << " condition=" << d.condition
+             << " iterations=" << d.iterations << " clips=" << d.clip_evaluations;
+    testing::Test::RecordProperty(property, evidence.str());
+    std::cout << "NATIVE_CELL8_CURRENT " << property << ' ' << evidence.str() << '\n';
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell8RetainsStrictOptimizerRejection)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell8 representation requires a 64-bit long-double significand; this ABI has "
+                     << std::numeric_limits<long double>::digits << " bits.";
+    namespace fixture = captured_native_cell8;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> stencil;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        stencil.push_back(fixture::sample(fixture::rows[i]));
+    const auto original = stencil;
+    const auto options = fixture::options();
+    const auto assessment = Kernel::assess_resolution(target, stencil, options);
+    ASSERT_TRUE(assessment.admitted());
+    ASSERT_TRUE(assessment.angular_fit_eligible);
+    ASSERT_EQ(assessment.stencil_cells, 4u);
+    try
+    {
+        const auto fit = Kernel::reconstruct(target, stencil, options);
+        ADD_FAILURE() << "The frozen native four-neighbor input requires strict optimizer rejection, got "
+                      << "RMS " << std::setprecision(17) << fit.stencil_volume_residual << ", step "
+                      << fit.orientation_step << ", iterations " << fit.fit_iterations;
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        expect_native_cell8_optimizer_rejection(error, options, "native_cell8_replay");
+    }
+    catch (const std::exception& error)
+    {
+        ADD_FAILURE() << "Captured native rejection type changed: " << error.what();
+    }
+    EXPECT_EQ(target.gas_volume, fixture::rows.front().gas);
+    EXPECT_EQ(target.carrier_volume, fixture::rows.front().carrier);
+    for (std::size_t i = 0; i < stencil.size(); ++i)
+    {
+        EXPECT_EQ(stencil[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(stencil[i].carrier_volume, original[i].carrier_volume);
+        EXPECT_EQ(stencil[i].observed_mixed, original[i].observed_mixed);
+        EXPECT_EQ(stencil[i].geometry, original[i].geometry);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell8RequiresFreshSupportWithoutDiscardingTinyReceipt)
+{
+    namespace fixture = captured_native_cell8;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> stencil;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        stencil.push_back(fixture::sample(fixture::rows[i]));
+    const auto original = stencil;
+    const auto options = fixture::options();
+    ASSERT_EQ(stencil[1].id, 9u);
+    ASSERT_GT(stencil[1].gas_volume, 0);
+    ASSERT_TRUE(stencil[1].observed_mixed);
+    EXPECT_TRUE(Kernel::assess_stencil_geometry(target, stencil, options).admitted());
+    EXPECT_TRUE(Kernel::assess_resolution(target, stencil, options).admitted());
+    PLIC::reset_geometry_statistics();
+    GeneralVoF::reset_geometry_statistics();
+    const auto support = Kernel::assess_transport_support(target, stencil, options);
+    EXPECT_EQ(support.reason, Reason::RankDeficientAngularSupport);
+    EXPECT_TRUE(support.angular_fit_eligible);
+    EXPECT_EQ(support.angular_support_cells, 1u);
+    auto disabled = options;
+    disabled.minimum_optimized_phase_length_ratio = 0;
+    const auto unrestricted = Kernel::assess_transport_support(target, stencil, disabled);
+    EXPECT_TRUE(unrestricted.admitted());
+    EXPECT_EQ(unrestricted.angular_support_cells, 2u);
+    for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
+    {
+        EXPECT_EQ(stats.constructions, 0u);
+        EXPECT_EQ(stats.intersections, 0u);
+    }
+    // Disabling the existing scale policy admits this original inadequate
+    // support again; it does not repair the clipped-volume derivative system.
+    if (std::numeric_limits<long double>::digits == 64)
+    {
+        try
+        {
+            (void) Kernel::reconstruct(target, stencil, disabled);
+            ADD_FAILURE() << "Disabling support eligibility unexpectedly repaired the original raw fit.";
+        }
+        catch (const PLIC::PolyhedralFitFailure& error)
+        {
+            expect_native_cell8_optimizer_rejection(error, disabled, "native_cell8_support_scale_disabled");
+            EXPECT_EQ(error.diagnostics().stencil_ids,
+                std::vector<std::uint64_t>(fixture::stencil_ids.begin(), fixture::stencil_ids.end()));
+        }
+    }
+    for (std::size_t i = 0; i < stencil.size(); ++i)
+    {
+        EXPECT_EQ(stencil[i].geometry, original[i].geometry);
+        EXPECT_EQ(stencil[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(stencil[i].carrier_volume, original[i].carrier_volume);
+        EXPECT_EQ(stencil[i].observed_mixed, original[i].observed_mixed);
+    }
+}
+
+TEST(PolyhedralReconstruction, TransportAngularSupportIncludesExactPhaseLengthBoundaryBeforeClipping)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 0, -1}})
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == -1 ? 1 : 0));
+    stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>({0, 1, 0}, 1, .125));
+    stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>({0, 0, 1}, 1, .25));
+    const auto original = stencil;
+    PLIC::PolyhedralReconstructionOptions options;
+    options.minimum_optimized_phase_length_ratio = .5;
+    // Exact independent boundary: cbrt(.125)/cbrt(1) == .5. Neighbor y+
+    // supplies the second independent tangent direction exactly at equality.
+    ASSERT_EQ(std::cbrt(static_cast<long double>(stencil[4].gas_volume)), .5L);
+    ASSERT_TRUE(Kernel::assess_stencil_geometry(target, stencil, options).admitted());
+    PLIC::reset_geometry_statistics();
+    GeneralVoF::reset_geometry_statistics();
+    const auto included = Kernel::assess_transport_support(target, stencil, options);
+    EXPECT_TRUE(included.admitted());
+    EXPECT_EQ(included.angular_support_cells, 2u);
+    stencil[4].gas_volume = std::nextafter(.125, 0.);
+    const auto excluded = Kernel::assess_transport_support(target, stencil, options);
+    EXPECT_EQ(excluded.reason, Reason::RankDeficientAngularSupport);
+    EXPECT_EQ(excluded.angular_support_cells, 1u);
+    EXPECT_EQ(stencil[4].gas_volume, std::nextafter(.125, 0.));
+    EXPECT_EQ(stencil[4].carrier_volume, original[4].carrier_volume);
+    EXPECT_TRUE(stencil[4].observed_mixed);
+    EXPECT_EQ(stencil[4].geometry, original[4].geometry);
+    for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
+    {
+        EXPECT_EQ(stats.constructions, 0u);
+        EXPECT_EQ(stats.intersections, 0u);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell34FirstRingRetainsOriginalWeakMajorityModelRejection)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Historical native cell34 replay requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell34;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> stencil;
+    for (std::size_t i = 1; i <= fixture::first_ring_size; ++i)
+        stencil.push_back(fixture::sample(fixture::rows[i]));
+    const auto options = fixture::options();
+    const auto assessment = Kernel::assess_resolution(target, stencil, options);
+    ASSERT_TRUE(assessment.admitted());
+    EXPECT_FALSE(assessment.angular_fit_eligible);
+    EXPECT_DOUBLE_EQ(assessment.gas_support_fraction, .29816934193800027);
+    EXPECT_DOUBLE_EQ(assessment.carrier_support_fraction, 1);
+    try
+    {
+        (void) Kernel::reconstruct(target, stencil, options);
+        ADD_FAILURE() << "The unchanged selected first ring must retain its weak-majority gradient model rejection.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+        EXPECT_FALSE(error.assessment().angular_fit_eligible);
+        ASSERT_TRUE(error.has_fit_diagnostics());
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.stencil_ids, std::vector<std::uint64_t>(fixture::stencil_ids.begin(),
+                                     fixture::stencil_ids.begin() + fixture::first_ring_size));
+        EXPECT_EQ(d.iterations, 0u);
+        EXPECT_EQ(d.clip_evaluations, 22u);
+        EXPECT_DOUBLE_EQ(d.normal[0], .33278734399357834);
+        EXPECT_DOUBLE_EQ(d.normal[1], .93991628784643322);
+        EXPECT_DOUBLE_EQ(d.normal[2], -.076223064217339098);
+        EXPECT_DOUBLE_EQ(d.rms, .24869105803461194);
+        EXPECT_DOUBLE_EQ(d.condition, 2.3379029997196525);
+        EXPECT_TRUE(std::isinf(d.angular_step));
+        EXPECT_EQ(d.finite_difference_scale, 0);
+        EXPECT_GT(d.rms, options.maximum_model_residual);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell34CompleteCurrentHaloRequiresQualifiedAngularFit)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell34 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell34;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> stencil;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        stencil.push_back(fixture::sample(row));
+        EXPECT_EQ(stencil.back().geometry->volume().value, row.stored_volume);
+        EXPECT_EQ(stencil.back().geometry->encode_certificate(), fixture::certificate(row));
+        EXPECT_EQ(stencil.back().id, fixture::stencil_ids[i - 1]);
+    }
+    const auto original = stencil;
+    const auto options = fixture::options();
+    ASSERT_EQ(options.maximum_fit_iterations, 24u);
+    ASSERT_EQ(options.maximum_clip_evaluations, 32768u);
+    ASSERT_EQ(options.maximum_model_residual, .2);
+    const auto assessment = Kernel::assess_transport_support(target, stencil, options);
+    ASSERT_TRUE(assessment.admitted());
+    ASSERT_TRUE(assessment.angular_fit_eligible);
+    EXPECT_GT(assessment.gas_support_fraction, options.minimum_phase_support_fraction);
+    EXPECT_EQ(assessment.stencil_cells, 20u);
+    try
+    {
+        const auto fit = Kernel::reconstruct(target, stencil, options);
+        EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_TRUE(fit.fit_converged);
+        EXPECT_TRUE(fit.stencil_volume_residual_measured);
+        EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+        EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
+        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) * options.volume_tolerance);
+        const auto record = [&](const char* name, auto value)
+        {
+            std::ostringstream text;
+            text << std::setprecision(std::is_same_v<decltype(value), long double> ? 21 : 17) << value;
+            RecordProperty(name, text.str());
+        };
+        record("native_cell34_expanded_rms", fit.stencil_volume_residual);
+        record("native_cell34_expanded_step", fit.orientation_step);
+        record("native_cell34_expanded_condition", fit.stencil_condition);
+        record("native_cell34_expanded_iterations", fit.fit_iterations);
+        std::ostringstream normal;
+        normal << std::setprecision(17) << fit.gas.normal[0] << ',' << fit.gas.normal[1] << ',' << fit.gas.normal[2];
+        RecordProperty("native_cell34_expanded_normal", normal.str());
+        record("native_cell34_expanded_target_residual", fit.finite_target_volume_difference.value);
+        record("native_cell34_expanded_numerical_indicator", fit.target_volume_numerical_error_estimate);
+        record("native_cell34_expanded_target_residual_with_indicator",
+            std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        const auto& d = error.diagnostics();
+        ADD_FAILURE() << "The complete same-candidate native halo has not produced a qualified fit: " << error.what()
+                      << " reason=" << int(error.reason()) << " rms=" << std::setprecision(17) << d.rms
+                      << " step=" << d.angular_step << " condition=" << d.condition << " iterations=" << d.iterations
+                      << " clips=" << d.clip_evaluations;
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        ADD_FAILURE() << "The complete same-candidate native halo still rejects: " << error.what()
+                      << " reason=" << int(error.assessment().reason) << " rms=" << std::setprecision(17)
+                      << error.diagnostics().rms;
+    }
+    for (std::size_t i = 0; i < stencil.size(); ++i)
+    {
+        EXPECT_EQ(stencil[i].geometry, original[i].geometry);
+        EXPECT_EQ(stencil[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(stencil[i].carrier_volume, original[i].carrier_volume);
+        EXPECT_EQ(stencil[i].observed_mixed, original[i].observed_mixed);
+    }
+    EXPECT_EQ(target.gas_volume, fixture::rows.front().gas);
+    EXPECT_EQ(target.carrier_volume, fixture::rows.front().carrier);
+}
+
+void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<const OrdinarySample> full_support,
+    PLIC::PolyhedralReconstructionOptions options, PLIC::GeometryPoint optimum, double expected_rms,
+    const std::string& prefix, std::size_t fitting_cells = 6)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto original_target = target;
+    const std::vector<OrdinarySample> original(full_support.begin(), full_support.end());
+    ASSERT_EQ(options.maximum_fit_iterations, 24u);
+    ASSERT_EQ(options.maximum_clip_evaluations, 32768u);
+    ASSERT_EQ(options.maximum_model_residual, .2);
+    ASSERT_EQ(options.maximum_condition, 1e8);
+    ASSERT_EQ(options.orientation_tolerance, 2e-8);
+    ASSERT_EQ(options.volume_tolerance, 8e-15);
+    const auto support = Kernel::assess_transport_support(target, full_support, fitting_cells, options);
+    ASSERT_TRUE(support.admitted());
+    ASSERT_TRUE(support.angular_fit_eligible);
+    EXPECT_EQ(support.stencil_cells, fitting_cells);
+    EXPECT_GE(support.gas_support_fraction, options.minimum_phase_support_fraction);
+    EXPECT_GE(support.carrier_support_fraction, options.minimum_phase_support_fraction);
+    try
+    {
+        const auto fit = Kernel::reconstruct(target, full_support, fitting_cells, options);
+        EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_TRUE(fit.fit_converged);
+        EXPECT_TRUE(fit.stencil_volume_residual_measured);
+        EXPECT_EQ(fit.resolution.stencil_cells, fitting_cells);
+        EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+        EXPECT_LE(fit.stencil_condition, options.maximum_condition);
+        EXPECT_GT(fit.fit_iterations, 0u);
+        EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+        EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
+        EXPECT_NEAR(fit.stencil_volume_residual, expected_rms, 2e-12);
+        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) * options.volume_tolerance);
+        long double chord_squared = 0, measured_squared = 0;
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            const auto difference = static_cast<long double>(fit.gas.normal[axis]) - optimum[axis];
+            chord_squared += difference * difference;
+        }
+        EXPECT_LE(std::sqrt(chord_squared), options.orientation_tolerance);
+        // Independently enumerate the objective population: only the fitting
+        // prefix contributes to the raw model RMS, including its minority signs.
+        for (std::size_t i = 0; i < fitting_cells; ++i)
+        {
+            const auto& sample = full_support[i];
+            const bool gas = sample.gas_volume <= sample.carrier_volume;
+            auto plane = fit.gas;
+            if (!gas)
+            {
+                for (auto& component : plane.normal)
+                    component = -component;
+                plane.offset = -plane.offset;
+            }
+            const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane);
+            const auto difference = measured.volume - (gas ? sample.gas_volume : sample.carrier_volume);
+            const auto residual = difference / sample.geometry->volume().value;
+            measured_squared += residual * residual;
+        }
+        const auto prefix_rms = std::sqrt(measured_squared / fitting_cells);
+        EXPECT_NEAR(fit.stencil_volume_residual, prefix_rms, 4 * std::numeric_limits<double>::epsilon());
+        const auto record = [&](const char* name, auto value)
+        {
+            std::ostringstream text;
+            text << std::setprecision(std::is_same_v<decltype(value), long double> ? 21 : 17) << value;
+            testing::Test::RecordProperty(prefix + name, text.str());
+        };
+        for (const auto& [name, point] : std::array<std::pair<const char*, PLIC::GeometryPoint>, 2>{
+                 {{"normal", fit.gas.normal}, {"anchor", fit.gas.anchor}}})
+        {
+            std::ostringstream text;
+            text << std::setprecision(17) << point[0] << ',' << point[1] << ',' << point[2];
+            testing::Test::RecordProperty(prefix + name, text.str());
+        }
+        record("offset", fit.gas.offset);
+        record("rms", fit.stencil_volume_residual);
+        record("independent_prefix_measure_rms", prefix_rms);
+        record("step", fit.orientation_step);
+        record("condition", fit.stencil_condition);
+        record("iterations", fit.fit_iterations);
+        record("fitting_cells", fit.resolution.stencil_cells);
+        record("available_gas_support", fit.resolution.gas_support_fraction);
+        record("available_carrier_support", fit.resolution.carrier_support_fraction);
+        record("target_residual", fit.finite_target_volume_difference.value);
+        record("numerical_indicator", fit.target_volume_numerical_error_estimate);
+        record("target_residual_with_indicator",
+            std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+        record("optimum_chord_distance", std::sqrt(chord_squared));
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        const auto& d = error.diagnostics();
+        ADD_FAILURE() << "Local prefix did not reach qualification: " << error.what()
+                      << " reason=" << int(error.reason()) << " rms=" << std::setprecision(17) << d.rms
+                      << " step=" << d.angular_step << " condition=" << d.condition << " iterations=" << d.iterations
+                      << " clips=" << d.clip_evaluations;
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        ADD_FAILURE() << "Local prefix still rejects: " << error.what() << " reason=" << int(error.assessment().reason)
+                      << " rms=" << std::setprecision(17) << error.diagnostics().rms;
+    }
+    for (std::size_t i = 0; i < full_support.size(); ++i)
+    {
+        EXPECT_EQ(full_support[i].geometry, original[i].geometry);
+        EXPECT_EQ(full_support[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(full_support[i].carrier_volume, original[i].carrier_volume);
+        EXPECT_EQ(full_support[i].id, original[i].id);
+        EXPECT_EQ(full_support[i].observed_mixed, original[i].observed_mixed);
+    }
+    EXPECT_EQ(target.geometry, original_target.geometry);
+    EXPECT_EQ(target.gas_volume, original_target.gas_volume);
+    EXPECT_EQ(target.carrier_volume, original_target.carrier_volume);
+    EXPECT_EQ(target.observed_mixed, original_target.observed_mixed);
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell34LocalFitUsesFullPhaseAvailability)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell34 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell34;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        support.push_back(fixture::sample(fixture::rows[i]));
+    // Independent Decimal65 constrained fit: native-cell34/review/local_context_fit.json.
+    expect_native_local_prefix_fit(target, support, fixture::options(),
+        {0x1.6a30b1e6be092p-1, 0x1.1d2999dc01329p-1, -0x1.bd9f102e8d9bcp-2}, .15685392563386221935,
+        "native_cell34_local6_");
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell37LegacyObjectivesRetainTheirModelRejections)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell37 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell37;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> full_support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        full_support.push_back(fixture::sample(fixture::rows[i]));
+    const auto options = fixture::options();
+    for (const std::size_t count : {fixture::first_ring_size, full_support.size()})
+    {
+        SCOPED_TRACE(count);
+        const auto stencil = std::span<const OrdinarySample>(full_support).first(count);
+        const auto assessment = Kernel::assess_resolution(target, stencil, options);
+        ASSERT_TRUE(assessment.admitted());
+        EXPECT_EQ(assessment.angular_fit_eligible, count == full_support.size());
+        try
+        {
+            (void) Kernel::reconstruct(target, stencil, options);
+            ADD_FAILURE() << "The unchanged explicit legacy objective must retain its model rejection.";
+        }
+        catch (const PLIC::PolyhedralResolutionRequired& error)
+        {
+            EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+            ASSERT_TRUE(error.has_fit_diagnostics());
+            const auto& d = error.diagnostics();
+            EXPECT_EQ(d.stencil_ids,
+                std::vector<std::uint64_t>(fixture::stencil_ids.begin(), fixture::stencil_ids.begin() + count));
+            EXPECT_GT(d.rms, options.maximum_model_residual);
+            EXPECT_GT(d.clip_evaluations, 0u);
+            EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+            EXPECT_LE(d.condition, options.maximum_condition);
+            if (count == fixture::first_ring_size)
+            {
+                EXPECT_EQ(d.iterations, 0u);
+                EXPECT_TRUE(std::isinf(d.angular_step));
+                EXPECT_EQ(d.finite_difference_scale, 0);
+                EXPECT_NEAR(d.rms, .20562611953178352094, 2e-12);
+            }
+            else
+            {
+                EXPECT_GT(d.iterations, 0u);
+                EXPECT_LE(d.iterations, options.maximum_fit_iterations);
+                EXPECT_LE(d.angular_step, options.orientation_tolerance);
+                EXPECT_NEAR(d.rms, .27341156226083700236, 2e-12);
+            }
+            std::ostringstream text;
+            text << std::setprecision(17) << "normal=" << d.normal[0] << ',' << d.normal[1] << ',' << d.normal[2]
+                 << " rms=" << d.rms << " step=" << d.angular_step << " condition=" << d.condition
+                 << " iterations=" << d.iterations << " clips=" << d.clip_evaluations
+                 << " fd=" << d.finite_difference_scale;
+            RecordProperty(
+                count == fixture::first_ring_size ? "native_cell37_legacy6" : "native_cell37_legacy20", text.str());
+        }
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell37LocalFitUsesFullPhaseAvailability)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell37 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell37;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        support.push_back(fixture::sample(row));
+        EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
+        EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
+        EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+    }
+    // Independent Decimal65 constrained fit: native-cell37/review/local_fit.json.
+    expect_native_local_prefix_fit(target, support, fixture::options(),
+        {0x1.b95c41faff27fp-1, 0x1.3329967589c38p-2, 0x1.a25e0df1b3366p-2}, .11116300484947740985,
+        "native_cell37_local6_");
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell33NegativeCurvatureQualifiesWithinOriginalBudgets)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell33 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell33;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+    {
+        const auto& row = fixture::rows[i];
+        support.push_back(fixture::sample(row));
+        EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
+        EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
+        EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+    }
+    // Same NEW4 input-015 target/full20/prefix6 as the retained IterationLimit
+    // trajectory. Independent Decimal85 stationary witness from
+    // native-cell33/review/stationary_witness.json, not a new production golden.
+    expect_native_local_prefix_fit(target, support, fixture::options(),
+        {0x1.afda6bdc8a4fep-1, 0x1.e5439a111de98p-2, -0x1.030c5bb8169d2p-2}, .09753929714099351891,
+        "native_cell33_local6_");
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell36PrimaryPlaneRetainsIndependentModelDefect)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell36 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell36;
+    const auto target = fixture::sample(fixture::rows.front());
+    const auto options = fixture::options();
+    ASSERT_LT(target.gas_volume, target.carrier_volume);
+    const auto measured = PLIC::OrdinaryPlaneMeasure(*target.geometry).below(fixture::captured_bad_plane);
+    ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
+    const auto target_difference = measured.volume - target.gas_volume;
+    EXPECT_LE(std::abs(target_difference - fixture::captured_bad_target_difference),
+        measured.numerical_error_estimate +
+            4 * std::numeric_limits<long double>::epsilon() * std::abs(fixture::captured_bad_target_difference));
+    EXPECT_LE(std::abs(target_difference) + measured.numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+    long double squared = 0;
+    for (std::size_t i = 1; i <= fixture::first_ring_size; ++i)
+    {
+        const auto sample = fixture::sample(fixture::rows[i]);
+        const bool gas = sample.gas_volume <= sample.carrier_volume;
+        auto plane = fixture::captured_bad_plane;
+        if (!gas)
+        {
+            for (auto& component : plane.normal)
+                component = -component;
+            plane.offset = -plane.offset;
+        }
+        const auto phase = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane);
+        const auto difference = phase.volume - (gas ? sample.gas_volume : sample.carrier_volume);
+        const auto residual = difference / sample.geometry->volume().as_double();
+        squared += residual * residual;
+    }
+    const auto rms = std::sqrt(squared / fixture::first_ring_size);
+    EXPECT_NEAR(rms, fixture::captured_bad_rms, 2e-16L);
+    EXPECT_GT(rms, options.maximum_model_residual);
+    // This particular converged plane exceeds the model gate. A separate
+    // independent witness and restart regression establish a different basin.
+    std::ostringstream text;
+    text << std::setprecision(21) << "rms=" << rms << " target_residual=" << target_difference
+         << " numerical_indicator=" << measured.numerical_error_estimate;
+    RecordProperty("native_cell36_captured_primary_plane", text.str());
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell36FaceRestartConvergesForBothPhaseLabels)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell36 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell36;
+    constexpr PLIC::GeometryPoint optimum{0x1.17bb3fcab72a2p-1, 0x1.6e111042aba67p-2, 0x1.83ce3690ba34cp-1};
+    for (const bool swapped : {false, true})
+    {
+        SCOPED_TRACE(swapped);
+        auto target = fixture::sample(fixture::rows.front());
+        std::vector<OrdinarySample> support;
+        for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        {
+            const auto& row = fixture::rows[i];
+            support.push_back(fixture::sample(row));
+            EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
+            EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
+            EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+        }
+        auto expected_normal = optimum;
+        if (swapped)
+        {
+            std::swap(target.gas_volume, target.carrier_volume);
+            for (auto& sample : support)
+                std::swap(sample.gas_volume, sample.carrier_volume);
+            for (auto& component : expected_normal)
+                component = -component;
+        }
+        // Independent Decimal85 feasible_witness.json supplies the normal and
+        // raw local model RMS. Actual stationarity/work still require the kernel.
+        expect_native_local_prefix_fit(target, support, fixture::options(), expected_normal, .00100452870018081524,
+            swapped ? "native_cell36_restart_swapped_" : "native_cell36_restart_original_", fixture::first_ring_size);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeCell36RestartSharesIterationAndClipBudgets)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native cell36 representation requires a 64-bit long-double significand.";
+    namespace fixture = captured_native_cell36;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        support.push_back(fixture::sample(fixture::rows[i]));
+    const auto original = support;
+    const auto record = [&](const char* name, const char* reason, const PLIC::PolyhedralFitDiagnostics& d)
+    {
+        std::ostringstream text;
+        text << std::setprecision(17) << "reason=" << reason << " normal=" << d.normal[0] << ',' << d.normal[1] << ','
+             << d.normal[2] << " rms=" << d.rms << " step=" << d.angular_step << " condition=" << d.condition
+             << " iterations=" << d.iterations << " clips=" << d.clip_evaluations
+             << " fd=" << d.finite_difference_scale;
+        RecordProperty(name, text.str());
+        EXPECT_EQ(d.stencil_ids, std::vector<std::uint64_t>(fixture::stencil_ids.begin(),
+                                     fixture::stencil_ids.begin() + fixture::first_ring_size));
+    };
+    auto primary_only = fixture::options();
+    primary_only.maximum_fit_iterations = 6;
+    std::size_t primary_clips = 0;
+    PLIC::PolyhedralFitDiagnostics primary_diagnostics;
+    try
+    {
+        (void) Kernel::reconstruct(target, support, fixture::first_ring_size, primary_only);
+        ADD_FAILURE() << "Six iterations must retain the qualified primary model rejection without a restart.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+        ASSERT_TRUE(error.has_fit_diagnostics());
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.iterations, 6u);
+        EXPECT_LE(d.angular_step, primary_only.orientation_tolerance);
+        EXPECT_LE(d.condition, primary_only.maximum_condition);
+        EXPECT_NEAR(d.rms, fixture::captured_bad_rms, 2e-12L);
+        EXPECT_GT(d.rms, primary_only.maximum_model_residual);
+        primary_clips = d.clip_evaluations;
+        primary_diagnostics = d;
+        EXPECT_EQ(primary_clips, 2808u); // Preserve the recorded unchanged primary work baseline.
+        record("native_cell36_primary_six_iterations", "UnresolvedPlaneModel", d);
+    }
+    ASSERT_GT(primary_clips, 0u);
+    auto one_secondary = fixture::options();
+    one_secondary.maximum_fit_iterations = 7;
+    try
+    {
+        (void) Kernel::reconstruct(target, support, fixture::first_ring_size, one_secondary);
+        ADD_FAILURE() << "A seed or one improving secondary iterate cannot bypass angular stationarity.";
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        EXPECT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::IterationLimit);
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.iterations, 7u);
+        EXPECT_TRUE(std::isfinite(d.angular_step));
+        EXPECT_GT(d.angular_step, one_secondary.orientation_tolerance);
+        EXPECT_LE(d.condition, one_secondary.maximum_condition);
+        EXPECT_LT(d.rms, one_secondary.maximum_model_residual);
+        EXPECT_GT(d.clip_evaluations, primary_clips);
+        EXPECT_LE(d.clip_evaluations, one_secondary.maximum_clip_evaluations);
+        record("native_cell36_one_secondary_iteration", "IterationLimit", d);
+    }
+    auto exhausted_bank = fixture::options();
+    exhausted_bank.maximum_clip_evaluations = primary_clips;
+    try
+    {
+        (void) Kernel::reconstruct(target, support, fixture::first_ring_size, exhausted_bank);
+        ADD_FAILURE() << "Face-bank evaluation must share the already spent primary clip budget.";
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        EXPECT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::Geometry);
+        EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+        EXPECT_FALSE(error.recoverable_trial());
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.iterations, 6u);
+        EXPECT_EQ(d.clip_evaluations, primary_clips + 1);
+        EXPECT_EQ(d.normal, primary_diagnostics.normal);
+        EXPECT_EQ(d.rms, primary_diagnostics.rms);
+        EXPECT_EQ(d.best_normal, primary_diagnostics.normal);
+        EXPECT_EQ(d.best_rms, primary_diagnostics.rms); // Not even a qualified seed precedes the charged failure.
+        record("native_cell36_shared_clip_exhaustion", "Geometry/ResourceLimit", d);
+    }
+    EXPECT_EQ(target.gas_volume, fixture::rows.front().gas);
+    EXPECT_EQ(target.carrier_volume, fixture::rows.front().carrier);
+    for (std::size_t i = 0; i < support.size(); ++i)
+    {
+        EXPECT_EQ(support[i].geometry, original[i].geometry);
+        EXPECT_EQ(support[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(support[i].carrier_volume, original[i].carrier_volume);
+        EXPECT_EQ(support[i].id, original[i].id);
+        EXPECT_EQ(support[i].observed_mixed, original[i].observed_mixed);
+    }
+}
+
+TEST(PolyhedralReconstruction, FaceRestartWithoutImprovingSeedRetainsStationaryContradiction)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> support;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        support.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == 1 ? 0 : 1));
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    const auto original = support;
+    std::optional<PLIC::PolyhedralFitDiagnostics> primary, with_bank;
+    for (const bool context_entry : {false, true})
+    {
+        try
+        {
+            if (context_entry)
+                (void) Kernel::reconstruct(target, support, support.size(), options);
+            else
+                (void) Kernel::reconstruct(target, support, options);
+            ADD_FAILURE() << "The independently incompatible explicit objective must retain its model rejection.";
+        }
+        catch (const PLIC::PolyhedralResolutionRequired& error)
+        {
+            EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+            ASSERT_TRUE(error.has_fit_diagnostics());
+            (context_entry ? with_bank : primary) = error.diagnostics();
+        }
+    }
+    ASSERT_TRUE(primary);
+    ASSERT_TRUE(with_bank);
+    // Central symmetry forces RMS>=sqrt(1/6); the +x plane already attains
+    // that global bound. Original-face directions are the six signed axes:
+    // +x duplicates the optimum; -x and the y/z directions have strictly higher
+    // objectives. The tie's two signs therefore supply no improving seed.
+    EXPECT_NEAR(primary->rms, std::sqrt(1. / 6), 2e-15);
+    EXPECT_NEAR(with_bank->rms, std::sqrt(1. / 6), 2e-15);
+    EXPECT_EQ(with_bank->iterations, primary->iterations);
+    EXPECT_EQ(with_bank->normal, primary->normal);
+    EXPECT_EQ(with_bank->angular_step, primary->angular_step);
+    EXPECT_LE(with_bank->angular_step, options.orientation_tolerance);
+    EXPECT_GT(with_bank->clip_evaluations, primary->clip_evaluations); // Bank evaluation is still charged.
+    EXPECT_LE(with_bank->clip_evaluations, options.maximum_clip_evaluations);
+    RecordProperty("no_improving_seed_primary_clips", std::to_string(primary->clip_evaluations));
+    RecordProperty("no_improving_seed_context_clips", std::to_string(with_bank->clip_evaluations));
+    for (std::size_t i = 0; i < support.size(); ++i)
+    {
+        EXPECT_EQ(support[i].geometry, original[i].geometry);
+        EXPECT_EQ(support[i].gas_volume, original[i].gas_volume);
+        EXPECT_EQ(support[i].carrier_volume, original[i].carrier_volume);
+    }
+}
+
 TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlaneModelRejection)
 {
     namespace fixture = captured_algebraic_corner;
@@ -2067,18 +3358,165 @@ TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSke
              {{.125, .25, 0}, {.25, .5, .5}}, {{0, .5, 0}, {.125, .75, .25}},
              {{.25, 0, 0}, {.375, .25, .5}}})
         stencil.push_back(sample(lower, upper, 100 + stencil.size()));
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    GeneralVoF::reset_geometry_statistics();
+    const auto local_only = Kernel::assess_transport_support(target, stencil, 4, options);
+    EXPECT_EQ(local_only.reason, Reason::RankDeficientAngularSupport);
+    EXPECT_EQ(local_only.angular_support_cells, 1u);
+    EXPECT_EQ(local_only.stencil_cells, 4u);
+    EXPECT_TRUE(local_only.angular_fit_eligible);
+    for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
+    {
+        EXPECT_EQ(stats.constructions, 0u);
+        EXPECT_EQ(stats.intersections, 0u);
+    }
     const auto expanded = Kernel::assess_transport_support(target, stencil);
     ASSERT_TRUE(expanded.admitted());
     EXPECT_EQ(expanded.angular_support_cells, 3u);
     EXPECT_LT(expanded.angular_support_condition, 10);
-    PLIC::PolyhedralReconstructionOptions options;
-    options.measure_only = true;
     const auto fit = Kernel::reconstruct(target, stencil, options);
     EXPECT_TRUE(fit.fit_converged);
     EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
     EXPECT_LE(fit.stencil_volume_residual, options.fit_tolerance);
     EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         target.gas_volume * options.volume_tolerance);
+    // Independent stress on the same analytic 13-neighbor geometry: a positive
+    // receipt in the originally pure z+ cell remains an observed mixed input,
+    // while three physically resolved neighbors still supply angular support.
+    // These are synthetic labels, not a combination of different captured trials.
+    auto received = stencil;
+    ASSERT_EQ(received[1].id, 9u);
+    ASSERT_EQ(received[1].gas_volume, 0);
+    constexpr double receipt = 0x1p-25;
+    received[1].gas_volume = receipt;
+    received[1].carrier_volume = 0x1p-7 - receipt;
+    received[1].observed_mixed = true;
+    const auto received_support = Kernel::assess_transport_support(target, received, options);
+    EXPECT_TRUE(received_support.admitted());
+    EXPECT_EQ(received_support.angular_support_cells, 3u);
+    EXPECT_LT(received_support.angular_support_condition, 10);
+    EXPECT_EQ(received.size(), 13u);
+    EXPECT_EQ(received[1].gas_volume, receipt);
+    EXPECT_TRUE(received[1].observed_mixed);
+    // The unchanged one-plane target witness excludes z+ geometrically, so
+    // retaining its positive phase creates a real nonzero objective residual.
+    const auto physical = Kernel::solve_offset(target, {1, .17, .11}, options);
+    const auto measured = PLIC::OrdinaryPlaneMeasure(*received[1].geometry).below(physical.gas);
+    EXPECT_EQ(measured.volume, 0);
+    EXPECT_EQ((measured.volume - received[1].gas_volume) / 0x1p-7L, -0x1p-18L);
+    EXPECT_LE(
+        std::abs(physical.finite_target_volume_difference.value) + physical.target_volume_numerical_error_estimate,
+        target.gas_volume * options.volume_tolerance);
+    EXPECT_EQ(stencil[1].gas_volume, 0);
+}
+
+template<ArithmeticMode Mode> void separated_phase_context_validation()
+{
+    using Kernel = PLIC::PolyhedralReconstruction<Mode>;
+    using Sample = PLIC::PolyhedralPhaseSample<Mode>;
+    const auto target = uniform_sample<Mode>({0, 0, 0}, 1, .25);
+    const auto pure = uniform_sample<Mode>({0, 0, 0}, 1, 1);
+    std::vector<Sample> full;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        full.push_back(uniform_sample<Mode>(index, 1, index[0] < 0 ? 1 : index[0] > 0 ? 0 : .25));
+    PLIC::PolyhedralReconstructionOptions options;
+    ASSERT_EQ(options.maximum_stencil_cells, 128u);
+    std::vector<Sample> oversized(options.maximum_stencil_cells + 1, full.front());
+    auto malformed = full;
+    malformed.push_back(uniform_sample<Mode>({1, 1, 1}, 1, .25));
+    malformed.back().gas_volume = std::numeric_limits<double>::quiet_NaN();
+    auto null_geometry = full;
+    null_geometry.push_back(full.front());
+    null_geometry.back().geometry.reset();
+    const std::vector<Sample> unused{malformed.back()};
+    PLIC::reset_geometry_statistics();
+    GeneralVoF::reset_geometry_statistics();
+    // Explicit contexts have a bounded, validated extent even when their
+    // fitting prefix or the pure target would not otherwise use the samples.
+    EXPECT_THROW((void) Kernel::assess_transport_support(pure, full, full.size() + 1, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::reconstruct(pure, full, full.size() + 1, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::assess_transport_support(pure, oversized, 0, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::reconstruct(pure, oversized, 0, options), std::invalid_argument);
+    for (const auto& invalid : {malformed, null_geometry})
+    {
+        EXPECT_THROW(
+            (void) Kernel::assess_transport_support(target, invalid, full.size(), options), std::invalid_argument);
+        EXPECT_THROW((void) Kernel::reconstruct(target, invalid, full.size(), options), std::invalid_argument);
+    }
+    // Preserve the legacy explicit-stencil pure-target short circuit. Only the
+    // newly explicit full context requires validation of unused outside data.
+    EXPECT_TRUE(Kernel::assess_transport_support(pure, unused, options).admitted());
+    EXPECT_TRUE(Kernel::reconstruct(pure, unused, options).pure_gas);
+    EXPECT_THROW((void) Kernel::assess_transport_support(pure, unused, 0, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::reconstruct(pure, unused, 0, options), std::invalid_argument);
+    EXPECT_TRUE(Kernel::assess_transport_support(pure, full, 0, options).admitted());
+    EXPECT_TRUE(Kernel::reconstruct(pure, full, 0, options).pure_gas);
+    for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
+    {
+        EXPECT_EQ(stats.constructions, 0u);
+        EXPECT_EQ(stats.intersections, 0u);
+    }
+}
+
+TEST(PolyhedralReconstruction, SeparatedPhaseContextValidatesBoundsAndOutsideSamplesBeforeClipping)
+{
+    separated_phase_context_validation<ArithmeticMode::Ordinary>();
+    separated_phase_context_validation<ArithmeticMode::BoundedCertification>();
+}
+
+template<ArithmeticMode Mode> void separated_phase_context_local_direction()
+{
+    using Kernel = PLIC::PolyhedralReconstruction<Mode>;
+    using Sample = PLIC::PolyhedralPhaseSample<Mode>;
+    using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
+    const auto target = uniform_sample<Mode>({0, 0, 0}, 1, .25);
+    std::vector<Sample> no_signal;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        no_signal.push_back(uniform_sample<Mode>(index, 1, .25));
+    no_signal.push_back(uniform_sample<Mode>({-2, 0, 0}, 1, 1));
+    no_signal.push_back(uniform_sample<Mode>({2, 0, 0}, 1, 0));
+    std::vector<Sample> rank_deficient;
+    for (const int x : {-2, -1, 1, 2})
+        rank_deficient.push_back(uniform_sample<Mode>({x, 0, 0}, 1, x < 0 ? 1 : 0));
+    for (const auto index : std::vector<std::array<int, 3>>{{0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        rank_deficient.push_back(uniform_sample<Mode>(index, 1, .5));
+    PLIC::PolyhedralReconstructionOptions options;
+    PLIC::reset_geometry_statistics();
+    GeneralVoF::reset_geometry_statistics();
+    // The outside samples establish a signal and full spatial rank when they
+    // are actually fitted. Availability alone cannot supply either to a prefix.
+    EXPECT_TRUE(Kernel::assess_transport_support(target, no_signal, options).admitted());
+    const auto local_signal = Kernel::assess_transport_support(target, no_signal, 6, options);
+    EXPECT_EQ(local_signal.reason, Reason::NoDirectionalSignal);
+    EXPECT_EQ(local_signal.stencil_cells, 6u);
+    try
+    {
+        (void) Kernel::reconstruct(target, no_signal, 6, options);
+        ADD_FAILURE() << "Outside phase availability supplied a missing local WLS direction.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, Reason::NoDirectionalSignal);
+    }
+    EXPECT_TRUE(Kernel::assess_transport_support(target, rank_deficient, options).admitted());
+    const auto local_geometry = Kernel::assess_transport_support(target, rank_deficient, 4, options);
+    EXPECT_EQ(local_geometry.reason, Reason::RankDeficientStencil);
+    EXPECT_EQ(local_geometry.stencil_cells, 4u);
+    for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
+    {
+        EXPECT_EQ(stats.constructions, 0u);
+        EXPECT_EQ(stats.intersections, 0u);
+    }
+}
+
+TEST(PolyhedralReconstruction, SeparatedPhaseContextCannotSupplyMissingLocalGeometryOrDirection)
+{
+    separated_phase_context_local_direction<ArithmeticMode::Ordinary>();
+    separated_phase_context_local_direction<ArithmeticMode::BoundedCertification>();
 }
 
 TEST(PolyhedralReconstruction, TransportAngularSupportRejectsIllConditionedMixedDirectionsBeforeClipping)

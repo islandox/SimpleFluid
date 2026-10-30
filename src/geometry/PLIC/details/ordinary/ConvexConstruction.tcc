@@ -121,14 +121,16 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
         poly.moment_cache = std::make_shared<MomentCache>();
     poly.volume = StorageScalar{};
     poly.displayed.clear();
-    for (const auto& v : poly.vertices)
+    for (auto& v : poly.vertices)
     {
+        if (v.source_identity)
+            v.authorities.share_if_equal(v.source_identity->support_payload);
         auto displayed =
             bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
         if (v.source_identity || poly.construction || poly.numerical_only)
-            DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities, poly.numerical_only);
+            DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities.values(), poly.numerical_only);
         else
-            DynamicGeometryAccess::seal(displayed, v.authorities);
+            DynamicGeometryAccess::seal(displayed, v.authorities.values());
         DynamicGeometryAccess::retain_supports(DynamicGeometryAccess::identity(displayed), active_work->allocations,
             active_work->bytes, active_work->limits.byte_budget);
         active_work->charge(DynamicGeometryAccess::storage_bytes(displayed, false) - sizeof(DynamicPoint), 1);

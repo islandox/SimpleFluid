@@ -24,10 +24,10 @@ acceptance contracts remain open regardless of the current work order.
 Work through the [Stage 7 checklist](#stage-7--general-vof-and-flow-qualification)
 in this dependency order:
 
-1. Diagnose shared pressure–velocity projection and pressure-work/energy behavior
-   before choosing a repair; face continuity alone is insufficient.
-2. Replay the failing native reconstruction faithfully and determine whether it
-   remains an independent blocker after the projection repair.
+1. Preserve the implemented Ordinary compatible projection and its independent
+   pressure-work/energy checks while completing coupled-flow qualification.
+2. Use the faithful native replays to distinguish optimizer defects from
+   remaining model rejection; retain strict target-volume and work gates.
 3. Resolve Q2 storage/accounting blockers and complete the required refinement
    sequence, separating capacity results from numerical convergence.
 4. Complete required GeometricFace Q3 coupled motion; recheck DonorCell where
@@ -667,40 +667,37 @@ raw/cleaned accounting; raw passes do not qualify enabled cleanup or coupled rem
       correction, interned hierarchy payloads and strict swept-face phase proofs.
       These repairs preserve the original gates and do not close long-flow accuracy.
 
-The latest local handoff and stage status are
-`build/gcc/verification/algebraic_vof_repair_20261030/HANDOFF.md` and
-`stage-status.json` in that directory. They record scoped Q0/Q5 serial/MPI2/MPI4,
-reconstruction and ABI/architecture passes, plus GeometricFace's separate `.125 s`
-single-interface and `.02 s` cylinder endpoints. Q2/Q3/Q4 overall remain incomplete.
-These source-pinned passes and the earlier [recorded results](docs/verification/vof_solver_contracts.md#recorded-stage-7-evidence)
-remain valid historical evidence; they do not qualify subsequent shared-operator
-changes. Preserve failed attempts and snapshot differences.
+The latest dated snapshot is `build/gcc/verification/algebraic_vof_repair_20261031/HANDOFF.md`,
+with `stage-status.json` and the source applicability audit beside it. Q0/Q5
+have scoped serial/MPI2/MPI4 evidence, including all Q5 field comparisons;
+uniform N32 initialization now passes its unchanged cap. Q2/Q3/Q4 overall remain
+incomplete. The separate `.125 s` motion baseline and older `.02 s` cylinder
+result do not replace those campaigns. Preserve failed attempts and source
+differences in these and the earlier [recorded results](docs/verification/vof_solver_contracts.md#recorded-stage-7-evidence).
 
 #### Immediate numerical blockers — priority and dependency order
 
-- [ ] **1. Shared pressure–velocity projection.** Investigate the actual coupled
-      instability using the retained pressure-work/energy audit. Establish the
-      relationship between canonical face fluxes, cell velocity correction,
-      physical masses, boundary work and stabilization; small face-continuity or
-      transport residuals alone are insufficient. Identify the defect before
-      selecting a repair. Minimum evidence: one decisive reproducer with an
-      independent pressure-work/energy check, directly affected pressure/boundary/
-      mass regressions and the affected coupled case. Development prefixes locate
-      the defect; item 4 supplies full-horizon acceptance.
-- [ ] **2. Faithful native reconstruction replay — reassess after item 1.** Replay
-      the actual failing native cell, preserving geometry/fitting views, ordered
-      stencil, phase amounts, controls and failure diagnostics. The handoff's
-      native-cell-17 capture is inspectable but not yet a certified standalone
-      checkpoint; an affine-box surrogate pass is insufficient. Reproduce the
-      original failure, then determine whether a valid native case still exposes
-      an independent blocker after projection repair. If it does, repair that
-      case under unchanged strict-volume/model/work gates, with affected kernel
-      regressions and its originating flow case; do not expand to a stress matrix.
+- [ ] **1. Shared pressure–velocity qualification.** The Ordinary compatible
+      projection repair and independent energy/mass/occupancy regressions are
+      implemented. Retain their original gates and complete item 4's full
+      coupled-flow acceptance; face-continuity residuals alone are insufficient.
+      Bounded and Exact projection remain separate supported scopes.
+- [ ] **2. Faithful native reconstruction qualification.** Native-cell replays
+      and constrained-merit/curvature/restart repairs are implemented; an affine
+      surrogate alone remains insufficient. The later Q3 cell-36 candidate
+      differs from its passing earlier fixture. Capture each remaining failure
+      faithfully and distinguish optimizer failure from proven model
+      incompatibility. Keep the original strict-volume/model/work gates and
+      originating full-flow case.
 - [ ] **3. Q2 refinement capacity and convergence.** On the smallest required
       failing setup, distinguish unique retained/live storage from duplication,
       cumulative charges and incorrect accounting before selecting a remedy.
-      N32 hierarchy construction passed but GeneralVoF initialization failed;
-      N64 construction also remains blocked. Unblock the required N16/N32/N64
+      Uniform N32 GeneralVoF initialization now passes the original 64 MiB
+      cap in serial/MPI2/MPI4 after measured allocation removal. Its original
+      finite-rectangle motion still rejects a single-plane model; the independent
+      all-plane lower bound is recorded in the Q2 repair evidence. N64
+      authority/closure completes, but compact native-draft admission still
+      rejects the expanded serialization proxy. Unblock the required N16/N32/N64
       sequence and separate temporal study under existing caps, or report the
       remaining capacity failure explicitly. Setup success is not convergence.
       Retain the original N16 model rejection, independent motion oracle, full

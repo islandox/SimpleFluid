@@ -5,7 +5,9 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
+#include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
+#include "geometry/unitTests/adaptive_native_draft_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <gtest/gtest.h>
@@ -233,6 +235,97 @@ void compare_oracle(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarc
     for (std::size_t a = 1; a < 4; ++a)
         EXPECT_NEAR(totals[a], .5, 1e-14);
 }
+TEST(DistributedCartesianKernel, CompactNativeDraftKeepsExactAuthorityAndPublication)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::CartesianAMR source(grid());
+    auto state = hierarchy(source);
+    const auto comm = Tpetra::getDefaultComm();
+    auto expanded_owned = state->native_draft();
+    auto compact_owned = AMR::adaptive_detail::compact_adaptive_native_draft(*state);
+    test::compare_native_drafts(expanded_owned, compact_owned);
+    EXPECT_EQ(compact_owned.global_cells, 8u);
+    EXPECT_EQ(compact_owned.global_faces, 36u);
+    EXPECT_EQ(compact_owned.global_nodes, 27u);
+    for (const auto& leaf : compact_owned.owned)
+    {
+        EXPECT_FALSE(leaf.geometry);
+        EXPECT_EQ(leaf.surfaces.size(), 6u);
+        EXPECT_THROW(AMR::encode_adaptive_leaf(leaf), std::invalid_argument);
+    }
+    // Request a diagonal cell too, so the comparison includes caller-declared
+    // full ghosts beyond the incident first-ring halo.
+    const std::array additional{source.cell_key(7)};
+    auto expanded = AMR::fetch_adaptive_native_draft(*state, additional);
+    auto compact = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*state, additional);
+    test::compare_native_drafts(expanded, compact);
+    for (const auto* records : {&compact.owned, &compact.ghosts})
+        for (const auto& leaf : *records)
+            EXPECT_FALSE(leaf.geometry);
+    for (const auto& binding : compact.cell_bindings)
+    {
+        EXPECT_DOUBLE_EQ(binding.volume, .125);
+        for (const auto x : binding.centroid)
+            EXPECT_TRUE(x == .25 || x == .75);
+    }
+    const auto schema = state->configuration_descriptor();
+    auto original = AMR::assemble_adaptive_native(std::move(expanded), schema, comm, state->options().byte_budget);
+    auto retained = AMR::assemble_adaptive_native(std::move(compact), schema, comm, state->options().byte_budget);
+    EXPECT_EQ(original.owned_gids, retained.owned_gids);
+    EXPECT_EQ(original.local_keys, retained.local_keys);
+    for (const auto& [key, gid] : retained.owned_gids)
+        EXPECT_TRUE(original.partition->geometry()->certified_sparse_cell_geometry(gid)->equivalent(
+            *retained.partition->geometry()->certified_sparse_cell_geometry(gid)));
+}
+TEST(DistributedCartesianKernel, CompactNativeDraftPreservesSuppliedProceduralCertificates)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::CartesianAMR source(grid());
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 0; id < 8; ++id)
+        if (id % comm->getSize() == std::uint64_t(comm->getRank()))
+            ids.push_back(id);
+    auto detached = source.detach_owned(ids, {'c', 'e', 'r', 't'});
+    for (auto& leaf : detached.owned)
+    {
+        leaf.geometry = detached.kernel->geometry(leaf);
+        leaf.surfaces = detached.kernel->surfaces(leaf);
+    }
+    AMR::DistributedAdaptiveHierarchy state(std::move(detached.owned), {}, detached.kernel, comm);
+    auto local = AMR::adaptive_detail::compact_adaptive_native_draft(state);
+    for (const auto& leaf : local.owned)
+        EXPECT_TRUE(leaf.geometry);
+    auto fetched = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(state);
+    for (const auto* records : {&fetched.owned, &fetched.ghosts})
+        for (const auto& leaf : *records)
+        {
+            ASSERT_TRUE(leaf.geometry);
+            EXPECT_TRUE(leaf.geometry->equivalent(*state.geometry(leaf)));
+        }
+}
+TEST(DistributedStaticHierarchy, CompactNativeDraftRetainsStaticCertificates)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::CartesianAMR source(grid());
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 0; id < 8; ++id)
+        if (id % comm->getSize() == std::uint64_t(comm->getRank()))
+            ids.push_back(id);
+    auto detached = AMR::detach_static_participant(
+        source.geometry()->regions().front(), 0, 0, 0, ids, {'s', 't', 'a', 't', 'i', 'c'});
+    AMR::DistributedAdaptiveHierarchy state(std::move(detached.owned), {}, detached.kernel, comm);
+    test::compare_native_drafts(state.native_draft(), AMR::adaptive_detail::compact_adaptive_native_draft(state));
+    auto fetched = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(state);
+    for (const auto* records : {&fetched.owned, &fetched.ghosts})
+        for (const auto& leaf : *records)
+        {
+            EXPECT_EQ(leaf.provider, AMR::AdaptiveProviderKind::Static);
+            ASSERT_TRUE(leaf.geometry);
+            EXPECT_TRUE(leaf.geometry->equivalent(*state.geometry(leaf)));
+        }
+}
 TEST(DistributedCartesianKernel, DistributedBlockRefineSplitFamiliesCoarsenAndEmptyOwners)
 {
     auto comm = Tpetra::getDefaultComm();
@@ -278,6 +371,8 @@ TEST(DistributedCartesianKernel, DistributedBlockRefineSplitFamiliesCoarsenAndEm
     EXPECT_EQ(empty->owned().size(), comm->getRank() == 0 ? 8 : 0);
     compare_oracle(*empty, source);
     auto draft = empty->native_draft();
+    auto compact_draft = ::SimpleFluid::Meshes::AMR::adaptive_detail::compact_adaptive_native_draft(*empty);
+    test::compare_native_drafts(draft, compact_draft);
     EXPECT_EQ(draft.owned.size(), empty->owned().size());
     if (comm->getRank() != 0)
         EXPECT_TRUE(draft.tiles.empty());
@@ -306,6 +401,12 @@ TEST(DistributedConvexHierarchy, SplitSiblingOwnersCoarsenExactParent)
     if (comm->getRank() == 0)
         owned.push_back(parent);
     ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy state(std::move(owned), {}, kernel, comm);
+    auto compact = ::SimpleFluid::Meshes::AMR::adaptive_detail::compact_adaptive_native_draft(state);
+    for (const auto& leaf : compact.owned)
+    {
+        ASSERT_TRUE(leaf.geometry);
+        EXPECT_TRUE(leaf.geometry->equivalent(*parent.geometry));
+    }
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks;
     if (comm->getRank() == 0)
         marks.push_back({parent.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});

@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -63,6 +64,34 @@ struct Occurrence
     std::string boundary;
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
 };
+// Read only the leading full support identity. Sorting must not duplicate the
+// encoded packet storage, and malformed prefixes fail inside the collective phase.
+std::span<const char> support_prefix(std::span<const char> packet)
+{
+    Reader reader{packet};
+    read_geometry_record_header(reader, GeometryRecordKind::SurfaceRequest);
+    const auto count = reader.word();
+    if (count > packet.size() - reader.offset)
+        throw std::invalid_argument("Invalid authority support prefix length.");
+    return packet.subspan(reader.offset, count);
+}
+struct TileEncodedSize
+{
+    std::size_t total = 0;
+    void add(std::size_t bytes)
+    {
+        if (bytes > std::numeric_limits<std::size_t>::max() - total)
+            throw std::overflow_error("Adaptive tile encoded length overflow.");
+        total += bytes;
+    }
+    void byte(std::uint8_t) { add(1); }
+    void word(std::uint64_t) { add(8); }
+    void bytes(std::span<const char> bytes)
+    {
+        add(8);
+        add(bytes.size());
+    }
+};
 struct BudgetLease
 {
     Budget* allocation;
@@ -81,34 +110,58 @@ struct BudgetLease
             allocation->used -= bytes;
     }
 };
-AdaptiveBytes encode_tile(const AdaptiveTile& tile, std::size_t byte_budget)
+AdaptiveBytes encode_tile(const AdaptiveTile& tile, std::size_t byte_budget, Budget* allocation = nullptr)
 {
-    Writer w;
-    w.word(tile.face_gid);
-    write_geometry_record_header(w, GeometryRecordKind::Tile);
-    w.bytes(tile.surface);
-    w.bytes(tile.domain);
-    w.bytes(tile.identity);
-    w.bytes(tile.geometry->encode_incidence(byte_budget));
-    w.bytes(PLIC::encode_identity(tile.second_image_identity));
-    w.bytes(encode_adaptive_key(tile.first));
-    w.word(tile.second.has_value());
-    if (tile.second)
-        w.bytes(encode_adaptive_key(*tile.second));
-    w.word(tile.first_owner);
-    w.word(tile.second_owner + 1);
-    w.word(tile.first_native_face);
-    w.word(tile.second_native_face);
-    w.word(tile.exterior);
-    w.bytes(std::span(tile.boundary));
-    for (const auto* incidence : {&tile.node_gids, &tile.second_node_gids})
+    // Scratch is declared first so encoded geometry/keys die before releasing
+    // their leases. The returned output retains its separate capacity charge.
+    BudgetLease scratch{allocation};
+    const auto geometry = tile.geometry->encode_incidence(byte_budget);
+    scratch.add(geometry.capacity());
+    const auto displacement = PLIC::encode_identity(tile.second_image_identity);
+    scratch.add(displacement.capacity());
+    const auto first_key = encode_adaptive_key(tile.first);
+    scratch.add(first_key.capacity());
+    const auto second_key = tile.second ? encode_adaptive_key(*tile.second) : AdaptiveBytes{};
+    scratch.add(second_key.capacity());
+    auto write = [&](auto& w)
     {
-        w.word(incidence->size());
-        for (auto node : *incidence)
-            w.word(node);
-    }
-    if (w.data.size() > byte_budget)
+        w.word(tile.face_gid);
+        write_geometry_record_header(w, GeometryRecordKind::Tile);
+        w.bytes(tile.surface);
+        w.bytes(tile.domain);
+        w.bytes(tile.identity);
+        w.bytes(geometry);
+        w.bytes(displacement);
+        w.bytes(first_key);
+        w.word(tile.second.has_value());
+        if (tile.second)
+            w.bytes(second_key);
+        w.word(tile.first_owner);
+        w.word(tile.second_owner + 1);
+        w.word(tile.first_native_face);
+        w.word(tile.second_native_face);
+        w.word(tile.exterior);
+        w.bytes(std::span(tile.boundary));
+        for (const auto* incidence : {&tile.node_gids, &tile.second_node_gids})
+        {
+            w.word(incidence->size());
+            for (auto node : *incidence)
+                w.word(node);
+        }
+    };
+    // Count the same wire sequence with checked additions before allocating.
+    // This avoids retaining vector growth tails in every authority reply.
+    TileEncodedSize size;
+    write(size);
+    if (size.total > byte_budget)
         throw std::invalid_argument("Adaptive tile packet exceeds byte budget.");
+    if (allocation)
+        allocation->add(size.total);
+    Writer w;
+    w.data.reserve(size.total);
+    if (allocation)
+        allocation->add(w.data.capacity() - size.total);
+    write(w);
     return std::move(w.data);
 }
 AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget)
@@ -225,7 +278,6 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
     diagnostics.stage = "support_exchange";
     auto incoming = consume_owner_packets(std::move(requests), comm, budget);
     diagnostics.stage = "support_decode_overlay";
-    std::map<AdaptiveBytes, std::vector<Occurrence>> groups;
     std::vector<OwnerPacket> replies;
     std::uint64_t authority_faces = 0;
     std::map<AdaptiveBytes, std::uint64_t> face_identity_order;
@@ -233,184 +285,255 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         [&]
         {
             Budget allocation{budget};
-            IdentityBudget identities;
             allocation.add(incoming.packets.capacity() * sizeof(OwnerPacket));
             for (const auto& packet : incoming.packets)
                 allocation.add(packet.bytes.capacity());
-            for (auto& packet : incoming.packets)
+            // The stable ordinal tie-break retains the original occurrence order
+            // within each complete support; full bytes, never hashes, form groups.
+            if (incoming.packets.size() > budget / sizeof(std::size_t))
+                throw std::invalid_argument("Authority packet-index budget exhausted.");
+            allocation.add(incoming.packets.size() * sizeof(std::size_t));
+            std::vector<std::size_t> packet_order(incoming.packets.size());
+            allocation.add((packet_order.capacity() - packet_order.size()) * sizeof(std::size_t));
+            for (std::size_t i = 0; i < packet_order.size(); ++i)
             {
-                const auto encoded_capacity = packet.bytes.capacity();
-                allocation.add(sizeof(Occurrence));
-                Reader r{packet.bytes};
-                read_geometry_record_header(r, GeometryRecordKind::SurfaceRequest);
-                auto support = r.bytes();
-                Occurrence entry;
-                entry.domain = r.bytes();
-                entry.cell = decode_adaptive_key(r.bytes());
-                entry.native_face = r.word();
-                entry.image = PLIC::decode_identity<DisplacementIdentity>(r.bytes(), budget);
-                auto nesting = r.word();
-                if (nesting > 2)
-                    throw std::invalid_argument("Invalid native face nesting policy.");
-                entry.native_whole = nesting;
-                auto whole = r.bytes();
-                if (nesting == 2 && !whole.empty())
-                    throw std::invalid_argument("Shared native whole-face proof has a duplicate payload.");
-                if (!whole.empty())
-                    entry.whole_geometry =
-                        PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole, budget)->translated(entry.image);
-                entry.rank = packet.peer;
-                auto orientation = r.word(), exterior = r.word();
-                if (orientation > 1 || exterior > 1 || authority(support, comm->getSize()) != comm->getRank())
-                    throw std::invalid_argument("Invalid authority support routing.");
-                entry.orientation = orientation ? 1 : -1;
-                entry.exterior = exterior;
-                auto name = r.bytes();
-                entry.boundary.assign(name.begin(), name.end());
-                entry.face =
-                    PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), budget)->translated(entry.image);
-                if (nesting == 2)
-                    entry.whole_geometry = entry.face;
-                if (entry.native_whole && !entry.whole_geometry)
-                    throw std::invalid_argument("Missing native whole-face authority proof.");
-                if (entry.whole_geometry && !entry.whole_geometry->contains(*entry.face))
-                    throw std::invalid_argument("Rewritten join lies outside its actual native face.");
-                r.done();
-                identities.face(allocation, *entry.face);
-                if (entry.whole_geometry && entry.whole_geometry != entry.face)
-                    identities.face(allocation, *entry.whole_geometry);
-                allocation.add(entry.domain.capacity() + entry.image.payload_bytes() + entry.boundary.capacity() +
-                               encode_adaptive_key(entry.cell).size());
-                auto [position, inserted] = groups.try_emplace(std::move(support));
-                if (inserted)
-                    allocation.add(
-                        sizeof(decltype(groups)::value_type) + position->first.capacity() + 4 * sizeof(void*));
-                allocation.append_capacity(position->second);
-                position->second.push_back(std::move(entry));
-                std::vector<char>().swap(packet.bytes);
-                allocation.used -= encoded_capacity;
+                (void) support_prefix(incoming.packets[i].bytes);
+                packet_order[i] = i;
             }
+            std::sort(packet_order.begin(), packet_order.end(),
+                [&](std::size_t a, std::size_t b)
+                {
+                    const auto first = support_prefix(incoming.packets[a].bytes);
+                    const auto second = support_prefix(incoming.packets[b].bytes);
+                    if (std::equal(first.begin(), first.end(), second.begin(), second.end()))
+                        return a < b;
+                    return std::lexicographical_compare(first.begin(), first.end(), second.begin(), second.end());
+                });
             std::size_t tiles = 0;
-            for (const auto& [support, entries] : groups)
+            for (std::size_t begin = 0; begin < packet_order.size();)
             {
-                if (entries.empty())
-                    continue;
-                const bool exterior = entries[0].exterior;
-                const auto boundary = entries[0].boundary;
-                allocation.add(entries.size() * sizeof(std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>));
-                // Charge the maximum retained overlap table before quadratic pair work.
-                if (entries.size() &&
-                    entries.size() > budget / entries.size() / sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>))
-                    throw std::invalid_argument("Authority overlap budget exhausted.");
-                allocation.add(entries.size() * entries.size() * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
-                std::vector<std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> coverage(entries.size());
-                std::set<AdaptiveCellKey> unique;
-                for (std::size_t i = 0; i < entries.size(); ++i)
+                // Determine the entire equal-key run while all compared payloads
+                // are live. No one support is split into independently checked batches.
+                const auto prefix = support_prefix(incoming.packets[packet_order[begin]].bytes);
+                auto end = begin + 1;
+                while (end < packet_order.size())
                 {
-                    const auto& a = entries[i];
-                    if (a.domain.empty() || a.domain != entries[0].domain || a.exterior != exterior ||
-                        a.boundary != boundary || !unique.insert(a.cell).second || (!exterior && !boundary.empty()))
-                        throw std::invalid_argument("Inconsistent support membership.");
-                    for (std::size_t j = 0; j < i; ++j)
-                        if (a.orientation == entries[j].orientation && a.face->intersection(*entries[j].face))
-                            throw std::invalid_argument("Same-side support overlap.");
+                    const auto next = support_prefix(incoming.packets[packet_order[end]].bytes);
+                    if (!std::equal(prefix.begin(), prefix.end(), next.begin(), next.end()))
+                        break;
+                    ++end;
                 }
-                auto emit =
-                    [&](std::size_t i, std::optional<std::size_t> j, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face)
+                std::size_t group_bytes = 0;
+                auto lease = [&](std::size_t bytes)
                 {
-                    if (tiles >= tile_budget)
-                        throw std::invalid_argument("Authority tile budget exhausted.");
-                    ++tiles;
-                    AdaptiveTile tile;
-                    tile.face_gid = authority_faces;
-                    tile.surface = support;
-                    tile.domain = entries[i].domain;
-                    tile.geometry = std::move(face);
-                    auto first_shift = entries[i].image, second_shift = j ? entries[*j].image : DisplacementIdentity{};
-                    tile.first = entries[i].cell;
-                    tile.first_owner = entries[i].rank;
-                    tile.first_native_face = entries[i].native_face;
-                    tile.exterior = exterior;
-                    tile.boundary = boundary;
-                    if (j)
+                    allocation.add(bytes);
+                    group_bytes += bytes;
+                };
+                {
+                    IdentityBudget identities;
+                    auto face_lease = [&](const auto& face)
                     {
-                        tile.second = entries[*j].cell;
-                        tile.second_owner = entries[*j].rank;
-                        tile.second_native_face = entries[*j].native_face;
-                        if (*tile.second < tile.first)
+                        const auto before = allocation.used;
+                        identities.face(allocation, *face);
+                        group_bytes += allocation.used - before;
+                    };
+                    lease(prefix.size());
+                    const AdaptiveBytes support(prefix.begin(), prefix.end());
+                    lease(support.capacity() - support.size());
+                    if (end - begin > budget / sizeof(Occurrence))
+                        throw std::invalid_argument("Authority occurrence budget exhausted.");
+                    lease((end - begin) * sizeof(Occurrence));
+                    std::vector<Occurrence> entries;
+                    entries.reserve(end - begin);
+                    lease((entries.capacity() - (end - begin)) * sizeof(Occurrence));
+                    for (auto cursor = begin; cursor < end; ++cursor)
+                    {
+                        auto& packet = incoming.packets[packet_order[cursor]];
+                        const auto encoded_capacity = packet.bytes.capacity();
+                        // Retain the prior conservative per-record admission in
+                        // addition to the separately leased vector allocation.
+                        lease(sizeof(Occurrence));
+                        Reader r{packet.bytes};
+                        read_geometry_record_header(r, GeometryRecordKind::SurfaceRequest);
+                        r.offset += 8 + support.size();
+                        Occurrence entry;
+                        entry.domain = r.bytes();
+                        entry.cell = decode_adaptive_key(r.bytes());
+                        entry.native_face = r.word();
+                        entry.image = PLIC::decode_identity<DisplacementIdentity>(r.bytes(), budget);
+                        auto nesting = r.word();
+                        if (nesting > 2)
+                            throw std::invalid_argument("Invalid native face nesting policy.");
+                        entry.native_whole = nesting;
+                        auto whole = r.bytes();
+                        if (nesting == 2 && !whole.empty())
+                            throw std::invalid_argument("Shared native whole-face proof has a duplicate payload.");
+                        if (!whole.empty())
+                            entry.whole_geometry =
+                                PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole, budget)->translated(
+                                    entry.image);
+                        entry.rank = packet.peer;
+                        auto orientation = r.word(), exterior = r.word();
+                        if (orientation > 1 || exterior > 1 || authority(support, comm->getSize()) != comm->getRank())
+                            throw std::invalid_argument("Invalid authority support routing.");
+                        entry.orientation = orientation ? 1 : -1;
+                        entry.exterior = exterior;
+                        auto name = r.bytes();
+                        entry.boundary.assign(name.begin(), name.end());
+                        entry.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), budget)->translated(
+                            entry.image);
+                        if (nesting == 2)
+                            entry.whole_geometry = entry.face;
+                        if (entry.native_whole && !entry.whole_geometry)
+                            throw std::invalid_argument("Missing native whole-face authority proof.");
+                        if (entry.whole_geometry && !entry.whole_geometry->contains(*entry.face))
+                            throw std::invalid_argument("Rewritten join lies outside its actual native face.");
+                        r.done();
+                        face_lease(entry.face);
+                        if (entry.whole_geometry && entry.whole_geometry != entry.face)
+                            face_lease(entry.whole_geometry);
+                        lease(entry.domain.capacity() + entry.image.payload_bytes() + entry.boundary.capacity() +
+                              encode_adaptive_key(entry.cell).size());
+                        entries.push_back(std::move(entry));
+                        std::vector<char>().swap(packet.bytes);
+                        allocation.used -= encoded_capacity;
+                    }
+                    const bool exterior = entries[0].exterior;
+                    const auto& boundary = entries[0].boundary;
+                    lease(entries.size() * sizeof(std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>));
+                    // Charge the maximum retained overlap table before quadratic pair work.
+                    if (entries.size() && entries.size() > budget / entries.size() /
+                                                               sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>))
+                        throw std::invalid_argument("Authority overlap budget exhausted.");
+                    lease(entries.size() * entries.size() * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
+                    std::vector<std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> coverage(entries.size());
+                    lease((coverage.capacity() - coverage.size()) * sizeof(decltype(coverage)::value_type));
+                    for (auto& row : coverage)
+                    {
+                        row.reserve(entries.size());
+                        lease(
+                            (row.capacity() - entries.size()) * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
+                    }
+                    std::set<AdaptiveCellKey> unique;
+                    for (std::size_t i = 0; i < entries.size(); ++i)
+                    {
+                        const auto& a = entries[i];
+                        if (a.domain.empty() || a.domain != entries[0].domain || a.exterior != exterior ||
+                            a.boundary != boundary || !unique.insert(a.cell).second || (!exterior && !boundary.empty()))
+                            throw std::invalid_argument("Inconsistent support membership.");
+                        lease(sizeof(AdaptiveCellKey) + 4 * sizeof(void*) + encode_adaptive_key(a.cell).size());
+                        for (std::size_t j = 0; j < i; ++j)
+                            if (a.orientation == entries[j].orientation && a.face->intersection(*entries[j].face))
+                                throw std::invalid_argument("Same-side support overlap.");
+                    }
+                    auto emit = [&](std::size_t i, std::optional<std::size_t> j,
+                                    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face)
+                    {
+                        if (tiles >= tile_budget)
+                            throw std::invalid_argument("Authority tile budget exhausted.");
+                        ++tiles;
+                        AdaptiveTile tile;
+                        tile.face_gid = authority_faces;
+                        tile.surface = support;
+                        tile.domain = entries[i].domain;
+                        tile.geometry = std::move(face);
+                        auto first_shift = entries[i].image,
+                             second_shift = j ? entries[*j].image : DisplacementIdentity{};
+                        tile.first = entries[i].cell;
+                        tile.first_owner = entries[i].rank;
+                        tile.first_native_face = entries[i].native_face;
+                        tile.exterior = exterior;
+                        tile.boundary = boundary;
+                        if (j)
                         {
-                            std::swap(tile.first, *tile.second);
-                            std::swap(tile.first_owner, tile.second_owner);
-                            std::swap(tile.first_native_face, tile.second_native_face);
-                            std::swap(first_shift, second_shift);
-                            tile.geometry = tile.geometry->reversed();
+                            tile.second = entries[*j].cell;
+                            tile.second_owner = entries[*j].rank;
+                            tile.second_native_face = entries[*j].native_face;
+                            if (*tile.second < tile.first)
+                            {
+                                std::swap(tile.first, *tile.second);
+                                std::swap(tile.first_owner, tile.second_owner);
+                                std::swap(tile.first_native_face, tile.second_native_face);
+                                std::swap(first_shift, second_shift);
+                                tile.geometry = tile.geometry->reversed();
+                            }
+                        }
+                        Writer identity;
+                        identity.bytes(support);
+                        auto forward = PLIC::canonical_face_key(*tile.geometry),
+                             reverse = PLIC::canonical_face_key(*tile.geometry->reversed());
+                        identity.bytes(std::min(forward, reverse));
+                        tile.identity = std::move(identity.data);
+                        allocation.add(
+                            tile.identity.size() + sizeof(AdaptiveBytes) + sizeof(std::uint64_t) + 4 * sizeof(void*));
+                        if (!face_identity_order.emplace(tile.identity, authority_faces++).second)
+                            throw std::invalid_argument("Duplicate canonical authority face identity.");
+                        if (j)
+                        {
+                            tile.second_image_identity =
+                                PLIC::displacement_difference<ArithmeticMode::Ordinary>(second_shift, first_shift);
+                            tile.second_image =
+                                PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
+                        }
+                        tile.geometry = tile.geometry->translated(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, first_shift));
+                        auto bytes = encode_tile(tile, budget, &allocation);
+                        allocation.append_capacity(replies);
+                        if (j && tile.second_owner != tile.first_owner)
+                        {
+                            allocation.add(bytes.size());
+                            AdaptiveBytes first_bytes(bytes);
+                            allocation.add(first_bytes.capacity() - first_bytes.size());
+                            replies.push_back({tile.first_owner, std::move(first_bytes)});
+                            allocation.append_capacity(replies);
+                            replies.push_back({tile.second_owner, std::move(bytes)});
+                        }
+                        else
+                            replies.push_back({tile.first_owner, std::move(bytes)});
+                    };
+                    if (exterior)
+                    {
+                        for (std::size_t i = 0; i < entries.size(); ++i)
+                        {
+                            if (entries[i].orientation != entries[0].orientation)
+                                throw std::invalid_argument("Exterior support has opposite side.");
+                            emit(i, {}, entries[i].face);
                         }
                     }
-                    Writer identity;
-                    identity.bytes(support);
-                    auto forward = PLIC::canonical_face_key(*tile.geometry),
-                         reverse = PLIC::canonical_face_key(*tile.geometry->reversed());
-                    identity.bytes(std::min(forward, reverse));
-                    tile.identity = std::move(identity.data);
-                    allocation.add(
-                        tile.identity.size() + sizeof(AdaptiveBytes) + sizeof(std::uint64_t) + 3 * sizeof(void*));
-                    if (!face_identity_order.emplace(tile.identity, authority_faces++).second)
-                        throw std::invalid_argument("Duplicate canonical authority face identity.");
-                    if (j)
+                    else
                     {
-                        tile.second_image_identity =
-                            PLIC::displacement_difference<ArithmeticMode::Ordinary>(second_shift, first_shift);
-                        tile.second_image =
-                            PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
-                    }
-                    tile.geometry = tile.geometry->translated(
-                        PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, first_shift));
-                    auto bytes = encode_tile(tile, budget);
-                    allocation.packet(bytes.size());
-                    replies.push_back({tile.first_owner, bytes});
-                    if (j && tile.second_owner != tile.first_owner)
-                    {
-                        allocation.packet(bytes.size());
-                        replies.push_back({tile.second_owner, std::move(bytes)});
-                    }
-                };
-                if (exterior)
-                {
-                    for (std::size_t i = 0; i < entries.size(); ++i)
-                    {
-                        if (entries[i].orientation != entries[0].orientation)
-                            throw std::invalid_argument("Exterior support has opposite side.");
-                        emit(i, {}, entries[i].face);
+                        for (std::size_t i = 0; i < entries.size(); ++i)
+                            if (entries[i].orientation > 0)
+                                for (std::size_t j = 0; j < entries.size(); ++j)
+                                    if (entries[j].orientation < 0)
+                                    {
+                                        auto face = entries[i].face->intersection(*entries[j].face);
+                                        if (!face)
+                                            continue;
+                                        if (entries[i].native_whole && entries[j].native_whole &&
+                                            !face->equivalent(*entries[i].whole_geometry) &&
+                                            !face->equivalent(*entries[j].whole_geometry))
+                                            throw std::invalid_argument(
+                                                "Crossed procedural traces need compatible native "
+                                                "closure; mortar tiles are not admitted.");
+                                        if (!entries[i].face->oppositely_oriented(*entries[j].face))
+                                            throw std::invalid_argument("Interior support normals disagree.");
+                                        face_lease(face);
+                                        coverage[i].push_back(face);
+                                        coverage[j].push_back(face);
+                                        emit(i, j, std::move(face));
+                                    }
+                        for (std::size_t i = 0; i < entries.size(); ++i)
+                            entries[i].face->certify_partition(coverage[i]);
                     }
                 }
-                else
-                {
-                    for (std::size_t i = 0; i < entries.size(); ++i)
-                        if (entries[i].orientation > 0)
-                            for (std::size_t j = 0; j < entries.size(); ++j)
-                                if (entries[j].orientation < 0)
-                                {
-                                    auto face = entries[i].face->intersection(*entries[j].face);
-                                    if (!face)
-                                        continue;
-                                    if (entries[i].native_whole && entries[j].native_whole &&
-                                        !face->equivalent(*entries[i].whole_geometry) &&
-                                        !face->equivalent(*entries[j].whole_geometry))
-                                        throw std::invalid_argument("Crossed procedural traces need compatible native "
-                                                                    "closure; mortar tiles are not admitted.");
-                                    if (!entries[i].face->oppositely_oriented(*entries[j].face))
-                                        throw std::invalid_argument("Interior support normals disagree.");
-                                    coverage[i].push_back(face);
-                                    coverage[j].push_back(face);
-                                    emit(i, j, std::move(face));
-                                }
-                    for (std::size_t i = 0; i < entries.size(); ++i)
-                        entries[i].face->certify_partition(coverage[i]);
-                }
+                // Only these leased objects have died. Incoming capacity,
+                // unconsumed packets, indices, identities and replies stay charged.
+                allocation.used -= group_bytes;
+                begin = end;
             }
         });
-    // Overlay occurrences are dead once their complete canonical tiles exist.
-    decltype(groups)().swap(groups);
+    // Each complete support was destroyed after encoding its owned tile replies.
     std::vector<OwnerPacket>().swap(incoming.packets);
     std::vector<std::uint64_t> sorted_face_ordinals;
     collective(*comm,
@@ -527,7 +650,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
     // retain local incidence payload rather than broadcasting the whole line.
     struct ExpectedEdge
     {
-        AdaptiveBytes key;
+        const AdaptiveBytes* key;
         std::size_t tile;
         bool received = false;
         DisplacementIdentity image;
@@ -539,50 +662,94 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
     for (unsigned propagation = 0; propagation < 64; ++propagation)
     {
         int local_changed = 0, changed = 0;
+        // Stable, complete (domain, exact line) keys outlive all subscriptions
+        // and their reply checks, without one owned byte copy per incidence.
+        std::set<AdaptiveBytes> expected_keys;
         std::vector<ExpectedEdge> expected;
         requests.clear();
+        diagnostics.stage = "edge_subscriptions";
         collective(*comm,
             [&]
             {
                 Budget allocation{budget};
+                allocation.add(requests.capacity() * sizeof(OwnerPacket));
+                allocation.add(expected.capacity() * sizeof(ExpectedEdge));
                 for (std::size_t t = 0; t < result.size(); ++t)
                 {
                     auto subscribe = [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry,
                                          const DisplacementIdentity& image)
                     {
+                        BudgetLease face_scratch{&allocation};
                         auto lines = geometry->edge_support_identities();
+                        face_scratch.add(lines.capacity() * sizeof(PLIC::LineIdentity<ArithmeticMode::Ordinary>));
                         auto points = geometry->vertex_identities();
+                        face_scratch.add(points.capacity() * sizeof(PointIdentity));
                         if (lines.size() != points.size())
                             throw std::invalid_argument("Invalid tile edge incidence.");
                         for (std::size_t e = 0; e < lines.size(); ++e)
                         {
-                            allocation.add(sizeof(ExpectedEdge) + sizeof(OwnerPacket) + 48 + image.payload_bytes());
-                            allocation.add(result[t].domain.size() + PLIC::canonical_key_size(lines[e]) +
-                                           PLIC::encoded_identity_size(points[e]) + PLIC::encoded_identity_size(points[(e + 1) % points.size()]));
+                            BudgetLease key_scratch{&allocation};
+                            BudgetLease writer_scratch{&allocation};
+                            // Preserve the conservative admission for the two
+                            // Writer objects while both per-edge objects live.
+                            writer_scratch.add(48);
+                            const auto line_key = PLIC::canonical_key(lines[e]);
+                            key_scratch.add(line_key.capacity());
+                            TileEncodedSize key_size;
+                            key_size.bytes(result[t].domain);
+                            key_size.bytes(line_key);
+                            key_scratch.add(key_size.total);
                             Writer support;
+                            support.data.reserve(key_size.total);
+                            key_scratch.add(support.data.capacity() - key_size.total);
                             support.bytes(result[t].domain);
-                            support.bytes(PLIC::canonical_key(lines[e]));
+                            support.bytes(line_key);
                             auto key = std::move(support.data);
+                            auto position = expected_keys.find(key);
+                            if (position == expected_keys.end())
+                            {
+                                allocation.add(sizeof(AdaptiveBytes) + 4 * sizeof(void*));
+                                position = expected_keys.insert(std::move(key)).first;
+                                // The moved allocation now belongs to the key
+                                // pool. Transfer its charge without releasing it.
+                                key_scratch.bytes = line_key.capacity();
+                            }
+                            const auto& canonical_key = *position;
+                            const auto first = PLIC::encode_identity(points[e]);
+                            const auto last = PLIC::encode_identity(points[(e + 1) % points.size()]);
+                            writer_scratch.add(first.capacity() + last.capacity());
+                            TileEncodedSize request_size;
+                            write_geometry_record_header(request_size, GeometryRecordKind::EdgeRequest);
+                            request_size.bytes(canonical_key);
+                            request_size.word(expected.size());
+                            request_size.bytes(first);
+                            request_size.bytes(last);
+                            allocation.add(request_size.total);
                             Writer w;
-                            w.data.reserve(32 + geometry_record_header_bytes + key.size() +
-                                           PLIC::encoded_identity_size(points[e]) +
-                                           PLIC::encoded_identity_size(points[(e + 1) % points.size()]));
+                            w.data.reserve(request_size.total);
+                            allocation.add(w.data.capacity() - request_size.total);
                             write_geometry_record_header(w, GeometryRecordKind::EdgeRequest);
-                            w.bytes(key);
+                            w.bytes(canonical_key);
                             w.word(expected.size());
-                            w.bytes(PLIC::encode_identity(points[e]));
-                            w.bytes(PLIC::encode_identity(points[(e + 1) % points.size()]));
-                            allocation.add(w.data.size() + key.size());
-                            requests.push_back({authority(key, comm->getSize()), std::move(w.data)});
-                            expected.push_back({std::move(key), t, false, image});
+                            w.bytes(first);
+                            w.bytes(last);
+                            allocation.append_capacity(requests);
+                            allocation.append_capacity(expected);
+                            DisplacementIdentity retained_image(image);
+                            requests.push_back({authority(canonical_key, comm->getSize()), std::move(w.data)});
+                            expected.push_back({&canonical_key, t, false, std::move(retained_image)});
                         }
                     };
                     subscribe(result[t].geometry, {});
                     if (!result[t].second_image_identity.is_zero())
-                        subscribe(
-                            result[t].geometry->translated(PLIC::displacement_difference<ArithmeticMode::Ordinary>(
-                                {}, result[t].second_image_identity)),
-                            result[t].second_image_identity);
+                    {
+                        BudgetLease image_scratch{&allocation};
+                        auto image_geometry = result[t].geometry->translated(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                {}, result[t].second_image_identity));
+                        image_scratch.add(image_geometry->storage_bytes());
+                        subscribe(image_geometry, result[t].second_image_identity);
+                    }
                 }
             });
         if (statistics)
@@ -630,7 +797,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     r.done();
                     auto [position, inserted] = lines.try_emplace(std::move(key));
                     if (inserted)
-                        allocation.add(sizeof(Line) + position->first.capacity() + 4 * sizeof(void*));
+                        allocation.add(
+                            sizeof(decltype(lines)::value_type) + position->first.capacity() + 4 * sizeof(void*));
                     auto& line = position->second;
                     auto intern = [&](PointIdentity point)
                     {
@@ -656,13 +824,30 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     std::vector<char>().swap(packet.bytes);
                     allocation.used -= encoded_capacity;
                 }
+                // Every request has passed routing, ordinal uniqueness and
+                // complete framing checks. Endpoints now belong to line nodes;
+                // neither the empty records nor the completed audit are used below.
+                const auto input_records = incoming.packets.capacity() * sizeof(OwnerPacket);
+                std::vector<OwnerPacket>().swap(incoming.packets);
+                allocation.used -= input_records;
+                const auto audit_nodes = unique.size() * (sizeof(decltype(unique)::value_type) + 4 * sizeof(void*));
+                decltype(unique)().swap(unique);
+                allocation.used -= audit_nodes;
                 for (const auto& [key, line] : lines)
                 {
+                    BudgetLease index_scratch{&allocation};
                     // The immutable endpoint index contains each actual point
                     // once. Subscriber references above retain no endpoint copy.
-                    allocation.add(line.points.size() * sizeof(PointIdentity));
+                    index_scratch.add(line.points.size() * sizeof(PointIdentity));
                     for (const auto& point : line.points)
-                        allocation.add(point.payload_bytes() + 4 * PLIC::encoded_identity_size(point) + 256);
+                    {
+                        TileEncodedSize bound;
+                        bound.add(point.payload_bytes());
+                        for (unsigned copy = 0; copy < 4; ++copy)
+                            bound.add(PLIC::encoded_identity_size(point));
+                        bound.add(256);
+                        index_scratch.add(bound.total);
+                    }
                     // Preserve first-arrival identity selection if the geometry
                     // index recognizes equivalent encodings of the same point.
                     std::vector<PointIdentity> indexed_points;
@@ -670,8 +855,17 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     for (const auto* point : line.point_order)
                         indexed_points.push_back(*point);
                     PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(indexed_points);
-                    // The lease outlives the workspace and keeps its capacity
-                    // charged across every query, including clear().
+                    TileEncodedSize actual_index;
+                    actual_index.add(indexed_points.capacity() * sizeof(PointIdentity));
+                    for (const auto& point : indexed_points)
+                        actual_index.add(point.payload_bytes());
+                    actual_index.add(index.storage_bytes());
+                    if (actual_index.total > index_scratch.bytes)
+                        index_scratch.add(actual_index.total - index_scratch.bytes);
+                    // One bounded hit buffer serves the complete line. Charge
+                    // retained capacity once, even when a query clears its hits.
+                    // This lease outlives the scratch, whose pin must disappear
+                    // before the immutable index storage lease is released.
                     BudgetLease query_storage{&allocation};
                     PLIC::OrdinaryEdgeQueryScratch points;
                     const auto query_peak = points.reserve_required_peak(line.points.size());
@@ -683,16 +877,25 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     for (const auto& subscriber : line.subscribers)
                     {
                         diagnostics.edge_work += line.points.size();
+                        BudgetLease query_scratch{&allocation};
                         ++diagnostics.edge_query_calls;
                         const auto scanned_before = points.scanned_points();
                         index.closed_segment(*subscriber.first, *subscriber.last, points);
                         diagnostics.edge_query_scanned += points.scanned_points() - scanned_before;
-                        std::size_t size = 24 + geometry_record_header_bytes + key.size();
+                        TileEncodedSize size;
+                        write_geometry_record_header(size, GeometryRecordKind::EdgeReply);
+                        size.bytes(key);
+                        size.word(subscriber.ordinal);
+                        size.word(points.size());
                         for (std::size_t p = 0; p < points.size(); ++p)
-                            size += 8 + PLIC::encoded_identity_size(points.point(p));
-                        allocation.packet(size);
+                            size.add(8 + PLIC::encoded_identity_size(points.point(p)));
+                        // Keep the conservative temporary OwnerPacket object
+                        // admission distinct from the retained vector slots.
+                        query_scratch.add(sizeof(OwnerPacket));
+                        allocation.add(size.total);
                         Writer w;
-                        w.data.reserve(size);
+                        w.data.reserve(size.total);
+                        allocation.add(w.data.capacity() - size.total);
                         write_geometry_record_header(w, GeometryRecordKind::EdgeReply);
                         w.bytes(key);
                         w.word(subscriber.ordinal);
@@ -701,7 +904,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                             w.bytes(PLIC::encode_identity(points.point(p)));
                         allocation.append_capacity(replies);
                         replies.push_back({subscriber.rank, std::move(w.data)});
-                        // Replies own their bytes before the borrowed hits reset.
+                        // Published replies now own every byte they reference.
                         points.clear();
                     }
                     points.release();
@@ -715,39 +918,86 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             [&]
             {
                 Budget allocation{budget};
+                const auto returned_records = returned.packets.capacity() * sizeof(OwnerPacket);
+                allocation.add(returned_records);
+                for (const auto& packet : returned.packets)
+                    allocation.add(packet.bytes.capacity());
+                TileEncodedSize expected_storage;
+                expected_storage.add(expected.capacity() * sizeof(ExpectedEdge));
+                for (const auto& edge : expected)
+                    expected_storage.add(edge.image.payload_bytes());
+                allocation.add(expected_storage.total);
+                TileEncodedSize key_storage;
+                for (const auto& key : expected_keys)
+                {
+                    key_storage.add(sizeof(AdaptiveBytes) + 4 * sizeof(void*));
+                    key_storage.add(key.capacity());
+                }
+                allocation.add(key_storage.total);
                 allocation.add(result.size() * sizeof(std::vector<PointIdentity>));
                 std::vector<std::vector<PointIdentity>> points(result.size());
-                for (const auto& packet : returned.packets)
+                allocation.add((points.capacity() - points.size()) * sizeof(decltype(points)::value_type));
+                for (auto& packet : returned.packets)
                 {
-                    allocation.add(packet.bytes.size());
-                    Reader r{packet.bytes};
-                    read_geometry_record_header(r, GeometryRecordKind::EdgeReply);
-                    auto key = r.bytes();
-                    auto ordinal = r.word(), n = r.word();
-                    if (ordinal >= expected.size() || n > packet.bytes.size() / 8)
-                        throw std::invalid_argument("Invalid edge authority response.");
-                    if (statistics)
+                    const auto encoded_capacity = packet.bytes.capacity();
                     {
-                        statistics->edge_reply_bytes += packet.bytes.size();
-                        statistics->edge_reply_points += n;
+                        BudgetLease packet_scratch{&allocation};
+                        Reader r{packet.bytes};
+                        read_geometry_record_header(r, GeometryRecordKind::EdgeReply);
+                        auto key = r.bytes();
+                        packet_scratch.add(key.capacity());
+                        auto ordinal = r.word(), n = r.word();
+                        if (ordinal >= expected.size() || n > packet.bytes.size() / 8)
+                            throw std::invalid_argument("Invalid edge authority response.");
+                        if (statistics)
+                        {
+                            statistics->edge_reply_bytes += packet.bytes.size();
+                            statistics->edge_reply_points += n;
+                        }
+                        auto& edge = expected[ordinal];
+                        if (edge.received || key != *edge.key || packet.peer != authority(key, comm->getSize()))
+                            throw std::invalid_argument("Foreign or duplicate edge authority response.");
+                        edge.received = true;
+                        for (std::uint64_t i = 0; i < n; ++i)
+                        {
+                            BudgetLease point_scratch{&allocation};
+                            point_scratch.add(sizeof(PointIdentity));
+                            auto point = PLIC::decode_identity<PointIdentity>(r.bytes(), budget);
+                            auto& row = points[edge.tile];
+                            if (edge.image.is_zero())
+                            {
+                                allocation.add(point.payload_bytes());
+                                allocation.append_capacity(row);
+                                row.push_back(std::move(point));
+                            }
+                            else
+                            {
+                                point_scratch.add(point.payload_bytes());
+                                point_scratch.add(sizeof(PointIdentity));
+                                auto translated = PLIC::point_translated<ArithmeticMode::Ordinary>(point, edge.image);
+                                allocation.add(translated.payload_bytes());
+                                allocation.append_capacity(row);
+                                row.push_back(std::move(translated));
+                            }
+                        }
+                        r.done();
                     }
-                    auto& edge = expected[ordinal];
-                    if (edge.received || key != edge.key || packet.peer != authority(key, comm->getSize()))
-                        throw std::invalid_argument("Foreign or duplicate edge authority response.");
-                    edge.received = true;
-                    for (std::uint64_t i = 0; i < n; ++i)
-                    {
-                        auto point = PLIC::decode_identity<PointIdentity>(r.bytes(), budget);
-                        allocation.add(point.payload_bytes() + sizeof(PointIdentity));
-                        points[edge.tile].push_back(
-                            edge.image.is_zero() ? std::move(point)
-                                                 : PLIC::point_translated<ArithmeticMode::Ordinary>(point, edge.image));
-                    }
-                    r.done();
+                    // Every value has detached and all framing/receipt checks
+                    // for this packet have passed. Its Reader is also dead.
+                    std::vector<char>().swap(packet.bytes);
+                    allocation.used -= encoded_capacity;
                 }
                 for (const auto& edge : expected)
                     if (!edge.received)
                         throw std::invalid_argument("Missing edge authority response.");
+                // No geometry enrichment uses packet records or ExpectedEdge
+                // controls. Destroy pointers/images before their full-key pool.
+                std::vector<OwnerPacket>().swap(returned.packets);
+                allocation.used -= returned_records;
+                std::vector<ExpectedEdge>().swap(expected);
+                allocation.used -= expected_storage.total;
+                decltype(expected_keys)().swap(expected_keys);
+                allocation.used -= key_storage.total;
                 for (std::size_t i = 0; i < result.size(); ++i)
                 {
                     const auto before = result[i].geometry->vertex_identities().size();

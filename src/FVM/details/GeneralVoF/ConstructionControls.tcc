@@ -112,7 +112,7 @@ AMR::AdaptiveBytes node_record(const GeneralVoF::Data& data, std::uint64_t node,
     writer.word(walls.size());
     for (const auto& wall : walls)
     {
-        writer.bytes(wall.identity);
+        writer.bytes(data.topology->wall_identity(wall));
         point(writer, wall.finite_normal);
     }
     return std::move(writer.data);
@@ -121,7 +121,7 @@ inline AMR::AdaptiveBytes face_record(const GeneralVoF::Data& data, std::uint64_
     PLIC::DynamicGeometryValue control, long double allowance, double timestep,
     const PLIC::GeometryPacketContext& context)
 {
-    const auto& face = data.topology->construction_faces.at(id);
+    const auto& face = data.topology->construction_face(id);
     wire::Writer writer;
     header(writer, 1, id, context, data.options.arithmetic_mode);
     writer.bytes(face.domain);
@@ -145,7 +145,7 @@ template<ArithmeticMode Mode>
 std::pair<PLIC::DynamicGeometryValue, long double> accept_face_record(const GeneralVoF::Data& data, std::uint64_t id,
     std::span<const char> bytes, double timestep, const PLIC::GeometryPacketContext& context)
 {
-    const auto& face = data.topology->construction_faces.at(id);
+    const auto& face = data.topology->construction_face(id);
     wire::Reader reader{bytes};
     if (header(reader, context, Mode) != std::pair<std::uint64_t, std::uint64_t>{1, id} ||
         reader.bytes() != face.domain || reader.bytes() != face.surface || reader.bytes() != face.identity ||
@@ -244,7 +244,7 @@ inline void admit_root(const GeneralVoF::Data& data, const PLIC::ConstructionRoo
     }
     if (root.kind != Kind::Sweep || root.revision != 0 || !data.topology->construction_faces.contains(root.entity))
         throw std::invalid_argument("Finite VoF construction root is outside the admitted native halo.");
-    const auto& face = data.topology->construction_faces.at(root.entity);
+    const auto& face = data.topology->construction_face(root.entity);
     if (face.first != recipient && (!face.second || *face.second != recipient))
         throw std::invalid_argument("Finite VoF construction sweep is not incident to its authenticated recipient.");
     if (face.node_gids.size() > data.options.sweep.maximum_simplices / 4 || root.slot >= 3 * face.node_gids.size())

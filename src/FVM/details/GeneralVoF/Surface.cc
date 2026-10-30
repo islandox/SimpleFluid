@@ -169,7 +169,7 @@ std::vector<GeneralVoFFaceInterface> GeneralVoF::face_interfaces() const
             if (arithmetic_mode() != ArithmeticMode::Ordinary)
                 throw std::invalid_argument("Explicit pure-cell face surfaces require Ordinary arithmetic.");
             wire::Budget budget{data_->options.byte_budget};
-            for (const auto& tile : data_->topology->surface_tiles)
+            for (const auto& tile : data_->topology->surface_tiles())
             {
                 if (tile.exterior || !tile.second)
                     continue;
@@ -353,7 +353,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 mixed.emplace(key, patch.key);
                 append(std::move(patch));
             }
-            for (const auto& tile : data_->topology->surface_tiles)
+            for (const auto& tile : data_->topology->surface_tiles())
             {
                 if (tile.exterior || !tile.second)
                     continue;

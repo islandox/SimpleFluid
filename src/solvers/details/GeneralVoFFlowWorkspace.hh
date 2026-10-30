@@ -119,6 +119,17 @@ public:
     }
 
 private:
+    /** Ordinary physical cell momentum is the predictor authority. Face input
+     * supplies the original physical residual scale, not an independent force.
+     * The compatible solve publishes one shared canonical rate and its cell
+     * moment; prescribed-rate arithmetic fixtures must supply matching momentum. */
+    void project_compatible(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
+        std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
+        const std::vector<double>& kappa, double dt, double sigma, const VoFSolverOptions& options,
+        VoFStepDiagnostics& diagnostics, GeneralVoFFiniteProjectionProvenance* provenance,
+        std::optional<std::span<const long double>> physical_mass,
+        const GeneralVoFFiniteProjectionClosureTopology* closure_topology,
+        std::optional<std::span<const long double>> physical_mass_error);
     template<ArithmeticMode Mode>
     void project_finite(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
         std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,

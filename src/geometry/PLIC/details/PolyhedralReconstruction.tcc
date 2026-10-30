@@ -247,10 +247,11 @@ long double roundoff_factor(std::size_t operations)
 template<ArithmeticMode Mode>
 DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
     std::span<const PolyhedralPhaseSample<Mode>> stencil, const PolyhedralReconstructionOptions& options,
-    bool geometry_only = false)
+    bool geometry_only = false, std::span<const PolyhedralPhaseSample<Mode>> phase_support = {})
 {
     validate_sample<Mode>(target, options);
-    if (stencil.size() > options.maximum_stencil_cells)
+    if (stencil.size() > options.maximum_stencil_cells ||
+        (!geometry_only && phase_support.size() > options.maximum_stencil_cells))
         throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
     DirectionAnalysis analysis;
     auto& result = analysis.resolution;
@@ -270,14 +271,23 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
             std::max(result.carrier_support_fraction, double(static_cast<long double>(sample.carrier_volume) / total));
     };
     if (!geometry_only)
+    {
         examine(target);
+        // The original explicit-stencil pure path never consumes its stencil.
+        // A supplied full context instead has the declared validation contract.
+        if (phase_support.empty() && (target.gas_volume == 0 || target.carrier_volume == 0))
+            return analysis;
+        // Phase availability is a premise supplied by the retained context,
+        // not another collection of fitting rows. Validate that entire context
+        // while keeping direction/conditioning/volumes local to the prefix.
+        for (const auto& sample : phase_support.empty() ? stencil : phase_support)
+            examine(sample);
+    }
+    else
+        for (const auto& sample : stencil)
+            validate_sample<Mode>(sample, options);
     if (!geometry_only && (target.gas_volume == 0 || target.carrier_volume == 0))
         return analysis;
-    for (const auto& sample : stencil)
-        if (geometry_only)
-            validate_sample<Mode>(sample, options);
-        else
-            examine(sample);
     if (stencil.size() < 4)
     {
         result.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
@@ -431,8 +441,10 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
 }
 template<ArithmeticMode Mode>
 PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
-    PolyhedralReconstructionOptions options, std::size_t& evaluations)
+    PolyhedralReconstructionOptions options, std::size_t& evaluations, long double* best_section_area = nullptr)
 {
+    if (best_section_area)
+        *best_section_area = 0;
     std::optional<OrdinaryPlaneMeasure> ordinary_measure;
     if constexpr (Mode == ArithmeticMode::Ordinary)
         if (options.measure_only)
@@ -538,6 +550,10 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
             result.finite_target_volume_difference = published_difference<Mode>(residual);
             result.target_volume_residual = static_cast<double>(residual.value);
             result.target_volume_numerical_error_estimate = numerical_error;
+            // Retain the sensitivity of this best represented plane, rather
+            // than that of a later bracket trial. No extra measure is needed.
+            if (best_section_area)
+                *best_section_area = section_area;
         }
         if (best_bound <= allowed)
             return result;
@@ -655,7 +671,19 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
     const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> stencil,
     PolyhedralReconstructionOptions options)
 {
-    const auto direction = analyze_direction<Mode>(target, stencil, options);
+    if (target.gas_volume == 0 || target.carrier_volume == 0)
+        return analyze_direction<Mode>(target, stencil, options).resolution;
+    return assess_transport_support(target, stencil, stencil.size(), options);
+}
+template<ArithmeticMode Mode>
+PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_support(
+    const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> full_support,
+    std::size_t fitting_cells, PolyhedralReconstructionOptions options)
+{
+    if (fitting_cells > full_support.size())
+        throw std::invalid_argument("Finite PLIC fitting prefix exceeds its retained phase-support context.");
+    const auto stencil = full_support.first(fitting_cells);
+    const auto direction = analyze_direction<Mode>(target, stencil, options, false, full_support);
     auto result = direction.resolution;
     if (!result.admitted() || !result.angular_fit_eligible || target.gas_volume == 0 || target.carrier_volume == 0)
         return result;
@@ -678,6 +706,16 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
     for (const auto& sample : stencil)
     {
         if (!sample.observed_mixed || sample.gas_volume == 0 || sample.carrier_volume == 0)
+            continue;
+        // A positive receipt remains an observed mixed phase and remains in
+        // the fitting objective. It can certify an independent angular support
+        // direction only at the same phase length admitted for optimizing a
+        // target orientation. Otherwise a microscopic receipt can spuriously
+        // collapse a complete expanded ring to an unobservable first ring.
+        const auto sample_phase_length_ratio =
+            std::cbrt(static_cast<long double>(std::min(sample.gas_volume, sample.carrier_volume))) /
+            std::cbrt(sample.geometry->volume().value);
+        if (sample_phase_length_ratio < options.minimum_optimized_phase_length_ratio)
             continue;
         auto displacement = sample.geometry->centroid();
         for (unsigned a = 0; a < 3; ++a)
@@ -714,17 +752,23 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
     std::size_t evaluations = 0;
     return offset_fit<Mode>(sample, normal, options, evaluations);
 }
-template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
-    std::span<const PolyhedralPhaseSample<Mode>> stencil, PolyhedralReconstructionOptions options)
+namespace
 {
-    auto direction = analyze_direction<Mode>(target, stencil, options);
+template<ArithmeticMode Mode>
+PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target,
+    std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
+    PolyhedralReconstructionOptions options, bool allow_seed_restart)
+{
+    if (fitting_cells > full_support.size())
+        throw std::invalid_argument("Finite PLIC fitting prefix exceeds its retained phase-support context.");
+    const auto stencil = full_support.first(fitting_cells);
+    auto direction = analyze_direction<Mode>(target, stencil, options, false, full_support);
     auto resolution = direction.resolution;
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
     if (target.gas_volume == 0 || target.carrier_volume == 0)
     {
-        auto result = solve_offset(target, {1, 0, 0}, options);
+        auto result = PolyhedralReconstruction<Mode>::solve_offset(target, {1, 0, 0}, options);
         result.resolution = resolution;
         return result;
     }
@@ -765,7 +809,26 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     {
         Evaluation value;
         SimpleFluid::detail::CompensatedSum<long double> objective;
-        value.plane = offset_fit<Mode>(target, unit(n), options, evaluations);
+        long double target_section_area = 0, target_offset_correction = 0;
+        long double* target_area_output = nullptr;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.measure_only)
+                target_area_output = &target_section_area;
+        value.plane = offset_fit<Mode>(target, unit(n), options, evaluations, target_area_output);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.measure_only)
+            {
+                const auto target_residual = value.plane.finite_target_volume_difference.value;
+                if (!std::isfinite(target_section_area) || !(target_section_area > 0) ||
+                    !std::isfinite(target_residual))
+                    throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                        "Finite PLIC constrained-target search requires a resolved positive target section.");
+                const int target_sign = target.gas_volume <= target.carrier_volume ? 1 : -1;
+                target_offset_correction = -target_sign * target_residual / target_section_area;
+                if (!std::isfinite(target_offset_correction))
+                    throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                        "Finite PLIC constrained-target search offset correction is nonfinite.");
+            }
         value.residual.reserve(stencil.size());
         for (std::size_t i = 0; i < stencil.size(); ++i)
         {
@@ -773,6 +836,7 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             const bool gas = sample.gas_volume <= sample.carrier_volume;
             if (evaluations++ >= options.maximum_clip_evaluations)
                 throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
+            long double sample_section_area = 0;
             const auto measured = [&]() -> Value<Mode>
             {
                 if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -786,7 +850,11 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
                                 component = -component;
                             plane.offset = -plane.offset;
                         }
-                        return {ordinary_stencil[i].below(plane).volume};
+                        // The same query supplies the offset sensitivity; it
+                        // adds no clipping call or polygon work buffer.
+                        const auto measure = ordinary_stencil[i].below(plane, true);
+                        sample_section_area = measure.section_area;
+                        return {measure.volume};
                     }
                     const auto phases = sample.geometry->phases(value.plane.gas);
                     return gas ? phases.gas : phases.carrier;
@@ -798,7 +866,34 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
                 }
             }();
             const auto residual = difference<Mode>(measured, gas ? sample.gas_volume : sample.carrier_volume);
-            const long double normalized = residual.value / volumes[i];
+            long double search_residual = residual.value;
+            if constexpr (Mode == ArithmeticMode::Ordinary)
+                if (options.measure_only)
+                {
+                    // The represented plane retains its strictly accepted
+                    // target volume and all measured sample inventories. Only
+                    // angular search is compared on the target-volume manifold:
+                    // dV_minority/doffset = sign_minority * section_area.
+                    // The model RMS below continues to use the raw measurement.
+                    const int sample_sign = gas ? 1 : -1;
+                    const long double correction = sample_sign * sample_section_area * target_offset_correction;
+                    if (!std::isfinite(sample_section_area) || sample_section_area < 0 || !std::isfinite(correction))
+                        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                            "Finite PLIC constrained-target search has an unresolved sample sensitivity.");
+                    SimpleFluid::detail::CompensatedSum<long double> corrected;
+                    corrected += search_residual;
+                    corrected += correction;
+                    search_residual = corrected.value();
+                    if (!std::isfinite(search_residual))
+                        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                            "Finite PLIC constrained-target search residual is nonfinite.");
+                }
+            const long double normalized = search_residual / volumes[i];
+            if constexpr (Mode == ArithmeticMode::Ordinary)
+                if (options.measure_only &&
+                    (!std::isfinite(normalized) || !std::isfinite(static_cast<double>(normalized))))
+                    throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                        "Finite PLIC constrained-target search normalization is nonfinite.");
             value.residual.push_back(static_cast<double>(normalized));
             objective += normalized * normalized;
             if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -848,7 +943,126 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         current.plane.resolution = resolution;
         return current.plane;
     }
-    bool converged = false;
+    const auto try_face_restart = [&]
+    {
+        if constexpr (Mode != ArithmeticMode::Ordinary)
+            return false;
+        else
+        {
+            std::optional<Evaluation> best;
+            Vector best_normal{};
+            const auto restart_evidence = [&]
+            {
+                auto result = evidence();
+                if (best)
+                {
+                    result.best_normal = best_normal;
+                    result.best_rms = static_cast<double>(std::sqrt(best->objective_upper / stencil.size()));
+                }
+                return result;
+            };
+            try
+            {
+                // This bank is declared by the original ordered target faces,
+                // independently of the failed model RMS. No new geometry is
+                // constructed, and no fitting row or phase inventory changes.
+                const auto points = target.geometry->local_points();
+                const int minority_sign = target.gas_volume <= target.carrier_volume ? 1 : -1;
+                const unsigned orientations = target.gas_volume == target.carrier_volume ? 2 : 1;
+                for (const auto& face : target.geometry->faces())
+                {
+                    try
+                    {
+                        if (face.size() < 3)
+                            throw GeometryError(GeometryErrorCode::InvalidTopology,
+                                "Finite PLIC face seed has fewer than three original vertices.");
+                        for (const auto vertex : face)
+                            if (vertex >= points.size())
+                                throw GeometryError(GeometryErrorCode::InvalidTopology,
+                                    "Finite PLIC face seed has an invalid original vertex index.");
+                        std::array<long double, 3> area{};
+                        const auto& origin = points[face[0]].value;
+                        for (std::size_t i = 1; i + 1 < face.size(); ++i)
+                        {
+                            std::array<long double, 3> a{}, b{};
+                            for (unsigned axis = 0; axis < 3; ++axis)
+                            {
+                                a[axis] = points[face[i]].value[axis] - origin[axis];
+                                b[axis] = points[face[i + 1]].value[axis] - origin[axis];
+                            }
+                            for (unsigned axis = 0; axis < 3; ++axis)
+                                area[axis] += a[(axis + 1) % 3] * b[(axis + 2) % 3] -
+                                              a[(axis + 2) % 3] * b[(axis + 1) % 3];
+                        }
+                        const long double length = std::hypot(area[0], area[1], area[2]);
+                        if (!std::isfinite(length) || !(length > 0))
+                            throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                                "Finite PLIC original-face seed normal is unresolved.");
+                        for (unsigned orientation = 0; orientation < orientations; ++orientation)
+                        {
+                            try
+                            {
+                                Vector seed{};
+                                const int sign = orientation == 0 ? -minority_sign : minority_sign;
+                                for (unsigned axis = 0; axis < 3; ++axis)
+                                    seed[axis] = static_cast<double>(sign * area[axis] / length);
+                                seed = unit(seed);
+                                auto candidate = evaluate(seed);
+                                if (candidate.residual.size() != current.residual.size())
+                                    throw GeometryError(GeometryErrorCode::InvalidInput,
+                                        "Finite PLIC face-seed residual shape differs.");
+                                if (candidate.objective < current.objective &&
+                                    angular_detail::observable_trial(seed, candidate, stencil.size(),
+                                        options.maximum_condition, evaluate,
+                                        [](Vector value) { return unit(value); }) &&
+                                    (!best || candidate.objective < best->objective))
+                                {
+                                    best_normal = seed;
+                                    best = std::move(candidate);
+                                }
+                            }
+                            catch (const angular_detail::Unobservable&)
+                            {
+                                // An unobservable seed cannot initialize a fit.
+                            }
+                            catch (const GeometryError& failure)
+                            {
+                                if (!failure.recoverable_trial())
+                                    throw;
+                            }
+                        }
+                    }
+                    catch (const GeometryError& failure)
+                    {
+                        if (!failure.recoverable_trial())
+                            throw;
+                    }
+                }
+            }
+            catch (const GeometryError& failure)
+            {
+                const GeometryError cause(failure.code(),
+                    std::string("Finite PLIC original-face restart failed: ") + failure.what());
+                throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Geometry, cause, restart_evidence());
+            }
+            catch (const std::invalid_argument& failure)
+            {
+                const GeometryError cause(GeometryErrorCode::InvalidInput,
+                    std::string("Finite PLIC original-face restart failed: ") + failure.what());
+                throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Geometry, cause, restart_evidence());
+            }
+            if (!best)
+                return false;
+            normal = best_normal;
+            current = std::move(*best);
+            // The bank proves observability, not stationarity. The next actual
+            // advance must qualify this seed and pass the original fit gates.
+            last_step = std::numeric_limits<double>::infinity();
+            probe_step = 0;
+            return true;
+        }
+    };
+    bool converged = false, restart_attempted = false;
     for (unsigned iteration = 0; iteration < options.maximum_fit_iterations; ++iteration)
     {
         iterations = iteration + 1;
@@ -893,6 +1107,18 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         probe_step = qualification.probe_step;
         if (status == angular_detail::IterationResult::Converged)
         {
+            // Only the context/prefix Ordinary measure entry may leave a
+            // qualified but incompatible basin. A single secondary solve uses
+            // this same total iteration counter and the same clip allowance.
+            if (allow_seed_restart && Mode == ArithmeticMode::Ordinary && options.measure_only &&
+                !restart_attempted && iterations < options.maximum_fit_iterations &&
+                static_cast<double>(std::sqrt(current.objective_upper / stencil.size())) >
+                    options.maximum_model_residual)
+            {
+                restart_attempted = true;
+                if (try_face_restart())
+                    continue;
+            }
             converged = true;
             break;
         }
@@ -915,5 +1141,26 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     }
     current.plane.resolution = resolution;
     return current.plane;
+}
+} // namespace
+template<ArithmeticMode Mode>
+PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
+    std::span<const PolyhedralPhaseSample<Mode>> stencil, PolyhedralReconstructionOptions options)
+{
+    if (target.gas_volume == 0 || target.carrier_volume == 0)
+    {
+        const auto resolution = analyze_direction<Mode>(target, stencil, options).resolution;
+        auto result = solve_offset(target, {1, 0, 0}, options);
+        result.resolution = resolution;
+        return result;
+    }
+    return reconstruct_finite<Mode>(target, stencil, stencil.size(), options, false);
+}
+template<ArithmeticMode Mode>
+PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
+    std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
+    PolyhedralReconstructionOptions options)
+{
+    return reconstruct_finite<Mode>(target, full_support, fitting_cells, options, true);
 }
 } // namespace SimpleFluid::PLIC
