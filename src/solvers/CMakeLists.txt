@@ -35,6 +35,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_SOLVER_SOURCES
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
+    details/GeneralVoFProjectionSupport.cc
     details/GeneralVoFCompatibleProjection.cc
     details/GeneralVoFExactProjection.cc
     details/GeneralVoFFiniteProjectionArithmetic.hh
@@ -159,6 +160,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
             details/ConservativeVoFFiniteTransport.tcc
             details/ConservativeVoFTransport.cc
             details/GeneralVoFFlowWorkspace.cc
+            details/GeneralVoFProjectionSupport.cc
             details/GeneralVoFCompatibleProjection.cc
             details/GeneralVoFPhiClosure.cc
             details/GeneralVoFCurvature.cc
@@ -168,6 +170,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
             SKIP_UNITY_BUILD_INCLUSION TRUE
             SKIP_PRECOMPILE_HEADERS TRUE)
     endif()
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFProjectionSupport.cc)
 endif()
 
 # Both arithmetic backends retain the owning implementation's numerical boundary.

@@ -161,6 +161,20 @@ rebuilding consumers, without regenerating compatible current-format packets.
 separate mechanisms. Identity equality does not establish shared allocation
 ownership, and shared ownership does not establish geometric incidence.
 
+A dynamic point exposes sealed supports and provenance only while its current
+coordinates, error coordinates, and arithmetic mode match the stored record
+exactly. These queries share one matching predicate; restoring matching fields
+restores validity. Source equality additionally requires the identical provenance
+owner. Storage queries still count retained provenance when those public fields
+have become stale.
+
+Private immediate-child enumeration visits a nonnull source origin first, then
+each edge's two endpoints in order, retaining duplicates and null endpoints.
+It borrows the existing owner slots without allocating or traversing ancestry.
+Footprint queries, support retention, and allocation admission retain their own
+queues, null filtering, deduplication, strong pins, and failure policies. Their
+local owners keep the record alive while callbacks grow traversal storage.
+
 `PlaneAuthority` is an immutable handle to a typed original support or shared
 opaque words. `opaque()` cannot mint the reserved original-support namespace.
 Copies share ownership; independently created equal authorities retain distinct

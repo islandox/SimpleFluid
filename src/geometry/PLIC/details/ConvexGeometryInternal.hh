@@ -67,6 +67,13 @@ struct SIMPLEFLUID_LOCAL DynamicPointProvenance
     }
 };
 
+namespace details
+{
+/** Borrow direct child owner slots in origin, then edge-endpoint order.
+ * The record must remain alive and unchanged throughout the visit. */
+template<class Visitor> SIMPLEFLUID_LOCAL void visit_provenance_children(const DynamicPointProvenance&, Visitor&&);
+} // namespace details
+
 class SIMPLEFLUID_LOCAL DynamicGeometryAccess
 {
 public:
@@ -484,3 +491,5 @@ namespace SimpleFluid::PLIC
 {
 
 }
+
+#include "geometry/PLIC/details/ProvenanceChildren.ipp"

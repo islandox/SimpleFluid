@@ -190,6 +190,8 @@ private:
     Pack::global_ordinal_type gauge_;
     void require(bool valid, const char* message) const;
     [[nodiscard]] double maximum(double value) const;
+    /** Import the owned face prefix, retaining represented wide rates. */
+    [[nodiscard]] std::vector<long double> halo_rates(const std::vector<long double>& owned) const;
     [[nodiscard]] std::vector<double> divergence(const std::vector<double>& velocity) const;
 };
 namespace Exact

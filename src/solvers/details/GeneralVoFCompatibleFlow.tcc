@@ -100,58 +100,13 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
         require(std::isfinite(readiness_limit) && readiness_limit > 0,
             "Finite projection transport readiness has an unrepresentable ratio threshold.");
     }
-    const auto wide_maximum = [&](long double local)
-    {
-        int exponent = std::numeric_limits<int>::min(), global_exponent = 0;
-        double mantissa = 0, global_mantissa = 0;
-        if (local > 0)
-        {
-            const auto wide = std::frexp(local, &exponent);
-            mantissa = static_cast<double>(wide);
-            if (static_cast<long double>(mantissa) < wide)
-                mantissa = std::nextafter(mantissa, std::numeric_limits<double>::infinity());
-        }
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &exponent, &global_exponent);
-        if (exponent != global_exponent)
-            mantissa = 0;
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &mantissa, &global_mantissa);
-        return global_mantissa > 0 ? std::ldexp(static_cast<long double>(global_mantissa), global_exponent) : 0.L;
-    };
-    const auto halo_rates = [&](const std::vector<long double>& owned)
-    {
-        std::vector<double> high(geometry_.size()), low(geometry_.size()), exponent(geometry_.size());
-        for (std::size_t f = 0; f < nf; ++f)
-        {
-            int e = 0;
-            const auto m = std::frexp(owned[f], &e);
-            high[f] = static_cast<double>(m);
-            low[f] = static_cast<double>(m - high[f]);
-            exponent[f] = e;
-        }
-        high = faces(high);
-        low = faces(low);
-        exponent = faces(exponent);
-        std::vector<long double> result(geometry_.size());
-        for (std::size_t f = 0; f < result.size(); ++f)
-            result[f] = std::ldexp(static_cast<long double>(high[f]) + low[f], int(exponent[f]));
-        return result;
-    };
+    const auto wide_maximum = [&](long double local) { return projection_support::wide_maximum(*comm, local); };
+
     namespace fp = VoF::finite_detail;
     using A = fp::Arithmetic<Mode>;
     const auto arithmetic_value = [](long double value, long double error = 0) { return A::make_value(value, error); };
     const auto arithmetic_guard = [&](auto&& work, const char* message)
-    {
-        bool accepted = true;
-        try
-        {
-            work();
-        }
-        catch (...)
-        {
-            accepted = false;
-        }
-        require(accepted, message);
-    };
+    { projection_support::arithmetic_guard(*comm, std::forward<decltype(work)>(work), message); };
     std::vector<long double> mass(n), force(nf), rate(nf), radius(nf);
     const auto fraction_halo = cells(fraction), curvature_halo = cells(kappa);
     arithmetic_guard(
@@ -208,7 +163,9 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
         });
     std::vector<long double> net(n), cell_radius(n), overlap_rate, overlap_radius;
     const bool cumulative = readiness && readiness->cumulative;
-    std::vector<long double> occupancy_target(n), incident_rate;
+    projection_support::OccupancyTargetResult occupancy{std::vector<long double>(n)};
+    auto& occupancy_target = occupancy.target;
+    std::vector<long double> incident_rate;
     arithmetic_guard(
         [&]
         {
@@ -220,8 +177,11 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
         },
         "Occupancy pressure target scratch allocation failed.");
     bool occupancy_target_frozen = false;
-    long double occupancy_target_defect = 0, occupancy_target_limit = 0, occupancy_target_maximum = 0;
-    long double occupancy_compatibility_residual = 0, occupancy_compatibility_bound = 0;
+    long double occupancy_target_defect = 0;
+    auto& occupancy_target_limit = occupancy.target_limit;
+    auto& occupancy_target_maximum = occupancy.maximum;
+    auto& occupancy_compatibility_residual = occupancy.compatibility_residual;
+    auto& occupancy_compatibility_bound = occupancy.compatibility_bound;
     long double readiness_ratio = 0, readiness_step_defect = 0, cumulative_step_defect = 0;
     const auto refresh_rates = [&]
     {
@@ -301,116 +261,38 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
     // A provisional physical projection supplies their actual circulation;
     // predictor circulation could vanish on a closed tree.
     const auto wide_sums = [&](const std::array<long double, 2>& local)
-    {
-        std::array<double, 6> send{};
-        std::vector<double> received;
-        arithmetic_guard(
-            [&]
-            {
-                received.resize(6 * std::size_t(comm->getSize()));
-                for (unsigned a = 0; a < 2; ++a)
-                {
-                    if (!std::isfinite(local[a]))
-                        throw std::runtime_error("Nonfinite occupancy target reduction.");
-                    int exponent = 0;
-                    const auto mantissa = std::frexp(local[a], &exponent);
-                    send[3 * a] = double(mantissa);
-                    send[3 * a + 1] = double(mantissa - send[3 * a]);
-                    send[3 * a + 2] = exponent;
-                    if (static_cast<long double>(send[3 * a]) + send[3 * a + 1] != mantissa)
-                        throw std::runtime_error("Occupancy target reduction loses represented precision.");
-                }
-            },
-            "Occupancy target reduction exceeds its admitted representation.");
-        Teuchos::gatherAll(*comm, 6, send.data(), 6 * comm->getSize(), received.data());
-        std::array<CompensatedSum<long double>, 2> sums;
-        arithmetic_guard(
-            [&]
-            {
-                for (int rank = 0; rank < comm->getSize(); ++rank)
-                    for (unsigned a = 0; a < 2; ++a)
-                    {
-                        const auto i = 6 * std::size_t(rank) + 3 * a;
-                        sums[a] +=
-                            std::ldexp(static_cast<long double>(received[i]) + received[i + 1], int(received[i + 2]));
-                    }
-            },
-            "Occupancy target reduction exceeds its arithmetic range.");
-        return std::array<long double, 2>{sums[0].value(), sums[1].value()};
-    };
+    { return projection_support::wide_sums(*comm, local); };
     const auto freeze_occupancy_target = [&]
     {
-        long double local_capacity = 0, local_floor = 0;
+        const projection_support::OccupancyTargetInput input{*mesh_, volumes_, incident_rate,
+            readiness->signed_discrepancy, readiness->volume, readiness->volume_tolerance, readiness->max_courant,
+            limit};
+        std::array<long double, 2> local_capacity{};
         arithmetic_guard(
             [&]
             {
                 const auto lease = mesh_->acquire_execution_view();
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    // Half of each original allowance remains for solve error.
-                    const auto capacity =
-                        .5L * std::min({readiness->volume_tolerance * incident_rate[c] / (2 * readiness->max_courant),
-                                  limit * volumes_[c],
-                                  2 * VoF::algebraic_physical_occupancy_relative_limit * incident_rate[c] /
-                                      readiness->max_courant});
-                    occupancy_target[c] = capacity;
-                    local_capacity = std::max(local_capacity, capacity);
-                    local_floor = std::max(local_floor, (32.L + 8.L * mesh_->faces(LO(c)).size()) *
-                                                            std::numeric_limits<long double>::epsilon() *
-                                                            incident_rate[c] / volumes_[c]);
-                }
+                local_capacity = projection_support::occupancy_capacities(input, occupancy);
             },
             "Occupancy pressure target has invalid local capacity.");
-        const auto capacity_scale = wide_maximum(local_capacity);
+        const auto capacity_scale = wide_maximum(local_capacity[0]);
         if (capacity_scale == 0)
         {
             occupancy_target_frozen = true;
             return;
         }
-        CompensatedSum<long double> weights, weighted_discrepancy;
-        arithmetic_guard(
-            [&]
-            {
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    const auto weight = occupancy_target[c] / capacity_scale;
-                    const auto relative = readiness->signed_discrepancy[c] /
-                                          (VoF::algebraic_physical_occupancy_relative_limit * readiness->volume[c]);
-                    weights += weight;
-                    weighted_discrepancy += weight * relative;
-                }
-            },
+        std::array<long double, 2> local_weights{};
+        arithmetic_guard([&]
+            { local_weights = projection_support::occupancy_weights(input, occupancy, capacity_scale); },
             "Occupancy pressure target has invalid signed inventory.");
-        const auto totals = wide_sums({weights.value(), weighted_discrepancy.value()});
+        const auto totals = wide_sums(local_weights);
         require(totals[0] > 0 && std::isfinite(totals[0]) && std::isfinite(totals[1]),
             "Occupancy pressure target has no finite compatible weights.");
         const auto mean = totals[1] / totals[0];
-        CompensatedSum<long double> target_sum, capacity_sum;
-        long double local_target = 0;
-        arithmetic_guard(
-            [&]
-            {
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    const auto capacity = occupancy_target[c];
-                    const auto relative = readiness->signed_discrepancy[c] /
-                                          (VoF::algebraic_physical_occupancy_relative_limit * readiness->volume[c]);
-                    occupancy_target[c] = capacity * ((relative - mean) / 2);
-                    target_sum += occupancy_target[c];
-                    capacity_sum += capacity;
-                    local_target = std::max(local_target, std::abs(occupancy_target[c]) / volumes_[c]);
-                    general_vof::flow_trace(comm->getRank(), "occupancy_pressure_target",
-                        [&](auto& out)
-                        {
-                            out << ",\"cell\":" << mesh_->cell_global_id(LO(c))
-                                << ",\"signed_occupancy\":" << readiness->signed_discrepancy[c]
-                                << ",\"capacity\":" << capacity << ",\"target_net_rate\":" << occupancy_target[c]
-                                << ",\"normalized_mean\":" << mean;
-                        });
-                }
-            },
+        projection_support::OccupancyTargetLocalTotals local_target;
+        arithmetic_guard([&] { local_target = projection_support::occupancy_targets(input, occupancy, mean); },
             "Occupancy pressure target exceeds its arithmetic range.");
-        const auto compatible = wide_sums({target_sum.value(), capacity_sum.value()});
+        const auto compatible = wide_sums(local_target.sums);
         const auto count = mesh_->owned_cell_map()->getGlobalNumElements();
         const auto u = (32.L + 16.L * count + 16.L * comm->getSize()) * std::numeric_limits<long double>::epsilon();
         require(u < .25L, "Occupancy compatibility reduction budget is exhausted.");
@@ -418,8 +300,8 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
         occupancy_compatibility_bound = u / (1 - u) * compatible[1];
         require(occupancy_compatibility_residual <= occupancy_compatibility_bound,
             "Closed-domain occupancy pressure target is incompatible.");
-        occupancy_target_maximum = wide_maximum(local_target);
-        occupancy_target_limit = std::max(occupancy_target_maximum / 8, wide_maximum(local_floor));
+        occupancy_target_maximum = wide_maximum(local_target.maximum);
+        occupancy_target_limit = std::max(occupancy_target_maximum / 8, wide_maximum(local_capacity[1]));
         occupancy_target_frozen = true;
     };
     // Resource capacities are rank-local. Reserve this caller's live footprint;
