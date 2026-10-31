@@ -36,9 +36,6 @@
 
 namespace SimpleFluid::PLIC
 {
-namespace details
-{
-}
 using namespace details;
 struct SIMPLEFLUID_LOCAL DynamicPointSupportPayload
 {
@@ -119,9 +116,6 @@ public:
     static const std::shared_ptr<const DynamicConvexGeometry::Impl>& implementation(const DynamicConvexGeometry&);
     static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
 };
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
 
 namespace details SIMPLEFLUID_LOCAL
 {
@@ -369,9 +363,6 @@ template<ArithmeticMode Mode> struct StoredMomentCache
     std::optional<StoredIntegrals<Mode>> integrals;
 };
 } // namespace details SIMPLEFLUID_LOCAL
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
 
 struct SIMPLEFLUID_LOCAL DynamicPointExportPayload
 {
@@ -445,29 +436,6 @@ void preserve_crossing_incidence(
     StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&, const Frame&, bool numerical_only);
 } // namespace details
 
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-
-std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint> points);
-bool certification_environment();
-GeometryStatistics geometry_statistics();
-void reset_geometry_statistics();
-void record_ledger_operations(std::uint64_t count);
-std::size_t dynamic_point_storage_bytes(const DynamicPoint& p);
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-
-const void* geometry_statistics_domain();
-}
-namespace SimpleFluid::PLIC
-{
-
 namespace details SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode> struct StoredPlanarVertex
@@ -487,9 +455,5 @@ template<ArithmeticMode Mode> struct StoredPlanarLine
 };
 } // namespace details SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-
-}
 
 #include "geometry/PLIC/details/ProvenanceChildren.ipp"

@@ -347,7 +347,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
             }
         }
         if (native_representable)
-            plane->native_support = details::ordinary_native::source_support_packet(native_points);
+            plane->native_support = details::ordinary_native::make_source_support(native_points);
         if (!plane->authorities.empty())
             if (const auto* support = details::OriginalSupportAuthorityAccess::get(plane->authorities.front()))
                 plane->native_support = *support;

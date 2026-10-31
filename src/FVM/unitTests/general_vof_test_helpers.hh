@@ -1,6 +1,7 @@
 /** Shared test-local native fixtures; no test cases or environment registration. */
 #pragma once
 #include "FVM/GeneralVoF.hh"
+#include "general_vof_test_builders.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
@@ -22,27 +23,12 @@ using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using namespace SimpleFluid::Meshes::AMR;
 using namespace SimpleFluid::VoF;
-struct Fixture
-{
-    std::shared_ptr<const DistributedAdaptiveHierarchy> hierarchy;
-    std::vector<AdaptiveCellKey> order;
-    std::vector<double> gas, carrier;
-};
+using Fixture = SimpleFluid::VoF::test::small_fixtures::Fixture;
 Fixture setup(bool trace = false)
 {
-    auto comm = Tpetra::getDefaultComm();
-    AMRGrid grid;
-    grid.block_cells = {2, 2, 2};
-    grid.extent = {2, 2, 2};
-    auto source = std::make_shared<CartesianAMR>(grid);
-    std::vector<std::uint64_t> owned;
-    for (std::uint64_t gid = 0; gid < 8; ++gid)
-        if (int(gid % std::min(2, comm->getSize())) == comm->getRank())
-            owned.push_back(gid);
-    auto boot = source->detach_owned(owned, {'g', 'e', 'n', 'e', 'r', 'a', 'l', '_', 'v', 'o', 'f'});
     Fixture f;
-    f.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
-        std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
+    f.hierarchy = SimpleFluid::VoF::test::small_fixtures::eight_cell_hierarchy(
+        {'g', 'e', 'n', 'e', 'r', 'a', 'l', '_', 'v', 'o', 'f'});
     for (const auto& [key, leaf] : f.hierarchy->owned())
     {
         f.order.push_back(key);
@@ -55,25 +41,11 @@ Fixture setup(bool trace = false)
 }
 std::vector<GeneralVoFNodeVelocity> nodes(const GeneralVoF& state)
 {
-    std::vector<GeneralVoFNodeVelocity> result;
-    for (const auto& node : state.nodes())
-        result.push_back({node.gid, {0, 0, 0}});
-    return result;
+    return SimpleFluid::VoF::test::small_fixtures::stationary(state);
 }
 std::vector<GeneralVoFFaceVolume> cycle(const GeneralVoF& state)
 {
-    std::vector<GeneralVoFFaceVolume> result;
-    for (const auto& face : state.tiles())
-    {
-        const auto p = face.geometry->centroid(), area = face.geometry->area_vector();
-        double phi = 0;
-        if (!face.exterior && p.x == 1 && area.x != 0)
-            phi = (p.y < 1 ? 1 : -1) * (area.x > 0 ? 1 : -1) / 64.;
-        if (!face.exterior && p.y == 1 && area.y != 0)
-            phi = (p.x > 1 ? 1 : -1) * (area.y > 0 ? 1 : -1) / 64.;
-        result.push_back({face.face_gid, phi});
-    }
-    return result;
+    return SimpleFluid::VoF::test::small_fixtures::circulation(state);
 }
 Fixture skew_setup(unsigned ownership_shift = 0)
 {

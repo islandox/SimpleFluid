@@ -226,19 +226,6 @@ template<std::size_t Count> std::array<Q, Count> read_tuple(std::span<const char
     reader.finish();
     return values;
 }
-template<std::size_t Count> std::vector<char> write_tuple(const std::array<Q, Count>& values, GeometryTag tag)
-{
-    std::vector<char> bytes;
-    const details::GeometryIdentityCanonicalWriter writer{&bytes, [](void* context, std::span<const char> fragment)
-        {
-            auto& output = *static_cast<std::vector<char>*>(context);
-            output.insert(output.end(), fragment.begin(), fragment.end());
-        }};
-    writer.tag(tag);
-    for (const auto& value : values)
-        emit_rational(writer, value);
-    return bytes;
-}
 template<std::size_t Count> std::size_t tuple_copy_storage_bound(const std::array<Q, Count>& values) noexcept
 {
     auto bytes = sizeof(NativeTuple<Count>);
@@ -354,7 +341,7 @@ const std::array<Q, 4>& support_coefficients(const PlaneSupportIdentity<Arithmet
     return native_tuple<4>(identity);
 }
 
-// These raw readers/writers are confined to canonical-key and new-wire import boundaries.
+// These raw readers are confined to canonical-key and new-wire import boundaries.
 P authority_point(std::span<const char> key)
 {
     return read_tuple<3>(key, point_tag);
@@ -363,15 +350,6 @@ P displacement_point(std::span<const char> key)
 {
     return key.empty() ? P{} : read_tuple<3>(key, displacement_tag);
 }
-std::vector<char> point_packet(const P& value)
-{
-    return write_tuple(value, point_tag);
-}
-std::vector<char> displacement_packet(const P& value)
-{
-    return zero(value) ? std::vector<char>{} : write_tuple(value, displacement_tag);
-}
-
 std::size_t point_identity_storage_bound(const P& value) noexcept
 {
     return sum(sizeof(details::GeometryIdentityBacking),

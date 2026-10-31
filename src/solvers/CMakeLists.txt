@@ -2,6 +2,7 @@
 # General-native source-free providers include each explicitly selected arithmetic backend.
 set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
     details/GeneralVoF/Resources.cc
+    details/GeneralVoF/StateTrace.cc
     explicit_instantiation/GeneralVoF/Initialization.cc
     explicit_instantiation/GeneralVoF/Advance.cc
     explicit_instantiation/GeneralVoF/Remap.cc

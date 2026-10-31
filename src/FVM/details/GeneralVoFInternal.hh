@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactLiveStorage.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
@@ -374,15 +375,6 @@ SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options);
-SIMPLEFLUID_FVM_LOCAL void real(wire::Writer& w, double value);
-SIMPLEFLUID_FVM_LOCAL double real(wire::Reader& r);
-SIMPLEFLUID_FVM_LOCAL void finite_real(wire::Writer& w, long double value);
-SIMPLEFLUID_FVM_LOCAL long double finite_real(wire::Reader& r);
-SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, PLIC::DynamicGeometryValue v);
-SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
-    wire::Reader& r, std::optional<ArithmeticMode> expected = {});
-SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p);
-SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
     const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
     const PLIC::PolyhedralInterface& p);

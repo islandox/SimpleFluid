@@ -321,34 +321,22 @@ constinit thread_local GeometryStatistics statistics;
 {
     reject(active_work ? active_work->limits.arithmetic_mode : ArithmeticMode::Exact, reason);
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 constinit thread_local Work* active_work = nullptr;
-}
 
-namespace SimpleFluid::PLIC::details
-{
 GeometryLimits mode_limits(ArithmeticMode mode)
 {
     GeometryLimits result;
     result.arithmetic_mode = mode;
     return result;
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 void require_mode(ArithmeticMode a, ArithmeticMode b)
 {
     if (a == ArithmeticMode::Exact || b == ArithmeticMode::Exact || a != b)
         reject(a, "incompatible arithmetic modes in finite geometry.");
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 void operation()
 {
     ++statistics.floating_operations;
@@ -361,10 +349,7 @@ std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::identity(co
 {
     return provenance_matches(p, p.provenance_.get()) ? p.provenance_ : nullptr;
 }
-} // namespace SimpleFluid::PLIC
 
-namespace SimpleFluid::PLIC
-{
 std::size_t DynamicGeometryAccess::identity_bytes(
     const std::shared_ptr<const DynamicPointProvenance>& p, bool include_support_payloads)
 {
@@ -394,10 +379,7 @@ std::size_t DynamicGeometryAccess::identity_bytes(
     }
     return bytes + attachments.payload_bytes();
 }
-} // namespace SimpleFluid::PLIC
 
-namespace SimpleFluid::PLIC
-{
 void DynamicGeometryAccess::retain_supports(const std::shared_ptr<const DynamicPointProvenance>& root,
     GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
 {
@@ -425,19 +407,13 @@ std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& p, bool inc
     }
     return bytes;
 }
-} // namespace SimpleFluid::PLIC
 
-namespace SimpleFluid::PLIC
-{
 bool DynamicGeometryAccess::same_source(const DynamicPoint& a, const DynamicPoint& b)
 {
     return a.provenance_ == b.provenance_ && provenance_matches(a, a.provenance_.get()) &&
            provenance_matches(b, b.provenance_.get());
 }
-} // namespace SimpleFluid::PLIC
 
-namespace SimpleFluid::PLIC
-{
 namespace
 {
 std::shared_ptr<const DynamicPointProvenance> point_provenance(const DynamicPoint& point,
@@ -594,29 +570,20 @@ Work::Work(GeometryLimits requested) : limits(requested)
             1024, checked_multiply(256, checked_multiply(v, checked_multiply(f, checked_add(checked_add(v, f), 1)))));
     }
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 void Work::charge(std::size_t count, std::size_t size)
 {
     if (size && count > (limits.byte_budget - bytes) / size)
         resource_failure(limits.arithmetic_mode, "construction storage cap exhausted.");
     bytes += count * size;
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 void Work::pair()
 {
     if (++pairs > limits.maximum_pair_tests)
         resource_failure(limits.arithmetic_mode, "pair-test cap exhausted.");
 }
-} // namespace SimpleFluid::PLIC::details
 
-namespace SimpleFluid::PLIC::details
-{
 Operation::Operation(GeometryLimits limits) : work(limits), previous(active_work)
 {
     if (limits.arithmetic_mode != ArithmeticMode::Ordinary &&

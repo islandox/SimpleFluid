@@ -242,42 +242,6 @@ struct Reader
 };
 inline constexpr GeometryTag point_tag = GeometryTag::OrdinaryPoint;
 inline constexpr GeometryTag displacement_tag = GeometryTag::OrdinaryDisplacement;
-inline std::vector<char> point_packet(const WidePoint& p)
-{
-    Writer w;
-    w.tag(point_tag);
-    w.point(p);
-    return std::move(w.bytes);
-}
-inline WidePoint read_point(std::span<const char> packet)
-{
-    Reader r{packet};
-    if (r.tag() != point_tag)
-        reject("foreign point identity arithmetic mode.");
-    const auto p = r.point();
-    r.finish();
-    return p;
-}
-inline std::vector<char> displacement_packet(const WidePoint& p)
-{
-    if (p == WidePoint{})
-        return {};
-    Writer w;
-    w.tag(displacement_tag);
-    w.point(p);
-    return std::move(w.bytes);
-}
-inline WidePoint read_displacement(std::span<const char> packet)
-{
-    if (packet.empty())
-        return {};
-    Reader r{packet};
-    if (r.tag() != displacement_tag)
-        reject("foreign displacement arithmetic mode.");
-    const auto p = r.point();
-    r.finish();
-    return p;
-}
 inline WidePoint polygon_vector(std::span<const WidePoint> points)
 {
     if (points.size() < 3)
@@ -287,27 +251,7 @@ inline WidePoint polygon_vector(std::span<const WidePoint> points)
         sum = add(sum, cross(sub(points[i], points[0]), sub(points[i + 1], points[0])));
     return mul(sum, .5L);
 }
-inline PlaneSupportIdentity<ArithmeticMode::Ordinary> plane_packet(
-    const WidePoint& normal, const WidePoint& anchor, long double offset = 0)
-{
-    std::size_t axis = 0;
-    for (std::size_t i = 1; i < 3; ++i)
-        if (std::abs(normal[i]) > std::abs(normal[axis]))
-            axis = i;
-    if (normal[axis] == 0)
-        reject("zero native support normal.");
-    WidePoint canonical{};
-    for (std::size_t i = 0; i < 3; ++i)
-        canonical[i] = normal[i] / normal[axis];
-    const auto location = (dot(normal, anchor) + offset) / normal[axis];
-    finite(location);
-    return details::GeometryIdentityAccess::support_plane(axis, canonical, location);
-}
-} // namespace SimpleFluid::PLIC::details::ordinary_native
-
-namespace SimpleFluid::PLIC::details::ordinary_native
-{
-inline PlaneSupportIdentity<ArithmeticMode::Ordinary> source_support_packet(std::span<const WidePoint> source)
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> make_source_support(std::span<const WidePoint> source)
 {
     if (source.size() < 3)
         reject("native support needs a face source.");
@@ -333,7 +277,7 @@ inline PlaneSupportIdentity<ArithmeticMode::Ordinary> source_support_packet(std:
     std::sort(polygon.begin(), polygon.end());
     return details::GeometryIdentityAccess::support_source(std::move(polygon));
 }
-inline PlaneSupportIdentity<ArithmeticMode::Ordinary> input_support_packet(
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> make_input_support(
     GeometryPoint normal, GeometryPoint anchor, double offset)
 {
     std::size_t nonzero = 0, axis = 0;
@@ -385,7 +329,7 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>&,
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC::details::ordinary_native
 {
-inline PlaneSupportIdentity<ArithmeticMode::Ordinary> translated_support_packet(
+inline PlaneSupportIdentity<ArithmeticMode::Ordinary> translate_support(
     const PlaneSupportIdentity<ArithmeticMode::Ordinary>& support, const WidePoint& shift)
 {
     return details::GeometryIdentityAccess::translated_support(support, shift);

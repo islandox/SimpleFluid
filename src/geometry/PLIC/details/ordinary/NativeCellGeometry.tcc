@@ -225,7 +225,7 @@ PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) co
         normal[axis] = surface.orientation * surface.plane->normal[axis].value;
     auto support = surface.plane->native_support;
     if (!support)
-        support = details::ordinary_native::source_support_packet(loop);
+        support = details::ordinary_native::make_source_support(loop);
     return PlanarFace<Mode>::from_retained_support(loop, normal, std::move(*support));
 }
 template<ArithmeticMode Mode> bool ConvexCellGeometry<Mode>::quality_above(double minimum) const

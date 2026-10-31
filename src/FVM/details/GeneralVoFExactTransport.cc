@@ -11,12 +11,24 @@ namespace Exact
 {
 namespace
 {
+namespace sweep = geometry::swept_volume;
+using Trajectory = sweep::NodeTrajectory<ArithmeticMode::Exact>;
+using PlanarFacePtr = PLIC::PlanarFacePtr<ArithmeticMode::Exact>;
+using SweepDonor = sweep::SweepDonor<ArithmeticMode::Exact>;
+using SweepRecipient = sweep::SweepRecipient<ArithmeticMode::Exact>;
+using Fragment = sweep::ConvexFragment<ArithmeticMode::Exact>;
+using FragmentPtr = sweep::ConvexFragmentPtr<ArithmeticMode::Exact>;
+using SweptFace = sweep::SweptFace<ArithmeticMode::Exact>;
+using SweepIntersection = sweep::SweepIntersection<ArithmeticMode::Exact>;
+using TransportAtom = sweep::TransportAtom<ArithmeticMode::Exact>;
+using TransportPartition = sweep::TransportPartition<ArithmeticMode::Exact>;
+using ExactPhases = PLIC::PhaseMeasures<ArithmeticMode::Exact>;
+
 // Sharded equality authorities compare full certificates/represented controls,
 // never a geometry hash alone. All ranks, including empty owners, participate.
 void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVelocity> nodes,
-    std::span<const GeneralVoFFaceVolume> faces, double dt,
-    std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint>& velocity, std::map<std::uint64_t, Measure>& flux,
-    std::map<std::uint64_t, SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>& trajectories)
+    std::span<const GeneralVoFFaceVolume> faces, double dt, std::map<std::uint64_t, PLIC::GeometryPoint>& velocity,
+    std::map<std::uint64_t, Measure>& flux, std::map<std::uint64_t, Trajectory>& trajectories)
 {
     auto comm = data.hierarchy->communicator();
     std::vector<OwnerPacket> packets;
@@ -47,17 +59,15 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
             for (const auto& node : data.topology->nodes)
             {
                 auto v = velocity.at(node.gid);
-                std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>> walls;
+                std::vector<PlanarFacePtr> walls;
                 const auto& catalog = data.topology->node_walls.at(node.gid);
-                budget.add(
-                    catalog.size() * sizeof(SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>));
+                budget.add(catalog.size() * sizeof(PlanarFacePtr));
                 for (const auto& wall : catalog)
                     walls.push_back(PLIC::PlanarFace<ArithmeticMode::Exact>::from_geometry(*wall.geometry));
-                SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
+                sweep::TrajectoryLimits limits;
                 limits.byte_budget = data.options.byte_budget;
-                auto trajectory =
-                    SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::
-                        backtrace_constrained(PLIC::promote_identity(node.coordinate_identity), v, dt, walls, limits);
+                auto trajectory = Trajectory::backtrace_constrained(
+                    PLIC::promote_identity(node.coordinate_identity), v, dt, walls, limits);
                 budget.add(sizeof(trajectory));
                 identity_allocations.retain(trajectory.point, budget.used, budget.limit);
                 identity_allocations.retain(trajectory.departure, budget.used, budget.limit);
@@ -132,7 +142,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
             }
         });
 }
-std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donor_support(
+std::vector<SweepDonor> donor_support(
     const GeneralVoF::Data& data, const Key& first, const std::optional<Key>& second = {})
 {
     std::set<Key> seen{first}, front{first};
@@ -159,7 +169,7 @@ std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::Arithme
         }
         front = std::move(next);
     }
-    std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> result;
+    std::vector<SweepDonor> result;
     for (const auto& key : seen)
     {
         const auto& cell = data.cells.at(key);
@@ -167,10 +177,10 @@ std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::Arithme
     }
     return result;
 }
-std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> face_donor_support(
+std::vector<SweepDonor> face_donor_support(
     const GeneralVoF::Data& data, const AMR::AdaptiveTile& face, wire::Budget& budget)
 {
-    std::map<Key, SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> selected;
+    std::map<Key, SweepDonor> selected;
     auto insert = [&](const Key& key)
     {
         const auto cell = data.cells.find(key);
@@ -180,10 +190,8 @@ std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::Arithme
         {
             if (selected.size() >= data.options.maximum_stencil_cells)
                 throw std::invalid_argument("General VoF complete face donor fan budget exhausted.");
-            budget.add(sizeof(Key) + sizeof(SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>) +
-                       AMR::encode_adaptive_key(key).size() + 8 * sizeof(void*));
-            selected.emplace(key, SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>{
-                                      cell->second.gid, cell->second.phase.geometry});
+            budget.add(sizeof(Key) + sizeof(SweepDonor) + AMR::encode_adaptive_key(key).size() + 8 * sizeof(void*));
+            selected.emplace(key, SweepDonor{cell->second.gid, cell->second.phase.geometry});
         }
     };
     for (const auto& donor : donor_support(data, face.first, face.second))
@@ -194,8 +202,8 @@ std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::Arithme
     for (auto node : face.node_gids)
         for (const auto& key : data.topology->node_fans.at(node))
             insert(key);
-    std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> result;
-    budget.add(selected.size() * sizeof(SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>));
+    std::vector<SweepDonor> result;
+    budget.add(selected.size() * sizeof(SweepDonor));
     result.reserve(selected.size());
     for (const auto& [key, donor] : selected)
         result.push_back(donor);
@@ -204,7 +212,7 @@ std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::Arithme
 struct ExactAmounts
 {
     Measure bulk, gas, carrier;
-    void add(const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& p, int sign = 1)
+    void add(const ExactPhases& p, int sign = 1)
     {
         bulk = bulk + p.bulk.scaled(sign);
         gas = gas + p.gas.scaled(sign);
@@ -225,7 +233,7 @@ struct ExactStorageBudget
     wire::Budget& bytes;
     std::set<const void*> fragments;
     const char* phase = "transport retained exact";
-    void fragment(const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& value)
+    void fragment(const Fragment& value)
     {
         if (fragments.insert(value.storage_identity()).second)
             transport_charge(bytes, value.storage_bytes() + 4 * sizeof(void*), phase, " fragment");
@@ -237,7 +245,7 @@ struct ExactStorageBudget
         // pointer deduplication is valid only for the retained live catalog.
         transport_charge(bytes, value.storage_bytes(), phase, " measure");
     }
-    void phases(const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& value)
+    void phases(const ExactPhases& value)
     {
         measure(value.bulk);
         measure(value.gas);
@@ -251,10 +259,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
     const auto& data = *self.data_;
     auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
-    std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint> velocity;
+    std::map<std::uint64_t, PLIC::GeometryPoint> velocity;
     std::map<std::uint64_t, Measure> flux;
-    std::map<std::uint64_t, SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>
-        canonical_trajectories;
+    std::map<std::uint64_t, Trajectory> canonical_trajectories;
     controls(data, node_velocity, face_volume, timestep, velocity, flux, canonical_trajectories);
     auto retain_trajectories = [&](Trial& trial)
     {
@@ -317,7 +324,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     const auto& cell = data.cells.at(key);
                     trial.transfers_.push_back({cell.gid, cell.gid, cell.owner, cell.owner, phase_measures(cell),
                         diagnostic(phase_measures(cell))});
-                    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> zero;
+                    ExactPhases zero;
                     trial.budgets_.push_back({cell.gid, phase_measures(cell), zero, phase_measures(cell),
                         diagnostic(phase_measures(cell)), diagnostic(zero), diagnostic(phase_measures(cell))});
                 }
@@ -332,10 +339,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             wire::Budget budget{limit};
             for (const auto& [key, cell] : data.cells)
             {
-                const auto raw =
-                    phases(*SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
-                               *cell.phase.geometry),
-                        planes.at(key));
+                const auto raw = phases(*Fragment::from_geometry(*cell.phase.geometry), planes.at(key));
                 const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
                 const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
                 const auto view = Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
@@ -357,12 +361,10 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 labels.emplace(key, std::move(label));
             }
         });
-    std::map<std::uint64_t, std::shared_ptr<const SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>>>
-        sweeps;
-    std::map<std::uint64_t, std::vector<SimpleFluid::geometry::swept_volume::SweepIntersection<SimpleFluid::ArithmeticMode::Exact>>>
-        face_parts;
-    std::map<std::uint64_t, std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>>> face_donors;
-    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> local_atoms;
+    std::map<std::uint64_t, std::shared_ptr<const SweptFace>> sweeps;
+    std::map<std::uint64_t, std::vector<SweepIntersection>> face_parts;
+    std::map<std::uint64_t, std::vector<SweepDonor>> face_donors;
+    std::vector<TransportAtom> local_atoms;
     std::map<Key, std::pair<Measure, Measure>> signed_repair;
     Trial trial;
     trial.source_ = self.data_;
@@ -378,14 +380,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             trial.roundoff_.resize(data.topology->order.size());
             for (const auto& tile : data.topology->tiles)
             {
-                std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> trajectories;
-                budget.add(tile.node_gids.size() *
-                           sizeof(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>));
+                std::vector<Trajectory> trajectories;
+                budget.add(tile.node_gids.size() * sizeof(Trajectory));
                 for (auto gid : tile.node_gids)
                     trajectories.push_back(canonical_trajectories.at(gid));
-                auto face = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
-                    *PLIC::PlanarFace<ArithmeticMode::Exact>::from_geometry(*tile.geometry), trajectories,
-                    flux.at(tile.face_gid), data.options.sweep);
+                auto face = SweptFace::make(*PLIC::PlanarFace<ArithmeticMode::Exact>::from_geometry(*tile.geometry),
+                    trajectories, flux.at(tile.face_gid), data.options.sweep);
                 auto candidates = face_donor_support(data, tile, budget);
                 auto pieces = [&]
                 {
@@ -413,8 +413,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             for (const auto& key : data.topology->order)
             {
                 const auto& cell = data.cells.at(key);
-                SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> recipient{
-                    cell.gid, cell.phase.geometry, {}};
+                SweepRecipient recipient{cell.gid, cell.phase.geometry, {}};
                 Measure divergence;
                 for (const auto index : data.topology->cell_tiles.at(key))
                 {
@@ -427,7 +426,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 }
                 if (divergence.sign())
                     throw std::invalid_argument("General VoF projected flux violates source-free occupancy.");
-                std::map<Key, SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> selected;
+                std::map<Key, SweepDonor> selected;
                 for (const auto index : data.topology->cell_tiles.at(key))
                 {
                     const auto& tile = data.topology->tiles[index];
@@ -438,23 +437,21 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         {
                             if (selected.size() >= data.options.maximum_stencil_cells)
                                 throw std::invalid_argument("General VoF recipient face-donor union budget exhausted.");
-                            budget.add(sizeof(Key) +
-                                       sizeof(SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>) +
-                                       AMR::encode_adaptive_key(donor_key).size() + 8 * sizeof(void*));
+                            budget.add(sizeof(Key) + sizeof(SweepDonor) + AMR::encode_adaptive_key(donor_key).size() +
+                                       8 * sizeof(void*));
                             selected.emplace(donor_key, donor);
                         }
                     }
                 }
-                std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors;
-                budget.add(selected.size() * sizeof(SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>));
+                std::vector<SweepDonor> donors;
+                budget.add(selected.size() * sizeof(SweepDonor));
                 for (const auto& [donor_key, donor] : selected)
                     donors.push_back(donor);
                 auto partition = [&]
                 {
                     try
                     {
-                        return SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
-                            donors, std::span(&recipient, 1), data.options.sweep);
+                        return TransportPartition::local(donors, std::span(&recipient, 1), data.options.sweep);
                     }
                     catch (const std::invalid_argument& error)
                     {
@@ -476,8 +473,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         throw std::invalid_argument(context.str());
                     }
                 }();
-                budget.add(partition.atoms().size() *
-                           sizeof(SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>));
+                budget.add(partition.atoms().size() * sizeof(TransportAtom));
                 for (const auto& atom : partition.atoms())
                     exact_storage.fragment(*atom.geometry);
                 local_atoms.insert(local_atoms.end(), partition.atoms().begin(), partition.atoms().end());
@@ -503,10 +499,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                             .add(phases(*piece.geometry, planes.at(data.topology->by_gid.at(piece.donor))),
                                 sign * piece.sign);
                 }
-                const auto original =
-                    phases(*SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
-                               *cell.phase.geometry),
-                        planes.at(key));
+                const auto original = phases(*Fragment::from_geometry(*cell.phase.geometry), planes.at(key));
                 row_for(cell.gid).add(original, -1);
                 for (const auto& [donor, amount] : row)
                 {
@@ -659,7 +652,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
         Key donor, recipient;
         std::uint64_t recipient_gid = 0;
         int recipient_owner = -1;
-        SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact> atom;
+        TransportAtom atom;
     };
     std::vector<Routed> routed;
     std::vector<Key> recipient_keys;
@@ -679,7 +672,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 const auto& donor = data.cells.at(dk);
                 if (donor.owner != comm->getRank() || donor.revision != revision || donor.gid != gid)
                     throw std::invalid_argument("General VoF atom donor authentication failed.");
-                SimpleFluid::geometry::swept_volume::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact> fragment;
+                FragmentPtr fragment;
                 if (tag == 1)
                 {
                     // Only a self packet can name this invocation's immutable,
@@ -706,8 +699,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     auto bytes = r.bytes();
                     r.done();
                     budget.add(sizeof(Routed) + bytes.size());
-                    fragment =
-                        SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(bytes, limit);
+                    fragment = Fragment::decode(bytes, limit);
                 }
                 else
                     throw std::invalid_argument("General VoF invalid atom route tag.");
@@ -719,7 +711,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             }
         });
     std::vector<OwnerPacket>().swap(incoming.packets);
-    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>>().swap(local_atoms);
+    std::vector<TransportAtom>().swap(local_atoms);
     auto recipient_owners = data.hierarchy->lookup_cells(recipient_keys);
     struct LocalAmount
     {
@@ -734,8 +726,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
         {
             wire::Budget budget{limit};
             detail::ExactLiveStorage live(budget, limit / 4);
-            std::map<Key, std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>>>
-                donor_atoms;
+            std::map<Key, std::vector<TransportAtom>> donor_atoms;
             std::map<Key, std::map<Key, ExactAmounts>> amounts;
             std::map<Key, Measure> route_repair;
             ExactStorageBudget exact_storage{budget};
@@ -785,9 +776,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     throw std::invalid_argument("General VoF atom recipient authentication failed.");
                 if (!donor_atoms.contains(route.donor))
                     metadata(route.donor, sizeof(decltype(donor_atoms)::value_type));
-                transport_charge(budget,
-                    3 * sizeof(SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>),
-                    "donor phase atom handles");
+                transport_charge(budget, 3 * sizeof(TransportAtom), "donor phase atom handles");
                 donor_atoms[route.donor].push_back(route.atom);
                 exact_storage.fragment(*route.atom.geometry);
                 auto raw = phases(*route.atom.geometry, planes.at(route.donor));
@@ -813,7 +802,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             for (const auto& key : data.topology->order)
             {
                 const auto& donor = data.cells.at(key);
-                SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                TransportPartition::certify_donor_cover(
                     {donor.gid, donor.phase.geometry}, donor_atoms[key], data.options.sweep);
                 const auto discrepancy = labels.at(key).discrepancy();
                 auto absolute_discrepancy = discrepancy.sign() < 0 ? live.scaled(discrepancy, -1) : discrepancy;
@@ -839,9 +828,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 if (retained_gas.sign() < 0 || retained_carrier.sign() < 0)
                     throw std::invalid_argument(
                         "General VoF donor phase capacity exceeded after bounded canonical correction.");
-                SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> exported_exact{
-                    exported.bulk, exported.gas, exported.carrier};
-                SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> retained_exact{
+                ExactPhases exported_exact{exported.bulk, exported.gas, exported.carrier};
+                ExactPhases retained_exact{
                     live.difference(phase_measures(donor).bulk, exported.bulk), retained_gas, retained_carrier};
                 detail::ExactLiveStorage::Scope retained_exact_scope(
                     live, {&retained_exact.bulk, &retained_exact.gas, &retained_exact.carrier});
@@ -1073,8 +1061,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 total.bulk = total.bulk + amount.bulk;
                 total.gas = total.gas + amount.gas;
                 total.carrier = total.carrier + amount.carrier;
-                SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> exact{
-                    amount.bulk, amount.gas, amount.carrier};
+                ExactPhases exact{amount.bulk, amount.gas, amount.carrier};
                 trial.transfers_.push_back({transfer.gid, data.cells.at(transfer.recipient).gid, transfer.owner,
                     comm->getRank(), exact, diagnostic(exact)});
             }
@@ -1241,4 +1228,4 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
 }
 } // namespace Exact
 
-}
+} // namespace SimpleFluid::VoF

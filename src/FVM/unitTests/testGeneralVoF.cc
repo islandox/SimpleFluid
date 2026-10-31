@@ -302,10 +302,11 @@ TEST(GeneralVoF, InferredObliquePLICDrivesActualSkewPolyhedralUnsplitTransport)
     }
     for (const auto& stream : trial.finite_face_contributions())
     {
-        EXPECT_NEAR(stream.amount.gas.value + stream.amount.carrier.value, stream.amount.bulk.value, stream.amount.gas.absolute_error + stream.amount.carrier.absolute_error + stream.amount.bulk.absolute_error);
+        EXPECT_NEAR(stream.amount.gas.value + stream.amount.carrier.value, stream.amount.bulk.value,
+            stream.amount.gas.absolute_error + stream.amount.carrier.absolute_error +
+                stream.amount.bulk.absolute_error);
         if (stream.amount.gas.value > 0)
-            EXPECT_NEAR(
-                stream.amount.gas.as_double(), .5 * stream.amount.bulk.as_double(), 3e-13);
+            EXPECT_NEAR(stream.amount.gas.as_double(), .5 * stream.amount.bulk.as_double(), 3e-13);
     }
 }
 TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
@@ -337,7 +338,8 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
             recipient->geometry->centroid() == SimpleFluid::PLIC::GeometryPoint{1.5, 1.5, 1.5})
         {
             EXPECT_GT(transfer.amount.bulk.value, transfer.amount.bulk.absolute_error);
-            EXPECT_NEAR(transfer.amount.gas.value, transfer.amount.bulk.value, transfer.amount.gas.absolute_error + transfer.amount.bulk.absolute_error);
+            EXPECT_NEAR(transfer.amount.gas.value, transfer.amount.bulk.value,
+                transfer.amount.gas.absolute_error + transfer.amount.bulk.absolute_error);
             ++local_corner;
         }
     }
@@ -346,8 +348,10 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
     EXPECT_EQ(global_corner, 1);
     for (const auto& budget : trial.finite_donor_budgets())
     {
-        EXPECT_NEAR(budget.exported.gas.value + budget.retained.gas.value, budget.old.gas.value, budget.exported.gas.absolute_error + budget.retained.gas.absolute_error);
-        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value, budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
+        EXPECT_NEAR(budget.exported.gas.value + budget.retained.gas.value, budget.old.gas.value,
+            budget.exported.gas.absolute_error + budget.retained.gas.absolute_error);
+        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value,
+            budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
     }
     if (comm->getRank() >= 2)
         EXPECT_TRUE(candidate->owned_order().empty());
@@ -413,12 +417,14 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
         if (a[0] < -.5 && b[0] > .5)
             ++local_distant;
         EXPECT_EQ(transfer.amount.gas.value, 0);
-        EXPECT_NEAR(transfer.amount.carrier.value, transfer.amount.bulk.value, transfer.amount.carrier.absolute_error + transfer.amount.bulk.absolute_error);
+        EXPECT_NEAR(transfer.amount.carrier.value, transfer.amount.bulk.value,
+            transfer.amount.carrier.absolute_error + transfer.amount.bulk.absolute_error);
     }
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_distant, &distant);
     EXPECT_GT(distant, 0);
     for (const auto& budget : trial.finite_donor_budgets())
-        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value, budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
+        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value,
+            budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
     if (comm->getRank() >= 2)
         EXPECT_TRUE(candidate->owned_order().empty());
 }
@@ -462,7 +468,8 @@ TEST(GeneralVoF, CrossedFaceKeepsOppositeDonorStreamsWhenProjectedNetVolumeIsZer
             for (const auto& stream : trial.finite_face_contributions())
                 if (stream.face == tile.face_gid)
                 {
-                    bulk.add(stream.direction > 0 ? stream.amount.bulk : SimpleFluid::VoF::finite_detail::negate(stream.amount.bulk));
+                    bulk.add(stream.direction > 0 ? stream.amount.bulk
+                                                  : SimpleFluid::VoF::finite_detail::negate(stream.amount.bulk));
                     gas += stream.direction * stream.amount.gas.as_double();
                     carrier += stream.direction * stream.amount.carrier.as_double();
                     positive |= stream.direction > 0;

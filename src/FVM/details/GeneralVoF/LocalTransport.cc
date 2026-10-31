@@ -170,6 +170,25 @@ long double ratio(long double available, long double demand)
     const auto result = std::min(1.L, std::nextafter(available, 0.L) / demand);
     return result > 0 && result < 1 ? std::nextafter(result, 0.L) : result;
 }
+struct LimiterRatios
+{
+    long double endpoint, donor;
+};
+LimiterRatios local_limiter_ratios(const Triple& old, const Triple& baseline, const Triple& exported,
+    const Demand& demand, long double canonical, double volume_tolerance)
+{
+    const Triple available{old[0] + canonical, baseline[1], baseline[2]};
+    long double er = 1, dr = 1;
+    for (unsigned p = 0; p < 3; ++p)
+    {
+        er = std::min(er, ratio(available[p], demand.endpoint[p]));
+        dr = std::min(dr, ratio(old[p] - exported[p], demand.donor[p]));
+    }
+    const auto allowed = volume_tolerance * old[0];
+    er = std::min(
+        {er, ratio(allowed - canonical, demand.closure_positive), ratio(allowed + canonical, demand.closure_negative)});
+    return {er, dr};
+}
 long double bound_product(long double a, long double b)
 {
     return a == 0 || b == 0 ? 0 : fp::upward(fp::upward(std::abs(a)) * b);
@@ -432,18 +451,10 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 // Use the unrounded positive ledger. Binary64 publication can
                 // round an endpoint capacity upward before a limiting correction.
                 const auto baseline = low.endpoint_capacity.at(c.gid);
-                const Triple available{old[0] + canonical.value(), baseline[1], baseline[2]};
-                long double er = 1, dr = 1;
-                for (unsigned p = 0; p < 3; ++p)
-                {
-                    er = std::min(er, ratio(available[p], demand.endpoint[p]));
-                    dr = std::min(dr, ratio(old[p] - low_export.at(c.gid)[p], demand.donor[p]));
-                }
-                const auto allowed = data.options.reconstruction.volume_tolerance * old[0];
-                er = std::min({er, ratio(allowed - canonical.value(), demand.closure_positive),
-                    ratio(allowed + canonical.value(), demand.closure_negative)});
-                endpoint_ratio.emplace(c.gid, er);
-                donor_ratio.emplace(c.gid, dr);
+                const auto ratios = local_limiter_ratios(old, baseline, low_export.at(c.gid), demand, canonical.value(),
+                    data.options.reconstruction.volume_tolerance);
+                endpoint_ratio.emplace(c.gid, ratios.endpoint);
+                donor_ratio.emplace(c.gid, ratios.donor);
             }
             wire::Budget budget{limit};
             for (const auto& request : requests)

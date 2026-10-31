@@ -262,7 +262,7 @@ OrdinaryFacePtr OrdinaryFace::make_wide(std::span<const WidePoint> vertices)
     impl->polygon.assign(vertices.begin(), vertices.end());
     validate(impl->polygon);
     impl->normal = on::polygon_vector(impl->polygon);
-    impl->support = on::source_support_packet(impl->polygon);
+    impl->support = on::make_source_support(impl->polygon);
     return OrdinaryFacePtr(new OrdinaryFace(std::move(impl)));
 }
 OrdinaryFacePtr OrdinaryFace::from_retained_support(
@@ -378,7 +378,7 @@ OrdinaryFacePtr OrdinaryFace::translated(GeometryPoint shift) const
     const auto delta = on::wide(shift);
     for (auto& v : p)
         v = on::add(v, delta);
-    return from_retained_support(p, impl_->normal, on::translated_support_packet(*impl_->support, delta));
+    return from_retained_support(p, impl_->normal, on::translate_support(*impl_->support, delta));
 }
 OrdinaryFacePtr OrdinaryFace::translated(const OrdinaryDisplacement& packet) const
 {
@@ -386,7 +386,7 @@ OrdinaryFacePtr OrdinaryFace::translated(const OrdinaryDisplacement& packet) con
     const auto shift = IdentityAccess::displacement(packet);
     for (auto& v : p)
         v = on::add(v, shift);
-    return from_retained_support(p, impl_->normal, on::translated_support_packet(*impl_->support, shift));
+    return from_retained_support(p, impl_->normal, on::translate_support(*impl_->support, shift));
 }
 OrdinaryFacePtr OrdinaryFace::oriented_like(GeometryPoint direction) const
 {
