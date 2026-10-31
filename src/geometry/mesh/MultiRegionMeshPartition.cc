@@ -5,6 +5,7 @@
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
+#include "geometry/mesh/NativePartitionWire.hh"
 #include <cstring>
 #include <numeric>
 #include <set>
@@ -18,7 +19,6 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490009ULL;
 struct Writer
 {
     std::vector<char> data;
@@ -82,6 +82,43 @@ struct Reader
         return {chars.begin(), chars.end()};
     }
 };
+void write_header(Writer& w, uint64_t region_count)
+{
+    using partition_wire::Header;
+    w.data.resize(sizeof(Header), 0);
+    const auto family = partition_wire::Family::MultiRegionPartition;
+    const auto version = partition_wire::version;
+    std::memcpy(w.data.data() + offsetof(Header, family), &family, sizeof(family));
+    std::memcpy(w.data.data() + offsetof(Header, version), &version, sizeof(version));
+    std::memcpy(w.data.data() + offsetof(Header, region_count), &region_count, sizeof(region_count));
+}
+size_t read_header(Reader& r)
+{
+    using partition_wire::Header;
+    if (r.data.size() < sizeof(Header))
+        throw std::invalid_argument("Truncated composite partition header.");
+    uint8_t family, version;
+    uint64_t region_count;
+    std::memcpy(&family, r.data.data() + offsetof(Header, family), sizeof(family));
+    std::memcpy(&version, r.data.data() + offsetof(Header, version), sizeof(version));
+    std::memcpy(&region_count, r.data.data() + offsetof(Header, region_count), sizeof(region_count));
+    if (family != static_cast<uint8_t>(partition_wire::Family::MultiRegionPartition) ||
+        version != partition_wire::version)
+        throw std::invalid_argument("Unsupported composite partition packet family or version.");
+    for (size_t i = 0; i < sizeof(Header); ++i)
+    {
+        const auto in_field = [i](size_t offset, size_t width) { return i >= offset && i - offset < width; };
+        const bool field = in_field(offsetof(Header, family), sizeof(Header::family)) ||
+                           in_field(offsetof(Header, version), sizeof(Header::version)) ||
+                           in_field(offsetof(Header, region_count), sizeof(Header::region_count));
+        if (!field && r.data[i] != 0)
+            throw std::invalid_argument("Nonzero composite partition header padding.");
+    }
+    r.data = r.data.subspan(sizeof(Header));
+    if (region_count > r.data.size())
+        throw std::invalid_argument("Composite partition count exceeds remaining payload.");
+    return static_cast<size_t>(region_count);
+}
 void write_layout(Writer& w, const RegionLayout& l)
 {
     w.value(l.family); w.value(uint64_t(l.cells)); w.value(uint64_t(l.faces));
@@ -878,8 +915,7 @@ std::vector<char> MultiRegionMesh::serialize_partition(std::span<const ID> visib
                 }
         }
     Writer w;
-    w.value(partition_magic);
-    w.value(uint64_t(d_regions.size()));
+    write_header(w, uint64_t(d_regions.size()));
     for (size_t i = 0; i < d_regions.size(); ++i)
         std::visit(
             [&](const auto& region) { write_region(w, region, d_regions[i].index(), selected[i]); }, d_regions[i]);
@@ -921,12 +957,11 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     if (comm.is_null())
         throw std::invalid_argument("Partition geometry requires a communicator.");
     Reader r{packet};
-    if (r.value<uint64_t>() != partition_magic)
-        throw std::invalid_argument("Unsupported composite partition packet version.");
+    const auto region_count = read_header(r);
     auto mesh = std::shared_ptr<MultiRegionMesh>(new MultiRegionMesh(PartitionTag{}));
     mesh->d_comm = std::move(comm);
     TopologyCache topology_cache;
-    for (size_t count = r.count(); count; --count)
+    for (size_t count = region_count; count; --count)
         mesh->d_regions.push_back(read_region(r, &topology_cache));
     mesh->d_native_patch_counts.resize(r.count(sizeof(uint64_t)));
     if (mesh->d_native_patch_counts.size() != mesh->d_regions.size())

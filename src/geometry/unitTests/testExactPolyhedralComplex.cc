@@ -376,7 +376,7 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
             packet.at(offset + b) = static_cast<char>(value >> (8 * b));
     };
     ASSERT_EQ(byte(), static_cast<std::uint8_t>(SimpleFluid::PLIC::GeometryTag::ExactComplex));
-    ASSERT_EQ(byte(), 3);
+    ASSERT_EQ(byte(), 4);
     skip_words(3);
     const auto cells = word();
     for (ID cell = 0; cell < cells; ++cell)

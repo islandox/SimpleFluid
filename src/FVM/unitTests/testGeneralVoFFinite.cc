@@ -1134,6 +1134,14 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
     {
         wire::Writer current;
         protocol::write_header(current, record);
+        ASSERT_EQ(current.data.size(), sizeof(protocol::Header));
+        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, family)]), 3u);
+        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, version)]), 3u);
+        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, record)]),
+            static_cast<std::uint8_t>(record));
+        wire::Writer repeated;
+        protocol::write_header(repeated, record);
+        EXPECT_EQ(repeated.data, current.data);
         wire::Reader accepted{current.data};
         EXPECT_NO_THROW(protocol::read_header(accepted, record));
         EXPECT_EQ(accepted.offset, protocol::header_bytes);
@@ -1143,10 +1151,43 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
         legacy.word(0);
         wire::Reader old{legacy.data};
         EXPECT_THROW(protocol::read_header(old, record), std::invalid_argument);
-        wire::Reader truncated{std::span<const char>(current.data).first(protocol::header_bytes - 1)};
-        EXPECT_THROW(protocol::read_header(truncated, record), std::invalid_argument);
+        for (const auto previous_version : {std::uint8_t{2}, std::uint8_t{3}})
+        {
+            wire::Writer legacy_frame;
+            legacy_frame.word(0x5346564f46574952ULL);
+            legacy_frame.byte(previous_version);
+            legacy_frame.byte(static_cast<std::uint8_t>(record));
+            wire::Reader previous_frame{legacy_frame.data};
+            EXPECT_THROW(protocol::read_header(previous_frame, record), std::invalid_argument);
+        }
+        for (std::size_t length = 0; length < protocol::header_bytes; ++length)
+        {
+            wire::Reader truncated{std::span<const char>(current.data).first(length)};
+            EXPECT_THROW(protocol::read_header(truncated, record), std::invalid_argument);
+        }
+        for (std::size_t i = 0; i < protocol::header_bytes; ++i)
+            if (i != offsetof(protocol::Header, family) && i != offsetof(protocol::Header, version) &&
+                i != offsetof(protocol::Header, record))
+            {
+                EXPECT_EQ(current.data[i], 0);
+                auto padding = current.data;
+                padding[i] = 1;
+                wire::Reader nonzero{padding};
+                EXPECT_THROW(protocol::read_header(nonzero, record), std::invalid_argument);
+            }
         auto changed = current.data;
-        changed[sizeof(std::uint64_t)] = char(protocol::version + 1);
+        changed[offsetof(protocol::Header, family)] = char(255);
+        wire::Reader unknown_family{changed};
+        EXPECT_THROW(protocol::read_header(unknown_family, record), std::invalid_argument);
+        changed = current.data;
+        changed[offsetof(protocol::Header, record)] = char(255);
+        wire::Reader unknown_record{changed};
+        EXPECT_THROW(protocol::read_header(unknown_record, record), std::invalid_argument);
+        changed = current.data;
+        changed[offsetof(protocol::Header, version)] = 2; // Immediate preceding stamp, including empty records.
+        wire::Reader previous{changed};
+        EXPECT_THROW(protocol::read_header(previous, record), std::invalid_argument);
+        changed[offsetof(protocol::Header, version)] = char(protocol::version + 1);
         wire::Reader future{changed};
         EXPECT_THROW(protocol::read_header(future, record), std::invalid_argument);
         wire::Reader foreign{current.data};

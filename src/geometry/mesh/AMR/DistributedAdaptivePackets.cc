@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -14,6 +15,7 @@ namespace SimpleFluid::Meshes::AMR
 namespace
 {
 using adaptive_detail::Reader;
+static_assert(std::endian::native == std::endian::little || std::endian::native == std::endian::big);
 struct Writer
 {
     AdaptiveBytes data;
@@ -38,6 +40,46 @@ struct Writer
         data.insert(data.end(), value.begin(), value.end());
     }
 };
+void write_batch_header(Writer& writer, std::uint64_t dictionary_count)
+{
+    using adaptive_detail::BatchHeader;
+    writer.room(sizeof(BatchHeader));
+    writer.data.resize(sizeof(BatchHeader), 0);
+    const auto family = adaptive_detail::PacketFamily::AdaptiveBatch;
+    const auto version = adaptive_detail::batch_version;
+    if constexpr (std::endian::native == std::endian::big)
+        dictionary_count = std::byteswap(dictionary_count);
+    std::memcpy(writer.data.data() + offsetof(BatchHeader, family), &family, sizeof(family));
+    std::memcpy(writer.data.data() + offsetof(BatchHeader, version), &version, sizeof(version));
+    std::memcpy(writer.data.data() + offsetof(BatchHeader, dictionary_count), &dictionary_count,
+        sizeof(dictionary_count));
+}
+std::uint64_t read_batch_header(Reader& reader)
+{
+    using adaptive_detail::BatchHeader;
+    if (reader.data.size() < sizeof(BatchHeader))
+        throw std::invalid_argument("Truncated adaptive batch header.");
+    const auto* bytes = reader.data.data();
+    if (static_cast<std::uint8_t>(bytes[offsetof(BatchHeader, family)]) !=
+            static_cast<std::uint8_t>(adaptive_detail::PacketFamily::AdaptiveBatch) ||
+        static_cast<std::uint8_t>(bytes[offsetof(BatchHeader, version)]) != adaptive_detail::batch_version)
+        throw std::invalid_argument("Unsupported adaptive batch packet family or version.");
+    for (std::size_t i = 0; i < sizeof(BatchHeader); ++i)
+    {
+        const auto in_field = [i](std::size_t offset, std::size_t width) { return i >= offset && i - offset < width; };
+        const bool field = in_field(offsetof(BatchHeader, family), sizeof(BatchHeader::family)) ||
+                           in_field(offsetof(BatchHeader, version), sizeof(BatchHeader::version)) ||
+                           in_field(offsetof(BatchHeader, dictionary_count), sizeof(BatchHeader::dictionary_count));
+        if (!field && bytes[i] != 0)
+            throw std::invalid_argument("Nonzero adaptive batch header padding.");
+    }
+    std::uint64_t count;
+    std::memcpy(&count, bytes + offsetof(BatchHeader, dictionary_count), sizeof(count));
+    if constexpr (std::endian::native == std::endian::big)
+        count = std::byteswap(count);
+    reader.offset = sizeof(BatchHeader);
+    return count;
+}
 using Part = std::shared_ptr<const AdaptiveBytes>;
 Part native_view(const std::shared_ptr<const NativeFragmentDescriptor>& recipe)
 {
@@ -45,7 +87,6 @@ Part native_view(const std::shared_ptr<const NativeFragmentDescriptor>& recipe)
     // and no per-record copy of a potentially large run view is allocated.
     return recipe ? Part(recipe, &recipe->view) : nullptr;
 }
-constexpr std::uint64_t magic = 0x5346414442410006ULL;
 struct PartLess
 {
     bool operator()(const Part& a, const Part& b) const { return *a < *b; }
@@ -283,8 +324,7 @@ AdaptiveBytes encode_adaptive_batch(
     for (const auto& family : families)
         dict.add(family.parent);
     Writer w{{}, budget};
-    w.word(magic);
-    w.word(dict.parts.size());
+    write_batch_header(w, dict.parts.size());
     for (const auto& part : dict.parts)
         w.bytes(*part);
     w.word(leaves.size());
@@ -312,11 +352,9 @@ AdaptiveBatch decode_adaptive_batch(std::span<const char> bytes, std::size_t bud
     if (bytes.size() > budget)
         throw std::invalid_argument("Adaptive batch wire budget exhausted.");
     Reader r{bytes};
-    if (r.word() != magic)
-        throw std::invalid_argument("Unsupported adaptive batch packet version.");
+    const auto count = read_batch_header(r);
     Decoder decoder(budget);
     AdaptiveBatch batch;
-    auto count = r.word();
     constexpr auto part_metadata = sizeof(Part) + sizeof(AdaptiveBytes) + 6 * sizeof(void*);
     if (count > (r.data.size() - r.offset) / 8 || count > budget / part_metadata)
         throw std::invalid_argument("Invalid adaptive batch dictionary size/budget.");

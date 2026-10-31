@@ -75,12 +75,28 @@ which are serialized as single bytes. Numeric payloads, indices, lengths, and
 publication pins retain their required widths; hardware floating-point masks
 are independent of codec tags.
 
-Identity and geometry packets use a checked 27-byte envelope: an eight-byte
-family signature, one byte each for version, kind, and arithmetic mode, and
-eight bytes each for finite numeric profile and body length. Multibyte fields
-are little-endian. Exact packets use profile zero; Ordinary packets bind
-the radix, significand precision, and exponent range. Decoders reject foreign
-kinds/modes/profiles, unsupported versions, noncanonical scalar or rational
+Identity and geometry packets use the natural C++ layout of
+`GeometryPacketHeader`. Family, version, kind, arithmetic mode, and numeric
+profile each occupy one byte; body length is eight bytes. `sizeof` and
+`offsetof` determine the serialized size and member positions, including
+compiler-inserted inter-member and tail padding. On the current GCC/x86-64
+layout the header is 16 bytes: fields at offsets 0--4, zero padding at 5--7,
+and length at offset 8.
+
+Serialization zeroes the header byte storage and writes members individually,
+so no indeterminate C++ padding enters a packet. Decoders reject nonzero padding.
+The length remains little-endian and uses `memcpy` with compile-time endian
+conversion; an enclosing variable-length record need not provide an aligned
+address. Padding aligns header-relative fields, not arbitrary enclosing buffers.
+
+Numeric profile enums identify Exact rational data, binary64, x87 binary80,
+or binary128. Ordinary selection matches radix, significand precision, and both
+exponent limits exactly; unsupported formats reject instead of selecting an
+approximation. Profiles describe arithmetic formats, not `sizeof(long double)`.
+This header is ABI-dependent: communicating endpoints and saved artifacts need
+compatible C++ member layouts. A matching numeric profile alone does not prove
+layout compatibility, and the header does not carry a separate layout ID.
+Decoders reject foreign kinds/modes/profiles, unsupported versions, noncanonical scalar or rational
 representations, truncated/trailing data, and exceeded byte budgets. Zero
 displacement has a complete envelope with an empty body; empty wire data is not
 a displacement packet.
@@ -100,11 +116,25 @@ whose optional geometry is absent. Ancestry keys retain their original schema.
 Mixed join capsules carry a new geometry certificate and regenerate the canonical
 key from it. Authority tile packets retain the leading numeric GID
 word for collective ordinal patching, followed by their checked record stamp.
-AMR/FVM geometry record stamps use an eight-byte family signature plus one-byte
-version and kind. Extrusion and measure codecs use compact tags too, and their
+AMR and FVM geometry record stamps use natural headers of one-byte family,
+version, and kind fields. With their byte alignment these headers occupy three
+bytes; the codecs still initialize and check any compiler-inserted padding.
+Adaptive batch headers include their eight-byte dictionary count after the
+one-byte family and version fields, using natural padding and the existing
+little-endian count encoding. Dictionary admission checks still precede
+allocation. Extrusion and measure codecs use compact tags too, and their
 native-fragment, frozen-part/batch, and partition containers are versioned
 accordingly. Independent product ancestry capsules and pure topology codecs
 retain their own schemas.
+
+Native multi-region partition packets likewise separate their one-byte family
+enum from their one-byte schema version. Their natural C++ header includes the
+eight-byte region count: on the current layout it occupies 16 bytes, with six
+zero padding bytes before the count. The decoder checks family, version, padding,
+and the count's remaining-byte bound before constructing the partition. This
+count keeps the partition format's native byte order. Header fields are copied
+individually with `memcpy`; decoding accepts unaligned packet addresses. These
+header guarantees do not change the native representation of partition bodies.
 
 This is a clean format break: regenerate saved artifacts using affected packet
 formats and rebuild every communicating process. There are no legacy packet
