@@ -116,7 +116,7 @@ Point native_point(std::span<const PLIC::ConvexGeometryPtr<mode>> cells, PLIC::G
 
 struct CapturedFace20
 {
-    std::array<Sweep::OrdinaryAggregateTetra, 1> tetrahedra;
+    Sweep::OrdinaryAggregateSourceBatch batch;
     std::vector<Sweep::OrdinaryAggregateDonor> donors;
 
     CapturedFace20()
@@ -168,27 +168,30 @@ struct CapturedFace20
                     walls.push_back({Geometry::from_geometry(*native.at(gid), ordinary_limits()), 2});
             departure[node] = PLIC::backtrace_constrained<mode>(current[node], velocities[node], .002, walls);
         }
-        auto& tetra = tetrahedra.front();
+        batch.points.resize(4);
+        batch.tetrahedra.resize(1);
+        auto& tetra = batch.tetrahedra.front();
         tetra.sign = 1;
-        tetra.vertex_ids = {0, 1, 7, 11};
-        tetra.vertices[0] = PLIC::point_average<mode>(current);
+        tetra.vertices = {Sweep::OrdinaryAggregatePointIndex{0}, Sweep::OrdinaryAggregatePointIndex{1},
+            Sweep::OrdinaryAggregatePointIndex{2}, Sweep::OrdinaryAggregatePointIndex{3}};
+        batch.points[0] = PLIC::point_average<mode>(current);
         // The corrected backcenter has no original support in the capture.
-        tetra.vertices[1] = Point({0xe661cd3ebeb43883p-65L, 0x80016a2e733017e1p-65L, 0xffffdb9e8eeedf9ep-65L});
-        tetra.vertices[2] = departure[0];
-        tetra.vertices[3] = departure[4];
+        batch.points[1] = Point({0xe661cd3ebeb43883p-65L, 0x80016a2e733017e1p-65L, 0xffffdb9e8eeedf9ep-65L});
+        batch.points[2] = departure[0];
+        batch.points[3] = departure[4];
     }
 };
 
 // Independent scalar triple product of the original represented four points.
 // No aggregate clipping, predicate implementation, or measured child is used.
-long double independent_volume(const Sweep::OrdinaryAggregateTetra& tetra)
+long double independent_volume(std::span<const Point> points)
 {
     Wide a, b, c;
     for (unsigned axis = 0; axis < 3; ++axis)
     {
-        a[axis] = tetra.vertices[1].value[axis] - tetra.vertices[0].value[axis];
-        b[axis] = tetra.vertices[2].value[axis] - tetra.vertices[0].value[axis];
-        c[axis] = tetra.vertices[3].value[axis] - tetra.vertices[0].value[axis];
+        a[axis] = points[1].value[axis] - points[0].value[axis];
+        b[axis] = points[2].value[axis] - points[0].value[axis];
+        c[axis] = points[3].value[axis] - points[0].value[axis];
     }
     return std::abs(a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2]) +
                     a[2] * (b[0] * c[1] - b[1] * c[0])) /
@@ -204,18 +207,17 @@ void expect_captured_source(const CapturedFace20& fixture)
     for (unsigned vertex = 0; vertex < expected.size(); ++vertex)
         for (unsigned axis = 0; axis < 3; ++axis)
         {
-            const auto observed = fixture.tetrahedra.front().vertices[vertex].value[axis];
+            const auto observed = fixture.batch.points[vertex].value[axis];
             if constexpr (std::numeric_limits<long double>::digits == 64)
                 EXPECT_EQ(observed, expected[vertex][axis]) << "vertex=" << vertex << ", axis=" << axis;
             else
                 EXPECT_LE(std::abs(observed - expected[vertex][axis]),
                     2 * std::numeric_limits<long double>::epsilon() * std::max(1.L, std::abs(expected[vertex][axis])));
         }
-    EXPECT_TRUE(fixture.tetrahedra.front().vertices[1].supports().empty());
-    EXPECT_FALSE(fixture.tetrahedra.front().vertices[2].supports().empty());
+    EXPECT_TRUE(fixture.batch.points[1].supports().empty());
+    EXPECT_FALSE(fixture.batch.points[2].supports().empty());
     const auto wall = fixture.donors[1].geometry->face_geometry(2);
-    EXPECT_TRUE(
-        PLIC::has_support(fixture.tetrahedra.front().vertices[2].dynamic(), PLIC::original_support_authority(*wall)));
+    EXPECT_TRUE(PLIC::has_support(fixture.batch.points[2].dynamic(), PLIC::original_support_authority(*wall)));
 }
 
 void expect_shared_support_across_frames(const CapturedFace20& fixture)
@@ -244,7 +246,7 @@ void expect_shared_support_across_frames(const CapturedFace20& fixture)
 
 void expect_covered_once(const Sweep::OrdinaryAggregateResult& result, const CapturedFace20& fixture)
 {
-    const auto expected = independent_volume(fixture.tetrahedra.front());
+    const auto expected = independent_volume(fixture.batch.points);
     ASSERT_GT(expected, 0);
     long double bulk = 0, carrier = 0, total_budget = 0;
     for (const auto& donor : fixture.donors)
@@ -282,7 +284,8 @@ TEST(OrdinaryAggregateReplay, CapturedFace20OriginalSupportCoverageInBothDonorOr
     CapturedFace20 fixture;
     expect_captured_source(fixture);
     expect_shared_support_across_frames(fixture);
-    const Sweep::OrdinaryAggregateSource source(fixture.tetrahedra, {}, ordinary_limits());
+    auto batch = fixture.batch;
+    const Sweep::OrdinaryAggregateSource source(std::move(batch), {}, ordinary_limits());
     for (unsigned order = 0; order < 2; ++order)
     {
         SCOPED_TRACE(order);
@@ -301,7 +304,8 @@ TEST(OrdinaryAggregateReplay, CapturedFallbackUsesRemainingNestedWorkAndRestores
     if (Tpetra::getDefaultComm()->getSize() != 1)
         GTEST_SKIP() << "The captured native GID ordering is serial.";
     CapturedFace20 fixture;
-    const Sweep::OrdinaryAggregateSource source(fixture.tetrahedra, {}, ordinary_limits());
+    auto batch = fixture.batch;
+    const Sweep::OrdinaryAggregateSource source(std::move(batch), {}, ordinary_limits());
     auto* const previous = PLIC::details::active_work;
     ASSERT_EQ(previous, nullptr);
     for (unsigned order = 0; order < 2; ++order)

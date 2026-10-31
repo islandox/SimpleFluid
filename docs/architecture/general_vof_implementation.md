@@ -137,3 +137,13 @@ geometry, provenance-support and typed identity owners across retained roots;
 the ledger pins those owners and includes its bookkeeping in admission.
 Allocation measurements report their scope and exclusions separately from these
 conservative admission estimates; neither metric is process RSS.
+
+Finite construction history retains shared immutable recipes. Each recipe stores
+only its active operation payload: a source geometry owner, a shared clip operation
+and side, or an exclusively owned Rebase payload with its parent and full input
+halfspace. The large Rebase payload is allocated only for that operation and is
+charged once with its recipe owner. Shared clip records retain source-point pins;
+the general recipe node has no retained-point vector. Both finite modes and
+authenticated replay use the same creation and accounting rules. Construction
+packet version 5, root ordering and replayed shells are independent of this private
+storage layout.

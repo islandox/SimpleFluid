@@ -2,12 +2,13 @@
  * @brief Indexed conservative interface reach and owner-authenticated local cuts.
  */
 #include "FVM/details/GeneralVoF/LocalGeometry.hh"
-#include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
+#include "FVM/details/GeneralVoF/PendingFaceGeometry.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
+#include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include <cstdio>
@@ -108,14 +109,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
     work.volume_tolerance = data.options.reconstruction.volume_tolerance;
     work.limits.byte_budget = std::min(work.limits.byte_budget, data.options.byte_budget);
     FaceWorkspaceTotals workspace_totals;
-    struct Pending
-    {
-        const AMR::AdaptiveTile* tile;
-        SimpleFluid::geometry::swept_volume::Sweep<mode> recipe;
-        std::vector<std::size_t> candidates;
-        bool geometric = false;
-    };
-    std::vector<Pending> pending;
+    PendingFaceGeometry pending;
     std::map<std::uint64_t, std::size_t> local_authorities;
     std::vector<const Cell*> cells;
     std::shared_ptr<const LocalSpatialCache> spatial;
@@ -187,7 +181,10 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 failure::Scope face_context("interface_local_reach");
                 face_context.record.face = tile.face_gid;
                 face_context.record.mark(failure::Field::Face);
-                work.charge(2 * tile.node_gids.size() * sizeof(Point) + sizeof(Pending));
+                if (tile.node_gids.size() > std::numeric_limits<std::size_t>::max() / (2 * sizeof(Point)))
+                    throw PLIC::GeometryError(
+                        PLIC::GeometryErrorCode::ResourceLimit, "Pending sweep point array capacity overflows.");
+                work.charge(2 * tile.node_gids.size() * sizeof(Point));
                 auto recipe = [&]
                 {
                     SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext progress;
@@ -205,9 +202,9 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                                 face_budgets.at(tile.face_gid));
                         });
                 }();
-                // These sealed centers own provenance beyond the inline point
-                // arrays. Their lifetime follows the pending recipe, not the
-                // source/metric workspace that later borrows them.
+                // Sealed centers own provenance beyond inline point arrays.
+                // Keep their conservative charge even when classification lets
+                // us destroy a scalar face's recipe before plane import.
                 work.charge(PLIC::point_storage_bytes(recipe.center) + PLIC::point_storage_bytes(recipe.backcenter));
                 Box bounds;
                 for (const auto& p : recipe.current)
@@ -300,7 +297,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         }
                     }
                 }
-                work.push(pending, Pending{&tile, std::move(recipe), std::move(candidates), geometric});
+                pending.push(&tile, std::move(recipe), std::move(candidates), geometric, work);
             }
             result.diagnostics.plane_requests = requested.size();
             if (result.balance_work)
@@ -357,7 +354,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 geometries.emplace(key, std::move(geometry));
             }
             std::size_t capture_face = 0;
-            for (auto& entry : pending)
+            for (const auto& entry : pending.faces())
             {
                 auto* face_sample = result.balance_work ? &result.balance_work->faces[capture_face++] : nullptr;
                 WorkObservation aggregate_observation(face_sample ? &face_sample->aggregate : nullptr);
@@ -373,12 +370,12 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 {
                     LocalFaceGeometry face;
                     face.face = tile.face_gid;
-                    face.geometric = entry.geometric;
-                    face.chain = {tile.face_gid, entry.recipe.control, entry.recipe.control, Math::make_value(mode, 0),
-                        entry.recipe.ordinary_volume_budget};
+                    face.geometric = entry.geometry.has_value();
+                    face.chain = {tile.face_gid, entry.control, entry.control, Math::make_value(mode, 0),
+                        entry.ordinary_volume_budget};
                     return face;
                 };
-                if (!entry.geometric)
+                if (!entry.geometry)
                 {
                     ++result.diagnostics.algebraic_faces;
                     work.push(result.owned_faces, make_face());
@@ -396,32 +393,26 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                     {
                         auto& face_work = workspace.setup_work();
                         auto face = make_face();
+                        auto geometric = pending.take_geometry(*entry.geometry);
                         // Source identities follow the face recipe, including its private
                         // corrected center. Equal rounded coordinates never merge identities.
-                        const auto& recipe = entry.recipe;
                         const auto n = tile.node_gids.size();
-                        std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra> tetrahedra;
+                        SimpleFluid::geometry::swept_volume::OrdinaryAggregateSourceBatch batch;
+                        batch.points = geometric.take_points(face_work);
                         const auto append = [&](std::array<std::size_t, 3> ids)
                         {
-                            const auto point = [&](std::size_t id) -> const Point&
-                            {
-                                if (id == 0)
-                                    return recipe.center;
-                                if (id == 1)
-                                    return recipe.backcenter;
-                                return id < n + 2 ? recipe.current.at(id - 2) : recipe.departure.at(id - n - 2);
-                            };
                             SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra tetra;
-                            tetra.vertex_ids = {0, ids[0], ids[1], ids[2]};
-                            for (unsigned i = 0; i < 4; ++i)
-                                tetra.vertices[i] = point(tetra.vertex_ids[i]);
-                            const auto orientation = PLIC::orientation<mode>(tetra.vertices).value;
+                            tetra.vertices = {{{0}, {ids[0]}, {ids[1]}, {ids[2]}}};
+                            const auto orientation =
+                                PLIC::orientation<mode>({batch.points[0], batch.points.at(ids[0]),
+                                                            batch.points.at(ids[1]), batch.points.at(ids[2])})
+                                    .value;
                             // A proved contact has zero measure. Every nonzero source
                             // cone remains in the immutable batch, however thin it is.
                             if (orientation == 0)
                                 return;
                             tetra.sign = orientation > 0 ? 1 : -1;
-                            face_work.push(tetrahedra, std::move(tetra));
+                            face_work.push(batch.tetrahedra, std::move(tetra));
                         };
                         for (std::size_t i = 0; i < n; ++i)
                         {
@@ -440,9 +431,9 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         }
                         std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor> donors;
                         std::map<std::size_t, std::array<long double, 2>> phase_quotas;
-                        const auto quota =
-                            face_budgets.at(tile.face_gid) / (2 * std::max<std::size_t>(1, entry.candidates.size()));
-                        for (const auto i : entry.candidates)
+                        const auto quota = face_budgets.at(tile.face_gid) /
+                                           (2 * std::max<std::size_t>(1, geometric.candidates.size()));
+                        for (const auto i : geometric.candidates)
                         {
                             const auto& cell = *cells[i];
                             const auto& plane = planes.at(cell.key);
@@ -473,6 +464,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             donor.gas_budget = donor.carrier_budget = quota;
                             face_work.push(donors, std::move(donor));
                         }
+                        std::vector<std::size_t>().swap(geometric.candidates);
                         auto sweep_limits = work.limits;
                         sweep_limits.byte_budget = workspace.remaining_bytes();
                         aggregate_trace.aggregate_entry = work.bytes + face_work.bytes;
@@ -483,11 +475,11 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         limits.maximum_pair_tests = sweep_limits.maximum_pair_tests;
                         limits.maximum_operations = data.options.maximum_face_geometry_operations;
                         SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult aggregate;
+                        std::optional<SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource> source;
                         try
                         {
-                            const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(
-                                tetrahedra, sweep_limits, limits, &progress);
-                            aggregate = source.measure(donors, &progress);
+                            source.emplace(std::move(batch), sweep_limits, limits, &progress);
+                            aggregate = source->measure(donors, &progress);
                         }
                         catch (...)
                         {
@@ -504,15 +496,27 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             for (const auto field : {failure::Field::BytesUsed, failure::Field::PairTests,
                                      failure::Field::PairBudget, failure::Field::Retry})
                                 diagnostic.record.mark(field);
+                            // Construction preserves the input on failure; a
+                            // successful source owns these views through measure.
+                            const auto tetrahedra =
+                                source ? source->tetrahedra()
+                                       : std::span<const SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra>(
+                                             batch.tetrahedra);
+                            const auto points = source ? source->points() : std::span<const Point>(batch.points);
                             if (progress.source < tetrahedra.size())
                             {
                                 diagnostic.record.construction = progress.source;
                                 diagnostic.record.mark(failure::Field::Construction);
-                                for (unsigned i = 0; i < 4; ++i)
-                                    for (unsigned k = 0; k < 3; ++k)
-                                        diagnostic.record.simplex[3 * i + k] =
-                                            tetrahedra[progress.source].vertices[i].value[k];
-                                diagnostic.record.mark(failure::Field::Simplex);
+                                const auto& tetra = tetrahedra[progress.source];
+                                if (std::all_of(tetra.vertices.begin(), tetra.vertices.end(),
+                                        [&](auto index) { return index.value < points.size(); }))
+                                {
+                                    for (unsigned i = 0; i < 4; ++i)
+                                        for (unsigned k = 0; k < 3; ++k)
+                                            diagnostic.record.simplex[3 * i + k] =
+                                                points[tetra.vertices[i].value].value[k];
+                                    diagnostic.record.mark(failure::Field::Simplex);
+                                }
                             }
                             if (progress.donor < cells.size())
                             {
@@ -526,6 +530,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             }
                             throw;
                         }
+                        source.reset();
                         // The aggregate reservation includes its returned groups and
                         // remains live while retained output is copied below. Only
                         // actual retained output growth enters preparation Work.
@@ -535,7 +540,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         result.diagnostics.cancelled_boundaries += aggregate.statistics.cancelled_boundaries;
                         result.diagnostics.aggregate_retries += aggregate.statistics.retries;
                         face.chain.constructed = Math::make_value(mode, aggregate.signed_source_volume);
-                        face.chain.signed_difference = Math::subtract(face.chain.constructed, recipe.control);
+                        face.chain.signed_difference = Math::subtract(face.chain.constructed, entry.control);
                         if (std::abs(face.chain.signed_difference.value) > face_budgets.at(tile.face_gid))
                             throw std::invalid_argument(
                                 "Interface aggregate source chain exceeds original face allowance.");

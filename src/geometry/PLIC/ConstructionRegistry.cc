@@ -10,6 +10,26 @@
 
 namespace SimpleFluid::PLIC::details
 {
+std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Source value)
+{
+    active_work->charge(1, sizeof(GeometryConstruction));
+    return std::make_shared<const GeometryConstruction>(std::move(value));
+}
+std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Clip value)
+{
+    active_work->charge(1, sizeof(GeometryConstruction));
+    return std::make_shared<const GeometryConstruction>(std::move(value));
+}
+std::shared_ptr<const GeometryConstruction> construction_rebase(
+    std::shared_ptr<const GeometryConstruction> parent, const GeometryHalfspace& input)
+{
+    // Charge the node and its exclusive rare payload before either allocation.
+    active_work->charge(1, sizeof(GeometryConstruction) + sizeof(GeometryConstruction::Rebase));
+    auto payload = std::make_unique<const GeometryConstruction::Rebase>(
+        GeometryConstruction::Rebase{std::move(parent), input});
+    return std::make_shared<const GeometryConstruction>(std::move(payload));
+}
+
 template<ArithmeticMode Mode>
 std::shared_ptr<const GeometryConstruction> construction_source(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>& source)
@@ -17,12 +37,9 @@ std::shared_ptr<const GeometryConstruction> construction_source(
     require_mode(source->limits.arithmetic_mode, Mode);
     if (source->construction)
         return source->construction;
-    active_work->charge(1, sizeof(GeometryConstruction));
-    auto result = std::make_shared<GeometryConstruction>();
-    result->source = source;
     // This root has no construction record of its own, so retaining it cannot
     // create a geometry-self cycle. It pins all original point definitions.
-    return result;
+    return construction_node(GeometryConstruction::Source{source});
 }
 
 std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConstruction>& root)
@@ -48,21 +65,31 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
         if (!node || !nodes.insert(node.get()).second)
             continue;
         bytes += sizeof(GeometryConstruction);
-        retained(node->retained_points);
-        if (node->source && sources.insert(node->source.get()).second)
+        if (node->kind() == GeometryConstruction::Kind::Source)
         {
-            const auto source = DynamicGeometryAccess::geometry(node->source);
-            bytes += node->source->limits.arithmetic_mode == ArithmeticMode::Ordinary
-                         ? source->storage_bytes<ArithmeticMode::Ordinary>()
-                         : source->storage_bytes<ArithmeticMode::BoundedCertification>();
+            const auto& owner = node->source().source;
+            if (owner && sources.insert(owner.get()).second)
+            {
+                const auto source = DynamicGeometryAccess::geometry(owner);
+                bytes += owner->limits.arithmetic_mode == ArithmeticMode::Ordinary
+                             ? source->storage_bytes<ArithmeticMode::Ordinary>()
+                             : source->storage_bytes<ArithmeticMode::BoundedCertification>();
+            }
         }
-        if (node->parent)
-            pending.push_back(node->parent);
-        if (node->clip && clips.insert(node->clip.get()).second)
+        else if (node->kind() == GeometryConstruction::Kind::Rebase)
         {
-            bytes += sizeof(GeometryClipConstruction);
-            retained(node->clip->retained_points);
-            pending.push_back(node->clip->parent);
+            bytes += sizeof(GeometryConstruction::Rebase);
+            pending.push_back(node->rebase().parent);
+        }
+        else
+        {
+            const auto& clip = node->clip().clip;
+            if (clip && clips.insert(clip.get()).second)
+            {
+                bytes += sizeof(GeometryClipConstruction);
+                retained(clip->retained_points);
+                pending.push_back(clip->parent);
+            }
         }
     }
     return bytes;

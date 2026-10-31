@@ -151,12 +151,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
         active_work->charge(storage_bytes(), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
         rebased->frame.origin = input.anchor;
-        active_work->charge(1, sizeof(GeometryConstruction));
-        auto recipe = std::make_shared<GeometryConstruction>();
-        recipe->kind = GeometryConstruction::Kind::Rebase;
-        recipe->parent = construction_source<Mode>(impl_);
-        recipe->rebase_input = input;
-        rebased->construction = std::move(recipe);
+        rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
         rebased->moment_cache = std::make_shared<MomentCache>();
         for (auto& vertex : rebased->vertices)
             vertex.coordinates = transform<Mode>(vertex.coordinates, impl_->frame, rebased->frame);
@@ -827,12 +822,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         poly->reference_origin = impl_->reference_origin;
         poly->limits = impl_->limits;
         poly->numerical_only = impl_->numerical_only || source->numerical_only;
-        active_work->charge(1, sizeof(GeometryConstruction));
-        auto recipe = std::make_shared<GeometryConstruction>();
-        recipe->kind = GeometryConstruction::Kind::Clip;
-        recipe->clip = construction;
-        recipe->outside = outside != 0;
-        poly->construction = std::move(recipe);
+        poly->construction = construction_node(GeometryConstruction::Clip{construction, outside != 0});
         poly->ancestry =
             std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
         std::set<std::size_t> used;

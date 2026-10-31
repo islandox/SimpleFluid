@@ -2,6 +2,8 @@
  * @brief Independent lifetime and overlap checks for preparation storage.
  */
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
+#include "FVM/details/GeneralVoF/PendingFaceGeometry.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 #include <exception>
 #include <gtest/gtest.h>
 #include <string>
@@ -200,8 +202,8 @@ TEST(GeneralVoFFaceWorkspace, AggregateResultOutlivesSourceAndFaceWorkspace)
         const auto geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
         donor_lifetime = geometry;
         face.setup_work().charge(geometry->storage_bytes());
-        const std::array<sweep::OrdinaryAggregateTetra, 1> tetrahedra{
-            {{{Point({0, 0, 0}), Point({1, 0, 0}), Point({0, 1, 0}), Point({0, 0, 1})}, {1, 2, 3, 4}, 1}}};
+        sweep::OrdinaryAggregateSourceBatch batch{
+            {Point({0, 0, 0}), Point({1, 0, 0}), Point({0, 1, 0}), Point({0, 0, 1})}, {{{{{0}, {1}, {2}, {3}}}, 1}}};
         sweep::OrdinaryAggregateDonor donor;
         donor.id = 9;
         donor.geometry = geometry;
@@ -213,7 +215,7 @@ TEST(GeneralVoFFaceWorkspace, AggregateResultOutlivesSourceAndFaceWorkspace)
         limits.arithmetic_mode = mode;
         limits.byte_budget = face.remaining_bytes();
         limits.maximum_operations = 64 * 1024 * 1024;
-        const sweep::OrdinaryAggregateSource source(tetrahedra, {}, limits, &progress);
+        const sweep::OrdinaryAggregateSource source(std::move(batch), {}, limits, &progress);
         const std::array donors{donor};
         const auto result = source.measure(donors, &progress);
         ASSERT_EQ(result.groups.size(), 1u);
@@ -241,8 +243,8 @@ TEST(GeneralVoFFaceWorkspace, WorkRejectionRemainsDistinctWithAmpleStorage)
     auto retained = retained_work(1024 * 1024, 64);
     local::FaceWorkspaceTotals totals;
     sweep::OrdinaryAggregateContext progress;
-    const std::array<sweep::OrdinaryAggregateTetra, 1> tetrahedra{
-        {{{Point({0, 0, 0}), Point({1, 0, 0}), Point({0, 1, 0}), Point({0, 0, 1})}, {1, 2, 3, 4}, 1}}};
+    sweep::OrdinaryAggregateSourceBatch batch{
+        {Point({0, 0, 0}), Point({1, 0, 0}), Point({0, 1, 0}), Point({0, 0, 1})}, {{{{{0}, {1}, {2}, {3}}}, 1}}};
     {
         local::FaceWorkspaceBudget face(retained, progress, totals);
         PLIC::GeometryLimits limits;
@@ -252,7 +254,7 @@ TEST(GeneralVoFFaceWorkspace, WorkRejectionRemainsDistinctWithAmpleStorage)
         try
         {
             face.checked_action(
-                [&] { const sweep::OrdinaryAggregateSource source(tetrahedra, {}, limits, &progress); });
+                [&] { const sweep::OrdinaryAggregateSource source(std::move(batch), {}, limits, &progress); });
             FAIL();
         }
         catch (const PLIC::GeometryError& error)
@@ -263,5 +265,86 @@ TEST(GeneralVoFFaceWorkspace, WorkRejectionRemainsDistinctWithAmpleStorage)
         }
     }
     EXPECT_EQ(retained.bytes, 64u);
+}
+
+TEST(GeneralVoFFaceWorkspace, PendingScalarFacesReleaseOwnersAndPreserveInterleavedOrder)
+{
+    using Point = PLIC::Point<mode>;
+    auto work = retained_work(1024 * 1024, 0);
+    local::PendingFaceGeometry pending;
+    std::array<std::weak_ptr<const PLIC::DynamicPointProvenance>, 4> owners;
+    for (unsigned i = 0; i < owners.size(); ++i)
+    {
+        sweep::Sweep<mode> recipe;
+        recipe.center = PLIC::point_average<mode>(std::array{Point({static_cast<long double>(i), 0, 0})});
+        owners[i] = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic());
+        recipe.control.value = i + 1;
+        recipe.ordinary_volume_budget = (i + 1) / 1024.L;
+        recipe.current = {Point({0, 0, 0}), Point({1, 0, 0})};
+        recipe.departure = {Point({0, 0, 1}), Point({1, 0, 1})};
+        pending.push(nullptr, std::move(recipe), {i, i + 10}, i % 2 == 1, work);
+        EXPECT_EQ(owners[i].expired(), i % 2 == 0);
+    }
+    const auto charged = work.bytes;
+    ASSERT_EQ(pending.faces().size(), 4u);
+    for (unsigned i = 0; i < pending.faces().size(); ++i)
+    {
+        const auto& scalar = pending.faces()[i];
+        EXPECT_EQ(scalar.control.value, i + 1);
+        EXPECT_EQ(scalar.ordinary_volume_budget, (i + 1) / 1024.L);
+        EXPECT_EQ(scalar.geometry.has_value(), i % 2 == 1);
+        if (scalar.geometry)
+        {
+            EXPECT_EQ(*scalar.geometry, i / 2);
+            {
+                auto geometric = pending.take_geometry(*scalar.geometry);
+                EXPECT_EQ(geometric.candidates, (std::vector<std::size_t>{i, i + 10}));
+                EXPECT_FALSE(owners[i].expired());
+            }
+            EXPECT_TRUE(owners[i].expired());
+            EXPECT_THROW((void) pending.take_geometry(*scalar.geometry), std::logic_error);
+        }
+    }
+    EXPECT_EQ(work.bytes, charged);
+}
+
+TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoesNotRefundCharges)
+{
+    using Point = PLIC::Point<mode>;
+    auto work = retained_work(1024 * 1024, 0);
+    local::PendingFaceGeometry pending;
+    std::weak_ptr<const PLIC::DynamicPointProvenance> owner;
+    {
+        sweep::Sweep<mode> recipe;
+        recipe.center = PLIC::point_average<mode>(std::array{Point({.5L, .5L, 0})});
+        owner = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic());
+        recipe.backcenter = Point({.5L, .5L, 1});
+        recipe.current = {Point({0, 0, 0}), Point({1, 0, 0}), Point({1, 1, 0}), Point({0, 1, 0})};
+        recipe.departure = {Point({0, 0, 1}), Point({1, 0, 1}), Point({1, 1, 1}), Point({0, 1, 1})};
+        pending.push(nullptr, std::move(recipe), {0, 1}, true, work);
+    }
+    const auto entry_charge = work.bytes;
+    std::size_t transferred_charge = 0;
+    EXPECT_THROW(
+        [&]
+        {
+            auto geometric = pending.take_geometry(0);
+            const auto points = geometric.take_points(work);
+            ASSERT_EQ(points.size(), 10u);
+            EXPECT_EQ(points[0].value, (std::array<long double, 3>{.5L, .5L, 0}));
+            EXPECT_EQ(points[1].value, (std::array<long double, 3>{.5L, .5L, 1}));
+            EXPECT_EQ(points[2].value, (std::array<long double, 3>{0, 0, 0}));
+            EXPECT_EQ(points[9].value, (std::array<long double, 3>{0, 1, 1}));
+            EXPECT_EQ(geometric.recipe.current.capacity(), 0u);
+            EXPECT_EQ(geometric.recipe.departure.capacity(), 0u);
+            EXPECT_FALSE(owner.expired());
+            transferred_charge = work.bytes;
+            EXPECT_EQ(transferred_charge - entry_charge, points.capacity() * sizeof(Point));
+            throw std::runtime_error("Reject after consuming pending geometry.");
+        }(),
+        std::runtime_error);
+    EXPECT_TRUE(owner.expired());
+    EXPECT_EQ(work.bytes, transferred_charge);
+    EXPECT_THROW((void) pending.take_geometry(0), std::logic_error);
 }
 } // namespace
