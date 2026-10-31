@@ -410,7 +410,7 @@ TEST_F(GeometryProvenanceBorrow, ScopeGuardsReleaseLockedOwnersOnSuccessAndBudge
 }
 TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupports)
 {
-    const PLIC::PlaneAuthority first{{2, 7}}, second{{9, 11}};
+    const auto first = PLIC::PlaneAuthority::opaque({2, 7}), second = PLIC::PlaneAuthority::opaque({9, 11});
     const std::vector<PLIC::PlaneAuthority> expected{first, second};
     for (const auto mode : finite_modes)
     {
@@ -444,8 +444,9 @@ TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupport
         PLIC::DynamicPoint independent(source.value, source.absolute_error, mode);
         Access::seal(independent, expected);
         EXPECT_NE(Access::identity(independent)->support_payload, root->support_payload);
-        auto different = second;
-        ++different.key.back();
+        auto changed_words = second.words();
+        ++changed_words.back();
+        const auto different = PLIC::PlaneAuthority::opaque(std::move(changed_words));
         PLIC::DynamicPoint changed(source.value, source.absolute_error, mode);
         Access::seal_export(changed, root, {first, different});
         EXPECT_NE(Access::identity(changed)->support_payload, root->support_payload);
@@ -474,11 +475,15 @@ TEST_F(GeometryProvenanceBorrow, SupportPayloadLivesThroughExportsAndCountsOnceA
         SCOPED_TRACE(static_cast<int>(mode));
         std::weak_ptr<const PLIC::DynamicPointProvenance> weak_source;
         std::shared_ptr<const PLIC::DynamicPointSupportPayload> retained_payload;
+        std::size_t opaque_bytes = 0;
         {
             PLIC::DynamicPoint exported;
             {
                 PLIC::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, mode);
-                Access::seal(source, {{{2, 7, 13}}});
+                std::vector<std::uint64_t> words{2, 7, 13};
+                words.reserve(17);
+                opaque_bytes = sizeof(words) + words.capacity() * sizeof(std::uint64_t);
+                Access::seal(source, {PLIC::PlaneAuthority::opaque(std::move(words))});
                 const auto root = Access::identity(source);
                 weak_source = root;
                 exported = PLIC::DynamicPoint(source.value, source.absolute_error, mode);
@@ -487,15 +492,13 @@ TEST_F(GeometryProvenanceBorrow, SupportPayloadLivesThroughExportsAndCountsOnceA
             }
             EXPECT_FALSE(weak_source.expired());
             ASSERT_EQ(exported.supports().size(), 1u);
-            EXPECT_EQ(exported.supports()[0].key, (std::vector<std::uint64_t>{2, 7, 13}));
-            auto expected = 2 * sizeof(PLIC::DynamicPointProvenance) + sizeof(PLIC::DynamicPointSupportPayload) +
-                            retained_payload->authorities.capacity() * sizeof(PLIC::PlaneAuthority);
-            for (const auto& authority : retained_payload->authorities)
-                expected += authority.key.capacity() * sizeof(std::uint64_t);
+            EXPECT_EQ(exported.supports()[0].words(), (std::vector<std::uint64_t>{2, 7, 13}));
+            const auto expected = 2 * sizeof(PLIC::DynamicPointProvenance) + sizeof(PLIC::DynamicPointSupportPayload) +
+                                  retained_payload->authorities.capacity() * sizeof(PLIC::PlaneAuthority) + opaque_bytes;
             EXPECT_EQ(Access::identity_bytes(Access::identity(exported)), expected);
         }
         EXPECT_TRUE(weak_source.expired());
-        EXPECT_EQ(retained_payload->authorities[0].key, (std::vector<std::uint64_t>{2, 7, 13}));
+        EXPECT_EQ(retained_payload->authorities[0].words(), (std::vector<std::uint64_t>{2, 7, 13}));
         const std::weak_ptr<const PLIC::DynamicPointSupportPayload> weak_payload = retained_payload;
         retained_payload.reset();
         EXPECT_TRUE(weak_payload.expired());
@@ -508,7 +511,7 @@ TEST_F(GeometryProvenanceBorrow, SharedSupportsDoNotTurnIndependentUncertainPoin
         GTEST_SKIP() << "BoundedCertification requires a supported floating-point environment.";
     constexpr auto mode = ArithmeticMode::BoundedCertification;
     PLIC::DynamicPoint first({0, 0, 0}, {.125L, .125L, .125L}, mode);
-    Access::seal(first, {{{2, 7}}});
+    Access::seal(first, {PLIC::PlaneAuthority::opaque({2, 7})});
     PLIC::DynamicPoint second(first.value, first.absolute_error, mode);
     Access::seal_export(second, Access::identity(first), first.supports());
     ASSERT_EQ(Access::identity(first)->support_payload, Access::identity(second)->support_payload);
@@ -533,21 +536,30 @@ TEST_F(GeometryProvenanceBorrow, SupportPayloadReuseFitsAWorkCapThatRejectsANewO
     {
         SCOPED_TRACE(static_cast<int>(mode));
         PLIC::DynamicPoint source({1, 2, 4}, {}, mode);
-        Access::seal(source, {{{2, 7}}});
+        Access::seal(source, {PLIC::PlaneAuthority::opaque({2, 7})});
         const auto root = Access::identity(source);
+        const auto fresh_authority = PLIC::PlaneAuthority::opaque({2, 8});
         auto limits = accounting_limits(1024);
-        limits.byte_budget = sizeof(PLIC::DynamicPointSupportPayload) - 1;
         detail::Operation operation(limits);
+        for (const auto& authority : source.supports())
+            operation.work.retain_identity(authority);
+        operation.work.retain_identity(fresh_authority);
+        const auto admitted = operation.work.bytes;
+        // Both immutable word owners already belong to this operation. One
+        // remaining byte permits reuse but cannot admit a new support payload.
+        operation.work.limits.byte_budget = admitted + 1;
         PLIC::DynamicPoint reused(source.value, source.absolute_error, mode);
         ASSERT_NO_THROW(Access::seal_export(reused, root, source.supports()));
         ASSERT_TRUE(Access::identity(reused));
         EXPECT_EQ(Access::identity(reused)->support_payload, root->support_payload);
+        EXPECT_EQ(operation.work.bytes, admitted);
         PLIC::DynamicPoint empty(source.value, source.absolute_error, mode);
         EXPECT_NO_THROW(Access::seal(empty, {}));
+        EXPECT_EQ(operation.work.bytes, admitted);
         PLIC::DynamicPoint fresh(source.value, source.absolute_error, mode);
         try
         {
-            Access::seal_export(fresh, root, {{{2, 8}}});
+            Access::seal_export(fresh, root, {fresh_authority});
             FAIL() << "A distinct nonempty support payload must respect the construction byte cap.";
         }
         catch (const PLIC::GeometryError& error)
@@ -559,10 +571,13 @@ TEST_F(GeometryProvenanceBorrow, SupportPayloadReuseFitsAWorkCapThatRejectsANewO
 }
 TEST_F(GeometryProvenanceBorrow, FreshSupportPayloadTrimsOnlySpareOuterCapacity)
 {
-    PLIC::PlaneAuthority first{{2, 7}}, second{{9, 11, 13}};
-    first.key.reserve(17);
-    second.key.reserve(23);
-    const auto first_capacity = first.key.capacity(), second_capacity = second.key.capacity();
+    std::vector<std::uint64_t> first_words{2, 7}, second_words{9, 11, 13};
+    first_words.reserve(17);
+    second_words.reserve(23);
+    const auto first_capacity = first_words.capacity(), second_capacity = second_words.capacity();
+    auto first = PLIC::PlaneAuthority::opaque(std::move(first_words));
+    auto second = PLIC::PlaneAuthority::opaque(std::move(second_words));
+    const auto first_owner = first.opaque_storage_owner(), second_owner = second.opaque_storage_owner();
     std::vector<PLIC::PlaneAuthority> supports;
     supports.reserve(31);
     supports.push_back(std::move(second));
@@ -572,14 +587,18 @@ TEST_F(GeometryProvenanceBorrow, FreshSupportPayloadTrimsOnlySpareOuterCapacity)
     const auto payload = Access::identity(point)->support_payload;
     ASSERT_TRUE(payload);
     EXPECT_EQ(payload->authorities.capacity(), 2u);
-    EXPECT_EQ(payload->authorities[0].key.capacity(), first_capacity);
-    EXPECT_EQ(payload->authorities[1].key.capacity(), second_capacity);
-    EXPECT_EQ(payload->authorities[0].key, (std::vector<std::uint64_t>{2, 7}));
-    EXPECT_EQ(payload->authorities[1].key, (std::vector<std::uint64_t>{9, 11, 13}));
+    EXPECT_EQ(payload->authorities[0].opaque_storage_owner(), first_owner);
+    EXPECT_EQ(payload->authorities[1].opaque_storage_owner(), second_owner);
+    EXPECT_EQ(payload->authorities[0].opaque_payload_bytes(),
+        sizeof(std::vector<std::uint64_t>) + first_capacity * sizeof(std::uint64_t));
+    EXPECT_EQ(payload->authorities[1].opaque_payload_bytes(),
+        sizeof(std::vector<std::uint64_t>) + second_capacity * sizeof(std::uint64_t));
+    EXPECT_EQ(payload->authorities[0].words(), (std::vector<std::uint64_t>{2, 7}));
+    EXPECT_EQ(payload->authorities[1].words(), (std::vector<std::uint64_t>{9, 11, 13}));
 
     std::vector<PLIC::PlaneAuthority> oversized;
     oversized.reserve(8);
-    oversized.push_back({{2, 7}});
+    oversized.push_back(PLIC::PlaneAuthority::opaque({2, 7}));
     auto limits = accounting_limits(1024);
     limits.byte_budget = sizeof(PLIC::DynamicPointSupportPayload) + sizeof(PLIC::PlaneAuthority) - 1;
     detail::Operation operation(limits);
@@ -590,7 +609,7 @@ TEST_F(GeometryProvenanceBorrow, FreshSupportPayloadTrimsOnlySpareOuterCapacity)
 
 TEST_F(GeometryProvenanceBorrow, VertexAuthoritiesFreezeOnlyExactSequencesAndCopiesDetachIndependently)
 {
-    const PLIC::PlaneAuthority first{{2, 7}}, second{{9, 11, 13}};
+    const auto first = PLIC::PlaneAuthority::opaque({2, 7}), second = PLIC::PlaneAuthority::opaque({9, 11, 13});
     PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
     Access::seal(point, {first, second});
     const auto root = Access::identity(point);
@@ -605,13 +624,15 @@ TEST_F(GeometryProvenanceBorrow, VertexAuthoritiesFreezeOnlyExactSequencesAndCop
     reordered.share_if_equal(root->support_payload);
     EXPECT_TRUE(reordered.owned_values());
     EXPECT_EQ(reordered.values(), (std::vector<PLIC::PlaneAuthority>{second, first}));
-    detail::StoredVertexAuthorities different(std::vector<PLIC::PlaneAuthority>{first, {{9, 11, 14}}});
+    detail::StoredVertexAuthorities different(
+        std::vector<PLIC::PlaneAuthority>{first, PLIC::PlaneAuthority::opaque({9, 11, 14})});
     different.share_if_equal(root->support_payload);
     EXPECT_TRUE(different.owned_values());
 
-    holder.append({{17, 19}});
+    holder.append(PLIC::PlaneAuthority::opaque({17, 19}));
     ASSERT_TRUE(holder.owned_values());
-    EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{first, second, {{17, 19}}}));
+    EXPECT_EQ(
+        holder.values(), (std::vector<PLIC::PlaneAuthority>{first, second, PLIC::PlaneAuthority::opaque({17, 19})}));
     EXPECT_EQ(sibling.shared_payload(), root->support_payload);
     EXPECT_EQ(sibling.values(), source_values);
     EXPECT_EQ(point.supports(), source_values);
@@ -626,20 +647,28 @@ TEST_F(GeometryProvenanceBorrow, VertexAuthoritiesFreezeOnlyExactSequencesAndCop
 TEST_F(GeometryProvenanceBorrow, VertexAuthorityDetachPrechargesAllBuffersAndFailsAtomically)
 {
     PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    Access::seal(point, {{{2, 7}}, {{9, 11, 13}}});
+    Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({9, 11, 13})});
     const auto payload = Access::identity(point)->support_payload;
     detail::StoredVertexAuthorities holder(point.supports());
     holder.share_if_equal(payload);
-    // Two existing keys contain five words; appending the first adds two more.
-    const auto detach_bytes = 2 * sizeof(PLIC::PlaneAuthority) + 5 * sizeof(std::uint64_t);
-    const auto append_bytes = 3 * sizeof(PLIC::PlaneAuthority) + 7 * sizeof(std::uint64_t);
+    // Once immutable payload owners are admitted, detaching copies only the
+    // outer handles. Appending an existing handle adds no word allocation.
+    const auto detach_bytes = 2 * sizeof(PLIC::PlaneAuthority);
+    const auto append_bytes = 3 * sizeof(PLIC::PlaneAuthority);
+    const auto admit_existing = [&]
+    {
+        for (const auto& authority : point.supports())
+            detail::active_work->retain_identity(authority);
+    };
     for (const bool append : {false, true})
     {
         auto draft = holder;
         auto limits = accounting_limits(1024);
-        limits.byte_budget = (append ? append_bytes : detach_bytes) - 1;
         {
             detail::Operation operation(limits);
+            admit_existing();
+            const auto baseline = operation.work.bytes;
+            operation.work.limits.byte_budget = baseline + (append ? append_bytes : detach_bytes) - 1;
             if (append)
                 EXPECT_THROW(draft.append(draft.values()[0]), PLIC::GeometryError);
             else
@@ -647,19 +676,22 @@ TEST_F(GeometryProvenanceBorrow, VertexAuthorityDetachPrechargesAllBuffersAndFai
         }
         EXPECT_EQ(draft.shared_payload(), payload);
         EXPECT_EQ(draft.values(), point.supports());
-        limits.byte_budget = append ? append_bytes : detach_bytes;
         {
             detail::Operation operation(limits);
+            admit_existing();
+            const auto baseline = operation.work.bytes;
+            operation.work.limits.byte_budget = baseline + (append ? append_bytes : detach_bytes);
             if (append)
                 EXPECT_NO_THROW(draft.append(draft.values()[0]));
             else
                 EXPECT_NO_THROW(draft.detach());
+            EXPECT_EQ(operation.work.bytes, operation.work.limits.byte_budget);
         }
         ASSERT_TRUE(draft.owned_values());
         EXPECT_EQ(draft.size(), append ? 3u : 2u);
-        EXPECT_EQ(draft.values()[0].key, (std::vector<std::uint64_t>{2, 7}));
+        EXPECT_EQ(draft.values()[0].words(), (std::vector<std::uint64_t>{2, 7}));
         if (append)
-            EXPECT_EQ(draft.values()[2].key, draft.values()[0].key);
+            EXPECT_EQ(draft.values()[2].words(), draft.values()[0].words());
         EXPECT_EQ(holder.shared_payload(), payload);
     }
 }
@@ -670,7 +702,7 @@ TEST_F(GeometryProvenanceBorrow, AliasedVertexAuthorityAppendPinsItsLastImmutabl
     std::weak_ptr<const PLIC::DynamicPointSupportPayload> weak_payload;
     {
         PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-        Access::seal(point, {{{2, 7}}});
+        Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7})});
         const auto payload = Access::identity(point)->support_payload;
         weak_payload = payload;
         holder = point.supports();
@@ -679,35 +711,39 @@ TEST_F(GeometryProvenanceBorrow, AliasedVertexAuthorityAppendPinsItsLastImmutabl
     EXPECT_FALSE(weak_payload.expired());
     holder.append(holder.values()[0]);
     EXPECT_TRUE(weak_payload.expired());
-    EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{{{2, 7}}, {{2, 7}}}));
+    EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{
+                                   PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({2, 7})}));
 }
 TEST_F(GeometryProvenanceBorrow, MovedFromSharedVertexAuthoritiesRetainTheirAppendCap)
 {
     PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    Access::seal(point, {{{2, 7}}});
+    Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7})});
     detail::StoredVertexAuthorities holder(point.supports());
     holder.share_if_equal(Access::identity(point)->support_payload);
     const auto moved = std::move(holder);
     ASSERT_TRUE(holder.empty());
     EXPECT_FALSE(holder.shared_payload());
     ASSERT_FALSE(holder.owned_values());
-    const PLIC::PlaneAuthority authority{{11, 13}};
-    const auto required = sizeof(PLIC::PlaneAuthority) + 2 * sizeof(std::uint64_t);
+    const auto authority = PLIC::PlaneAuthority::opaque({11, 13});
+    const auto required = sizeof(PLIC::PlaneAuthority);
     for (const auto cap : {std::size_t(1), required - 1})
     {
         auto limits = accounting_limits(1024);
-        limits.byte_budget = cap;
         detail::Operation operation(limits);
+        operation.work.retain_identity(authority);
+        operation.work.limits.byte_budget = operation.work.bytes + cap;
         EXPECT_THROW(holder.append(authority), PLIC::GeometryError);
         EXPECT_TRUE(holder.empty());
         EXPECT_FALSE(holder.owned_values());
         EXPECT_FALSE(holder.shared_payload());
     }
     auto limits = accounting_limits(1024);
-    limits.byte_budget = required;
     {
         detail::Operation operation(limits);
+        operation.work.retain_identity(authority);
+        operation.work.limits.byte_budget = operation.work.bytes + required;
         EXPECT_NO_THROW(holder.append(authority));
+        EXPECT_EQ(operation.work.bytes, operation.work.limits.byte_budget);
     }
     EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{authority}));
     EXPECT_EQ(moved.values(), point.supports());

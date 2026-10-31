@@ -11,7 +11,7 @@ namespace SimpleFluid::PLIC
 {
 namespace details
 {
-[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> checked_identity_key(
+[[nodiscard]] SIMPLEFLUID_LOCAL std::span<const char> checked_identity_key(
     GeometryIdentityKind, ArithmeticMode, std::span<const char>);
 }
 [[nodiscard]] constexpr GeometryPacketKind identity_packet_kind(GeometryIdentityKind kind)

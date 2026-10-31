@@ -527,6 +527,7 @@ DynamicConvexGeometryPtr rebase_geometry(const DynamicConvexGeometryPtr& source,
     const auto typed = details::checked_geometry_storage<Mode>(original);
     details::active_work->charge(source->template storage_bytes<Mode>(), 1);
     auto rebased = std::make_shared<details::GeometryStorage<Mode>>(*typed);
+    rebased->export_source = original->export_source ? original->export_source : original;
     rebased->frame.origin = input.anchor;
     rebased->moment_cache = std::make_shared<details::StoredMomentCache<Mode>>();
     for (auto& vertex : rebased->vertices)

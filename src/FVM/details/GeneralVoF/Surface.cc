@@ -6,6 +6,7 @@
 #include "FVM/details/GeneralVoF/FilteredSurface.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -60,14 +61,18 @@ int geometric_phase(const Cell& cell)
         return -1;
     return 0;
 }
-void physical_scale(GeneralVoFSurfacePatch& patch, const Cell& cell)
+void physical_scale(GeneralVoFSurfacePatch& patch, const Cell& cell, PLIC::GeometryAllocationLedger& point_exports,
+    wire::Budget& budget, std::size_t& point_export_bytes)
 {
     const auto geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
     const auto spans = geometry->axis_spans();
     patch.physical_spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
     patch.cell_scale = std::min({patch.physical_spans[0], patch.physical_spans[1], patch.physical_spans[2]});
     long double surface = 0;
-    const auto& points = geometry->points();
+    const auto before_export = budget.used;
+    const auto exported = geometry->export_points(point_exports, budget.used, budget.limit);
+    point_export_bytes += budget.used - before_export;
+    const auto points = exported.points();
     for (const auto& face : geometry->faces())
     {
         WidePoint area{};
@@ -240,6 +245,8 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     values.reserve(n);
                 }
             };
+            PLIC::GeometryAllocationLedger point_exports;
+            std::size_t point_export_bytes = 0;
             std::map<Key, GeneralVoFSurfaceKey> mixed;
             std::map<Key, std::vector<WidePoint>> polygons;
             std::map<Edge, std::set<GeneralVoFSurfaceKey>> edge_patches;
@@ -291,7 +298,10 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     std::cerr << "CAP_GEOMETRY control=" << data_->control << " rank=" << comm->getRank()
                               << " id=" << cell.gid << " centroid=" << cell.centroid[0] << ',' << cell.centroid[1]
                               << ',' << cell.centroid[2] << " volume=" << geometry->volume().value << " points=";
-                    for (const auto& point : geometry->points())
+                    const auto before_export = budget.used;
+                    const auto exported = geometry->export_points(point_exports, budget.used, budget.limit);
+                    point_export_bytes += budget.used - before_export;
+                    for (const auto& point : exported.points())
                         std::cerr << point.value[0] << ',' << point.value[1] << ',' << point.value[2] << ';';
                     std::cerr << " faces=";
                     for (const auto& face : geometry->faces())
@@ -324,7 +334,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 for (auto& v : n)
                     v /= magnitude;
                 patch.normal = display(n);
-                physical_scale(patch, cell);
+                physical_scale(patch, cell, point_exports, budget, point_export_bytes);
                 auto& polygon = polygons[key];
                 budget.add(section.vertices.size() * sizeof(WidePoint) + sizeof(Key) + sizeof(std::vector<WidePoint>) +
                            4 * sizeof(void*));
@@ -372,9 +382,9 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     patch.centroid = face.centroid;
                     patch.normal = face.normal;
                     patch.area = face.area;
-                    physical_scale(patch, first);
+                    physical_scale(patch, first, point_exports, budget, point_export_bytes);
                     GeneralVoFSurfacePatch other;
-                    physical_scale(other, second);
+                    physical_scale(other, second, point_exports, budget, point_export_bytes);
                     patch.cell_scale = std::min(patch.cell_scale, other.cell_scale);
                     for (unsigned axis = 0; axis < 3; ++axis)
                         patch.physical_spans[axis] = std::max(patch.physical_spans[axis], other.physical_spans[axis]);
@@ -451,7 +461,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                         std::cerr << vertex[0] << ',' << vertex[1] << ',' << vertex[2] << ';';
                     std::cerr << '\n';
                 }
-            result.allocation_bytes = budget.used;
+            result.allocation_bytes = budget.used - point_export_bytes;
         });
     planes.clear();
     if (options.model == GeneralVoFCapillaryModel::FilteredBinary)

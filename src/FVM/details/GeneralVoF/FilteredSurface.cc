@@ -4,6 +4,7 @@
 #include "FVM/details/GeneralVoF/FilteredSurface.hh"
 #include "FVM/details/GeneralVoF/FilteredSurfaceGeometry.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <bit>
 #include <iomanip>
 
@@ -224,6 +225,8 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     result.model = GeneralVoFCapillaryModel::FilteredBinary;
     wire::Budget budget{
         remaining_budget ? std::min(remaining_budget, data.options.byte_budget) : data.options.byte_budget};
+    PLIC::GeometryAllocationLedger point_exports;
+    std::size_t point_export_bytes = 0;
     std::vector<MeshCell> cells;
     reserve_exact(cells, data.cells.size(), budget);
     std::map<Key, std::size_t> index;
@@ -243,7 +246,10 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         row.spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
         row.fit_scale = std::min({row.spans[0], row.spans[1], row.spans[2]});
         long double surface_area = 0;
-        const auto& points = c.finite_geometry->points();
+        const auto before_export = budget.used;
+        const auto exported = c.finite_geometry->export_points(point_exports, budget.used, budget.limit);
+        point_export_bytes += budget.used - before_export;
+        const auto points = exported.points();
         for (const auto& face : geometry->faces())
         {
             Wide area_vector{};
@@ -409,7 +415,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     // all eligible filter supports is unrelated and does not reject the model.
     if (std::none_of(eligible.begin(), eligible.end(), [](bool value) { return value; }))
     {
-        result.allocation_bytes = budget.used;
+        result.allocation_bytes = budget.used - point_export_bytes;
         return result;
     }
     // The public control-node range only contains owned-incident nodes. Halo
@@ -1110,7 +1116,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         }
     }
     std::sort(result.filtered_source_cells.begin(), result.filtered_source_cells.end());
-    result.allocation_bytes = budget.used;
+    result.allocation_bytes = budget.used - point_export_bytes;
     return result;
 }
 } // namespace SimpleFluid::VoF::general_vof_detail

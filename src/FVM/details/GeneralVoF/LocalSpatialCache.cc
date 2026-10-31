@@ -287,6 +287,7 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
         return previous;
     }
     const auto before = work.bytes;
+    std::size_t point_export_bytes = 0;
     work.charge(sizeof(LocalSpatialCache) + 2 * sizeof(void*));
     auto cache = std::make_shared<LocalSpatialCache>();
     cache->observation = data.observation;
@@ -301,7 +302,10 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
         work.charge(AMR::encode_adaptive_key(key).size());
         work.push(cache->cells, LocalSpatialCache::CellIdentity{key, cell.gid, cell.owner, cell.finite_geometry});
         Box box;
-        for (const auto& p : cell.finite_geometry->points())
+        const auto before_export = work.bytes;
+        const auto exported = cell.finite_geometry->export_points(work.allocations, work.bytes, work.limits.byte_budget);
+        point_export_bytes += work.bytes - before_export;
+        for (const auto& p : exported.points())
         {
             work.test();
             box.add(p.value);
@@ -340,9 +344,10 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
     }
     cache->donor_index.initialize(work);
     cache->frontier_index.initialize(work);
-    // Work charges capacities conservatively, including the temporary frontier
-    // ordering buffer. Preserve this admission footprint for later consumers.
-    cache->bytes = work.bytes - before;
+    // Preserve the established conservative capacity footprint (including the
+    // frontier ordering buffer). Point publications remain operation-local; the
+    // cache retains geometry only.
+    cache->bytes = work.bytes - before - point_export_bytes;
     // Admit the combined source and proposed retained cache before changing the
     // accepted topology slot. A rejected trial cannot poison later retries.
     if (admit_retained)

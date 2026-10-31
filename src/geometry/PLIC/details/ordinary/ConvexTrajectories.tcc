@@ -39,7 +39,7 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
                 continue;
             const auto bytes = planar_support<ArithmeticMode::Ordinary>(*face);
             auto authority = details::original_support_authority(bytes);
-            active_work->charge(authority.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(authority, active_work->bytes, active_work->limits.byte_budget);
             supports.push_back(std::move(authority));
         }
     if (supports.empty())
@@ -147,7 +147,7 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         if (authorities.empty() && plane->native_support.has_value())
         {
             native_authority = details::original_support_authority(*plane->native_support);
-            active_work->charge(native_authority.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(native_authority, active_work->bytes, active_work->limits.byte_budget);
             authorities = {&native_authority, 1};
         }
         bool authenticated = false;

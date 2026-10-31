@@ -31,7 +31,7 @@ template<ArithmeticMode Mode> void planar_charge(const PlanarVertex& vertex)
     active_work->charge(1, sizeof(PlanarVertex));
     active_work->charge(vertex.supports.capacity(), sizeof(PlaneAuthority));
     for (const auto& key : vertex.supports)
-        active_work->charge(key.key.capacity(), sizeof(std::uint64_t));
+        active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
 }
 
 template<ArithmeticMode Mode>
@@ -150,7 +150,7 @@ DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoin
     Operation scope(limits);
     ++statistics.intersections;
     if (first.size() < 3 || second.size() < 3 || first.size() > limits.maximum_vertices ||
-        second.size() > limits.maximum_vertices || support.key.empty())
+        second.size() > limits.maximum_vertices || support.empty())
         reject("planar overlap requires admitted nondegenerate source loops and a support authority.");
     for (const auto loop : {first, second})
         for (const auto& vertex : loop)

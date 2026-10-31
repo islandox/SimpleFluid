@@ -30,8 +30,8 @@ SimpleFluid::PLIC::ConvexGeometryPtr<Mode> axis_box(
         {
             const double coordinate = (vertex >> axis) & 1 ? upper[axis] : lower[axis];
             point.value[axis] = coordinate;
-            supports.push_back({{0x706c69635f746573ULL, axis,
-                std::bit_cast<std::uint64_t>(coordinate == 0 ? 0. : coordinate)}});
+            supports.push_back(PLIC::PlaneAuthority::opaque({0x706c69635f746573ULL, axis,
+                std::bit_cast<std::uint64_t>(coordinate == 0 ? 0. : coordinate)}));
         }
         PLIC::DynamicGeometryAccess::seal(point, std::move(supports));
         vertices[vertex] = PLIC::Point<Mode>(point);
@@ -54,9 +54,9 @@ SimpleFluid::PLIC::ConvexGeometryPtr<Mode> unit_tetrahedron()
         std::vector<PLIC::PlaneAuthority> supports;
         for (std::size_t axis = 0; axis < 3; ++axis)
             if (point.value[axis] == 0)
-                supports.push_back({{0x706c69635f746573ULL, axis, 0}});
+                supports.push_back(PLIC::PlaneAuthority::opaque({0x706c69635f746573ULL, axis, 0}));
         if (point.value[0] + point.value[1] + point.value[2] == 1)
-            supports.push_back({{0x706c69635f746573ULL, 3, 1}});
+            supports.push_back(PLIC::PlaneAuthority::opaque({0x706c69635f746573ULL, 3, 1}));
         PLIC::DynamicGeometryAccess::seal(point, std::move(supports));
         vertices[vertex] = PLIC::Point<Mode>(point);
     }

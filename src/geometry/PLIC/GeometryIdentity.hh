@@ -59,10 +59,15 @@ using GeometryIdentityBackingPtr = std::shared_ptr<const GeometryIdentityBacking
 [[nodiscard]] SIMPLEFLUID_LOCAL std::strong_ordering compare_geometry_identity_native(
     GeometryIdentityKind, ArithmeticMode, const GeometryIdentityBackingPtr&, const GeometryIdentityBackingPtr&);
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryIdentityBackingPtr import_geometry_identity_backing(
-    GeometryIdentityKind, ArithmeticMode, std::vector<char> checked_key, std::size_t byte_budget);
+    GeometryIdentityKind, ArithmeticMode, std::span<const char> checked_key, std::size_t byte_budget);
 
-[[nodiscard]] SIMPLEFLUID_LOCAL const std::vector<char>& geometry_identity_key(
-    const GeometryIdentityBackingPtr&) noexcept;
+[[nodiscard]] SIMPLEFLUID_LOCAL std::vector<char> geometry_identity_key(const GeometryIdentityBackingPtr&);
+[[nodiscard]] SIMPLEFLUID_LOCAL std::size_t geometry_identity_key_size(const GeometryIdentityBackingPtr&) noexcept;
+[[nodiscard]] SIMPLEFLUID_LOCAL std::uint64_t geometry_identity_key_hash(const GeometryIdentityBackingPtr&) noexcept;
+[[nodiscard]] SIMPLEFLUID_LOCAL bool equal_geometry_identity_native(
+    const GeometryIdentityBackingPtr&, const GeometryIdentityBackingPtr&) noexcept;
+[[nodiscard]] SIMPLEFLUID_LOCAL std::uint64_t geometry_identity_key_word(
+    const GeometryIdentityBackingPtr&, std::size_t byte_offset) noexcept;
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t geometry_identity_backing_bytes() noexcept;
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t geometry_identity_payload_bytes(const GeometryIdentityBackingPtr&) noexcept;
 [[nodiscard]] SIMPLEFLUID_LOCAL GeometryIdentityBackingPtr geometry_identity_parent(
@@ -130,7 +135,7 @@ public:
         {
             if (storage_ == other.storage_)
                 return true;
-            return key() == other.key();
+            return details::equal_geometry_identity_native(storage_, other.storage_);
         }
         else if constexpr (Kind == GeometryIdentityKind::Line)
             return storage_.axis == other.storage_.axis && storage_.direction == other.storage_.direction &&
@@ -198,10 +203,10 @@ private:
         : storage_(std::move(storage))
     {
     }
-    explicit GeometryIdentity(std::vector<char> key, std::size_t byte_budget = 64 * 1024 * 1024)
+    explicit GeometryIdentity(std::span<const char> key, std::size_t byte_budget)
     {
         if constexpr (shared_storage)
-            storage_ = details::import_geometry_identity_backing(Kind, Mode, std::move(key), byte_budget);
+            storage_ = details::import_geometry_identity_backing(Kind, Mode, key, byte_budget);
         else if constexpr (Kind == GeometryIdentityKind::Line)
             storage_ = details::import_ordinary_identity_line(key);
         else
@@ -217,11 +222,6 @@ private:
         requires(Mode == ArithmeticMode::Ordinary && Kind == GeometryIdentityKind::Line)
         : storage_(std::move(line))
     {
-    }
-    [[nodiscard]] const std::vector<char>& key() const noexcept
-        requires(shared_storage)
-    {
-        return details::geometry_identity_key(storage_);
     }
     [[nodiscard]] details::OrdinaryIdentityKey inline_key() const noexcept
         requires(!shared_storage)
@@ -254,7 +254,7 @@ template<GeometryIdentityKind Kind, ArithmeticMode Mode>
 [[nodiscard]] std::size_t canonical_key_size(const GeometryIdentity<Kind, Mode>& identity) noexcept
 {
     if constexpr (GeometryIdentity<Kind, Mode>::shared_storage)
-        return identity.key().size();
+        return details::geometry_identity_key_size(identity.storage_);
     else
         return identity.inline_key_size();
 }
@@ -265,7 +265,7 @@ template<GeometryIdentityKind Kind, ArithmeticMode Mode>
 [[nodiscard]] std::vector<char> canonical_key(const GeometryIdentity<Kind, Mode>& identity)
 {
     if constexpr (GeometryIdentity<Kind, Mode>::shared_storage)
-        return identity.key();
+        return details::geometry_identity_key(identity.storage_);
     else
     {
         const auto key = identity.inline_key();
@@ -298,8 +298,7 @@ template<GeometryIdentityKind Kind, ArithmeticMode Mode>
         hash *= 1099511628211ULL;
     };
     if constexpr (GeometryIdentity<Kind, Mode>::shared_storage)
-        for (const auto byte : identity.key())
-            consume(byte);
+        return details::geometry_identity_key_hash(identity.storage_);
     else
     {
         const auto key = identity.inline_key();

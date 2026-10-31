@@ -1,5 +1,6 @@
 #include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include <algorithm>
 #include <map>
@@ -263,14 +264,17 @@ std::shared_ptr<const Complex> Complex::make(std::vector<PolyhedralComplexCell<A
     std::vector<Box> boxes;
     for (std::size_t c = 0; c < cells.size(); ++c)
     {
-        const auto points = cells[c].geometry->points();
-        Box box{c, points.front().value, points.front().value};
-        for (const auto& point : points)
+        const details::OrdinaryExportCoordinates coordinates(*cells[c].geometry);
+        Box box{c, coordinates.at(0), coordinates.at(0)};
+        for (std::size_t vertex = 1; vertex < coordinates.size(); ++vertex)
+        {
+            const auto point = coordinates.at(vertex);
             for (std::size_t axis = 0; axis < 3; ++axis)
             {
-                box.lo[axis] = std::min(box.lo[axis], point.value[axis]);
-                box.hi[axis] = std::max(box.hi[axis], point.value[axis]);
+                box.lo[axis] = std::min(box.lo[axis], point[axis]);
+                box.hi[axis] = std::max(box.hi[axis], point[axis]);
             }
+        }
         boxes.push_back(box);
     }
     std::sort(boxes.begin(), boxes.end(), [](const auto& a, const auto& b) { return a.lo[0] < b.lo[0]; });
@@ -621,7 +625,7 @@ std::shared_ptr<const Complex> Complex::decode(std::span<const char> packet)
         face.surface = read_surface(r);
         face.owner = r.word();
         face.neighbor = r.word();
-        face.geometry = Face::decode(r.packet());
+        face.geometry = ordinary_complex_detail::Face::decode(r.packet());
         const auto n = r.count();
         for (std::size_t j = 0; j < n; ++j)
             face.nodes.push_back(r.word());
@@ -647,7 +651,7 @@ std::size_t Complex::storage_bytes() const
     {
         bytes += sizeof(cell) + sizeof(ID) + 4 * sizeof(void*) +
                  (cell.faces.capacity() + cell.nodes.capacity()) * sizeof(ID);
-        bytes += std::get<Ancestry>(cell.key.ancestry).path.capacity() * sizeof(ID);
+        bytes += std::get<ordinary_complex_detail::Ancestry>(cell.key.ancestry).path.capacity() * sizeof(ID);
         if (cell.geometry && geometry.insert(cell.geometry.get()).second)
             bytes += cell.geometry->storage_bytes();
     }

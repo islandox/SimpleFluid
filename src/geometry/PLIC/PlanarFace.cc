@@ -13,7 +13,7 @@ PlanarFaceOverlap<Mode> planar_face_overlap(std::span<const Point<Mode>> first, 
     limits.arithmetic_mode = Mode;
     details::Operation scope(limits);
     if (first.size() < 3 || second.size() < 3 || first.size() > limits.maximum_vertices ||
-        second.size() > limits.maximum_vertices || support.key.empty())
+        second.size() > limits.maximum_vertices || support.empty())
         details::reject(Mode, "planar overlap requires admitted nondegenerate source loops and a support authority.");
     details::active_work->charge(first.size(), sizeof(DynamicPoint));
     details::active_work->charge(second.size(), sizeof(DynamicPoint));

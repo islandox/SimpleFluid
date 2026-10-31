@@ -4,6 +4,7 @@
 #include "geometry/PLIC/ConstructionRegistry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/unitTests/plic_analytic_test_geometry.hh"
@@ -21,6 +22,7 @@
 
 namespace
 {
+using SimpleFluid::PLIC::test::exported_points;
 using namespace SimpleFluid::Meshes;
 using SimpleFluid::ArithmeticMode;
 using Faces = std::vector<std::vector<std::size_t>>;
@@ -448,7 +450,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryGeometryUsesNominalValuesWithoutClaiming
     for (const auto coordinate : center)
         EXPECT_DOUBLE_EQ(coordinate, .25);
     EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().interval_operations, 0u);
-    for (const auto& point : tetra->dynamic_geometry()->points())
+    for (const auto& point : exported_points(*tetra->dynamic_geometry()))
         EXPECT_EQ(point.arithmetic_mode, ArithmeticMode::Ordinary);
 
     const std::array<SimpleFluid::PLIC::DynamicPoint, 4> uncertain_y{
@@ -582,7 +584,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryFinalizedCapsConformAcrossPermutationsAn
         for (std::size_t side = 0; side < children.size(); ++side)
         {
             check_closed_shell(*children[side]);
-            for (const auto& point : children[side]->points())
+            for (const auto& point : exported_points(*children[side]))
                 if (point.value[0] == point.value[1])
                     caps[side].insert(point.value);
         }
@@ -824,7 +826,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryCapturedThinEdgeRepairRetainsMeasuredWed
         const auto split = parent->clip({{0, 1, 0}, origin, -.5});
         ASSERT_TRUE(split.inside);
         ASSERT_TRUE(split.outside);
-        EXPECT_EQ(split.inside->points().size(), 6u);
+        EXPECT_EQ(split.inside->vertex_count(), 6u);
         EXPECT_EQ(split.inside->faces().size(), 5u);
         EXPECT_GT(split.inside->volume().value, 0x1p-165L);
         EXPECT_LT(split.inside->volume().value, 0x1p-154L);
@@ -971,7 +973,7 @@ OrdinarySharedCornerFixture ordinary_shared_corner_fixture(long double downward_
     const auto root = Geometry<ArithmeticMode::Ordinary>::from_geometry(*native, limits);
     std::vector<SimpleFluid::PLIC::DynamicPoint> top;
     SimpleFluid::PLIC::DynamicPoint edge;
-    for (const auto& point : root->dynamic_geometry()->points())
+    for (const auto& point : exported_points(*root->dynamic_geometry()))
         if (point.value[2] == .5L)
         {
             top.push_back(point);
@@ -1013,9 +1015,10 @@ TEST(BoundedConvexGeometryTest, OrdinaryCapturedCrossingsRetainAuthenticatedSour
     // Three retained support equations reconstruct the original wall point.
     // The old crossing formula displaced it by a few wider-FP increments and
     // manufactured a coplanar tetrahedron on the following grazing cut.
-    const auto restored = std::find_if(parent->dynamic_geometry()->points().begin(),
-        parent->dynamic_geometry()->points().end(), [&](const auto& point) { return point.value == corner.value; });
-    ASSERT_NE(restored, parent->dynamic_geometry()->points().end());
+    const auto restored_parent_points = exported_points(*parent->dynamic_geometry());
+    const auto restored = std::find_if(restored_parent_points.begin(),
+        restored_parent_points.end(), [&](const auto& point) { return point.value == corner.value; });
+    ASSERT_NE(restored, restored_parent_points.end());
     EXPECT_EQ(restored->supports(), corner.supports());
     ASSERT_GT(parent->volume().value, 0);
     SimpleFluid::PLIC::reset_geometry_statistics();
@@ -1056,7 +1059,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryCapturedOppositeSourcePlanesPreserveTheW
     const auto f = source_point({0.350007862053653909896L, 0.500055715528393436662L, 0.500000065164287879681L});
     const auto g = source_point({0.100022802874966634604L, 0.500114014374833145272L, 0.499999705241252620898L});
     const auto& a = fixture.source_corner;
-    const auto& e = fixture.cutter->dynamic_geometry()->points()[1];
+    const auto e = exported_points(*fixture.cutter->dynamic_geometry())[1];
     const auto first = selected_tetrahedron<ArithmeticMode::Ordinary>({a, d, f, g}, limits);
     const auto opposite = selected_tetrahedron<ArithmeticMode::Ordinary>({a, e, f, g}, limits);
     const auto parent = fixture.parent->clip_by_face(*first, 2, false).outside;
@@ -1333,7 +1336,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
             token = Access::identity(exported);
         }
         auto vertex = edge_vertex(.5L);
-        vertex.authorities.append({{190}});
+        vertex.authorities.append(SimpleFluid::PLIC::PlaneAuthority::opaque({190}));
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             auto plane = std::make_shared<ordinary::Plane>();
@@ -1468,7 +1471,8 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
         auto vertex = second;
         vertex.source_identity.reset();
         vertex.incident = {p, q, query};
-        vertex.authorities = std::vector<SimpleFluid::PLIC::PlaneAuthority>{{{191}}};
+        vertex.authorities =
+            std::vector<SimpleFluid::PLIC::PlaneAuthority>{SimpleFluid::PLIC::PlaneAuthority::opaque({191})};
         const auto before = vertex;
         if (control == 0)
         {
@@ -1592,7 +1596,8 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         auto vertex = first;
         vertex.source_identity.reset();
         vertex.incident = {p, q, query};
-        vertex.authorities = std::vector<SimpleFluid::PLIC::PlaneAuthority>{{{192}}};
+        vertex.authorities =
+            std::vector<SimpleFluid::PLIC::PlaneAuthority>{SimpleFluid::PLIC::PlaneAuthority::opaque({192})};
         const auto before = vertex;
         const int lower_direction =
             ordinary::source_normal_orientation(*p, *q, *context->surfaces[4].plane) * context->surfaces[4].orientation;
@@ -1786,7 +1791,7 @@ TEST(BoundedConvexGeometryTest, GeometryModesArePinnedAcrossOperationsPartitions
     const auto b = cube();
     EXPECT_THROW((void) Ordinary::from_dynamic(b->dynamic_geometry()), std::invalid_argument);
     EXPECT_THROW((void) BoundedGeometry::from_dynamic(a->dynamic_geometry()), std::invalid_argument);
-    EXPECT_THROW((void) typed_points<ArithmeticMode::BoundedCertification>(a->dynamic_geometry()->points()),
+    EXPECT_THROW((void) typed_points<ArithmeticMode::BoundedCertification>(exported_points(*a->dynamic_geometry())),
         std::invalid_argument);
     const SimpleFluid::PLIC::GeometryPacketContext context{{101, 103, 107, 109}};
     const auto packet = a->encode(context);
@@ -1954,8 +1959,8 @@ TEST(BoundedConvexGeometryTest, ComplementaryRemainderSharesPrecheckPairCapAndRe
     const std::array pieces{source->intersect(*left), source->intersect(*right)};
     ASSERT_TRUE(pieces[0]);
     ASSERT_TRUE(pieces[1]);
-    ASSERT_EQ(pieces[0]->dynamic_geometry()->points().size(), 6u);
-    ASSERT_EQ(pieces[1]->dynamic_geometry()->points().size(), 4u);
+    ASSERT_EQ(pieces[0]->dynamic_geometry()->vertex_count(), 6u);
+    ASSERT_EQ(pieces[1]->dynamic_geometry()->vertex_count(), 4u);
     ASSERT_EQ(pieces[0]->faces().size(), 5u);
     ASSERT_EQ(pieces[1]->faces().size(), 4u);
     const std::array before{parent->volume(), pieces[0]->volume(), pieces[1]->volume()};
@@ -2457,7 +2462,7 @@ TEST(BoundedConvexGeometryTest, IncidentPlaneContractionRetainsDifferentAdmissib
     const auto result = parent->intersect(*cutter);
     ASSERT_TRUE(result);
     bool found = false;
-    for (const auto& vertex : result->dynamic_geometry()->points())
+    for (const auto& vertex : exported_points(*result->dynamic_geometry()))
         if (vertex.value[2] == 0 && vertex.value[1] == .625L && vertex.value[0] > 0)
         {
             // y-height 1 and 1.25 are both admitted source states. Their edge
@@ -2703,7 +2708,7 @@ TEST(BoundedConvexGeometryTest, MalformedAndUnresolvedPublicShellsCannotMintPlan
     EXPECT_THROW((void) Geometry<ArithmeticMode::BoundedCertification>::make(
                      tetra, {{0, 1, 2}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}}),
         std::invalid_argument);
-    auto points = cube()->dynamic_geometry()->points();
+    auto points = exported_points(*cube()->dynamic_geometry());
     points[6].absolute_error[0] = 1e-3L;
     EXPECT_THROW((void) selected_make_points<ArithmeticMode::BoundedCertification>(points, cube()->faces()),
         std::invalid_argument);
@@ -2713,8 +2718,9 @@ TEST(BoundedConvexGeometryTest, AuthenticatedSupportProvenanceSurvivesAffineWork
 {
     const auto finite = plic_test::axis_box<ArithmeticMode::BoundedCertification>({0, 0, 0}, {1, 1, 1});
     std::vector<SimpleFluid::PLIC::DynamicPoint> points;
+    const auto finite_points = exported_points(*finite->dynamic_geometry());
     for (const auto index : finite->faces().front())
-        points.push_back(finite->dynamic_geometry()->points()[index]);
+        points.push_back(finite_points[index]);
     ASSERT_FALSE(points.front().supports().empty());
     for (const auto& p : finite->local_points())
         EXPECT_TRUE(p.supports().empty());
@@ -2874,7 +2880,7 @@ TEST(BoundedConvexGeometryTest, NonbinaryEdgeParameterRetainsExactRepresentableI
     const auto parent = Geometry<ArithmeticMode::BoundedCertification>::box({0, 0, 0}, {3, 1, 1});
     const auto cut = parent->clip({{1, 0, 0}, {}, 1}, false);
     ASSERT_TRUE(cut.inside);
-    for (const auto& p : cut.inside->dynamic_geometry()->points())
+    for (const auto& p : exported_points(*cut.inside->dynamic_geometry()))
         EXPECT_EQ(p.absolute_error[0], 0);
     const auto oblique = cut.inside->clip({{1, 0, -1}, {}, 0}, false);
     ASSERT_TRUE(oblique.inside);
@@ -3151,11 +3157,12 @@ TEST(BoundedConvexGeometryTest, RebasedThinComplementsKeepPhysicalReferenceAndPa
                 encloses(moment.first_moment[1], oracle * scale / 2);
                 encloses(moment.first_moment[2], oracle * scale / 2);
                 const auto local = geometry->local_points();
-                ASSERT_EQ(local.size(), geometry->dynamic_geometry()->points().size());
+                const auto global_points = exported_points(*geometry->dynamic_geometry());
+                ASSERT_EQ(local.size(), geometry->dynamic_geometry()->vertex_count());
                 for (std::size_t i = 0; i < local.size(); ++i)
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
-                        const auto global = geometry->dynamic_geometry()->points()[i];
+                        const auto global = global_points[i];
                         const auto difference = global.value[axis] - geometry->origin()[axis];
                         EXPECT_LE(std::abs(local[i].value[axis] - difference),
                             local[i].absolute_error[axis] + global.absolute_error[axis]);
@@ -3182,10 +3189,11 @@ TEST(BoundedConvexGeometryTest, CrossFrameSourceFaceRetainsThinFragmentCoordinat
     ASSERT_TRUE(slab);
     const double cut_x = 1 - 5e-7;
     const auto cutter = Geometry<ArithmeticMode::BoundedCertification>::box({0, 0, 0}, {cut_x, 1, 1});
+    const auto cutter_points = exported_points(*cutter->dynamic_geometry());
     std::size_t face = cutter->faces().size();
     for (std::size_t f = 0; f < cutter->faces().size(); ++f)
         if (std::all_of(cutter->faces()[f].begin(), cutter->faces()[f].end(),
-                [&](auto i) { return cutter->dynamic_geometry()->points()[i].value[0] == cut_x; }))
+                [&](auto i) { return cutter_points[i].value[0] == cut_x; }))
             face = f;
     ASSERT_LT(face, cutter->faces().size());
     const auto split = slab->clip_by_face(*cutter, face, false);
@@ -3233,7 +3241,7 @@ TEST(BoundedConvexGeometryTest, CapturedThinTetrahedronRetainsPositiveAnchoredVo
     const auto complementary = above->clip({{0, 1, 0}, origin, .25}, false);
     ASSERT_TRUE(complementary.inside);
     ASSERT_TRUE(complementary.outside);
-    ASSERT_EQ(complementary.outside->dynamic_geometry()->points().size(), 6u);
+    ASSERT_EQ(complementary.outside->dynamic_geometry()->vertex_count(), 6u);
     EXPECT_GT(complementary.outside->volume().lower(), 0);
     const std::array cover{complementary.inside, complementary.outside};
     SimpleFluid::PLIC::reset_geometry_statistics();
@@ -3243,12 +3251,13 @@ TEST(BoundedConvexGeometryTest, CapturedThinTetrahedronRetainsPositiveAnchoredVo
     const auto donor = Geometry<ArithmeticMode::BoundedCertification>::box({-1, -1, -1}, {1, .5, 1});
     const auto result = above->intersect(*donor);
     ASSERT_TRUE(result);
-    ASSERT_EQ(result->dynamic_geometry()->points().size(), 4u);
+    ASSERT_EQ(result->dynamic_geometry()->vertex_count(), 4u);
     const SimpleFluid::PLIC::DynamicPoint* low = nullptr;
     const SimpleFluid::PLIC::DynamicPoint* high = nullptr;
     std::vector<const SimpleFluid::PLIC::DynamicPoint*> edge;
     std::array<long double, 3> centroid{};
-    for (const auto& point : result->dynamic_geometry()->points())
+    const auto result_points = exported_points(*result->dynamic_geometry());
+    for (const auto& point : result_points)
     {
         for (std::size_t axis = 0; axis < 3; ++axis)
             centroid[axis] += point.value[axis] / 4;
@@ -3350,11 +3359,10 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
         {.175, .25, .5}, old_vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
     const auto atom = donor->clip_by_face(*old_source, 0).outside;
     ASSERT_TRUE(atom);
-    ASSERT_EQ(atom->dynamic_geometry()->points().size(), 6u);
+    ASSERT_EQ(atom->dynamic_geometry()->vertex_count(), 6u);
     const auto is_lower_corner = [](const SimpleFluid::PLIC::DynamicPoint& point)
     { return point.value[0] == .35 && point.value[1] == .5 && point.value[2] < .5 && point.absolute_error[2] > 0; };
-    ASSERT_TRUE(std::any_of(
-        atom->dynamic_geometry()->points().begin(), atom->dynamic_geometry()->points().end(), is_lower_corner));
+    ASSERT_TRUE(std::ranges::any_of(exported_points(*atom->dynamic_geometry()), is_lower_corner));
     const auto atom_before = atom->volume();
     // Face 0 contains (0,0,.5), (0,0,.5+h), and (sx,.25,.5).
     // At q=(.35,.5,.5), its residual is h*(.35-2*sx)/4>0:
@@ -3381,16 +3389,12 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
                 return point.value == std::array<long double, 3>{.35, .5, .5} &&
                        point.absolute_error == std::array<long double, 3>{};
             };
-            EXPECT_FALSE(std::any_of(result.inside->dynamic_geometry()->points().begin(),
-                result.inside->dynamic_geometry()->points().end(), is_corner));
-            EXPECT_TRUE(std::any_of(result.outside->dynamic_geometry()->points().begin(),
-                result.outside->dynamic_geometry()->points().end(), is_corner));
+            EXPECT_FALSE(std::ranges::any_of(exported_points(*result.inside->dynamic_geometry()), is_corner));
+            EXPECT_TRUE(std::ranges::any_of(exported_points(*result.outside->dynamic_geometry()), is_corner));
             if (target == atom)
             {
-                EXPECT_FALSE(std::any_of(result.inside->dynamic_geometry()->points().begin(),
-                    result.inside->dynamic_geometry()->points().end(), is_lower_corner));
-                EXPECT_TRUE(std::any_of(result.outside->dynamic_geometry()->points().begin(),
-                    result.outside->dynamic_geometry()->points().end(), is_lower_corner));
+                EXPECT_FALSE(std::ranges::any_of(exported_points(*result.inside->dynamic_geometry()), is_lower_corner));
+                EXPECT_TRUE(std::ranges::any_of(exported_points(*result.outside->dynamic_geometry()), is_lower_corner));
             }
             const auto repeated = result.inside->clip_by_face(*support, 0);
             ASSERT_TRUE(repeated.inside);
@@ -3422,8 +3426,7 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
                     // that infinite line proves face1 contact at y near .5.
                     const auto beyond_edge = [](const SimpleFluid::PLIC::DynamicPoint& point)
                     { return point.value[1] > .4 && point.value[2] == .5 && point.absolute_error[2] == 0; };
-                    EXPECT_TRUE(std::any_of(next.inside->dynamic_geometry()->points().begin(),
-                        next.inside->dynamic_geometry()->points().end(), beyond_edge));
+                    EXPECT_TRUE(std::ranges::any_of(exported_points(*next.inside->dynamic_geometry()), beyond_edge));
                 }
                 SimpleFluid::PLIC::ClipResult<ArithmeticMode::BoundedCertification> repeat;
                 ASSERT_NO_THROW(repeat = next.inside->clip_by_face(*source, face));
@@ -3461,7 +3464,7 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     }
     const auto shared_atom = donor->clip_by_face(*shared_old, 0).outside;
     ASSERT_TRUE(shared_atom);
-    ASSERT_EQ(shared_atom->dynamic_geometry()->points().size(), 6u);
+    ASSERT_EQ(shared_atom->dynamic_geometry()->vertex_count(), 6u);
     const auto shared_atom_before = shared_atom->volume();
     // An even permutation moves the old face0 to face1 with the same normal.
     // Its three shared input points certify the whole supporting plane, even
@@ -3494,8 +3497,7 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     EXPECT_FALSE(reversed.outside);
     EXPECT_EQ(reversed.inside->volume().value, shared_atom_before.value);
     EXPECT_EQ(reversed.inside->volume().absolute_error, shared_atom_before.absolute_error);
-    EXPECT_TRUE(std::any_of(reversed.inside->dynamic_geometry()->points().begin(),
-        reversed.inside->dynamic_geometry()->points().end(), is_lower_corner));
+    EXPECT_TRUE(std::ranges::any_of(exported_points(*reversed.inside->dynamic_geometry()), is_lower_corner));
     const auto repeated_plane = reversed.inside->clip_by_face(*reversed_plane, 1);
     ASSERT_TRUE(repeated_plane.inside);
     EXPECT_FALSE(repeated_plane.outside);
@@ -3560,12 +3562,11 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     const SimpleFluid::PLIC::GeometryPacketContext tiny_context{{61, 67, 71, 73}};
     EXPECT_THROW((void) q_cut.inside->encode(tiny_context), std::invalid_argument);
     EXPECT_THROW((void) selected_make_points<ArithmeticMode::BoundedCertification>(
-                     q_cut.inside->dynamic_geometry()->points(), q_cut.inside->faces()),
+                     exported_points(*q_cut.inside->dynamic_geometry()), q_cut.inside->faces()),
         std::invalid_argument);
     const auto negative_p_vertex = [](const SimpleFluid::PLIC::DynamicPoint& point)
     { return point.value[1] == 0 && point.value[2] < .5 && point.value[2] > .4999999L; };
-    EXPECT_TRUE(std::any_of(q_cut.inside->dynamic_geometry()->points().begin(),
-        q_cut.inside->dynamic_geometry()->points().end(), negative_p_vertex));
+    EXPECT_TRUE(std::ranges::any_of(exported_points(*q_cut.inside->dynamic_geometry()), negative_p_vertex));
     EXPECT_EQ(sliver->volume().value, sliver_before.value);
     EXPECT_EQ(sliver->volume().absolute_error, sliver_before.absolute_error);
     const auto q_source_before = q_source->volume();
@@ -3583,8 +3584,8 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
             for (std::size_t i = 0; i < face.size(); ++i)
             {
                 const auto a = face[i], b = face[(i + 1) % face.size()];
-                ASSERT_LT(a, child->dynamic_geometry()->points().size());
-                ASSERT_LT(b, child->dynamic_geometry()->points().size());
+                ASSERT_LT(a, child->dynamic_geometry()->vertex_count());
+                ASSERT_LT(b, child->dynamic_geometry()->vertex_count());
                 EXPECT_NE(a, b);
                 used.insert(a);
                 auto& entry = edges[{std::min(a, b), std::max(a, b)}];
@@ -3592,8 +3593,8 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
                 entry.second += a < b ? 1 : -1;
             }
         }
-        EXPECT_EQ(used.size(), child->dynamic_geometry()->points().size());
-        EXPECT_EQ(child->dynamic_geometry()->points().size() + child->faces().size(), edges.size() + 2);
+        EXPECT_EQ(used.size(), child->dynamic_geometry()->vertex_count());
+        EXPECT_EQ(child->dynamic_geometry()->vertex_count() + child->faces().size(), edges.size() + 2);
         for (const auto& [edge, incidence] : edges)
         {
             EXPECT_EQ(incidence.first, 2u);
@@ -3609,10 +3610,11 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     {
         std::multiset<std::pair<Coordinate, Coordinate>> edges;
         const auto& cap = child->faces().back();
+        const auto points = exported_points(*child->dynamic_geometry());
         for (std::size_t i = 0; i < cap.size(); ++i)
         {
-            const auto& a = child->dynamic_geometry()->points()[cap[i]];
-            const auto& b = child->dynamic_geometry()->points()[cap[(i + 1) % cap.size()]];
+            const auto& a = points[cap[i]];
+            const auto& b = points[cap[(i + 1) % cap.size()]];
             const Coordinate first{a.value, a.absolute_error}, second{b.value, b.absolute_error};
             edges.emplace(reverse ? second : first, reverse ? first : second);
         }
@@ -3637,14 +3639,15 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     const auto line_source_before = line_source->volume();
     const auto roof = donor->clip_by_face(*line_source, 0).outside;
     ASSERT_TRUE(roof);
+    const auto roof_points = exported_points(*roof->dynamic_geometry());
     const auto near_q =
-        std::find_if(roof->dynamic_geometry()->points().begin(), roof->dynamic_geometry()->points().end(),
+        std::find_if(roof_points.begin(), roof_points.end(),
             [](const SimpleFluid::PLIC::DynamicPoint& point)
             {
                 return point.value[0] < .15 && point.value[1] > .4 && point.value[2] == .5 &&
                        point.absolute_error[0] > 0 && point.absolute_error[2] == 0;
             });
-    ASSERT_NE(near_q, roof->dynamic_geometry()->points().end());
+    ASSERT_NE(near_q, roof_points.end());
     const auto crossing = *near_q;
     EXPECT_GT(crossing.value[1] - crossing.absolute_error[1],
         std::max(global[0].value[1] + global[0].absolute_error[1], p.value[1] + p.absolute_error[1]));
@@ -3655,10 +3658,8 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     ASSERT_TRUE(line_cut.outside);
     const auto copied_crossing = [&](const SimpleFluid::PLIC::DynamicPoint& point)
     { return point.value == crossing.value && point.absolute_error == crossing.absolute_error; };
-    EXPECT_FALSE(std::any_of(line_cut.inside->dynamic_geometry()->points().begin(),
-        line_cut.inside->dynamic_geometry()->points().end(), copied_crossing));
-    EXPECT_TRUE(std::any_of(line_cut.outside->dynamic_geometry()->points().begin(),
-        line_cut.outside->dynamic_geometry()->points().end(), copied_crossing));
+    EXPECT_FALSE(std::ranges::any_of(exported_points(*line_cut.inside->dynamic_geometry()), copied_crossing));
+    EXPECT_TRUE(std::ranges::any_of(exported_points(*line_cut.outside->dynamic_geometry()), copied_crossing));
     ASSERT_NO_FATAL_FAILURE(closed_oriented(line_cut.inside));
     ASSERT_NO_FATAL_FAILURE(closed_oriented(line_cut.outside));
     const std::array line_cover{line_cut.inside, line_cut.outside};
@@ -3674,10 +3675,11 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     // certify the transverse coefficient on Q0's center/q/departed basis.
     const auto p_at_q = selected_orientation<>({global[0], global[3], p, q});
     EXPECT_LT(p_at_q.upper(), 0);
-    const auto on_q0 = std::find_if(line_cut.inside->dynamic_geometry()->points().begin(),
-        line_cut.inside->dynamic_geometry()->points().end(), [](const SimpleFluid::PLIC::DynamicPoint& point)
+    const auto line_inside_points = exported_points(*line_cut.inside->dynamic_geometry());
+    const auto on_q0 = std::find_if(line_inside_points.begin(),
+        line_inside_points.end(), [](const SimpleFluid::PLIC::DynamicPoint& point)
         { return point.value[0] < .15 && point.value[1] > .4 && point.absolute_error[2] > 0; });
-    ASSERT_NE(on_q0, line_cut.inside->dynamic_geometry()->points().end());
+    ASSERT_NE(on_q0, line_inside_points.end());
     const auto q0_crossing = *on_q0;
     EXPECT_LE(q0_crossing.value[2] - q0_crossing.absolute_error[2], .5L);
     EXPECT_GE(q0_crossing.value[2] + q0_crossing.absolute_error[2], .5L);
@@ -3688,10 +3690,8 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
     ASSERT_TRUE(affine_cut.outside);
     const auto copied_q0_crossing = [&](const SimpleFluid::PLIC::DynamicPoint& point)
     { return point.value == q0_crossing.value && point.absolute_error == q0_crossing.absolute_error; };
-    EXPECT_FALSE(std::any_of(affine_cut.inside->dynamic_geometry()->points().begin(),
-        affine_cut.inside->dynamic_geometry()->points().end(), copied_q0_crossing));
-    EXPECT_TRUE(std::any_of(affine_cut.outside->dynamic_geometry()->points().begin(),
-        affine_cut.outside->dynamic_geometry()->points().end(), copied_q0_crossing));
+    EXPECT_FALSE(std::ranges::any_of(exported_points(*affine_cut.inside->dynamic_geometry()), copied_q0_crossing));
+    EXPECT_TRUE(std::ranges::any_of(exported_points(*affine_cut.outside->dynamic_geometry()), copied_q0_crossing));
     ASSERT_NO_FATAL_FAILURE(closed_oriented(affine_cut.inside));
     ASSERT_NO_FATAL_FAILURE(closed_oriented(affine_cut.outside));
     const std::array affine_cover{affine_cut.inside, affine_cut.outside};
@@ -3737,7 +3737,7 @@ TEST(BoundedConvexGeometryTest, CapturedSourceFaceFactorsAStrictNonzeroNearCopla
         const auto decoded =
             Geometry<ArithmeticMode::BoundedCertification>::decode(next.inside->encode(context), context, registry);
         ASSERT_TRUE(decoded);
-        EXPECT_EQ(decoded->dynamic_geometry()->points().size(), next.inside->dynamic_geometry()->points().size());
+        EXPECT_EQ(decoded->dynamic_geometry()->vertex_count(), next.inside->dynamic_geometry()->vertex_count());
         EXPECT_EQ(decoded->faces().size(), next.inside->faces().size());
         EXPECT_LE(decoded->volume().lower(), next.inside->volume().upper());
         EXPECT_GE(decoded->volume().upper(), next.inside->volume().lower());
@@ -3956,6 +3956,11 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
     const auto parent = plic_test::axis_box<mode>({0, 0, 0}, {1, 1, 1});
     const auto cutter = plic_test::unit_tetrahedron<mode>();
     const auto storage = detail::checked_geometry_storage<mode>(Access::implementation(*parent->dynamic_geometry()));
+    PLIC::GeometryAllocationLedger point_ledger;
+    std::size_t point_bytes = 0;
+    const auto point_export = parent->export_points(point_ledger, point_bytes, PLIC::test::point_export_test_budget);
+    const auto global_points = point_export.points();
+    ASSERT_EQ(global_points.size(), storage->vertices.size());
     std::vector<std::vector<PLIC::PlaneAuthority>> original_keys;
     std::vector<std::shared_ptr<const PLIC::DynamicPointProvenance>> original_sources;
     for (std::size_t i = 0; i < storage->vertices.size(); ++i)
@@ -3963,8 +3968,8 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
         const auto& vertex = storage->vertices[i];
         ASSERT_TRUE(vertex.source_identity);
         EXPECT_EQ(vertex.authorities.shared_payload(), vertex.source_identity->support_payload);
-        EXPECT_EQ(Access::original_source(Access::identity(storage->displayed[i])), vertex.source_identity);
-        EXPECT_NE(Access::identity(storage->displayed[i]), vertex.source_identity);
+        EXPECT_EQ(Access::original_source(Access::identity(global_points[i].dynamic())), vertex.source_identity);
+        EXPECT_NE(Access::identity(global_points[i].dynamic()), vertex.source_identity);
         original_keys.push_back(vertex.authorities.values());
         original_sources.push_back(vertex.source_identity);
     }
@@ -4003,7 +4008,7 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
     ASSERT_TRUE(restored);
     check_volume(restored->volume(), 1.L / 6);
     EXPECT_EQ(restored->encode(registry), first_child_packet);
-    const auto actual_points = split.inside->points(), restored_points = restored->points();
+    const auto actual_points = exported_points(*split.inside), restored_points = exported_points(*restored);
     ASSERT_EQ(actual_points.size(), restored_points.size());
     for (std::size_t i = 0; i < actual_points.size(); ++i)
     {
@@ -4015,7 +4020,7 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
     const auto numerical = Geometry<mode>::decode(numerical_packet, context, sources);
     ASSERT_TRUE(numerical);
     check_volume(numerical->volume(), 1.L / 6);
-    const auto numerical_points = numerical->points();
+    const auto numerical_points = exported_points(*numerical);
     ASSERT_EQ(numerical_points.size(), actual_points.size());
     for (std::size_t i = 0; i < numerical_points.size(); ++i)
     {

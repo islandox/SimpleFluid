@@ -293,6 +293,12 @@ are not a count of actual allocations or simultaneous live storage.
 This is a preparation-storage allowance, not a bound on total process RSS or
 the combined memory of every source, candidate, MPI runtime and caller.
 
+Finite global-point consumers request owning exports against their preparation
+ledger and existing byte ceiling. Handles keep borrowed point spans alive; the
+ledger pins admitted owners until its scope ends. Temporary export spending stays
+in cumulative preparation accounting but is excluded from persistent spatial and
+surface catalog byte totals unless those objects retain an export handle.
+
 Construction traffic remains monotone across faces, including retired capacity
 and work admitted before a rejected trial. `maximum_face_geometry_operations` defaults to 67,108,864
 counted aggregate scalar operations per geometric face, including source

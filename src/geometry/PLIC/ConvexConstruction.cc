@@ -1,5 +1,6 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/SupportClassification.hh"
+#include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -21,14 +22,14 @@ std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint
         return {};
     std::vector<PlaneAuthority> result;
     for (const auto& key : points.front().supports())
-        if (!key.key.empty() &&
+        if (!key.empty() &&
             std::all_of(points.begin() + 1, points.end(), [&](const auto& p)
                 { return has_support(p, key); }))
         {
             auto attached = key;
             for (const auto& point : points)
                 for (const auto& candidate : point.supports())
-                    if (candidate.key == key.key)
+                    if (candidate == key)
                         details::OriginalSupportAuthorityAccess::merge(attached, candidate);
             result.push_back(std::move(attached));
         }
@@ -117,9 +118,9 @@ GeometryPoint DynamicConvexGeometry::origin() const
 
 namespace SimpleFluid::PLIC
 {
-const std::vector<DynamicPoint>& DynamicConvexGeometry::points() const
+std::size_t DynamicConvexGeometry::vertex_count() const noexcept
 {
-    return impl_->displayed;
+    return impl_->point_export_cache ? impl_->point_export_cache->vertex_provenance.size() : 0;
 }
 } // namespace SimpleFluid::PLIC
 

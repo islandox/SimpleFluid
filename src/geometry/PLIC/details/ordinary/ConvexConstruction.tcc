@@ -111,7 +111,7 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
         poly.faces.size() > std::min(poly.limits.maximum_faces, active_work->limits.maximum_faces))
         reject("vertex/face cap exhausted.");
     active_work->charge(1, sizeof(MomentCache));
-    active_work->charge(poly.vertices.size(), sizeof(Vertex) + sizeof(DynamicPoint));
+    active_work->charge(poly.vertices.size(), sizeof(Vertex));
     active_work->charge(poly.faces.size(), sizeof(Face) + sizeof(Surface));
     // Draft rebuilds invalidate all derived caches together. In particular,
     // a copied shell must never clear the immutable parent's shared cache.
@@ -120,28 +120,34 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
     if (!poly.moment_cache || !poly.moment_cache.unique() || poly.moment_cache->integrals)
         poly.moment_cache = std::make_shared<MomentCache>();
     poly.volume = StorageScalar{};
-    poly.displayed.clear();
+    active_work->charge(1, sizeof(PointExportCache));
+    active_work->charge(poly.vertices.size(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    poly.point_export_cache = std::make_shared<PointExportCache>();
+    if (std::fegetenv(&poly.point_export_cache->environment) != 0)
+        reject("cannot capture global-coordinate arithmetic environment.");
+    poly.point_export_cache->vertex_provenance.resize(poly.vertices.size());
+    if (poly.point_export_cache->vertex_provenance.capacity() > poly.vertices.size())
+        active_work->charge(poly.point_export_cache->vertex_provenance.capacity() - poly.vertices.size(),
+            sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    poly.export_source.reset();
+    // Recipe attachment after finish must not change the point publication policy.
+    poly.export_seal = bool(poly.construction) || poly.numerical_only;
     for (auto& v : poly.vertices)
     {
         if (v.source_identity)
             v.authorities.share_if_equal(v.source_identity->support_payload);
-        auto displayed =
-            bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
-        if (v.source_identity || poly.construction || poly.numerical_only)
-            DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities.values(), poly.numerical_only);
-        else
-            DynamicGeometryAccess::seal(displayed, v.authorities.values());
-        DynamicGeometryAccess::retain_supports(DynamicGeometryAccess::identity(displayed), active_work->allocations,
-            active_work->bytes, active_work->limits.byte_budget);
-        active_work->charge(DynamicGeometryAccess::storage_bytes(displayed, false) - sizeof(DynamicPoint), 1);
-        poly.displayed.push_back(std::move(displayed));
+        // Validate physical-coordinate range now without allocating a publication.
+        (void) bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
         active_work->charge(v.authorities.size(), sizeof(PlaneAuthority));
         DynamicGeometryAccess::retain_supports(
             v.source_identity, active_work->allocations, active_work->bytes, active_work->limits.byte_budget);
         active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity, false), 1);
         for (const auto& key : v.authorities)
-            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+        {
+            OriginalSupportAuthorityAccess::validate_boundary(key);
+            active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
+        }
     }
     std::set<PlanePtr> retained_planes;
     for (const auto& v : poly.vertices)
@@ -154,7 +160,7 @@ template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool par
         active_work->charge(plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
         active_work->charge(plane->authorities.size(), sizeof(PlaneAuthority));
         for (const auto& key : plane->authorities)
-            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
     }
     for (const auto& f : poly.faces)
         active_work->charge(f.size(), sizeof(std::size_t));
@@ -599,7 +605,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
     {
         const auto& bytes = shell.face_support_identities[f];
         auto authority = details::original_support_authority(bytes);
-        active_work->charge(authority.key.size(), sizeof(std::uint64_t));
+        active_work->allocations.retain(authority, active_work->bytes, active_work->limits.byte_budget);
         for (const auto index : shell.outward_faces[f])
         {
             auto supports = relative.at(index).supports();
@@ -620,7 +626,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
         active_work->charge(1, sizeof(DynamicPointProvenance));
         active_work->charge(supports.size(), sizeof(PlaneAuthority));
         for (const auto& key : supports)
-            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
         DynamicGeometryAccess::seal_represented_source(global, supports);
         identities.push_back(DynamicGeometryAccess::identity(global));
     }

@@ -88,7 +88,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     Operation scope(limits);
     if (packet.size() > limits.byte_budget || authenticated_sources.empty())
         reject("numerical decode requires capped payload and authenticated source registry.");
-    std::set<PlaneAuthority> registry;
+    PlaneAuthorityRegistry registry;
     std::map<PlaneAuthority, PlanePtr> registry_planes;
     for (const auto& source : authenticated_sources)
     {
@@ -102,7 +102,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                     if (registry.insert(key).second)
                     {
                         active_work->charge(2, sizeof(PlaneAuthority) + 4 * sizeof(void*));
-                        active_work->charge(2 * key.key.size(), sizeof(std::uint64_t));
+                        active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
                         registry_planes.emplace(key, plane);
                     }
                 }
@@ -349,9 +349,9 @@ template<ArithmeticMode Mode> void NumericalWriter<Mode>::authorities(const std:
     word(keys.size());
     for (const auto& key : keys)
     {
-        word(key.key.size());
-        for (const auto x : key.key)
-            word(x);
+        word(key.word_count());
+        key.emit_words(this,
+            [](void* context, std::uint64_t value) { static_cast<NumericalWriter<Mode>*>(context)->word(value); });
     }
 }
 
@@ -436,26 +436,31 @@ template<ArithmeticMode Mode> Frame NumericalReader<Mode>::frame()
 
 template<ArithmeticMode Mode>
 std::vector<PlaneAuthority> NumericalReader<Mode>::authorities(
-    const std::set<PlaneAuthority>& registry, GeometryLimits limits)
+    const PlaneAuthorityRegistry& registry, GeometryLimits limits)
 {
     static_assert(Mode == kernel_mode);
     std::vector<PlaneAuthority> result;
     const auto n = count(limits.maximum_faces, sizeof(std::uint64_t));
+    // count() charges the wire-count lower bound. Admit the complete retained
+    // handle buffer separately from each temporary serialized word buffer.
+    active_work->charge(n, sizeof(PlaneAuthority) - sizeof(std::uint64_t));
+    result.reserve(n);
+    if (result.capacity() > n)
+        active_work->charge(result.capacity() - n, sizeof(PlaneAuthority));
     for (std::size_t i = 0; i < n; ++i)
     {
-        PlaneAuthority key;
         const auto words = count(limits.byte_budget / sizeof(std::uint64_t), sizeof(std::uint64_t));
         if (!words)
             reject("empty numerical support authority.");
+        std::vector<std::uint64_t> serialized;
+        serialized.reserve(words);
+        if (serialized.capacity() > words)
+            active_work->charge(serialized.capacity() - words, sizeof(std::uint64_t));
         for (std::size_t j = 0; j < words; ++j)
-            key.key.push_back(word());
-        const auto authenticated = registry.find(key);
-        if (authenticated == registry.end())
-            reject("foreign or absent original source support authority.");
-        OriginalSupportAuthorityAccess::validate_boundary(*authenticated);
-        if (const auto* support = OriginalSupportAuthorityAccess::retained(*authenticated))
-            active_work->retain_identity(*support);
-        result.push_back(*authenticated);
+            serialized.push_back(word());
+        auto authenticated = OriginalSupportAuthorityAccess::authenticate(serialized, registry);
+        active_work->allocations.retain(authenticated, active_work->bytes, active_work->limits.byte_budget);
+        result.push_back(std::move(authenticated));
     }
     std::sort(result.begin(), result.end());
     if (std::adjacent_find(result.begin(), result.end()) != result.end())
@@ -482,6 +487,6 @@ template long double NumericalReader<kernel_mode>::real();
 template Interval NumericalReader<kernel_mode>::interval();
 template Frame NumericalReader<kernel_mode>::frame();
 template std::vector<PlaneAuthority> NumericalReader<kernel_mode>::authorities(
-    const std::set<PlaneAuthority>& registry, GeometryLimits limits);
+    const PlaneAuthorityRegistry& registry, GeometryLimits limits);
 } // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::PLIC::details

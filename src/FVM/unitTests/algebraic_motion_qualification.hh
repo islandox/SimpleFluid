@@ -134,7 +134,7 @@ Cell cell(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& geometry, lon
     Polygon p;
     long double bottom = 2, top = -1;
     long double xmin = 2, xmax = -1, ymin = 2, ymax = -1;
-    for (const auto& q : geometry->points())
+    for (const auto& q : PLIC::test::exported_points(*geometry))
     {
         const long double x = q.value[0] - s * q.value[1], y = q.value[1];
         p.push_back({x, y});
@@ -884,10 +884,11 @@ void dump_failure(const Fixture& f, const Case& c, unsigned n, const std::string
         if (!binary)
             throw std::runtime_error("Qualification support certificate write failed");
         out << "certificate " << sample.cell << ' ' << certificate_name << " bytes " << certificate.size() << '\n';
-        for (std::size_t p = 0; p < geometry->points().size(); ++p)
+        const auto points = PLIC::test::exported_points(*geometry);
+        for (std::size_t p = 0; p < points.size(); ++p)
         {
             out << "point " << sample.cell << ' ' << p;
-            for (const auto value : geometry->points()[p].value)
+            for (const auto value : points[p].value)
                 out << ' ' << value;
             out << '\n';
         }

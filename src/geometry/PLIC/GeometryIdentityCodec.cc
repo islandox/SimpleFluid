@@ -22,7 +22,7 @@ void exact_packet(std::span<const char> packet, GeometryTag tag, unsigned count)
         throw std::invalid_argument("Foreign geometry identity kind or arithmetic mode.");
     std::array<ex::Q, 6> values;
     for (unsigned i = 0; i < count; ++i)
-        values[i] = reader.rational();
+        values[i] = ex::read_identity_rational(reader);
     reader.finish();
     if (tag == exact_line_tag || tag == exact_support_tag)
     {
@@ -135,7 +135,7 @@ void ordinary_support(std::span<const char> packet)
     }
 }
 } // namespace
-std::vector<char> details::checked_identity_key(
+std::span<const char> details::checked_identity_key(
     GeometryIdentityKind kind, ArithmeticMode mode, std::span<const char> packet)
 {
     if (kind == GeometryIdentityKind::Displacement && packet.empty())
@@ -202,7 +202,7 @@ std::vector<char> details::checked_identity_key(
     }
     else
         throw std::invalid_argument("Unsupported geometry identity arithmetic mode.");
-    return {packet.begin(), packet.end()};
+    return packet;
 }
 PointIdentity<ArithmeticMode::Exact> promote_identity(const PointIdentity<ArithmeticMode::Ordinary>& identity)
 {
@@ -241,12 +241,12 @@ OrdinaryIdentityLine import_ordinary_identity_line(std::span<const char> key)
     return {axis, direction, anchor};
 }
 GeometryIdentityBackingPtr import_geometry_identity_backing(
-    GeometryIdentityKind kind, ArithmeticMode mode, std::vector<char> checked_key, std::size_t budget)
+    GeometryIdentityKind kind, ArithmeticMode mode, std::span<const char> checked_key, std::size_t budget)
 {
     if (mode == ArithmeticMode::Exact)
-        return import_exact_identity_backing(kind, std::move(checked_key), budget);
+        return import_exact_identity_backing(kind, checked_key, budget);
     if (mode == ArithmeticMode::Ordinary && kind == GeometryIdentityKind::PlaneSupport)
-        return import_ordinary_support_backing(std::move(checked_key), budget);
+        return import_ordinary_support_backing(checked_key, budget);
     throw std::invalid_argument("Unsupported native identity import kind or mode.");
 }
 } // namespace details

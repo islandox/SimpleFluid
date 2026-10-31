@@ -5,6 +5,7 @@
 #include "FVM/GeneralVoFSurface.hh"
 #include "SimpleFluidExport.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <optional>
 #include <span>
 namespace SimpleFluid::detail
@@ -44,8 +45,15 @@ public:
      * section; centroid integrates its convex polygon in physical coordinates.
      */
     template<ArithmeticMode Mode>
+        requires(Mode == ArithmeticMode::Exact)
     [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
         std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>&, const PLIC::PolyhedralInterface&);
+    /** Finite physical coordinates are published within the caller's cumulative admission scope. */
+    template<ArithmeticMode Mode>
+        requires(Mode != ArithmeticMode::Exact)
+    [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(std::uint64_t cell,
+        const PLIC::ConvexCellGeometry<Mode>&, const PLIC::PolyhedralInterface&,
+        PLIC::GeometryAllocationLedger&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Fit a quadratic Monge surface in the target normal's tangential frame.
      * Curvature is div(n) [1/m], positive for convex gas with outward normals.
      */

@@ -119,7 +119,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 return true;
         }
         for (const auto& key : plane->authorities)
-            if (!key.key.empty())
+            if (!key.empty())
                 for (const auto& original : candidate->supports())
                 {
                     active_work->pair();
@@ -397,7 +397,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         if (!retained)
         {
             active_work->charge(1, sizeof(PlaneAuthority));
-            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
             vertex.authorities.append(key);
         }
     }
@@ -472,6 +472,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     {
         active_work->charge(storage_bytes(), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
+        rebased->export_source = impl_->export_source ? impl_->export_source : impl_;
         rebased->frame.origin = input.anchor;
         rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
         rebased->moment_cache = std::make_shared<MomentCache>();

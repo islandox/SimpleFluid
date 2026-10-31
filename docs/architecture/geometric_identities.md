@@ -19,8 +19,9 @@ normalized as in the original codec. Hashing consumes unsigned canonical bytes.
 Exact identities retain native rational tuples in compiled private payloads.
 Ordinary support payloads retain typed axis, source polygon, input plane,
 normalized plane, translation, retained Exact ancestry, and extrusion-DAG
-variants. Variable-sized identities keep eager canonical key caches. Local
-geometry operations consume native payloads; parsing is confined to checked
+variants. Native payloads and retained ancestry are authoritative; backing owners
+cache canonical length and FNV hash, without retaining serialized key buffers.
+Local geometry operations consume native payloads; parsing is confined to checked
 imports. Exact periodic normalization retains its upper-seam-only rule, while
 Ordinary retains its existing interval-wrapping rule.
 
@@ -38,8 +39,12 @@ Ordinary support variants order as axis, source polygon, input plane,
 normalized plane, translation, retained Exact support, and extrusion DAG.
 Translations compare parents before shifts without combining operations. DAGs
 compare records before endpoints. Equal coordinates do not merge different
-support constructions. Shared comparisons can propagate allocation failures
-from arbitrary-precision arithmetic.
+support constructions. Native ordering can propagate allocation failures from
+arbitrary-precision arithmetic. Identity equality, size and hash remain
+allocation-free and nonthrowing: matching hashes require complete native field
+comparison. Canonical emission streams native scalars and Exact integer limbs.
+Sequential cursors preserve packed word ordering with bounded ancestry scratch;
+deep traversal and final-owner release do not recurse through the parent chain.
 
 `LegacyCanonicalKeyLess` is explicitly deprecated. It provides the former
 plain-`char` byte-order policy over the current canonical encoding; computational
@@ -139,32 +144,34 @@ count keeps the partition format's native byte order. Header fields are copied
 individually with `memcpy`; decoding accepts unaligned packet addresses. These
 header guarantees do not change the native representation of partition bodies.
 
-This is a clean format break: regenerate saved artifacts using affected packet
-formats and rebuild every communicating process. There are no legacy packet
-import paths or automatic migrations. Configuration signatures, keys, hashes,
-and numeric entity IDs may change. Geometric equivalence, construction history,
-deterministic ownership, and numerical acceptance gates remain the contracts.
+These compact-tag formats exclude legacy pre-tag packet imports and automatic
+migrations; legacy artifacts must be regenerated. Native identity storage,
+immutable authorities and owning point exports preserve the current canonical
+bytes, hashes, ordering and packet versions. Their source API changes require
+rebuilding consumers, without regenerating compatible current-format packets.
 
 `PlaneAuthority`, `DynamicPointProvenance`, and `GeometryAllocationLedger` remain
 separate mechanisms. Identity equality does not establish shared allocation
 ownership, and shared ownership does not establish geometric incidence.
 
-`PlaneAuthority` carries a sealed typed original-support attachment alongside
-its public key. Equality, ordering, and serialization still use only that key.
+`PlaneAuthority` is an immutable handle to a typed original support or shared
+opaque words. `opaque()` cannot mint the reserved original-support namespace.
+Copies share ownership; independently created equal authorities retain distinct
+owners. Equality, ordering, and serialization preserve the original numeric
+`uint64_t` word sequence, which differs from native identity and byte ordering.
 The leading key word packs the one-byte `AuthorityKeyTag` namespace in its high
 eight bits and the payload length in its low 56 bits. This reserves the original
 support namespace without confusing arbitrary opaque tokens with compact tags.
-Semantic access checks every key word and padding byte against the attachment;
-recognized original-support keys cannot manufacture missing attachments.
-Authenticated imports rebind to the supplied source authorities. Generic
-opaque authority tokens retain their existing behavior. Allocation traversal
-counts the actual carrier owner even when a mutable key has been rejected; it
-does not authenticate that key.
+Boundary import checks every word, declared length and padding byte against a
+supplied authority registry, then reuses its immutable owner. Serialized words
+alone never grant original-support authority. `words()` explicitly materializes
+boundary data; packet writers stream words without retaining another key buffer.
+Allocation traversal counts opaque owners or typed ancestry once per owner.
 
 Ordinary supports and Exact identities share immutable backing allocations.
 Copies retain the same owner; separately decoded equal identities remain
 distinct owners. Translation retains its parent support without simplifying the
-construction expression. There is no global interner or lazy face cache.
+construction expression. There is no global interner or persistent key cache.
 
 `GeometryAllocationLedger` admits geometry and shared identity owners in the
 same scope, pins them against address reuse, and charges each owner once.
@@ -175,11 +182,14 @@ changing a shared support sequence. Failed admission poisons the scope.
 Standalone footprint queries include reachable identity ancestry; `exclusive_storage_bytes()` on a planar face excludes those
 shared identity allocations so a caller can admit them through its ledger.
 Counts cover backing objects, buffer capacities, and ledger bookkeeping, not
-allocator overhead, shared-pointer control blocks, or RSS. Cached full keys and
-retained parent owners can increase the footprint of nested translations.
+allocator overhead, shared-pointer control blocks, or RSS. A translation adds
+one native owner rather than a copy of every ancestor's canonical key. Unique
+retained storage grows linearly with depth; computing each new canonical hash
+can still perform quadratic cumulative work across a complete chain.
 Native Exact payloads also include dynamically allocated integer limbs without
 counting inline limbs twice. Import budgets bound both encoded records and
-retained native payloads. Nested translation caches are preflighted cumulatively;
+retained native payloads. Import layers and canonical cursor scratch are
+preflighted separately from borrowed wire data and charged to active operations;
 cell imports share a bounded construction operation and owner ledger across
 decoded fields and reconstruction, with no separate default-budget fallback.
 

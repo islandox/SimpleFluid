@@ -22,6 +22,9 @@ namespace native = SimpleFluid::PLIC::exact_geometry_detail;
 constexpr auto exact = ArithmeticMode::Exact;
 using ExactPoint = PointIdentity<exact>;
 using Measure = GeometryMeasure<exact>;
+template<class Owner>
+concept RetainsCanonicalKey = requires(Owner value) { value.key; };
+static_assert(!RetainsCanonicalKey<details::GeometryIdentityBacking>);
 
 struct PointPacket
 {
@@ -98,15 +101,13 @@ TEST(ExactGeometryIdentityTest, LargeRationalTuplesRetainDynamicLimbsAcrossCodec
     const auto& zero_owner = PLIC::details::GeometryIdentityAccess::backing(zero);
     ASSERT_TRUE(owner);
     ASSERT_TRUE(zero_owner);
-    ASSERT_GE(owner->key.capacity(), zero_owner->key.capacity());
-    const auto key_growth = owner->key.capacity() - zero_owner->key.capacity();
     const auto dynamic_bytes =
         (coordinates[0].backend().num().capacity() + coordinates[0].backend().denom().capacity()) *
         sizeof(boost::multiprecision::limb_type);
-    // The control has the same root and tuple object sizes. Removing actual
-    // key-cache growth leaves precisely the two heap-backed integer buffers.
-    ASSERT_GE(point.payload_bytes(), zero.payload_bytes() + key_growth);
-    EXPECT_EQ(point.payload_bytes() - zero.payload_bytes() - key_growth, dynamic_bytes);
+    // The control has the same root and native tuple sizes. Only the two
+    // heap-backed integer buffers grow; serialized key bytes are not retained.
+    ASSERT_GE(point.payload_bytes(), zero.payload_bytes());
+    EXPECT_EQ(point.payload_bytes() - zero.payload_bytes(), dynamic_bytes);
 
     const auto copy = point;
     EXPECT_EQ(copy.storage_identity(), point.storage_identity());

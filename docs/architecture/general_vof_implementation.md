@@ -147,3 +147,32 @@ the general recipe node has no retained-point vector. Both finite modes and
 authenticated replay use the same creation and accounting rules. Construction
 packet version 5, root ordering and replayed shells are independent of this private
 storage layout.
+
+Finite global point exports are explicit owners. `export_points(ledger, used,
+limit)` admits a `DynamicPointExport` or `PointExport<Mode>` into the caller's
+budget and returns a handle whose lvalue `points()` view borrows that payload.
+The handle or ledger pin must survive the view. `vertex_count()` and numerical
+queries need no global export; `local_points()` retains its authority-free
+contract. Native planar and Exact point APIs are separate.
+
+Geometry owns only fixed cache metadata: a mutex, weak export roots, and fixed
+weak provenance slots. Actual dynamic and typed point buffers, provenance and
+supports are allocated on request and admitted before cache publication. Typed
+exports retain the canonical dynamic export. Independent ledgers can share one
+published payload; a ledger itself is not shared across threads. Geometry-only
+admission ignores weak cache entries and has the same cost before and after an
+export. Export-specific resource failures occur at the explicit request, while
+malformed geometry, support and coordinate-range checks remain at construction.
+
+After all export handles and ledger pins expire, later queries rebuild a payload.
+Any individual point or descendant provenance still alive is reused through its
+weak vertex slot, preserving identity even for uncertain bounded coordinates.
+Failed admission publishes neither new roots nor provenance slots and preserves
+ledger poisoning. Scratch spending and retained owners share the caller's limit;
+cumulative charges are never refunded when an owner expires.
+
+Numerical rebases share the original export control and retain one flattened
+canonical export-source dependency. Deferred export therefore uses the original
+frame, coordinates, errors and sealing policy. The ledger charges that strong
+dependency. Certificate-only copies share the existing control and dependency;
+physical translations and changed shells detach. These edges remain acyclic.

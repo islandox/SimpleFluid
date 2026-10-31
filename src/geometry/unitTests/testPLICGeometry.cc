@@ -1,6 +1,7 @@
 /** @file testPLICGeometry.cc
  * @brief Typed PLIC geometry, arithmetic separation, and checked publication contracts.
  */
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/SupportClassification.hh"
@@ -375,7 +376,7 @@ template<ArithmeticMode Mode> void fixed_mode_operations_do_not_redispatch()
     const auto imported = Geometry::from_geometry(*source);
     EXPECT_DOUBLE_EQ(imported->volume().as_double(), 1);
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
-        for (const auto& point : imported->points())
+        for (const auto& point : SimpleFluid::PLIC::test::exported_points(*imported))
             EXPECT_TRUE(point.supports().empty());
     const auto cube = plic_test::axis_box<Mode>({0, 0, 0}, {1, 1, 1});
     const PLIC::GeometryHalfspace plane{{1, 0, 0}, {0, 0, 0}, .25};
@@ -406,7 +407,7 @@ template<ArithmeticMode Mode> void fixed_mode_operations_do_not_redispatch()
     const std::array sources{cube};
     const auto restored = Geometry::decode(cut.inside->encode(context), context, sources);
     EXPECT_NEAR(restored->volume().as_double(), .25, 1e-14);
-    const auto points = cube->points();
+    const auto points = SimpleFluid::PLIC::test::exported_points(*cube);
     const auto local_points = cube->local_points();
     EXPECT_EQ(points.size(), local_points.size());
     std::vector<Point> face;

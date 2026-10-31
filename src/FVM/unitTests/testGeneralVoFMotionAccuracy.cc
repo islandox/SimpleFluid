@@ -1,3 +1,4 @@
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -100,7 +101,7 @@ ReferenceCell reference_cell(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordin
 {
     Polygon points;
     long double bottom = std::numeric_limits<long double>::max(), top = -bottom;
-    for (const auto& p : shape->points())
+    for (const auto& p : PLIC::test::exported_points(*shape))
     {
         points.push_back({p.value[0] - shear * p.value[1], p.value[1]});
         bottom = std::min(bottom, p.value[2]);
