@@ -138,6 +138,26 @@ the ledger pins those owners and includes its bookkeeping in admission.
 Allocation measurements report their scope and exclusions separately from these
 conservative admission estimates; neither metric is process RSS.
 
+The allocation ledger stores a strong pin for each kind-qualified owner address.
+Payload and bookkeeping totals belong to the admission scope rather than to
+individual map entries. Node charges use the actual entry representation;
+admission still precedes publication and a failed scope remains poisoned.
+
+Finite clipping compacts each child through local used flags and an old-to-new
+index array over the completed source/crossing vertex domain. Scanning old IDs in
+ascending order preserves point numbering. The arrays are reused only between
+children of one split and destroyed before final validation or recursive retry.
+Ordinary face-distinctness marks are local to one validation call and cleared
+along each successfully checked face. Aggregate cap membership and directed
+successors similarly use local arrays, preserve the minimum-ID ring start and
+winding, and retain duplicate/open/disconnected-ring rejection. Sparse edge and
+support lookups remain separate mechanisms.
+
+Scratch admission covers actual capacities, including whole replacement buffers
+when growth overlaps an earlier allocation. Reuse and destruction do not refund
+cumulative charges. These local indices never allocate by a maximum global ID or
+introduce a dense vertex-pair table.
+
 Finite construction history retains shared immutable recipes. Each recipe stores
 only its active operation payload: a source geometry owner, a shared clip operation
 and side, or an exclusively owned Rebase payload with its parent and full input

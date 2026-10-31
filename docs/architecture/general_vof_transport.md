@@ -186,6 +186,17 @@ must relinquish mutable aliases. Const source views remain valid while their
 source owner lives. This indexed interface replaces the point-carrying tetrahedron
 span interface.
 
+Source-facet lookup uses contiguous records ordered by stream sign, three sorted
+point indices, and original facet identity. A private facet handle encodes the
+tetrahedron and one of its four faces; an unmatched sentinel replaces separate
+persistent cancellation flags. The integer-only prepass covers at most the first
+effective pair allowance plus one facets. Orientations, signed volume sums, pair
+admission and semantic incidence rejection still follow the original source/face
+order. Source-stage diagnostics retain the source ordinal and leave `cut` absent.
+Only an opposite-oriented pair is authenticated; a third incidence rejects at its
+original occurrence. A structural partner cancels only if that partner survives
+the same donor/sign/phase channel.
+
 A computational cut is an unmeasured barycentric
 witness; its rounded shell need not have a separately measurable positive volume.
 Donor supports come from the retained geometry authority. Complementary cuts
@@ -258,6 +269,11 @@ each geometric slot is consumed into the current face scope. Its complete points
 move into the source table in center/backcenter/current/departure order, its old
 recipe buffers are destroyed, and candidates are released after donor preparation.
 Face order remains aligned with optional work-capture rows.
+
+Phase quotas retain the numerical donor-vector order. A separate sorted
+permutation resolves full donor IDs to those local slots; donor IDs are never
+treated as quota-vector indices. Duplicate donor admission remains the aggregate
+validator's responsibility.
 
 Spatial indexes, pending preparation charges, imported planes/shared geometry and
 completed face contributions remain charged throughout preparation even when a

@@ -73,7 +73,6 @@ struct GeometryAllocationLedger::Impl
     struct Entry
     {
         std::shared_ptr<const void> pin;
-        std::size_t bytes;
     };
     std::map<allocation_detail::Key, Entry, allocation_detail::Less> owners;
     std::vector<allocation_detail::Item> pending;
@@ -124,7 +123,7 @@ struct GeometryAllocationLedger::Impl
         // make an uncharged allocation disappear from a later admission.
         account(bytes, false, used, limit);
         account(sizeof(typename decltype(owners)::value_type) + 4 * sizeof(void*), true, used, limit);
-        owners.emplace(key, Entry{item.owner, bytes});
+        owners.emplace(key, Entry{item.owner});
         return true;
     }
 
