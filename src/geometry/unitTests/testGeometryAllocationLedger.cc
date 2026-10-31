@@ -314,6 +314,153 @@ TEST(GeometryAllocationLedgerTest, SharedPointSupportsAreChargedAsOneSeparateImm
         shared_support_payload_contract<ArithmeticMode::BoundedCertification>();
 }
 
+template<ArithmeticMode Mode> void provenance_dag_contract()
+{
+    using Access = P::DynamicGeometryAccess;
+    using Record = P::DynamicPointProvenance;
+    using Owner = std::shared_ptr<const Record>;
+    using Payload = P::DynamicPointSupportPayload;
+    const std::array<P::GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto support =
+        P::planar_support<ArithmeticMode::Ordinary>(*P::PlanarFace<ArithmeticMode::Ordinary>::make(points));
+    std::vector<std::uint64_t> first_words{2, 7}, second_words{13, 17, 19};
+    first_words.reserve(7);
+    second_words.reserve(11);
+    const auto opaque_bytes = 2 * sizeof(first_words) +
+                              (first_words.capacity() + second_words.capacity()) * sizeof(std::uint64_t);
+    const auto first = P::PlaneAuthority::opaque(std::move(first_words));
+    const auto second = P::PlaneAuthority::opaque(std::move(second_words));
+    const auto typed = P::details::original_support_authority(support);
+    std::vector<P::PlaneAuthority> first_supports{first, typed}, second_supports{second, first};
+    first_supports.reserve(5);
+    second_supports.reserve(9);
+    std::shared_ptr<const Payload> first_payload = std::make_shared<Payload>(std::move(first_supports));
+    std::shared_ptr<const Payload> second_payload = std::make_shared<Payload>(std::move(second_supports));
+    const auto make_record = [&](const std::shared_ptr<const Payload>& payload)
+    {
+        auto record = std::make_shared<Record>();
+        record->value = {1, 2, 4};
+        record->absolute_error = {};
+        record->arithmetic_mode = Mode;
+        record->support_payload = payload;
+        return record;
+    };
+    auto leaf = make_record(first_payload), chain = make_record(first_payload), root = make_record(first_payload);
+    auto other = make_record(second_payload), branch = make_record(second_payload);
+    chain->source_origin = leaf;
+    root->source_origin = chain;
+    root->source_edges.reserve(7);
+    root->source_edges = {{branch, leaf}, {nullptr, branch}};
+    branch->source_edges.reserve(11);
+    branch->source_edges = {{other, leaf}, {other, nullptr}};
+
+    // Verify actual borrowed slots, including duplicate and null endpoints.
+    // The temporary visitor can only be invoked as a named lvalue.
+    struct Visitor
+    {
+        std::vector<const Owner*>& slots;
+        void operator()(const Owner& owner) & { slots.push_back(&owner); }
+        void operator()(const Owner&) && = delete;
+    };
+    std::vector<const Owner*> slots;
+    P::details::visit_provenance_children(*root, Visitor{slots});
+    EXPECT_EQ(slots, (std::vector<const Owner*>{&root->source_origin, &root->source_edges[0][0],
+                         &root->source_edges[0][1], &root->source_edges[1][0], &root->source_edges[1][1]}));
+    slots.clear();
+    P::details::visit_provenance_children(*branch, Visitor{slots});
+    EXPECT_EQ(slots, (std::vector<const Owner*>{&branch->source_edges[0][0], &branch->source_edges[0][1],
+                         &branch->source_edges[1][0], &branch->source_edges[1][1]}));
+    slots.clear();
+    P::details::visit_provenance_children(*leaf, Visitor{slots});
+    EXPECT_TRUE(slots.empty());
+
+    // Fixed graph: root -> chain -> leaf; root edges reach branch and leaf;
+    // branch edges reach other and leaf. Five records, two shared support
+    // payloads, two opaque word owners and one typed support owner.
+    const auto provenance_bytes = 5 * sizeof(Record) +
+                                  (root->source_edges.capacity() + branch->source_edges.capacity()) *
+                                      sizeof(root->source_edges.front()) +
+                                  2 * sizeof(Payload) +
+                                  (first_payload->authorities.capacity() + second_payload->authorities.capacity()) *
+                                      sizeof(P::PlaneAuthority);
+    const auto attachment_bytes = opaque_bytes + support.payload_bytes();
+    EXPECT_EQ(Access::identity_bytes(root, false), provenance_bytes);
+    EXPECT_EQ(Access::identity_bytes(root), provenance_bytes + attachment_bytes);
+    P::GeometryAllocationLedger manual, attachments;
+    std::size_t manual_used = 0, attachment_used = 0;
+    manual.retain(first, manual_used, byte_limit);
+    manual.retain(typed, manual_used, byte_limit);
+    manual.retain(second, manual_used, byte_limit);
+    Access::retain_supports(root, attachments, attachment_used, byte_limit);
+    EXPECT_EQ(attachments.owner_count(), 3u);
+    EXPECT_EQ(attachments.owner_count(), manual.owner_count());
+    EXPECT_EQ(attachments.payload_bytes(), attachment_bytes);
+    EXPECT_EQ(attachments.payload_bytes(), manual.payload_bytes());
+    EXPECT_EQ(attachment_used, manual_used);
+    Access::retain_supports(root, attachments, attachment_used, byte_limit);
+    EXPECT_EQ(attachment_used, manual_used);
+
+    auto storage = std::make_shared<P::details::GeometryStorage<Mode>>();
+    storage->ancestry.reset();
+    storage->moment_cache.reset();
+    storage->vertices.resize(1);
+    storage->vertices[0].source_identity = root;
+    auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
+    const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
+                          storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + provenance_bytes +
+                          attachment_bytes;
+    const std::array<std::weak_ptr<const Record>, 5> weak_records{root, chain, leaf, branch, other};
+    const std::array<std::weak_ptr<const Payload>, 2> weak_payloads{first_payload, second_payload};
+    {
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        ledger.retain(geometry, used, byte_limit);
+        EXPECT_EQ(ledger.owner_count(), 13u);
+        EXPECT_EQ(ledger.payload_bytes(), expected);
+        EXPECT_EQ(used, expected + ledger.bookkeeping_bytes());
+        const auto required = used;
+        ledger.retain(geometry, used, byte_limit);
+        EXPECT_EQ(used, required);
+        {
+            P::GeometryAllocationLedger exact;
+            std::size_t exact_used = 0;
+            EXPECT_NO_THROW(exact.retain(geometry, exact_used, required));
+            EXPECT_EQ(exact_used, required);
+            P::GeometryAllocationLedger limited;
+            std::size_t limited_used = 0;
+            EXPECT_THROW(limited.retain(geometry, limited_used, required - 1), P::GeometryError);
+            EXPECT_LE(limited_used, required - 1);
+            const auto rejected = limited_used;
+            EXPECT_THROW(limited.retain(geometry, limited_used, byte_limit), P::GeometryError);
+            EXPECT_EQ(limited_used, rejected);
+        }
+        geometry.reset();
+        storage.reset();
+        root.reset();
+        chain.reset();
+        leaf.reset();
+        branch.reset();
+        other.reset();
+        first_payload.reset();
+        second_payload.reset();
+        for (const auto& weak : weak_records)
+            EXPECT_FALSE(weak.expired());
+        for (const auto& weak : weak_payloads)
+            EXPECT_FALSE(weak.expired());
+    }
+    for (const auto& weak : weak_records)
+        EXPECT_TRUE(weak.expired());
+    for (const auto& weak : weak_payloads)
+        EXPECT_TRUE(weak.expired());
+}
+
+TEST(GeometryAllocationLedgerTest, ProvenanceDagPreservesUniqueOwnersCapsAndDescendantLifetimes)
+{
+    provenance_dag_contract<ArithmeticMode::Ordinary>();
+    if (P::certification_environment())
+        provenance_dag_contract<ArithmeticMode::BoundedCertification>();
+}
+
 template<ArithmeticMode Mode> void construction_payload_contract()
 {
     namespace D = P::details;

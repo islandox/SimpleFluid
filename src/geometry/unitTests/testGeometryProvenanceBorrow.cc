@@ -444,6 +444,20 @@ TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupport
         PLIC::DynamicPoint independent(source.value, source.absolute_error, mode);
         Access::seal(independent, expected);
         EXPECT_NE(Access::identity(independent)->support_payload, root->support_payload);
+        EXPECT_FALSE(Access::same_source(source, independent));
+        EXPECT_FALSE(Access::same_source(independent, source));
+        PLIC::DynamicPoint unsealed(copy.value, copy.absolute_error, mode);
+        EXPECT_TRUE(unsealed.supports().empty());
+        EXPECT_FALSE(Access::identity(unsealed));
+        EXPECT_FALSE(Access::same_source(unsealed, unsealed));
+        EXPECT_FALSE(Access::same_source(unsealed, copy));
+        EXPECT_FALSE(Access::same_source(copy, unsealed));
+        const auto valid_copy = copy;
+        EXPECT_EQ(&valid_copy.supports(), &copy.supports());
+        EXPECT_EQ(Access::identity(valid_copy), exported);
+        EXPECT_TRUE(Access::same_source(copy, valid_copy));
+        EXPECT_TRUE(Access::same_source(valid_copy, copy));
+        EXPECT_TRUE(Access::same_source(valid_copy, valid_copy));
         auto changed_words = second.words();
         ++changed_words.back();
         const auto different = PLIC::PlaneAuthority::opaque(std::move(changed_words));
@@ -464,6 +478,21 @@ TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupport
                                                                           : ArithmeticMode::Ordinary;
             EXPECT_TRUE(mutated.supports().empty());
             EXPECT_FALSE(Access::identity(mutated));
+            EXPECT_FALSE(Access::same_source(mutated, copy));
+            EXPECT_FALSE(Access::same_source(copy, mutated));
+            EXPECT_FALSE(Access::same_source(mutated, mutated));
+            // An invalid seal still owns its immutable provenance allocation.
+            EXPECT_EQ(Access::storage_bytes(mutated, false), Access::storage_bytes(copy, false));
+            EXPECT_EQ(Access::storage_bytes(mutated), Access::storage_bytes(copy));
+            EXPECT_GT(Access::storage_bytes(mutated, false), sizeof(PLIC::DynamicPoint));
+            mutated.value = copy.value;
+            mutated.absolute_error = copy.absolute_error;
+            mutated.arithmetic_mode = copy.arithmetic_mode;
+            EXPECT_EQ(&mutated.supports(), &copy.supports());
+            EXPECT_EQ(Access::identity(mutated), exported);
+            EXPECT_TRUE(Access::same_source(mutated, copy));
+            EXPECT_TRUE(Access::same_source(copy, mutated));
+            EXPECT_TRUE(Access::same_source(mutated, mutated));
         }
     }
 }

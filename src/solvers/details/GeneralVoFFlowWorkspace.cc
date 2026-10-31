@@ -2,17 +2,18 @@
 /** @file GeneralVoFFlowWorkspace.cc
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
-#include "geometry/PLIC/ConvexGeometry.hh"
 #include "FVM/details/GeneralVoF/OccupancyAdmission.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/FlowTrace.hh"
+#include "solvers/details/GeneralVoFCompatibleProjection.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
-#include "solvers/details/GeneralVoFCompatibleProjection.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "solvers/details/GeneralVoFProjectionSupport.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -325,6 +326,26 @@ std::vector<double> GeneralVoFFlowWorkspace::faces(const std::vector<double>& ov
     face_overlap_.doImport(face_owned_, face_import_, Tpetra::INSERT);
     auto d = face_overlap_.getData();
     return {d.begin(), d.end()};
+}
+std::vector<long double> GeneralVoFFlowWorkspace::halo_rates(const std::vector<long double>& owned) const
+{
+    const auto nf = mesh_->num_owned_faces();
+    std::vector<double> high(geometry_.size()), low(geometry_.size()), exponent(geometry_.size());
+    for (std::size_t f = 0; f < nf; ++f)
+    {
+        int e = 0;
+        const auto m = std::frexp(owned[f], &e);
+        high[f] = static_cast<double>(m);
+        low[f] = static_cast<double>(m - high[f]);
+        exponent[f] = e;
+    }
+    high = faces(high);
+    low = faces(low);
+    exponent = faces(exponent);
+    std::vector<long double> result(geometry_.size());
+    for (std::size_t f = 0; f < result.size(); ++f)
+        result[f] = std::ldexp(static_cast<long double>(high[f]) + low[f], int(exponent[f]));
+    return result;
 }
 std::vector<Vector> GeneralVoFFlowWorkspace::vectors(const std::vector<Vector>& owned) const
 {

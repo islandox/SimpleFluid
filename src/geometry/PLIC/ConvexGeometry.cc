@@ -279,11 +279,19 @@ OrdinaryBoundaryClass OrdinaryBoundary::classify(const Point<ArithmeticMode::Ord
                                                                      : OrdinaryBoundaryClass::Outside;
 }
 
+namespace
+{
+bool provenance_matches(const DynamicPoint& point, const DynamicPointProvenance* provenance) noexcept
+{
+    return provenance && provenance->value == point.value && provenance->absolute_error == point.absolute_error &&
+           provenance->arithmetic_mode == point.arithmetic_mode;
+}
+} // namespace
+
 const std::vector<PlaneAuthority>& DynamicPoint::supports() const
 {
     static const std::vector<PlaneAuthority> empty;
-    if (!provenance_ || provenance_->value != value || provenance_->absolute_error != absolute_error ||
-        provenance_->arithmetic_mode != arithmetic_mode)
+    if (!provenance_matches(*this, provenance_.get()))
         return empty;
     return provenance_->supports();
 }
@@ -351,10 +359,7 @@ namespace SimpleFluid::PLIC
 {
 std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::identity(const DynamicPoint& p)
 {
-    return p.provenance_ && p.provenance_->value == p.value && p.provenance_->absolute_error == p.absolute_error &&
-                   p.provenance_->arithmetic_mode == p.arithmetic_mode
-               ? p.provenance_
-               : nullptr;
+    return provenance_matches(p, p.provenance_.get()) ? p.provenance_ : nullptr;
 }
 } // namespace SimpleFluid::PLIC
 
@@ -385,13 +390,7 @@ std::size_t DynamicGeometryAccess::identity_bytes(
                     attachments.retain(key, retained_bytes, std::numeric_limits<std::size_t>::max());
             }
         }
-        if (point->source_origin)
-            pending.push_back(point->source_origin);
-        for (const auto& edge : point->source_edges)
-        {
-            pending.push_back(edge[0]);
-            pending.push_back(edge[1]);
-        }
+        details::visit_provenance_children(*point, [&](const auto& child) { pending.push_back(child); });
     }
     return bytes + attachments.payload_bytes();
 }
@@ -413,13 +412,7 @@ void DynamicGeometryAccess::retain_supports(const std::shared_ptr<const DynamicP
             continue;
         for (const auto& authority : point->supports())
             ledger.retain(authority, used, limit);
-        if (point->source_origin)
-            pending.push_back(point->source_origin);
-        for (const auto& edge : point->source_edges)
-        {
-            pending.push_back(edge[0]);
-            pending.push_back(edge[1]);
-        }
+        details::visit_provenance_children(*point, [&](const auto& child) { pending.push_back(child); });
     }
 }
 
@@ -438,10 +431,8 @@ namespace SimpleFluid::PLIC
 {
 bool DynamicGeometryAccess::same_source(const DynamicPoint& a, const DynamicPoint& b)
 {
-    return a.provenance_ && a.provenance_ == b.provenance_ && a.provenance_->value == a.value &&
-           a.provenance_->absolute_error == a.absolute_error && b.provenance_->value == b.value &&
-           b.provenance_->absolute_error == b.absolute_error && a.arithmetic_mode == a.provenance_->arithmetic_mode &&
-           b.arithmetic_mode == a.arithmetic_mode;
+    return a.provenance_ == b.provenance_ && provenance_matches(a, a.provenance_.get()) &&
+           provenance_matches(b, b.provenance_.get());
 }
 } // namespace SimpleFluid::PLIC
 

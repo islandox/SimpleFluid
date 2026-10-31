@@ -102,6 +102,21 @@ Projection and implicit momentum remain owned by the existing flow workspace
 and conservative transport components. The extraction does not create another
 numerical backend or broaden their support matrices.
 
+`GeneralVoFProjectionSupport` shares the finite wide reductions, local arithmetic
+guard, and local occupancy-target calculations. The guard retains the flow
+workspace's Boolean reduction and `runtime_error` protocol. The workspace owns
+the high/low/exponent face imports and consumes the owned prefix of its input.
+Ordinary compatible projection and bounded finite projection retain their
+separate operators, arithmetic policies, and admission rules.
+
+Occupancy calculations borrow geometry, volumes, incident rates, and signed
+inventory discrepancies. Their result reuses the existing target buffer and
+holds its diagnostics. Each projection coordinator keeps the guards, reduction
+sequence, zero-capacity branch, compatibility checks, and decision to freeze the
+target after provisional physical projection. Bounded projection still rejects
+transport readiness. The extraction preserves existing scratch-allocation and
+collective placement; it does not extend allocation-failure guarantees.
+
 ## Compilation and resource contracts
 
 Private `.hh` files declare interfaces and retain simple one-line members.

@@ -1,7 +1,9 @@
 /** @file testGeneralVoFFlowWorkspace.cc */
 #include "general_vof_flow_test_helpers.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "solvers/details/GeneralVoFProjectionSupport.hh"
 #include <boost/multiprecision/cpp_int.hpp>
+#include <new>
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -1431,5 +1433,140 @@ TEST(GeneralVoFFlowWorkspaceTest, CapillaryExtensionInactiveCurvatureLeavesPhysi
     EXPECT_EQ(changed_pressure, base_pressure);
     EXPECT_EQ(changed_velocity, base_velocity);
     EXPECT_EQ(changed_diagnostics.maximum_divergence, base_diagnostics.maximum_divergence);
+}
+} // namespace
+
+namespace
+{
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideMaximumPreservesZeroAndExponentSelection)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    EXPECT_EQ(detail::projection_support::wide_maximum(*comm, 0.L), 0.L);
+    const long double local = comm->getRank() == comm->getSize() - 1 ? 1.25L : .75L;
+    EXPECT_EQ(detail::projection_support::wide_maximum(*comm, local), 1.25L);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideMaximumRoundsOutward)
+{
+    constexpr int digits = std::numeric_limits<long double>::digits;
+    if constexpr (digits <= std::numeric_limits<double>::digits)
+        GTEST_SKIP() << "The FP profile has no wider mantissa than binary64.";
+    const auto comm = Tpetra::getDefaultComm();
+    const long double x = 1 + std::ldexp(1.L, 1 - digits);
+    const auto maximum = detail::projection_support::wide_maximum(*comm, comm->getRank() == 0 ? x : 0.L);
+    EXPECT_EQ(maximum, static_cast<long double>(std::nextafter(1., 2.)));
+    EXPECT_GE(maximum, x);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideMaximumRetainsLargeExponent)
+{
+    const long double large = std::ldexp(1.L, std::numeric_limits<double>::max_exponent);
+    if (!std::isfinite(large))
+        GTEST_SKIP() << "The FP profile cannot represent values beyond binary64's exponent range.";
+    const auto comm = Tpetra::getDefaultComm();
+    EXPECT_EQ(detail::projection_support::wide_maximum(*comm, comm->getRank() == 0 ? large : 0.L), large);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideMaximumRetainsTinyExponent)
+{
+    const long double tiny =
+        std::ldexp(1.L, std::numeric_limits<double>::min_exponent - std::numeric_limits<double>::digits - 1);
+    if (tiny == 0)
+        GTEST_SKIP() << "The FP profile cannot represent values below binary64's subnormal range.";
+    const auto comm = Tpetra::getDefaultComm();
+    EXPECT_EQ(detail::projection_support::wide_maximum(*comm, comm->getRank() == 0 ? tiny : 0.L), tiny);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideSumsRetainLowMantissaBits)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const long double x = 1 + std::ldexp(1.L, 1 - std::numeric_limits<long double>::digits);
+    const std::array<long double, 2> local = comm->getRank() == 0 ? std::array{x, -x} : std::array{0.L, 0.L};
+    const auto sums = detail::projection_support::wide_sums(*comm, local);
+    EXPECT_EQ(sums[0], x);
+    EXPECT_EQ(sums[1], -x);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportWideSumsPreserveSignedCancellation)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    constexpr int digits = std::numeric_limits<long double>::digits;
+    const long double delta = std::ldexp(1.L, 1 - digits), x = 1 + delta;
+    long double value = 0;
+    if (comm->getSize() == 1)
+        value = delta;
+    else if (comm->getSize() < 4)
+        value = comm->getRank() == 0 ? x : comm->getRank() == 1 ? -1.L : 0.L;
+    else
+    {
+        // Exact dyadic leaves give delta independently of the implementation.
+        // Rank-major summation must retain x while the large terms cancel.
+        const long double large = std::ldexp(1.L, digits + 2);
+        const std::array<long double, 4> values{large, x, -large, -1.L};
+        if (comm->getRank() < 4)
+            value = values[comm->getRank()];
+    }
+    const auto sums = detail::projection_support::wide_sums(*comm, {value, -value});
+    EXPECT_EQ(sums[0], delta);
+    EXPECT_EQ(sums[1], -delta);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, ProjectionSupportGuardRejectsLocalFailureAndRecovers)
+{
+    const auto mesh = axial_slab_native(2, 1);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const int local_empty = mesh->num_owned_cells() == 0;
+    int empty_owners = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty_owners);
+    EXPECT_EQ(empty_owners, comm->getSize() - 1);
+    const int failing_rank = comm->getSize() - 1;
+    if (comm->getSize() > 1 && comm->getRank() == failing_rank)
+        EXPECT_EQ(mesh->num_owned_cells(), 0);
+    constexpr const char* message = "Projection support rejected the supplied local work.";
+    for (unsigned failure = 0; failure < 2; ++failure)
+    {
+        unsigned calls = 0;
+        bool caught = false;
+        try
+        {
+            detail::projection_support::arithmetic_guard(
+                *comm,
+                [&]
+                {
+                    ++calls;
+                    if (comm->getRank() == failing_rank)
+                    {
+                        if (failure == 0)
+                            throw std::bad_alloc();
+                        throw 17;
+                    }
+                },
+                message);
+        }
+        catch (const std::runtime_error& error)
+        {
+            caught = true;
+            EXPECT_STREQ(error.what(), message);
+        }
+        catch (...)
+        {
+            ADD_FAILURE() << "The collective guard did not report std::runtime_error.";
+        }
+        EXPECT_TRUE(caught);
+        EXPECT_EQ(calls, 1);
+        int local = 0;
+        EXPECT_NO_THROW(detail::projection_support::arithmetic_guard(
+            *comm,
+            [&]
+            {
+                ++calls;
+                local = comm->getRank() + 1;
+            },
+            message));
+        EXPECT_EQ(calls, 2);
+        int sum = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local, &sum);
+        EXPECT_EQ(sum, comm->getSize() * (comm->getSize() + 1) / 2);
+    }
 }
 } // namespace

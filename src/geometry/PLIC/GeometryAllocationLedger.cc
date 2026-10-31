@@ -266,12 +266,8 @@ struct GeometryAllocationLedger::Impl
                     if (admit(item, bytes, used, limit))
                     {
                         push(Kind::SupportPayload, point->support_payload, used, limit);
-                        push(Kind::Point, point->source_origin, used, limit);
-                        for (const auto& edge : point->source_edges)
-                        {
-                            push(Kind::Point, edge[0], used, limit);
-                            push(Kind::Point, edge[1], used, limit);
-                        }
+                        details::visit_provenance_children(
+                            *point, [&](const auto& child) { push(Kind::Point, child, used, limit); });
                     }
                     break;
                 }

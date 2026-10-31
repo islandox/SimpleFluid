@@ -47,7 +47,7 @@ endif()
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace" OR TEST_NAME STREQUAL "testExactGeneralVoFFlowWorkspace")
-    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/GeneralVoFCompatibleProjection.cc ../details/GeneralVoF/Execution.cc ../details/GeneralVoFExactProjection.cc ../details/VoFProjectionWorkspace.cc
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/GeneralVoFProjectionSupport.cc ../details/GeneralVoFCompatibleProjection.cc ../details/GeneralVoF/Execution.cc ../details/GeneralVoFExactProjection.cc ../details/VoFProjectionWorkspace.cc
       ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFExactPhiClosure.cc ../details/GeneralVoFPhiClosureSupport.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFExactPressure")
@@ -780,6 +780,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           ../details/ConservativeVoFTransport.cc
           ../details/ConservativeVoFExactTransport.cc
           ../details/GeneralVoFFlowWorkspace.cc
+          ../details/GeneralVoFProjectionSupport.cc
           ../details/GeneralVoFCompatibleProjection.cc
           ../details/GeneralVoFExactProjection.cc
           ../details/GeneralVoFPhiClosure.cc
@@ -791,6 +792,8 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           SKIP_UNITY_BUILD_INCLUSION TRUE
           SKIP_PRECOMPILE_HEADERS TRUE)
   endif()
+
+  simplefluid_exclude_from_pgo_sources(../details/GeneralVoFProjectionSupport.cc)
 
   # Preserve the rank coverage of cases extracted from the mixed executables.
   simplefluid_add_mpi_test(
@@ -877,6 +880,10 @@ foreach(PROCS 2 4)
       ARGS "--gtest_filter=GeneralVoFFaceTransactions.${_face_transaction_case}"
       LABELS "mpi;vof;amr;transaction;empty_rank" TIMEOUT 600)
   endforeach()
+  simplefluid_add_mpi_test(NAME GeneralVoFProjectionSupport_${PROCS}procs
+    TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.ProjectionSupport*"
+    LABELS "mpi;vof;projection;collective;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicReadiness_${PROCS}procs
     TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryAlgebraicReadiness*:GeneralVoFFlowWorkspaceTest.OrdinaryCumulativeOccupancyProjection*"
