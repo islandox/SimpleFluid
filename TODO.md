@@ -667,9 +667,7 @@ raw/cleaned accounting; raw passes do not qualify enabled cleanup or coupled rem
       correction, interned hierarchy payloads and strict swept-face phase proofs.
       These repairs preserve the original gates and do not close long-flow accuracy.
 
-The latest dated snapshot is `build/gcc/verification/algebraic_vof_repair_20261031/HANDOFF.md`,
-with `stage-status.json` and the source applicability audit beside it. Q0/Q5
-have scoped serial/MPI2/MPI4 evidence, including all Q5 field comparisons;
+Q0/Q5 have scoped serial/MPI2/MPI4 evidence, including all Q5 field comparisons;
 uniform N32 initialization now passes its unchanged cap. Q2/Q3/Q4 overall remain
 incomplete. The separate `.125 s` motion baseline and older `.02 s` cylinder
 result do not replace those campaigns. Preserve failed attempts and source
@@ -695,11 +693,14 @@ differences in these and the earlier [recorded results](docs/verification/vof_so
       Uniform N32 GeneralVoF initialization now passes the original 64 MiB
       cap in serial/MPI2/MPI4 after measured allocation removal. Its original
       finite-rectangle motion still rejects a single-plane model; the independent
-      all-plane lower bound is recorded in the Q2 repair evidence. N64
-      authority/closure completes, but compact native-draft admission still
-      rejects the expanded serialization proxy. Unblock the required N16/N32/N64
-      sequence and separate temporal study under existing caps, or report the
-      remaining capacity failure explicitly. Setup success is not convergence.
+      all-plane lower bound is reproduced from the current captured inputs.
+      Uniform Cartesian N16/N32/N64 hierarchy and compact owned native-draft setup now
+      passes serial/MPI2/MPI4, using scoped construction/scratch admission under
+      the original cap. This does not qualify halo/publication, all mesh families
+      or numerical convergence. Larger serial sphere setups still reject; their
+      retained representation and required closure pair work need explicit
+      treatment under the unchanged caps. Preserve the failed levels while
+      completing the spatial sequence and separate temporal study.
       Retain the original N16 model rejection, independent motion oracle, full
       endpoints and accuracy/order gates; omitting a failed level is not acceptance.
 - [ ] **4. Q3 GeometricFace coupled motion — after the applicable blockers above.**

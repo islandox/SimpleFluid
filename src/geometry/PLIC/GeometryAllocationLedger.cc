@@ -347,6 +347,12 @@ struct GeometryAllocationLedger::Impl
         }
     }
 };
+std::size_t details::identity_ledger_bookkeeping_bound(std::size_t owners)
+{
+    return allocation_detail::add(sizeof(GeometryAllocationLedger::Impl),
+        allocation_detail::product(
+            owners, sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*)));
+}
 
 GeometryAllocationLedger::GeometryAllocationLedger() noexcept = default;
 GeometryAllocationLedger::~GeometryAllocationLedger() = default;

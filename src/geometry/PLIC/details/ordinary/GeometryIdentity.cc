@@ -544,6 +544,15 @@ namespace SimpleFluid::PLIC::details
 {
 using namespace ordinary_identity_detail;
 using NativePoint = OrdinaryIdentityPoint;
+std::size_t ordinary_native::source_support_allocation_bound(std::size_t points)
+{
+    // source_support_packet either issues an Axis or copies the polygon into
+    // Source. Backing construction hashes a depth-one owner with pointer scratch.
+    return ordinary_native::encoding_add(
+        ordinary_native::encoding_add(std::max(sizeof(Axis), sizeof(Source)), sizeof(GeometryIdentityBacking)),
+        ordinary_native::encoding_add(
+            ordinary_native::encoding_product(points, sizeof(NativePoint)), sizeof(const GeometryIdentityBacking*)));
+}
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_axis(
     std::uint64_t axis, long double location)
 {

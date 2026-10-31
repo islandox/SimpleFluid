@@ -23,6 +23,8 @@ struct Budget
         if (bytes > limit - used)
             throw std::invalid_argument("Distributed adaptive payload budget exhausted: used=" + std::to_string(used) +
                                         " request=" + std::to_string(bytes) + " limit=" + std::to_string(limit) + ".");
+        if (bytes > std::numeric_limits<std::size_t>::max() - cumulative)
+            throw std::invalid_argument("Distributed adaptive cumulative byte count overflows.");
         used += bytes;
         peak = std::max(peak, used);
         cumulative += bytes;

@@ -1,6 +1,10 @@
 /** @file ordinary/PlanarFace.tcc
  * @brief Ordinary planar-face clipping and nominal overlap measures.
  */
+
+#pragma once
+
+
 namespace SimpleFluid::PLIC::details
 {
 namespace ordinary_kernel SIMPLEFLUID_LOCAL

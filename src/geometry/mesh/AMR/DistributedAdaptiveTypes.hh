@@ -148,6 +148,14 @@ struct AdaptiveNativeDraft
     std::vector<AdaptiveBytes> family_references;
 };
 [[nodiscard]] AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf&);
+namespace adaptive_detail
+{
+/** Counting facade over the complete leaf/geometry encoding traversal.
+ * Only the returned scratch capacity bound needs transient admission; no wire
+ * packet, nested body, envelope, or writer growth is allocated. */
+[[nodiscard]] std::size_t adaptive_leaf_encoding_scratch_bytes(const AdaptiveLeaf&);
+[[nodiscard]] std::size_t validate_adaptive_leaf_encoding(const AdaptiveLeaf&, std::size_t scratch_budget);
+} // namespace adaptive_detail
 [[nodiscard]] AdaptiveLeaf decode_adaptive_leaf(std::span<const char>);
 [[nodiscard]] AdaptiveBytes encode_adaptive_family(const AdaptiveFamily&);
 [[nodiscard]] AdaptiveFamily decode_adaptive_family(std::span<const char>);

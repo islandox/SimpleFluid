@@ -26,6 +26,47 @@ using Cell = PLIC::ConvexCellGeometry<ordinary>;
 using Face = PLIC::PlanarFace<ordinary>;
 using PointIdentity = PLIC::PointIdentity<ordinary>;
 
+TEST(FiniteNativeGeometryTest, CountingCodecPreservesCanonicalAndIncidencePackets)
+{
+    RecordProperty("bounded_capacity_profile",
+        PLIC::geometry_encoding_capacity_profile_supported() ? "verified" : "unsupported");
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+    {
+        EXPECT_THROW((void) Cell::box_construction_capacity_bound(), std::invalid_argument);
+        EXPECT_THROW((void) Face::construction_capacity_bound(4), std::invalid_argument);
+        return;
+    }
+    // The extra midpoint belongs to incidence even though canonical face
+    // encoding removes it. A translated support also exercises ancestry.
+    const std::array<PLIC::GeometryPoint, 5> vertices{
+        {{0, 0, 0}, {.5, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    auto face = Face::make(vertices);
+    for (unsigned i = 0; i < 32; ++i)
+        face = face->translated({1. / 1024, -1. / 2048, 1. / 4096});
+    const auto canonical = face->encode(), incidence = face->encode_incidence();
+    EXPECT_GT(incidence.size(), canonical.size());
+    const auto scratch = face->encoding_scratch_bytes();
+    ASSERT_GT(scratch, 0u);
+    EXPECT_EQ(face->encoded_size(scratch), canonical.size());
+    EXPECT_EQ(face->encoded_incidence_size(), incidence.size());
+    EXPECT_THROW((void) face->encoded_size(scratch - 1), std::invalid_argument);
+    EXPECT_EQ(face->encode(), canonical);
+    EXPECT_EQ(face->encode_incidence(), incidence);
+
+    const std::array<std::array<double, 2>, 4> polygon{{{0, 0}, {1, .25}, {1.25, 1.25}, {.25, 1}}};
+    const std::array cells{Cell::box({0, 0, 0}, {1, 1, 1}), Cell::extruded_polygon(polygon, -.25, .75)};
+    for (const auto& cell : cells)
+    {
+        const auto certificate = cell->encode_certificate();
+        const auto bound = cell->certificate_encoding_scratch_bytes();
+        ASSERT_GT(bound, 0u);
+        EXPECT_EQ(cell->encoded_certificate_size(bound), certificate.size());
+        EXPECT_THROW((void) cell->encoded_certificate_size(bound - 1), std::invalid_argument);
+        EXPECT_EQ(cell->encode_certificate(), certificate);
+        EXPECT_TRUE(Cell::decode_certificate(certificate)->equivalent(*cell));
+    }
+}
+
 TEST(FiniteNativeGeometryTest, NativeShellAndCellPacketUseOrdinaryGeometry)
 {
     const std::array<PLIC::GeometryPoint, 8> vertices{

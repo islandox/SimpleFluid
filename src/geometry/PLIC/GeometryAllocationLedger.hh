@@ -45,6 +45,12 @@ private:
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;
 };
+namespace details
+{
+/** Identity-only admission uses no pending graph vector. Fixed-shape
+ * preflights include the ledger object and ordered owner-node allocations. */
+[[nodiscard]] std::size_t identity_ledger_bookkeeping_bound(std::size_t owners);
+} // namespace details
 
 extern template void GeometryAllocationLedger::retain<ArithmeticMode::Ordinary>(
     const ConvexGeometryPtr<ArithmeticMode::Ordinary>&, std::size_t&, std::size_t);

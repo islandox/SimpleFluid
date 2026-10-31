@@ -44,6 +44,27 @@ runs with `--gtest_filter` and `--gtest_output=xml:<local-path>` preserve numeri
 properties. An MPI runtime unable to create local sockets must be rerun in an
 environment supporting normal host MPI; startup failure is not a numerical test.
 
+## Construction admission regressions
+
+These tests protect setup and rejection behavior; they do not qualify a motion
+endpoint or relax the original manifests. The [AMR contract](../architecture/general_amr.md)
+defines separate owned-record, authority, exchange and publication admission
+scopes, including allocator/control-block exclusions and the verified capacity
+profile for the bounded Cartesian materializer.
+
+| Contract | Focused regression |
+| --- | --- |
+| Generated contact shells retire between records, with source state preserved after a rank-local failure | `DistributedAdaptiveClosure.ContactShellsRetireBetweenRecordsAndAfterCollectiveRejection`; independent contact/work counts and empty MPI4 owners |
+| Counting codecs preserve canonical/incidence encodings and reject malformed leaves | `FiniteNativeGeometryTest.CountingCodecPreservesCanonicalAndIncidencePackets`, `DistributedAdaptiveEncoding.CountingValidatesTheSameLeafAndNativeDescriptor` |
+| Capacity admission preserves independent owners, bounds construction before allocation and rejects cumulative overflow | `DistributedAdaptiveEncoding.CompactAdmissionSharesRecipesAndRetiresDisposableShells`, `ConstructionLeaseRejectsBeforeCallingProviderAndRecovers`, `CumulativeBudgetOverflowRejectsWithoutReset` |
+| Rank-local compact construction exhaustion rejects collectively and a valid retry reproduces the expanded oracle | `DistributedAdaptiveEncoding.RankLocalConstructionRejectionKeepsHierarchyAndRecovers` |
+| Export metadata retires before receive-heavy decoding; malformed complete streams reject before decoded allocation | `SparseOwnerExchange.ReceiveHeavyDecodeRetiresExportMetadataAndRecovers`, `CompleteFrameAuditRejectsOversizedPrefixAndMalformedTails` |
+
+Use registered MPI2/MPI4 cases after the serial checks, retain actual per-rank
+results and report unsupported capacity profiles separately. The deliberately
+smaller exchange-test budget is a diagnostic fixture, not a replacement for
+the unchanged 64 MiB construction cases.
+
 ## Numerical assertions
 
 | Contract | Reproducible coverage |

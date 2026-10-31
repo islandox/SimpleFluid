@@ -26,8 +26,10 @@ struct OwnerExchange
 /** Collective, including empty ranks. One packed stream per actual peer uses a
  * Tpetra Distributor; packet sizes never pad another packet's payload. The byte
  * budget bounds the maximum live phase of packed buffers, output and explicit
- * framing/route metadata before allocations. Packed sends are destroyed after
- * transfer and before decoding; received bytes coexist with decoded output.
+ * framing/route metadata before allocations. Packed sends and export-only
+ * grouping/route metadata are destroyed after transfer and before decoding;
+ * received bytes coexist with decoded output. Complete inner framing is audited
+ * collectively without payload allocation before exact decoded-byte admission.
  * Stats count these buffers, not MPI/allocator/control-block RSS. Borrowed input
  * is excluded; diagnostics report its packet range and payload capacities.
  * Duplicate peers and zero-byte records are supported; decoding is collective.

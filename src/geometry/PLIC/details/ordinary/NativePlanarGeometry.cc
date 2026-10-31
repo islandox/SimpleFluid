@@ -5,8 +5,8 @@
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
-#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -672,43 +672,60 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
     }
 }
 
-template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
+namespace
 {
-    auto polygon = face.impl_->polygon;
-    bool changed = true;
-    while (changed && polygon.size() > 3)
+template<class Writer>
+void emit_face_key(Writer& w, const OrdinaryFace& face, const on::WidePoint& normal, bool incidence)
+{
+    auto polygon = incidence ? Polygon{} : face.points();
+    if (!incidence)
     {
-        changed = false;
-        for (std::size_t i = 0; i < polygon.size(); ++i)
+        bool changed = true;
+        while (changed && polygon.size() > 3)
         {
-            const auto previous = (i + polygon.size() - 1) % polygon.size();
-            const auto next = (i + 1) % polygon.size();
-            if (on::cross(on::sub(polygon[i], polygon[previous]), on::sub(polygon[next], polygon[i])) ==
-                on::WidePoint{})
+            changed = false;
+            for (std::size_t i = 0; i < polygon.size(); ++i)
             {
-                polygon.erase(polygon.begin() + i);
-                changed = true;
-                break;
+                const auto previous = (i + polygon.size() - 1) % polygon.size();
+                const auto next = (i + 1) % polygon.size();
+                if (on::cross(on::sub(polygon[i], polygon[previous]), on::sub(polygon[next], polygon[i])) ==
+                    on::WidePoint{})
+                {
+                    polygon.erase(polygon.begin() + i);
+                    changed = true;
+                    break;
+                }
             }
         }
+        std::rotate(polygon.begin(), std::min_element(polygon.begin(), polygon.end()), polygon.end());
     }
-    std::rotate(polygon.begin(), std::min_element(polygon.begin(), polygon.end()), polygon.end());
-    on::Writer w;
+    const auto& points = incidence ? face.points() : polygon;
+    const auto support = planar_support<ArithmeticMode::Ordinary>(face);
     w.tag(GeometryTag::OrdinaryPlanarFace);
-    w.word(canonical_key_size(*face.impl_->support));
-    IdentityAccess::emit_canonical(*face.impl_->support, &w,
-        [](void* context, std::span<const char> fragment)
-        {
-            auto& writer = *static_cast<on::Writer*>(context);
-            writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
-        });
-    w.point(face.impl_->normal);
-    w.word(polygon.size());
-    for (const auto& p : polygon)
+    w.word(canonical_key_size(support));
+    w.identity(support);
+    // The retained normal is not a derived area vector; keep its exact codec
+    // representation, including for incidence packets.
+    w.point(normal);
+    w.word(points.size());
+    for (const auto& p : points)
         w.point(p);
+}
+std::size_t face_packet_size(std::size_t body)
+{
+    if (geometry_packet_profile(ArithmeticMode::Ordinary) == GeometryNumericProfile::Unsupported ||
+        body > geometry_packet_default_budget - geometry_packet_header_bytes)
+        throw std::invalid_argument("Geometry packet exceeds its kind or byte budget.");
+    return on::encoding_add(geometry_packet_header_bytes, body);
+}
+} // namespace
+
+template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
+{
+    on::Writer w;
+    emit_face_key(w, face, face.impl_->normal, false);
     return std::move(w.bytes);
 }
-
 std::vector<char> OrdinaryFace::encode(std::size_t byte_budget) const
 {
     return encode_geometry_packet(
@@ -717,20 +734,44 @@ std::vector<char> OrdinaryFace::encode(std::size_t byte_budget) const
 std::vector<char> OrdinaryFace::encode_incidence(std::size_t byte_budget) const
 {
     on::Writer w;
-    w.tag(GeometryTag::OrdinaryPlanarFace);
-    w.word(canonical_key_size(*impl_->support));
-    IdentityAccess::emit_canonical(*impl_->support, &w,
-        [](void* context, std::span<const char> fragment)
-        {
-            auto& writer = *static_cast<on::Writer*>(context);
-            writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
-        });
-    w.point(impl_->normal);
-    w.word(impl_->polygon.size());
-    for (const auto& p : impl_->polygon)
-        w.point(p);
+    emit_face_key(w, *this, impl_->normal, true);
     return encode_geometry_packet(
         GeometryPacketKind::PlanarFaceIncidence, ArithmeticMode::Ordinary, w.bytes, byte_budget);
+}
+std::size_t OrdinaryFace::encoding_scratch_bytes() const
+{
+    on::require_encoding_capacity_profile();
+    return on::encoding_product(impl_->polygon.size(), sizeof(WidePoint));
+}
+std::size_t OrdinaryFace::encoded_size(std::size_t scratch_budget) const
+{
+    if (encoding_scratch_bytes() > scratch_budget)
+        throw std::invalid_argument("Planar encoding scratch exceeds its byte budget.");
+    on::CountingWriter w;
+    emit_face_key(w, *this, impl_->normal, false);
+    return face_packet_size(w.bytes.size());
+}
+std::size_t OrdinaryFace::encoded_incidence_size() const
+{
+    on::require_encoding_capacity_profile();
+    on::CountingWriter w;
+    emit_face_key(w, *this, impl_->normal, true);
+    return face_packet_size(w.bytes.size());
+}
+std::size_t on::fallback_face_allocation_bound(std::size_t points)
+{
+    // Sum all explicitly owned buffers, even where their lifetimes only partly
+    // overlap: face_geometry loop, support source, retained polygon, unique set.
+    const auto polygon = encoding_product(points, sizeof(WidePoint));
+    const auto unique = encoding_product(points, sizeof(WidePoint) + 4 * sizeof(void*));
+    return encoding_add(encoding_add(encoding_add(polygon, source_support_allocation_bound(points)),
+                            sizeof(OrdinaryFace::Impl) + sizeof(OrdinaryFace)),
+        encoding_add(polygon, unique));
+}
+std::size_t OrdinaryFace::construction_capacity_bound(std::size_t vertices)
+{
+    on::require_encoding_capacity_profile();
+    return on::fallback_face_allocation_bound(vertices);
 }
 
 std::size_t OrdinaryFace::exclusive_storage_bytes() const

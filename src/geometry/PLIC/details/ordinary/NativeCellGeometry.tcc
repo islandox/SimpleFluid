@@ -215,6 +215,7 @@ PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) co
 {
     const details::OrdinaryExportCoordinates vertices(*this);
     std::vector<std::array<long double, 3>> loop;
+    loop.reserve(faces().at(face).size());
     for (auto i : faces().at(face))
         loop.push_back(vertices.at(i));
     const auto stored = details::checked_geometry_storage<Mode>(geometry_->impl_);
@@ -280,11 +281,65 @@ template<ArithmeticMode Mode> bool ConvexCellGeometry<Mode>::equivalent(const Co
     }
 }
 
-std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
+template<ArithmeticMode Mode>
+std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    namespace on = details::ordinary_native;
+    on::require_encoding_capacity_profile();
+    using namespace details;
+    using Vertex = StoredVertex<Mode>;
+    using Plane = StoredPlane<Mode>;
+    using Surface = StoredSurface<Mode>;
+    using PlanePtr = StoredPlanePtr<Mode>;
+    std::size_t bytes = 0;
+    auto add = [&](std::size_t count, std::size_t size)
+    { bytes = on::encoding_add(bytes, on::encoding_product(count, size)); };
+    // Sum complete growth histories, not only final capacities. For 8, 6 and
+    // 4 insertions the respective 1+2+4+8 / 1+2+4 bounds are 15 / 7.
+    // box initializer-list inner vectors, outer-vector copies, import copies.
+    add(3 * 6 * 4, sizeof(std::size_t));
+    add(2 * 6, sizeof(Face));
+    // make's input conversion/identity histories and represented-source owners.
+    add(15, sizeof(DynamicPoint));
+    add(15, sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    add(8, sizeof(DynamicPointProvenance));
+    // import's framed input, immutable graph, and per-face scratch histories.
+    add(15, sizeof(StoredPoint<Mode>));
+    add(1, sizeof(GeometryStorage<Mode>) + sizeof(Ancestry) + sizeof(StoredMomentCache<Mode>));
+    add(15, sizeof(Vertex));
+    add(15, sizeof(Surface));
+    add(8 * 7, sizeof(PlanePtr));
+    add(6, sizeof(Plane));
+    add(6 * 4, sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    add(6 * 7, sizeof(DynamicPoint));
+    add(6 * 7, sizeof(on::WidePoint));
+    add(6, on::source_support_allocation_bound(4));
+    add(12, sizeof(std::pair<const std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>>) + 4 * sizeof(void*));
+    add(6 * 4, sizeof(std::size_t) + 4 * sizeof(void*));
+    // validate_connected_boundary's graph, visitation and BFS growth histories.
+    add(8 + 6, sizeof(char));
+    add(6, sizeof(std::vector<std::size_t>));
+    add(6 * 7 + 15, sizeof(std::size_t));
+    add(24, sizeof(std::pair<const std::pair<std::size_t, std::size_t>, std::size_t>) + 4 * sizeof(void*));
+    // prepare_finish's cache, plane set, and two one-owner source walks per
+    // vertex (retain_supports and identity_bytes). All source supports are empty.
+    add(1, sizeof(PointExportCache));
+    add(8, sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    add(24, sizeof(PlanePtr) + 4 * sizeof(void*));
+    add(2 * 8, sizeof(const DynamicPointProvenance*) + 4 * sizeof(void*) +
+                   sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    add(1, identity_ledger_bookkeeping_bound(6));
+    add(1, sizeof(DynamicConvexGeometry) + sizeof(ConvexCellGeometry));
+    return bytes;
+}
+
+namespace native_cell_detail
+{
+template<class Writer> void emit_cell_key(Writer& w, const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
 {
     constexpr auto Mode = ArithmeticMode::Ordinary;
     namespace on = details::ordinary_native;
-    on::Writer w;
     w.tag(GeometryTag::OrdinaryCell);
     w.point(on::wide(cell.origin()));
     const auto vertices = cell.local_points();
@@ -292,7 +347,8 @@ std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Or
     for (const auto& p : vertices)
         w.point(p.value);
     w.word(cell.faces().size());
-    const auto stored = details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*cell.geometry_));
+    const auto stored =
+        details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*cell.dynamic_geometry()));
     for (std::size_t index = 0; index < cell.faces().size(); ++index)
     {
         const auto& f = cell.faces()[index];
@@ -303,22 +359,54 @@ std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Or
         if (!support)
             support = planar_support<Mode>(*cell.face_geometry(index));
         w.word(canonical_key_size(*support));
-        details::GeometryIdentityAccess::emit_canonical(*support, &w,
-            [](void* context, std::span<const char> fragment)
-            {
-                auto& writer = *static_cast<on::Writer*>(context);
-                writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
-            });
+        w.identity(*support);
     }
+}
+} // namespace native_cell_detail
+
+std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
+{
+    details::ordinary_native::Writer w;
+    native_cell_detail::emit_cell_key(w, cell);
     return std::move(w.bytes);
 }
-
 template<ArithmeticMode Mode>
 std::vector<char> ConvexCellGeometry<Mode>::encode_certificate(std::size_t byte_budget) const
     requires(Mode == ArithmeticMode::Ordinary)
 {
     return encode_geometry_packet(GeometryPacketKind::CellCertificate, Mode, canonical_cell_key(*this), byte_budget);
 }
+template<ArithmeticMode Mode>
+std::size_t ConvexCellGeometry<Mode>::certificate_encoding_scratch_bytes() const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    namespace on = details::ordinary_native;
+    on::require_encoding_capacity_profile();
+    const auto storage = details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*geometry_));
+    std::size_t fallback = 0;
+    for (std::size_t index = 0; index < faces().size(); ++index)
+        if (!storage->surfaces.at(index).plane->native_support)
+            fallback = std::max(fallback, on::fallback_face_allocation_bound(faces()[index].size()));
+    // local_points converts a reserved DynamicPoint vector to an independently
+    // reserved typed vector before releasing the former. Count both throughout
+    // the traversal, together with the largest original face fallback.
+    return on::encoding_add(on::encoding_product(vertex_count(), sizeof(DynamicPoint) + sizeof(Point<Mode>)), fallback);
+}
+template<ArithmeticMode Mode>
+std::size_t ConvexCellGeometry<Mode>::encoded_certificate_size(std::size_t scratch_budget) const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    namespace on = details::ordinary_native;
+    if (certificate_encoding_scratch_bytes() > scratch_budget)
+        throw std::invalid_argument("Cell certificate encoding scratch exceeds its byte budget.");
+    on::CountingWriter w;
+    native_cell_detail::emit_cell_key(w, *this);
+    if (geometry_packet_profile(Mode) == GeometryNumericProfile::Unsupported ||
+        w.bytes.size() > geometry_packet_default_budget - geometry_packet_header_bytes)
+        throw std::invalid_argument("Geometry packet exceeds its kind or byte budget.");
+    return on::encoding_add(geometry_packet_header_bytes, w.bytes.size());
+}
+
 template<ArithmeticMode Mode>
 ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
     std::span<const char> bytes, std::size_t byte_budget)

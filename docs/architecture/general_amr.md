@@ -1221,9 +1221,29 @@ ownership directly after admitting actual vector and payload capacities. Remote
 rounds retain the bounded peer transport. Dead support overlays, canonical
 tiles, expanded provider leaves and packed requests are released before later
 decode/response phases; storage is never treated as released while retained.
+After remote transfer completes, packed sends and export-only grouping/routing
+metadata are destroyed before decode admission uses its smaller live scope.
+Decoded payload lengths exclude framing words only after an allocation-free
+audit has checked every record, declared stream boundary and total coverage on
+every rank. No decoded packet vector or payload is allocated before that
+collective audit succeeds. The same parser then supplies the authenticated
+payload spans to decoding. Receive headers, sizes, sender identities and packed
+receives remain charged while decoded output is constructed. Statistics retain
+the total record/byte counts and expose planned and actual transfer/decode
+capacities; the hypothetical all-buffers-resident diagnostic is not the admitted
+peak. These phases do not introduce chunks or reset any cumulative work budget.
 The contact builder also destroys each cell's encoding and destination scratch
-before returning its temporary byte lease. Geometry and typed identity owners
-pinned by the request ledger keep their charges until that phase ends.
+before returning its temporary byte lease. Its geometry admission ledger is
+scoped to one contact encoder: generated full shells, trace supports and their
+identity pins are destroyed before that encoder's temporary charge is released.
+Only encoded span/trace bytes survive the encoder. Caller-supplied source
+geometry has a separate phase-long ledger and retains its charge; overlap with
+the temporary ledger is counted conservatively. Neither ledger uses reference
+counts or stale object addresses to infer that an allocation has disappeared.
+Diagnostics distinguish retained source geometry from the maximum admitted
+per-record geometry scratch, including the certificate and decoded-shell
+overlap. This scratch metric does not measure nested serializer allocation
+peaks or process RSS.
 Diagnostics separate the peak admitted live estimate from the cumulative
 admitted byte charges; neither the cumulative object counters nor the
 pair/trace work budget resets between cells or rounds. The tile-authority input
@@ -1231,12 +1251,60 @@ retains support faces without materializing unused full cell shells.
 These representation changes retain all configured byte, object, contact and
 round limits. Construction can still reject when unique required state or
 remaining transport/work exceeds them.
-In particular, the current transient `native_draft().owned` representation
-retains full cell certificates and support-face collections. Their unique
-capacity can exceed the lease even when the retained hierarchy itself is
-compact. Removing packet replicas does not resolve that boundary; larger owned
-selections require procedural or lazy draft certificates, or a bounded
-publication design, before they can be qualified under the same limits.
+
+The expanded `native_draft().owned` path retains full cell certificates and
+support-face collections and keeps its original cumulative expanded-packet
+size guard. The internal compact publication path can instead admit owned
+records by retained capacity plus simultaneous construction/encoding scratch.
+This is an explicit representation-specific admission contract with the same
+configured byte limit, not a change to an operation/work limit.
+
+That capacity path requires the actual provider kernel to offer a construction
+envelope for every locally owned source record. The initial capability is
+nonperiodic Cartesian procedural input with no supplied geometry/surface
+certificates or factor/join recipes. One unsupported record keeps the complete
+local owned selection on its legacy guard. Product, Mixed and custom kernels
+do not acquire the capability merely from a Cartesian provider tag. The
+Cartesian materializer reuses its authenticated box when constructing its six
+faces and reserves its construction envelope before calling the provider.
+The envelope remains charged through graph admission, then retires only after
+construction scratch and discarded full-shell owners have been destroyed and
+surviving records have their own charges.
+
+The retained ledger charges vector capacities, growth overlap, copied metadata,
+geometry and support owners, native/factor/join recipes, shared recipe parts,
+and owner-tracking storage. A surface's physical and native-whole face may
+alias or have separate owners; both cases are accounted by allocation identity.
+Strong temporary geometry pins are local to one record. The destination and
+its immutable records outlive the retained ledger, and a rejection poisons
+that transaction. Admission cannot resume after failure or accept a destination
+modified outside the ledger.
+
+Counting and owning encoders share the same leaf, native descriptor, face and
+cell traversal and rejection checks. The count path preserves canonical versus
+incidence semantics and avoids wire packets, nested byte bodies and envelope
+buffers. It admits point conversion, polygon canonicalization and fallback
+face scratch before those allocations. The cumulative expanded serialized size
+is still checked for overflow and reported; it is not reset per record.
+Object, contact and operation-work caps remain separate and unchanged.
+
+The preallocation envelopes use a verified standard-library capacity policy:
+libstdc++ 16 with `__GLIBCXX__=20260810`, without debug-container modes.
+`geometry_encoding_capacity_profile_supported()` exposes that scope. On other
+profiles the new scratch/count facades reject before allocation and the
+Cartesian kernel declines bounded materialization, preserving the existing
+owned-draft guard. Existing owning codecs remain available. A new toolchain
+needs its capacity policy verified before this capability is enabled; the C++
+standard alone does not bound vector growth by this implementation's policy.
+
+Owned-record diagnostics report admitted payload/tracker capacity and temporary
+envelopes. As with hierarchy storage accounting, allocator and shared
+control-block overhead are excluded and must be reported separately in direct
+allocation measurements. Binding, authority, halo and final publication phases
+retain their existing admission scopes; a successful owned-record stage does
+not establish a whole-draft or process-memory bound. Expanded or compact
+construction may still reject at a later stage or when unique retained data
+exceeds its cap. Construction success does not establish motion accuracy.
 
 `AdaptiveClosureOptions::statistics` optionally records rank-local counts and
 the completed or rejected prefix. Its `geometry_records`, transmitted and
