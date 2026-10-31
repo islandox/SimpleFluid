@@ -7,6 +7,7 @@
 #include "FVM/details/GeneralVoF/LimiterReplay.hh"
 #include "FVM/details/GeneralVoF/LimiterProtocol.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/PhasePublication.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -378,7 +379,7 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
     const auto& streams = ledger.streams;
     auto& totals = ledger.totals;
     FaceAdmission admitted;
-    std::array<double, 8> local{}, global{};
+    PhaseConservationSummary local{}, global{};
     wire::collective(*comm,
         [&]
         {
@@ -620,23 +621,12 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
     wire::collective(*comm,
         [&]
         {
-            const auto operations = 8.L * comm->getSize() + 16;
-            const auto u = operations * std::numeric_limits<double>::epsilon();
-            if (!(u < .25L))
+            const auto conservation = check_phase_conservation<PhaseConservationPolicy::Ordinary>(
+                global, comm->getSize(), data.options.reconstruction.volume_tolerance);
+            if (conservation == PhaseConservationResult::ReductionBoundExhausted)
                 throw std::invalid_argument("Finite VoF global phase reduction bound is exhausted.");
-            for (unsigned phase = 0; phase < 2; ++phase)
-            {
-                const auto physical = [&]
-                {
-                    if constexpr (mode == ArithmeticMode::Ordinary)
-                        return data.options.reconstruction.volume_tolerance * global[6 + phase];
-                    else
-                        return 0.L;
-                }();
-                const auto bound = physical + global[2 + phase] + u / (1 - u) * (global[4 + phase] + global[2 + phase]);
-                if (!std::isfinite(global[phase]) || !std::isfinite(bound) || std::abs(global[phase]) > bound)
-                    throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
-            }
+            if (conservation == PhaseConservationResult::Nonconserved)
+                throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
             current(data);
         });
     return admitted;
@@ -744,16 +734,6 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
     trial.transaction_ = homogeneous && transaction_id != 0 ? transaction_id : transaction(comm);
     trial.homogeneous_algebraic_ = homogeneous;
     trial.timestep_ = dt;
-    std::shared_ptr<GeneralVoFPreparedTransport> prepared;
-    wire::collective(*comm, [&] { prepared = std::make_shared<GeneralVoFPreparedTransport>(); });
-    prepared->source_identity = data_;
-    prepared->source_control = data.control;
-    prepared->transaction = trial.transaction_;
-    prepared->mesh_generation = data.hierarchy->partition_generation();
-    prepared->time_stage = time_stage;
-    prepared->timestep = dt;
-    prepared->density = density;
-    prepared->backend = data.options.transport_backend;
     if (homogeneous)
     {
         int local_streams = !streams.empty(), any_streams = 0;
@@ -1273,37 +1253,26 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
         {
             candidate = std::make_shared<Data>(data);
             candidate->control = trial.transaction_;
-            candidate->gas.clear();
-            candidate->carrier.clear();
-            candidate->phases.clear();
-            candidate->roundoff.clear();
-            candidate->phase_history.clear();
-            candidate->occupancy.clear();
+            reset_finite_phase_publication(*candidate);
         });
     auto admitted = admit_face_ledger(
         data, ledger, homogeneous,
         [&](const Cell& c)
         {
-            const auto& old = data.cells.at(c.key);
             candidate->cells.at(c.key) = c;
-            prepared->old_mass.push_back(density[0] * static_cast<long double>(old.phase.gas_volume) +
-                                         density[1] * static_cast<long double>(old.phase.carrier_volume));
-            prepared->new_mass.push_back(density[0] * static_cast<long double>(c.phase.gas_volume) +
-                                         density[1] * static_cast<long double>(c.phase.carrier_volume));
-            candidate->gas.push_back(c.phase.gas_volume);
-            candidate->carrier.push_back(c.phase.carrier_volume);
-            candidate->phases.push_back({c.native_volume, c.phase.gas_volume, c.phase.carrier_volume});
-            candidate->roundoff.push_back(c.roundoff);
-            candidate->phase_history.push_back(c.finite_history);
-            candidate->occupancy.push_back(c.occupancy);
+            append_finite_phase_publication(*candidate, c);
         },
         [&](const GeneralVoFFiniteFaceContribution& face) { trial.finite_faces_.push_back(face); });
     wire::collective(*comm,
         [&]
         {
             for (const auto& [face, stream] : streams)
-                prepared->streams.push_back(stream);
-            prepared->diagnostics = ledger.diagnostics;
+            {
+                trial.unbound_streams_.push_back(stream);
+                if (homogeneous)
+                    trial.unbound_streams_.back().mass = 0;
+            }
+            trial.unbound_diagnostics_ = ledger.diagnostics;
             trial.finite_transfers_ = std::move(admitted.transfers);
             trial.finite_budgets_ = std::move(admitted.budgets);
             trial.roundoff_ = candidate->roundoff;
@@ -1319,16 +1288,12 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
     trial.candidate_ = std::move(candidate);
     if (homogeneous)
     {
-        trial.unbound_streams_ = std::move(prepared->streams);
-        for (auto& stream : trial.unbound_streams_)
-            stream.mass = 0;
-        trial.unbound_diagnostics_ = prepared->diagnostics;
         trial.validate_retained_algebraic_payload();
     }
     else
     {
-        trial.prepared_ = std::move(prepared);
         trial.prepared_ = trial.prepare_transport(density, time_stage);
+        std::vector<Stream>{}.swap(trial.unbound_streams_);
     }
     return trial;
 }

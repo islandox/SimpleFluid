@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/LocalTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/PhasePublication.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
 {
@@ -857,12 +858,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                         fp::upper_double(
                             fp::bound_add(transfer.history.carrier.value, transfer.history.carrier.absolute_error))}});
             }
-            candidate->gas.clear();
-            candidate->carrier.clear();
-            candidate->phases.clear();
-            candidate->roundoff.clear();
-            candidate->occupancy.clear();
-            candidate->phase_history.clear();
+            reset_finite_phase_publication(*candidate);
             for (const auto& key : data.topology->order)
             {
                 auto& cell = candidate->cells.at(key);
@@ -913,19 +909,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                         : (cell.declaration == GeneralVoFPhaseGeometry::PureGas ? carrier.first : gas.first);
                 cell.inherited = true;
                 validate_cell<Mode>(cell, data.options);
-                candidate->gas.push_back(gas.first);
-                candidate->carrier.push_back(carrier.first);
-                candidate->phases.push_back({cell.native_volume, gas.first, carrier.first});
-                candidate->roundoff.push_back(cell.roundoff);
-                candidate->occupancy.push_back(cell.occupancy);
-                candidate->phase_history.push_back(cell.finite_history);
+                append_finite_phase_publication(*candidate, cell);
             }
             trial.roundoff_ = candidate->roundoff;
             current(data);
         });
     // Shared signed transfers give opposite incidences; an independent global
     // phase check accounts for wire reduction and one-time publication error.
-    std::array<double, 8> local{}, global{};
+    PhaseConservationSummary local{}, global{};
     wire::collective(*comm,
         [&]
         {
@@ -969,23 +960,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     wire::collective(*comm,
         [&]
         {
-            const auto operations = 8.L * comm->getSize() + 16;
-            const auto u = operations * std::numeric_limits<double>::epsilon();
-            if (!(u < .25L))
+            constexpr auto policy =
+                Mode == ArithmeticMode::Ordinary ? PhaseConservationPolicy::Ordinary : PhaseConservationPolicy::Bounded;
+            const auto conservation =
+                check_phase_conservation<policy>(global, comm->getSize(), data.options.reconstruction.volume_tolerance);
+            if (conservation == PhaseConservationResult::ReductionBoundExhausted)
                 throw std::invalid_argument("Finite VoF global phase reduction bound is exhausted.");
-            for (unsigned phase = 0; phase < 2; ++phase)
-            {
-                const auto physical = [&]
-                {
-                    if constexpr (Mode == ArithmeticMode::Ordinary)
-                        return data.options.reconstruction.volume_tolerance * global[6 + phase];
-                    else
-                        return 0.L;
-                }();
-                const auto bound = physical + global[2 + phase] + u / (1 - u) * (global[4 + phase] + global[2 + phase]);
-                if (!std::isfinite(global[phase]) || !std::isfinite(bound) || std::abs(global[phase]) > bound)
-                    throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
-            }
+            if (conservation == PhaseConservationResult::Nonconserved)
+                throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
             current(data);
         });
     apply_phase_cleanup(*candidate);
