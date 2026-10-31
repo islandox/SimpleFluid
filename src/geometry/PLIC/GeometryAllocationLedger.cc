@@ -277,15 +277,16 @@ struct GeometryAllocationLedger::Impl
                 case Kind::Recipe: {
                     const auto recipe = std::static_pointer_cast<const GeometryConstruction>(item.owner);
                     auto bytes = sizeof(GeometryConstruction);
-                    add_bytes(bytes, recipe->retained_points.capacity(),
-                        sizeof(std::shared_ptr<const DynamicPointProvenance>));
+                    if (recipe->kind() == GeometryConstruction::Kind::Rebase)
+                        add_bytes(bytes, 1, sizeof(GeometryConstruction::Rebase));
                     if (admit(item, bytes, used, limit))
                     {
-                        push(Kind::Geometry, recipe->source, used, limit);
-                        push(Kind::Recipe, recipe->parent, used, limit);
-                        push(Kind::Clip, recipe->clip, used, limit);
-                        for (const auto& point : recipe->retained_points)
-                            push(Kind::Point, point, used, limit);
+                        if (recipe->kind() == GeometryConstruction::Kind::Source)
+                            push(Kind::Geometry, recipe->source().source, used, limit);
+                        else if (recipe->kind() == GeometryConstruction::Kind::Clip)
+                            push(Kind::Clip, recipe->clip().clip, used, limit);
+                        else
+                            push(Kind::Recipe, recipe->rebase().parent, used, limit);
                     }
                     break;
                 }

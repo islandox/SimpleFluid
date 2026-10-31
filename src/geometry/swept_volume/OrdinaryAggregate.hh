@@ -4,18 +4,32 @@
 #pragma once
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/swept_volume/SweptVolumeDeclarations.hh"
+#include <compare>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
+#include <vector>
 
 namespace SimpleFluid::geometry::swept_volume
 {
+/** Identity of one slot in an immutable source point table. Coordinate equality
+ * does not merge slots or authenticate source-face incidence. */
+struct OrdinaryAggregatePointIndex
+{
+    std::size_t value = 0;
+    auto operator<=>(const OrdinaryAggregatePointIndex&) const = default;
+};
 struct OrdinaryAggregateTetra
 {
-    std::array<PLIC::Point<ArithmeticMode::Ordinary>, 4> vertices;
-    /** Identities belong to this source batch; equal coordinates do not issue an identity. */
-    std::array<std::uint64_t, 4> vertex_ids{};
+    std::array<OrdinaryAggregatePointIndex, 4> vertices;
     int sign = 1;
+};
+struct OrdinaryAggregateSourceBatch
+{
+    std::vector<PLIC::Point<ArithmeticMode::Ordinary>> points;
+    std::vector<OrdinaryAggregateTetra> tetrahedra;
 };
 struct OrdinaryAggregateDonor
 {
@@ -105,8 +119,17 @@ class OrdinaryAggregateSource
 {
 public:
     struct Impl;
-    explicit OrdinaryAggregateSource(std::span<const OrdinaryAggregateTetra>, SweepLimits = {},
+    /** Validates and allocates metadata before consuming the batch. On every
+     * constructor failure, both caller vectors and their elements are unchanged.
+     * Success transfers the buffers; callers must relinquish mutable aliases. */
+    explicit OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&&, SweepLimits = {},
         PLIC::GeometryLimits = {.arithmetic_mode = ArithmeticMode::Ordinary}, OrdinaryAggregateContext* = nullptr);
+    /** Borrowed immutable views remain valid while this source owns its batch,
+     * including after a measurement failure. */
+    [[nodiscard]] std::span<const PLIC::Point<ArithmeticMode::Ordinary>> points() const& noexcept;
+    [[nodiscard]] std::span<const OrdinaryAggregateTetra> tetrahedra() const& noexcept;
+    std::span<const PLIC::Point<ArithmeticMode::Ordinary>> points() const&& = delete;
+    std::span<const OrdinaryAggregateTetra> tetrahedra() const&& = delete;
     [[nodiscard]] OrdinaryAggregateResult measure(
         std::span<const OrdinaryAggregateDonor>, OrdinaryAggregateContext* = nullptr) const;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;

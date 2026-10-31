@@ -311,4 +311,92 @@ TEST(GeometryAllocationLedgerTest, SharedPointSupportsAreChargedAsOneSeparateImm
     if (P::certification_environment())
         shared_support_payload_contract<ArithmeticMode::BoundedCertification>();
 }
+
+template<ArithmeticMode Mode> void construction_payload_contract()
+{
+    namespace D = P::details;
+    using Node = D::GeometryConstruction;
+    using Storage = D::GeometryStorage<Mode>;
+    P::GeometryLimits limits;
+    limits.arithmetic_mode = Mode;
+    D::Operation operation(limits);
+    const auto empty_storage = []
+    {
+        auto storage = std::make_shared<Storage>();
+        storage->ancestry.reset();
+        storage->moment_cache.reset();
+        return storage;
+    };
+    const P::GeometryHalfspace first{{2, 0, 0}, {.125, .25, .375}, .75};
+    const P::GeometryHalfspace second{{0, 4, 0}, {.25, .5, .75}, 6};
+    const auto make_pair = [&]
+    {
+        const auto source = D::construction_source<Mode>(empty_storage());
+        const auto parent = D::construction_rebase(source, first);
+        auto clip = std::make_shared<D::GeometryClipConstruction>();
+        clip->mode = Mode;
+        clip->parent = parent;
+        std::array<P::ConvexGeometryPtr<Mode>, 2> pair;
+        for (std::size_t side = 0; side < pair.size(); ++side)
+        {
+            auto storage = empty_storage();
+            storage->construction = D::construction_rebase(
+                D::construction_node(Node::Clip{clip, side != 0}), second);
+            pair[side] = Geometry<Mode>::from_dynamic(P::DynamicGeometryAccess::geometry(storage));
+        }
+        return pair;
+    };
+    const auto pair = make_pair();
+    // No shell buffers, ancestry or moment caches: independently enumerate
+    // two wrappers, two storages, four recipe owners, two exclusive rebase
+    // payloads, and one shared clip owner. Exclusive payloads add no owners.
+    const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + 2 * sizeof(Storage) +
+                          4 * sizeof(Node) + 2 * sizeof(Node::Rebase) + sizeof(D::GeometryClipConstruction);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(pair[0], used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes(), expected);
+    EXPECT_EQ(ledger.owner_count(), 9u);
+    EXPECT_EQ(pair[0]->storage_bytes(), expected);
+    const auto first_used = used;
+    ledger.retain(pair[0], used, byte_limit);
+    EXPECT_EQ(used, first_used);
+    // The sibling adds its wrappers, shell, clip recipe and final rebase
+    // recipe/payload, while the shared clip and predecessor chain stay pinned.
+    const auto sibling_bytes = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(Storage) +
+                               2 * sizeof(Node) + sizeof(Node::Rebase);
+    ledger.retain(pair[1], used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes(), expected + sibling_bytes);
+    EXPECT_EQ(ledger.owner_count(), 14u);
+    const auto distinct = make_pair();
+    ledger.retain(distinct[0], used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes(), 2 * expected + sibling_bytes);
+    EXPECT_EQ(ledger.owner_count(), 23u);
+
+    // Independent ledgers reproduce the same admission cost including scratch
+    // bookkeeping. The exact cap succeeds; one byte less poisons admission.
+    P::GeometryAllocationLedger exact;
+    std::size_t exact_used = 0;
+    exact.retain(pair[0], exact_used, first_used);
+    EXPECT_EQ(exact_used, first_used);
+    P::GeometryAllocationLedger short_cap;
+    std::size_t short_used = 0;
+    EXPECT_THROW(short_cap.retain(pair[0], short_used, first_used - 1), P::GeometryError);
+    EXPECT_LE(short_used, first_used - 1);
+    const auto rejected_used = short_used;
+    EXPECT_THROW(short_cap.retain(pair[0], short_used, byte_limit), P::GeometryError);
+    EXPECT_EQ(short_used, rejected_used);
+
+    const auto& recipe = P::DynamicGeometryAccess::implementation(*pair[0]->dynamic_geometry())->construction;
+    const auto source = recipe->rebase().parent->clip().clip->parent->rebase().parent->source().source;
+    const auto source_bytes = P::DynamicGeometryAccess::geometry(source)->template storage_bytes<Mode>();
+    EXPECT_EQ(D::construction_storage_bytes(recipe),
+        4 * sizeof(Node) + 2 * sizeof(Node::Rebase) + sizeof(D::GeometryClipConstruction) + source_bytes);
+}
+TEST(GeometryAllocationLedgerTest, ExclusiveRebasePayloadsAndSharedRecipesHaveExactAdmissionCosts)
+{
+    construction_payload_contract<ArithmeticMode::Ordinary>();
+    if (P::certification_environment())
+        construction_payload_contract<ArithmeticMode::BoundedCertification>();
+}
 } // namespace

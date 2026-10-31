@@ -235,4 +235,106 @@ TEST(ConstructionRegistryTest, V4ReplayRejectsMissingStaleCyclicModeAndNumericCl
     if (P::certification_environment())
         replay_and_reject<ArithmeticMode::BoundedCertification>();
 }
+
+template<ArithmeticMode Mode> void rebase_clip_chain()
+{
+    using Node = D::GeometryConstruction;
+    auto source = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
+    auto source_impl = P::DynamicGeometryAccess::implementation(*source->dynamic_geometry());
+    std::weak_ptr<const P::DynamicConvexGeometry::Impl> source_lifetime = source_impl;
+    const P::GeometryHalfspace cut{{2, 0, 0}, {.125, .25, .375}, .75}; // x <= 1/2
+    const std::array<P::GeometryHalfspace, 2> noncutting{{
+        {{0, 4, 0}, {.25, .5, .75}, 6}, // y <= 2, wholly inside
+        {{0, 2, 0}, {.75, .25, .5}, -2.5} // y <= -1, wholly outside
+    }};
+    const auto split = source->clip(cut, true);
+    ASSERT_TRUE(split.inside);
+    ASSERT_TRUE(split.outside);
+    const auto inside_node = P::DynamicGeometryAccess::implementation(*split.inside->dynamic_geometry())->construction;
+    const auto outside_node =
+        P::DynamicGeometryAccess::implementation(*split.outside->dynamic_geometry())->construction;
+    ASSERT_EQ(inside_node->kind(), Node::Kind::Clip);
+    EXPECT_FALSE(inside_node->clip().outside);
+    EXPECT_TRUE(outside_node->clip().outside);
+    EXPECT_EQ(inside_node->clip().clip, outside_node->clip().clip);
+    const auto rebased = inside_node->clip().clip->parent;
+    ASSERT_EQ(rebased->kind(), Node::Kind::Rebase);
+    EXPECT_EQ(rebased->rebase().input.normal, cut.normal);
+    EXPECT_EQ(rebased->rebase().input.anchor, cut.anchor);
+    EXPECT_EQ(rebased->rebase().input.offset, cut.offset);
+    ASSERT_EQ(rebased->rebase().parent->kind(), Node::Kind::Source);
+    EXPECT_EQ(rebased->rebase().parent->source().source, source_impl);
+    EXPECT_FALSE(source_impl->construction); // The pinned source cannot point back to its recipe.
+
+    const P::GeometryPacketContext pins{{47, 53, 59, 61}};
+    const P::ConstructionRootKey native{P::ConstructionRootKey::Kind::Native, 7, 11, 0, {}};
+    for (std::size_t side = 0; side < 2; ++side)
+        for (std::size_t noncut = 0; noncut < noncutting.size(); ++noncut)
+        {
+            SCOPED_TRACE(::testing::Message() << "side=" << side << " noncut=" << noncut);
+            const auto& child = side ? split.outside : split.inside;
+            const auto repeated = child->clip(noncutting[noncut], false);
+            const auto terminal = noncut ? repeated.outside : repeated.inside;
+            ASSERT_TRUE(terminal);
+            EXPECT_FALSE(noncut ? repeated.inside : repeated.outside);
+            const auto node = P::DynamicGeometryAccess::implementation(*terminal->dynamic_geometry())->construction;
+            ASSERT_EQ(node->kind(), Node::Kind::Rebase);
+            EXPECT_EQ(node->rebase().parent, side ? outside_node : inside_node);
+            EXPECT_EQ(node->rebase().input.normal, noncutting[noncut].normal);
+            EXPECT_EQ(node->rebase().input.anchor, noncutting[noncut].anchor);
+            EXPECT_EQ(node->rebase().input.offset, noncutting[noncut].offset);
+            P::ConstructionRegistry<Mode> registry(pins);
+            registry.register_native(7, 11, source);
+            registry.register_plane(13, cut);
+            registry.register_plane(17, noncutting[noncut]);
+            const auto packet = terminal->encode(registry);
+            const std::vector<P::ConstructionRootKey> expected_roots{native,
+                {P::ConstructionRootKey::Kind::InputPlane, 13, 0, 0, {}},
+                {P::ConstructionRootKey::Kind::InputPlane, 17, 0, 0, {}}};
+            EXPECT_EQ(P::ConstructionRegistry<Mode>::required_roots(packet, pins), expected_roots);
+            EXPECT_TRUE(registry.derived_from(*terminal, native));
+            const auto decoded = Geometry<Mode>::decode(packet, registry);
+            EXPECT_TRUE(registry.derived_from(*decoded, native));
+            EXPECT_EQ(decoded->encode(registry), packet);
+            EXPECT_EQ(decoded->faces(), terminal->faces());
+            const auto original_points = terminal->points(), replayed_points = decoded->points();
+            ASSERT_EQ(replayed_points.size(), original_points.size());
+            for (std::size_t point = 0; point < original_points.size(); ++point)
+            {
+                EXPECT_EQ(replayed_points[point].value, original_points[point].value);
+                if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                    EXPECT_EQ(replayed_points[point].absolute_error, original_points[point].absolute_error);
+            }
+            const auto expected_x = side ? .375L : .125L;
+            for (const auto& geometry : {terminal, decoded})
+            {
+                const auto moments = geometry->moments({0, 0, 0});
+                const auto check = [](const auto& value, long double expected)
+                {
+                    if constexpr (Mode == ArithmeticMode::Ordinary)
+                        EXPECT_NEAR(value.value, expected, 2e-15L);
+                    else
+                    {
+                        EXPECT_LE(value.lower(), expected);
+                        EXPECT_GE(value.upper(), expected);
+                    }
+                };
+                // Integral over [0,1/2]x[0,1]^2 or [1/2,1]x[0,1]^2.
+                check(moments.volume, .5L);
+                check(moments.first_moment[0], expected_x);
+                check(moments.first_moment[1], .25L);
+                check(moments.first_moment[2], .25L);
+            }
+        }
+    source_impl.reset();
+    source.reset();
+    EXPECT_FALSE(source_lifetime.expired());
+    EXPECT_NEAR(split.inside->moments({0, 0, 0}).first_moment[0].value, .125L, 2e-15L);
+}
+TEST(ConstructionRegistryTest, BinaryExactSourceRebaseClipRebaseChainsKeepRootsAndMoments)
+{
+    rebase_clip_chain<ArithmeticMode::Ordinary>();
+    if (P::certification_environment())
+        rebase_clip_chain<ArithmeticMode::BoundedCertification>();
+}
 } // namespace

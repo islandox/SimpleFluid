@@ -200,13 +200,29 @@ struct GeometryClipConstruction
 struct GeometryConstruction
 {
     enum class Kind { Source, Clip, Rebase };
-    Kind kind = Kind::Source;
-    std::shared_ptr<const DynamicConvexGeometry::Impl> source;
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> retained_points;
-    std::shared_ptr<const GeometryClipConstruction> clip;
-    bool outside = false;
-    std::shared_ptr<const GeometryConstruction> parent;
-    GeometryHalfspace rebase_input;
+    struct Source
+    {
+        std::shared_ptr<const DynamicConvexGeometry::Impl> source;
+    };
+    struct Clip
+    {
+        std::shared_ptr<const GeometryClipConstruction> clip;
+        bool outside = false;
+    };
+    struct Rebase
+    {
+        std::shared_ptr<const GeometryConstruction> parent;
+        GeometryHalfspace input;
+    };
+    using Payload = std::variant<Source, Clip, std::unique_ptr<const Rebase>>;
+    explicit GeometryConstruction(Source value) : payload(std::move(value)) {}
+    explicit GeometryConstruction(Clip value) : payload(std::move(value)) {}
+    explicit GeometryConstruction(std::unique_ptr<const Rebase> value) : payload(std::move(value)) {}
+    [[nodiscard]] Kind kind() const { return static_cast<Kind>(payload.index()); }
+    [[nodiscard]] const Source& source() const { return std::get<Source>(payload); }
+    [[nodiscard]] const Clip& clip() const { return std::get<Clip>(payload); }
+    [[nodiscard]] const Rebase& rebase() const { return *std::get<std::unique_ptr<const Rebase>>(payload); }
+    const Payload payload;
 };
 
 // Spatial coordinate ranges are not uncertainty scalars: keep their full extent
@@ -376,6 +392,10 @@ std::shared_ptr<const GeometryStorage<Mode>> checked_geometry_storage(
 template<ArithmeticMode Mode>
 std::shared_ptr<const GeometryConstruction> construction_source(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
+std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Source);
+std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Clip);
+std::shared_ptr<const GeometryConstruction> construction_rebase(
+    std::shared_ptr<const GeometryConstruction>, const GeometryHalfspace&);
 std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConstruction>&);
 template<ArithmeticMode Mode>
 std::size_t geometry_allocation_footprint(const std::shared_ptr<const DynamicConvexGeometry::Impl>&);

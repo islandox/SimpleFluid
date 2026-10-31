@@ -175,8 +175,18 @@ retained cell catalog and does not establish constant-cost preparation.
 
 ### Aggregate metric admission
 
-`OrdinaryAggregateSource` retains immutable tetrahedron recipes and explicit
-source-vertex identities. A computational cut is an unmeasured barycentric
+`OrdinaryAggregateSource` consumes an `OrdinaryAggregateSourceBatch` containing
+one point table and indexed tetrahedron recipes. Each tetrahedron retains four
+typed local indices and its stream sign; a table slot supplies the source-vertex
+identity, including the point's complete provenance. Equal coordinates in different
+slots remain different identities. Construction validates the table and incidence
+and allocates metadata before moving the buffers, so rejection leaves the input
+unchanged. Successful construction transfers exclusive buffer ownership; callers
+must relinquish mutable aliases. Const source views remain valid while their
+source owner lives. This indexed interface replaces the point-carrying tetrahedron
+span interface.
+
+A computational cut is an unmeasured barycentric
 witness; its rounded shell need not have a separately measurable positive volume.
 Donor supports come from the retained geometry authority. Complementary cuts
 retain outside witnesses until donor coverage is complete. Donor overlap,
@@ -241,9 +251,17 @@ direct metric clipping requests only the inside child. Phase integration retains
 the bulk witness and accounts for the copy needed before consuming its phase
 split. Source-face cancellation and the structural donor-cover proof are unchanged.
 
-Ordinary interface-local preparation gives storage two lifetimes. Spatial indexes,
-pending recipes and candidate lists, imported planes/shared geometry and completed
-face contributions remain charged throughout preparation. Current-face setup,
+Ordinary interface-local preparation preserves ordered scalar metadata for every
+pending face. Reach, classification and zero-effect checks run before a scalar
+face releases its recipe and candidates. Only geometric faces retain those owners;
+each geometric slot is consumed into the current face scope. Its complete points
+move into the source table in center/backcenter/current/departure order, its old
+recipe buffers are destroyed, and candidates are released after donor preparation.
+Face order remains aligned with optional work-capture rows.
+
+Spatial indexes, pending preparation charges, imported planes/shared geometry and
+completed face contributions remain charged throughout preparation even when a
+pending owner has already been destroyed. Current-face setup,
 source bookkeeping, donor validation, support/distance/predicate caches, coverage
 remainders, metric witnesses and temporary aggregate results have a face-local
 scope. The default 64 MiB admission condition covers the retained preparation
@@ -268,6 +286,10 @@ only the output groups' surviving capacity and growth of the retained face vecto
 On exceptions, unpublished output is destroyed before its pending charge is
 released. The scratch reservation expires only after all its owning containers.
 Short-lived reach-query and sweep-boundary buffers use the same lifetime discipline.
+The setup allowance and source allowance both conservatively cover the moved point
+and index buffers. Ownership transfer removes the buffer copy but does not transfer
+or refund admission charges. These overlapping reservations and retired charges
+are not a count of actual allocations or simultaneous live storage.
 This is a preparation-storage allowance, not a bound on total process RSS or
 the combined memory of every source, candidate, MPI runtime and caller.
 

@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <type_traits>
 
 namespace SimpleFluid::geometry::swept_volume
 {
@@ -332,12 +333,23 @@ struct Face
     std::vector<std::size_t> vertices;
     int source = -1;
 };
+/** A view of the immutable owned point table and its indexed recipe. No
+ * expanded tetrahedron is retained or used as replay provenance. */
+struct SourceTetra
+{
+    const OrdinaryAggregateSourceBatch* batch = nullptr;
+    const OrdinaryAggregateTetra* recipe = nullptr;
+    const Point<ArithmeticMode::Ordinary>& point(unsigned local) const
+    {
+        return batch->points[recipe->vertices[local].value];
+    }
+};
 struct Poly
 {
     std::vector<B> vertices;
     std::vector<B> errors;
     std::vector<std::vector<const Support*>> supports;
-    const OrdinaryAggregateTetra* source = nullptr;
+    SourceTetra source;
     DefiningCache* defining_cache = nullptr;
     // Only face-referenced vertices are stored. Defining support evidence and
     // the immutable source recipe do not depend on a source-leaf index prefix.
@@ -423,15 +435,14 @@ void charge_poly_copy(const Poly& p, AggregateWork& work)
         work.charge(face.vertices.size() * sizeof(std::size_t));
 }
 constexpr std::array<std::array<unsigned, 3>, 4> tetra_faces{{{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}}};
-Poly tetra(const OrdinaryAggregateTetra& source, const std::array<Support, 4>& supports, DefiningCache& cache,
-    AggregateWork& work)
+Poly tetra(SourceTetra source, const std::array<Support, 4>& supports, DefiningCache& cache, AggregateWork& work)
 {
     work.witness();
     work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(std::vector<const Support*>) + 4 * sizeof(Face) +
                 12 * sizeof(std::size_t) + 12 * sizeof(const Support*));
     Poly p;
     p.watch(work);
-    p.source = &source;
+    p.source = source;
     p.defining_cache = &cache;
     p.vertices.resize(4);
     p.errors.resize(4);
@@ -469,12 +480,7 @@ predicates::Result distance(const B& b, const B& error, const Distances& d, Aggr
     std::array<predicates::Result, 4> terms;
     for (unsigned k = 0; k < 4; ++k)
         terms[k] = construction_product({b[k], error[k]}, {d.value[k], d.error[k]}, work);
-    return predicate(
-        [&]
-        {
-            return predicates::sum_results(terms);
-        },
-        work);
+    return predicate([&] { return predicates::sum_results(terms); }, work);
 }
 bool resolved(const predicates::Result& result)
 {
@@ -486,11 +492,11 @@ bool resolved(const predicates::Result& result)
 std::optional<predicates::Result> defining_distance(
     const Poly& p, std::size_t vertex, const Distances& d, AggregateWork& work)
 {
-    if (!p.source || !p.defining_cache || !d.support)
+    if (!p.source.batch || !p.source.recipe || !p.defining_cache || !d.support)
         fail(GeometryErrorCode::ProvenanceMismatch, "Aggregate defining-support source is missing.");
     std::array<predicates::FramedPoint, 4> source;
     for (unsigned i = 0; i < 4; ++i)
-        source[i].local = p.source->vertices[i].value;
+        source[i].local = p.source.point(i).value;
     auto query = d.support->expression;
     query.orientation = 1;
     const auto interpret = [&](predicates::SupportEvaluation evaluation) -> std::optional<predicates::Result>
@@ -834,8 +840,7 @@ struct Cut
     std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> native_support;
     const void* identity = nullptr;
 };
-Distances source_distances(
-    const OrdinaryAggregateTetra& t, const Support& support, int orientation, AggregateWork& work)
+Distances source_distances(SourceTetra t, const Support& support, int orientation, AggregateWork& work)
 {
     Distances result;
     result.support = &support;
@@ -848,8 +853,8 @@ Distances source_distances(
         const auto distance = predicate(
             [&]
             {
-                return predicates::plane_distance(predicates::FramedPoint{t.vertices[i].value, {}, 0},
-                    expression.anchor, expression.normal, expression.offset);
+                return predicates::plane_distance(predicates::FramedPoint{t.point(i).value, {}, 0}, expression.anchor,
+                    expression.normal, expression.offset);
             },
             work);
         result.value[i] = distance.value * orientation;
@@ -909,19 +914,15 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
 /** Multilinear integration leaves tiny barycentric weights intact. Every
  * surviving exterior face uses the SAME physical pivot and power-of-two scale. */
 std::array<predicates::Result, 4> integration_coefficients(
-    const OrdinaryAggregateTetra& t, V pivot, long double scale, AggregateWork& work)
+    SourceTetra t, V pivot, long double scale, AggregateWork& work)
 {
     const auto cube = product(product(scale, scale), scale);
     std::array<predicates::Result, 4> result;
     for (unsigned omitted = 0; omitted < 4; ++omitted)
     {
         const auto j = axes(omitted);
-        const auto coefficient = predicate(
-            [&]
-            {
-                return predicates::orientation(
-                    {pivot, t.vertices[j[0]].value, t.vertices[j[1]].value, t.vertices[j[2]].value});
-            },
+        const auto coefficient = predicate([&]
+            { return predicates::orientation({pivot, t.point(j[0]).value, t.point(j[1]).value, t.point(j[2]).value}); },
             work);
         result[omitted] = {quotient(coefficient.value, cube), quotient(coefficient.absolute_error, cube)};
     }
@@ -1055,7 +1056,7 @@ void integrate_source_reference(
 } // namespace
 struct OrdinaryAggregateSource::Impl
 {
-    std::vector<OrdinaryAggregateTetra> tetrahedra;
+    OrdinaryAggregateSourceBatch batch;
     std::vector<predicates::Result> orientations;
     std::vector<std::array<bool, 4>> cancelled;
     std::vector<std::array<std::pair<std::size_t, unsigned>, 4>> partners;
@@ -1064,7 +1065,7 @@ struct OrdinaryAggregateSource::Impl
     OrdinaryAggregateStatistics initial;
     long double signed_volume = 0;
 };
-OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggregateTetra> recipes, SweepLimits sweep,
+OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& batch, SweepLimits sweep,
     GeometryLimits geometry, OrdinaryAggregateContext* progress)
 {
     OrdinaryAggregateContext local;
@@ -1073,28 +1074,67 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
     const ScopedAggregateEnvironment environment;
     if (geometry.arithmetic_mode != ArithmeticMode::Ordinary)
         fail(GeometryErrorCode::InvalidInput, "Ordinary aggregate requires Ordinary geometry limits.");
+    const auto& recipes = batch.tetrahedra;
     if (recipes.size() > sweep.maximum_simplices)
         fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate source simplex cap exhausted.");
     AggregateWork work{sweep, geometry};
     work.context = &context;
-    work.charge(sizeof(Impl) + recipes.size() * (sizeof(OrdinaryAggregateTetra) + sizeof(predicates::Result) +
-                                                    sizeof(std::array<bool, 4>) +
-                                                    sizeof(std::array<std::pair<std::size_t, unsigned>, 4>)));
+    const auto charge_elements = [&](std::size_t count, std::size_t element_bytes)
+    {
+        if (count > std::numeric_limits<std::size_t>::max() / element_bytes)
+            work.storage_limit(
+                work.bytes, std::numeric_limits<std::size_t>::max(), std::min(sweep.byte_budget, geometry.byte_budget));
+        work.charge(count * element_bytes);
+    };
+    work.charge(sizeof(Impl));
+    charge_elements(batch.points.capacity(), sizeof(Point<ArithmeticMode::Ordinary>));
+    charge_elements(recipes.capacity(), sizeof(OrdinaryAggregateTetra));
     auto impl = std::make_shared<Impl>();
     impl->sweep = sweep;
     impl->geometry = geometry;
-    impl->tetrahedra.assign(recipes.begin(), recipes.end());
-    impl->orientations.reserve(recipes.size());
-    impl->cancelled.resize(recipes.size());
-    impl->partners.resize(recipes.size());
-    std::map<std::uint64_t, Point<ArithmeticMode::Ordinary>> points;
+    const auto prepare = [&](auto& metadata)
+    {
+        using Element = typename std::remove_reference_t<decltype(metadata)>::value_type;
+        if (recipes.size() > metadata.max_size())
+            work_limit("source_metadata", 0, recipes.size(), metadata.max_size());
+        charge_elements(recipes.size(), sizeof(Element));
+        metadata.resize(recipes.size());
+        charge_elements(metadata.capacity() - recipes.size(), sizeof(Element));
+    };
+    prepare(impl->orientations);
+    prepare(impl->cancelled);
+    prepare(impl->partners);
+    // The table retains every slot, including unused ones. Charge its actual
+    // object capacity above and provenance payload once per slot here. Shared
+    // provenance between distinct slots is conservatively charged per slot;
+    // the transient DynamicPoint adapter itself is not retained.
+    for (std::size_t point_index = 0; point_index < batch.points.size(); ++point_index)
+    {
+        const auto& point = batch.points[point_index];
+        for (auto x : point.value)
+            if (!std::isfinite(x))
+            {
+                // Preserve the first containing source for failure diagnostics.
+                // Unused invalid slots have no source identity. Scan only on
+                // failure, without dereferencing any unvalidated recipe index.
+                for (std::size_t i = 0; i < recipes.size(); ++i)
+                    if (std::find(recipes[i].vertices.begin(), recipes[i].vertices.end(),
+                            OrdinaryAggregatePointIndex{point_index}) != recipes[i].vertices.end())
+                    {
+                        context.source = i;
+                        break;
+                    }
+                fail(GeometryErrorCode::InvalidInput, "Nonfinite Ordinary aggregate source point.");
+            }
+        work.charge(point_storage_bytes(point) - sizeof(DynamicPoint));
+    }
     struct Incidence
     {
         std::size_t tetra;
         unsigned face;
         int orientation;
     };
-    std::map<std::pair<int, std::array<std::uint64_t, 3>>, Incidence> boundaries;
+    std::map<std::pair<int, std::array<OrdinaryAggregatePointIndex, 3>>, Incidence> boundaries;
     Sum volume;
     for (std::size_t i = 0; i < recipes.size(); ++i)
     {
@@ -1104,38 +1144,31 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
             fail(GeometryErrorCode::InvalidInput, "Invalid Ordinary aggregate stream sign.");
         for (unsigned k = 0; k < 4; ++k)
         {
-            for (auto x : t.vertices[k].value)
-                if (!std::isfinite(x))
-                    fail(GeometryErrorCode::InvalidInput, "Nonfinite Ordinary aggregate source.");
-            auto [it, fresh] = points.try_emplace(t.vertex_ids[k], t.vertices[k]);
-            if (fresh)
-                work.charge(
-                    sizeof(decltype(points)::value_type) + 4 * sizeof(void*) + point_storage_bytes(t.vertices[k]));
-            else if (it->second.value != t.vertices[k].value || it->second.supports() != t.vertices[k].supports())
-                fail(GeometryErrorCode::ProvenanceMismatch,
-                    "Ordinary aggregate source identity changed its immutable point.");
+            if (t.vertices[k].value >= batch.points.size())
+                fail(GeometryErrorCode::InvalidInput, "Ordinary aggregate source point index is out of range.");
             for (unsigned j = 0; j < k; ++j)
-                if (t.vertex_ids[k] == t.vertex_ids[j])
-                    fail(GeometryErrorCode::InvalidTopology, "Repeated source tetra vertex identity.");
+                if (t.vertices[k] == t.vertices[j])
+                    fail(GeometryErrorCode::InvalidTopology, "Repeated source tetra point index.");
         }
+        const SourceTetra source{&batch, &t};
         const auto orientation = predicate(
             [&]
             {
                 return predicates::orientation(
-                    {t.vertices[0].value, t.vertices[1].value, t.vertices[2].value, t.vertices[3].value});
+                    {source.point(0).value, source.point(1).value, source.point(2).value, source.point(3).value});
             },
             work);
         const auto d = orientation.value;
         work.op(64);
         if (!std::isfinite(d) || orientation.sign == predicates::Sign::Unresolved || d == 0)
             fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate source orientation is unresolved.");
-        impl->orientations.push_back(orientation);
+        impl->orientations[i] = orientation;
         volume.add(product(t.sign, quotient(std::abs(d), 6)));
         for (unsigned f = 0; f < 4; ++f)
         {
-            std::array<std::uint64_t, 3> ids{};
+            std::array<OrdinaryAggregatePointIndex, 3> ids{};
             for (unsigned k = 0; k < 3; ++k)
-                ids[k] = t.vertex_ids[tetra_faces[f][k]];
+                ids[k] = t.vertices[tetra_faces[f][k]];
             int parity = d > 0 ? 1 : -1;
             for (unsigned a = 0; a < 3; ++a)
                 for (unsigned b = a + 1; b < 3; ++b)
@@ -1161,7 +1194,21 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
     work.stats.source_pieces = recipes.size();
     work.sync();
     impl->initial = work.stats;
+    // These are the only mutations of the caller batch. All operations that
+    // can throw, including metadata and cumulative-budget admission, finished.
+    static_assert(std::is_nothrow_move_assignable_v<decltype(batch.points)>);
+    static_assert(std::is_nothrow_move_assignable_v<decltype(batch.tetrahedra)>);
+    impl->batch.points = std::move(batch.points);
+    impl->batch.tetrahedra = std::move(batch.tetrahedra);
     impl_ = std::move(impl);
+}
+std::span<const Point<ArithmeticMode::Ordinary>> OrdinaryAggregateSource::points() const& noexcept
+{
+    return impl_->batch.points;
+}
+std::span<const OrdinaryAggregateTetra> OrdinaryAggregateSource::tetrahedra() const& noexcept
+{
+    return impl_->batch.tetrahedra;
 }
 std::size_t OrdinaryAggregateSource::storage_bytes() const noexcept
 {
@@ -1183,6 +1230,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     work.context = &context;
     work.stage = context.stage;
     work.sync();
+    const auto source_tetra = [&](std::size_t i) { return SourceTetra{&impl_->batch, &impl_->batch.tetrahedra[i]}; };
     OrdinaryAggregateResult result;
     if (donors.size() > result.groups.max_size() / 2)
         work_limit("result_groups", 0, donors.size(), result.groups.max_size() / 2);
@@ -1300,11 +1348,11 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (std::size_t di = 0; di < donors.size(); ++di)
         if (donors[di].gas)
             phase_cuts[di] = phase_cut(*donors[di].gas);
-    work.charge(impl_->tetrahedra.size() *
+    work.charge(impl_->batch.tetrahedra.size() *
                 (sizeof(std::array<Support, 4>) + sizeof(std::map<const void*, Support>) + sizeof(DefiningCache)));
-    std::vector<std::array<Support, 4>> source_faces(impl_->tetrahedra.size());
-    std::vector<DefiningCache> defining_caches(impl_->tetrahedra.size());
-    std::vector<std::map<const void*, Support>> support_catalogs(impl_->tetrahedra.size());
+    std::vector<std::array<Support, 4>> source_faces(impl_->batch.tetrahedra.size());
+    std::vector<DefiningCache> defining_caches(impl_->batch.tetrahedra.size());
+    std::vector<std::map<const void*, Support>> support_catalogs(impl_->batch.tetrahedra.size());
     for (auto& faces : source_faces)
         for (unsigned j = 0; j < 4; ++j)
         {
@@ -1332,7 +1380,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             support.expression.normal = original.normal;
             support.expression.offset = original.offset;
             for (unsigned i = 0; i < 4; ++i)
-                if (has_any_support(impl_->tetrahedra[ti].vertices[i].dynamic(), original.authorities))
+                if (has_any_support(source_tetra(ti).point(i).dynamic(), original.authorities))
                     support.expression.source_incidence |= 1u << i;
         }
         unsigned pivot = 0;
@@ -1342,7 +1390,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         if (original.normal[pivot] == 0 || cut.normal[pivot] == 0)
             fail(GeometryErrorCode::UnresolvedArithmetic, "Aggregate original support orientation is unresolved.");
         const auto orientation = cut.orientation * ((original.normal[pivot] > 0) == (cut.normal[pivot] > 0) ? 1 : -1);
-        auto values = source_distances(impl_->tetrahedra[ti], support, orientation, work);
+        auto values = source_distances(source_tetra(ti), support, orientation, work);
         work.charge(sizeof(decltype(distance_cache)::value_type) + 4 * sizeof(void*));
         return distance_cache.emplace(key, values).first->second;
     };
@@ -1405,7 +1453,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     // tolerance substitutes for this structural coverage proof.
     context.stage = OrdinaryAggregateContext::Stage::Coverage;
     work.stage = context.stage;
-    for (std::size_t ordinal = 0; ordinal < impl_->tetrahedra.size(); ++ordinal)
+    for (std::size_t ordinal = 0; ordinal < impl_->batch.tetrahedra.size(); ++ordinal)
     {
         context.source = ordinal;
         for (unsigned retry = 0; retry < 2; ++retry)
@@ -1415,7 +1463,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             {
                 std::vector<Poly> remainder;
                 remainder.push_back(
-                    tetra(impl_->tetrahedra[ordinal], source_faces[ordinal], defining_caches[ordinal], work));
+                    tetra(source_tetra(ordinal), source_faces[ordinal], defining_caches[ordinal], work));
                 work.stats.peak_remainders = std::max(work.stats.peak_remainders, remainder.size());
                 for (std::size_t donor_index = 0; donor_index < cuts.size(); ++donor_index)
                 {
@@ -1471,7 +1519,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             const auto& donor = donors[di];
             context.donor = donor.id;
             bool used = false;
-            for (const auto& t : impl_->tetrahedra)
+            for (const auto& t : impl_->batch.tetrahedra)
                 used |= t.sign == sign;
             if (!used)
                 continue;
@@ -1493,14 +1541,15 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     std::array<bool, 3> positive{};
                     V pivot{};
                     long double scale = 0;
-                    const auto& first = *std::find_if(impl_->tetrahedra.begin(), impl_->tetrahedra.end(),
+                    const auto& first = *std::find_if(impl_->batch.tetrahedra.begin(), impl_->batch.tetrahedra.end(),
                         [&](const auto& t) { return t.sign == sign; });
-                    pivot = first.vertices[0].value;
+                    pivot = impl_->batch.points[first.vertices[0].value].value;
                     auto closest = std::numeric_limits<long double>::infinity();
-                    for (const auto& t : impl_->tetrahedra)
+                    for (const auto& t : impl_->batch.tetrahedra)
                         if (t.sign == sign)
-                            for (const auto& p : t.vertices)
+                            for (const auto index : t.vertices)
                             {
+                                const auto& p = impl_->batch.points[index.value];
                                 if (!retry)
                                 {
                                     if (p.value < pivot)
@@ -1522,11 +1571,12 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                                 else if (pivot < p.value)
                                     pivot = p.value;
                             }
-                    for (const auto& t : impl_->tetrahedra)
+                    for (const auto& t : impl_->batch.tetrahedra)
                         if (t.sign == sign)
-                            for (const auto& p : t.vertices)
+                            for (const auto index : t.vertices)
                                 for (unsigned k = 0; k < 3; ++k)
-                                    scale = std::max(scale, std::abs(p.value[k] - pivot[k]));
+                                    scale =
+                                        std::max(scale, std::abs(impl_->batch.points[index.value].value[k] - pivot[k]));
                     int exponent = 0;
                     std::frexp(scale, &exponent);
                     scale = represented(std::ldexp(1.L, exponent));
@@ -1537,14 +1587,14 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         std::array<predicates::Result, 4> coefficients;
                     };
                     std::vector<Witness> witnesses;
-                    work.charge(impl_->tetrahedra.size() * sizeof(Witness));
-                    for (std::size_t ti = 0; ti < impl_->tetrahedra.size(); ++ti)
+                    work.charge(impl_->batch.tetrahedra.size() * sizeof(Witness));
+                    for (std::size_t ti = 0; ti < impl_->batch.tetrahedra.size(); ++ti)
                     {
                         context.source = ti;
-                        const auto& t = impl_->tetrahedra[ti];
+                        const auto& t = impl_->batch.tetrahedra[ti];
                         if (t.sign != sign)
                             continue;
-                        auto bulk = tetra(t, source_faces[ti], defining_caches[ti], work);
+                        auto bulk = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], work);
                         // Replay immutable supports in reverse order on the single
                         // reconstruction retry; rounded child coordinates are not inputs.
                         for (std::size_t k = 0; k < cuts[di].size() && !bulk.faces.empty(); ++k)
@@ -1559,7 +1609,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         Witness witness;
                         witness.tetra = ti;
                         if (!retry)
-                            witness.coefficients = integration_coefficients(t, pivot, scale, work);
+                            witness.coefficients = integration_coefficients(source_tetra(ti), pivot, scale, work);
                         if (!donor.pure_gas && !donor.pure_carrier)
                         {
                             context.cut = cuts[di].size(); // The phase support follows donor supports.
@@ -1570,7 +1620,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             // donor intersections introduce dependent crossings.
                             Poly phase_source;
                             if (retry)
-                                phase_source = tetra(t, source_faces[ti], defining_caches[ti], work);
+                                phase_source = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], work);
                             else
                             {
                                 // Bulk remains immutable for its own channel.
@@ -1606,7 +1656,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                                 return w.bulk;
                             return channel == 1 ? w.gas : w.carrier;
                         };
-                        std::vector<std::array<bool, 4>> present(impl_->tetrahedra.size());
+                        std::vector<std::array<bool, 4>> present(impl_->batch.tetrahedra.size());
                         work.charge(present.size() * sizeof(std::array<bool, 4>));
                         for (const auto& w : witnesses)
                             for (const auto& f : poly(w).faces)

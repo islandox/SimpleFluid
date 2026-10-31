@@ -319,16 +319,16 @@ bool ConstructionRegistry<Mode>::derived_from(
         details::active_work->pair();
         if (target->construction && node == target->construction)
             return true;
-        if (node->kind == details::GeometryConstruction::Kind::Source)
-            return node->source == target;
-        if (node->kind == details::GeometryConstruction::Kind::Clip)
+        if (node->kind() == details::GeometryConstruction::Kind::Source)
+            return node->source().source == target;
+        if (node->kind() == details::GeometryConstruction::Kind::Clip)
         {
-            if (!node->clip || (node->outside && !node->clip->construct_outside))
+            if (!node->clip().clip || (node->clip().outside && !node->clip().clip->construct_outside))
                 return false;
-            node = node->clip->parent;
+            node = node->clip().clip->parent;
         }
-        else if (node->kind == details::GeometryConstruction::Kind::Rebase)
-            node = node->parent;
+        else if (node->kind() == details::GeometryConstruction::Kind::Rebase)
+            node = node->rebase().parent;
         else
             return false;
     }
@@ -443,9 +443,9 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
             emitted.emplace(node.get(), emit_root(root->second));
             continue;
         }
-        if (node->kind == Node::Kind::Source)
+        if (node->kind() == Node::Kind::Source)
         {
-            const auto& source = node->source;
+            const auto& source = node->source().source;
             const auto found = geometry_roots.find(source.get());
             if (!source || found == geometry_roots.end())
                 fail(GeometryErrorCode::ProvenanceMismatch,
@@ -453,7 +453,9 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
             emitted.emplace(node.get(), emit_root(found->second));
             continue;
         }
-        const auto parent = node->kind == Node::Kind::Clip && node->clip ? node->clip->parent : node->parent;
+        const auto parent = node->kind() == Node::Kind::Clip
+                                ? (node->clip().clip ? node->clip().clip->parent : nullptr)
+                                : node->rebase().parent;
         if (!finish)
         {
             details::active_work->charge(1, sizeof(const Node*) + 4 * sizeof(void*));
@@ -470,20 +472,20 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
         Record record;
         record.parent = emitted.at(parent.get());
         Reference reference{result.records.size(), 0};
-        if (node->kind == Node::Kind::Rebase)
+        if (node->kind() == Node::Kind::Rebase)
         {
             record.kind = Record::Kind::Rebase;
-            record.root = input_root(node->rebase_input);
+            record.root = input_root(node->rebase().input);
             root_id(record.root);
         }
-        else if (node->kind == Node::Kind::Clip && node->clip)
+        else if (node->kind() == Node::Kind::Clip && node->clip().clip)
         {
-            const auto& clip = *node->clip;
+            const auto& clip = *node->clip().clip;
             details::require_mode(clip.mode, Mode);
-            reference.side = node->outside ? 1 : 0;
+            reference.side = node->clip().outside ? 1 : 0;
             if (reference.side && !clip.construct_outside)
                 fail(GeometryErrorCode::ProvenanceMismatch, "Construction references an unbuilt complement.");
-            if (const auto cached = clips.find(node->clip.get()); cached != clips.end())
+            if (const auto cached = clips.find(node->clip().clip.get()); cached != clips.end())
             {
                 reference.node = cached->second;
                 emitted.emplace(node.get(), reference);
@@ -506,7 +508,7 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
             }
             root_id(record.plane.key);
             details::active_work->charge(1, sizeof(const Clip*) + sizeof(std::size_t) + 4 * sizeof(void*));
-            clips.emplace(node->clip.get(), reference.node);
+            clips.emplace(node->clip().clip.get(), reference.node);
         }
         else
             fail(GeometryErrorCode::ProvenanceMismatch, "Unknown local construction recipe.");
@@ -541,12 +543,7 @@ DynamicConvexGeometryPtr rebase_geometry(const DynamicConvexGeometryPtr& source,
     else
         rebased->bounds =
             details::certification_kernel::transform<Mode>(original->bounds, original->frame, rebased->frame);
-    details::active_work->charge(1, sizeof(details::GeometryConstruction));
-    auto recipe = std::make_shared<details::GeometryConstruction>();
-    recipe->kind = details::GeometryConstruction::Kind::Rebase;
-    recipe->parent = details::construction_source<Mode>(original);
-    recipe->rebase_input = input;
-    rebased->construction = std::move(recipe);
+    rebased->construction = details::construction_rebase(details::construction_source<Mode>(original), input);
     ++details::statistics.constructions;
     return DynamicGeometryAccess::geometry(std::move(rebased));
 }
