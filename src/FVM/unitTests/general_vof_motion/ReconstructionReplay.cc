@@ -1,6 +1,34 @@
-/** @file algebraic_reconstruction_replay.hh
- * @brief Local replay of captured accepted-source reconstruction inputs; no physical qualification claim.
- */
+/** Captured accepted-source reconstruction replay; no physical qualification claim. */
+#include "FVM/GeneralVoF.hh"
+#include "geometry/PLIC/PlaneMeasure.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include <Teuchos_CommHelpers.hpp>
+#include <Tpetra_Core.hpp>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid::VoF::test::motion
+{
+namespace AMR = SimpleFluid::Meshes::AMR;
 namespace algebraic_replay
 {
 constexpr auto mode = ArithmeticMode::Ordinary;
@@ -497,3 +525,5 @@ TEST(GeneralVoFMotionAccuracy, ReplayCapturedAlgebraicReconstruction)
         std::cout << report.str();
 }
 } // namespace algebraic_replay
+
+} // namespace SimpleFluid::VoF::test::motion

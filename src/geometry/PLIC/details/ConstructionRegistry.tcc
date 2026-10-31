@@ -567,8 +567,7 @@ std::shared_ptr<const DynamicConvexGeometry::Impl> input_plane_source(
         plane->normal = point<Mode>(input.normal);
         plane->anchor = scaled<Mode>(point<Mode>(input.anchor) - point<Mode>(frame.origin), -frame.exponent);
         plane->offset = scaled<Mode>(Scalar(input.offset), -frame.exponent);
-        plane->native_support =
-            details::ordinary_native::input_support_packet(input.normal, input.anchor, input.offset);
+        plane->native_support = details::ordinary_native::make_input_support(input.normal, input.anchor, input.offset);
     }
     else
     {

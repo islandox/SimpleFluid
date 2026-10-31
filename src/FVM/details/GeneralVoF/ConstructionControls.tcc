@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/ConstructionRegistry.hh"
 
 namespace SimpleFluid::VoF::construction_controls

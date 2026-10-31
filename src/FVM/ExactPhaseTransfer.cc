@@ -23,7 +23,10 @@ namespace AMR = Meshes::AMR;
 namespace wire = AMR::adaptive_detail;
 using H = AMR::DistributedAdaptiveHierarchy;
 using Key = AMR::AdaptiveCellKey;
-using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
+using M = PLIC::GeometryMeasure<ArithmeticMode::Exact>;
+using ExactPhases = PLIC::PhaseMeasures<ArithmeticMode::Exact>;
+using ExactFragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>;
+using OrdinaryGeometry = PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>;
 M abs(const M& value)
 {
     return value.sign() < 0 ? value.scaled(-1) : value;
@@ -50,7 +53,7 @@ struct WorkingCapsule
     Key key;
     std::uint64_t revision = 0;
     PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
-    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases;
+    ExactPhases phases;
     PLIC::PolyhedralInterface geometry;
     bool geometry_ready = false;
     WorkingError error;
@@ -359,8 +362,9 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
         c.phases.bulk != h.metrics(found->second).volume || !std::isfinite(c.phases.bulk) || c.phases.bulk <= 0 ||
         !std::isfinite(c.phases.gas) || !std::isfinite(c.phases.carrier) || c.phases.gas < 0 || c.phases.carrier < 0)
         throw std::invalid_argument("Finite source capsule ownership/geometry/phase differs.");
-    for (double bound : {c.roundoff.gas, c.roundoff.carrier, c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier, c.error.admitted_bound, c.error.phase_input_bound,
-             c.error.fit_bound, c.error.transferred_bound, c.error.fit_allocation_bound})
+    for (double bound : {c.roundoff.gas, c.roundoff.carrier, c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier,
+             c.error.admitted_bound, c.error.phase_input_bound, c.error.fit_bound, c.error.transferred_bound,
+             c.error.fit_allocation_bound})
         if (!std::isfinite(bound) || bound < 0)
             throw std::invalid_argument("Invalid finite source bound.");
     for (double value : {c.error.difference, c.error.native_conversion, c.error.fit_residual})
@@ -408,8 +412,9 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
     w.word(c.geometry_ready);
     plane(w, c.geometry);
     for (double value : {c.phases.bulk, c.phases.gas, c.phases.carrier, c.roundoff.gas, c.roundoff.carrier,
-             c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier, c.error.difference, c.error.admitted_bound, c.error.native_conversion, c.error.phase_input_bound,
-             c.error.fit_residual, c.error.fit_bound, c.error.transferred_bound, c.error.fit_allocation_bound})
+             c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier, c.error.difference, c.error.admitted_bound,
+             c.error.native_conversion, c.error.phase_input_bound, c.error.fit_residual, c.error.fit_bound,
+             c.error.transferred_bound, c.error.fit_allocation_bound})
         real(w, value);
     const auto put = [&](const M& value)
     {
@@ -853,10 +858,9 @@ struct ColumnRecord
     Key source, target;
     std::uint64_t source_gid = 0, target_gid = 0, target_revision = 0;
     int owner = -1;
-    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
+    OrdinaryGeometry geometry;
 };
-SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> raw_phases(
-    const WorkingCapsule& c, const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment)
+ExactPhases raw_phases(const WorkingCapsule& c, const ExactFragment& fragment)
 {
     if (!c.phases.gas.sign() || c.geometry.pure_carrier)
         return {fragment.volume(), {}, fragment.volume()};
@@ -978,7 +982,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     M::volume(*source.hierarchy->geometry(source.hierarchy->owned().at(finite_original.key))));
                 const auto& records = grouped.at(original.key);
                 const auto donor_geometry = source.hierarchy->geometry(source.hierarchy->owned().at(original.key));
-                std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> cover;
+                std::vector<OrdinaryGeometry> cover;
                 for (auto r : records)
                     cover.push_back(r->geometry);
                 donor_geometry->certify_partition(cover);
@@ -990,22 +994,19 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     throw std::invalid_argument("Exact phase source has no positive dominant geometric capacity.");
                 M raw_minor, raw_major;
                 std::optional<detail::ExactPhaseLabelMap> label_map;
-                std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> raw;
+                std::vector<ExactPhases> raw;
                 if (!whole)
                 {
                     for (auto r : records)
                     {
-                        auto phase = raw_phases(original,
-                            *SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
-                                *r->geometry));
+                        auto phase = raw_phases(original, *ExactFragment::from_geometry(*r->geometry));
                         raw_minor = raw_minor + (gas ? phase.gas : phase.carrier);
                         raw_major = raw_major + (gas ? phase.carrier : phase.gas);
                         raw.push_back(std::move(phase));
                     }
                     if ((raw_minor + raw_major).compare(original.phases.bulk))
                         throw std::invalid_argument("Raw exact overlap phase column does not fill actual source.");
-                    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> full{
-                        original.phases.bulk, gas ? raw_minor : raw_major, gas ? raw_major : raw_minor};
+                    ExactPhases full{original.phases.bulk, gas ? raw_minor : raw_major, gas ? raw_major : raw_minor};
                     label_map =
                         detail::ExactPhaseLabelMap::create(full, gas, physical_minor, original.error.fit_bound, limit);
                 }
@@ -1052,7 +1053,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                                wb = weight(out.phases.bulk, original.phases.bulk, limit);
                     out.accumulated_roundoff = {
                         product(original.accumulated_roundoff.gas, original.phases.gas.sign() ? wg : wb, limit),
-                        product(original.accumulated_roundoff.carrier, original.phases.carrier.sign() ? wc : wb, limit)};
+                        product(
+                            original.accumulated_roundoff.carrier, original.phases.carrier.sign() ? wc : wb, limit)};
                     out.error.difference = out.phases.gas + out.phases.carrier - out.phases.bulk;
                     out.error.transferred_bound = product(abs(original.error.difference), share, limit);
                     out.error.admitted_bound = product(original.error.admitted_bound, share, limit);

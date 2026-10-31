@@ -262,8 +262,8 @@ TEST(GeometryIdentityTest, RetainedSupportAncestrySurvivesCoincidenceAndNestedTr
 {
     namespace on = details::ordinary_native;
     const std::array<on::WidePoint, 3> points{{{0, 0, 0}, {1, -1, 0}, {0, 0, 1}}};
-    const auto first_support = on::input_support_packet({1, 1, 0}, {}, 0);
-    const auto second_support = on::input_support_packet({2, 2, 0}, {}, 0);
+    const auto first_support = on::make_input_support({1, 1, 0}, {}, 0);
+    const auto second_support = on::make_input_support({2, 2, 0}, {}, 0);
     ASSERT_NE(first_support, second_support);
     const auto first = details::NativeSupportAccess::face_support(points, {1, 1, 0}, first_support);
     const auto second = details::NativeSupportAccess::face_support(points, {1, 1, 0}, second_support);

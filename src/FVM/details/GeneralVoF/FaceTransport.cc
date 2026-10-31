@@ -29,6 +29,76 @@ PLIC::DynamicPhaseMeasures measures(long double q, long double g, long double l)
 {
     return {Math::make_value(q), Math::make_value(g), Math::make_value(l)};
 }
+std::array<long double, 2> integrate_translated_face_phases(std::span<const std::array<long double, 3>> vertices,
+    const PLIC::GeometryHalfspace& plane, long double shift, long double area, long double volume,
+    double volume_tolerance, std::size_t& plane_measurements)
+{
+    std::vector<long double> times{0, 1};
+    if (shift != 0)
+        for (const auto& p : vertices)
+        {
+            long double distance = -plane.offset;
+            for (unsigned a = 0; a < 3; ++a)
+                distance += plane.normal[a] * p[a];
+            const auto time = distance / shift;
+            if (time > 0 && time < 1)
+                times.push_back(time);
+        }
+    std::sort(times.begin(), times.end());
+    times.erase(std::unique(times.begin(), times.end()), times.end());
+    SimpleFluid::detail::CompensatedSum<long double> covered_gas, covered_liquid;
+    const auto sample = [&](long double time)
+    {
+        auto translated = plane;
+        translated.offset = static_cast<double>(static_cast<long double>(plane.offset) + shift * time);
+        auto opposite = translated;
+        for (auto& n : opposite.normal)
+            n = -n;
+        opposite.offset = -opposite.offset;
+        const auto gas_area = PLIC::ordinary_plane_face_area(vertices, translated, plane.anchor);
+        const auto liquid_area = PLIC::ordinary_plane_face_area(vertices, opposite, plane.anchor);
+        plane_measurements += 2;
+        for (const auto& result : {gas_area, liquid_area})
+            if (result.status != PLIC::PlaneMeasureStatus::Resolved || result.area > area || result.area < 0)
+                throw PLIC::GeometryError(
+                    PLIC::GeometryErrorCode::UnresolvedArithmetic, "Face phase area is numerically unresolved.");
+        return std::array<long double, 2>{gas_area.area, liquid_area.area};
+    };
+    // Polygon area is quadratic between vertex crossings.
+    // Interior Gauss points also handle the discontinuous
+    // face-parallel contact without counting an endpoint twice.
+    for (std::size_t i = 1; i < times.size(); ++i)
+    {
+        const auto half = (times[i] - times[i - 1]) / 2;
+        const auto midpoint = (times[i] + times[i - 1]) / 2;
+        const auto distance = half / std::sqrt(3.L);
+        const auto left = sample(midpoint - distance), right = sample(midpoint + distance);
+        covered_gas += half * (left[0] + right[0]);
+        covered_liquid += half * (left[1] + right[1]);
+    }
+    const auto gas_amount = volume * (covered_gas.value() / area);
+    const auto liquid_amount = volume * (covered_liquid.value() / area);
+    if (gas_amount < 0 || liquid_amount < 0 || gas_amount > volume || liquid_amount > volume ||
+        !std::isfinite(gas_amount) || !std::isfinite(liquid_amount) ||
+        std::abs(gas_amount + liquid_amount - volume) > volume_tolerance * volume)
+        throw PLIC::GeometryError(
+            PLIC::GeometryErrorCode::UnresolvedArithmetic, "Face phase integral is numerically unresolved.");
+    // The smaller face integral need not be the donor-cell
+    // minority. Measure both sides directly before choosing
+    // the complement, retaining any representable small stream.
+    std::array<long double, 2> amounts;
+    if (gas_amount <= liquid_amount)
+    {
+        amounts[0] = gas_amount;
+        amounts[1] = volume - gas_amount;
+    }
+    else
+    {
+        amounts[1] = liquid_amount;
+        amounts[0] = volume - liquid_amount;
+    }
+    return amounts;
+}
 void write_stream(wire::Writer& w, const Stream& s)
 {
     w.word(s.face);
@@ -605,13 +675,7 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
             {
                 const auto sum = sums[a].value();
                 local[a] = static_cast<double>(sum.value);
-                const auto narrowing = [&]
-                {
-                    if constexpr (mode == ArithmeticMode::Ordinary)
-                        return publication[a].value().value;
-                    else
-                        return sum.absolute_error;
-                }();
+                const auto narrowing = publication[a].value().value;
                 local[2 + a] = fp::upper_double(fp::upward(narrowing + std::abs(sum.value - local[a])));
                 local[4 + a] = fp::upper_double(sums[2 + a].value().value);
                 local[6 + a] = fp::upper_double(sums[4 + a].value().value);
@@ -889,75 +953,11 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                             }
                             else
                             {
-                                std::vector<long double> times{0, 1};
-                                if (shift != 0)
-                                    for (const auto& p : vertices)
-                                    {
-                                        long double distance = -plane.offset;
-                                        for (unsigned a = 0; a < 3; ++a)
-                                            distance += plane.normal[a] * p[a];
-                                        const auto time = distance / shift;
-                                        if (time > 0 && time < 1)
-                                            times.push_back(time);
-                                    }
-                                std::sort(times.begin(), times.end());
-                                times.erase(std::unique(times.begin(), times.end()), times.end());
-                                SimpleFluid::detail::CompensatedSum<long double> covered_gas, covered_liquid;
-                                const auto sample = [&](long double time)
-                                {
-                                    auto translated = plane;
-                                    translated.offset =
-                                        static_cast<double>(static_cast<long double>(plane.offset) + shift * time);
-                                    auto opposite = translated;
-                                    for (auto& n : opposite.normal)
-                                        n = -n;
-                                    opposite.offset = -opposite.offset;
-                                    const auto gas_area =
-                                        PLIC::ordinary_plane_face_area(vertices, translated, plane.anchor);
-                                    const auto liquid_area =
-                                        PLIC::ordinary_plane_face_area(vertices, opposite, plane.anchor);
-                                    ledger.diagnostics.plane_measurements += 2;
-                                    for (const auto& result : {gas_area, liquid_area})
-                                        if (result.status != PLIC::PlaneMeasureStatus::Resolved || result.area > area ||
-                                            result.area < 0)
-                                            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
-                                                "Face phase area is numerically unresolved.");
-                                    return std::array<long double, 2>{gas_area.area, liquid_area.area};
-                                };
-                                // Polygon area is quadratic between vertex crossings.
-                                // Interior Gauss points also handle the discontinuous
-                                // face-parallel contact without counting an endpoint twice.
-                                for (std::size_t i = 1; i < times.size(); ++i)
-                                {
-                                    const auto half = (times[i] - times[i - 1]) / 2;
-                                    const auto midpoint = (times[i] + times[i - 1]) / 2;
-                                    const auto distance = half / std::sqrt(3.L);
-                                    const auto left = sample(midpoint - distance), right = sample(midpoint + distance);
-                                    covered_gas += half * (left[0] + right[0]);
-                                    covered_liquid += half * (left[1] + right[1]);
-                                }
-                                const auto gas_amount = s.volume * (covered_gas.value() / area);
-                                const auto liquid_amount = s.volume * (covered_liquid.value() / area);
-                                if (gas_amount < 0 || liquid_amount < 0 || gas_amount > s.volume ||
-                                    liquid_amount > s.volume || !std::isfinite(gas_amount) ||
-                                    !std::isfinite(liquid_amount) ||
-                                    std::abs(gas_amount + liquid_amount - s.volume) >
-                                        data.options.reconstruction.volume_tolerance * s.volume)
-                                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
-                                        "Face phase integral is numerically unresolved.");
-                                // The smaller face integral need not be the donor-cell
-                                // minority. Measure both sides directly before choosing
-                                // the complement, retaining any representable small stream.
-                                if (gas_amount <= liquid_amount)
-                                {
-                                    s.gas_high = gas_amount;
-                                    s.liquid_high = s.volume - gas_amount;
-                                }
-                                else
-                                {
-                                    s.liquid_high = liquid_amount;
-                                    s.gas_high = s.volume - liquid_amount;
-                                }
+                                const auto integrated = integrate_translated_face_phases(vertices, plane, shift, area,
+                                    s.volume, data.options.reconstruction.volume_tolerance,
+                                    ledger.diagnostics.plane_measurements);
+                                s.gas_high = integrated[0];
+                                s.liquid_high = integrated[1];
                             }
                         }
                         catch (const PLIC::GeometryError& e)

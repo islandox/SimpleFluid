@@ -1,8 +1,37 @@
-/** @file algebraic_motion_qualification.hh
- * @brief Independent manufactured-motion oracle and opt-in algebraic VoF qualification campaign.
- */
-// Included inside testGeneralVoFMotionAccuracy.cc's anonymous namespace, after
-// its independent hull/area oracle. This is test-only manufactured transport.
+/** Independent manufactured-motion oracle and opt-in algebraic VoF qualification. */
+#include "FVM/GeneralVoF.hh"
+#include "FVM/details/VoFFailure.hh"
+#include "ReferenceOracle.hh"
+#include "geometry/PLIC/PlaneMeasure.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/unitTests/point_export_test_helpers.hh"
+#include <Teuchos_CommHelpers.hpp>
+#include <Tpetra_Core.hpp>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <gtest/gtest.h>
+#include <iomanip>
+#include <iostream>
+#include <iterator>
+#include <limits>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid::VoF::test::motion
+{
+namespace AMR = SimpleFluid::Meshes::AMR;
 namespace algebraic_motion
 {
 using XYZ = std::array<long double, 3>;
@@ -96,28 +125,6 @@ Polygon reference_polygon(Motion m, long double t)
             y += t * v[1];
         }
         p.push_back({x, y});
-    }
-    return p;
-}
-Polygon intersection(Polygon p, const Polygon& clip)
-{
-    for (std::size_t j = 0; j < clip.size() && !p.empty(); ++j)
-    {
-        Polygon next;
-        const auto a = clip[j], b = clip[(j + 1) % clip.size()];
-        for (std::size_t i = 0; i < p.size(); ++i)
-        {
-            const auto u = p[i], v = p[(i + 1) % p.size()];
-            const auto du = cross(a, b, u), dv = cross(a, b, v);
-            if (du >= 0)
-                next.push_back(u);
-            if ((du < 0 && dv > 0) || (du > 0 && dv < 0))
-            {
-                const auto f = du / (du - dv);
-                next.push_back({u[0] + f * (v[0] - u[0]), u[1] + f * (v[1] - u[1])});
-            }
-        }
-        p = std::move(next);
     }
     return p;
 }
@@ -1430,3 +1437,5 @@ TEST(GeneralVoFMotionAccuracy, ActualNativeFaceWitnessesRejectHiddenSpatialCount
         validate_single_stream_face(vertical({.5L, .0625L}, {.5L, .1875L}, 0), Motion::PlanarPatch, 0, .25L, 34),
         std::invalid_argument);
 }
+
+} // namespace SimpleFluid::VoF::test::motion

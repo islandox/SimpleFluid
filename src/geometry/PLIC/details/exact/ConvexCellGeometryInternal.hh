@@ -590,8 +590,6 @@ P authority_point(std::span<const char> packet);
 P displacement_point(std::span<const char> packet);
 const P& authority_point(const PointIdentity<ArithmeticMode::Exact>& identity);
 const P& displacement_point(const DisplacementIdentity<ArithmeticMode::Exact>& identity);
-std::vector<char> displacement_packet(const P& p);
-std::vector<char> point_packet(const P& p);
 } // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC

@@ -18,6 +18,23 @@ redistribution and inherited uncertainty calculations. `Wire` owns shared
 record encoding, without selecting communication order. Operation-specific
 records and codecs stay with their operation.
 
+Shared state support has separate compiled providers within FVM:
+
+| Provider | Responsibility |
+| --- | --- |
+| `GeneralVoFState` | Accepted-state validation, inventories, catalog refresh, and source observation checks |
+| `Wire` | Scalar, phase, and interface codecs; its declaration header does not include the accepted-state layout |
+| `Reconstruction` | Samples, stencils, fitting, and observed owner reconstruction |
+| `RetainedStorage` | Retained allocation accounting and admission |
+| `OperationAgreement` | Transaction identities and collective option agreement |
+| `HaloExchange` | Complete canonical node fans and owner phase exchange |
+| `PlaneExchange` | Full and requested-owner plane exchange, including reply-cache admission |
+
+Each provider owns its supported explicit instantiations. Reconstruction work
+observation surrounds fitting itself; reply-codec calibration remains outside
+that measurement. Moving these responsibilities does not move collective stages
+or change their failure boundaries.
+
 `PhasePublication` owns finite owned-cell array assembly and the shared
 eight-value independent phase-conservation reduction summary and check. Each
 transport coordinator retains its accumulation and narrowing policy, collective
@@ -43,6 +60,13 @@ and diagnostics without inferring policy from nonempty records. Remap agrees
 the schema and target, authenticates overlap requests, transfers contributions,
 certifies recipient coverage and installs phase inventories and their evidence
 together. A source-pinned trial remains responsible for observation validation.
+
+After common authentication and the no-motion path, moving Ordinary transport
+selects homogeneous face or interface-local transport. The remaining finite
+partition body is compiled only for BoundedCertification. Local limiter ratios
+and translated-face phase integrals have named computation boundaries; their
+coordinators retain packet exchange, recovery, diagnostic accounting, and final
+publication order.
 
 ## Solver transaction ownership
 
@@ -86,6 +110,7 @@ The private `GeneralVoF/` directory contains independently compiled components:
 | `FaceRates` | Phase authority, canonical rate evidence and flow workspace; rates, integrated volumes and topology |
 | `AdaptedFaceTransfer` | Source/target geometry and remap evidence; common-refinement face transfer and closure |
 | `OwnedFaceTransfer` | Source/target canonical identities and rates; ownership-only face transfer |
+| `StateTrace` | Borrowed finite fields and diagnostics; lazy rank-local advancement trace emission |
 
 These components have no access to the solver coordinator or its accepted-state
 pointer. Face transfer borrows pinned source/target views and returns detached
@@ -93,6 +118,10 @@ face fields, projection evidence and divergence. Phase storage returns separate
 finite mass/error or rational mass results. Exact storage and diagnostics use
 explicit specializations compiled in `exact/`; their shared rational reduction
 retains the existing codec and storage admission checks.
+
+`StateTrace` receives a borrowed view rather than the private accepted-state or
+resource bundle. Derived trace values and cell/face output are evaluated inside
+the existing opt-in trace guard; trace emission introduces no collectives.
 
 The architecture check rejects component includes of the coordinator and
 rejects whole-state/resource dependencies in the narrow numerical components.
@@ -119,6 +148,18 @@ collective placement; it does not extend allocation-failure guarantees.
 
 ## Compilation and resource contracts
 
+The motion-accuracy executable compiles its independent polygon oracle, native
+fixtures, qualification cases, and captured reconstruction replay as separate
+sources. Test-only headers declare their named interfaces; the oracle uses STL
+geometry calculations rather than production PLIC cuts or measures. The main
+test source owns the single environment registration. Qualification cases retain
+their existing names, horizons, gates, and opt-in execution controls.
+
+Small general and finite test fixtures share hierarchy and control builders,
+while their callers supply domain identities and independent phase values.
+FVM-only test membership is an explicit CMake list, preserving the link boundary
+against dependencies on the solver library.
+
 Private `.hh` files declare interfaces and retain simple one-line members.
 Heavy templates live in `.tcc` providers under `details/GeneralVoF/`. Their
 supported modes are instantiated by `.cc` units under each owning component's
@@ -129,6 +170,9 @@ are ordinary compiled implementations, not explicit-instantiation statements.
 Declaration and provider includes precede
 code; only `.ipp` definitions may be included at the end of a header. Public
 headers never include compiled providers.
+
+The state-support providers retain their existing concrete template definitions
+and explicit instantiations together in their owning `.cc` files.
 
 New numerical translation units inherit the owning component's strict floating
 point, PGO, PCH and unity-build policy. Internal functions stay hidden inside

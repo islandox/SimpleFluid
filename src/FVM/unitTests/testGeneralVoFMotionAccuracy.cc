@@ -1,9 +1,4 @@
-#include "geometry/unitTests/point_export_test_helpers.hh"
-#include "FVM/GeneralVoF.hh"
-#include "FVM/details/VoFFailure.hh"
-#include "geometry/PLIC/PlaneMeasure.hh"
-#include "geometry/mesh/AMR/ExtrudedAMR.hh"
-#include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "general_vof_motion/MotionFixtures.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -11,213 +6,16 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <map>
-#include <set>
-#include <iterator>
-#include <optional>
-#include <stdexcept>
 #include <gtest/gtest.h>
-#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <string>
+#include <vector>
 
-namespace
+namespace SimpleFluid::VoF::test::motion
 {
-using namespace SimpleFluid;
-using namespace SimpleFluid::VoF;
-namespace AMR = SimpleFluid::Meshes::AMR;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-constexpr long double shear = .25L, speed = 1.L / 16, dt = 1.L / 64;
-using XY = std::array<long double, 2>;
-using Polygon = std::vector<XY>;
-
-// Test-local monotone hull, half-plane clipping and shoelace integration. Native
-// points supply the cell shape only; no production PLIC cuts/measures form the oracle.
-long double cross(XY a, XY b, XY c)
-{
-    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-}
-Polygon hull(Polygon p)
-{
-    std::sort(p.begin(), p.end());
-    p.erase(std::unique(p.begin(), p.end()), p.end());
-    Polygon q;
-    for (const auto& a : p)
-    {
-        while (q.size() > 1 && cross(q[q.size() - 2], q.back(), a) <= 0)
-            q.pop_back();
-        q.push_back(a);
-    }
-    const auto lower = q.size();
-    for (auto i = p.rbegin() + 1; i != p.rend(); ++i)
-    {
-        while (q.size() > lower && cross(q[q.size() - 2], q.back(), *i) <= 0)
-            q.pop_back();
-        q.push_back(*i);
-    }
-    q.pop_back();
-    return q;
-}
-long double area(const Polygon& p)
-{
-    long double twice = 0;
-    for (std::size_t i = 0; i < p.size(); ++i)
-        twice += p[i][0] * p[(i + 1) % p.size()][1] - p[i][1] * p[(i + 1) % p.size()][0];
-    return std::abs(twice) / 2;
-}
-long double clipped_area(const Polygon& p, long double time, bool gas)
-{
-    Polygon cut;
-    const auto distance = [&](XY a)
-    {
-        const auto d = a[0] + 2 * speed * time * a[1] - (.5L + speed * time);
-        return gas ? d : -d;
-    };
-    for (std::size_t i = 0; i < p.size(); ++i)
-    {
-        const auto a = p[i], b = p[(i + 1) % p.size()];
-        const auto da = distance(a), db = distance(b);
-        if (da <= 0)
-            cut.push_back(a);
-        if ((da < 0 && db > 0) || (da > 0 && db < 0))
-        {
-            const auto t = da / (da - db);
-            cut.push_back({a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])});
-        }
-    }
-    return area(cut);
-}
-struct ReferenceCell
-{
-    Polygon xy;
-    long double height = 0;
-    long double volume() const { return area(xy) * height; }
-    long double phase(long double time, bool gas) const { return clipped_area(xy, time, gas) * height; }
-};
-ReferenceCell reference_cell(const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& shape)
-{
-    Polygon points;
-    long double bottom = std::numeric_limits<long double>::max(), top = -bottom;
-    for (const auto& p : PLIC::test::exported_points(*shape))
-    {
-        points.push_back({p.value[0] - shear * p.value[1], p.value[1]});
-        bottom = std::min(bottom, p.value[2]);
-        top = std::max(top, p.value[2]);
-    }
-    return {hull(std::move(points)), top - bottom};
-}
-std::shared_ptr<const GeneralVoF> motion_fixture(
-    GeneralVoFTransportBackend backend = GeneralVoFTransportBackend::SweptPartition)
-{
-    AMR::ExtrudedAMRGrid grid;
-    for (unsigned y = 0; y < 3; ++y)
-        for (unsigned x = 0; x < 5; ++x)
-            grid.xy_nodes.push_back({x / 4. + double(shear) * y / 2., y / 2., 0});
-    for (unsigned y = 0; y < 2; ++y)
-        for (unsigned x = 0; x < 4; ++x)
-        {
-            const unsigned p = 5 * y + x;
-            grid.base_cells.push_back({p, p + 1, p + 6, p + 5});
-        }
-    for (unsigned x = 0; x < 4; ++x)
-    {
-        grid.boundaries.push_back({x, x + 1, "wall"});
-        grid.boundaries.push_back({10 + x, 11 + x, "wall"});
-    }
-    for (unsigned y = 0; y < 2; ++y)
-    {
-        grid.boundaries.push_back({5 * y, 5 * (y + 1), "wall"});
-        grid.boundaries.push_back({5 * y + 4, 5 * (y + 1) + 4, "wall"});
-    }
-    grid.z_edges = {0, .5, 1};
-    const auto comm = Tpetra::getDefaultComm();
-    std::vector<std::uint64_t> owned;
-    for (std::uint64_t c = 0; c < 16; ++c)
-        if (int(c % std::min(2, comm->getSize())) == comm->getRank())
-            owned.push_back(c);
-    AMR::ExtrudedAMR provider(grid);
-    auto bootstrap = provider.detach_owned(owned, {'m', 'o', 't', 'i', 'o', 'n'});
-    auto raw = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
-        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
-    std::vector<AMR::AdaptiveMark> marks;
-    for (const auto& [key, leaf] : raw->owned())
-    {
-        const auto c = raw->geometry(leaf)->centroid();
-        const auto x = c[0] - double(shear) * c[1];
-        if (x > .5 && x < .75)
-            marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
-    }
-    const auto refined = raw->apply(raw->plan_adaptation(marks));
-    std::vector<AMR::AdaptiveCellKey> order;
-    std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : refined->owned())
-    {
-        const auto reference = reference_cell(refined->geometry(leaf));
-        order.push_back(key);
-        gas.push_back(double(reference.phase(0, true)));
-        carrier.push_back(double(reference.phase(0, false)));
-    }
-    int local_empty = order.empty(), empty = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
-    EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
-    GeneralVoFOptions options;
-    options.transport_backend = backend;
-    options.phase_cleanup.relative_cutoff = 0;
-    return std::make_shared<const GeneralVoF>(refined, std::move(order), std::move(gas), std::move(carrier), options);
-}
-long double streamfunction(XY p)
-{
-    const auto f = p[0] < .25L ? 4 * p[0] : p[0] > .75L ? 4 * (1 - p[0]) : 1;
-    return speed * f * p[1] * (1 - p[1]);
-}
-std::vector<GeneralVoFNodeVelocity> velocities(const GeneralVoF& source)
-{
-    std::vector<GeneralVoFNodeVelocity> result;
-    for (const auto& n : source.nodes())
-    {
-        const long double y = n.coordinate[1], x = n.coordinate[0] - shear * y;
-        const auto f = x < .25L ? 4 * x : x > .75L ? 4 * (1 - x) : 1;
-        const auto df = x < .25L ? 4 : x > .75L ? -4 : 0;
-        const auto v = -speed * df * y * (1 - y), u = speed * f * (1 - 2 * y);
-        result.push_back({n.gid, {double(u + shear * v), double(v), 0}});
-    }
-    return result;
-}
-std::vector<GeneralVoFFaceVolume> controls(const GeneralVoF& source)
-{
-    std::vector<GeneralVoFFaceVolume> result;
-    for (const auto& tile : source.tiles())
-    {
-        long double q = 0;
-        if (!tile.exterior)
-        {
-            const auto face = source.finite_face_points<ArithmeticMode::Ordinary>(tile.face_gid);
-            Polygon xy;
-            long double bottom = std::numeric_limits<long double>::max(), top = -bottom;
-            for (const auto& p : face)
-            {
-                xy.push_back({p.value[0] - shear * p.value[1], p.value[1]});
-                bottom = std::min(bottom, p.value[2]);
-                top = std::max(top, p.value[2]);
-            }
-            const auto [a, b] = std::minmax_element(xy.begin(), xy.end());
-            const auto dx = (*b)[0] - (*a)[0], dy = (*b)[1] - (*a)[1];
-            const auto n = tile.geometry->area_vector();
-            const auto orientation = dy * n.x + (-dx - shear * dy) * n.y;
-            q = dt * (streamfunction(*b) - streamfunction(*a)) * (top - bottom);
-            if (orientation < 0)
-                q = -q;
-        }
-        result.push_back({tile.face_gid, double(q)});
-    }
-    return result;
-}
-#include "algebraic_motion_qualification.hh"
-#include "algebraic_reconstruction_replay.hh"
-
 TEST(GeneralVoFMotionAccuracy, IndependentPolygonOracleIntegratesKnownShearedCuts)
 {
     const Polygon unit{{0, 0}, {1, 0}, {1, 1}, {0, 1}};
@@ -253,8 +51,8 @@ void single_interface_motion(GeneralVoFTransportBackend backend)
     const auto comm = Tpetra::getDefaultComm();
     testing::Test::RecordProperty("byte_budget", std::to_string(source->options().byte_budget));
     testing::Test::RecordProperty("support_rings", std::to_string(source->options().support_rings));
-    testing::Test::RecordProperty("clip_evaluation_cap",
-        std::to_string(source->options().reconstruction.maximum_clip_evaluations));
+    testing::Test::RecordProperty(
+        "clip_evaluation_cap", std::to_string(source->options().reconstruction.maximum_clip_evaluations));
     std::array<double, 2> local_structure{double(source->owned_order().size()), 0}, structure{};
     for (std::size_t f = 0; f < source->mesh()->num_owned_faces(); ++f)
     {
@@ -400,11 +198,10 @@ void single_interface_motion(GeneralVoFTransportBackend backend)
                << " gas_relative_mass_drift=" << (sum[3] - .5) / .5
                << " carrier_relative_mass_drift=" << (sum[4] - .5) / .5 << " gas_passage=" << sum[7]
                << " minimum_theta=" << global_min[0] << " minimum_quality_theta=" << global_min[1]
-               << " maximum_outgoing_courant=" << maximum_courant
-               << " fallback_streams=" << global_work[0] << " fallback_volume=" << global_work[1]
-               << " limited_streams=" << global_work[2] << " limited_volume=" << global_work[3]
-               << " plane_measurements=" << global_work[4] << " swept_pieces=" << global_work[5]
-               << " geometric_theta_histogram=";
+               << " maximum_outgoing_courant=" << maximum_courant << " fallback_streams=" << global_work[0]
+               << " fallback_volume=" << global_work[1] << " limited_streams=" << global_work[2]
+               << " limited_volume=" << global_work[3] << " plane_measurements=" << global_work[4]
+               << " swept_pieces=" << global_work[5] << " geometric_theta_histogram=";
         for (unsigned i = 0; i < global_histogram.size(); ++i)
             report << (i ? "," : "[") << global_histogram[i];
         report << "]";
@@ -446,4 +243,4 @@ TEST(GeneralVoFMotionAccuracy, SingleInterfaceClosedShearGeometricFace)
 {
     single_interface_motion(GeneralVoFTransportBackend::GeometricFace);
 }
-} // namespace
+} // namespace SimpleFluid::VoF::test::motion

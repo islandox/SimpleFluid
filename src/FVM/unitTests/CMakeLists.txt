@@ -1,9 +1,58 @@
 # Unit tests for FVM
 
+set(FVM_ONLY_TESTS
+    testGeneralVoFBalance
+    testGeneralVoFPhaseCleanup
+    testGeneralVoFFaceWorkspace
+    testGeneralVoFBoundaryReach
+    testGeneralVoFMotionAccuracy
+    testGeneralVoFSpatialCache
+    testFilteredSurfaceGeometry
+    testGeneralVoFInterfaceTransport
+    testGeneralVoFHomogeneousTransport
+    testGeneralVoFPreparedTransport
+    testGeneralVoFFaceTransport
+    testExactGeneralVoF
+    testExactPolyhedralReconstruction
+    testFiniteVoFRemap
+    testBoundedPhaseArithmetic
+    testGeneralVoFFinite
+    testOrdinaryVoFSweep
+    testExactFaceTransfer
+    testExactPhaseTransfer
+    testPolyhedralReconstruction
+    testGeneralVoF
+    testFvmLibrary
+    testGeometricVoF
+    testGeneralVoFOwnerPlaneRequests
+    testGeneralVoFLimiterProtocol
+    testGeneralVoFPhaseConservation
+    testGeneralVoFSurfaceCatalog
+    testGeneralVoFReconstructionSupport
+    testAdaptiveVoF
+    testAdaptiveVoFThreeDimensional
+    testVoFPhysicalSources
+    testConservativeAMRRemap
+    testProductAMRRemap
+    testPolyhedralAMRRemap
+    testMixedAMRRemap
+    testDistributedNativeOperators
+    testDistributedAdaptiveState
+)
+
+set(GENERAL_VOF_MOTION_SOURCES
+    general_vof_motion/ReferenceOracle.cc
+    general_vof_motion/MotionFixtures.cc
+    general_vof_motion/Qualification.cc
+    general_vof_motion/ReconstructionReplay.cc)
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy")
+    target_sources(${TEST_NAME} PRIVATE ${GENERAL_VOF_MOTION_SOURCES})
+  endif()
   if(TEST_NAME STREQUAL "testGeneralVoFBalance")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/BalanceForecast.cc)
   endif()
@@ -33,13 +82,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testGeneralVoFBalance" OR TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
-      OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests" OR TEST_NAME STREQUAL "testGeneralVoFLimiterProtocol"
-      OR TEST_NAME STREQUAL "testGeneralVoFPhaseConservation"
-      OR TEST_NAME STREQUAL "testGeneralVoFSurfaceCatalog"
-      OR TEST_NAME STREQUAL "testGeneralVoFReconstructionSupport"
-      OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
-      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
+  if(TEST_NAME IN_LIST FVM_ONLY_TESTS)
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
@@ -376,7 +419,7 @@ endforeach()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
         testGeneralVoFFaceTransport.cc testGeneralVoFLimiterProtocol.cc testPolyhedralReconstruction.cc testExactPolyhedralReconstruction.cc
-        testGeneralVoFReconstructionSupport.cc
+        testGeneralVoFReconstructionSupport.cc ${GENERAL_VOF_MOTION_SOURCES}
         testGeneralVoFPhaseConservation.cc ../details/GeneralVoF/PhasePublication.cc
         testExactGeneralVoF.cc exact/GeneralVoFRoundtrip.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"

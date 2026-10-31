@@ -488,7 +488,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     plane->anchor = scaled<Mode>(point<Mode>(input.anchor) - point<Mode>(impl_->frame.origin), -impl_->frame.exponent);
     plane->offset = scaled<Mode>(Scalar(input.offset), -impl_->frame.exponent);
     plane->input = input;
-    plane->native_support = details::ordinary_native::input_support_packet(input.normal, input.anchor, input.offset);
+    plane->native_support = details::ordinary_native::make_input_support(input.normal, input.anchor, input.offset);
     auto source = std::make_shared<Impl>();
     source->limits = impl_->limits;
     source->surfaces.push_back({plane, 1});
@@ -1340,7 +1340,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
                 shifted->input.reset();
                 shifted->normal_error.reset();
                 if (shifted->native_support.has_value())
-                    shifted->native_support = details::ordinary_native::translated_support_packet(
+                    shifted->native_support = details::ordinary_native::translate_support(
                         *shifted->native_support, details::ordinary_native::wide(displacement));
                 shifted->authorities.clear();
                 shifted->source_vertices.clear();

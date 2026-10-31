@@ -166,7 +166,7 @@ std::pair<PlaneSupportIdentity<ArithmeticMode::Ordinary>, P> ancestral_edge_supp
         auto a = base.points.at(selected.first), b = base.points.at(selected.second), upper = a;
         upper[2] = 1;
         const std::array source{a, b, upper};
-        return {details::ordinary_native::source_support_packet(source), normal};
+        return {details::ordinary_native::make_source_support(source), normal};
     }
     return {segment_recipe_support(base.recipes, selected.first, selected.second), normal};
 }
@@ -436,7 +436,7 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode:
         auto cap = product.base;
         for (auto& point : cap)
             point[2] = z;
-        supports.push_back(details::ordinary_native::source_support_packet(cap));
+        supports.push_back(details::ordinary_native::make_source_support(cap));
     }
     for (auto edge : impl_->topology->native_topology().cell_side_faces(id.ij))
         supports.push_back(impl_->base->edge_supports.at(edge));
@@ -652,7 +652,7 @@ PlanarFacePtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ord
     P normal{outward.x, outward.y, outward.z};
     std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> support;
     if (id.orientation == SemiStructuredIndexer::AXIAL)
-        support = details::ordinary_native::source_support_packet(points);
+        support = details::ordinary_native::make_source_support(points);
     else
     {
         normal = impl_->base->support_normals.at(id.ij);
