@@ -2,6 +2,7 @@
  * @brief Compiled general VoF Resources operation.
  */
 #include "solvers/details/GeneralVoF/Resources.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -114,11 +115,15 @@ void initialize_geometry(
         {
             if (geometry.size() != volume.size())
                 throw std::runtime_error("General VoF phase/native geometry order differs.");
+            PLIC::GeometryAllocationLedger point_exports;
+            std::size_t point_export_bytes = 0;
             for (std::size_t c = 0; c < volume.size(); ++c)
             {
                 if (!bounded_geometry.empty())
                 {
-                    const auto& p = bounded_geometry[c]->points();
+                    const auto exported =
+                        bounded_geometry[c]->export_points(point_exports, point_export_bytes, o.byte_budget);
+                    const auto p = exported.points();
                     long double area = 0;
                     for (const auto& face : bounded_geometry[c]->faces())
                     {

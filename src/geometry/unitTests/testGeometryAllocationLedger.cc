@@ -241,7 +241,14 @@ template<ArithmeticMode Mode> void shared_support_payload_contract()
     const auto face = P::PlanarFace<ArithmeticMode::Ordinary>::make(face_points);
     const auto support = P::planar_support<ArithmeticMode::Ordinary>(*face);
     P::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, Mode);
-    Access::seal(source, {{{2, 7, 13}}, {{17, 19}}, P::details::original_support_authority(support)});
+    std::vector<std::uint64_t> first_words{2, 7, 13}, second_words{17, 19};
+    first_words.reserve(11);
+    second_words.reserve(17);
+    const auto opaque_bytes = 2 * sizeof(std::vector<std::uint64_t>) +
+                              (first_words.capacity() + second_words.capacity()) * sizeof(std::uint64_t);
+    Access::seal(
+        source, {P::PlaneAuthority::opaque(std::move(first_words)), P::PlaneAuthority::opaque(std::move(second_words)),
+                    P::details::original_support_authority(support)});
     P::DynamicPoint exported(source.value, source.absolute_error, Mode);
     const auto root = Access::identity(source);
     Access::seal_export(exported, root, source.supports());
@@ -251,10 +258,8 @@ template<ArithmeticMode Mode> void shared_support_payload_contract()
 
     auto provenance_bytes = 2 * sizeof(P::DynamicPointProvenance) + sizeof(P::DynamicPointSupportPayload) +
                             root->supports().capacity() * sizeof(P::PlaneAuthority);
-    for (const auto& authority : root->supports())
-        provenance_bytes += authority.key.capacity() * sizeof(std::uint64_t);
     EXPECT_EQ(Access::identity_bytes(copy, false), provenance_bytes);
-    EXPECT_EQ(Access::identity_bytes(copy), provenance_bytes + support.payload_bytes());
+    EXPECT_EQ(Access::identity_bytes(copy), provenance_bytes + opaque_bytes + support.payload_bytes());
 
     enum class VertexSupports
     {
@@ -268,35 +273,32 @@ template<ArithmeticMode Mode> void shared_support_payload_contract()
         // Independently enumerate two wrappers, storage, one vertex slot,
         // two provenance records, one shared support payload and its typed
         // support attachment. Empty vertex authorities make the attachment
-        // reachable only through the point payload. The owned vertex case
-        // additionally charges its private outer and key buffers.
+        // reachable only through the vertex source-provenance chain. The owned vertex case
+        // additionally charges its private outer buffer; the two immutable
+        // opaque payload owners remain shared across every authority copy.
         auto storage = std::make_shared<P::details::GeometryStorage<Mode>>();
         storage->ancestry.reset();
         storage->moment_cache.reset();
-        storage->displayed = {source, exported};
         storage->vertices.resize(1);
         auto& vertex = storage->vertices[0];
-        vertex.source_identity = root;
+        vertex.source_identity = copy;
         if (vertex_supports != VertexSupports::Empty)
             vertex.authorities = source.supports();
         if (vertex_supports == VertexSupports::Shared)
             vertex.authorities.share_if_equal(root->support_payload);
         const auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
         auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
-                        storage->displayed.capacity() * sizeof(P::DynamicPoint) +
                         storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + provenance_bytes +
-                        support.payload_bytes();
+                        opaque_bytes + support.payload_bytes();
         if (vertex_supports == VertexSupports::Owned)
         {
             const auto& keys = vertex.authorities.values();
             expected += keys.capacity() * sizeof(P::PlaneAuthority);
-            for (const auto& authority : keys)
-                expected += authority.key.capacity() * sizeof(std::uint64_t);
         }
         P::GeometryAllocationLedger ledger;
         std::size_t used = 0;
         ledger.retain(geometry, used, byte_limit);
-        EXPECT_EQ(ledger.owner_count(), 7u);
+        EXPECT_EQ(ledger.owner_count(), 9u);
         EXPECT_EQ(ledger.payload_bytes(), expected);
         EXPECT_EQ(used, expected + ledger.bookkeeping_bytes());
         const auto first_used = used;

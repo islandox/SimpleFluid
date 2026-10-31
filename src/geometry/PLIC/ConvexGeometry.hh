@@ -12,11 +12,17 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <variant>
 #include <vector>
 
 namespace SimpleFluid::PLIC
 {
 template<ArithmeticMode> class ConstructionRegistry;
+class GeometryAllocationLedger;
+class DynamicPointExport;
+template<ArithmeticMode> class PointExport;
+struct DynamicPointExportPayload;
+template<ArithmeticMode> struct PointExportPayload;
 namespace details
 {
 class NativeSupportAccess;
@@ -55,23 +61,49 @@ struct DynamicGeometryValue
 /** Collision-free opaque original geometric support identity. Only immutable
  * source authority export issues these keys; they are never geometric numbers
  * or ownership/revision credentials. The caller authenticates those separately. */
-/** Opaque source-support sidecar. Public authority words remain the identity;
- * only immutable source issuance/authenticated imports may seal this value. */
-class OriginalSupportAttachment
+class PlaneAuthority
 {
 public:
-    OriginalSupportAttachment() = default;
+    PlaneAuthority() = default;
+    PlaneAuthority(const PlaneAuthority&) = default;
+    PlaneAuthority& operator=(const PlaneAuthority&) = default;
+    PlaneAuthority(PlaneAuthority&& other) noexcept : storage_(std::move(other.storage_))
+    {
+        other.storage_.emplace<0>();
+    }
+    PlaneAuthority& operator=(PlaneAuthority&& other) noexcept
+    {
+        if (this != &other)
+        {
+            storage_ = std::move(other.storage_);
+            other.storage_.emplace<0>();
+        }
+        return *this;
+    }
+    /** Own opaque words. The original-support namespace requires trusted
+     * issuance or authenticated import and cannot be minted by this factory. */
+    [[nodiscard]] static PlaneAuthority opaque(std::vector<std::uint64_t>);
+    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::size_t word_count() const noexcept;
+    /** Frozen numeric word sequence; index must be less than word_count(). */
+    [[nodiscard]] std::uint64_t word(std::size_t index) const noexcept;
+    [[nodiscard]] std::vector<std::uint64_t> words() const;
+    /** Sequential boundary emission without a complete packed-key buffer. */
+    void emit_words(void*, void (*)(void*, std::uint64_t)) const;
+    [[nodiscard]] std::strong_ordering compare_words(std::span<const std::uint64_t>) const;
+    [[nodiscard]] bool operator==(const PlaneAuthority&) const noexcept;
+    [[nodiscard]] std::strong_ordering operator<=>(const PlaneAuthority&) const;
+    /** Opaque payload ownership only. Typed support ancestry is visited by
+     * GeometryAllocationLedger through its native identity owner instead. */
+    [[nodiscard]] std::shared_ptr<const void> opaque_storage_owner() const noexcept;
+    [[nodiscard]] std::size_t opaque_payload_bytes() const noexcept;
 
 private:
     friend class details::OriginalSupportAuthorityAccess;
-    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> support_;
-};
-struct PlaneAuthority
-{
-    std::vector<std::uint64_t> key;
-    OriginalSupportAttachment original_support;
-    bool operator==(const PlaneAuthority& other) const { return key == other.key; }
-    auto operator<=>(const PlaneAuthority& other) const { return key <=> other.key; }
+    using Native = PlaneSupportIdentity<ArithmeticMode::Ordinary>;
+    using Opaque = std::shared_ptr<const std::vector<std::uint64_t>>;
+    explicit PlaneAuthority(Native support) : storage_(std::move(support)) {}
+    std::variant<std::monostate, Native, Opaque> storage_;
 };
 struct DynamicPointProvenance;
 class DynamicGeometryAccess;
@@ -151,6 +183,23 @@ void record_ledger_operations(std::uint64_t count = 1);
 /** Retained point allocation, including sealed provenance/support keys. */
 [[nodiscard]] std::size_t dynamic_point_storage_bytes(const DynamicPoint&);
 
+/** Owning finite global-point publication admitted by an explicit allocation ledger. */
+class DynamicPointExport
+{
+public:
+    DynamicPointExport() = default;
+    [[nodiscard]] std::span<const DynamicPoint> points() const& noexcept;
+    std::span<const DynamicPoint> points() const&& = delete;
+
+private:
+    friend class DynamicGeometryAccess;
+    friend class GeometryAllocationLedger;
+    explicit DynamicPointExport(std::shared_ptr<const DynamicPointExportPayload> payload) : payload_(std::move(payload))
+    {
+    }
+    std::shared_ptr<const DynamicPointExportPayload> payload_;
+};
+
 class DynamicConvexGeometry;
 using DynamicConvexGeometryPtr = std::shared_ptr<const DynamicConvexGeometry>;
 struct DynamicFaceConstraint
@@ -177,7 +226,9 @@ public:
     struct Impl;
     [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept;
     [[nodiscard]] GeometryPoint origin() const;
-    [[nodiscard]] const std::vector<DynamicPoint>& points() const;
+    [[nodiscard]] std::size_t vertex_count() const noexcept;
+    [[nodiscard]] DynamicPointExport export_points(
+        GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     [[nodiscard]] const std::vector<std::vector<std::size_t>>& faces() const;
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
     template<ArithmeticMode Mode> [[nodiscard]] std::size_t storage_bytes() const;
@@ -230,6 +281,23 @@ public:
 
 private:
     std::shared_ptr<const DynamicPointProvenance> provenance_;
+};
+
+/** Typed owning publication; its immutable dynamic publication remains pinned. */
+template<ArithmeticMode Mode> class PointExport
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+
+public:
+    PointExport() = default;
+    [[nodiscard]] std::span<const Point<Mode>> points() const& noexcept;
+    std::span<const Point<Mode>> points() const&& = delete;
+
+private:
+    friend class DynamicGeometryAccess;
+    friend class GeometryAllocationLedger;
+    explicit PointExport(std::shared_ptr<const PointExportPayload<Mode>> payload) : payload_(std::move(payload)) {}
+    std::shared_ptr<const PointExportPayload<Mode>> payload_;
 };
 
 template<ArithmeticMode Mode> struct Section
@@ -314,7 +382,9 @@ public:
     [[nodiscard]] GeometryMoments<Mode> moments(GeometryPoint origin) const;
     [[nodiscard]] GeometryPoint centroid() const;
     [[nodiscard]] GeometryPoint origin() const { return geometry_->origin(); }
-    [[nodiscard]] std::vector<Point<Mode>> points() const;
+    [[nodiscard]] std::size_t vertex_count() const noexcept { return geometry_->vertex_count(); }
+    [[nodiscard]] PointExport<Mode> export_points(
+        GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     [[nodiscard]] std::vector<Point<Mode>> local_points() const;
     [[nodiscard]] const std::vector<std::vector<std::size_t>>& faces() const { return geometry_->faces(); }
     [[nodiscard]] std::array<GeometryValue<Mode>, 3> axis_spans() const;

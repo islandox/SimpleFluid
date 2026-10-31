@@ -118,8 +118,10 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMod
     return result;
 }
 template<ArithmeticMode Mode>
-std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
-    std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane)
+    requires(Mode != ArithmeticMode::Exact)
+std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(std::uint64_t cell,
+    const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane,
+    PLIC::GeometryAllocationLedger& point_exports, std::size_t& cumulative_bytes, std::size_t byte_limit)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};
@@ -149,7 +151,8 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
     result.physical_spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
     result.cell_scale = std::min({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
     long double surface = 0;
-    const auto& points = geometry.points();
+    const auto exported = geometry.export_points(point_exports, cumulative_bytes, byte_limit);
+    const auto points = exported.points();
     for (const auto& face : geometry.faces())
     {
         Point area{};
@@ -168,10 +171,11 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
     return result;
 }
 template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::Ordinary>(
-    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&, const PLIC::PolyhedralInterface&);
+    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&, const PLIC::PolyhedralInterface&,
+    PLIC::GeometryAllocationLedger&, std::size_t&, std::size_t);
 template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::BoundedCertification>(
     std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>&,
-    const PLIC::PolyhedralInterface&);
+    const PLIC::PolyhedralInterface&, PLIC::GeometryAllocationLedger&, std::size_t&, std::size_t);
 
 GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatch& target,
     std::span<const GeneralVoFCurvaturePatch> support, GeneralVoFCurvatureOptions options)

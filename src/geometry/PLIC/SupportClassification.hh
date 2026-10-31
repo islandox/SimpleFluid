@@ -35,11 +35,11 @@ public:
     explicit OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary>);
     [[nodiscard]] std::span<const PlaneAuthority> authorities() const;
     [[nodiscard]] OrdinaryBoundaryClass classify(const Point<ArithmeticMode::Ordinary>&) const;
-    /** Wrapper and its owned fallback key only; retained immutable cell storage
+    /** Wrapper and opaque fallback payload only; retained immutable cell storage
      * belongs to the caller's geometry accounting. */
     [[nodiscard]] std::size_t storage_bytes() const
     {
-        return sizeof(*this) + native_authority_.key.capacity() * sizeof(std::uint64_t);
+        return sizeof(*this) + native_authority_.opaque_payload_bytes();
     }
 
 private:

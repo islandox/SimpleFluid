@@ -905,8 +905,9 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
             c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(*c.native_support));
         if (c.native_support)
             work.retain_identity(*c.native_support);
+        work.charge(c.authorities.capacity() * sizeof(PlaneAuthority));
         for (const auto& authority : c.authorities)
-            work.charge(sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));
+            work.retain_identity(authority);
         result.push_back(std::move(c));
     }
     return result;
@@ -1285,8 +1286,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             {
                 auto [it, fresh] = authorities.try_emplace(a, c.identity);
                 if (fresh)
-                    work.charge(sizeof(decltype(authorities)::value_type) + a.key.size() * sizeof(std::uint64_t) +
-                                4 * sizeof(void*));
+                {
+                    work.charge(sizeof(decltype(authorities)::value_type) + 4 * sizeof(void*));
+                    work.retain_identity(a);
+                }
                 else
                     parents[root(c.identity)] = root(it->second);
             }
@@ -1318,7 +1321,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                 work.charge(sizeof(decltype(canonical)::value_type) + 4 * sizeof(void*) +
                             selected.authorities.capacity() * sizeof(PlaneAuthority));
                 for (const auto& authority : selected.authorities)
-                    work.charge(authority.key.capacity() * sizeof(std::uint64_t));
+                    work.retain_identity(authority);
             }
             else
             {
@@ -1334,7 +1337,8 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     if (std::find(selected.authorities.begin(), selected.authorities.end(), authority) ==
                         selected.authorities.end())
                     {
-                        work.charge(2 * sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));
+                        work.charge(2 * sizeof(PlaneAuthority));
+                        work.retain_identity(authority);
                         selected.authorities.push_back(authority);
                     }
             }

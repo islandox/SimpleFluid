@@ -23,7 +23,11 @@ template<ArithmeticMode Mode> void typed_physical_patch()
     plane.finite_geometry = true;
     plane.gas = {{0, 0, 1}, {2, 3, 4}, 1};
     PLIC::reset_geometry_statistics();
-    const auto patch = detail::GeneralVoFCurvature::patch<Mode>(17, *geometry, plane);
+    PLIC::GeometryAllocationLedger point_exports;
+    std::size_t point_export_bytes = 0;
+    constexpr std::size_t point_export_budget = 64 * 1024 * 1024;
+    const auto patch = detail::GeneralVoFCurvature::patch<Mode>(
+        17, *geometry, plane, point_exports, point_export_bytes, point_export_budget);
     ASSERT_TRUE(patch);
     EXPECT_EQ(patch->cell, 17u);
     ASSERT_TRUE(patch->key);
@@ -37,7 +41,8 @@ template<ArithmeticMode Mode> void typed_physical_patch()
     EXPECT_EQ(patch->physical_spans, (PLIC::GeometryPoint{2, 3, 4}));
     EXPECT_NEAR(patch->cell_scale, 12. / 13, 1e-13);
     plane.pure_gas = true;
-    EXPECT_FALSE(detail::GeneralVoFCurvature::patch<Mode>(17, *geometry, plane));
+    EXPECT_FALSE(detail::GeneralVoFCurvature::patch<Mode>(
+        17, *geometry, plane, point_exports, point_export_bytes, point_export_budget));
     EXPECT_GT(PLIC::geometry_statistics().volume_evaluations, 0u);
     EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 0u);
 }
@@ -198,6 +203,9 @@ void report_physical_curvature_refinement(bool sphere)
         std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> geometries;
         std::vector<long double> original_volumes;
         std::vector<Patch> patches;
+        PLIC::GeometryAllocationLedger point_exports;
+        std::size_t point_export_bytes = 0;
+        constexpr std::size_t point_export_budget = 64 * 1024 * 1024;
         for (int j = -1; j <= 1; ++j)
             for (int i = -1; i <= 1; ++i)
             {
@@ -228,7 +236,8 @@ void report_physical_curvature_refinement(bool sphere)
                 // These samples are physical clipped polygons, including their
                 // measured centroids/areas, rather than analytic point samples.
                 const auto patch =
-                    detail::GeneralVoFCurvature::patch<ArithmeticMode::Ordinary>(patches.size(), *geometry, plane);
+                    detail::GeneralVoFCurvature::patch<ArithmeticMode::Ordinary>(
+                        patches.size(), *geometry, plane, point_exports, point_export_bytes, point_export_budget);
                 ASSERT_TRUE(patch);
                 EXPECT_GT(patch->area, 0);
                 EXPECT_TRUE(std::isfinite(patch->area));

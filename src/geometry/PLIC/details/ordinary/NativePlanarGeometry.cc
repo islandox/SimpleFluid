@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -460,7 +461,7 @@ bool OrdinaryFace::oppositely_oriented(const OrdinaryFace& other) const
 }
 bool OrdinaryFace::cell_bounds_overlap(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell) const
 {
-    const auto p = cell.points();
+    const details::OrdinaryExportCoordinates coordinates(cell);
     for (std::size_t a = 0; a < 3; ++a)
     {
         auto lo = impl_->polygon[0][a], hi = lo;
@@ -469,11 +470,14 @@ bool OrdinaryFace::cell_bounds_overlap(const ConvexCellGeometry<ArithmeticMode::
             lo = std::min(lo, q[a]);
             hi = std::max(hi, q[a]);
         }
-        auto clo = p[0].value[a], chi = clo;
-        for (const auto& q : p)
+        // Numeric rebases can round their working coordinates differently.
+        // Preserve the canonical export-source bounds without exported points.
+        auto clo = coordinates.at(0)[a], chi = clo;
+        for (std::size_t vertex = 1; vertex < coordinates.size(); ++vertex)
         {
-            clo = std::min(clo, q.value[a]);
-            chi = std::max(chi, q.value[a]);
+            const auto value = coordinates.at(vertex)[a];
+            clo = std::min(clo, value);
+            chi = std::max(chi, value);
         }
         if (hi < clo || chi < lo)
             return false;
@@ -691,7 +695,13 @@ template<> std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const 
     std::rotate(polygon.begin(), std::min_element(polygon.begin(), polygon.end()), polygon.end());
     on::Writer w;
     w.tag(GeometryTag::OrdinaryPlanarFace);
-    w.packet(IdentityAccess::key(*face.impl_->support));
+    w.word(canonical_key_size(*face.impl_->support));
+    IdentityAccess::emit_canonical(*face.impl_->support, &w,
+        [](void* context, std::span<const char> fragment)
+        {
+            auto& writer = *static_cast<on::Writer*>(context);
+            writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
+        });
     w.point(face.impl_->normal);
     w.word(polygon.size());
     for (const auto& p : polygon)
@@ -708,7 +718,13 @@ std::vector<char> OrdinaryFace::encode_incidence(std::size_t byte_budget) const
 {
     on::Writer w;
     w.tag(GeometryTag::OrdinaryPlanarFace);
-    w.packet(IdentityAccess::key(*impl_->support));
+    w.word(canonical_key_size(*impl_->support));
+    IdentityAccess::emit_canonical(*impl_->support, &w,
+        [](void* context, std::span<const char> fragment)
+        {
+            auto& writer = *static_cast<on::Writer*>(context);
+            writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
+        });
     w.point(impl_->normal);
     w.word(impl_->polygon.size());
     for (const auto& p : impl_->polygon)

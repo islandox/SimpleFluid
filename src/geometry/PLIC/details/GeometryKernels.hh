@@ -96,7 +96,7 @@ template<ArithmeticMode Mode> struct NumericalReader
     Scalar scalar();
     Point coordinates() { return {scalar(), scalar(), scalar()}; }
     Frame frame();
-    std::vector<PlaneAuthority> authorities(const std::set<PlaneAuthority>& registry, GeometryLimits limits);
+    std::vector<PlaneAuthority> authorities(const PlaneAuthorityRegistry& registry, GeometryLimits limits);
 };
 template<ArithmeticMode Mode> class GeometryKernel : public DynamicConvexGeometry
 {
@@ -108,7 +108,8 @@ public:
     using DynamicConvexGeometry::faces;
     std::shared_ptr<const Impl> impl_;
     using DynamicConvexGeometry::origin;
-    using DynamicConvexGeometry::points;
+    using DynamicConvexGeometry::export_points;
+    using DynamicConvexGeometry::vertex_count;
     std::size_t storage_bytes() const { return DynamicConvexGeometry::storage_bytes<Mode>(); }
     static std::vector<DynamicConvexGeometryPtr> validate_donors(
         std::span<const DynamicConvexGeometryPtr> donors, GeometryLimits limits);
@@ -370,7 +371,7 @@ template<ArithmeticMode Mode> struct NumericalReader
     Interval interval();
     Point coordinates() { return {interval(), interval(), interval()}; }
     Frame frame();
-    std::vector<PlaneAuthority> authorities(const std::set<PlaneAuthority>& registry, GeometryLimits limits);
+    std::vector<PlaneAuthority> authorities(const PlaneAuthorityRegistry& registry, GeometryLimits limits);
 };
 template<ArithmeticMode Mode> class GeometryKernel : public DynamicConvexGeometry
 {
@@ -382,7 +383,8 @@ public:
     using DynamicConvexGeometry::faces;
     std::shared_ptr<const Impl> impl_;
     using DynamicConvexGeometry::origin;
-    using DynamicConvexGeometry::points;
+    using DynamicConvexGeometry::export_points;
+    using DynamicConvexGeometry::vertex_count;
     std::size_t storage_bytes() const { return DynamicConvexGeometry::storage_bytes<Mode>(); }
     static std::vector<DynamicConvexGeometryPtr> validate_donors(
         std::span<const DynamicConvexGeometryPtr> donors, GeometryLimits limits);

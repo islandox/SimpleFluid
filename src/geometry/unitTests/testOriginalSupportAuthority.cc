@@ -9,6 +9,7 @@
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
+#include "point_export_test_helpers.hh"
 #include <algorithm>
 #include <gtest/gtest.h>
 #include <map>
@@ -27,32 +28,36 @@ P::PlaneAuthority original_with_padding()
     const std::array<P::GeometryPoint, 3> points{{{0, 0, 1000}, {1, 0, 1000}, {0, 1, 1000}}};
     return Access::issue(P::planar_support<exact>(*P::PlanarFace<exact>::make(points)));
 }
-TEST(OriginalSupportAuthorityTest, MutatedWordsAndPaddingNeverBlessStaleAttachments)
+TEST(OriginalSupportAuthorityTest, MutatedWordsAndPaddingCannotMintOrAuthenticateOriginalSupport)
 {
     const auto original = original_with_padding();
     ASSERT_NE(Access::get(original), nullptr);
-    EXPECT_EQ(static_cast<std::uint8_t>(original.key.front() >> 56), static_cast<std::uint8_t>(P::AuthorityKeyTag::OriginalSupport));
-    EXPECT_EQ(original.key.front() & P::authority_key_length_mask, P::canonical_key_size(*Access::get(original)));
-    ASSERT_NE(original.key.front() % 8, 0u);
-    auto altered = original;
-    altered.key[1] ^= 1;
-    EXPECT_THROW((Access::get(altered)), P::GeometryError);
-    auto padding = original;
-    padding.key.back() ^= std::uint64_t(1) << (8 * (padding.key.front() % 8));
-    EXPECT_THROW((Access::validate_boundary(padding)), P::GeometryError);
-    P::PlaneAuthority missing{original.key};
-    EXPECT_THROW((Access::validate_boundary(missing)), P::GeometryError);
-    // Invalid key consistency does not erase an allocation actually retained
-    // by the opaque carrier, and accounting does not authorize numeric use.
-    const auto* retained = Access::retained(altered);
-    ASSERT_NE(retained, nullptr);
+    const auto words = original.words();
+    EXPECT_EQ(
+        static_cast<std::uint8_t>(words.front() >> 56), static_cast<std::uint8_t>(P::AuthorityKeyTag::OriginalSupport));
+    EXPECT_EQ(words.front() & P::authority_key_length_mask, P::canonical_key_size(*Access::get(original)));
+    ASSERT_NE(words.front() % 8, 0u);
+    P::details::PlaneAuthorityRegistry registry{original};
+    const auto restored = Access::authenticate(words, registry);
+    EXPECT_EQ(Access::get(restored)->storage_identity(), Access::get(original)->storage_identity());
+    auto altered = words;
+    altered[1] ^= 1;
+    EXPECT_THROW((Access::authenticate(altered, registry)), P::GeometryError);
+    auto padding = words;
+    padding.back() ^= std::uint64_t(1) << (8 * (padding.front() % 8));
+    EXPECT_THROW((Access::authenticate(padding, registry)), P::GeometryError);
+    EXPECT_THROW((P::PlaneAuthority::opaque(words)), P::GeometryError);
+    auto length = words;
+    length.front() ^= 1;
+    EXPECT_THROW((Access::authenticate(length, registry)), P::GeometryError);
+    EXPECT_THROW((Access::authenticate(words, {})), P::GeometryError);
+    EXPECT_EQ(original.words(), words);
     P::GeometryAllocationLedger ledger;
     std::size_t used = 0;
-    ledger.retain(*retained, used, budget);
+    ledger.retain(original, used, budget);
     const auto charged = used;
-    ledger.retain(*Access::retained(original), used, budget);
+    ledger.retain(restored, used, budget);
     EXPECT_EQ(used, charged);
-    EXPECT_THROW((Access::get(altered)), P::GeometryError);
 }
 TEST(OriginalSupportAuthorityTest, EqualKeysKeepDistinctOwnersAndOpaqueTokensRemainUnchanged)
 {
@@ -81,15 +86,47 @@ TEST(OriginalSupportAuthorityTest, EqualKeysKeepDistinctOwnersAndOpaqueTokensRem
     ledger.retain(*Access::get(second), used, budget);
     EXPECT_EQ(ledger.owner_count(), owners.size());
     EXPECT_EQ(ledger.payload_bytes(), expected);
-    P::PlaneAuthority opaque{{7, 11, 13}};
-    const auto key = opaque.key;
+    const auto opaque = P::PlaneAuthority::opaque({7, 11, 13});
+    const auto key = opaque.words();
     EXPECT_NO_THROW(Access::validate_boundary(opaque));
     EXPECT_EQ(Access::get(opaque), nullptr);
     EXPECT_EQ(Access::retained(opaque), nullptr);
-    EXPECT_EQ(opaque.key, key);
-    P::PlaneAuthority short_opaque{{1, 0x53464e4158495331ULL}};
+    EXPECT_EQ(opaque.words(), key);
+    const auto short_opaque = P::PlaneAuthority::opaque({1, 0x53464e4158495331ULL});
     EXPECT_NO_THROW(Access::validate_boundary(short_opaque));
     EXPECT_EQ(Access::get(short_opaque), nullptr);
+}
+
+TEST(OriginalSupportAuthorityTest, LargeSourceWordsPreserveNumericOrderingAndAuthenticatedOwner)
+{
+    using IdentityAccess = P::details::GeometryIdentityAccess;
+    std::vector<P::details::OrdinaryIdentityPoint> points;
+    for (unsigned i = 0; i < 4096; ++i)
+        points.push_back({static_cast<long double>(i), 2, 3});
+    const auto first = Access::issue(IdentityAccess::support_source(points));
+    points.back()[2] = 4;
+    const auto second = Access::issue(IdentityAccess::support_source(points));
+    const auto first_words = first.words(), second_words = second.words();
+    EXPECT_EQ(first <=> second, first_words <=> second_words);
+    EXPECT_EQ(first.compare_words(first_words), std::strong_ordering::equal);
+    EXPECT_EQ(first.compare_words(second_words), first_words <=> second_words);
+    const P::details::PlaneAuthorityRegistry registry{first, second};
+    const auto authenticated = Access::authenticate(first_words, registry);
+    EXPECT_EQ(Access::get(authenticated)->storage_identity(), Access::get(first)->storage_identity());
+    auto corrupted = first_words;
+    corrupted.back() ^= 1;
+    EXPECT_THROW((Access::authenticate(corrupted, registry)), P::GeometryError);
+
+    auto moved = first;
+    auto owner = std::move(moved);
+    EXPECT_TRUE(moved.empty());
+    EXPECT_EQ(moved.word_count(), 0u);
+    EXPECT_TRUE(moved.words().empty());
+    EXPECT_EQ(owner, first);
+    auto opaque = P::PlaneAuthority::opaque({7, 11});
+    owner = std::move(opaque);
+    EXPECT_TRUE(opaque.empty());
+    EXPECT_EQ(owner.words(), (std::vector<std::uint64_t>{7, 11}));
 }
 
 template<ArithmeticMode Mode>
@@ -97,7 +134,7 @@ P::ConvexGeometryPtr<Mode> authority_fixture(const P::ConvexCellGeometry<ordinar
 {
     using Cell = P::ConvexCellGeometry<Mode>;
     std::vector<P::Point<Mode>> points;
-    for (const auto& point : native.points())
+    for (const auto& point : P::test::exported_points(native))
         points.push_back(P::source_point<Mode>(native, P::details::GeometryIdentityAccess::point(point.value)));
     auto result = Cell::make_points(points, native.faces());
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
@@ -168,7 +205,7 @@ TEST(OriginalSupportAuthorityTest, AuthenticatedImportsRebindTypedCarriersForBot
     if (P::certification_environment())
         authenticated_rebind<ArithmeticMode::BoundedCertification>();
 }
-TEST(OriginalSupportAuthorityTest, NativeAncestryBudgetRejectsBeforeQuadraticCachesAndPreservesInput)
+TEST(OriginalSupportAuthorityTest, CompactNativeAncestryFitsFormerCacheLimitedAllowanceAndPreservesInput)
 {
     const std::array<P::GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
     auto face = P::PlanarFace<ordinary>::make(points);
@@ -180,7 +217,8 @@ TEST(OriginalSupportAuthorityTest, NativeAncestryBudgetRejectsBeforeQuadraticCac
     ASSERT_LT(support.payload_bytes(), limited);
     auto pin = support.storage_owner();
     const auto references = pin.use_count();
-    EXPECT_THROW((P::decode_identity<P::PlaneSupportIdentity<ordinary>>(bytes, limited)), std::invalid_argument);
+    const auto compact = P::decode_identity<P::PlaneSupportIdentity<ordinary>>(bytes, limited);
+    EXPECT_EQ(compact, support);
     EXPECT_EQ(pin.use_count(), references);
     EXPECT_EQ(P::canonical_key(support), frozen);
     const auto restored = P::decode_identity<P::PlaneSupportIdentity<ordinary>>(bytes, budget);
@@ -257,23 +295,31 @@ template<ArithmeticMode Mode> void operation_rebind_budget()
     const auto* carrier = Access::get(stored->surfaces.front().plane->authorities.front());
     ASSERT_NE(carrier, nullptr);
     EXPECT_EQ(P::canonical_key(*carrier), P::canonical_key(supports.front()));
-    constexpr std::size_t limited = 128 * 1024;
-    std::size_t ancestry = 0;
-    P::visit_identity_allocations(*carrier,
-        [&](const P::GeometryIdentityAllocation& allocation)
-        {
-            ancestry += allocation.payload_bytes;
-            return true;
-        });
-    ASSERT_GT(ancestry, limited);
     const P::GeometryPacketContext context{};
     const auto bytes = source->encode(context);
-    ASSERT_LT(bytes.size(), limited);
     const std::array sources{source};
     auto pin = supports.front().storage_owner();
     const auto references = pin.use_count();
     P::GeometryLimits limits;
-    limits.byte_budget = limited;
+    limits.arithmetic_mode = Mode;
+    limits.byte_budget = budget;
+    std::size_t required = 0;
+    {
+        P::details::Operation operation(limits);
+        const auto restored = Cell::decode(bytes, context, sources, limits);
+        required = operation.work.bytes;
+        // Every authenticated input support must already have entered the
+        // same operation ledger, including every separately shared ancestor.
+        for (const auto& support : supports)
+            operation.work.allocations.retain(support, operation.work.bytes, limits.byte_budget);
+        EXPECT_EQ(operation.work.bytes, required);
+        EXPECT_EQ(restored->volume().value, source->volume().value);
+    }
+    EXPECT_EQ(pin.use_count(), references);
+    ASSERT_GT(required, bytes.size());
+    limits.byte_budget = required;
+    EXPECT_NO_THROW((Cell::decode(bytes, context, sources, limits)));
+    limits.byte_budget = required - 1;
     try
     {
         (void) Cell::decode(bytes, context, sources, limits);
@@ -282,10 +328,10 @@ template<ArithmeticMode Mode> void operation_rebind_budget()
     catch (const P::GeometryError& error)
     {
         EXPECT_EQ(error.code(), P::GeometryErrorCode::ResourceLimit);
-        EXPECT_NE(std::string(error.what()).find("Geometry allocation ledger"), std::string::npos);
     }
     EXPECT_EQ(pin.use_count(), references);
     EXPECT_NO_THROW((Cell::decode(bytes, context, sources)));
+
 }
 TEST(OriginalSupportAuthorityTest, AuthenticatedCarrierImportsChargeFullAncestryInsideEachFiniteOperation)
 {

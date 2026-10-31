@@ -24,7 +24,7 @@ struct OrdinarySupportRecipe
     std::vector<std::size_t> parents;
 };
 [[nodiscard]] GeometryIdentityBackingPtr import_ordinary_support_backing(
-    std::vector<char> checked_key, std::size_t byte_budget);
+    std::span<const char> checked_key, std::size_t byte_budget);
 [[nodiscard]] OrdinarySupportKind ordinary_support_kind(const PlaneSupportIdentity<ArithmeticMode::Ordinary>&);
 [[nodiscard]] std::strong_ordering compare_ordinary_support_native(
     const GeometryIdentityBackingPtr&, const GeometryIdentityBackingPtr&);

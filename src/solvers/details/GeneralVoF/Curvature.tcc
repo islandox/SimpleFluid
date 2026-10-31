@@ -65,6 +65,8 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
     execution.collective(
         [&]
         {
+            PLIC::GeometryAllocationLedger point_exports;
+            std::size_t point_export_bytes = 0;
             for (const auto& patch : patches)
             {
                 const auto sample = [&]
@@ -75,13 +77,14 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
                             patch.interface);
                     else
                         return GeneralVoFCurvature::patch<Mode>(patch.cell,
-                            *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry), patch.interface);
+                            *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry), patch.interface,
+                            point_exports, point_export_bytes, byte_budget);
                 }();
                 if (sample)
                     surface.push_back(*sample);
             }
             constexpr auto index_entry_bytes = sizeof(std::pair<const std::uint64_t, std::size_t>) + 4 * sizeof(void*);
-            if (surface.size() > byte_budget / index_entry_bytes)
+            if (surface.size() > (byte_budget - point_export_bytes) / index_entry_bytes)
                 throw std::runtime_error("General VoF curvature index exceeds its byte budget.");
             const auto index_bytes = surface.size() * index_entry_bytes;
             std::map<std::uint64_t, std::size_t> surface_index;
@@ -93,7 +96,7 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
                 if (local >= 0)
                 {
                     const auto support = phases.cell_support(patch.cell);
-                    if (support.size() > (byte_budget - index_bytes) / sizeof(std::size_t))
+                    if (support.size() > (byte_budget - point_export_bytes - index_bytes) / sizeof(std::size_t))
                         throw std::runtime_error("General VoF curvature support index exceeds its byte budget.");
                     std::vector<std::size_t> selected;
                     selected.reserve(support.size());

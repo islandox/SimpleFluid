@@ -1,4 +1,5 @@
 /** @file testGeneralVoFFinite.cc */
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/GeometryWireProtocol.hh"
@@ -1081,10 +1082,11 @@ TEST(GeneralVoFFinite, ConstructionDependenciesBindDonorRecipientAndAdmittedHalo
     PLIC::ConstructionRegistry<ArithmeticMode::Ordinary> registry({{101, 103, 107, 109}});
     registry.register_native(11, 7, donor_geometry);
     registry.register_sweep(17, 0, other_base);
+    const auto donor_points = PLIC::test::exported_points(*donor_geometry);
     std::size_t right = donor_geometry->faces().size();
     for (std::size_t f = 0; f < donor_geometry->faces().size(); ++f)
         if (std::all_of(donor_geometry->faces()[f].begin(), donor_geometry->faces()[f].end(),
-                [&](auto vertex) { return donor_geometry->points()[vertex].value[0] == 1; }))
+                [&](auto vertex) { return donor_points[vertex].value[0] == 1; }))
             right = f;
     ASSERT_LT(right, donor_geometry->faces().size());
     const auto borrowed = other_base->clip_by_face(*donor_geometry, right, false).inside;

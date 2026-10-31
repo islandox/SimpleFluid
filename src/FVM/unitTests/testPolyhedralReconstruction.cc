@@ -1,6 +1,7 @@
 /** @file testPolyhedralReconstruction.cc
  * @brief Resolution requests, bounded PLIC fitting and retained finite inventories.
  */
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "FVM/GeneralVoF.hh"
 #include "FVM/GeometricVoF.hh"
 #include "FVM/details/VoFFailure.hh"
@@ -2051,7 +2052,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17RetainsRepresentedShellAndFit
         // Compare ordered public relative coordinates to the captured normalized
         // storage scaled by its exact power-of-two frame, without double rounding.
         const auto relative = cell.local_points();
-        const auto physical = cell.points();
+        const auto physical = PLIC::test::exported_points(cell);
         ASSERT_EQ(relative.size(), row.stored_vertices.size());
         ASSERT_EQ(physical.size(), row.stored_vertices.size());
         fixture::WidePoint center{}, lower{}, upper{};
@@ -2234,7 +2235,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell8RetainsActualCandidateShellAnd
         EXPECT_EQ(cell.origin(), row.origin);
         EXPECT_EQ(cell.faces(), fixture::faces);
         const auto relative = cell.local_points();
-        const auto physical = cell.points();
+        const auto physical = PLIC::test::exported_points(cell);
         ASSERT_EQ(relative.size(), row.stored_vertices.size());
         ASSERT_EQ(physical.size(), row.stored_vertices.size());
         fixture::WidePoint lower{}, upper{};

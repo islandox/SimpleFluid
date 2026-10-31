@@ -1,9 +1,11 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "geometry/unitTests/geometry_compact_tag_oracle.hh"
+#include "geometry/unitTests/native_identity_fixtures.hh"
 #include <gtest/gtest.h>
 #include <limits>
 #include <optional>
@@ -229,7 +231,7 @@ template<class Identity> void check_shared_owner_contract(const Identity& origin
     EXPECT_NE(independent.storage_identity(), original.storage_identity());
     EXPECT_EQ(independent, original);
     EXPECT_EQ(independent <=> original, std::strong_ordering::equal);
-    EXPECT_GE(original.payload_bytes(), canonical_key_size(original));
+    EXPECT_GT(original.payload_bytes(), 0u);
 }
 TEST(GeometryIdentityTest, CopiesShareOwnersWhileEqualIndependentImportsRemainDistinct)
 {
@@ -299,4 +301,92 @@ TEST(GeometryIdentityTest, TranslatedSupportsRetainAndVisitTheirSharedAncestry)
     retained.reset();
     EXPECT_TRUE(ancestor.expired());
 }
+std::vector<char> fixture_bytes(std::string_view hex)
+{
+    const auto digit = [](char value) { return value <= '9' ? value - '0' : value - 'a' + 10; };
+    std::vector<char> result;
+    result.reserve(hex.size() / 2);
+    for (std::size_t i = 0; i < hex.size(); i += 2)
+        result.push_back(static_cast<char>((digit(hex[i]) << 4) | digit(hex[i + 1])));
+    return result;
+}
+template<class Identity> void expect_frozen_native(std::string_view name, const Identity& identity)
+{
+    const auto found = std::find_if(std::begin(native_identity_fixtures::values),
+        std::end(native_identity_fixtures::values), [&](const auto& item) { return item.name == name; });
+    ASSERT_NE(found, std::end(native_identity_fixtures::values));
+    SCOPED_TRACE(name);
+    const auto body = fixture_bytes(found->body), wire = fixture_bytes(found->wire);
+    EXPECT_EQ(canonical_key(identity), body);
+    EXPECT_EQ(encode_identity(identity), wire);
+    EXPECT_EQ(canonical_key_size(identity), body.size());
+    EXPECT_EQ(encoded_identity_size(identity), wire.size());
+    EXPECT_EQ(canonical_key_hash(identity), found->hash);
+    const auto expected_word = [&](std::size_t offset)
+    {
+        std::uint64_t word = 0;
+        for (unsigned byte = 0; byte < 8 && offset + byte < body.size(); ++byte)
+            word |= std::uint64_t(static_cast<unsigned char>(body[offset + byte])) << (8 * byte);
+        return word;
+    };
+    if constexpr (Identity::shared_storage)
+    {
+        auto cursor = details::GeometryIdentityAccess::canonical_cursor(identity);
+        for (std::size_t offset = 0; offset < body.size(); offset += 8)
+        {
+            ASSERT_EQ(cursor.remaining(), body.size() - offset);
+            EXPECT_EQ(cursor.next_word(), expected_word(offset));
+        }
+        EXPECT_EQ(cursor.remaining(), 0u);
+        EXPECT_EQ(cursor.next_word(), 0u);
+        EXPECT_EQ(cursor.remaining(), 0u);
+    }
+    else
+        for (std::size_t offset = 0; offset < body.size(); offset += 8)
+            EXPECT_EQ(details::GeometryIdentityAccess::canonical_word_at(identity, offset), expected_word(offset));
+    const auto imported = decode_identity<Identity>(wire);
+    EXPECT_EQ(imported, identity);
+    EXPECT_EQ(canonical_key(imported), body);
+    EXPECT_EQ(encode_identity(imported), wire);
+    EXPECT_EQ(canonical_key_hash(imported), found->hash);
+    auto malformed = wire;
+    malformed.push_back(0);
+    const auto unchanged = malformed;
+    EXPECT_THROW((void) decode_identity<Identity>(malformed), std::invalid_argument);
+    EXPECT_EQ(malformed, unchanged);
+    EXPECT_THROW((void) decode_identity<Identity>(wire, wire.size() - 1), std::invalid_argument);
+    EXPECT_EQ(canonical_key(identity), body);
+    EXPECT_EQ(imported, identity);
+}
+TEST(GeometryIdentityTest, CompleteNativeBodiesAndPacketsMatchPreRefactorBinaryFixtures)
+{
+    if constexpr (std::numeric_limits<long double>::digits != 64 || sizeof(GeometryPacketHeader) != 16)
+        GTEST_SKIP() << "Frozen packet fixtures require X87Binary80 and the 16-byte packet header.";
+    namespace E = exact_geometry_detail;
+    using A = details::GeometryIdentityAccess;
+    const E::I numerator = (E::I{1} << 257) + 1, denominator = (E::I{1} << 263) + 3;
+    const E::Q q(numerator, denominator), r(-denominator, numerator);
+    expect_frozen_native("exact_point", E::make_point_identity({q, r, E::Q{7}}));
+    expect_frozen_native("exact_displacement", E::make_displacement_identity({q, r, E::Q{-3}}));
+    expect_frozen_native("exact_line", E::make_line_identity({E::Q{1}, q, E::Q{}}, {E::Q{}, E::Q{}, r}));
+    const auto exact_support = E::make_support_identity({E::Q{1}, q, r, E::Q{5}});
+    expect_frozen_native("exact_support", exact_support);
+    expect_frozen_native("exact_zero", DisplacementIdentity<exact>{});
+    expect_frozen_native("ordinary_zero", DisplacementIdentity<ordinary>{});
+    expect_frozen_native("ordinary_point", A::point({.25L, -.5L, 1}));
+    expect_frozen_native("ordinary_line", A::line({0, {1, .25L, -.5L}, {0, 2, 3}}));
+    expect_frozen_native("ordinary_displacement", A::displacement({.5L, -.25L, 1}));
+    const auto axis = A::support_axis(2, .25L);
+    const std::vector<PlaneSupportIdentity<ordinary>> supports{axis,
+        A::support_source({{0, 0, 0}, {0, 1, 0}, {1, 0, 1}}), A::support_input({1, 1, 0}, {.5L, 0, 0}, .25L),
+        A::support_plane(1, {.5L, 1, 0}, .75L), A::translated_support(axis, {1, -2, .5L}),
+        A::retained_exact_support(exact_support),
+        A::support_dag(
+            {{true, {0, 0, 0}, {}}, {true, {1, 2, 0}, {}}, {true, {3, -1, 0}, {}}, {false, {}, {0, 1, 2}}}, 0, 3)};
+    for (std::size_t i = 0; i < supports.size(); ++i)
+        expect_frozen_native("support_" + std::to_string(i), supports[i]);
+    expect_frozen_native(
+        "nested_retained", A::translated_support(A::translated_support(supports[5], {.5L, 0, 0}), {0, .25L, -1}));
+}
+
 } // namespace

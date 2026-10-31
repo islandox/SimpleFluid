@@ -110,7 +110,7 @@ template<ArithmeticMode Mode> bool directly_on(const Identity& token, const Stor
     }
     for (const auto* point = token.get(); point; point = point->source_origin.get())
         for (const auto& key : plane.authorities)
-            if (!key.key.empty())
+            if (!key.empty())
                 for (const auto& support : point->supports())
                 {
                     active_work->pair();

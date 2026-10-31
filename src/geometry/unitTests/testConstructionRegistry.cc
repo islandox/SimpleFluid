@@ -3,6 +3,7 @@
  */
 #include "geometry/PLIC/ConstructionRegistry.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 
 namespace
 {
+using SimpleFluid::PLIC::test::exported_points;
 using SimpleFluid::ArithmeticMode;
 namespace P = SimpleFluid::PLIC;
 namespace D = P::details;
@@ -25,7 +27,7 @@ template<ArithmeticMode Mode> Point<Mode> source_point(std::array<long double, 3
 template<ArithmeticMode Mode>
 std::size_t upper_face(const Geometry<Mode>& geometry, std::size_t axis, long double value)
 {
-    const auto points = geometry.points();
+    const auto points = exported_points(geometry);
     for (std::size_t face = 0; face < geometry.faces().size(); ++face)
         if (std::all_of(geometry.faces()[face].begin(), geometry.faces()[face].end(),
                 [&](std::size_t vertex) { return points[vertex].value[axis] == value; }))
@@ -73,7 +75,7 @@ TEST(ConstructionRegistryTest, CapturedWallSourceEdgeSurvivesComplementExportAnd
     const auto native = Geometry<mode>::make(corners, faces);
     const auto donor = Geometry<mode>::from_geometry(*native);
     std::vector<Point<mode>> top;
-    for (const auto& point : donor->points())
+    for (const auto& point : exported_points(*donor))
         if (point.value[2] == .5L)
             top.push_back(point);
     const auto a = P::point_average<mode>(top);
@@ -92,7 +94,7 @@ TEST(ConstructionRegistryTest, CapturedWallSourceEdgeSurvivesComplementExportAnd
     }
     ASSERT_GT(parent->volume().value, 0);
     bool generated_edge = false;
-    for (const auto& point : parent->points())
+    for (const auto& point : exported_points(*parent))
         if (point.value[1] == .5L)
         {
             const auto identity =
@@ -116,7 +118,7 @@ TEST(ConstructionRegistryTest, CapturedWallSourceEdgeSurvivesComplementExportAnd
     ASSERT_TRUE(repeated.inside);
     EXPECT_FALSE(repeated.outside);
     EXPECT_EQ(repeated.inside->storage_identity(), decoded->storage_identity());
-    const auto exported = Geometry<mode>::make_points(decoded->points(), decoded->faces());
+    const auto exported = Geometry<mode>::make_points(exported_points(*decoded), decoded->faces());
     const auto exported_cut = exported->clip_by_face(*query, 3, false);
     ASSERT_TRUE(exported_cut.inside);
     EXPECT_FALSE(exported_cut.outside);
@@ -297,7 +299,7 @@ template<ArithmeticMode Mode> void rebase_clip_chain()
             EXPECT_TRUE(registry.derived_from(*decoded, native));
             EXPECT_EQ(decoded->encode(registry), packet);
             EXPECT_EQ(decoded->faces(), terminal->faces());
-            const auto original_points = terminal->points(), replayed_points = decoded->points();
+            const auto original_points = exported_points(*terminal), replayed_points = exported_points(*decoded);
             ASSERT_EQ(replayed_points.size(), original_points.size());
             for (std::size_t point = 0; point < original_points.size(); ++point)
             {

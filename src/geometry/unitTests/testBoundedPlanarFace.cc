@@ -1,6 +1,7 @@
 /** @file testBoundedPlanarFace.cc
  * @brief Independent projected face-overlap, incidence and authority checks.
  */
+#include "geometry/unitTests/point_export_test_helpers.hh"
 #include "geometry/unitTests/plic_analytic_test_geometry.hh"
 #include "geometry/PLIC/GeometryInstrumentation.hh"
 #include "geometry/PLIC/PlanarFace.hh"
@@ -9,17 +10,19 @@
 #include <gtest/gtest.h>
 namespace
 {
+using SimpleFluid::PLIC::test::exported_points;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 template<SimpleFluid::ArithmeticMode Mode>
 std::vector<SimpleFluid::PLIC::DynamicPoint> face_on_support(
     const SimpleFluid::PLIC::ConvexCellGeometry<Mode>& geometry, const SimpleFluid::PLIC::PlaneAuthority& support)
 {
+    const auto points = exported_points(*geometry.dynamic_geometry());
     for (const auto& face : geometry.faces())
     {
         std::vector<SimpleFluid::PLIC::DynamicPoint> loop;
         for (auto index : face)
-            loop.push_back(geometry.dynamic_geometry()->points()[index]);
+            loop.push_back(points[index]);
         if (std::all_of(loop.begin(), loop.end(), [&](const auto& p)
                 { return std::find(p.supports().begin(), p.supports().end(), support) != p.supports().end(); }))
             return loop;
@@ -29,11 +32,12 @@ std::vector<SimpleFluid::PLIC::DynamicPoint> face_on_support(
 template<SimpleFluid::ArithmeticMode Mode>
 std::vector<SimpleFluid::PLIC::DynamicPoint> bottom(const SimpleFluid::PLIC::ConvexCellGeometry<Mode>& geometry)
 {
+    const auto points = exported_points(*geometry.dynamic_geometry());
     for (const auto& face : geometry.faces())
     {
         std::vector<SimpleFluid::PLIC::DynamicPoint> loop;
         for (auto index : face)
-            loop.push_back(geometry.dynamic_geometry()->points()[index]);
+            loop.push_back(points[index]);
         if (std::all_of(
                 loop.begin(), loop.end(), [](const auto& p) { return p.value[2] == 0 && p.absolute_error[2] == 0; }))
             return loop;
@@ -192,11 +196,12 @@ TEST(BoundedPlanarFaceTest, ObliqueCertifiedCutsUseOriginalSupportAndIndependent
 {
     const auto first = plic_test::unit_tetrahedron<SimpleFluid::ArithmeticMode::BoundedCertification>();
     std::vector<SimpleFluid::PLIC::DynamicPoint> a;
+    const auto first_points = exported_points(*first->dynamic_geometry());
     for (const auto& face : first->faces())
     {
         std::vector<SimpleFluid::PLIC::DynamicPoint> loop;
         for (auto index : face)
-            loop.push_back(first->dynamic_geometry()->points()[index]);
+            loop.push_back(first_points[index]);
         if (std::all_of(
                 loop.begin(), loop.end(), [](const auto& p) { return p.value[0] + p.value[1] + p.value[2] == 1; }))
         {
@@ -231,8 +236,9 @@ TEST(BoundedPlanarFaceTest, ForeignSupportTamperedPointsNonconvexLoopsAndResourc
     auto bad = a;
     bad[0].value[0] += .01;
     EXPECT_THROW((void) selected_overlap<>(a, bad, support), std::invalid_argument);
-    auto foreign = support;
-    foreign.key.push_back(13);
+    auto foreign_words = support.words();
+    foreign_words.push_back(13);
+    const auto foreign = SimpleFluid::PLIC::PlaneAuthority::opaque(std::move(foreign_words));
     EXPECT_THROW((void) selected_overlap<>(a, a, foreign), std::invalid_argument);
     bad = a;
     std::swap(bad[1], bad[2]);

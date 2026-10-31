@@ -150,6 +150,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     {
         active_work->charge(storage_bytes(), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
+        rebased->export_source = impl_->export_source ? impl_->export_source : impl_;
         rebased->frame.origin = input.anchor;
         rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
         rebased->moment_cache = std::make_shared<MomentCache>();
@@ -222,7 +223,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         result.source_identity = identity;
         active_work->charge(identity->supports().size(), sizeof(PlaneAuthority));
         for (const auto& key : identity->supports())
-            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+            active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
         result.authorities = identity->supports();
         return result;
     };

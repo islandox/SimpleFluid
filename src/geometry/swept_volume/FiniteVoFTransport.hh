@@ -154,7 +154,7 @@ inline std::vector<OverlayFace> overlay_face_order(const Geometry<Mode>& geometr
     result.reserve(geometry.faces().size());
     for (std::size_t f = 0; f < geometry.faces().size(); ++f)
         result.push_back({f, 0});
-    charge(geometry.points().size(), sizeof(PLIC::Point<Mode>));
+    charge(geometry.vertex_count(), sizeof(PLIC::Point<Mode>));
     const auto points = geometry.local_points();
     long double magnitude = 0;
     for (const auto& p : points)

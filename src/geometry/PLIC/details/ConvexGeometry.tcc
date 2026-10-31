@@ -297,10 +297,11 @@ std::vector<char> ConvexCellGeometry<Mode>::encode(const GeometryPacketContext& 
 {
     return SelectedGeometryKernel<Mode>(geometry_->impl_).encode(context, budget);
 }
-template<ArithmeticMode Mode> std::vector<Point<Mode>> ConvexCellGeometry<Mode>::points() const
+template<ArithmeticMode Mode>
+PointExport<Mode> ConvexCellGeometry<Mode>::export_points(
+    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit) const
 {
-    details::Operation scope(geometry_->impl_->limits);
-    return typed_points<Mode>(geometry_->points());
+    return DynamicGeometryAccess::export_typed<Mode>(geometry_->impl_, ledger, used, limit);
 }
 template<ArithmeticMode Mode> std::vector<Point<Mode>> ConvexCellGeometry<Mode>::local_points() const
 {
@@ -403,7 +404,7 @@ template<ArithmeticMode Mode> std::vector<PlaneAuthority> common_supports(std::s
         return {};
     std::vector<PlaneAuthority> result;
     for (const auto& key : points.front().supports())
-        if (!key.key.empty() &&
+        if (!key.empty() &&
             std::all_of(points.begin() + 1, points.end(), [&](const auto& point)
                 { return has_support(point.dynamic(), key); }))
             result.push_back(key);

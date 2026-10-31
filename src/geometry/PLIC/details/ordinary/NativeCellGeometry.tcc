@@ -213,10 +213,10 @@ template<ArithmeticMode Mode>
 PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) const
     requires(Mode == ArithmeticMode::Ordinary)
 {
-    const auto vertices = points();
+    const details::OrdinaryExportCoordinates vertices(*this);
     std::vector<std::array<long double, 3>> loop;
     for (auto i : faces().at(face))
-        loop.push_back(vertices.at(i).value);
+        loop.push_back(vertices.at(i));
     const auto stored = details::checked_geometry_storage<Mode>(geometry_->impl_);
     const auto& surface = stored->surfaces.at(face);
     std::array<long double, 3> normal;
@@ -302,7 +302,13 @@ std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Or
         auto support = stored->surfaces.at(index).plane->native_support;
         if (!support)
             support = planar_support<Mode>(*cell.face_geometry(index));
-        w.packet(details::GeometryIdentityAccess::key(*support));
+        w.word(canonical_key_size(*support));
+        details::GeometryIdentityAccess::emit_canonical(*support, &w,
+            [](void* context, std::span<const char> fragment)
+            {
+                auto& writer = *static_cast<on::Writer*>(context);
+                writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
+            });
     }
     return std::move(w.bytes);
 }

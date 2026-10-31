@@ -24,6 +24,12 @@ public:
     void retain(const ConvexGeometryPtr<Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     template<ArithmeticMode Mode>
     void retain(const DynamicConvexGeometryPtr&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    void retain(const DynamicPointExport&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+    void retain(const PointExport<Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    /** Admit a shared opaque authority payload or the complete typed support
+     * ancestry. Content equality does not merge independently owned handles. */
+    void retain(const PlaneAuthority&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Shared identity owners join the same admission scope as geometry.
      * Content equality never deduplicates independently allocated owners. */
     template<GeometryIdentityKind Kind, ArithmeticMode Mode>
@@ -34,6 +40,7 @@ public:
     [[nodiscard]] std::size_t bookkeeping_bytes() const noexcept;
 
 private:
+    friend class DynamicGeometryAccess;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;

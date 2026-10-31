@@ -4,6 +4,7 @@
 #include "FVM/ExactFaceTransfer.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
@@ -129,6 +130,7 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
     geometry_limits.byte_budget = controls.byte_budget / 2;
     geometry_limits.arithmetic_mode = source_input.arithmetic_mode;
     std::size_t pairs = 0, patches = 0, retained_bytes = common_geometry_bytes;
+    PLIC::GeometryAllocationLedger point_exports;
     const auto charge = [&](std::size_t bytes)
     {
         if (bytes > controls.byte_budget - std::min(retained_bytes, controls.byte_budget))
@@ -242,7 +244,8 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                 for (std::size_t c = 0; c < indices.size(); ++c)
                 {
                     const auto& geometry = *common_geometry[indices[c]];
-                    const auto points = geometry.points();
+                    const auto exported = geometry.export_points(point_exports, retained_bytes, controls.byte_budget);
+                    const auto points = exported.points();
                     for (const auto& face : geometry.faces())
                     {
                         Facet facet{c, {}, {}};

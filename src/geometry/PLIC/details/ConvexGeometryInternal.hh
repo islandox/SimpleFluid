@@ -95,10 +95,20 @@ public:
         const std::shared_ptr<const DynamicPointProvenance>&);
     static void seal_export(DynamicPoint&, const std::shared_ptr<const DynamicPointProvenance>&,
         std::vector<PlaneAuthority>, bool numerical_only = false);
-    static void seal_generated(DynamicPoint&,
-        std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>>,
+    static void seal_generated(DynamicPoint&, std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>>,
         std::vector<PlaneAuthority> = {}, bool numerical_only = false);
     static void seal_numerical(DynamicPoint&);
+    static void attach_identity(DynamicPoint&, std::shared_ptr<const DynamicPointProvenance>);
+    template<ArithmeticMode Mode>
+    static PointExport<Mode> export_typed(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
+        GeometryAllocationLedger&, std::size_t&, std::size_t);
+    template<ArithmeticMode Mode>
+    static DynamicPointExport export_dynamic(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
+        GeometryAllocationLedger&, std::size_t&, std::size_t);
+    template<ArithmeticMode Mode, bool Typed>
+    static auto export_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>&, GeometryAllocationLedger&,
+        std::size_t&, std::size_t);
+
     static const std::shared_ptr<const DynamicConvexGeometry::Impl>& implementation(const DynamicConvexGeometry&);
     static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
 };
@@ -356,12 +366,35 @@ template<ArithmeticMode Mode> struct StoredMomentCache
 namespace SimpleFluid::PLIC
 {
 
+struct SIMPLEFLUID_LOCAL DynamicPointExportPayload
+{
+    ArithmeticMode mode = ArithmeticMode::Ordinary;
+    std::vector<DynamicPoint> points;
+};
+template<ArithmeticMode Mode> struct PointExportPayload
+{
+    std::vector<Point<Mode>> points;
+    std::shared_ptr<const DynamicPointExportPayload> dynamic;
+};
+struct SIMPLEFLUID_LOCAL PointExportCache
+{
+    std::mutex mutex;
+    std::fenv_t environment{}; ///< Arithmetic environment of the validated global-coordinate publication.
+
+    std::weak_ptr<const DynamicPointExportPayload> dynamic_root;
+    std::weak_ptr<const PointExportPayload<ArithmeticMode::Ordinary>> ordinary_root;
+    std::weak_ptr<const PointExportPayload<ArithmeticMode::BoundedCertification>> bounded_root;
+    std::vector<std::weak_ptr<const DynamicPointProvenance>> vertex_provenance;
+};
+
 struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
 {
     Frame frame;
     GeometryPoint reference_origin{};
     std::vector<Face> faces;
-    std::vector<DynamicPoint> displayed;
+    std::shared_ptr<PointExportCache> point_export_cache;
+    std::shared_ptr<const Impl> export_source;
+    bool export_seal = false;
     GeometryLimits limits;
     CoordinateBox bounds;
     bool partition_proof_only = false;

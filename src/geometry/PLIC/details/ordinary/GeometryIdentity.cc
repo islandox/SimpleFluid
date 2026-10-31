@@ -38,6 +38,11 @@ struct NativeSupport : GeometryIdentityNativePayload
         return GeometryIdentityNativeKind::OrdinarySupport;
     }
     [[nodiscard]] virtual OrdinarySupportKind kind() const noexcept = 0;
+    void emit_prefix(const GeometryIdentityCanonicalWriter&, std::size_t parent_bytes) const override;
+    void emit_suffix(const GeometryIdentityCanonicalWriter&) const override;
+    bool encoded_fields_equal(const GeometryIdentityNativePayload&) const noexcept override;
+    std::size_t next_canonical_chunk(
+        bool, std::array<std::size_t, 4>&, std::size_t parent_bytes, std::span<char>) const override;
 };
 struct Axis final : NativeSupport
 {
@@ -102,22 +107,316 @@ struct Dag final : NativeSupport
         return bytes;
     }
 };
-Support make(std::vector<char> key, std::unique_ptr<const GeometryIdentityNativePayload> native,
-    GeometryIdentityBackingPtr parent = {})
+Support make(std::unique_ptr<const GeometryIdentityNativePayload> native, GeometryIdentityBackingPtr parent = {})
 {
-    return GeometryIdentityAccess::share<Support>(std::move(key), std::move(native), std::move(parent));
+    return GeometryIdentityAccess::share<Support>(std::move(native), std::move(parent));
 }
 constexpr GeometryTag axis_tag = GeometryTag::OrdinaryAxisSupport, source_tag = GeometryTag::OrdinarySourceSupport;
 constexpr GeometryTag input_tag = GeometryTag::OrdinaryInputSupport, plane_tag = GeometryTag::OrdinaryPlaneSupport;
-constexpr GeometryTag translation_tag = GeometryTag::OrdinaryTranslatedSupport, dag_tag = GeometryTag::OrdinaryExtrusionDagSupport;
+constexpr GeometryTag translation_tag = GeometryTag::OrdinaryTranslatedSupport,
+                      dag_tag = GeometryTag::OrdinaryExtrusionDagSupport;
 constexpr GeometryTag exact_support_tag = GeometryTag::ExactPlaneSupport;
-std::size_t node_size(std::size_t key, std::size_t native) noexcept
+std::size_t point_size(const Point& point) noexcept
 {
-    return add(sizeof(GeometryIdentityBacking), add(key, native));
+    std::size_t bytes = 0;
+    for (auto value : point)
+        bytes += value == 0 ? 16 : ordinary_identity_scalar_bytes;
+    return bytes;
+}
+std::size_t record_size(const OrdinarySupportRecipe& record) noexcept
+{
+    return record.original ? 1 + point_size(record.root) : add(9, product(8, record.parents.size()));
+}
+void NativeSupport::emit_prefix(const GeometryIdentityCanonicalWriter& writer, std::size_t parent_bytes) const
+{
+    switch (kind())
+    {
+        case OrdinarySupportKind::Axis: {
+            const auto& value = static_cast<const Axis&>(*this);
+            writer.tag(axis_tag);
+            writer.word(value.axis);
+            writer.real(value.location);
+            break;
+        }
+        case OrdinarySupportKind::Source: {
+            const auto& value = static_cast<const Source&>(*this);
+            writer.tag(source_tag);
+            writer.word(value.points.size());
+            for (const auto& point : value.points)
+                writer.point(point);
+            break;
+        }
+        case OrdinarySupportKind::Input: {
+            const auto& value = static_cast<const Input&>(*this);
+            writer.tag(input_tag);
+            writer.point(value.normal);
+            writer.point(value.anchor);
+            writer.real(value.offset);
+            break;
+        }
+        case OrdinarySupportKind::Plane: {
+            const auto& value = static_cast<const Plane&>(*this);
+            writer.tag(plane_tag);
+            writer.word(value.axis);
+            writer.point(value.normal);
+            writer.real(value.location);
+            break;
+        }
+        case OrdinarySupportKind::Translation:
+            writer.tag(translation_tag);
+            writer.word(parent_bytes);
+            break;
+        case OrdinarySupportKind::RetainedExact:
+            break;
+        case OrdinarySupportKind::ExtrusionDag: {
+            const auto& value = static_cast<const Dag&>(*this);
+            writer.tag(dag_tag);
+            writer.word(value.records.size());
+            for (const auto& record : value.records)
+            {
+                writer.word(record_size(record));
+                writer.byte(static_cast<std::uint8_t>(
+                    record.original ? SupportRecipeKind::Original : SupportRecipeKind::Derived));
+                if (record.original)
+                    writer.point(record.root);
+                else
+                {
+                    writer.word(record.parents.size());
+                    for (auto parent : record.parents)
+                        writer.word(parent);
+                }
+            }
+            writer.word(value.first);
+            writer.word(value.second);
+            break;
+        }
+    }
+}
+void NativeSupport::emit_suffix(const GeometryIdentityCanonicalWriter& writer) const
+{
+    if (kind() == OrdinarySupportKind::Translation)
+        writer.point(static_cast<const Translation&>(*this).shift);
+}
+std::size_t NativeSupport::next_canonical_chunk(
+    bool suffix, std::array<std::size_t, 4>& state, std::size_t parent_bytes, std::span<char> output) const
+{
+    struct Chunk
+    {
+        std::span<char> bytes;
+        std::size_t written = 0;
+    } chunk{output};
+    const GeometryIdentityCanonicalWriter writer{&chunk, [](void* context, std::span<const char> bytes)
+        {
+            auto& destination = *static_cast<Chunk*>(context);
+            if (bytes.size() > destination.bytes.size() - destination.written)
+                throw std::logic_error("Canonical support chunk exceeds its fixed buffer.");
+            std::copy(bytes.begin(), bytes.end(), destination.bytes.begin() + destination.written);
+            destination.written += bytes.size();
+        }};
+    if (suffix)
+    {
+        if (kind() == OrdinarySupportKind::Translation && state[0] < 3)
+            writer.real(static_cast<const Translation&>(*this).shift[state[0]++]);
+        return chunk.written;
+    }
+    switch (kind())
+    {
+        case OrdinarySupportKind::Axis: {
+            const auto& value = static_cast<const Axis&>(*this);
+            switch (state[0]++)
+            {
+                case 0:
+                    writer.tag(axis_tag);
+                    break;
+                case 1:
+                    writer.word(value.axis);
+                    break;
+                case 2:
+                    writer.real(value.location);
+                    break;
+            }
+            break;
+        }
+        case OrdinarySupportKind::Source: {
+            const auto& value = static_cast<const Source&>(*this);
+            const auto field = state[0]++;
+            if (field == 0)
+                writer.tag(source_tag);
+            else if (field == 1)
+                writer.word(value.points.size());
+            else if ((field - 2) / 3 < value.points.size())
+                writer.real(value.points[(field - 2) / 3][(field - 2) % 3]);
+            break;
+        }
+        case OrdinarySupportKind::Input: {
+            const auto& value = static_cast<const Input&>(*this);
+            const auto field = state[0]++;
+            if (field == 0)
+                writer.tag(input_tag);
+            else if (field < 4)
+                writer.real(value.normal[field - 1]);
+            else if (field < 7)
+                writer.real(value.anchor[field - 4]);
+            else if (field == 7)
+                writer.real(value.offset);
+            break;
+        }
+        case OrdinarySupportKind::Plane: {
+            const auto& value = static_cast<const Plane&>(*this);
+            const auto field = state[0]++;
+            if (field == 0)
+                writer.tag(plane_tag);
+            else if (field == 1)
+                writer.word(value.axis);
+            else if (field < 5)
+                writer.real(value.normal[field - 2]);
+            else if (field == 5)
+                writer.real(value.location);
+            break;
+        }
+        case OrdinarySupportKind::Translation:
+            if (state[0] == 0)
+                writer.tag(translation_tag);
+            else if (state[0] == 1)
+                writer.word(parent_bytes);
+            ++state[0];
+            break;
+        case OrdinarySupportKind::RetainedExact:
+            break;
+        case OrdinarySupportKind::ExtrusionDag: {
+            const auto& value = static_cast<const Dag&>(*this);
+            for (;;)
+            {
+                if (state[0] == 0)
+                {
+                    writer.tag(dag_tag);
+                    ++state[0];
+                }
+                else if (state[0] == 1)
+                {
+                    writer.word(value.records.size());
+                    ++state[0];
+                }
+                else if (state[0] == 2)
+                {
+                    if (state[1] == value.records.size())
+                    {
+                        ++state[0];
+                        continue;
+                    }
+                    const auto& record = value.records[state[1]];
+                    if (state[2] == 0)
+                    {
+                        writer.word(record_size(record));
+                        ++state[2];
+                    }
+                    else if (state[2] == 1)
+                    {
+                        writer.byte(static_cast<std::uint8_t>(
+                            record.original ? SupportRecipeKind::Original : SupportRecipeKind::Derived));
+                        ++state[2];
+                    }
+                    else if (record.original)
+                    {
+                        writer.real(record.root[state[3]++]);
+                        if (state[3] == 3)
+                        {
+                            ++state[1];
+                            state[2] = state[3] = 0;
+                        }
+                    }
+                    else if (state[2] == 2)
+                    {
+                        writer.word(record.parents.size());
+                        ++state[2];
+                    }
+                    else if (state[3] < record.parents.size())
+                    {
+                        writer.word(record.parents[state[3]++]);
+                        if (state[3] == record.parents.size())
+                        {
+                            ++state[1];
+                            state[2] = state[3] = 0;
+                        }
+                    }
+                    else
+                    {
+                        ++state[1];
+                        state[2] = state[3] = 0;
+                        continue;
+                    }
+                }
+                else if (state[0] == 3)
+                {
+                    writer.word(value.first);
+                    ++state[0];
+                }
+                else if (state[0] == 4)
+                {
+                    writer.word(value.second);
+                    ++state[0];
+                }
+                break;
+            }
+            break;
+        }
+    }
+    return chunk.written;
+}
+bool NativeSupport::encoded_fields_equal(const GeometryIdentityNativePayload& other) const noexcept
+{
+    if (other.native_kind() != GeometryIdentityNativeKind::OrdinarySupport)
+        return false;
+    const auto& that = static_cast<const NativeSupport&>(other);
+    if (kind() != that.kind())
+        return false;
+    switch (kind())
+    {
+        case OrdinarySupportKind::Axis: {
+            const auto& a = static_cast<const Axis&>(*this);
+            const auto& b = static_cast<const Axis&>(that);
+            return a.axis == b.axis && a.location == b.location;
+        }
+        case OrdinarySupportKind::Source:
+            return static_cast<const Source&>(*this).points == static_cast<const Source&>(that).points;
+        case OrdinarySupportKind::Input: {
+            const auto& a = static_cast<const Input&>(*this);
+            const auto& b = static_cast<const Input&>(that);
+            return a.normal == b.normal && a.anchor == b.anchor && a.offset == b.offset;
+        }
+        case OrdinarySupportKind::Plane: {
+            const auto& a = static_cast<const Plane&>(*this);
+            const auto& b = static_cast<const Plane&>(that);
+            return a.axis == b.axis && a.normal == b.normal && a.location == b.location;
+        }
+        case OrdinarySupportKind::Translation:
+            return static_cast<const Translation&>(*this).shift == static_cast<const Translation&>(that).shift;
+        case OrdinarySupportKind::RetainedExact:
+            return true;
+        case OrdinarySupportKind::ExtrusionDag: {
+            const auto& a = static_cast<const Dag&>(*this);
+            const auto& b = static_cast<const Dag&>(that);
+            if (a.first != b.first || a.second != b.second || a.records.size() != b.records.size())
+                return false;
+            for (std::size_t i = 0; i < a.records.size(); ++i)
+            {
+                const auto& x = a.records[i];
+                const auto& y = b.records[i];
+                if (x.original != y.original || (x.original ? x.root != y.root : x.parents != y.parents))
+                    return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+std::size_t node_size(std::size_t native) noexcept
+{
+    return add(sizeof(GeometryIdentityBacking), native);
 }
 
 // Preflight uses no persistent owners or per-parent key caches. It keeps the
-// original expression layers and estimates every cumulative retained cache.
+// original expression layers and estimates native allocations and live scratch.
 std::size_t leaf_size(std::span<const char> key)
 {
     on::Reader reader{key};
@@ -150,16 +449,15 @@ std::size_t leaf_size(std::span<const char> key)
             break;
         }
         case exact_support_tag:
-            return add(node_size(key.size(), sizeof(RetainedExact)),
+            return add(node_size(sizeof(RetainedExact)),
                 exact_identity_import_storage_bound(GeometryIdentityKind::PlaneSupport, key));
         default:
             throw std::invalid_argument("Unknown native support import kind.");
     }
-    return node_size(key.size(), native);
+    return node_size(native);
 }
 struct Layer
 {
-    std::span<const char> key;
     Point shift;
 };
 GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t budget)
@@ -222,15 +520,23 @@ GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t bu
             native = std::make_unique<const Dag>(std::move(records), first, second);
             break;
         }
-        case exact_support_tag:
-            parent =
-                import_exact_identity_backing(GeometryIdentityKind::PlaneSupport, {key.begin(), key.end()}, budget);
+        case exact_support_tag: {
+            const auto retained = node_size(sizeof(RetainedExact));
+            if (retained > budget)
+                throw std::invalid_argument("Retained Exact support exceeds its native import budget.");
+            parent = import_exact_identity_backing(GeometryIdentityKind::PlaneSupport, key, budget - retained);
             native = std::make_unique<const RetainedExact>();
             break;
+        }
         default:
             throw std::invalid_argument("Unknown native support import kind.");
     }
-    return make_geometry_identity_backing({key.begin(), key.end()}, std::move(native), std::move(parent));
+    std::size_t retained = node_size(native->storage_bytes());
+    for (auto ancestor = parent; ancestor; ancestor = geometry_identity_parent(ancestor))
+        admit(geometry_identity_payload_bytes(ancestor), retained, budget);
+    if (retained > budget)
+        throw std::invalid_argument("Native support import exceeds its retained payload budget.");
+    return make_geometry_identity_backing(std::move(native), std::move(parent), budget - retained);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_identity_detail
 
@@ -244,11 +550,7 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_a
     if (axis > 2)
         on::reject("invalid native support axis.");
     location = scalar(location);
-    on::Writer key;
-    key.tag(axis_tag);
-    key.word(axis);
-    key.real(location);
-    return ordinary_identity_detail::make(std::move(key.bytes), std::make_unique<const Axis>(axis, location));
+    return ordinary_identity_detail::make(std::make_unique<const Axis>(axis, location));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_source(std::vector<NativePoint> points)
 {
@@ -256,12 +558,7 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_s
         point = normalize_identity_point(std::move(point));
     if (points.size() < 3 || !std::is_sorted(points.begin(), points.end()))
         on::reject("invalid native source support points.");
-    on::Writer key;
-    key.tag(source_tag);
-    key.word(points.size());
-    for (const auto& point : points)
-        key.point(point);
-    return ordinary_identity_detail::make(std::move(key.bytes), std::make_unique<const Source>(std::move(points)));
+    return ordinary_identity_detail::make(std::make_unique<const Source>(std::move(points)));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_input(
     NativePoint normal, NativePoint anchor, long double offset)
@@ -272,12 +569,7 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_i
     const auto first = std::find_if(normal.begin(), normal.end(), [](auto value) { return value != 0; });
     if (first == normal.end() || *first < 0)
         on::reject("native input support normal is zero or has a noncanonical sign.");
-    on::Writer key;
-    key.tag(input_tag);
-    key.point(normal);
-    key.point(anchor);
-    key.real(offset);
-    return ordinary_identity_detail::make(std::move(key.bytes), std::make_unique<const Input>(normal, anchor, offset));
+    return ordinary_identity_detail::make(std::make_unique<const Input>(normal, anchor, offset));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_plane(
     std::uint64_t axis, NativePoint normal, long double location)
@@ -286,12 +578,7 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_p
         on::reject("invalid native support axis.");
     normal = normalize_identity_point(std::move(normal));
     location = scalar(location);
-    on::Writer key;
-    key.tag(plane_tag);
-    key.word(axis);
-    key.point(normal);
-    key.real(location);
-    return ordinary_identity_detail::make(std::move(key.bytes), std::make_unique<const Plane>(axis, normal, location));
+    return ordinary_identity_detail::make(std::make_unique<const Plane>(axis, normal, location));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::translated_support(
     const Support& parent, NativePoint shift)
@@ -299,54 +586,30 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::translate
     shift = normalize_identity_point(std::move(shift));
     if (shift == NativePoint{})
         return parent;
-    on::Writer key;
-    key.tag(translation_tag);
-    key.packet(GeometryIdentityAccess::key(parent));
-    key.point(shift);
-    return ordinary_identity_detail::make(
-        std::move(key.bytes), std::make_unique<const Translation>(shift), backing(parent));
+    return ordinary_identity_detail::make(std::make_unique<const Translation>(shift), backing(parent));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::retained_exact_support(
     const PlaneSupportIdentity<ArithmeticMode::Exact>& parent)
 {
     if (!backing(parent))
         throw std::invalid_argument("Missing retained Exact support owner.");
-    return ordinary_identity_detail::make(
-        canonical_key(parent), std::make_unique<const RetainedExact>(), backing(parent));
+    return ordinary_identity_detail::make(std::make_unique<const RetainedExact>(), backing(parent));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_dag(
     std::vector<OrdinarySupportRecipe> records, std::size_t first, std::size_t second)
 {
     if (first > second || second >= records.size())
         on::reject("invalid native support recipe endpoints.");
-    on::Writer key;
-    key.tag(dag_tag);
-    key.word(records.size());
     for (std::size_t i = 0; i < records.size(); ++i)
     {
         auto& record = records[i];
-        on::Writer fields;
-        fields.byte(static_cast<std::uint8_t>(record.original ? SupportRecipeKind::Original : SupportRecipeKind::Derived));
         if (record.original)
-        {
             record.root = normalize_identity_point(std::move(record.root));
-            fields.point(record.root);
-        }
-        else
-        {
-            if (record.parents.empty() || !std::is_sorted(record.parents.begin(), record.parents.end()) ||
-                record.parents.back() >= i)
-                on::reject("invalid native support recipe parents.");
-            fields.word(record.parents.size());
-            for (auto parent : record.parents)
-                fields.word(parent);
-        }
-        key.packet(fields.bytes);
+        else if (record.parents.empty() || !std::is_sorted(record.parents.begin(), record.parents.end()) ||
+                 record.parents.back() >= i)
+            on::reject("invalid native support recipe parents.");
     }
-    key.word(first);
-    key.word(second);
-    return ordinary_identity_detail::make(
-        std::move(key.bytes), std::make_unique<const Dag>(std::move(records), first, second));
+    return ordinary_identity_detail::make(std::make_unique<const Dag>(std::move(records), first, second));
 }
 OrdinarySupportKind ordinary_support_kind(const Support& support)
 {
@@ -403,7 +666,7 @@ std::strong_ordering compare_record(const OrdinarySupportRecipe& first, const Or
     return first.parents <=> second.parents;
 }
 } // namespace
-std::strong_ordering compare_ordinary_support_native(
+static std::strong_ordering compare_support_node(
     const GeometryIdentityBackingPtr& first, const GeometryIdentityBackingPtr& second)
 {
     if (first == second)
@@ -443,9 +706,7 @@ std::strong_ordering compare_ordinary_support_native(
             return compare_scalar(x.location, y.location);
         }
         case OrdinarySupportKind::Translation: {
-            const auto parent = compare_ordinary_support_native(first->parent, second->parent);
-            if (parent != 0)
-                return parent;
+            // The iterative driver visits translation parents before shifts.
             return compare_point(static_cast<const Translation&>(a).shift, static_cast<const Translation&>(b).shift);
         }
         case OrdinarySupportKind::RetainedExact:
@@ -461,7 +722,40 @@ std::strong_ordering compare_ordinary_support_native(
     throw std::invalid_argument("Unknown native support ordering variant.");
 }
 
-GeometryIdentityBackingPtr import_ordinary_support_backing(std::vector<char> checked_key, std::size_t budget)
+std::strong_ordering compare_ordinary_support_native(
+    const GeometryIdentityBackingPtr& first, const GeometryIdentityBackingPtr& second)
+{
+    auto a = first, b = second;
+    std::size_t translations = 0;
+    while (a != b && support_payload(a).kind() == OrdinarySupportKind::Translation &&
+           support_payload(b).kind() == OrdinarySupportKind::Translation)
+    {
+        a = a->parent;
+        b = b->parent;
+        ++translations;
+    }
+    if (const auto parent = compare_support_node(a, b); parent != 0)
+        return parent;
+    // Revisit parents rather than retaining a scratch stack. This preserves
+    // parent-first native order with bounded stack and no query allocations.
+    while (translations)
+    {
+        --translations;
+        auto x = first.get(), y = second.get();
+        for (std::size_t i = 0; i < translations; ++i)
+        {
+            x = x->parent.get();
+            y = y->parent.get();
+        }
+        const auto order = compare_point(
+            static_cast<const Translation&>(*x->native).shift, static_cast<const Translation&>(*y->native).shift);
+        if (order != 0)
+            return order;
+    }
+    return std::strong_ordering::equal;
+}
+
+GeometryIdentityBackingPtr import_ordinary_support_backing(std::span<const char> checked_key, std::size_t budget)
 {
     auto current = std::span<const char>(checked_key);
     std::size_t planned = 0, depth = 0;
@@ -470,15 +764,26 @@ GeometryIdentityBackingPtr import_ordinary_support_backing(std::vector<char> che
         on::Reader reader{current};
         if (reader.tag() != translation_tag)
             break;
-        admit(node_size(current.size(), sizeof(Translation)), planned, budget);
+        admit(node_size(sizeof(Translation)), planned, budget);
         const auto parent = reader.packet();
         (void) reader.point();
         current = parent;
         ++depth;
     }
-    admit(leaf_size(current), planned, budget); // Before any cumulative parent key caches exist.
+    admit(leaf_size(current), planned, budget);
+    const auto leaf_depth = static_cast<GeometryTag>(current.front()) == exact_support_tag ? 2u : 1u;
+    const auto pointer_scratch = product(add(depth, leaf_depth), sizeof(const GeometryIdentityBacking*));
+    const auto layer_scratch = product(depth, sizeof(Layer));
+    admit(add(layer_scratch, pointer_scratch), planned, budget); // Wire has its own envelope limit.
+    charge_geometry_identity_scratch(depth, sizeof(Layer));
     std::vector<Layer> layers;
     layers.reserve(depth);
+    const auto actual_layer_scratch = product(layers.capacity(), sizeof(Layer));
+    if (layers.capacity() > depth)
+    {
+        admit(product(layers.capacity() - depth, sizeof(Layer)), planned, budget);
+        charge_geometry_identity_scratch(layers.capacity() - depth, sizeof(Layer));
+    }
     current = checked_key;
     for (std::size_t i = 0; i < depth; ++i)
     {
@@ -486,19 +791,19 @@ GeometryIdentityBackingPtr import_ordinary_support_backing(std::vector<char> che
         (void) reader.tag();
         const auto parent = reader.packet();
         const auto shift = reader.point();
-        layers.push_back({current, shift});
+        layers.push_back({shift});
         current = parent;
     }
-    auto result = import_leaf(current, budget);
-    std::size_t actual = 0;
+    auto result = import_leaf(current, budget - actual_layer_scratch);
+    std::size_t actual = actual_layer_scratch;
     for (auto owner = result; owner; owner = geometry_identity_parent(owner))
         admit(geometry_identity_payload_bytes(owner), actual, budget);
     for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer)
     {
-        auto key = std::vector<char>(layer->key.begin(), layer->key.end());
+        const auto retained = node_size(sizeof(Translation));
+        admit(retained, actual, budget);
         auto next =
-            make_geometry_identity_backing(std::move(key), std::make_unique<const Translation>(layer->shift), result);
-        admit(geometry_identity_payload_bytes(next), actual, budget);
+            make_geometry_identity_backing(std::make_unique<const Translation>(layer->shift), result, budget - actual);
         result = std::move(next);
     }
     return result;

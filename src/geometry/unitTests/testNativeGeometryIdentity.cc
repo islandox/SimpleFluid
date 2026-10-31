@@ -3,6 +3,8 @@
  */
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include <cmath>
 #include <cstdlib>
@@ -15,6 +17,13 @@ namespace
 {
 thread_local bool count_identity_allocations = false;
 thread_local std::size_t identity_allocations = 0;
+thread_local std::size_t identity_allocation_bytes = 0;
+thread_local bool fail_identity_allocations = false;
+struct IdentityAllocationFailureScope
+{
+    IdentityAllocationFailureScope() { fail_identity_allocations = true; }
+    ~IdentityAllocationFailureScope() { fail_identity_allocations = false; }
+};
 struct IdentityAllocationScope
 {
     IdentityAllocationScope() { count_identity_allocations = true; }
@@ -24,7 +33,12 @@ struct IdentityAllocationScope
 void* operator new(std::size_t size)
 {
     if (count_identity_allocations)
+    {
         ++identity_allocations;
+        identity_allocation_bytes += size;
+    }
+    if (fail_identity_allocations)
+        throw std::bad_alloc();
     if (auto* value = std::malloc(size ? size : 1))
         return value;
     throw std::bad_alloc();
@@ -207,5 +221,167 @@ TEST(NativeGeometryIdentityTest, NativeOrderingUsesValuesAndLegacyAdapterIsExpli
         return PlanarFace<ordinary>::make(points)->edge_support_identities().front();
     };
     EXPECT_LT(line(std::ldexp(1., -66)), line(std::ldexp(1., -65)));
+}
+
+template<class Identity> void expect_no_allocation_equality(const Identity& original, const Identity& unequal)
+{
+    static_assert(noexcept(original == unequal));
+    const auto independent = decode_identity<Identity>(encode_identity(original));
+    if (original.storage_identity())
+        EXPECT_NE(original.storage_identity(), independent.storage_identity());
+    bool equal = false, different = false, reverse = false;
+    // Every allocation and Google Test assertion lies outside this scope. A
+    // bad_alloc inside the noexcept equality operation terminates the test.
+    {
+        IdentityAllocationFailureScope fail;
+        equal = original == independent;
+        reverse = independent == original;
+        different = !(original == unequal) && !(unequal == original);
+    }
+    EXPECT_TRUE(equal);
+    EXPECT_TRUE(reverse);
+    EXPECT_TRUE(different);
+}
+TEST(NativeGeometryIdentityTest, CompleteNativeEqualitySurvivesAllocationFailureForAllVariants)
+{
+    namespace E = exact_geometry_detail;
+    using A = details::GeometryIdentityAccess;
+    const E::I numerator = (E::I{1} << 257) + 1, denominator = (E::I{1} << 263) + 3;
+    const E::Q large(numerator, denominator);
+    expect_no_allocation_equality(
+        E::make_point_identity({large, E::Q{}, E::Q{}}), E::make_point_identity({large, E::Q{}, E::Q{1}}));
+    expect_no_allocation_equality(E::make_displacement_identity({large, E::Q{}, E::Q{}}),
+        E::make_displacement_identity({large, E::Q{}, E::Q{1}}));
+    expect_no_allocation_equality(
+        E::make_displacement_identity({large, E::Q{}, E::Q{}}), DisplacementIdentity<exact>{});
+    expect_no_allocation_equality(E::make_line_identity({E::Q{1}, large, E::Q{}}, {E::Q{}, E::Q{}, large}),
+        E::make_line_identity({E::Q{1}, large, E::Q{}}, {E::Q{}, E::Q{}, large + 1}));
+    const auto first_exact = E::make_support_identity({E::Q{1}, large, E::Q{}, large});
+    const auto second_exact = E::make_support_identity({E::Q{1}, large, E::Q{}, large + 1});
+    expect_no_allocation_equality(first_exact, second_exact);
+    const auto axis = A::support_axis(0, 0);
+    expect_no_allocation_equality(axis, A::support_axis(0, 1));
+    expect_no_allocation_equality(
+        A::support_source({{0, 0, 0}, {0, 1, 0}, {1, 0, 1}}), A::support_source({{0, 0, 0}, {0, 2, 0}, {1, 0, 1}}));
+    expect_no_allocation_equality(A::support_input({1, 1, 0}, {}, 0), A::support_input({1, 1, 0}, {}, 1));
+    expect_no_allocation_equality(A::support_plane(0, {1, 0, 0}, 0), A::support_plane(0, {1, 0, 0}, 1));
+    expect_no_allocation_equality(
+        A::translated_support(axis, {1, 0, 0}), A::translated_support(A::support_axis(0, 1), {1, 0, 0}));
+    expect_no_allocation_equality(A::retained_exact_support(first_exact), A::retained_exact_support(second_exact));
+    const std::vector<details::OrdinarySupportRecipe> recipes{
+        {true, {0, 0, 0}, {}}, {true, {1, 2, 0}, {}}, {true, {3, -1, 0}, {}}, {false, {}, {0, 1, 2}}};
+    expect_no_allocation_equality(A::support_dag(recipes, 0, 3), A::support_dag(recipes, 1, 3));
+    expect_no_allocation_equality(A::point({1, 2, 3}), A::point({1, 2, 4}));
+    expect_no_allocation_equality(A::line({0, {1, 0, 0}, {0, 2, 3}}), A::line({0, {1, 0, 0}, {0, 2, 4}}));
+    expect_no_allocation_equality(A::displacement({1, 2, 3}), DisplacementIdentity<ordinary>{});
+}
+
+template<class Identity> void expect_hash_collision_is_not_identity(const Identity& first, const Identity& second)
+{
+    using A = details::GeometryIdentityAccess;
+    ASSERT_NE(first, second);
+    ASSERT_EQ(canonical_key_size(first), canonical_key_size(second));
+    // The factory creates a mutable allocation before publishing const owners.
+    // These unpublished test-owned objects inject a metadata collision only;
+    // their native authoritative fields and canonical sizes stay untouched.
+    auto& metadata = const_cast<details::GeometryIdentityBacking&>(*A::backing(second));
+    const auto saved_hash = metadata.cached_hash;
+    metadata.cached_hash = canonical_key_hash(first);
+    bool different = false;
+    {
+        IdentityAllocationFailureScope fail;
+        different = !(first == second) && !(second == first);
+    }
+    metadata.cached_hash = saved_hash;
+    EXPECT_TRUE(different);
+    EXPECT_NE(first, second);
+}
+TEST(NativeGeometryIdentityTest, EqualCachedHashesNeverEstablishIdentity)
+{
+    using A = details::GeometryIdentityAccess;
+    namespace E = exact_geometry_detail;
+    expect_hash_collision_is_not_identity(A::support_axis(0, 1), A::support_axis(0, 2));
+    expect_hash_collision_is_not_identity(
+        E::make_point_identity({E::Q{1}, E::Q{2}, E::Q{3}}), E::make_point_identity({E::Q{1}, E::Q{2}, E::Q{4}}));
+    const auto first = A::translated_support(A::support_axis(0, 1), {0, 1, 0});
+    const auto second = A::translated_support(A::support_axis(0, 2), {0, 1, 0});
+    expect_hash_collision_is_not_identity(first, second);
+}
+
+struct CursorPayloadObserver final : details::GeometryIdentityNativePayload
+{
+    details::GeometryIdentityBackingPtr source;
+    std::size_t& prefix_calls;
+    std::size_t& chunk_calls;
+    CursorPayloadObserver(details::GeometryIdentityBackingPtr owner, std::size_t& prefixes, std::size_t& chunks)
+        : source(std::move(owner)), prefix_calls(prefixes), chunk_calls(chunks)
+    {
+    }
+    details::GeometryIdentityNativeKind native_kind() const noexcept override { return source->native->native_kind(); }
+    std::size_t storage_bytes() const noexcept override { return sizeof(*this); }
+    void emit_prefix(const details::GeometryIdentityCanonicalWriter& writer, std::size_t parent_bytes) const override
+    {
+        ++prefix_calls;
+        source->native->emit_prefix(writer, parent_bytes);
+    }
+    void emit_suffix(const details::GeometryIdentityCanonicalWriter& writer) const override
+    {
+        source->native->emit_suffix(writer);
+    }
+    bool encoded_fields_equal(const details::GeometryIdentityNativePayload&) const noexcept override { return false; }
+    std::size_t next_canonical_chunk(
+        bool suffix, std::array<std::size_t, 4>& state, std::size_t parent_bytes, std::span<char> output) const override
+    {
+        ++chunk_calls;
+        return source->native->next_canonical_chunk(suffix, state, parent_bytes, output);
+    }
+};
+TEST(NativeGeometryIdentityTest, LargeSourceCursorUsesOneSmallAncestryAllocationAndLinearNativeChunks)
+{
+    using A = details::GeometryIdentityAccess;
+    constexpr std::size_t count = 4096;
+    std::vector<details::OrdinaryIdentityPoint> points;
+    points.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+        points.push_back({static_cast<long double>(i), static_cast<long double>(i % 7), -.25L});
+    const auto source = A::support_source(std::move(points));
+    const auto expected = canonical_key(source);
+    std::size_t prefix_calls = 0, chunk_calls = 0;
+    // Observe the native provider boundary: a random-access implementation
+    // that re-emits every prefix for each byte/word must fail this regression.
+    const auto observed = A::share<PlaneSupportIdentity<ordinary>>(
+        std::make_unique<CursorPayloadObserver>(A::backing(source), prefix_calls, chunk_calls));
+    prefix_calls = chunk_calls = 0;
+    identity_allocations = identity_allocation_bytes = 0;
+    bool correct = true;
+    std::size_t construction_allocations = 0;
+    {
+        IdentityAllocationScope count_allocations;
+        auto cursor = A::canonical_cursor(observed);
+        construction_allocations = identity_allocations;
+        // Output and assertions were prepared outside the allocation scope.
+        // After its one ancestry reservation, traversal must work with new()
+        // disabled even while crossing scalar, word and final-byte boundaries.
+        IdentityAllocationFailureScope fail;
+        for (std::size_t offset = 0; offset < expected.size(); offset += 8)
+        {
+            std::uint64_t word = 0;
+            for (unsigned byte = 0; byte < 8 && offset + byte < expected.size(); ++byte)
+                word |= std::uint64_t(static_cast<unsigned char>(expected[offset + byte])) << (8 * byte);
+            correct = correct && cursor.remaining() == expected.size() - offset;
+            const auto actual = cursor.next_word();
+            correct = correct && actual == word;
+        }
+        correct = correct && cursor.remaining() == 0 && cursor.next_word() == 0;
+    }
+    EXPECT_TRUE(correct);
+    EXPECT_EQ(construction_allocations, 1u);
+    EXPECT_EQ(identity_allocations, 1u);
+    EXPECT_EQ(identity_allocation_bytes, sizeof(const details::GeometryIdentityBacking*));
+    EXPECT_EQ(prefix_calls, 0u);
+    EXPECT_GT(chunk_calls, 0u);
+    // Three scalar fields per point, plus a constant number of structural
+    // chunks; the traversal cannot restart for each packed output word.
+    EXPECT_LE(chunk_calls, 3 * count + 4);
 }
 } // namespace

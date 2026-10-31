@@ -66,7 +66,12 @@ TEST(GeneralVoFSpatialCache, ImmutableCatalogReusesStorageAndCountsOnlyExecutedP
     EXPECT_EQ(second.diagnostics.spatial_index_builds, 0u);
     EXPECT_EQ(second.diagnostics.spatial_index_reuses, 1u);
     EXPECT_EQ(second.diagnostics.spatial_index_bytes, first.diagnostics.spatial_index_bytes);
-    EXPECT_EQ(second.work.bytes, first.work.bytes);
+    // Building the bounds consumes temporary point exports. A warm index
+    // retains its geometry and bounds, without charging those exports again.
+    EXPECT_EQ(second.work.bytes, first.cache->bytes);
+    EXPECT_GT(first.work.bytes, second.work.bytes);
+    EXPECT_GT(first.work.allocations.owner_count(), 0u);
+    EXPECT_EQ(second.work.allocations.owner_count(), 0u);
     EXPECT_LT(second.work.pair_tests, first.work.pair_tests);
     EXPECT_EQ(query(*second.cache, 4.5L, second.work, second.diagnostics), std::vector<std::size_t>{2});
     EXPECT_TRUE(query(*second.cache, 5.5L, second.work, second.diagnostics).empty());
