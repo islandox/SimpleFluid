@@ -18,6 +18,19 @@ redistribution and inherited uncertainty calculations. `Wire` owns shared
 record encoding, without selecting communication order. Operation-specific
 records and codecs stay with their operation.
 
+`PhasePublication` owns finite owned-cell array assembly and the shared
+eight-value independent phase-conservation reduction summary and check. Each
+transport coordinator retains its accumulation and narrowing policy, collective
+reduction, and failure context. The check selects its policy at compile time,
+with private Ordinary and Bounded instantiations owned by FVM. Ordinary physical
+allowances and bounded arithmetic allowances remain distinct, including their
+intermediate precision.
+Publication copies already computed cell inventories and evidence in topology
+order; it does not derive either phase from the other, import ghosts, or apply
+cleanup. Finite remap uses the same assembly operations while retaining its own
+coverage, channel, and history-preservation checks. Exact publication remains
+with its separate authority.
+
 The operation coordinators retain collective failure boundaries and owner
 exchanges in their original order. Rank-local work must complete its collective
 error propagation before the next exchange, including on empty owners. Local

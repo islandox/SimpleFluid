@@ -16,6 +16,13 @@ Their local arithmetic, native comparison, key size, and key hashing do not
 allocate. Canonical export may allocate a byte vector. Scalar zero signs are
 normalized as in the original codec. Hashing consumes unsigned canonical bytes.
 
+The private canonical scalar encoder shares the finite `long double` word
+representation across fixed-buffer identity queries, callback emission, and
+native vector/counting writers. Each writer retains its validation, storage,
+and exception contract. This preserves allocation-free inline queries, checked
+counting, and the existing profile-specific bytes; numerical scalar packets
+retain their separate codec.
+
 Exact identities retain native rational tuples in compiled private payloads.
 Ordinary support payloads retain typed axis, source polygon, input plane,
 normalized plane, translation, retained Exact ancestry, and extrusion-DAG

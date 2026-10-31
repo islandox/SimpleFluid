@@ -16,6 +16,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   if(TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/OwnerPlaneRequests.cc)
   endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFPhaseConservation")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/PhasePublication.cc)
+  endif()
   if(TEST_NAME STREQUAL "testFilteredSurfaceGeometry")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/FilteredSurfaceGeometry.cc)
   endif()
@@ -32,6 +35,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFBalance" OR TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests" OR TEST_NAME STREQUAL "testGeneralVoFLimiterProtocol"
+      OR TEST_NAME STREQUAL "testGeneralVoFPhaseConservation"
       OR TEST_NAME STREQUAL "testGeneralVoFSurfaceCatalog"
       OR TEST_NAME STREQUAL "testGeneralVoFReconstructionSupport"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
@@ -373,6 +377,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
         testGeneralVoFFaceTransport.cc testGeneralVoFLimiterProtocol.cc testPolyhedralReconstruction.cc testExactPolyhedralReconstruction.cc
         testGeneralVoFReconstructionSupport.cc
+        testGeneralVoFPhaseConservation.cc ../details/GeneralVoF/PhasePublication.cc
         testExactGeneralVoF.cc exact/GeneralVoFRoundtrip.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE

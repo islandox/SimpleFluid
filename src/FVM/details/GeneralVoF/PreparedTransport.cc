@@ -312,7 +312,7 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             if (low != high || first_stage != last_stage)
                 throw std::invalid_argument("Prepared VoF transport controls differ across ranks.");
         });
-    if (prepared_ && prepared_->mesh_identity)
+    if (prepared_)
     {
         validate_prepared_transport(*prepared_, density, time_stage);
         return prepared_;
@@ -335,7 +335,7 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                 // Unbound trial measurement and detached copy coexist during preparation.
                 reserve(general_vof_detail::balance_work_storage_bytes(*unbound_balance_work_), 2);
             }
-            reserve(prepared_ ? prepared_->streams.size() : unbound_streams_.size(), sizeof(GeneralVoFDirectedStream));
+            reserve(unbound_streams_.size(), sizeof(GeneralVoFDirectedStream));
             reserve(finite_faces_.size(), sizeof(GeneralVoFFiniteFaceContribution));
             reserve(finite_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
             reserve(finite_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
@@ -402,18 +402,11 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->authenticated_mesh_generation_ = result->mesh_generation;
             result->authenticated_mesh_topology_generation_ = result->mesh_topology_generation;
             result->authenticated_family_ = result->family;
-            if (prepared_)
-            {
-                result->streams = prepared_->streams;
-                result->diagnostics = prepared_->diagnostics;
-            }
-            else if (homogeneous_algebraic_ || interface_local_)
-            {
-                result->streams = unbound_streams_;
-                result->diagnostics = unbound_diagnostics_;
+            result->streams = unbound_streams_;
+            result->diagnostics = unbound_diagnostics_;
+            if (homogeneous_algebraic_ || interface_local_)
                 for (auto& stream : result->streams)
                     stream.mass = density[0] * stream.gas + density[1] * stream.liquid;
-            }
             result->signed_face_contributions = finite_faces_;
             result->positive_transfers = finite_transfers_;
             result->signed_receipts = signed_receipts_;

@@ -6,6 +6,7 @@
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/PhasePublication.hh"
 #include <Teuchos_Array.hpp>
 namespace SimpleFluid::VoF
 {
@@ -828,12 +829,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
         {
             candidate = std::make_shared<Data>(data);
             candidate->control = trial.transaction_;
-            candidate->gas.clear();
-            candidate->carrier.clear();
-            candidate->phases.clear();
-            candidate->roundoff.clear();
-            candidate->phase_history.clear();
-            candidate->occupancy.clear();
+            reset_finite_phase_publication(*candidate);
             for (const auto& key : data.topology->order)
             {
                 const auto& old = data.cells.at(key);
@@ -939,12 +935,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                                            : c.declaration == GeneralVoFPhaseGeometry::PureGas ? carrier.first
                                                                                                : gas.first;
                 validate_cell<local_mode>(c, data.options);
-                candidate->gas.push_back(gas.first);
-                candidate->carrier.push_back(carrier.first);
-                candidate->phases.push_back({c.native_volume, gas.first, carrier.first});
-                candidate->roundoff.push_back(c.roundoff);
-                candidate->phase_history.push_back(c.finite_history);
-                candidate->occupancy.push_back(c.occupancy);
+                append_finite_phase_publication(*candidate, c);
                 Sum canonical;
                 for (const auto index : data.topology->cell_tiles.at(key))
                 {
@@ -970,7 +961,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
         });
     // Independent phase conservation excludes inherited history and geometric
     // occupancy allowances from its physical acceptance budget.
-    std::array<double, 8> local{}, global{};
+    PhaseConservationSummary local{}, global{};
     safe(
         [&]
         {
@@ -998,16 +989,12 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     safe(
         [&]
         {
-            const auto u = (8.L * comm->getSize() + 16) * std::numeric_limits<double>::epsilon();
-            if (!(u < .25L))
+            const auto conservation = check_phase_conservation<PhaseConservationPolicy::Ordinary>(
+                global, comm->getSize(), data.options.reconstruction.volume_tolerance);
+            if (conservation == PhaseConservationResult::ReductionBoundExhausted)
                 throw std::invalid_argument("Interface ledger global arithmetic bound is exhausted.");
-            for (unsigned p = 0; p < 2; ++p)
-            {
-                const auto bound = data.options.reconstruction.volume_tolerance * global[6 + p] + global[2 + p] +
-                                   u / (1 - u) * (global[4 + p] + global[2 + p]);
-                if (!std::isfinite(global[p]) || !std::isfinite(bound) || std::abs(global[p]) > bound)
-                    throw std::invalid_argument("Interface ledger global independent phase conservation failed.");
-            }
+            if (conservation == PhaseConservationResult::Nonconserved)
+                throw std::invalid_argument("Interface ledger global independent phase conservation failed.");
             current(data);
         });
     apply_phase_cleanup(*candidate);

@@ -548,6 +548,13 @@ phase densities and a caller time-stage identity. Its immutable
 selected backend/family and arithmetic mode, timestep, independently stored phase
 records and histories, and owned old/new mixture-mass capacities. Empty owner
 collections are valid and do not select an arithmetic policy or transport family.
+Face planning retains streams and diagnostics as unbound trial data until this
+preparation boundary. It creates the authenticated preparation once, after
+candidate cleanup, where mass capacities and their errors are calculated from
+the independent phase inventories. Regular face transport returns that completed,
+context-bound preparation and releases the temporary stream storage; repeated
+preparation with the same context reuses it, while changed densities or stage
+are rejected.
 The homogeneous swept trial retains phase streams privately until the caller binds
 densities and time stage with `prepare_transport`; it exposes no dummy-density
 preparation through `prepared_transport()`. The actual family is factory-authenticated

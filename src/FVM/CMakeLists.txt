@@ -18,6 +18,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
     details/GeneralVoF/LocalSpatialCache.cc
     details/GeneralVoF/AggregateBudgets.cc
     details/GeneralVoF/PhaseCleanup.cc
+    details/GeneralVoF/PhasePublication.cc
     details/GeneralVoF/LocalTransport.cc
     details/GeneralVoF/FaceTransport.cc
     details/GeneralVoF/PreparedTransport.cc
@@ -36,6 +37,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_FRAGMENTS
     details/GeneralVoF/Transport.tcc
     details/GeneralVoF/Remap.tcc
     details/GeneralVoF/PhaseAllocation.tcc
+    details/GeneralVoF/PhasePublication.tcc
 )
 set(SIMPLEFLUID_ADAPTIVE_VOF_FVM_SOURCES
     AdaptiveVoF.cc

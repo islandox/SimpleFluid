@@ -4,6 +4,7 @@
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/PhasePublication.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -695,12 +696,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     wire::collective(*comm,
         [&]
         {
-            candidate->gas.clear();
-            candidate->carrier.clear();
-            candidate->phases.clear();
-            candidate->roundoff.clear();
-            candidate->phase_history.clear();
-            candidate->occupancy.clear();
+            reset_finite_phase_publication(*candidate);
             wire::Budget budget{limit};
             for (const auto& key : candidate->topology->order)
             {
@@ -775,12 +771,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                                                    : fp::upper_double(Math::upper(row.pure_fit.value()));
                 }
                 validate_cell<Mode>(cell, data.options);
-                candidate->gas.push_back(gas.first);
-                candidate->carrier.push_back(carrier.first);
-                candidate->phases.push_back({cell.native_volume, gas.first, carrier.first});
-                candidate->roundoff.push_back(cell.roundoff);
-                candidate->phase_history.push_back(cell.finite_history);
-                candidate->occupancy.push_back(cell.occupancy);
+                append_finite_phase_publication(*candidate, cell);
                 GeneralVoFFiniteOwnedChannels output;
                 output.key = key;
                 for (std::size_t i = 0; i < row.channels.size(); ++i)

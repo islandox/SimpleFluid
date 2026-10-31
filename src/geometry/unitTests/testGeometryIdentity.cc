@@ -1,5 +1,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/CanonicalScalarEncoding.hh"
+#include "geometry/PLIC/details/GeometryIdentityCanonicalWriter.hh"
 #include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
@@ -7,6 +9,7 @@
 #include "geometry/unitTests/geometry_compact_tag_oracle.hh"
 #include "geometry/unitTests/native_identity_fixtures.hh"
 #include <gtest/gtest.h>
+#include <initializer_list>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -57,6 +60,141 @@ template<std::size_t... I> constexpr bool all_identity_types_separated(std::inde
     return (separated_identity_row<I>(indices) && ...);
 }
 static_assert(all_identity_types_separated(std::make_index_sequence<std::tuple_size_v<IdentityTypes>>{}));
+
+struct NoThrowWordSink
+{
+    void word(std::uint64_t) noexcept;
+};
+struct ThrowingWordSink
+{
+    void word(std::uint64_t);
+};
+static_assert(noexcept(details::emit_canonical_scalar(0.L, std::declval<NoThrowWordSink&>())));
+static_assert(!noexcept(details::emit_canonical_scalar(0.L, std::declval<ThrowingWordSink&>())));
+
+std::vector<char> scalar_word_bytes(std::span<const std::uint64_t> words)
+{
+    std::vector<char> bytes;
+    for (auto word : words)
+        for (unsigned byte = 0; byte < 8; ++byte)
+            bytes.push_back(static_cast<char>((word >> (8 * byte)) & 255));
+    return bytes;
+}
+std::vector<std::uint64_t> scalar_fixture_words(
+    std::uint64_t descriptor, std::initializer_list<std::uint64_t> leading_limbs)
+{
+    std::vector<std::uint64_t> words{descriptor, std::numeric_limits<long double>::digits};
+    words.insert(words.end(), leading_limbs);
+    words.resize(2 + (std::numeric_limits<long double>::digits + 31) / 32, 0);
+    return words;
+}
+void expect_scalar_words(long double value, const std::vector<std::uint64_t>& words)
+{
+    const auto expected = scalar_word_bytes(words);
+    details::ordinary_native::Writer vector_writer;
+    vector_writer.real(value);
+    EXPECT_EQ(vector_writer.bytes, expected);
+
+    struct Emission
+    {
+        std::vector<char> bytes;
+        std::vector<std::size_t> fragments;
+    } emission;
+    const details::GeometryIdentityCanonicalWriter callback_writer{&emission,
+        [](void* context, std::span<const char> fragment)
+        {
+            auto& output = *static_cast<Emission*>(context);
+            output.fragments.push_back(fragment.size());
+            output.bytes.insert(output.bytes.end(), fragment.begin(), fragment.end());
+        }};
+    callback_writer.real(value);
+    EXPECT_EQ(emission.bytes, expected);
+    EXPECT_EQ(emission.fragments, std::vector<std::size_t>(words.size(), 8));
+
+    details::ordinary_native::CountingWriter counting_writer;
+    counting_writer.real(value);
+    EXPECT_EQ(counting_writer.bytes.size(), words.size() * 8);
+
+    // The public point payload exercises the fixed stack writer, including
+    // the two following zero-coordinate encodings and its compact tag.
+    std::vector<char> expected_point{static_cast<char>(GeometryTag::OrdinaryPoint)};
+    expected_point.insert(expected_point.end(), expected.begin(), expected.end());
+    expected_point.resize(expected_point.size() + 32, 0);
+    const auto point = details::GeometryIdentityAccess::point({value, 0, 0});
+    EXPECT_EQ(canonical_key(point), expected_point);
+    EXPECT_EQ(canonical_key_size(point), expected_point.size());
+}
+TEST(GeometryIdentityTest, CanonicalScalarsMatchIndependentWordFixturesAcrossWriters)
+{
+    static_assert(std::numeric_limits<long double>::radix == 2);
+    expect_scalar_words(0.L, {0, 0});
+    expect_scalar_words(-0.L, {0, 0});
+    expect_scalar_words(1.L, scalar_fixture_words(2, {0x80000000}));
+    expect_scalar_words(-.5L, scalar_fixture_words(1, {0x80000000}));
+    expect_scalar_words(.25L, scalar_fixture_words(8589934590ULL, {0x80000000}));
+    expect_scalar_words(1.5L, scalar_fixture_words(2, {0xc0000000}));
+    expect_scalar_words(1.L + 0x1p-40L, scalar_fixture_words(2, {0x80000000, 0x00800000}));
+
+    constexpr auto min_exponent = std::numeric_limits<long double>::min_exponent;
+    constexpr auto precision = std::numeric_limits<long double>::digits;
+    const auto min_descriptor = std::uint64_t(static_cast<std::uint32_t>(min_exponent)) * 2;
+    expect_scalar_words(std::numeric_limits<long double>::min(), scalar_fixture_words(min_descriptor, {0x80000000}));
+    if constexpr (std::numeric_limits<long double>::has_denorm == std::denorm_present)
+    {
+        const auto descriptor = std::uint64_t(static_cast<std::uint32_t>(min_exponent - precision + 1)) * 2;
+        expect_scalar_words(
+            std::numeric_limits<long double>::denorm_min(), scalar_fixture_words(descriptor, {0x80000000}));
+    }
+    // Max finite has exactly `precision` one bits, left aligned in 32-bit
+    // limbs. Partial final limbs retain their low zero padding (e.g. 53/113 bits).
+    std::vector<std::uint64_t> maximum{std::uint64_t(std::numeric_limits<long double>::max_exponent) * 2, precision};
+    for (int remaining = precision; remaining > 0; remaining -= 32)
+        maximum.push_back((0xffffffffULL << (32 - std::min(remaining, 32))) & 0xffffffffULL);
+    expect_scalar_words(std::numeric_limits<long double>::max(), maximum);
+}
+TEST(GeometryIdentityTest, CheckedScalarWritersRejectNonfiniteBeforeChangingDestinations)
+{
+    for (const auto value : {std::numeric_limits<long double>::infinity(),
+             -std::numeric_limits<long double>::infinity(), std::numeric_limits<long double>::quiet_NaN()})
+    {
+        details::ordinary_native::Writer vector_writer;
+        vector_writer.bytes = {'p', 'r', 'e'};
+        const auto original = vector_writer.bytes;
+        EXPECT_THROW(vector_writer.real(value), std::invalid_argument);
+        EXPECT_EQ(vector_writer.bytes, original);
+        details::ordinary_native::CountingWriter counting_writer;
+        counting_writer.bytes.count = 17;
+        EXPECT_THROW(counting_writer.real(value), std::invalid_argument);
+        EXPECT_EQ(counting_writer.bytes.size(), 17u);
+    }
+    details::ordinary_native::CountingWriter full;
+    full.bytes.count = std::numeric_limits<std::size_t>::max();
+    EXPECT_THROW(full.real(1.L), std::invalid_argument);
+    EXPECT_EQ(full.bytes.size(), std::numeric_limits<std::size_t>::max());
+}
+struct ScalarSinkFailure
+{
+};
+TEST(GeometryIdentityTest, CanonicalScalarCallbackPropagatesFailureAfterCompleteWordPrefix)
+{
+    struct Emission
+    {
+        std::vector<char> prefix;
+        std::vector<std::size_t> fragments;
+    } emission;
+    const details::GeometryIdentityCanonicalWriter writer{&emission, [](void* context, std::span<const char> fragment)
+        {
+            auto& output = *static_cast<Emission*>(context);
+            output.fragments.push_back(fragment.size());
+            if (output.fragments.size() == 3)
+                throw ScalarSinkFailure{};
+            output.prefix.insert(output.prefix.end(), fragment.begin(), fragment.end());
+        }};
+    EXPECT_THROW(writer.real(1.L), ScalarSinkFailure);
+    EXPECT_EQ(emission.fragments, (std::vector<std::size_t>{8, 8, 8}));
+    const std::array<std::uint64_t, 2> expected_prefix{2, std::numeric_limits<long double>::digits};
+    EXPECT_EQ(emission.prefix, scalar_word_bytes(expected_prefix));
+}
 
 template<ArithmeticMode Mode> void check_roundtrips()
 {
