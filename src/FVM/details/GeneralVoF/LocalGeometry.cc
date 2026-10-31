@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/LocalGeometry.hh"
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
+#include "FVM/details/GeneralVoF/DonorSlots.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
@@ -430,7 +431,15 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             }
                         }
                         std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor> donors;
-                        std::map<std::size_t, std::array<long double, 2>> phase_quotas;
+                        std::vector<std::array<long double, 2>> phase_quotas;
+                        const auto quota_count = geometric.candidates.size();
+                        if (quota_count > phase_quotas.max_size() ||
+                            quota_count > std::numeric_limits<std::size_t>::max() / sizeof(phase_quotas.front()))
+                            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                                "Aggregate phase-quota capacity overflows.");
+                        face_work.charge(quota_count * sizeof(phase_quotas.front()));
+                        phase_quotas.reserve(quota_count);
+                        face_work.charge((phase_quotas.capacity() - quota_count) * sizeof(phase_quotas.front()));
                         const auto quota = face_budgets.at(tile.face_gid) /
                                            (2 * std::max<std::size_t>(1, geometric.candidates.size()));
                         for (const auto i : geometric.candidates)
@@ -455,15 +464,15 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                                     throw std::invalid_argument("Aggregate independent phase quota is unresolved.");
                                 return std::min(quota, allocated);
                             };
-                            face_work.charge(sizeof(decltype(phase_quotas)::value_type) + 4 * sizeof(void*));
-                            phase_quotas.emplace(i, std::array{phase_quota(label.gas_bulk, label.raw_source.gas),
-                                                        phase_quota(label.carrier_bulk, label.raw_source.carrier)});
+                            phase_quotas.push_back(std::array{phase_quota(label.gas_bulk, label.raw_source.gas),
+                                phase_quota(label.carrier_bulk, label.raw_source.carrier)});
                             // The candidate must resolve both positive phases and the
                             // original face allowance. Its donor-phase allowance is
                             // consumed only by the final shared correction below.
                             donor.gas_budget = donor.carrier_budget = quota;
                             face_work.push(donors, std::move(donor));
                         }
+                        const auto quota_slots = make_donor_slot_order(donors, face_work);
                         std::vector<std::size_t>().swap(geometric.candidates);
                         auto sweep_limits = work.limits;
                         sweep_limits.byte_budget = workspace.remaining_bytes();
@@ -562,9 +571,10 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                                                                    : group.numerical_error_estimate.gas,
                                 label.carrier_bulk ? group.numerical_error_estimate.bulk
                                                    : group.numerical_error_estimate.carrier};
+                            const auto& quotas = phase_quotas.at(donor_slot(donors, quota_slots, group.donor));
                             for (unsigned phase = 0; phase < 2; ++phase)
                             {
-                                const auto available = phase_quotas.at(group.donor)[phase];
+                                const auto available = quotas[phase];
                                 const auto error = errors[phase];
                                 if (error > available)
                                 {

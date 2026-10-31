@@ -815,40 +815,80 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     for (const auto& weak : plane->source_vertices)
         if (const auto point = weak.lock())
             construction->retained_points.push_back(point);
-    const auto child = [&](unsigned outside)
+    const auto resize_scratch = [](auto& buffer, std::size_t count)
     {
-        active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
-        auto poly = std::make_shared<Impl>();
-        poly->frame = impl_->frame;
-        poly->reference_origin = impl_->reference_origin;
-        poly->limits = impl_->limits;
-        poly->numerical_only = impl_->numerical_only || source->numerical_only;
-        poly->construction = construction_node(GeometryConstruction::Clip{construction, outside != 0});
-        poly->ancestry =
-            std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
-        std::set<std::size_t> used;
-        for (const auto& face : output_faces[outside])
-            used.insert(face.begin(), face.end());
-        std::map<std::size_t, std::size_t> remap;
-        for (const auto i : used)
+        using Value = typename std::remove_reference_t<decltype(buffer)>::value_type;
+        if (count > buffer.max_size() || count > std::numeric_limits<std::size_t>::max() / sizeof(Value))
         {
-            remap.emplace(i, poly->vertices.size());
-            poly->vertices.push_back(vertices[i]);
+            ++statistics.rejections;
+            throw GeometryError(GeometryErrorCode::ResourceLimit,
+                "Bounded FP geometry: clipping scratch size overflows.");
         }
-        poly->faces = std::move(output_faces[outside]);
-        poly->surfaces = std::move(output_surfaces[outside]);
-        for (auto& face : poly->faces)
-            for (auto& i : face)
-                i = remap.at(i);
+        if (count > buffer.capacity())
+        {
+            // Work is cumulative: a replacement allocation is charged in full.
+            active_work->charge(count, sizeof(Value));
+            buffer.reserve(count);
+            if (buffer.capacity() > count)
+                active_work->charge(buffer.capacity() - count, sizeof(Value));
+        }
+        buffer.resize(count);
+    };
+    std::array<std::shared_ptr<Impl>, 2> drafts;
+    {
+        // Crossing construction is complete. Include generated vertex IDs and
+        // reuse these arrays only across the requested children of this split.
+        std::vector<unsigned char> used;
+        std::vector<std::size_t> old_to_new;
+        resize_scratch(used, vertices.size());
+        resize_scratch(old_to_new, vertices.size());
+        const auto draft_child = [&](unsigned outside)
+        {
+            active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
+            auto poly = std::make_shared<Impl>();
+            poly->frame = impl_->frame;
+            poly->reference_origin = impl_->reference_origin;
+            poly->limits = impl_->limits;
+            poly->numerical_only = impl_->numerical_only || source->numerical_only;
+            poly->construction = construction_node(GeometryConstruction::Clip{construction, outside != 0});
+            poly->ancestry =
+                std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
+            std::fill(used.begin(), used.end(), 0);
+            for (const auto& face : output_faces[outside])
+                for (const auto i : face)
+                {
+                    if (i >= vertices.size())
+                        reject("complementary child has an invalid face vertex.");
+                    used[i] = 1;
+                }
+            for (std::size_t i = 0; i < vertices.size(); ++i)
+                if (used[i])
+                {
+                    old_to_new[i] = poly->vertices.size();
+                    poly->vertices.push_back(vertices[i]);
+                }
+            poly->faces = std::move(output_faces[outside]);
+            poly->surfaces = std::move(output_surfaces[outside]);
+            for (auto& face : poly->faces)
+                for (auto& i : face)
+                    i = old_to_new[i];
+            return poly;
+        };
+        drafts[0] = draft_child(0);
+        if (construct_outside)
+            drafts[1] = draft_child(1);
+    } // Release compaction scratch before either child is finalized.
+    const auto finish_child = [&](std::shared_ptr<Impl> poly)
+    {
         // Certified strict signs on both sides of a full-dimensional convex
         // parent prove that both children have positive interiors. Private
         // partition witnesses use only that geometry and never their measures.
         finish<Mode>(*poly, partition_proof, true);
         return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(poly)));
     };
-    result.inside = child(0);
+    result.inside = finish_child(std::move(drafts[0]));
     if (construct_outside)
-        result.outside = child(1);
+        result.outside = finish_child(std::move(drafts[1]));
     return result;
 }
 

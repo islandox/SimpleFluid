@@ -4043,4 +4043,96 @@ TEST(BoundedConvexGeometryTest, SharedVertexSupportsDetachDuringAnalyticContactA
     shared_vertex_support_contact_contract<ArithmeticMode::Ordinary>();
     shared_vertex_support_contact_contract<ArithmeticMode::BoundedCertification>();
 }
+
+template<ArithmeticMode mode> void dense_clipping_compaction_contract()
+{
+    namespace PLIC = SimpleFluid::PLIC;
+    SCOPED_TRACE(static_cast<int>(mode));
+    const auto parent = plic_test::axis_box<mode>({0, 0, 0}, {1, 1, 1});
+    const PLIC::GeometryHalfspace plane{{1, 0, 0}, {}, .5};
+    const auto split = parent->clip(plane);
+    ASSERT_TRUE(split.inside);
+    ASSERT_TRUE(split.outside);
+    const std::array children{split.inside, split.outside};
+    // These outward shells follow directly from the two rectangular half-boxes.
+    // The original coordinate-plane vertices precede the four new cut points;
+    // this also checks crossing IDs beyond the parent's eight source vertices.
+    const std::array<Faces, 2> expected_faces{
+        Faces{{0, 2, 3, 1}, {0, 4, 5, 2}, {1, 3, 6, 7}, {0, 1, 7, 4}, {2, 5, 6, 3}, {7, 6, 5, 4}},
+        Faces{{0, 1, 3, 2}, {4, 0, 2, 5}, {6, 3, 1, 7}, {7, 1, 0, 4}, {5, 2, 3, 6}, {4, 5, 6, 7}}};
+    const PLIC::GeometryPacketContext context{{179, 181, 191, static_cast<std::uint64_t>(mode)}};
+    const std::array roots{parent};
+    for (std::size_t side = 0; side < children.size(); ++side)
+    {
+        SCOPED_TRACE(side);
+        const long double x = static_cast<long double>(side);
+        const std::array<std::array<long double, 3>, 8> expected_points{std::array<long double, 3>{x, 0, 0}, {x, 1, 0},
+            {x, 0, 1}, {x, 1, 1}, {.5L, 0, 0}, {.5L, 0, 1}, {.5L, 1, 1}, {.5L, 1, 0}};
+        const auto restored = Geometry<mode>::decode(children[side]->encode(context), context, roots);
+        for (const auto& child : {children[side], restored})
+        {
+            EXPECT_EQ(child->faces(), expected_faces[side]);
+            const auto points = exported_points(*child);
+            ASSERT_EQ(points.size(), expected_points.size());
+            for (std::size_t i = 0; i < points.size(); ++i)
+                EXPECT_EQ(points[i].value, expected_points[i]);
+            if constexpr (mode == ArithmeticMode::BoundedCertification)
+                encloses(child->volume(), .5L);
+            else
+                EXPECT_EQ(child->volume().value, .5L);
+        }
+        // A triangular prism of base area .5*.5/2 and x-width .5 has
+        // volume 1/16. Its complement has 7/16; their vertex counts differ,
+        // exercising scratch reuse when both children and many faces share IDs.
+        const auto nested = children[side]->clip({{0, 1, 1}, {}, .5});
+        ASSERT_TRUE(nested.inside);
+        ASSERT_TRUE(nested.outside);
+        EXPECT_EQ(exported_points(*nested.inside).size(), 6u);
+        EXPECT_EQ(exported_points(*nested.outside).size(), 10u);
+        if constexpr (mode == ArithmeticMode::BoundedCertification)
+        {
+            encloses(nested.inside->volume(), 1.L / 16);
+            encloses(nested.outside->volume(), 7.L / 16);
+        }
+        else
+        {
+            EXPECT_NEAR(nested.inside->volume().value, 1.L / 16, 1e-18L);
+            EXPECT_NEAR(nested.outside->volume().value, 7.L / 16, 1e-18L);
+        }
+        const std::array pieces{nested.inside, nested.outside};
+        EXPECT_NO_THROW(children[side]->certify_fragment_partition(pieces));
+    }
+
+    const auto before = parent->encode(context);
+    std::size_t required_bytes = 0;
+    {
+        PLIC::details::Operation scope(geometry_limits(mode));
+        (void) parent->clip(plane, false);
+        required_bytes = scope.work.bytes;
+    }
+    ASSERT_GT(required_bytes, 1u);
+    auto capped = geometry_limits(mode);
+    capped.byte_budget = required_bytes - 1;
+    {
+        PLIC::details::Operation scope(capped);
+        try
+        {
+            (void) parent->clip(plane, false);
+            FAIL() << "The complete clipping allocation must fit the cumulative byte budget.";
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+            EXPECT_FALSE(error.recoverable_trial());
+        }
+    }
+    EXPECT_EQ(parent->encode(context), before);
+}
+
+TEST(BoundedConvexGeometryTest, DenseClippingPreservesIndexedShellsAndRejectsBytesWithoutSourceMutation)
+{
+    dense_clipping_compaction_contract<ArithmeticMode::Ordinary>();
+    if (SimpleFluid::PLIC::certification_environment())
+        dense_clipping_compaction_contract<ArithmeticMode::BoundedCertification>();
+}
 } // namespace

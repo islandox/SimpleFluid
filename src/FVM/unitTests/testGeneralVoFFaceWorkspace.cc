@@ -1,6 +1,7 @@
 /** @file testGeneralVoFFaceWorkspace.cc
  * @brief Independent lifetime and overlap checks for preparation storage.
  */
+#include "FVM/details/GeneralVoF/DonorSlots.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/PendingFaceGeometry.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
@@ -346,5 +347,55 @@ TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoes
     EXPECT_TRUE(owner.expired());
     EXPECT_EQ(work.bytes, transferred_charge);
     EXPECT_THROW((void) pending.take_geometry(0), std::logic_error);
+}
+TEST(GeneralVoFFaceWorkspace, SparseDonorIdsResolveUnchangedQuotaSlots)
+{
+    std::array<sweep::OrdinaryAggregateDonor, 3> donors{};
+    donors[0].id = std::numeric_limits<std::uint64_t>::max() - 1;
+    donors[1].id = 7;
+    donors[2].id = std::uint64_t{1} << 40;
+    const std::array ids{donors[0].id, donors[1].id, donors[2].id};
+    const std::array<std::array<long double, 2>, 3> quotas{{{1.25L, 2.5L}, {3.75L, 4.5L}, {5.25L, 6.L}}};
+    auto work = retained_work(4096, 0);
+    const auto slots = local::make_donor_slot_order(donors, work);
+    EXPECT_EQ(slots, (std::vector<std::size_t>{1, 2, 0}));
+    EXPECT_EQ(work.bytes, slots.capacity() * sizeof(std::size_t));
+    EXPECT_EQ(work.pair_tests, 0u);
+    EXPECT_EQ(quotas[local::donor_slot(donors, slots, 7)][0], 3.75L);
+    EXPECT_EQ(quotas[local::donor_slot(donors, slots, std::uint64_t{1} << 40)][1], 6.L);
+    EXPECT_EQ(quotas[local::donor_slot(donors, slots, std::numeric_limits<std::uint64_t>::max() - 1)][0], 1.25L);
+    EXPECT_THROW((void) local::donor_slot(donors, slots, 9), std::out_of_range);
+    for (std::size_t i = 0; i < donors.size(); ++i)
+        EXPECT_EQ(donors[i].id, ids[i]);
+
+    donors[2].id = 7;
+    auto duplicate_work = retained_work(4096, 0);
+    const auto duplicate_slots = local::make_donor_slot_order(donors, duplicate_work);
+    EXPECT_EQ(duplicate_slots, (std::vector<std::size_t>{1, 2, 0}));
+    EXPECT_EQ(local::donor_slot(donors, duplicate_slots, 7), 1u);
+    // The aggregate's existing donor-validation stage rejects duplicates.
+}
+
+TEST(GeneralVoFFaceWorkspace, DonorSlotAdmissionRetainsExactCapsAndInputOnRejection)
+{
+    std::array<sweep::OrdinaryAggregateDonor, 3> donors{};
+    donors[0].id = 90;
+    donors[1].id = 4;
+    donors[2].id = 17;
+    auto measured = retained_work(4096, 11);
+    const auto slots = local::make_donor_slot_order(donors, measured);
+    auto exact = retained_work(measured.bytes, 11);
+    EXPECT_EQ(local::make_donor_slot_order(donors, exact), slots);
+    EXPECT_EQ(exact.bytes, measured.bytes);
+    auto short_cap = retained_work(measured.bytes - 1, 11);
+    EXPECT_THROW((void) local::make_donor_slot_order(donors, short_cap), PLIC::GeometryError);
+    EXPECT_EQ(short_cap.bytes, 11u);
+    EXPECT_EQ(donors[0].id, 90u);
+    EXPECT_EQ(donors[1].id, 4u);
+    EXPECT_EQ(donors[2].id, 17u);
+    auto empty_work = retained_work(1, 0);
+    EXPECT_TRUE(local::make_donor_slot_order({}, empty_work).empty());
+    EXPECT_EQ(empty_work.bytes, 0u);
+    EXPECT_THROW((void) local::donor_slot({}, {}, 0), std::out_of_range);
 }
 } // namespace

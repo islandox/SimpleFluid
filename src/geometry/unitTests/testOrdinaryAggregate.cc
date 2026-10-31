@@ -120,6 +120,34 @@ void expect_split(
     EXPECT_GT(result.statistics.witnesses, 0u);
     EXPECT_GT(result.statistics.operations, 0u);
 }
+void expect_identical_results(const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& a,
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& b)
+{
+    using Group = SimpleFluid::geometry::swept_volume::OrdinaryAggregateGroup;
+    EXPECT_EQ(b.signed_source_volume, a.signed_source_volume);
+    ASSERT_EQ(b.groups.size(), a.groups.size());
+    for (std::size_t i = 0; i < a.groups.size(); ++i)
+    {
+        const auto& first = a.groups[i];
+        const auto& again = b.groups[i];
+        EXPECT_EQ(again.donor, first.donor);
+        EXPECT_EQ(again.sign, first.sign);
+        for (const auto member : {&Group::nominal, &Group::numerical_error_estimate, &Group::approximation_bound})
+        {
+            EXPECT_EQ((again.*member).bulk, (first.*member).bulk);
+            EXPECT_EQ((again.*member).gas, (first.*member).gas);
+            EXPECT_EQ((again.*member).carrier, (first.*member).carrier);
+        }
+        EXPECT_EQ(again.bulk_positive, first.bulk_positive);
+        EXPECT_EQ(again.gas_positive, first.gas_positive);
+        EXPECT_EQ(again.carrier_positive, first.carrier_positive);
+    }
+    EXPECT_EQ(b.statistics.storage_bytes, a.statistics.storage_bytes);
+    EXPECT_EQ(b.statistics.pair_tests, a.statistics.pair_tests);
+    EXPECT_EQ(b.statistics.operations, a.statistics.operations);
+    EXPECT_EQ(b.statistics.cancelled_boundaries, a.statistics.cancelled_boundaries);
+    EXPECT_EQ(b.statistics.failed_charge_bytes, a.statistics.failed_charge_bytes);
+}
 void expect_no_exact_work(const GeometryStatistics& before)
 {
     const auto after = geometry_statistics();
@@ -195,6 +223,16 @@ Batch indexed_cube()
         }
         batch.tetrahedra.push_back(tetra);
     } while (std::next_permutation(axes.begin(), axes.end()));
+    return batch;
+}
+
+Batch indexed_bipyramid()
+{
+    auto batch = indexed_corner();
+    batch.points.emplace_back(std::array<long double, 3>{0, 0, -1});
+    auto below = batch.tetrahedra.front();
+    below.vertices[3] = Index{4};
+    batch.tetrahedra.push_back(below);
     return batch;
 }
 
@@ -398,6 +436,200 @@ TEST(OrdinaryAggregateTest, IndexedConstructorRejectionsPreserveCallerStorageAnd
     }
 }
 
+TEST(OrdinaryAggregateTest, IndexedIncidenceRetainsOriginalSemanticRejectionOrder)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    for (unsigned example = 0; example < 3; ++example)
+    {
+        SCOPED_TRACE(example);
+        auto batch = indexed_bipyramid();
+        std::size_t expected_source = 2, expected_pairs = 12, expected_cancelled = 1;
+        if (example == 0)
+        {
+            // A valid opposite pair followed by a third shared base face.
+            batch.points.emplace_back(std::array<long double, 3>{0, 0, 2});
+            auto third = batch.tetrahedra.front();
+            third.vertices[3] = Index{5};
+            batch.tetrahedra.push_back(third);
+        }
+        else if (example == 1)
+        {
+            // The same-oriented second occurrence rejects before a later bad
+            // sign or out-of-range index is allowed to change the diagnosis.
+            batch.tetrahedra[1] = batch.tetrahedra.front();
+            auto later = batch.tetrahedra.front();
+            later.sign = 0;
+            later.vertices[0] = Index{std::numeric_limits<std::size_t>::max()};
+            batch.tetrahedra.push_back(later);
+            expected_source = 1;
+            expected_pairs = 5;
+            expected_cancelled = 0;
+        }
+        else
+        {
+            // Two valid pairs acquire third occurrences. The smaller-key group
+            // appears first when sorted but its third occurrence is later.
+            const auto low = batch.tetrahedra;
+            const auto points = batch.points;
+            for (auto point : points)
+            {
+                point.value[0] += 2;
+                batch.points.push_back(std::move(point));
+            }
+            auto high = low;
+            for (auto& tetra : high)
+                for (auto& index : tetra.vertices)
+                    index.value += points.size();
+            batch.tetrahedra = {high[0], high[1], low[0], low[1]};
+            batch.points.emplace_back(std::array<long double, 3>{2, 0, 2});
+            batch.points.emplace_back(std::array<long double, 3>{0, 0, 2});
+            auto third_high = high[0], third_low = low[0];
+            third_high.vertices[3] = Index{10};
+            third_low.vertices[3] = Index{11};
+            batch.tetrahedra.push_back(third_high);
+            batch.tetrahedra.push_back(third_low);
+            expected_source = 4;
+            expected_pairs = 20;
+            expected_cancelled = 2;
+        }
+        const BatchSnapshot original(batch);
+        OrdinaryAggregateContext context;
+        expect_error([&] { (void) OrdinaryAggregateSource(std::move(batch), {}, ordinary_limits(), &context); },
+            GeometryErrorCode::InvalidTopology);
+        original.expect_unchanged(batch);
+        EXPECT_EQ(context.stage, OrdinaryAggregateStage::Source);
+        EXPECT_EQ(context.source, expected_source);
+        EXPECT_EQ(context.cut, OrdinaryAggregateContext::absent);
+        EXPECT_EQ(context.pairs, expected_pairs);
+        EXPECT_EQ(context.statistics.cancelled_boundaries, expected_cancelled);
+    }
+}
+
+TEST(OrdinaryAggregateTest, IndexedSourcePairAllowancesPreservePrefixCountsAndCallerBatch)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    constexpr std::size_t facets = 24;
+    for (bool geometry_controls : {false, true})
+        for (const auto allowance : {std::size_t{0}, facets - 1, facets})
+        {
+            SCOPED_TRACE(::testing::Message() << "geometry=" << geometry_controls << " allowance=" << allowance);
+            auto batch = indexed_cube();
+            const BatchSnapshot original(batch);
+            SweepLimits sweep;
+            auto geometry = ordinary_limits();
+            if (geometry_controls)
+                geometry.maximum_pair_tests = allowance;
+            else
+                sweep.maximum_pair_tests = allowance;
+            OrdinaryAggregateContext context;
+            if (allowance == facets)
+            {
+                const OrdinaryAggregateSource source(std::move(batch), sweep, geometry, &context);
+                EXPECT_EQ(source.points().data(), original.points);
+                EXPECT_EQ(source.tetrahedra().data(), original.tetrahedra);
+                EXPECT_EQ(context.pairs, facets);
+                EXPECT_EQ(context.statistics.cancelled_boundaries, 6u);
+                EXPECT_EQ(context.statistics.source_pieces, 6u);
+            }
+            else
+            {
+                expect_error([&] { (void) OrdinaryAggregateSource(std::move(batch), sweep, geometry, &context); },
+                    GeometryErrorCode::ResourceLimit);
+                original.expect_unchanged(batch);
+                EXPECT_EQ(context.pairs, allowance);
+                EXPECT_EQ(context.source, allowance / 4);
+                EXPECT_EQ(context.statistics.source_pieces, 0u);
+            }
+            EXPECT_EQ(context.cut, OrdinaryAggregateContext::absent);
+            EXPECT_EQ(context.statistics.pair_tests, context.pairs);
+            EXPECT_EQ(context.statistics.storage_bytes, context.bytes);
+        }
+}
+
+TEST(OrdinaryAggregateTest, IndexedPairAdmissionPrecedesSecondAndThirdIncidenceRejections)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    for (const bool third_occurrence : {false, true})
+        for (const bool admit_rejecting_face : {false, true})
+        {
+            SCOPED_TRACE(::testing::Message() << "third=" << third_occurrence << " admit=" << admit_rejecting_face);
+            auto batch = third_occurrence ? indexed_bipyramid() : indexed_corner();
+            auto repeated = batch.tetrahedra.front();
+            if (third_occurrence)
+            {
+                batch.points.emplace_back(std::array<long double, 3>{0, 0, 2});
+                repeated.vertices[3] = Index{5};
+            }
+            batch.tetrahedra.push_back(repeated);
+            const BatchSnapshot original(batch);
+            const auto rejecting_pair = third_occurrence ? std::size_t{12} : std::size_t{5};
+            SweepLimits sweep;
+            sweep.maximum_pair_tests = rejecting_pair - (admit_rejecting_face ? 0 : 1);
+            OrdinaryAggregateContext context;
+            expect_error([&] { (void) OrdinaryAggregateSource(std::move(batch), sweep, ordinary_limits(), &context); },
+                admit_rejecting_face ? GeometryErrorCode::InvalidTopology : GeometryErrorCode::ResourceLimit);
+            original.expect_unchanged(batch);
+            EXPECT_EQ(context.stage, OrdinaryAggregateStage::Source);
+            EXPECT_EQ(context.source, third_occurrence ? 2u : 1u);
+            EXPECT_EQ(context.cut, OrdinaryAggregateContext::absent);
+            EXPECT_EQ(context.pairs, sweep.maximum_pair_tests);
+            EXPECT_EQ(context.statistics.pair_tests, context.pairs);
+            EXPECT_EQ(context.statistics.cancelled_boundaries, third_occurrence ? 1u : 0u);
+        }
+}
+
+TEST(OrdinaryAggregateTest, IndexedIdenticalRecipesRepeatGroupOrderAmountsErrorsAndFlagsExactly)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const std::array donors{cut_donor(Geometry::box({0, 0, 0}, {.5, 1, 1}), {{0, 1, 0}, {}, .5}, .5, .25),
+        cut_donor(Geometry::box({.5, 0, 0}, {1, 1, 1}), {{0, 1, 0}, {}, .5}, .5, .25)};
+    auto labelled = donors;
+    labelled[1].id = 11;
+    const OrdinaryAggregateSource source(indexed_cube(), {}, ordinary_limits());
+    const auto first = source.measure(labelled);
+    ASSERT_EQ(first.groups.size(), 2u);
+    expect_amount(first.signed_source_volume, 1);
+    for (const auto& group : first.groups)
+    {
+        expect_amount(group.nominal.bulk, .5);
+        expect_amount(group.nominal.gas, .25);
+        expect_amount(group.nominal.carrier, .25);
+        EXPECT_TRUE(group.bulk_positive && group.gas_positive && group.carrier_positive);
+    }
+    expect_identical_results(first, source.measure(labelled));
+    const OrdinaryAggregateSource rebuilt(indexed_cube(), {}, ordinary_limits());
+    expect_identical_results(first, rebuilt.measure(labelled));
+}
+
+TEST(OrdinaryAggregateTest, IndexedPartnersCancelOnlyWhenBothFacesSurviveTheSameChannel)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const OrdinaryAggregateSource source(indexed_bipyramid(), {}, ordinary_limits());
+    const auto box = Geometry::box({0, 0, -1}, {1, 1, 1});
+    const std::array phases{cut_donor(box, {{0, 0, 1}, {}, 0}, 1.L / 3, 1.L / 6)};
+    const auto full = source.measure(phases);
+    expect_split(full, 1.L / 3, 1.L / 6);
+    EXPECT_EQ(full.statistics.cancelled_boundaries, 1u);
+    std::array sides{cut_donor(Geometry::box({0, 0, -1}, {1, 1, 0}), {{1, 0, 0}, {}, .5}, 1.L / 6, 7.L / 48),
+        cut_donor(Geometry::box({0, 0, 0}, {1, 1, 1}), {{1, 0, 0}, {}, .5}, 1.L / 6, 7.L / 48)};
+    sides[1].id = 38;
+    for (unsigned order = 0; order < 2; ++order)
+    {
+        const auto result = source.measure(sides);
+        ASSERT_EQ(result.groups.size(), 2u);
+        EXPECT_EQ(result.statistics.cancelled_boundaries, 1u);
+        expect_amount(result.signed_source_volume, 1.L / 3);
+        for (const auto& group : result.groups)
+        {
+            expect_amount(group.nominal.bulk, 1.L / 6);
+            expect_amount(group.nominal.gas, 7.L / 48);
+            expect_amount(group.nominal.carrier, 1.L / 48);
+            EXPECT_TRUE(group.bulk_positive && group.gas_positive && group.carrier_positive);
+        }
+        std::reverse(sides.begin(), sides.end());
+    }
+}
+
 TEST(OrdinaryAggregateTest, IndexedCapacityAdmissionAcceptsExactAllowanceAndRejectsOneByteShort)
 {
     using namespace SimpleFluid::geometry::swept_volume;
@@ -511,6 +743,24 @@ TEST(OrdinaryAggregateTest, SharedSplitRetainsAnalyticEdgeVertexAndTangentContac
     }
 }
 
+TEST(OrdinaryAggregateTest, SharedCapIdDomainCanExceedBothCompactChildVertexCaps)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    auto batch = indexed_corner();
+    const std::array<P, 4> points{batch.points[0], batch.points[1], batch.points[2], batch.points[3]};
+    auto limits = ordinary_limits();
+    limits.maximum_vertices = 6;
+    // The x=1/2 cut has three fresh crossings: its shared ID domain has
+    // seven slots, while the retained children have six and four vertices.
+    const OrdinaryAggregateSource source(std::move(batch), {}, limits);
+    const std::array donors{cut_donor(Geometry::tetrahedron(points, limits), {{1, 0, 0}, {}, .5}, 1.L / 6, 7.L / 48)};
+    const auto first = source.measure(donors);
+    expect_split(first, 1.L / 6, 7.L / 48);
+    expect_compact_accounting(first.statistics);
+    const auto again = source.measure(donors);
+    expect_identical_results(first, again);
+}
+
 TEST(OrdinaryAggregateTest, CompactRemaindersPreserveFourSlabInventoriesAndSourceFaces)
 {
     using namespace SimpleFluid::geometry::swept_volume;
@@ -563,6 +813,11 @@ TEST(OrdinaryAggregateTest, FailedChargeReportsUnspentRequestAndStageAttribution
     const OrdinaryAggregateSource reference(make_batch(recipes), {}, ordinary_limits());
     const auto required = reference.measure(donors).statistics.storage_bytes;
     auto limits = ordinary_limits();
+    limits.byte_budget = required;
+    const OrdinaryAggregateSource exact(make_batch(recipes), {}, limits);
+    const auto admitted = exact.measure(donors);
+    expect_split(admitted, 1, .5);
+    EXPECT_EQ(admitted.statistics.storage_bytes, required);
     limits.byte_budget = required - 1;
     OrdinaryAggregateContext context;
     const OrdinaryAggregateSource limited(make_batch(recipes), {}, limits, &context);

@@ -22,6 +22,11 @@ namespace predicates = ::SimpleFluid::PLIC::details::ordinary_predicates;
 using V = std::array<long double, 3>;
 using B = std::array<long double, 4>;
 constexpr long double eps = std::numeric_limits<long double>::epsilon();
+struct SourceFacetHandle
+{
+    std::size_t value = std::numeric_limits<std::size_t>::max();
+};
+static_assert(sizeof(SourceFacetHandle) == sizeof(std::size_t));
 [[noreturn]] void fail(GeometryErrorCode code, const char* message)
 {
     throw GeometryError(code, message);
@@ -671,12 +676,44 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
     std::vector<std::size_t> negative_indices(count, absent);
     std::vector<std::size_t> positive_indices(complementary ? count : 0, absent);
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> intersections;
-    std::set<std::size_t> cap;
-    std::map<std::size_t, std::size_t> cap_ring;
+    std::vector<unsigned char> cap;
+    std::vector<std::size_t> cap_ring;
+    std::size_t cap_count = 0, ring_count = 0, ring_start = absent;
+    const auto grow_cap_array = [&](auto& array, std::size_t required, auto initial)
+    {
+        using Element = typename std::remove_reference_t<decltype(array)>::value_type;
+        const auto maximum = std::min(array.max_size(), absent / sizeof(Element));
+        if (required > maximum)
+            work_limit("cap_vertex_ids", array.size(), required - array.size(), maximum);
+        if (required > array.capacity())
+        {
+            // These are cumulative construction charges: retain every earlier
+            // allocation charge, and admit the whole replacement before growth.
+            const auto doubled = array.capacity() > maximum / 2 ? maximum : 2 * array.capacity();
+            const auto requested = std::max(required, doubled);
+            work.charge(requested * sizeof(Element));
+            array.reserve(requested);
+            if (array.capacity() > maximum)
+                work.storage_limit(work.bytes, absent, std::min(work.sweep.byte_budget, work.geometry.byte_budget));
+            work.charge((array.capacity() - requested) * sizeof(Element));
+        }
+        array.resize(required, initial);
+    };
+    const auto grow_cap = [&](std::size_t required)
+    {
+        grow_cap_array(cap, required, static_cast<unsigned char>(0));
+        grow_cap_array(cap_ring, required, absent);
+    };
+    // Shared source/crossing IDs can exceed either compact child's vertex cap.
+    // Their domain follows the parent and fresh crossings, never a child cap.
+    grow_cap(count);
     const auto add_cap = [&](std::size_t i)
     {
-        if (cap.insert(i).second)
-            work.charge(sizeof(std::size_t) + 4 * sizeof(void*));
+        if (!cap[i])
+        {
+            cap[i] = 1;
+            ++cap_count;
+        }
     };
     const auto append_point =
         [&](Poly& child, const B& b, const B& error, const std::vector<const Support*>& supports, bool copied)
@@ -733,11 +770,17 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
             if ((dp < 0 && dc > 0) || (dp > 0 && dc < 0))
             {
                 const auto key = std::minmax(previous, current);
-                auto [it, fresh] = intersections.try_emplace(key, count + intersections.size());
-                if (fresh)
+                auto it = intersections.find(key);
+                if (it == intersections.end())
                 {
+                    if (count == absent || intersections.size() >= absent - count)
+                        work_limit("cap_vertex_ids", count, intersections.size(), absent);
+                    const auto id = count + intersections.size();
+                    grow_cap(id + 1);
                     work.charge(sizeof(decltype(intersections)::value_type) + 4 * sizeof(void*) +
                                 sizeof(std::size_t) * (complementary ? 2 : 1));
+                    // Publish the new shared ID only after its dense tables exist.
+                    it = intersections.emplace(key, id).first;
                     const auto i = std::abs(dp) <= std::abs(dc) ? previous : current,
                                j = i == previous ? current : previous;
                     const auto denominator = construction_difference(distances[i], distances[j], work);
@@ -785,32 +828,35 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
             for (std::size_t k = 0; k < below.vertices.size(); ++k)
             {
                 const auto a = below.vertices[k], b = below.vertices[(k + 1) % below.vertices.size()];
-                if (a != b && cap.contains(a) && cap.contains(b))
-                    if (!cap_ring.emplace(b, a).second)
+                if (a != b && cap[a] && cap[b])
+                {
+                    // Repeated insertion is ambiguous even for an equal successor.
+                    if (cap_ring[b] != absent)
                         fail(GeometryErrorCode::UnresolvedArithmetic,
                             "Ordinary aggregate cap ring has ambiguous incidence.");
-                    else
-                        work.charge(sizeof(decltype(cap_ring)::value_type) + 4 * sizeof(void*));
+                    cap_ring[b] = a;
+                    ++ring_count;
+                    ring_start = std::min(ring_start, b);
+                }
             }
         retain_face(negative, negative_indices, std::move(below));
         if (complementary)
             retain_face(positive, positive_indices, std::move(above));
     }
-    if (cap.size() < 3)
+    if (cap_count < 3)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cut lost its retained boundary.");
-    if (cap_ring.size() != cap.size())
+    if (ring_count != cap_count)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is incomplete.");
     Face boundary;
-    auto current = cap_ring.begin()->first;
+    auto current = ring_start;
     do
     {
         boundary.vertices.push_back(current);
-        auto it = cap_ring.find(current);
-        if (it == cap_ring.end())
+        if (current >= cap_ring.size() || cap_ring[current] == absent)
             fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is open.");
-        current = it->second;
-    } while (current != boundary.vertices.front() && boundary.vertices.size() <= cap_ring.size());
-    if (boundary.vertices.size() != cap_ring.size())
+        current = cap_ring[current];
+    } while (current != boundary.vertices.front() && boundary.vertices.size() <= ring_count);
+    if (boundary.vertices.size() != ring_count)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is disconnected.");
     if (complementary)
     {
@@ -1059,8 +1105,7 @@ struct OrdinaryAggregateSource::Impl
 {
     OrdinaryAggregateSourceBatch batch;
     std::vector<predicates::Result> orientations;
-    std::vector<std::array<bool, 4>> cancelled;
-    std::vector<std::array<std::pair<std::size_t, unsigned>, 4>> partners;
+    std::vector<std::array<SourceFacetHandle, 4>> partners;
     SweepLimits sweep;
     GeometryLimits geometry;
     OrdinaryAggregateStatistics initial;
@@ -1078,6 +1123,9 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
     const auto& recipes = batch.tetrahedra;
     if (recipes.size() > sweep.maximum_simplices)
         fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate source simplex cap exhausted.");
+    if (recipes.size() > std::numeric_limits<std::size_t>::max() / 4)
+        fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate source facet count exceeds its represented range.");
+    const auto facet_count = 4 * recipes.size();
     AggregateWork work{sweep, geometry};
     work.context = &context;
     const auto charge_elements = [&](std::size_t count, std::size_t element_bytes)
@@ -1103,7 +1151,6 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
         charge_elements(metadata.capacity() - recipes.size(), sizeof(Element));
     };
     prepare(impl->orientations);
-    prepare(impl->cancelled);
     prepare(impl->partners);
     // The table retains every slot, including unused ones. Charge its actual
     // object capacity above and provenance payload once per slot here. Shared
@@ -1129,13 +1176,66 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
             }
         work.charge(point_storage_bytes(point) - sizeof(DynamicPoint));
     }
-    struct Incidence
+    struct Record
     {
-        std::size_t tetra;
-        unsigned face;
-        int orientation;
+        std::array<OrdinaryAggregatePointIndex, 3> key;
+        SourceFacetHandle facet;
+        int sign;
     };
-    std::map<std::pair<int, std::array<OrdinaryAggregatePointIndex, 3>>, Incidence> boundaries;
+    const auto pair_limit = std::min(sweep.maximum_pair_tests, geometry.maximum_pair_tests);
+    // Only this prefix can reach semantic incidence validation. Include the
+    // first rejected pair admission without overflowing pair_limit + 1.
+    const auto record_count = facet_count <= pair_limit ? facet_count : pair_limit + 1;
+    std::vector<Record> records;
+    if (record_count > records.max_size())
+        work_limit("source_facets", 0, record_count, records.max_size());
+    charge_elements(record_count, sizeof(Record));
+    records.resize(record_count);
+    charge_elements(records.capacity() - record_count, sizeof(Record));
+    for (std::size_t facet = 0; facet < record_count; ++facet)
+    {
+        const auto& t = recipes[facet / 4];
+        auto& record = records[facet];
+        record.facet = SourceFacetHandle{facet};
+        record.sign = t.sign;
+        for (unsigned k = 0; k < 3; ++k)
+            record.key[k] = t.vertices[tetra_faces[facet % 4][k]];
+        std::sort(record.key.begin(), record.key.end());
+    }
+    std::sort(records.begin(), records.end(), [](const Record& a, const Record& b)
+        { return std::tie(a.sign, a.key, a.facet.value) < std::tie(b.sign, b.key, b.facet.value); });
+    SourceFacetHandle first_third;
+    for (std::size_t begin = 0; begin < records.size();)
+    {
+        auto end = begin + 1;
+        while (
+            end < records.size() && records[end].sign == records[begin].sign && records[end].key == records[begin].key)
+            ++end;
+        if (end - begin >= 2)
+        {
+            const auto a = records[begin].facet, b = records[begin + 1].facet;
+            impl->partners[a.value / 4][a.value % 4] = b;
+            impl->partners[b.value / 4][b.value % 4] = a;
+        }
+        if (end - begin >= 3)
+            first_third.value = std::min(first_third.value, records[begin + 2].facet.value);
+        begin = end;
+    }
+    // The prepass above reads integer recipes only. Keep every numerical and
+    // semantic rejection in original source/facet order below, after its pair
+    // admission. A structural partner is authenticated only on second encounter.
+    const auto facet_parity = [](const OrdinaryAggregateTetra& t, unsigned face, long double determinant)
+    {
+        std::array<OrdinaryAggregatePointIndex, 3> ids{};
+        for (unsigned k = 0; k < 3; ++k)
+            ids[k] = t.vertices[tetra_faces[face][k]];
+        int parity = determinant > 0 ? 1 : -1;
+        for (unsigned a = 0; a < 3; ++a)
+            for (unsigned b = a + 1; b < 3; ++b)
+                if (ids[a] > ids[b])
+                    parity = -parity;
+        return parity;
+    };
     Sum volume;
     for (std::size_t i = 0; i < recipes.size(); ++i)
     {
@@ -1167,26 +1267,18 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
         volume.add(product(t.sign, quotient(std::abs(d), 6)));
         for (unsigned f = 0; f < 4; ++f)
         {
-            std::array<OrdinaryAggregatePointIndex, 3> ids{};
-            for (unsigned k = 0; k < 3; ++k)
-                ids[k] = t.vertices[tetra_faces[f][k]];
-            int parity = d > 0 ? 1 : -1;
-            for (unsigned a = 0; a < 3; ++a)
-                for (unsigned b = a + 1; b < 3; ++b)
-                    if (ids[a] > ids[b])
-                        parity = -parity;
-            std::sort(ids.begin(), ids.end());
-            auto [it, fresh] = boundaries.try_emplace({t.sign, ids}, Incidence{i, f, parity});
             work.pair();
-            if (fresh)
-                work.charge(sizeof(decltype(boundaries)::value_type) + 4 * sizeof(void*));
-            else
+            const auto facet = SourceFacetHandle{4 * i + f};
+            if (facet.value == first_third.value)
+                fail(GeometryErrorCode::InvalidTopology, "Ordinary aggregate source face has invalid incidence.");
+            const auto partner = impl->partners[i][f];
+            if (partner.value < facet.value)
             {
-                if (it->second.orientation != -parity || impl->cancelled[it->second.tetra][it->second.face])
+                const auto earlier = partner.value / 4;
+                const auto earlier_face = static_cast<unsigned>(partner.value % 4);
+                if (facet_parity(recipes[earlier], earlier_face, impl->orientations[earlier].value) !=
+                    -facet_parity(t, f, d))
                     fail(GeometryErrorCode::InvalidTopology, "Ordinary aggregate source face has invalid incidence.");
-                impl->cancelled[i][f] = impl->cancelled[it->second.tetra][it->second.face] = true;
-                impl->partners[i][f] = {it->second.tetra, it->second.face};
-                impl->partners[it->second.tetra][it->second.face] = {i, f};
                 ++work.stats.cancelled_boundaries;
             }
         }
@@ -1674,11 +1766,11 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             positive[channel] = true;
                             std::array<bool, 4> cancelled{};
                             for (unsigned f = 0; f < 4; ++f)
-                                if (impl_->cancelled[w.tetra][f])
-                                {
-                                    const auto [neighbor, face] = impl_->partners[w.tetra][f];
-                                    cancelled[f] = present[neighbor][face];
-                                }
+                            {
+                                const auto partner = impl_->partners[w.tetra][f];
+                                if (partner.value != std::numeric_limits<std::size_t>::max())
+                                    cancelled[f] = present[partner.value / 4][partner.value % 4];
+                            }
                             context.source = w.tetra;
                             context.cut = OrdinaryAggregateContext::absent;
                             if (retry)

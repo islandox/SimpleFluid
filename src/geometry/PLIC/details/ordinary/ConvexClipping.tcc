@@ -911,36 +911,69 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         for (const auto& weak : plane->source_vertices)
             if (const auto point = weak.lock())
                 construction->retained_points.push_back(point);
-        const auto draft_child = [&](unsigned outside)
+        const auto resize_scratch = [](auto& buffer, std::size_t count)
         {
-            active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
-            auto poly = std::make_shared<Impl>();
-            poly->frame = frame;
-            poly->reference_origin = impl_->reference_origin;
-            poly->limits = impl_->limits;
-            poly->numerical_only = impl_->numerical_only || source->numerical_only;
-            poly->construction = construction_node(GeometryConstruction::Clip{construction, outside != 0});
-            poly->ancestry =
-                std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
-            std::set<std::size_t> used;
-            for (const auto& face : output_faces[outside])
-                used.insert(face.begin(), face.end());
-            std::map<std::size_t, std::size_t> remap;
-            for (const auto i : used)
+            using Value = typename std::remove_reference_t<decltype(buffer)>::value_type;
+            if (count > buffer.max_size() || count > std::numeric_limits<std::size_t>::max() / sizeof(Value))
             {
-                remap.emplace(i, poly->vertices.size());
-                poly->vertices.push_back(vertices[i]);
+                ++statistics.rejections;
+                throw GeometryError(GeometryErrorCode::ResourceLimit,
+                    "Ordinary FP geometry: clipping scratch size overflows.");
             }
-            poly->faces = std::move(output_faces[outside]);
-            poly->surfaces = std::move(output_surfaces[outside]);
-            for (auto& face : poly->faces)
-                for (auto& i : face)
-                    i = remap.at(i);
-            return poly;
+            if (count > buffer.capacity())
+            {
+                // Work is cumulative: a replacement allocation is charged in full.
+                active_work->charge(count, sizeof(Value));
+                buffer.reserve(count);
+                if (buffer.capacity() > count)
+                    active_work->charge(buffer.capacity() - count, sizeof(Value));
+            }
+            buffer.resize(count);
         };
-        std::array<std::shared_ptr<Impl>, 2> drafts{draft_child(0), nullptr};
-        if (construct_outside)
-            drafts[1] = draft_child(1);
+        std::array<std::shared_ptr<Impl>, 2> drafts;
+        {
+            // Crossing construction is complete. Include generated vertex IDs and
+            // reuse these arrays only across the requested children of this split.
+            std::vector<unsigned char> used;
+            std::vector<std::size_t> old_to_new;
+            resize_scratch(used, vertices.size());
+            resize_scratch(old_to_new, vertices.size());
+            const auto draft_child = [&](unsigned outside)
+            {
+                active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
+                auto poly = std::make_shared<Impl>();
+                poly->frame = frame;
+                poly->reference_origin = impl_->reference_origin;
+                poly->limits = impl_->limits;
+                poly->numerical_only = impl_->numerical_only || source->numerical_only;
+                poly->construction = construction_node(GeometryConstruction::Clip{construction, outside != 0});
+                poly->ancestry =
+                    std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
+                std::fill(used.begin(), used.end(), 0);
+                for (const auto& face : output_faces[outside])
+                    for (const auto i : face)
+                    {
+                        if (i >= vertices.size())
+                            reject("complementary child has an invalid face vertex.");
+                        used[i] = 1;
+                    }
+                for (std::size_t i = 0; i < vertices.size(); ++i)
+                    if (used[i])
+                    {
+                        old_to_new[i] = poly->vertices.size();
+                        poly->vertices.push_back(vertices[i]);
+                    }
+                poly->faces = std::move(output_faces[outside]);
+                poly->surfaces = std::move(output_surfaces[outside]);
+                for (auto& face : poly->faces)
+                    for (auto& i : face)
+                        i = old_to_new[i];
+                return poly;
+            };
+            drafts[0] = draft_child(0);
+            if (construct_outside)
+                drafts[1] = draft_child(1);
+        } // Release compaction scratch before validation or recursive recovery.
 
         // Validate the whole requested split before evaluating either child. The
         // cap already has the directed winding inherited from the parent faces;
@@ -950,18 +983,19 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             if (poly.vertices.size() < 4 || poly.faces.size() < 4 || poly.faces.size() != poly.surfaces.size())
                 reject("positive complementary child has an incomplete boundary.");
             std::map<std::pair<std::size_t, std::size_t>, CapEdge> edges;
+            std::vector<unsigned char> distinct;
+            resize_scratch(distinct, poly.vertices.size());
             for (const auto& face : poly.faces)
             {
                 if (face.size() < 3)
                     reject("complementary child face has fewer than three vertices.");
-                active_work->charge(face.size(), sizeof(std::size_t) + 4 * sizeof(void*));
-                std::set<std::size_t> distinct;
                 for (std::size_t i = 0; i < face.size(); ++i)
                 {
                     active_work->pair();
                     const auto a = face[i], b = face[(i + 1) % face.size()];
-                    if (a >= poly.vertices.size() || b >= poly.vertices.size() || !distinct.insert(a).second)
+                    if (a >= poly.vertices.size() || b >= poly.vertices.size() || distinct[a])
                         reject("complementary child has an invalid or repeated face vertex.");
+                    distinct[a] = 1;
                     const std::pair edge{std::min(a, b), std::max(a, b)};
                     auto found = edges.find(edge);
                     if (found == edges.end())
@@ -973,6 +1007,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                         reject("complementary child edge has more than two face incidences.");
                     found->second.orientation += a < b ? 1 : -1;
                 }
+                for (const auto i : face)
+                    distinct[i] = 0;
             }
             for (const auto& [edge, incidence] : edges)
                 if (incidence.occurrences != 2 || incidence.orientation != 0)
