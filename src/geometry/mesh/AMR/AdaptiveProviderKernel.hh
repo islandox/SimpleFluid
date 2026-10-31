@@ -52,6 +52,12 @@ public:
     [[nodiscard]] virtual AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf&) const = 0;
     [[nodiscard]] virtual std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const = 0;
+    /** Opt-in successful-path capacity envelope for publication materialization.
+     * Zero preserves legacy expanded admission. Implementations must include
+     * all output owners and simultaneous construction scratch; caller admits
+     * this envelope before invoking compact_native_materialize. */
+    [[nodiscard]] virtual std::size_t compact_native_materialization_bound(const AdaptiveLeaf&) const { return 0; }
+    [[nodiscard]] virtual AdaptiveLeaf compact_native_materialize(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual PLIC::PointIdentity<ArithmeticMode::Ordinary> contact_point(
         const AdaptiveLeaf&, const PLIC::PointIdentity<ArithmeticMode::Ordinary>&) const;
     [[nodiscard]] virtual std::vector<AdaptiveCellKey> matching_partners(const AdaptiveLeaf&) const;

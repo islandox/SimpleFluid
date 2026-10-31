@@ -142,6 +142,15 @@ public:
     void certify_partition(std::span<const PlanarFacePtr<ArithmeticMode::Ordinary>>) const;
     [[nodiscard]] std::vector<char> encode(std::size_t byte_budget = geometry_packet_default_budget) const;
     [[nodiscard]] std::vector<char> encode_incidence(std::size_t byte_budget = geometry_packet_default_budget) const;
+    /** Same encoding traversal without packet/body buffers. The canonical
+     * polygon copy is admitted before allocation; incidence needs no scratch. */
+    [[nodiscard]] std::size_t encoding_scratch_bytes() const;
+    [[nodiscard]] std::size_t encoded_size(std::size_t scratch_budget) const;
+    [[nodiscard]] std::size_t encoded_incidence_size() const;
+    /** Successful-path payload/capacity envelope for face_geometry's original
+     * finite face/support construction, including its temporary owner checks. */
+    [[nodiscard]] static std::size_t construction_capacity_bound(std::size_t vertices);
+    [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
     /** Own face buffers only; shared identity owners are visited separately. */
     [[nodiscard]] std::size_t exclusive_storage_bytes() const;
     /** Full standalone footprint, including retained identity ancestry. */

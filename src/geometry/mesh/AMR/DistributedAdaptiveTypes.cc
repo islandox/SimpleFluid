@@ -2,7 +2,10 @@
  * @brief Versioned bounded lossless ancestry and owner-record encoding.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -24,6 +27,33 @@ struct Writer
     {
         word(value.size());
         data.insert(data.end(), value.begin(), value.end());
+    }
+    void path(const std::vector<std::uint64_t>& path)
+    {
+        word(path.size());
+        for (auto n : path)
+            word(n);
+    }
+};
+struct SizeWriter
+{
+    std::size_t size = 0;
+    void add(std::size_t n)
+    {
+        if (n > std::numeric_limits<std::size_t>::max() - size)
+            throw std::invalid_argument("Adaptive encoded length overflows.");
+        size += n;
+    }
+    void word(std::uint64_t) { add(8); }
+    void bytes(std::span<const char> value)
+    {
+        word(value.size());
+        add(value.size());
+    }
+    void sized_bytes(std::size_t n)
+    {
+        word(n);
+        add(n);
     }
     void path(const std::vector<std::uint64_t>& path)
     {
@@ -70,7 +100,7 @@ struct Reader
             throw std::invalid_argument("Trailing adaptive packet bytes.");
     }
 };
-void base(Writer& w, const BaseCellKey& key)
+template<class PacketWriter> void base(PacketWriter& w, const BaseCellKey& key)
 {
     w.word(key.root);
     w.word(key.root_template);
@@ -84,7 +114,7 @@ BaseCellKey base(Reader& r)
     key.path = r.path();
     return key;
 }
-void axial(Writer& w, const AxialIntervalKey& key)
+template<class PacketWriter> void axial(PacketWriter& w, const AxialIntervalKey& key)
 {
     w.word(key.root);
     w.path(key.path);
@@ -96,7 +126,7 @@ AxialIntervalKey axial(Reader& r)
     key.path = r.path();
     return key;
 }
-void header(Writer& w, std::uint64_t kind, std::uint64_t version)
+template<class PacketWriter> void header(PacketWriter& w, std::uint64_t kind, std::uint64_t version)
 {
     w.word(0x5346414450543631ULL);
     w.word(version);
@@ -108,9 +138,10 @@ void header(Reader& r, std::uint64_t kind, std::uint64_t version)
         throw std::invalid_argument("Invalid adaptive packet version/type.");
 }
 } // namespace
-AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
+namespace
 {
-    Writer w;
+template<class PacketWriter> void emit_adaptive_key(PacketWriter& w, const AdaptiveCellKey& key)
+{
     header(w, 0, 1);
     w.word(key.region);
     w.word(key.ancestry.index());
@@ -141,8 +172,15 @@ AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
             }
         },
         key.ancestry);
+}
+} // namespace
+AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
+{
+    Writer w;
+    emit_adaptive_key(w, key);
     return std::move(w.data);
 }
+
 AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
 {
     Reader r{packet};
@@ -212,7 +250,10 @@ double AdaptiveWork::total() const
         throw std::invalid_argument("Adaptive work must be finite and positive.");
     return sum;
 }
-AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
+namespace
+{
+template<class PacketWriter>
+void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t scratch_budget)
 {
     if (leaf.domain.empty())
         throw std::invalid_argument("Adaptive connected-domain provenance is required.");
@@ -220,14 +261,23 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
         (!leaf.geometry && (!leaf.surfaces.empty() || !leaf.native_recipe)))
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
-    Writer w;
     header(w, 1, 4);
-    w.bytes(encode_adaptive_key(leaf.key));
+    if constexpr (std::is_same_v<PacketWriter, Writer>)
+        w.bytes(encode_adaptive_key(leaf.key));
+    else
+    {
+        SizeWriter key;
+        emit_adaptive_key(key, leaf.key);
+        w.sized_bytes(key.size);
+    }
     w.bytes(leaf.domain);
     w.word(leaf.material);
     w.word(leaf.revision);
     w.word(std::uint64_t(leaf.provider));
-    w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
+    if constexpr (std::is_same_v<PacketWriter, Writer>)
+        w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
+    else
+        w.sized_bytes(leaf.geometry ? leaf.geometry->encoded_certificate_size(scratch_budget) : 0);
     w.word(leaf.surfaces.size());
     for (const auto& s : leaf.surfaces)
     {
@@ -235,29 +285,74 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
             (!s.exterior && !s.boundary.empty()))
             throw std::invalid_argument("Invalid adaptive surface.");
         w.bytes(s.key);
-        w.bytes(s.geometry->encode());
+        if constexpr (std::is_same_v<PacketWriter, Writer>)
+            w.bytes(s.geometry->encode());
+        else
+            w.sized_bytes(s.geometry->encoded_size(scratch_budget));
         w.word(s.orientation == 1);
         w.word(s.exterior);
         w.bytes(std::span(s.boundary));
         w.word(s.native_face);
-        w.bytes(PLIC::encode_identity(s.authority_image));
+        if constexpr (std::is_same_v<PacketWriter, Writer>)
+            w.bytes(PLIC::encode_identity(s.authority_image));
+        else
+            w.sized_bytes(PLIC::encoded_identity_size(s.authority_image));
         w.word(s.require_native_whole_tile);
         w.word(bool(s.native_whole_geometry));
         if (s.native_whole_geometry)
-            w.bytes(s.native_whole_geometry->encode_incidence());
+        {
+            if constexpr (std::is_same_v<PacketWriter, Writer>)
+                w.bytes(s.native_whole_geometry->encode_incidence());
+            else
+                w.sized_bytes(s.native_whole_geometry->encoded_incidence_size());
+        }
     }
-    w.bytes(leaf.native_recipe ? encode_native_fragment_descriptor(*leaf.native_recipe) : AdaptiveBytes{});
+    if constexpr (std::is_same_v<PacketWriter, Writer>)
+        w.bytes(leaf.native_recipe ? encode_native_fragment_descriptor(*leaf.native_recipe) : AdaptiveBytes{});
+    else
+        w.sized_bytes(leaf.native_recipe ? encoded_native_fragment_descriptor_size(*leaf.native_recipe) : 0);
     w.word(leaf.native_cell);
     for (const auto& part :
         leaf.factor_recipe ? std::array{leaf.factor_recipe->root, leaf.factor_recipe->base, leaf.factor_recipe->axis}
                            : std::array<std::shared_ptr<const AdaptiveBytes>, 3>{})
-        w.bytes(part ? *part : AdaptiveBytes{});
-    w.bytes(leaf.join_recipe ? *leaf.join_recipe : AdaptiveBytes{});
+        if (part)
+            w.bytes(*part);
+        else
+            w.bytes(std::span<const char>{});
+    if (leaf.join_recipe)
+        w.bytes(*leaf.join_recipe);
+    else
+        w.bytes(std::span<const char>{});
     w.bytes(leaf.parent_family);
     for (double n : {leaf.work.reconstruction, leaf.work.interface, leaf.work.population, leaf.work.migration})
         w.word(std::bit_cast<std::uint64_t>(n));
+}
+} // namespace
+AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
+{
+    Writer w;
+    emit_adaptive_leaf(w, leaf, PLIC::geometry_packet_default_budget);
     return std::move(w.data);
 }
+std::size_t adaptive_detail::adaptive_leaf_encoding_scratch_bytes(const AdaptiveLeaf& leaf)
+{
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+        throw std::invalid_argument("Adaptive encoding capacity policy is not qualified for this standard library.");
+    std::size_t bytes = leaf.geometry ? leaf.geometry->certificate_encoding_scratch_bytes() : 0;
+    for (const auto& surface : leaf.surfaces)
+        if (surface.geometry)
+            bytes = std::max(bytes, surface.geometry->encoding_scratch_bytes());
+    return bytes;
+}
+std::size_t adaptive_detail::validate_adaptive_leaf_encoding(const AdaptiveLeaf& leaf, std::size_t scratch_budget)
+{
+    if (adaptive_leaf_encoding_scratch_bytes(leaf) > scratch_budget)
+        throw std::invalid_argument("Adaptive encoding scratch exceeds its byte budget.");
+    SizeWriter w;
+    emit_adaptive_leaf(w, leaf, scratch_budget);
+    return w.size;
+}
+
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     Reader r{packet};
@@ -377,4 +472,238 @@ AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
     (void) encode_adaptive_family(family);
     return family;
 }
+namespace adaptive_detail
+{
+struct CompactNativeOwnedBudget::Impl
+{
+    enum class Kind
+    {
+        Face,
+        FacePayload,
+        NativeRecipe,
+        Bytes,
+        Factor
+    };
+    struct Less
+    {
+        bool operator()(
+            const std::pair<Kind, const void*>& first, const std::pair<Kind, const void*>& second) const noexcept
+        {
+            return first.first != second.first ? first.first < second.first
+                                               : std::less<const void*>{}(first.second, second.second);
+        }
+    };
+    Budget budget;
+    PLIC::GeometryAllocationLedger retained_geometry;
+    std::size_t graph_charged = 0;
+    std::set<std::pair<Kind, const void*>, Less> objects;
+    CompactNativeOwnedStats stats;
+    const std::vector<AdaptiveLeaf>* destination = nullptr;
+    std::size_t destination_size = 0, destination_capacity = 0;
+    bool failed = false;
+    explicit Impl(std::size_t limit) : budget{limit} { budget.add(sizeof(Impl)); }
+    void destination_admission(const std::vector<AdaptiveLeaf>& values)
+    {
+        if (!destination)
+        {
+            if (!values.empty())
+                throw std::invalid_argument("Compact native ledger needs an initially empty destination.");
+            capacity(values.capacity(), sizeof(AdaptiveLeaf));
+            destination = &values;
+            destination_capacity = values.capacity();
+        }
+        else if (destination != &values || destination_size != values.size() ||
+                 destination_capacity != values.capacity())
+            throw std::invalid_argument("Compact native destination changed outside its admission ledger.");
+    }
+    void capacity(std::size_t count, std::size_t width)
+    {
+        if (width && count > std::numeric_limits<std::size_t>::max() / width)
+            throw std::invalid_argument("Compact native retained capacity overflows.");
+        budget.add(count * width);
+    }
+    bool unique(Kind kind, const void* pointer)
+    {
+        if (!pointer || objects.contains({kind, pointer}))
+            return false;
+        // Same conservative ordered-node estimate used by AMR admission.
+        budget.add(sizeof(typename decltype(objects)::value_type) + 4 * sizeof(void*));
+        objects.emplace(kind, pointer);
+        return true;
+    }
+    template<class Value> void geometry_owner(const Value& value)
+    {
+        const auto before = graph_charged;
+        const auto available = budget.limit - budget.used;
+        const auto maximum = std::numeric_limits<std::size_t>::max();
+        const auto limit = available > maximum - graph_charged ? maximum : graph_charged + available;
+        try
+        {
+            retained_geometry.retain(value, graph_charged, limit);
+        }
+        catch (...)
+        {
+            budget.add(graph_charged - before);
+            throw;
+        }
+        budget.add(graph_charged - before);
+    }
+    void bytes_owner(const std::shared_ptr<const AdaptiveBytes>& value)
+    {
+        if (value && unique(Kind::Bytes, value.get()))
+        {
+            budget.add(sizeof(AdaptiveBytes));
+            budget.add(value->capacity());
+        }
+    }
+    void face_owner(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face)
+    {
+        if (!face)
+            return;
+        if (unique(Kind::Face, face.get()))
+            budget.add(sizeof(*face));
+        if (unique(Kind::FacePayload, face->storage_identity()))
+            budget.add(face->exclusive_storage_bytes());
+        geometry_owner(PLIC::planar_support<ArithmeticMode::Ordinary>(*face));
+    }
+    void leaf_metadata(const AdaptiveLeaf& leaf)
+    {
+        std::visit(
+            [&](const auto& ancestry)
+            {
+                if constexpr (requires { ancestry.path; })
+                    capacity(ancestry.path.capacity(), sizeof(std::uint64_t));
+                else if constexpr (requires { ancestry.base.path; })
+                {
+                    capacity(ancestry.base.path.capacity(), sizeof(std::uint64_t));
+                    capacity(ancestry.axial.path.capacity(), sizeof(std::uint64_t));
+                }
+            },
+            leaf.key.ancestry);
+        budget.add(leaf.domain.capacity());
+        budget.add(leaf.parent_family.capacity());
+        capacity(leaf.surfaces.capacity(), sizeof(AdaptiveSurface));
+        for (const auto& surface : leaf.surfaces)
+        {
+            budget.add(surface.key.capacity());
+            // Counting SSO capacity too is conservative and avoids relying on
+            // a particular standard-library string allocation threshold.
+            budget.add(surface.boundary.capacity());
+            // Ordinary displacement identity is inline in AdaptiveSurface.
+            face_owner(surface.geometry);
+            face_owner(surface.native_whole_geometry);
+        }
+        if (leaf.native_recipe && unique(Kind::NativeRecipe, leaf.native_recipe.get()))
+        {
+            budget.add(sizeof(NativeFragmentDescriptor));
+            budget.add(leaf.native_recipe->view.capacity());
+            capacity(leaf.native_recipe->parts.capacity(), sizeof(std::shared_ptr<const AdaptiveBytes>));
+            for (const auto& part : leaf.native_recipe->parts)
+                bytes_owner(part);
+        }
+        bytes_owner(leaf.join_recipe);
+        if (leaf.factor_recipe && unique(Kind::Factor, leaf.factor_recipe.get()))
+        {
+            budget.add(sizeof(AdaptiveFactorRecipe));
+            bytes_owner(leaf.factor_recipe->root);
+            bytes_owner(leaf.factor_recipe->base);
+            bytes_owner(leaf.factor_recipe->axis);
+        }
+    }
+};
+CompactNativeOwnedBudget::CompactNativeOwnedBudget(std::size_t limit)
+{
+    if (limit < sizeof(Impl))
+        throw std::invalid_argument("Compact native ledger exceeds its byte budget.");
+    impl_ = std::make_unique<Impl>(limit);
+}
+CompactNativeOwnedBudget::~CompactNativeOwnedBudget() = default;
+void CompactNativeOwnedBudget::append(
+    std::vector<AdaptiveLeaf>& destination, AdaptiveLeaf transient, bool discard_geometry)
+{
+    auto& state = *impl_;
+    if (state.failed)
+        throw std::invalid_argument("Compact native admission cannot resume a rejected transaction.");
+    try
+    {
+        state.destination_admission(destination);
+        state.leaf_metadata(transient);
+        if (!discard_geometry && transient.geometry)
+            state.geometry_owner(transient.geometry);
+        std::size_t transient_bytes = 0;
+        {
+            // Only the current disposable full cell enters this local ledger.
+            // Destroy all its pins before destroying the actual owner below.
+            PLIC::GeometryAllocationLedger scratch_geometry;
+            if (discard_geometry && transient.geometry)
+            {
+                scratch_geometry.retain(transient.geometry, transient_bytes, state.budget.limit - state.budget.used);
+                state.budget.add(transient_bytes);
+                state.stats.transient_geometry_peak_bytes =
+                    std::max(state.stats.transient_geometry_peak_bytes, transient_bytes);
+            }
+            const auto scratch = adaptive_leaf_encoding_scratch_bytes(transient);
+            state.budget.add(scratch);
+            state.stats.encoding_scratch_peak_bytes = std::max(state.stats.encoding_scratch_peak_bytes, scratch);
+            const auto serialized = validate_adaptive_leaf_encoding(transient, scratch);
+            if (serialized > std::numeric_limits<std::size_t>::max() - state.stats.serialized_bytes)
+                throw std::invalid_argument("Compact native cumulative serialized bytes overflow.");
+            state.stats.serialized_bytes += serialized;
+            // validate_adaptive_leaf_encoding has returned and released every
+            // conversion/canonicalization buffer before its lease retires.
+            state.budget.used -= scratch;
+        }
+        if (discard_geometry)
+            transient.geometry.reset();
+        state.budget.used -= transient_bytes;
+        state.budget.append_capacity(destination);
+        destination.push_back(std::move(transient));
+        state.destination_size = destination.size();
+        state.destination_capacity = destination.capacity();
+        ++state.stats.leaves;
+    }
+    catch (...)
+    {
+        state.failed = true;
+        throw;
+    }
+}
+bool CompactNativeOwnedBudget::append_bounded(
+    std::vector<AdaptiveLeaf>& destination, const AdaptiveLeaf& source, const AdaptiveProviderKernel& kernel)
+{
+    auto& state = *impl_;
+    if (state.failed)
+        throw std::invalid_argument("Compact native admission cannot resume a rejected transaction.");
+    try
+    {
+        const auto bound = kernel.compact_native_materialization_bound(source);
+        if (!bound)
+            return false;
+        state.destination_admission(destination);
+        state.budget.add(bound);
+        state.stats.materialization_peak_bytes = std::max(state.stats.materialization_peak_bytes, bound);
+        auto transient = kernel.compact_native_materialize(source);
+        // Keep the construction envelope leased while append admits the
+        // returned graph and allocates its tracking metadata. This deliberately
+        // double-counts one bounded record rather than exposing an uncharged
+        // live graph during the transfer to persistent admission.
+        append(destination, std::move(transient), true);
+        state.budget.used -= bound;
+        return true;
+    }
+    catch (...)
+    {
+        state.failed = true;
+        throw;
+    }
+}
+CompactNativeOwnedStats CompactNativeOwnedBudget::statistics() const noexcept
+{
+    auto result = impl_->stats;
+    result.retained_bytes = impl_->budget.used;
+    result.live_peak_bytes = impl_->budget.peak;
+    result.cumulative_bytes = impl_->budget.cumulative;
+    return result;
+}
+} // namespace adaptive_detail
 } // namespace SimpleFluid::Meshes::AMR

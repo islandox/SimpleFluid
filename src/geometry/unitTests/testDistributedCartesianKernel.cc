@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
@@ -11,6 +12,7 @@
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <gtest/gtest.h>
+#include <limits>
 #include <map>
 #include <set>
 namespace
@@ -276,6 +278,262 @@ TEST(DistributedCartesianKernel, CompactNativeDraftKeepsExactAuthorityAndPublica
     for (const auto& [key, gid] : retained.owned_gids)
         EXPECT_TRUE(original.partition->geometry()->certified_sparse_cell_geometry(gid)->equivalent(
             *retained.partition->geometry()->certified_sparse_cell_geometry(gid)));
+}
+TEST(DistributedAdaptiveEncoding, CountingValidatesTheSameLeafAndNativeDescriptor)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::CartesianAMR source(grid());
+    const std::array<std::uint64_t, 1> ids{0};
+    auto detached = source.detach_owned(ids, {'e', 'n', 'c', 'o', 'd', 'e'});
+    auto leaf = detached.owned.front();
+    leaf.geometry = detached.kernel->geometry(leaf);
+    leaf.surfaces = detached.kernel->surfaces(leaf);
+    const auto wire = AMR::encode_adaptive_leaf(leaf);
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+    {
+        RecordProperty("bounded_capacity_profile", "unsupported_rejection");
+        EXPECT_THROW((void) AMR::adaptive_detail::adaptive_leaf_encoding_scratch_bytes(leaf), std::invalid_argument);
+        EXPECT_THROW((void) AMR::adaptive_detail::validate_adaptive_leaf_encoding(leaf, 64 * 1024 * 1024),
+            std::invalid_argument);
+        return;
+    }
+    const auto bound = AMR::adaptive_detail::adaptive_leaf_encoding_scratch_bytes(leaf);
+    ASSERT_GT(bound, 0u);
+    EXPECT_EQ(AMR::adaptive_detail::validate_adaptive_leaf_encoding(leaf, bound), wire.size());
+    EXPECT_THROW((void) AMR::adaptive_detail::validate_adaptive_leaf_encoding(leaf, bound - 1), std::invalid_argument);
+    EXPECT_EQ(AMR::encode_adaptive_leaf(leaf), wire);
+    EXPECT_EQ(encoded_native_fragment_descriptor_size(*leaf.native_recipe),
+        encode_native_fragment_descriptor(*leaf.native_recipe).size());
+    const auto rejects = [&](const AMR::AdaptiveLeaf& invalid)
+    {
+        EXPECT_THROW((void) AMR::encode_adaptive_leaf(invalid), std::invalid_argument);
+        EXPECT_THROW((void) AMR::adaptive_detail::validate_adaptive_leaf_encoding(invalid, 64 * 1024 * 1024),
+            std::invalid_argument);
+    };
+    auto invalid = leaf;
+    invalid.domain.clear();
+    rejects(invalid);
+    invalid = leaf;
+    invalid.surfaces.pop_back();
+    rejects(invalid);
+    invalid = leaf;
+    invalid.surfaces.front().key.clear();
+    rejects(invalid);
+    invalid = leaf;
+    invalid.surfaces.front().geometry.reset();
+    rejects(invalid);
+    invalid = leaf;
+    invalid.surfaces.front().orientation = 0;
+    rejects(invalid);
+    invalid = leaf;
+    invalid.surfaces.front().exterior = false;
+    invalid.surfaces.front().boundary = "unexpected-internal-boundary";
+    rejects(invalid);
+    invalid = leaf;
+    invalid.work.reconstruction = std::numeric_limits<double>::quiet_NaN();
+    rejects(invalid);
+    invalid = leaf;
+    auto recipe = std::make_shared<NativeFragmentDescriptor>(*leaf.native_recipe);
+    recipe->parts.front().reset();
+    invalid.native_recipe = recipe;
+    rejects(invalid);
+    EXPECT_THROW((void) encoded_native_fragment_descriptor_size(*recipe), std::invalid_argument);
+}
+TEST(DistributedAdaptiveEncoding, CompactAdmissionSharesRecipesAndRetiresDisposableShells)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::CartesianAMR source(grid());
+    const std::array<std::uint64_t, 2> ids{0, 1};
+    auto detached = source.detach_owned(ids, {'s', 't', 'o', 'r', 'a', 'g', 'e'});
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+    {
+        RecordProperty("bounded_capacity_profile", "unsupported_legacy_guard");
+        for (const auto& leaf : detached.owned)
+            EXPECT_EQ(detached.kernel->compact_native_materialization_bound(leaf), 0u);
+        return;
+    }
+    const auto run = [&](bool separate_recipe, bool separate_whole)
+    {
+        std::vector<AMR::AdaptiveLeaf> retained;
+        AMR::adaptive_detail::CompactNativeOwnedBudget budget(64 * 1024 * 1024);
+        std::size_t emitted_bytes = 0;
+        for (auto value : detached.owned)
+        {
+            value.geometry = detached.kernel->geometry(value);
+            value.surfaces = detached.kernel->surfaces(value);
+            if (separate_recipe)
+            {
+                auto recipe = std::make_shared<NativeFragmentDescriptor>(*value.native_recipe);
+                for (auto& part : recipe->parts)
+                    part = std::make_shared<const NativeFragmentBytes>(*part);
+                value.native_recipe = std::move(recipe);
+            }
+            if (separate_whole)
+                for (auto& surface : value.surfaces)
+                    surface.native_whole_geometry = surface.geometry->reversed()->reversed();
+            emitted_bytes += AMR::encode_adaptive_leaf(value).size();
+            const std::weak_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>> shell = value.geometry;
+            budget.append(retained, std::move(value), true);
+            EXPECT_TRUE(shell.expired());
+            EXPECT_FALSE(retained.back().geometry);
+        }
+        EXPECT_EQ(retained.size(), ids.size());
+        const auto stats = budget.statistics();
+        EXPECT_EQ(stats.leaves, ids.size());
+        EXPECT_EQ(stats.serialized_bytes, emitted_bytes);
+        EXPECT_GE(stats.live_peak_bytes, stats.retained_bytes);
+        EXPECT_GE(stats.cumulative_bytes, stats.live_peak_bytes);
+        EXPECT_LE(stats.live_peak_bytes, 64u * 1024 * 1024);
+        return stats;
+    };
+    const auto shared = run(false, false), separate_recipes = run(true, false), separate_faces = run(false, true);
+    // These records serialize identically. Their extra independent owners must
+    // nevertheless consume storage; content equality cannot erase allocations.
+    EXPECT_EQ(shared.serialized_bytes, separate_recipes.serialized_bytes);
+    EXPECT_EQ(shared.serialized_bytes, separate_faces.serialized_bytes);
+    EXPECT_GT(separate_recipes.retained_bytes, shared.retained_bytes);
+    EXPECT_GT(separate_faces.retained_bytes, shared.retained_bytes);
+}
+TEST(DistributedAdaptiveEncoding, CumulativeBudgetOverflowRejectsWithoutReset)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    AMR::adaptive_detail::Budget budget{64 * 1024 * 1024};
+    budget.cumulative = std::numeric_limits<std::size_t>::max() - 1;
+    EXPECT_THROW(budget.add(2), std::invalid_argument);
+    EXPECT_EQ(budget.used, 0u);
+    EXPECT_EQ(budget.peak, 0u);
+    EXPECT_EQ(budget.cumulative, std::numeric_limits<std::size_t>::max() - 1);
+}
+class MaterializationProbe final : public AMR::AdaptiveProviderKernel
+{
+    std::shared_ptr<const AMR::AdaptiveProviderKernel> delegate_;
+    bool enabled_;
+
+public:
+    mutable unsigned materializations = 0;
+    bool reject_materialization = false;
+    MaterializationProbe(std::shared_ptr<const AMR::AdaptiveProviderKernel> delegate, bool enabled)
+        : delegate_(std::move(delegate)), enabled_(enabled)
+    {
+    }
+    AMR::AdaptiveBytes descriptor() const override { return delegate_->descriptor(); }
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AMR::AdaptiveLeaf& source) const override
+    {
+        return delegate_->geometry(source);
+    }
+    std::vector<AMR::AdaptiveSurface> surfaces(const AMR::AdaptiveLeaf& source) const override
+    {
+        return delegate_->surfaces(source);
+    }
+    std::size_t compact_native_materialization_bound(const AMR::AdaptiveLeaf& source) const override
+    {
+        if (reject_materialization)
+            return 64 * 1024 * 1024 + 1;
+        return enabled_ ? delegate_->compact_native_materialization_bound(source) : 0;
+    }
+    AMR::AdaptiveLeaf compact_native_materialize(const AMR::AdaptiveLeaf& source) const override
+    {
+        ++materializations;
+        return delegate_->compact_native_materialize(source);
+    }
+    AMR::AdaptiveSplitResult split(const AMR::AdaptiveLeaf& source, AMR::AdaptiveSplit split) const override
+    {
+        return delegate_->split(source, split);
+    }
+};
+TEST(DistributedAdaptiveEncoding, ConstructionLeaseRejectsBeforeCallingProviderAndRecovers)
+{
+    AMR::CartesianAMR source(grid());
+    const std::array<std::uint64_t, 1> ids{0};
+    auto detached = source.detach_owned(ids, {'p', 'r', 'e', 'f', 'l', 'i', 'g', 'h', 't'});
+    const auto& leaf = detached.owned.front();
+    MaterializationProbe capable(detached.kernel, true), unproven(detached.kernel, false);
+    const auto bound = capable.compact_native_materialization_bound(leaf);
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+    {
+        RecordProperty("bounded_capacity_profile", "unsupported_legacy_guard");
+        EXPECT_EQ(bound, 0u);
+        std::vector<AMR::AdaptiveLeaf> retained;
+        AMR::adaptive_detail::CompactNativeOwnedBudget budget(64 * 1024 * 1024);
+        EXPECT_FALSE(budget.append_bounded(retained, leaf, capable));
+        EXPECT_EQ(capable.materializations, 0u);
+        return;
+    }
+    ASSERT_GT(bound, 1u);
+    std::vector<AMR::AdaptiveLeaf> retained;
+    AMR::adaptive_detail::CompactNativeOwnedBudget short_budget(bound - 1);
+    EXPECT_THROW((void) short_budget.append_bounded(retained, leaf, capable), std::invalid_argument);
+    EXPECT_EQ(capable.materializations, 0u);
+    EXPECT_TRUE(retained.empty());
+    EXPECT_FALSE(leaf.geometry);
+    EXPECT_TRUE(leaf.surfaces.empty());
+    AMR::adaptive_detail::CompactNativeOwnedBudget recovered(64 * 1024 * 1024);
+    EXPECT_FALSE(recovered.append_bounded(retained, leaf, unproven));
+    EXPECT_EQ(unproven.materializations, 0u);
+    EXPECT_TRUE(retained.empty());
+    ASSERT_TRUE(recovered.append_bounded(retained, leaf, capable));
+    EXPECT_EQ(capable.materializations, 1u);
+    ASSERT_EQ(retained.size(), 1u);
+    EXPECT_FALSE(retained.front().geometry);
+    EXPECT_EQ(retained.front().key, leaf.key);
+    const auto full = detached.kernel->surfaces(leaf);
+    ASSERT_EQ(retained.front().surfaces.size(), full.size());
+    for (std::size_t f = 0; f < full.size(); ++f)
+    {
+        EXPECT_EQ(retained.front().surfaces[f].key, full[f].key);
+        EXPECT_EQ(retained.front().surfaces[f].native_face, full[f].native_face);
+        EXPECT_EQ(retained.front().surfaces[f].geometry->encode_incidence(), full[f].geometry->encode_incidence());
+    }
+    auto supplied = leaf;
+    supplied.geometry = detached.kernel->geometry(leaf);
+    EXPECT_EQ(capable.compact_native_materialization_bound(supplied), 0u);
+}
+TEST(DistributedAdaptiveEncoding, RankLocalConstructionRejectionKeepsHierarchyAndRecovers)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMR::CartesianAMR source(grid());
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 0; id < 8; ++id)
+        if (id % std::min(2, comm->getSize()) == std::uint64_t(comm->getRank()))
+            ids.push_back(id);
+    auto detached = source.detach_owned(ids, {'c', 'o', 'l', 'l', 'e', 'c', 't', 'i', 'v', 'e'});
+    auto probe = std::make_shared<MaterializationProbe>(detached.kernel, true);
+    AMR::DistributedAdaptiveHierarchy state(std::move(detached.owned), {}, probe, comm);
+    const auto identity = state.identity();
+    const auto expanded = state.native_draft();
+    if (!PLIC::geometry_encoding_capacity_profile_supported())
+    {
+        RecordProperty("bounded_capacity_profile", "unsupported_legacy_guard");
+        test::compare_native_drafts(expanded, AMR::adaptive_detail::compact_adaptive_native_draft(state));
+        return;
+    }
+    std::vector<AMR::AdaptiveCellKey> keys;
+    std::vector<const NativeFragmentDescriptor*> recipes;
+    for (const auto& [key, leaf] : state.owned())
+    {
+        keys.push_back(key);
+        recipes.push_back(leaf.native_recipe.get());
+    }
+    const auto calls = probe->materializations;
+    probe->reject_materialization = comm->getRank() == 0;
+    EXPECT_THROW((void) AMR::adaptive_detail::compact_adaptive_native_draft(state), std::invalid_argument);
+    EXPECT_EQ(state.identity(), identity);
+    EXPECT_EQ(state.owned().size(), ids.size());
+    if (comm->getRank() == 0)
+        EXPECT_EQ(probe->materializations, calls);
+    std::size_t index = 0;
+    for (const auto& [key, leaf] : state.owned())
+    {
+        EXPECT_EQ(key, keys[index]);
+        EXPECT_EQ(leaf.native_recipe.get(), recipes[index++]);
+        EXPECT_FALSE(leaf.geometry);
+        EXPECT_TRUE(leaf.surfaces.empty());
+    }
+    probe->reject_materialization = false;
+    test::compare_native_drafts(expanded, AMR::adaptive_detail::compact_adaptive_native_draft(state));
+    int empty = ids.empty(), empty_total = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_total);
+    EXPECT_EQ(empty_total, std::max(0, comm->getSize() - 2));
 }
 TEST(DistributedCartesianKernel, CompactNativeDraftPreservesSuppliedProceduralCertificates)
 {

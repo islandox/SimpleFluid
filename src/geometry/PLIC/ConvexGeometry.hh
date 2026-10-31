@@ -349,6 +349,11 @@ public:
     [[nodiscard]] static ConvexGeometryPtr<Mode> from_geometry(
         const ConvexCellGeometry<ArithmeticMode::Ordinary>&, GeometryLimits = {});
     [[nodiscard]] static ConvexGeometryPtr<Mode> box(GeometryPoint, GeometryPoint, GeometryLimits = {});
+    /** Fixed eight-vertex/six-quad box construction capacity envelope, including
+     * all successful-path transient vectors, graph owners and tracking nodes.
+     * Excludes allocator/shared control blocks, as retained storage does. */
+    [[nodiscard]] static std::size_t box_construction_capacity_bound()
+        requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] static ConvexGeometryPtr<Mode> tetrahedron(const std::array<Point<Mode>, 4>&, GeometryLimits = {});
     [[nodiscard]] static NativeConvexShell native_cell_shell(const MultiRegionMesh&, std::uint64_t)
         requires(Mode == ArithmeticMode::Ordinary);
@@ -373,6 +378,12 @@ public:
     [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&, std::size_t axis, double ratio) const;
     [[nodiscard]] bool equivalent(const ConvexCellGeometry&) const;
     [[nodiscard]] std::vector<char> encode_certificate(std::size_t byte_budget = geometry_packet_default_budget) const
+        requires(Mode == ArithmeticMode::Ordinary);
+    /** Same complete certificate traversal without packet/body buffers.
+     * Bounds include local-point conversion and original fallback face scratch. */
+    [[nodiscard]] std::size_t certificate_encoding_scratch_bytes() const
+        requires(Mode == ArithmeticMode::Ordinary);
+    [[nodiscard]] std::size_t encoded_certificate_size(std::size_t scratch_budget) const
         requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] static ConvexGeometryPtr<Mode> decode_certificate(
         std::span<const char>, std::size_t byte_budget = geometry_packet_default_budget)

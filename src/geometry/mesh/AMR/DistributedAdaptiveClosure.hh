@@ -22,8 +22,13 @@ struct AdaptiveClosureStats
     std::size_t transmitted_geometry_records = 0, decoded_geometry_records = 0;
     std::size_t unique_record_bytes = 0, replicated_record_bytes = 0;
     std::size_t decoded_geometry_bytes = 0; ///< Retained axis spans; trace faces enter live byte accounting separately.
-    std::size_t cumulative_bytes = 0, live_peak_bytes = 0, input_retained_bytes = 0, retained_geometry_bytes = 0,
-                work = 0;
+    std::size_t cumulative_bytes = 0, live_peak_bytes = 0, input_retained_bytes = 0;
+    std::size_t retained_geometry_bytes = 0; ///< Persistent request-phase source geometry and ledger admission.
+    /** Maximum per-record admitted geometry/trace scratch estimate, including
+     * certificate and decoded-shell overlap. Excludes the returned record and
+     * existing nested encoder/writer-growth scratch outside this estimate. */
+    std::size_t transient_geometry_peak_bytes = 0;
+    std::size_t work = 0;
 };
 struct AdaptiveClosureOptions
 {

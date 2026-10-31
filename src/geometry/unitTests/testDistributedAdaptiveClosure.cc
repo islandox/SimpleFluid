@@ -10,6 +10,7 @@
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -201,6 +202,96 @@ void require_contact_counts(const ObservedClosure& observed, std::uint64_t conta
     EXPECT_EQ(global[2], contacts);
     EXPECT_EQ(global[3], point_groups);
     EXPECT_EQ(observed.global_physical_nodes, physical_nodes);
+}
+/** Observe the lifetime of actual provider-generated shells, independently of
+ * the production byte ledger. Surface queries delegate directly so only the
+ * full shells needed to encode contact records enter this observation. */
+class ShellLifetimeKernel final : public AMR::AdaptiveProviderKernel
+{
+    std::shared_ptr<const AMR::AdaptiveProviderKernel> delegate_;
+
+public:
+    using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    mutable std::vector<std::weak_ptr<const Geometry>> shells;
+    mutable std::size_t maximum_live_shells = 0;
+    bool reject_second_trace = false;
+    explicit ShellLifetimeKernel(std::shared_ptr<const AMR::AdaptiveProviderKernel> delegate)
+        : delegate_(std::move(delegate))
+    {
+    }
+    AMR::AdaptiveBytes descriptor() const override { return {'s', 'h', 'e', 'l', 'l', 's'}; }
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AMR::AdaptiveLeaf& source) const override
+    {
+        auto result = delegate_->geometry(source);
+        shells.push_back(result);
+        const auto live =
+            std::count_if(shells.begin(), shells.end(), [](const auto& shell) { return !shell.expired(); });
+        maximum_live_shells = std::max(maximum_live_shells, std::size_t(live));
+        return result;
+    }
+    std::vector<AMR::AdaptiveSurface> surfaces(const AMR::AdaptiveLeaf& source) const override
+    {
+        return delegate_->surfaces(source);
+    }
+    AMR::AdaptiveTrace traces(const AMR::AdaptiveLeaf& source) const override
+    {
+        if (reject_second_trace && shells.size() == 2)
+            throw std::invalid_argument("Injected second contact trace failure.");
+        return {source.key, {}};
+    }
+    AMR::AdaptiveSplitResult split(const AMR::AdaptiveLeaf&, AMR::AdaptiveSplit) const override
+    {
+        throw std::invalid_argument("Lifetime fixture has no refinement kernel.");
+    }
+    void reset_observation()
+    {
+        for (const auto& shell : shells)
+            EXPECT_TRUE(shell.expired());
+        shells.clear();
+        maximum_live_shells = 0;
+    }
+};
+TEST(DistributedAdaptiveClosure, ContactShellsRetireBetweenRecordsAndAfterCollectiveRejection)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMR::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    AMR::CartesianAMR source(grid);
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 0; id < 8; ++id)
+        if (id % std::min(2, comm->getSize()) == std::uint64_t(comm->getRank()))
+            ids.push_back(id);
+    auto detached = source.detach_owned(ids, {'l', 'i', 'f', 'e'});
+    ShellLifetimeKernel kernel(detached.kernel);
+    const auto check = [&]
+    {
+        const auto result = observe_closure(detached.owned, kernel);
+        EXPECT_TRUE(result.marks.empty());
+        // A 2x2x2 box has 27 distinct vertices and 8 vertices/24 face-vertex
+        // occurrences per cell. At its contacts there are 12*C(2,2) +
+        // 6*C(4,2) + C(8,2) = 76 unordered cell pairs, with no trace work.
+        require_contact_counts(result, 64, 192, 27, 27);
+        std::size_t global_work = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &result.statistics.work, &global_work);
+        EXPECT_EQ(global_work, 76u);
+        EXPECT_EQ(kernel.shells.size(), ids.size());
+        EXPECT_EQ(kernel.maximum_live_shells, ids.empty() ? 0u : 1u);
+        for (const auto& value : detached.owned)
+        {
+            EXPECT_FALSE(value.geometry);
+            EXPECT_TRUE(value.surfaces.empty());
+        }
+        kernel.reset_observation();
+    };
+    check();
+    kernel.reject_second_trace = comm->getRank() == 0;
+    EXPECT_THROW(AMR::required_adaptive_refinements(detached.owned, kernel, comm), std::invalid_argument);
+    kernel.reset_observation();
+    kernel.reject_second_trace = false;
+    check();
+    int empty = ids.empty(), empty_total = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_total);
+    EXPECT_EQ(empty_total, std::max(0, comm->getSize() - 2));
 }
 TEST(DistributedAdaptiveClosure, ScalarPacketRoundTripsNativePrecisionAndRejectsMalformedWords)
 {

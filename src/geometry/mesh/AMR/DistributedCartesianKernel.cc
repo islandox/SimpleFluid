@@ -15,6 +15,18 @@ namespace SimpleFluid::Meshes::AMR
 namespace
 {
 using ID = std::uint64_t;
+std::size_t capacity_add(std::size_t first, std::size_t second)
+{
+    if (second > std::numeric_limits<std::size_t>::max() - first)
+        throw std::invalid_argument("Cartesian materialization capacity overflows.");
+    return first + second;
+}
+std::size_t capacity_product(std::size_t count, std::size_t size)
+{
+    if (size && count > std::numeric_limits<std::size_t>::max() / size)
+        throw std::invalid_argument("Cartesian materialization capacity overflows.");
+    return count * size;
+}
 ID mul(ID a, ID b)
 {
     if (b && a > std::numeric_limits<ID>::max() / b)
@@ -199,16 +211,19 @@ public:
         }
         return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(lower, upper);
     }
-    std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override
+    std::vector<AdaptiveSurface> surfaces_from_shape(
+        const AdaptiveLeaf& leaf, const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& shape,
+        bool bounded_capacity = false) const
     {
         const auto& cell = ancestry(grid_, leaf.key);
-        auto shape = geometry(leaf);
         std::vector<AdaptiveSurface> result;
+        result.reserve(shape->num_faces());
         for (std::size_t f = 0; f < shape->num_faces(); ++f)
         {
             AdaptiveSurface surface;
             surface.geometry = shape->face_geometry(f);
-            surface.require_native_whole_tile=true;surface.native_whole_geometry=surface.geometry;
+            surface.require_native_whole_tile = true;
+            surface.native_whole_geometry = surface.geometry;
             auto normal = surface.geometry->area_vector();
             std::size_t axis = 0;
             while (axis < 3 && normal.component(axis) == 0)
@@ -218,14 +233,12 @@ public:
             const bool upper = normal.component(axis) > 0;
             surface.orientation = upper ? 1 : -1;
             const auto& counts = grid_.block_cells;
-            RectilinearTopology native(
-                std::make_shared<const OrthoMeshTopo>(unsigned(counts[0]), unsigned(counts[1]), unsigned(counts[2]),
-                    false, false, false, OrthoMeshTopo::BoundaryNames{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"}));
+            const OrthogonalIndexer native(
+                unsigned(counts[0]), unsigned(counts[1]), unsigned(counts[2]), false, false, false);
             std::array<unsigned, 3> location{unsigned(cell.index[0] % counts[0]), unsigned(cell.index[1] % counts[1]),
                 unsigned(cell.index[2] % counts[2])};
             location[axis] += upper;
-            surface.native_face =
-                native.indexer().face_ordinal({location[0], location[1], location[2], std::uint8_t(axis)});
+            surface.native_face = native.face_ordinal({location[0], location[1], location[2], std::uint8_t(axis)});
 
             const auto boundary = cell.index[axis] + upper;
             const auto domain_cells = mul(mul(grid_.root_blocks[axis], grid_.block_cells[axis]), scale(cell.level));
@@ -244,6 +257,10 @@ public:
                 --level;
             }
             adaptive_detail::Writer w;
+            const auto key_capacity = capacity_add(64, leaf.domain.size());
+            w.data.reserve(key_capacity);
+            if (bounded_capacity && w.data.capacity() != key_capacity)
+                throw std::invalid_argument("Cartesian surface key capacity differs from admission.");
             w.word(0x5346434152543631ULL);
             w.bytes(leaf.domain);
             w.word(grid_.region_id);
@@ -259,6 +276,52 @@ public:
                 surface.boundary = std::string(1, char('x' + axis)) + (upper ? "max" : "min");
             result.push_back(std::move(surface));
         }
+        return result;
+    }
+    std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override
+    {
+        return surfaces_from_shape(leaf, geometry(leaf));
+    }
+    std::size_t compact_native_materialization_bound(const AdaptiveLeaf& leaf) const override
+    {
+        // This envelope covers only this fixed Cartesian construction. Supplied
+        // certificates/surfaces and arbitrary provider metadata keep the legacy
+        // expanded guard, even if their public provider enum says Cartesian.
+        if (!PLIC::geometry_encoding_capacity_profile_supported() || leaf.geometry || !leaf.surfaces.empty() ||
+            !leaf.native_recipe || leaf.factor_recipe || leaf.join_recipe ||
+            (grid_.periodic[0] || grid_.periodic[1] || grid_.periodic[2]))
+            return 0;
+        (void) ancestry(grid_, leaf.key);
+        std::size_t bytes = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box_construction_capacity_bound();
+        auto add = [&](std::size_t n) { bytes = capacity_add(bytes, n); };
+        add(sizeof(AdaptiveLeaf));
+        add(leaf.domain.capacity());
+        add(leaf.parent_family.capacity());
+        add(capacity_product(6, sizeof(AdaptiveSurface)));
+        add(capacity_product(6, PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(4)));
+        add(capacity_product(6, capacity_add(64, leaf.domain.size())));
+        add(capacity_product(6, std::string{}.capacity()));
+        // Include borrowed immutable recipe payloads too; the retained ledger
+        // will subsequently deduplicate them across leaves and shared parts.
+        add(sizeof(NativeFragmentDescriptor));
+        add(leaf.native_recipe->view.capacity());
+        add(capacity_product(leaf.native_recipe->parts.capacity(), sizeof(std::shared_ptr<const AdaptiveBytes>)));
+        for (const auto& part : leaf.native_recipe->parts)
+        {
+            if (!part)
+                throw std::invalid_argument("Null Cartesian native descriptor part.");
+            add(sizeof(AdaptiveBytes));
+            add(part->capacity());
+        }
+        return bytes;
+    }
+    AdaptiveLeaf compact_native_materialize(const AdaptiveLeaf& leaf) const override
+    {
+        if (!compact_native_materialization_bound(leaf))
+            throw std::invalid_argument("Cartesian native record needs legacy admission.");
+        auto result = leaf;
+        result.geometry = geometry(leaf);
+        result.surfaces = surfaces_from_shape(leaf, result.geometry, true);
         return result;
     }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override

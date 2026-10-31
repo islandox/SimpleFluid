@@ -42,14 +42,16 @@ struct ClosureDiagnostics : AdaptiveClosureStats
                 "trace_records=%zu unique_record_bytes=%zu replicated_record_bytes=%zu "
                 "transmitted_geometry_records=%zu decoded_geometry_records=%zu decoded_geometry_bytes=%zu "
                 "cumulative_bytes=%zu live_peak_bytes=%zu input_retained_bytes=%zu retained_geometry_bytes=%zu "
+                "transient_geometry_peak_bytes=%zu "
                 "work=%zu point_observations=%zu catalogue_nodes=%zu global_physical_nodes=%zu "
                 "tile_input_bytes=%zu request_state_peak_bytes=%zu tile_and_request_peak_bytes=%zu "
                 "planned_reply_records=%zu retired_groups=%zu retired_group_bytes=%zu\n",
                 rank, stage, cells, faces, contacts, geometry_records, trace_records, unique_record_bytes,
                 replicated_record_bytes, transmitted_geometry_records, decoded_geometry_records, decoded_geometry_bytes,
-                cumulative_bytes, live_peak_bytes, input_retained_bytes, retained_geometry_bytes, work,
-                point_observations, catalogue_nodes, global_physical_nodes, tile_input_bytes, request_state_peak_bytes,
-                tile_and_request_peak_bytes, planned_reply_records, retired_groups, retired_group_bytes);
+                cumulative_bytes, live_peak_bytes, input_retained_bytes, retained_geometry_bytes,
+                transient_geometry_peak_bytes, work, point_observations, catalogue_nodes, global_physical_nodes,
+                tile_input_bytes, request_state_peak_bytes, tile_and_request_peak_bytes, planned_reply_records,
+                retired_groups, retired_group_bytes);
     }
 };
 struct BudgetObservation
@@ -135,69 +137,96 @@ NodeIdentity node_identity(const AdaptiveNode& node)
     return {domain, physical};
 }
 AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
-    IdentityBudget& identities, std::size_t& trace_records, std::size_t& retained_geometry)
+    std::size_t& trace_records, std::size_t& transient_geometry_peak)
 {
-    auto shape = kernel.geometry(leaf);
-    auto trace = kernel.traces(leaf);
-    if (trace.key != leaf.key)
-        throw std::invalid_argument("Provider trace identifies another leaf.");
-    trace_records += trace.faces.size();
-    const auto before_shape = budget.used;
-    identities.retain(budget, shape);
-    retained_geometry = budget.used - before_shape;
-    std::array<long double, 3> spans;
+    const auto before = budget.used;
+    AdaptiveBytes record;
     {
-        // Preserve the original receiver's certificate validation and its
-        // decoded coordinate frame before discarding the transient shell.
-        // Closure authorities need only these lossless physical axis spans.
-        auto certificate = shape->encode_certificate(budget.limit);
-        budget.add(certificate.capacity());
-        auto decoded =
-            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(certificate, budget.limit);
-        const auto decoded_bytes = decoded->storage_bytes();
-        budget.add(decoded_bytes);
-        const auto measures = decoded->axis_spans();
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            spans[axis] = measures[axis].value;
-        const auto released = certificate.capacity() + decoded_bytes;
-        decoded.reset();
-        AdaptiveBytes().swap(certificate);
-        budget.used -= released;
-    }
-    Writer w;
-    write_geometry_record_header(w, GeometryRecordKind::ClosureSpanContact);
-    w.bytes(encode_adaptive_key(leaf.key));
-    w.bytes(leaf.domain);
-    w.word(std::numeric_limits<long double>::digits);
-    w.word(std::numeric_limits<long double>::max_exponent);
-    for (const auto span : spans)
-        for (const auto word : PLIC::scalar_packet(span))
-            w.word(word);
-    for (std::size_t a = 0; a < 3; ++a)
-        w.word(leaf.provider == AdaptiveProviderKind::Static ? 3 : std::uint64_t(kernel.closure_split(leaf, a)));
-    w.word(trace.faces.size());
-    for (const auto& face : trace.faces)
-    {
-        if (face.stem.empty())
-            throw std::invalid_argument("Comparable trace requires explicit provenance.");
-        budget.add(face.stem.size() + sizeof(AdaptiveTraceFace));
-        w.bytes(face.stem);
-        w.word(face.depth);
-        w.word(std::uint64_t(face.split));
-        w.word(face.terminal);
-        w.word(bool(face.face));
-        if (face.face)
+        // This ledger pins only one encoder's full cell and trace supports.
+        // Source geometry has a separate phase-long ledger. Conservatively
+        // charging shared owners in both scopes avoids ownership inference.
+        IdentityBudget identities;
+        auto observe_transient = [&]()
+        { transient_geometry_peak = std::max(transient_geometry_peak, budget.used - before); };
+        auto add_transient = [&](std::size_t bytes)
         {
-            budget.add(face.face->exclusive_storage_bytes());
-            const auto before_support = budget.used;
-            identities.retain(budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*face.face));
-            retained_geometry += budget.used - before_support;
-            budget.add(face.face->encode_incidence(budget.limit).size());
-            w.bytes(face.face->encode_incidence(budget.limit));
+            budget.add(bytes);
+            observe_transient();
+        };
+        auto shape = kernel.geometry(leaf);
+        auto trace = kernel.traces(leaf);
+        if (trace.key != leaf.key)
+            throw std::invalid_argument("Provider trace identifies another leaf.");
+        trace_records += trace.faces.size();
+        identities.retain(budget, shape);
+        observe_transient();
+        // Trace buffers are already live during certificate validation. Admit
+        // them before measuring that simultaneous scratch estimate.
+        add_transient(trace.faces.capacity() * sizeof(AdaptiveTraceFace) + key_capacity(trace.key));
+        for (const auto& face : trace.faces)
+        {
+            add_transient(face.stem.capacity());
+            if (face.face)
+            {
+                add_transient(sizeof(*face.face) + face.face->exclusive_storage_bytes());
+                identities.retain(budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*face.face));
+                observe_transient();
+            }
         }
+        std::array<long double, 3> spans;
+        {
+            // Preserve the original receiver's certificate validation and its
+            // decoded coordinate frame before discarding the transient shell.
+            // Closure authorities need only these lossless physical axis spans.
+            auto certificate = shape->encode_certificate(budget.limit);
+            add_transient(certificate.capacity());
+            auto decoded =
+                PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(certificate, budget.limit);
+            const auto decoded_bytes = decoded->storage_bytes();
+            add_transient(decoded_bytes);
+            const auto measures = decoded->axis_spans();
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                spans[axis] = measures[axis].value;
+            const auto released = certificate.capacity() + decoded_bytes;
+            decoded.reset();
+            AdaptiveBytes().swap(certificate);
+            budget.used -= released;
+        }
+        Writer w;
+        write_geometry_record_header(w, GeometryRecordKind::ClosureSpanContact);
+        w.bytes(encode_adaptive_key(leaf.key));
+        w.bytes(leaf.domain);
+        w.word(std::numeric_limits<long double>::digits);
+        w.word(std::numeric_limits<long double>::max_exponent);
+        for (const auto span : spans)
+            for (const auto word : PLIC::scalar_packet(span))
+                w.word(word);
+        for (std::size_t a = 0; a < 3; ++a)
+            w.word(leaf.provider == AdaptiveProviderKind::Static ? 3 : std::uint64_t(kernel.closure_split(leaf, a)));
+        w.word(trace.faces.size());
+        for (const auto& face : trace.faces)
+        {
+            if (face.stem.empty())
+                throw std::invalid_argument("Comparable trace requires explicit provenance.");
+            w.bytes(face.stem);
+            w.word(face.depth);
+            w.word(std::uint64_t(face.split));
+            w.word(face.terminal);
+            w.word(bool(face.face));
+            if (face.face)
+            {
+                add_transient(face.face->encode_incidence(budget.limit).size());
+                w.bytes(face.face->encode_incidence(budget.limit));
+            }
+        }
+        budget.add(w.data.capacity());
+        record = std::move(w.data);
     }
-    budget.add(w.data.capacity());
-    return std::move(w.data);
+    // All geometry, trace owners and ledger pins are dead before retirement.
+    // Only the returned immutable span/trace bytes survive this encoder.
+    const auto released = budget.used - before - record.capacity();
+    budget.used -= released;
+    return record;
 }
 ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
 {
@@ -359,7 +388,11 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             BudgetObservation observation{budget, diagnostics, true};
             for (const auto& source : owned)
                 if (source.geometry)
+                {
+                    const auto before_geometry = budget.used;
                     identities.retain(budget, source.geometry);
+                    diagnostics.retained_geometry_bytes += budget.used - before_geometry;
+                }
             // Returned tiles retain the established borrowed-input scope. Report
             // their conservative baseline separately from the admitted builder
             // state, and measure their actual overlap before destroying them.
@@ -446,9 +479,9 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 std::size_t released = 0;
                 {
                     const auto before_leaf = budget.used;
-                    std::size_t retained_delta = 0, retained_geometry = 0;
-                    auto record =
-                        encode_contact(leaf, kernel, budget, identities, diagnostics.trace_records, retained_geometry);
+                    std::size_t retained_delta = 0;
+                    auto record = encode_contact(
+                        leaf, kernel, budget, diagnostics.trace_records, diagnostics.transient_geometry_peak_bytes);
                     ++diagnostics.geometry_records;
                     diagnostics.unique_record_bytes += record.size();
                     struct Pending
@@ -517,8 +550,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                         retained_delta += budget.used - before_requests;
                         requests.push_back({peer, std::move(w.data)});
                     }
-                    diagnostics.retained_geometry_bytes += retained_geometry;
-                    released = budget.used - before_leaf - retained_delta - retained_geometry;
+                    released = budget.used - before_leaf - retained_delta;
                 }
                 // Record/certificate and destination scratch are dead now.
                 // Expected replies, output packets and source-shared geometry

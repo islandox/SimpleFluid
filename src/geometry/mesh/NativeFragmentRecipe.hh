@@ -48,6 +48,8 @@ private:
 [[nodiscard]] std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
     const MultiRegionMesh::Region&, NativeFragmentCache&);
 [[nodiscard]] NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor&);
+/** Same descriptor validation/traversal without constructing a packet. */
+[[nodiscard]] std::size_t encoded_native_fragment_descriptor_size(const NativeFragmentDescriptor&);
 [[nodiscard]] std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descriptor(
     std::span<const char>, NativeFragmentCache&);
 [[nodiscard]] MultiRegionMesh::Region materialize_native_fragment(

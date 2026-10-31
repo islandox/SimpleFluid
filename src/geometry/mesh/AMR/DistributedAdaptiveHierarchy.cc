@@ -12,6 +12,8 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <set>
 namespace SimpleFluid::Meshes::AMR
@@ -1884,18 +1886,57 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
     collective(*data_->comm,
         [&]
         {
-            Budget budget{data_->options.byte_budget};
-            for (const auto& [key, leaf] : data_->owned)
+            // A provider enum is not an allocation guarantee. Only the actual
+            // kernel's explicit bounded materialization capability can select
+            // the capacity contract. Any unsupported/supplied record preserves
+            // the complete call's original cumulative expanded-size guard.
+            const bool bounded = compact_procedural && !data_->owned.empty() &&
+                std::all_of(data_->owned.begin(), data_->owned.end(), [&](const auto& entry)
+                    { return data_->kernel->compact_native_materialization_bound(entry.second) != 0; });
+            if (bounded)
             {
-                auto transient = leaf;
-                transient.geometry = data_->kernel->geometry(leaf);
-                transient.surfaces = data_->kernel->surfaces(leaf);
-                // Preserve the expanded wire admission and its geometry/surface
-                // invariant before selecting publication-only retention.
-                budget.add(encode_adaptive_leaf(transient).size());
-                if (adaptive_detail::compact_native_geometry(leaf, compact_procedural))
-                    transient.geometry.reset();
-                result.owned.push_back(std::move(transient));
+                adaptive_detail::CompactNativeOwnedBudget budget(data_->options.byte_budget);
+                auto report = [&](const char* stage)
+                {
+                    if (!std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+                        return;
+                    const auto stats = budget.statistics();
+                    std::fprintf(stderr,
+                        "ADAPTIVE_NATIVE_OWNED rank=%d mode=bounded_cartesian stage=%s leaves=%zu "
+                        "retained_bytes=%zu live_peak_bytes=%zu cumulative_bytes=%zu serialized_bytes=%zu "
+                        "transient_geometry_peak_bytes=%zu encoding_scratch_peak_bytes=%zu "
+                        "materialization_peak_bytes=%zu limit=%zu scope=owned_record_capacity_and_scratch\n",
+                        data_->comm->getRank(), stage, stats.leaves, stats.retained_bytes, stats.live_peak_bytes,
+                        stats.cumulative_bytes, stats.serialized_bytes, stats.transient_geometry_peak_bytes,
+                        stats.encoding_scratch_peak_bytes, stats.materialization_peak_bytes,
+                        data_->options.byte_budget);
+                };
+                try
+                {
+                    for (const auto& [key, leaf] : data_->owned)
+                        if (!budget.append_bounded(result.owned, leaf, *data_->kernel))
+                            throw std::invalid_argument("Native provider changed bounded materialization capability.");
+                }
+                catch (...)
+                {
+                    report("rejected");
+                    throw;
+                }
+                report("complete");
+            }
+            else
+            {
+                Budget budget{data_->options.byte_budget};
+                for (const auto& [key, leaf] : data_->owned)
+                {
+                    auto transient = leaf;
+                    transient.geometry = data_->kernel->geometry(leaf);
+                    transient.surfaces = data_->kernel->surfaces(leaf);
+                    budget.add(encode_adaptive_leaf(transient).size());
+                    if (adaptive_detail::compact_native_geometry(leaf, compact_procedural))
+                        transient.geometry.reset();
+                    result.owned.push_back(std::move(transient));
+                }
             }
         });
     result.global_cells = data_->global_cells;

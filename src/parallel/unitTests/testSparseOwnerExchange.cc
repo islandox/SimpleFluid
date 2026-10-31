@@ -2,15 +2,109 @@
  * @brief Actual variable peer streams, empty ranks and collective rejection.
  */
 #include "parallel/SparseOwnerExchange.hh"
+#include "parallel/SparseOwnerExchangeFraming.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <gtest/gtest.h>
+#include <array>
+#include <cstring>
+#include <limits>
 #include <stdexcept>
 namespace
 {
 using namespace SimpleFluid;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 constexpr std::size_t budget = 1024 * 1024;
+TEST(SparseOwnerExchange, CompleteFrameAuditRejectsOversizedPrefixAndMalformedTails)
+{
+    using owner_exchange_detail::walk_owner_streams;
+    auto word = [](std::vector<char>& bytes, std::uint64_t value)
+    {
+        const auto offset = bytes.size();
+        bytes.resize(offset + sizeof(value));
+        std::memcpy(bytes.data() + offset, &value, sizeof(value));
+    };
+    std::vector<char> bytes;
+    word(bytes, 3);
+    bytes.insert(bytes.end(), {'a', 'b', 'c'});
+    word(bytes, 0);
+    word(bytes, 2);
+    bytes.insert(bytes.end(), {'d', 'e'});
+    const std::array<std::size_t, 2> sizes{19, 10};
+    const std::array<std::uint64_t, 4> headers{2, 19, 1, 10};
+    const auto audit = walk_owner_streams(bytes, sizes, headers);
+    EXPECT_EQ(audit.records, 3u);
+    EXPECT_EQ(audit.payload_bytes, 5u);
+    EXPECT_EQ(walk_owner_streams({}, {}, {}).records, 0u);
+    EXPECT_THROW((void) walk_owner_streams(std::span(bytes).first(28), sizes, headers), std::invalid_argument);
+    EXPECT_THROW((void) walk_owner_streams(bytes, sizes, std::span(headers).first(3)), std::invalid_argument);
+    auto bad_headers = headers;
+    bad_headers[0] = 1;
+    EXPECT_THROW((void) walk_owner_streams(bytes, sizes, bad_headers), std::invalid_argument);
+    bad_headers[0] = 0;
+    EXPECT_THROW((void) walk_owner_streams(bytes, sizes, bad_headers), std::invalid_argument);
+    auto bad = bytes;
+    const auto huge = std::numeric_limits<std::uint64_t>::max();
+    std::memcpy(bad.data(), &huge, sizeof(huge));
+    EXPECT_THROW((void) walk_owner_streams(bad, sizes, headers), std::invalid_argument);
+    // The first payload would allocate 16 bytes although a declaration of two
+    // frames leaves only eight payload bytes. Audit must reject the missing
+    // second frame before production invokes any allocating decode visitor.
+    bad.clear();
+    word(bad, 16);
+    bad.resize(24, 'x');
+    const std::array<std::size_t, 1> misleading_size{24};
+    const std::array<std::uint64_t, 2> misleading_header{2, 24};
+    EXPECT_THROW((void) walk_owner_streams(bad, misleading_size, misleading_header), std::invalid_argument);
+    bad = bytes;
+    bad.push_back('x');
+    EXPECT_THROW((void) walk_owner_streams(bad, sizes, headers), std::invalid_argument);
+    EXPECT_EQ(walk_owner_streams(bytes, sizes, headers).payload_bytes, 5u);
+}
+TEST(SparseOwnerExchange, ReceiveHeavyDecodeRetiresExportMetadataAndRecovers)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto rank = comm->getRank(), last = comm->getSize() - 1;
+    constexpr std::size_t payload_size = 512, phase_budget = 427000;
+    auto payload = [](int source, std::size_t ordinal)
+    {
+        std::vector<char> result(payload_size);
+        for (std::size_t i = 0; i < result.size(); ++i)
+            result[i] = char((i + 17 * source + 31 * ordinal) % 127);
+        return result;
+    };
+    auto make_packets = [&]
+    {
+        std::vector<OwnerPacket> packets;
+        const auto count = rank == 0 ? 400u : rank == last ? 200u : 0u;
+        for (unsigned i = 0; i < count; ++i)
+            packets.push_back({rank == 0 ? last : 0, payload(rank, i)});
+        return packets;
+    };
+    auto check = [&](const OwnerExchange& result)
+    {
+        const auto count = rank == last ? 400u : rank == 0 ? 200u : 0u;
+        const auto sender = rank == last ? 0 : last;
+        ASSERT_EQ(result.packets.size(), count);
+        EXPECT_EQ(result.stats.received_bytes, count * payload_size);
+        EXPECT_EQ(result.stats.received_packets, count);
+        EXPECT_LE(result.stats.peak_scratch_bytes, phase_budget);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            EXPECT_EQ(result.packets[i].peer, sender);
+            EXPECT_EQ(result.packets[i].bytes, payload(sender, i));
+        }
+    };
+    auto packets = make_packets();
+    check(consume_owner_packets(std::move(packets), comm, phase_budget));
+    EXPECT_TRUE(packets.empty());
+    packets = make_packets();
+    EXPECT_THROW((void) consume_owner_packets(std::move(packets), comm, rank == last ? 1 : phase_budget),
+        std::length_error);
+    EXPECT_EQ(packets.size(), make_packets().size());
+    check(consume_owner_packets(std::move(packets), comm, phase_budget));
+    EXPECT_TRUE(exchange_owner_packets({}, comm, 0).packets.empty());
+}
 TEST(SparseOwnerExchange, HeterogeneousDuplicatePeersAndEmptyOwners)
 {
     auto comm = Tpetra::getDefaultComm();

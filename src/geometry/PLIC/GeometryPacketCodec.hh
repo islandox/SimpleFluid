@@ -42,6 +42,19 @@ struct GeometryPacketHeader
 static_assert(sizeof(ArithmeticMode) == 1);
 static_assert(std::is_standard_layout_v<GeometryPacketHeader> && std::is_trivially_copyable_v<GeometryPacketHeader>);
 inline constexpr std::size_t geometry_packet_header_bytes = sizeof(GeometryPacketHeader);
+/** Capacity envelopes are proved against this libstdc++ vector/node policy.
+ * Other libraries/build modes retain ordinary wire codecs but cannot opt into
+ * allocation preflights based on this policy. Allocator/control blocks remain
+ * outside the application's payload/capacity accounting scope. */
+[[nodiscard]] constexpr bool geometry_encoding_capacity_profile_supported() noexcept
+{
+#if defined(_GLIBCXX_RELEASE) && _GLIBCXX_RELEASE == 16 && defined(__GLIBCXX__) && __GLIBCXX__ == 20260810 && \
+    !defined(_GLIBCXX_DEBUG) && !defined(_GLIBCXX_DEBUG_PEDANTIC)
+    return true;
+#else
+    return false;
+#endif
+}
 
 /** An unknown format is never silently mapped to the closest known profile. */
 [[nodiscard]] constexpr GeometryNumericProfile geometry_numeric_profile(

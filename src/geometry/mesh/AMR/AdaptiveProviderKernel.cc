@@ -10,6 +10,10 @@
 #include <set>
 namespace SimpleFluid::Meshes::AMR
 {
+AdaptiveLeaf AdaptiveProviderKernel::compact_native_materialize(const AdaptiveLeaf&) const
+{
+    throw std::invalid_argument("Provider has no bounded compact native materialization.");
+}
 AdaptiveBytes adaptive_family_key(const AdaptiveCellKey& parent, AdaptiveSplit split)
 {
     adaptive_detail::Writer w;

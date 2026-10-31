@@ -744,9 +744,26 @@ std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
     d.view = std::move(view.data);
     return cache.impl_->adopt(std::move(d));
 }
-NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor& descriptor)
+namespace
 {
-    Writer w;
+struct DescriptorSizeWriter
+{
+    std::size_t size = 0;
+    void add(std::size_t amount)
+    {
+        if (amount > std::numeric_limits<std::size_t>::max() - size)
+            throw std::invalid_argument("Native descriptor encoded length overflows.");
+        size += amount;
+    }
+    template<class T> void value(const T&) { add(sizeof(T)); }
+    void array(std::span<const char> bytes)
+    {
+        add(sizeof(std::uint64_t));
+        add(bytes.size());
+    }
+};
+template<class PacketWriter> void emit_native_descriptor(PacketWriter& w, const NativeFragmentDescriptor& descriptor)
+{
     w.value(std::uint64_t{0x53464e4154520002ULL});
     w.value(static_cast<std::uint64_t>(descriptor.kind));
     w.value(std::uint64_t(descriptor.parts.size()));
@@ -757,8 +774,21 @@ NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescri
         w.array(*part);
     }
     w.array(descriptor.view);
+}
+} // namespace
+NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor& descriptor)
+{
+    Writer w;
+    emit_native_descriptor(w, descriptor);
     return std::move(w.data);
 }
+std::size_t encoded_native_fragment_descriptor_size(const NativeFragmentDescriptor& descriptor)
+{
+    DescriptorSizeWriter w;
+    emit_native_descriptor(w, descriptor);
+    return w.size;
+}
+
 std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descriptor(
     std::span<const char> bytes, NativeFragmentCache& cache)
 {

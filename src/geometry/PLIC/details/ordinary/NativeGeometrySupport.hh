@@ -79,9 +79,27 @@ inline GeometryPoint display(WidePoint p)
         GeometryValue<ArithmeticMode::Ordinary>{p[1]}.as_double(),
         GeometryValue<ArithmeticMode::Ordinary>{p[2]}.as_double()};
 }
-struct Writer
+/** Size-only storage for the same scalar serialization traversal. */
+struct CountingBytes
 {
-    std::vector<char> bytes;
+    std::size_t count = 0;
+    void add(std::size_t n)
+    {
+        if (n > std::numeric_limits<std::size_t>::max() - count)
+            reject("finite geometry encoded length overflows.");
+        count += n;
+    }
+    void push_back(char) { add(1); }
+    [[nodiscard]] const char* end() const noexcept { return nullptr; }
+    template<class Iterator> void insert(const char*, Iterator first, Iterator last)
+    {
+        add(static_cast<std::size_t>(std::distance(first, last)));
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return count; }
+};
+template<class Bytes> struct BasicWriter
+{
+    Bytes bytes;
     void byte(std::uint8_t value) { bytes.push_back(static_cast<char>(value)); }
     void tag(GeometryTag value) { byte(static_cast<std::uint8_t>(value)); }
     void word(std::uint64_t value)
@@ -120,7 +138,42 @@ struct Writer
         word(b.size());
         bytes.insert(bytes.end(), b.begin(), b.end());
     }
+    template<class Identity> void identity(const Identity& identity)
+    {
+        if constexpr (std::is_same_v<Bytes, CountingBytes>)
+            bytes.add(canonical_key_size(identity));
+        else
+            GeometryIdentityAccess::emit_canonical(identity, this,
+                [](void* context, std::span<const char> fragment)
+                {
+                    auto& writer = *static_cast<BasicWriter*>(context);
+                    writer.bytes.insert(writer.bytes.end(), fragment.begin(), fragment.end());
+                });
+    }
 };
+using Writer = BasicWriter<std::vector<char>>;
+using CountingWriter = BasicWriter<CountingBytes>;
+inline void require_encoding_capacity_profile()
+{
+    if (!geometry_encoding_capacity_profile_supported())
+        throw std::invalid_argument("Geometry encoding capacity policy is not qualified for this standard library.");
+}
+/** Owning-implementation bounds used before the original fallback face
+ * construction. Payload/capacity accounting excludes allocator/control blocks. */
+[[nodiscard]] std::size_t source_support_allocation_bound(std::size_t points);
+[[nodiscard]] std::size_t fallback_face_allocation_bound(std::size_t points);
+inline std::size_t encoding_add(std::size_t first, std::size_t second)
+{
+    if (second > std::numeric_limits<std::size_t>::max() - first)
+        reject("finite geometry encoding scratch overflows.");
+    return first + second;
+}
+inline std::size_t encoding_product(std::size_t count, std::size_t width)
+{
+    if (width && count > std::numeric_limits<std::size_t>::max() / width)
+        reject("finite geometry encoding scratch overflows.");
+    return count * width;
+}
 struct Reader
 {
     std::span<const char> bytes;
