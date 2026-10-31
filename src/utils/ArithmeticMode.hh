@@ -3,9 +3,11 @@
  */
 #pragma once
 
+#include <cstdint>
+
 namespace SimpleFluid
 {
-enum class ArithmeticMode
+enum class ArithmeticMode : std::uint8_t
 {
     Ordinary,
     BoundedCertification,

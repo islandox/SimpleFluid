@@ -5,7 +5,22 @@
 #include <cstdint>
 namespace SimpleFluid::PLIC
 {
-enum class GeometryTag : std::uint8_t
+using std::uint8_t;
+
+enum class GeometryPacketFamily : uint8_t
+{
+    Geometry = 1
+};
+/** Arithmetic format identifiers, independent of storage size and padding. */
+enum class GeometryNumericProfile : uint8_t
+{
+    ExactRational = 0,
+    Binary64 = 1,
+    X87Binary80 = 2,
+    Binary128 = 3,
+    Unsupported = 0xff
+};
+enum class GeometryTag : uint8_t
 {
     OrdinaryPoint = 0x01,
     OrdinaryLine = 0x02,
@@ -36,12 +51,12 @@ enum class GeometryTag : std::uint8_t
     OrdinaryMeasure = 0x60,
     ExactMeasure = 0x61
 };
-enum class SupportRecipeKind : std::uint8_t
+enum class SupportRecipeKind : uint8_t
 {
     Original = 0,
     Derived = 1
 };
-enum class AuthorityKeyTag : std::uint8_t
+enum class AuthorityKeyTag : uint8_t
 {
     OriginalSupport = 0xA1
 };

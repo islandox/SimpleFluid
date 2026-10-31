@@ -4,10 +4,13 @@
 #include <gtest/gtest.h>
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/mesh/NativePartitionWire.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_DefaultSerialComm.hpp>
+#include <algorithm>
 #include <cstring>
 #include <limits>
+#include <span>
 
 namespace
 {
@@ -80,9 +83,15 @@ PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
 {
     Cursor r{packet};
     PacketOffsets p;
-    if (r.take<uint64_t>() != 0x5346524547490009ULL)
-        throw std::logic_error("Codec test expected native packet format 7.");
+    using partition_wire::Header;
+    if (packet.size() < sizeof(Header) ||
+        static_cast<uint8_t>(packet[offsetof(Header, family)]) !=
+            static_cast<uint8_t>(partition_wire::Family::MultiRegionPartition) ||
+        static_cast<uint8_t>(packet[offsetof(Header, version)]) != partition_wire::version)
+        throw std::logic_error("Codec test expected native packet format 10.");
+    r.pos = offsetof(Header, region_count);
     const auto regions = r.take<uint64_t>();
+    r.pos = sizeof(Header);
     for (size_t region = 0; region < regions; ++region)
     {
         if (r.take<uint32_t>() != 0)
@@ -142,6 +151,76 @@ PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
     return p;
 }
 } // namespace
+
+TEST(MultiRegionPartitionCodecTest, NativeHeaderHasDeterministicPaddingAndRejectsLegacyFrames)
+{
+    using partition_wire::Header;
+    static_assert(sizeof(partition_wire::Family) == sizeof(uint8_t));
+    MultiRegionMesh source({cartesian_region("cell", {{{0,1},{0,1},{0,1}}})}, {}, serial_comm());
+    for (const auto& visible : {std::vector<ID>{0}, std::vector<ID>{}})
+    {
+        const auto packet = source.serialize_partition(visible);
+        ASSERT_GE(packet.size(), sizeof(Header));
+        EXPECT_EQ(source.serialize_partition(visible), packet);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Header, family)]), 2u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Header, version)]), 10u);
+        uint64_t region_count;
+        std::memcpy(&region_count, packet.data() + offsetof(Header, region_count), sizeof(region_count));
+        EXPECT_EQ(region_count, 1u);
+        const auto restored = MultiRegionMesh::deserialize_partition(packet, serial_comm());
+        EXPECT_EQ(restored->serialize_partition(visible), packet);
+        EXPECT_EQ(restored->cell_volume(0), source.cell_volume(0));
+        std::vector<char> unaligned(packet.size() + 1);
+        std::copy(packet.begin(), packet.end(), unaligned.begin() + 1);
+        const auto shifted = MultiRegionMesh::deserialize_partition(
+            std::span<const char>{unaligned.data() + 1, packet.size()}, serial_comm());
+        EXPECT_EQ(shifted->serialize_partition(visible), packet);
+        const auto reject = [](std::span<const char> bytes)
+        {
+            EXPECT_THROW(MultiRegionMesh::deserialize_partition(bytes, serial_comm()), std::invalid_argument);
+        };
+        for (size_t i = 0; i < sizeof(Header); ++i)
+        {
+            const auto in_field = [i](size_t offset, size_t width) { return i >= offset && i - offset < width; };
+            const bool field = in_field(offsetof(Header, family), sizeof(Header::family)) ||
+                               in_field(offsetof(Header, version), sizeof(Header::version)) ||
+                               in_field(offsetof(Header, region_count), sizeof(Header::region_count));
+            if (!field)
+            {
+                EXPECT_EQ(packet[i], 0);
+                auto bad = packet;
+                bad[i] = 1;
+                reject(bad);
+            }
+            reject(std::span<const char>{packet.data(), i});
+        }
+        auto bad = packet;
+        overwrite(bad, offsetof(Header, family), uint8_t{255});
+        reject(bad);
+        bad = packet;
+        overwrite(bad, offsetof(Header, version), uint8_t{9});
+        reject(bad);
+        bad = packet;
+        overwrite(bad, offsetof(Header, version), uint8_t{255});
+        reject(bad);
+        bad = packet;
+        overwrite(bad, offsetof(Header, region_count), std::numeric_limits<uint64_t>::max());
+        reject(bad);
+        bad.assign(packet.begin(), packet.begin() + sizeof(Header));
+        reject(bad); // The declared region cannot fit in an absent body.
+        bad = packet;
+        bad.push_back(0);
+        reject(bad);
+        for (const uint64_t magic : {0x5346524547490009ULL, 0x534652454749000aULL})
+        {
+            std::vector<char> legacy(2 * sizeof(uint64_t));
+            overwrite(legacy, 0, magic);
+            overwrite(legacy, sizeof(uint64_t), region_count);
+            legacy.insert(legacy.end(), packet.begin() + sizeof(Header), packet.end());
+            reject(legacy);
+        }
+    }
+}
 
 TEST(MultiRegionPartitionCodecTest, MergesOverlappingShardsWithoutRetainingInputs)
 {

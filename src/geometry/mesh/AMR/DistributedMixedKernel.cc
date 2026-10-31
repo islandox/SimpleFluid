@@ -46,7 +46,7 @@ AdaptiveBytes encode_join_capsule(const AdaptiveJoinCapsule& capsule, std::size_
     Budget budget{limit};
     budget.add(40);
     w.word(0x53464a4f494e3631ULL);
-    w.word(4);
+    w.word(5);
     w.word(capsule.route);
     w.word(capsule.rules.size());
     std::set<AdaptiveBytes> unique;
@@ -89,7 +89,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
     if (bytes.size() > limit)
         throw std::invalid_argument("Mixed join capsule exceeds byte budget.");
     Reader r{bytes};
-    if (r.word() != 0x53464a4f494e3631ULL || r.word() != 4)
+    if (r.word() != 0x53464a4f494e3631ULL || r.word() != 5)
         throw std::invalid_argument("Unknown mixed join capsule version.");
     AdaptiveJoinCapsule capsule;
     capsule.route = r.word();

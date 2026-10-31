@@ -529,7 +529,7 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
     }
     Writer w;
     w.tag(GeometryTag::OrdinaryComplex);
-    w.byte(3);
+    w.byte(4);
     w.word(impl_->global_cells);
     w.word(impl_->global_faces);
     w.word(impl_->global_nodes);
@@ -580,7 +580,7 @@ std::vector<char> Complex::encode(std::span<const ID> visible) const
 std::shared_ptr<const Complex> Complex::decode(std::span<const char> packet)
 {
     Reader r{packet, 0, true};
-    if (r.tag() != GeometryTag::OrdinaryComplex || r.byte() != 3)
+    if (r.tag() != GeometryTag::OrdinaryComplex || r.byte() != 4)
         reject("foreign native complex packet mode/version.");
     auto data = std::make_shared<Impl>();
     data->global_cells = r.word();

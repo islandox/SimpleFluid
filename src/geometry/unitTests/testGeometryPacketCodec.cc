@@ -6,6 +6,7 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
+#include <type_traits>
 
 namespace
 {
@@ -13,6 +14,7 @@ using namespace SimpleFluid;
 using namespace SimpleFluid::PLIC;
 constexpr auto ordinary = ArithmeticMode::Ordinary;
 constexpr auto exact = ArithmeticMode::Exact;
+using Header = GeometryPacketHeader;
 void overwrite(std::vector<char>& bytes, std::size_t offset, std::uint64_t value)
 {
     for (unsigned i = 0; i < 8; ++i)
@@ -38,6 +40,7 @@ TEST(GeometryPacketCodecTest, CategoryTagsUseOneByteWhileNumericWordsKeepTheirWi
 {
     static_assert(sizeof(GeometryTag) == 1 && sizeof(GeometryPacketKind) == 1);
     static_assert(sizeof(SupportRecipeKind) == 1 && sizeof(AuthorityKeyTag) == 1);
+    static_assert(sizeof(GeometryPacketFamily) == 1 && sizeof(GeometryNumericProfile) == 1);
     details::ordinary_native::Writer writer;
     writer.tag(GeometryTag::OrdinaryPoint);
     writer.word(123);
@@ -48,11 +51,16 @@ TEST(GeometryPacketCodecTest, CategoryTagsUseOneByteWhileNumericWordsKeepTheirWi
     const auto key = canonical_key(point), packet = encode_identity(point);
     EXPECT_EQ(key.size(), 1 + 3 * 16);
     EXPECT_EQ(static_cast<std::uint8_t>(key.front()), static_cast<std::uint8_t>(GeometryTag::OrdinaryPoint));
-    EXPECT_EQ(geometry_packet_header_bytes, 27u);
-    EXPECT_EQ(packet.size(), 27 + key.size());
-    EXPECT_EQ(static_cast<std::uint8_t>(packet[8]), 2u);
-    EXPECT_EQ(static_cast<std::uint8_t>(packet[9]), static_cast<std::uint8_t>(GeometryPacketKind::PointIdentity));
-    EXPECT_EQ(static_cast<std::uint8_t>(packet[10]), static_cast<std::uint8_t>(ordinary));
+    EXPECT_EQ(geometry_packet_header_bytes, sizeof(Header));
+    EXPECT_EQ(packet.size(), sizeof(Header) + key.size());
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(Header, family)]),
+        static_cast<std::uint8_t>(GeometryPacketFamily::Geometry));
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(Header, version)]), 3u);
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(Header, kind)]),
+        static_cast<std::uint8_t>(GeometryPacketKind::PointIdentity));
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(Header, mode)]), static_cast<std::uint8_t>(ordinary));
+    EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(Header, profile)]),
+        static_cast<std::uint8_t>(geometry_packet_profile(ordinary)));
 }
 TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
 {
@@ -63,13 +71,8 @@ TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
     { EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(bytes)), std::invalid_argument); };
     rejects({});
     rejects(canonical_key(point));
-    for (const auto offset : {std::size_t(0), std::size_t(11)})
-    {
-        auto bytes = original;
-        overwrite(bytes, offset, std::numeric_limits<std::uint64_t>::max());
-        rejects(bytes);
-    }
-    for (const auto offset : {8u, 9u, 10u})
+    for (const auto offset : {offsetof(Header, family), offsetof(Header, version), offsetof(Header, kind),
+             offsetof(Header, mode), offsetof(Header, profile)})
     {
         auto bytes = original;
         bytes[offset] = char(0xff);
@@ -81,13 +84,103 @@ TEST(GeometryPacketCodecTest, IdentityHeaderRejectsForeignAndUnboundedRecords)
     bytes.push_back(0);
     rejects(bytes);
     bytes = original;
-    bytes[8] = 1;
+    bytes[offsetof(Header, version)] = 2;
     rejects(bytes);
     bytes = original;
-    overwrite(bytes, 19, std::numeric_limits<std::uint64_t>::max());
+    overwrite(bytes, offsetof(Header, body_length), std::numeric_limits<std::uint64_t>::max());
     rejects(bytes);
     EXPECT_THROW((decode_identity<PointIdentity<ordinary>>(original, original.size() - 1)), std::invalid_argument);
     EXPECT_EQ(decode_identity<PointIdentity<ordinary>>(original, original.size()), point);
+}
+TEST(GeometryPacketCodecTest, NumericProfilesAreExplicitAndUnknownFormatsDoNotAlias)
+{
+    using Profile = GeometryNumericProfile;
+    EXPECT_EQ(geometry_numeric_profile(2, 53, -1021, 1024), Profile::Binary64);
+    EXPECT_EQ(geometry_numeric_profile(2, 64, -16381, 16384), Profile::X87Binary80);
+    EXPECT_EQ(geometry_numeric_profile(2, 113, -16381, 16384), Profile::Binary128);
+    for (const auto format : {std::array{2, 53, -1022, 1024}, std::array{2, 64, -16381, 16383},
+             std::array{2, 106, -968, 1024}, std::array{10, 34, -6142, 6145}})
+        EXPECT_EQ(geometry_numeric_profile(format[0], format[1], format[2], format[3]), Profile::Unsupported);
+    EXPECT_EQ(geometry_packet_profile(exact), Profile::ExactRational);
+    EXPECT_EQ(geometry_packet_profile(ArithmeticMode::BoundedCertification), Profile::Unsupported);
+    for (const auto mode : {ordinary, exact})
+    {
+        const auto packet = encode_geometry_packet(GeometryPacketKind::DisplacementIdentity, mode, {});
+        for (const auto foreign : {Profile::ExactRational, Profile::Binary64, Profile::X87Binary80, Profile::Binary128,
+                 static_cast<Profile>(4), Profile::Unsupported})
+        {
+            if (foreign == geometry_packet_profile(mode))
+                continue;
+            auto corrupt = packet;
+            corrupt[offsetof(Header, profile)] = static_cast<char>(foreign);
+            EXPECT_THROW(decode_geometry_packet(corrupt, mode), std::invalid_argument);
+        }
+    }
+}
+TEST(GeometryPacketCodecTest, NaturalPaddingIsSerializedDeterministicallyAndUnalignedReadsAreSafe)
+{
+    static_assert(std::is_standard_layout_v<Header> && std::is_trivially_copyable_v<Header>);
+    const std::vector<char> body(257, 'x'); // Opaque framing payload; numerical bodies have their own validators.
+    const auto packet = encode_geometry_packet(GeometryPacketKind::PlanarFace, ordinary, body);
+    EXPECT_EQ(packet.size(), sizeof(Header) + body.size());
+    EXPECT_EQ(encode_geometry_packet(GeometryPacketKind::PlanarFace, ordinary, body), packet);
+    EXPECT_EQ(offsetof(Header, body_length) % alignof(std::uint64_t), 0u);
+    std::vector<char> expected(sizeof(Header), 0);
+    expected[offsetof(Header, family)] = static_cast<char>(GeometryPacketFamily::Geometry);
+    expected[offsetof(Header, version)] = 3;
+    expected[offsetof(Header, kind)] = static_cast<char>(GeometryPacketKind::PlanarFace);
+    expected[offsetof(Header, mode)] = static_cast<char>(ordinary);
+    expected[offsetof(Header, profile)] = static_cast<char>(geometry_packet_profile(ordinary));
+    overwrite(expected, offsetof(Header, body_length), 257);
+    EXPECT_EQ(std::vector<char>(packet.begin(), packet.begin() + sizeof(Header)), expected);
+    std::array<bool, sizeof(Header)> fields{};
+    for (const auto offset : {offsetof(Header, family), offsetof(Header, version), offsetof(Header, kind),
+             offsetof(Header, mode), offsetof(Header, profile)})
+        fields[offset] = true;
+    for (std::size_t i = 0; i < sizeof(std::uint64_t); ++i)
+        fields[offsetof(Header, body_length) + i] = true;
+    for (std::size_t i = 0; i < fields.size(); ++i)
+        if (!fields[i])
+        {
+            EXPECT_EQ(packet[i], 0);
+            auto corrupt = packet;
+            corrupt[i] = 1;
+            EXPECT_THROW(decode_geometry_packet(corrupt, ordinary), std::invalid_argument);
+        }
+    for (std::size_t offset = 1; offset <= alignof(Header) + 1; ++offset)
+    {
+        std::vector<char> enclosing(offset + packet.size() + 1, 'z');
+        std::copy(packet.begin(), packet.end(), enclosing.begin() + offset);
+        const auto input = std::span<const char>(enclosing).subspan(offset, packet.size());
+        const auto decoded = decode_geometry_packet(input, ordinary, packet.size());
+        EXPECT_EQ(decoded.kind, GeometryPacketKind::PlanarFace);
+        EXPECT_EQ(decoded.body.data(), input.data() + sizeof(Header));
+        EXPECT_EQ(std::vector<char>(decoded.body.begin(), decoded.body.end()), body);
+        EXPECT_THROW(decode_geometry_packet(input, ordinary, packet.size() - 1), std::invalid_argument);
+    }
+    EXPECT_EQ(encode_geometry_packet(GeometryPacketKind::PlanarFace, ordinary, body, packet.size()), packet);
+    EXPECT_THROW(encode_geometry_packet(GeometryPacketKind::PlanarFace, ordinary, body, packet.size() - 1),
+        std::invalid_argument);
+}
+TEST(GeometryPacketCodecTest, OldCompactEnvelopesRejectEvenWithoutBodies)
+{
+    for (const auto mode : {ordinary, exact})
+    {
+        std::vector<char> previous;
+        word(previous, 0x534647454f4d5631ULL); // Actual preceding 27-byte v2 envelope.
+        previous.push_back(2);
+        previous.push_back(static_cast<char>(GeometryPacketKind::DisplacementIdentity));
+        previous.push_back(static_cast<char>(mode));
+        using Numeric = std::numeric_limits<long double>;
+        const auto profile = mode == exact ? 0
+                                           : std::uint64_t(Numeric::radix) | (std::uint64_t(Numeric::digits) << 8) |
+                                                 (std::uint64_t(std::uint16_t(Numeric::min_exponent)) << 16) |
+                                                 (std::uint64_t(std::uint16_t(Numeric::max_exponent)) << 32);
+        word(previous, profile);
+        word(previous, 0);
+        ASSERT_EQ(previous.size(), 27u);
+        EXPECT_THROW(decode_geometry_packet(previous, mode), std::invalid_argument);
+    }
 }
 TEST(GeometryPacketCodecTest, CanonicalScalarsAndRationalsAreRequired)
 {
@@ -186,11 +279,11 @@ TEST(GeometryPacketCodecTest, RoundedFiniteLineKeysRemainValid)
 TEST(GeometryPacketCodecTest, OldEnclosingComplexVersionsRejectBeforeOptionalRecords)
 {
     std::vector<char> ordinary_packet;
-    word(ordinary_packet, 0x53464650434f4d32ULL);
-    word(ordinary_packet, 1);
+    tag(ordinary_packet, GeometryTag::OrdinaryComplex);
+    ordinary_packet.push_back(3); // Immediately preceding compact schema, no child geometry needed.
     std::vector<char> exact_packet;
-    word(exact_packet, 0x5346504f4c594331ULL);
-    word(exact_packet, 1);
+    tag(exact_packet, GeometryTag::ExactComplex);
+    exact_packet.push_back(3);
     // This was a valid sparse empty local catalog under the previous version:
     // nonempty global catalogs, with zero resident cell/face/node records.
     for (unsigned i = 0; i < 3; ++i)

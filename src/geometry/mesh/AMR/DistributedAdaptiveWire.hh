@@ -6,9 +6,13 @@
 #include "parallel/SparseOwnerExchange.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct Budget
@@ -95,6 +99,11 @@ struct Reader
     }
 };
 /** Wire records have independent versions; canonical keys never use this stamp. */
+enum class PacketFamily : std::uint8_t
+{
+    GeometryRecord = 4,
+    AdaptiveBatch = 5
+};
 enum class GeometryRecordKind : std::uint8_t
 {
     Tile = 1,
@@ -112,19 +121,46 @@ enum class GeometryRecordKind : std::uint8_t
     FrozenPart,
     FrozenBatch
 };
-inline constexpr std::size_t geometry_record_header_bytes = 10;
-inline constexpr std::uint64_t geometry_record_magic = 0x5346414452454332ULL;
+struct GeometryRecordHeader
+{
+    PacketFamily family;
+    std::uint8_t version;
+    GeometryRecordKind kind;
+};
+struct BatchHeader
+{
+    PacketFamily family;
+    std::uint8_t version;
+    std::uint64_t dictionary_count;
+};
+static_assert(std::is_standard_layout_v<GeometryRecordHeader> &&
+              std::is_trivially_copyable_v<GeometryRecordHeader>);
+static_assert(std::is_standard_layout_v<BatchHeader> && std::is_trivially_copyable_v<BatchHeader>);
+inline constexpr std::uint8_t geometry_record_version = 3;
+inline constexpr std::uint8_t batch_version = 7;
+inline constexpr std::size_t geometry_record_header_bytes = sizeof(GeometryRecordHeader);
 inline void write_geometry_record_header(Writer& writer, GeometryRecordKind kind)
 {
-    writer.word(geometry_record_magic);
-    writer.byte(2);
-    writer.byte(static_cast<std::uint8_t>(kind));
+    std::array<std::uint8_t, geometry_record_header_bytes> bytes{};
+    bytes[offsetof(GeometryRecordHeader, family)] = static_cast<std::uint8_t>(PacketFamily::GeometryRecord);
+    bytes[offsetof(GeometryRecordHeader, version)] = geometry_record_version;
+    bytes[offsetof(GeometryRecordHeader, kind)] = static_cast<std::uint8_t>(kind);
+    for (const auto byte : bytes)
+        writer.byte(byte);
 }
 inline void read_geometry_record_header(Reader& reader, GeometryRecordKind kind)
 {
-    if (reader.word() != geometry_record_magic || reader.byte() != 2 ||
-        reader.byte() != static_cast<std::uint8_t>(kind))
-        throw std::invalid_argument("Unsupported adaptive geometry record version or kind.");
+    std::array<std::uint8_t, geometry_record_header_bytes> bytes{};
+    for (auto& byte : bytes)
+        byte = reader.byte();
+    if (bytes[offsetof(GeometryRecordHeader, family)] != static_cast<std::uint8_t>(PacketFamily::GeometryRecord) ||
+        bytes[offsetof(GeometryRecordHeader, version)] != geometry_record_version ||
+        bytes[offsetof(GeometryRecordHeader, kind)] != static_cast<std::uint8_t>(kind))
+        throw std::invalid_argument("Unsupported adaptive geometry record family, version or kind.");
+    for (std::size_t i = 0; i < geometry_record_header_bytes; ++i)
+        if (i != offsetof(GeometryRecordHeader, family) && i != offsetof(GeometryRecordHeader, version) &&
+            i != offsetof(GeometryRecordHeader, kind) && bytes[i])
+            throw std::invalid_argument("Nonzero adaptive geometry record header padding.");
 }
 template<class F> void collective(const Teuchos::Comm<int>& comm, F&& action)
 {
