@@ -102,7 +102,7 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         packets.push_back({int(tile.face_gid % comm->getSize()), std::move(bytes)});
     }
     wire::Writer w;
-    auth::header(w, 2, 0, packet_context, Mode);
+    auth::header(w, auth::ControlKind::Algorithm, 0, packet_context, Mode);
     real(w, timestep);
     w.bytes(auth::algorithm(data.options));
     budget.packet(w.data.size());
@@ -541,8 +541,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                                AMR::encode_adaptive_key(item.value.recipient).size());
                 retained_protocol_bytes = budget.used;
             });
-        auto face_records = auth::request_records(
-            1, missing_faces, authoritative_controls, packet_context, Mode, comm, limit, retained_protocol_bytes);
+        auto face_records = auth::request_records(auth::ControlKind::Face, missing_faces, authoritative_controls,
+            packet_context, Mode, comm, limit, retained_protocol_bytes);
         std::set<std::uint64_t> missing_nodes;
         wire::collective(*comm,
             [&]
@@ -571,8 +571,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 }
                 retained_protocol_bytes = budget.used;
             });
-        auto node_records = auth::request_records(
-            0, missing_nodes, authoritative_controls, packet_context, Mode, comm, limit, retained_protocol_bytes);
+        auto node_records = auth::request_records(auth::ControlKind::Node, missing_nodes, authoritative_controls,
+            packet_context, Mode, comm, limit, retained_protocol_bytes);
         wire::collective(*comm,
             [&]
             {

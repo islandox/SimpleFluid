@@ -13,6 +13,7 @@
 #include <set>
 namespace
 {
+using std::uint8_t;
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -550,13 +551,13 @@ TEST(DistributedAdaptiveAuthority, ExactReservedTileEncodingMatchesIndependentWi
         word(37);
         for (std::size_t index = 0; index < AMR::adaptive_detail::geometry_record_header_bytes; ++index)
         {
-            std::uint8_t value = 0;
+            uint8_t value = 0;
             if (index == offsetof(AMR::adaptive_detail::GeometryRecordHeader, family))
-                value = static_cast<std::uint8_t>(AMR::adaptive_detail::PacketFamily::GeometryRecord);
+                value = static_cast<uint8_t>(AMR::adaptive_detail::PacketFamily::GeometryRecord);
             else if (index == offsetof(AMR::adaptive_detail::GeometryRecordHeader, version))
                 value = AMR::adaptive_detail::geometry_record_version;
             else if (index == offsetof(AMR::adaptive_detail::GeometryRecordHeader, kind))
-                value = static_cast<std::uint8_t>(AMR::adaptive_detail::GeometryRecordKind::Tile);
+                value = static_cast<uint8_t>(AMR::adaptive_detail::GeometryRecordKind::Tile);
             reference.push_back(static_cast<char>(value));
         }
         bytes(tile.surface);
@@ -665,7 +666,7 @@ TEST(DistributedAdaptiveAuthority, TileCodecRejectsLegacyWrongKindAndRankLocalCo
                 auto incoming = bytes;
                 if (comm->getRank() == 0)
                     incoming[sizeof(std::uint64_t) + offsetof(A::adaptive_detail::GeometryRecordHeader, version)] =
-                        4; // Unsupported outer record version on one rank.
+                        5; // Unsupported outer record version on one rank.
                 candidate.emplace(A::decode_adaptive_tile(incoming));
             });
         published = std::move(candidate);

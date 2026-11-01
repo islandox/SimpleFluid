@@ -151,11 +151,37 @@ count keeps the partition format's native byte order. Header fields are copied
 individually with `memcpy`; decoding accepts unaligned packet addresses. These
 header guarantees do not change the native representation of partition bodies.
 
-These compact-tag formats exclude legacy pre-tag packet imports and automatic
-migrations; legacy artifacts must be regenerated. Native identity storage,
-immutable authorities and owning point exports preserve the current canonical
-bytes, hashes, ordering and packet versions. Their source API changes require
-rebuilding consumers, without regenerating compatible current-format packets.
+VoF exchanges and their supporting AMR capsules share the scoped
+`geometry/VoFWireProtocol.hh` header contract. Family, version, and a checked
+protocol-specific kind use `uint8_t`; the header follows natural C++ layout
+and initializes and validates any padding. Capillary plane, node-fan, aggregate,
+and curvature exchanges distinguish requests from replies. Phase-transfer,
+inventory, cleanup, construction-control, and schema-agreement records have
+independent families and versions. Existing domain enums are reused with
+`uint8_t` underlying types; distinct message kinds have their own byte enums.
+Readers validate retained word-sized category fields before narrowing them.
+The enum layout changes require rebuilding consumers; numerical payload types
+and values remain unchanged.
+
+IDs, revisions, publication pins, channel and topology counts, and numerical
+payloads keep their existing widths. The exact phase-transfer codecs retain
+their native `long double` representation descriptors. Header and category
+sizes participate in packet admission and counting codecs; reducing their
+width does not change resource limits or collective rejection rules.
+
+Canonical ancestry and trace encodings remain independent of these transport
+headers. Adaptive key prefixes and product trace/support prefixes retain their
+original bytes and routing hashes. Product traces stream the original root
+identity prefix and root body, while product root/base/axis transport capsules
+use the current byte headers. These retained identity prefixes do not provide
+legacy packet readers. Enclosing leaf/family, batch, frozen, and native partition
+versions reject previous formats even when their optional geometry is absent.
+
+These wire revisions exclude previous affected packet imports and automatic
+migrations; affected artifacts must be regenerated and communicating consumers
+rebuilt together. The separate native-identity storage, immutable-authority,
+and owning-point-export refactors preserve canonical bytes, hashes, and ordering;
+those storage changes alone do not change packet formats.
 
 `PlaneAuthority`, `DynamicPointProvenance`, and `GeometryAllocationLedger` remain
 separate mechanisms. Identity equality does not establish shared allocation

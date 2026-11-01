@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -44,9 +45,8 @@ AdaptiveBytes encode_join_capsule(const AdaptiveJoinCapsule& capsule, std::size_
 {
     Writer w;
     Budget budget{limit};
-    budget.add(40);
-    w.word(0x53464a4f494e3631ULL);
-    w.word(5);
+    budget.add(packet_codec::header_bytes<packet_codec::Record> + 3 * sizeof(std::uint64_t));
+    packet_codec::write_header(w, packet_codec::Family::MixedJoin, 6, packet_codec::Record::Value);
     w.word(capsule.route);
     w.word(capsule.rules.size());
     std::set<AdaptiveBytes> unique;
@@ -89,8 +89,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
     if (bytes.size() > limit)
         throw std::invalid_argument("Mixed join capsule exceeds byte budget.");
     Reader r{bytes};
-    if (r.word() != 0x53464a4f494e3631ULL || r.word() != 5)
-        throw std::invalid_argument("Unknown mixed join capsule version.");
+    packet_codec::read_header(r, packet_codec::Family::MixedJoin, 6, packet_codec::Record::Value);
     AdaptiveJoinCapsule capsule;
     capsule.route = r.word();
     auto count = r.word();

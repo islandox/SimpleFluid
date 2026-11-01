@@ -4,14 +4,21 @@
 #include "FVM/details/GeneralVoF/LocalTransport.hh"
 #include "FVM/details/GeneralVoF/FaceTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
-#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoF/PhasePublication.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/ProtocolTags.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <Teuchos_Array.hpp>
 namespace SimpleFluid::VoF
 {
 namespace
 {
+enum class LimiterKind : uint8_t
+{
+    Endpoint = 0,
+    Donor = 1
+};
 constexpr auto local_mode = ArithmeticMode::Ordinary;
 using LocalMath = fp::Arithmetic<local_mode>;
 using Triple = std::array<long double, 3>;
@@ -69,7 +76,7 @@ void source(wire::Writer& w, const Source& s)
     for (auto value : {s.occupancy.difference, s.occupancy.admitted_bound, s.occupancy.phase_input_bound,
              s.occupancy.fit_bound, s.occupancy.transferred_bound, s.occupancy.fit_allocation_bound})
         real(w, value);
-    w.word(std::uint64_t(s.declaration));
+    protocol_tags::write(w, s.declaration, GeneralVoFPhaseGeometry::PureCarrier);
 }
 Source source(wire::Reader& r)
 {
@@ -85,11 +92,12 @@ Source source(wire::Reader& r)
     s.occupancy.fit_bound = real(r);
     s.occupancy.transferred_bound = real(r);
     s.occupancy.fit_allocation_bound = real(r);
-    s.declaration = GeneralVoFPhaseGeometry(r.word());
+    s.declaration = protocol_tags::read(r, GeneralVoFPhaseGeometry::PureCarrier);
     return s;
 }
 void stamp(wire::Writer& w, const GeneralVoF::Data& data, std::uint64_t transaction)
 {
+    packet_codec::write_header(w, packet_codec::Family::LimiterExchange, 1, packet_codec::Record::Value);
     w.word(data.control);
     w.word(transaction);
     w.word(data.hierarchy->topology_generation());
@@ -97,6 +105,7 @@ void stamp(wire::Writer& w, const GeneralVoF::Data& data, std::uint64_t transact
 }
 void stamp(wire::Reader& r, const GeneralVoF::Data& data, std::uint64_t transaction)
 {
+    packet_codec::read_header(r, packet_codec::Family::LimiterExchange, 1, packet_codec::Record::Value);
     if (r.word() != data.control || r.word() != transaction || r.word() != data.hierarchy->topology_generation() ||
         r.word() != data.hierarchy->partition_generation())
         throw std::invalid_argument("Interface ledger packet source or transaction differs.");
@@ -133,7 +142,7 @@ struct Demand
 struct Request
 {
     std::uint64_t face = 0, cell = 0;
-    unsigned kind = 0;
+    LimiterKind kind = LimiterKind::Endpoint;
     int peer = -1;
 };
 struct Coefficient
@@ -213,7 +222,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     std::map<std::uint64_t, Demand> demands;
     std::vector<Request> requests;
     std::vector<OwnerPacket> packets;
-    std::map<std::tuple<std::uint64_t, unsigned, std::uint64_t>, int> expected_ratios;
+    std::map<std::tuple<std::uint64_t, LimiterKind, std::uint64_t>, int> expected_ratios;
     safe(
         [&]
         {
@@ -334,7 +343,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     wire::Writer w;
                     stamp(w, data, trial.transaction_);
                     w.word(gid);
-                    w.word(0);
+                    protocol_tags::write(w, LimiterKind::Endpoint, LimiterKind::Donor);
                     w.word(cell);
                     w.word(data.cells.at(data.topology->by_gid.at(cell)).revision);
                     const auto dv = delta.value();
@@ -346,7 +355,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     finite_real(w, std::max(incidence * closure_delta, 0.L));
                     budget.packet(w.data.size());
                     packets.push_back({owner, std::move(w.data)});
-                    expected_ratios.emplace(std::tuple{gid, 0U, cell}, owner);
+                    expected_ratios.emplace(std::tuple{gid, LimiterKind::Endpoint, cell}, owner);
                 }
                 for (const auto& [donor, sum] : donor_delta)
                 {
@@ -361,7 +370,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     wire::Writer w;
                     stamp(w, data, trial.transaction_);
                     w.word(gid);
-                    w.word(1);
+                    protocol_tags::write(w, LimiterKind::Donor, LimiterKind::Donor);
                     w.word(donor);
                     w.word(c.revision);
                     triple(w, increase);
@@ -369,7 +378,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     finite_real(w, 0);
                     budget.packet(w.data.size());
                     packets.push_back({c.owner, std::move(w.data)});
-                    expected_ratios.emplace(std::tuple{gid, 1U, donor}, c.owner);
+                    expected_ratios.emplace(std::tuple{gid, LimiterKind::Donor, donor}, c.owner);
                 }
             }
         });
@@ -404,21 +413,20 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     throw std::invalid_argument("Interface limiter references a foreign canonical face.");
                 face_owners.emplace(std::uint64_t(demanded_faces[i]), demanded_face_owners[i]);
             }
-            std::set<std::tuple<std::uint64_t, unsigned, std::uint64_t>> unique;
+            std::set<std::tuple<std::uint64_t, LimiterKind, std::uint64_t>> unique;
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
                 stamp(r, data, trial.transaction_);
                 Request request;
                 request.face = r.word();
-                request.kind = unsigned(r.word());
+                request.kind = protocol_tags::read(r, LimiterKind::Donor);
                 request.cell = r.word();
                 const auto revision = r.word();
                 const auto& c = data.cells.at(data.topology->by_gid.at(request.cell));
-                if (c.owner != rank || c.revision != revision || request.kind > 1 ||
-                    face_owners.at(request.face) != packet.peer ||
+                if (c.owner != rank || c.revision != revision || face_owners.at(request.face) != packet.peer ||
                     !unique.emplace(request.face, request.kind, request.cell).second ||
-                    (request.kind == 0 &&
+                    (request.kind == LimiterKind::Endpoint &&
                         (!tiles.contains(request.face) || tiles.at(request.face)->first_owner != packet.peer)))
                     throw std::invalid_argument("Interface limiter owner/revision/face differs.");
                 const auto d = triple(r);
@@ -427,7 +435,8 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 {
                     if (d[p] < 0)
                         throw std::invalid_argument("Interface limiter has negative demand.");
-                    auto& target = request.kind == 0 ? accumulated.endpoint[p] : accumulated.donor[p];
+                    auto& target =
+                        request.kind == LimiterKind::Endpoint ? accumulated.endpoint[p] : accumulated.donor[p];
                     target = fp::bound_add(target, d[p]);
                 }
                 accumulated.closure_positive = fp::bound_add(accumulated.closure_positive, finite_real(r));
@@ -462,9 +471,10 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 wire::Writer w;
                 stamp(w, data, trial.transaction_);
                 w.word(request.face);
-                w.word(request.kind);
+                protocol_tags::write(w, request.kind, LimiterKind::Donor);
                 w.word(request.cell);
-                finite_real(w, request.kind == 0 ? endpoint_ratio.at(request.cell) : donor_ratio.at(request.cell));
+                finite_real(w, request.kind == LimiterKind::Endpoint ? endpoint_ratio.at(request.cell)
+                                                                     : donor_ratio.at(request.cell));
                 budget.packet(w.data.size());
                 packets.push_back({request.peer, std::move(w.data)});
             }
@@ -479,7 +489,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 wire::Reader r{packet.bytes};
                 stamp(r, data, trial.transaction_);
                 const auto face = r.word();
-                const auto kind = unsigned(r.word());
+                const auto kind = protocol_tags::read(r, LimiterKind::Donor);
                 const auto cell = r.word();
                 const auto key = std::tuple{face, kind, cell};
                 const auto value = finite_real(r);

@@ -4,6 +4,7 @@
 #include "FVM/details/GeneralVoF/BalanceForecast.hh"
 #include "FVM/GeneralVoFWork.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -17,6 +18,12 @@ namespace
 namespace AMR = Meshes::AMR;
 namespace wire = AMR::adaptive_detail;
 using Key = AMR::AdaptiveCellKey;
+enum class ForecastKind : uint8_t
+{
+    Demand = 0,
+    Observation = 1,
+    Work = 2
+};
 void seconds(double value)
 {
     if (!std::isfinite(value) || value < 0)
@@ -240,11 +247,11 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
                     retained.add(
                         2 * key.size() + sizeof(Key) + 2 * sizeof(int) + sizeof(std::uint64_t) + 6 * sizeof(void*));
                     unique.emplace(lookup, std::pair{donor.owner, donor.revision});
-                    retained.packet(key.size() + 32);
+                    retained.packet(key.size() + 24 + packet_codec::header_bytes<ForecastKind>);
                     retained.add(sizeof(OwnerPacket));
                     wire::Writer w;
-                    w.data.reserve(key.size() + 32);
-                    w.word(0);
+                    w.data.reserve(key.size() + 24 + packet_codec::header_bytes<ForecastKind>);
+                    packet_codec::write_header(w, packet_codec::Family::BalanceForecast, 1, ForecastKind::Demand);
                     w.bytes(key);
                     w.word(donor.revision);
                     w.word(std::uint64_t(destination));
@@ -254,11 +261,11 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
             for (const auto& receiver : sample.receivers)
             {
                 const auto key = AMR::encode_adaptive_key(receiver.donor.key);
-                retained.packet(key.size() + 64);
+                retained.packet(key.size() + 56 + packet_codec::header_bytes<ForecastKind>);
                 retained.add(sizeof(OwnerPacket));
                 wire::Writer w;
-                w.data.reserve(key.size() + 64);
-                w.word(1);
+                w.data.reserve(key.size() + 56 + packet_codec::header_bytes<ForecastKind>);
+                packet_codec::write_header(w, packet_codec::Family::BalanceForecast, 1, ForecastKind::Observation);
                 w.bytes(key);
                 w.word(receiver.donor.revision);
                 w.word(receiver.mixed);
@@ -279,7 +286,8 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
                 // Reader/decode scratch coexists with the retained exchange.
                 charge(retained, packet.bytes.size(), 2);
                 wire::Reader r{packet.bytes};
-                const auto type = r.word();
+                const auto type = packet_codec::read_header(
+                    r, packet_codec::Family::BalanceForecast, 1, {ForecastKind::Demand, ForecastKind::Observation});
                 const auto key_bytes = r.bytes();
                 const auto key = AMR::decode_adaptive_key(key_bytes);
                 const auto revision = r.word();
@@ -290,7 +298,7 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
                 if (!demands.contains(key))
                     retained.add(key_bytes.size() + sizeof(Key) + sizeof(DonorDemand) + 6 * sizeof(void*));
                 auto& demand = demands[key];
-                if (type == 0)
+                if (type == ForecastKind::Demand)
                 {
                     const auto destination = r.word();
                     if (destination >= std::uint64_t(ranks))
@@ -299,7 +307,7 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
                     demand.before.insert(packet.peer);
                     demand.after.insert(int(destination));
                 }
-                else if (type == 1)
+                else if (type == ForecastKind::Observation)
                 {
                     DonorDemand::Observation observation;
                     auto mixed = r.word();
@@ -379,10 +387,11 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
             {
                 seconds(work.core);
                 seconds(work.receiver);
-                retained.packet(16);
+                retained.packet(16 + packet_codec::header_bytes<ForecastKind>);
                 retained.add(sizeof(OwnerPacket));
                 wire::Writer w;
-                w.data.reserve(16);
+                w.data.reserve(16 + packet_codec::header_bytes<ForecastKind>);
+                packet_codec::write_header(w, packet_codec::Family::BalanceForecast, 1, ForecastKind::Work);
                 w.word(std::bit_cast<std::uint64_t>(work.core));
                 w.word(std::bit_cast<std::uint64_t>(work.receiver));
                 work_packets.push_back({peer, std::move(w.data)});
@@ -399,6 +408,7 @@ GeneralVoFBalanceForecast forecast_partition_work(const GeneralVoFWorkSample& sa
             for (const auto& packet : work_incoming.packets)
             {
                 wire::Reader r{packet.bytes};
+                packet_codec::read_header(r, packet_codec::Family::BalanceForecast, 1, ForecastKind::Work);
                 const auto core = std::bit_cast<double>(r.word());
                 const auto receiver = std::bit_cast<double>(r.word());
                 r.done();

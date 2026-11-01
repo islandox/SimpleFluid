@@ -13,7 +13,8 @@
 
 namespace SimpleFluid::VoF
 {
-enum class GeneralVoFSurfaceKind
+using std::uint8_t;
+enum class GeneralVoFSurfaceKind : uint8_t
 {
     MixedCell,
     AlignedFace,
@@ -25,7 +26,7 @@ struct GeneralVoFSurfaceKey
     std::uint64_t identity = 0, ordinal = 0;
     auto operator<=>(const GeneralVoFSurfaceKey&) const = default;
 };
-enum class GeneralVoFCapillaryModel
+enum class GeneralVoFCapillaryModel : uint8_t
 {
     Reconstructed,
     FilteredBinary

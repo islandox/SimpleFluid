@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
+#include "geometry/VoFWireProtocol.hh"
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -13,7 +14,8 @@ namespace
 constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr auto original_face = std::numeric_limits<std::uint64_t>::max();
 constexpr auto full_support_plane = original_face - 1;
-constexpr std::uint64_t protocol = 0x5346434150504c04ULL;
+using Record = packet_codec::Record;
+constexpr uint8_t protocol_version = 5;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Wide = std::array<long double, 3>;
 using Planes = std::map<Key, PLIC::PolyhedralInterface>;
@@ -333,16 +335,17 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
     validate_plane_metadata(result, data.options.reconstruction, mode);
     return {selected->tile->face_gid, result};
 }
-void stamp(wire::Writer& writer, const GeneralVoF::Data& data)
+void stamp(wire::Writer& writer, Record kind, const GeneralVoF::Data& data)
 {
-    writer.word(protocol);
+    packet_codec::write_header(writer, packet_codec::Family::CapillaryPlanes, protocol_version, kind);
     writer.word(data.control);
     writer.word(data.hierarchy->topology_generation());
     writer.word(data.hierarchy->partition_generation());
 }
-void check_stamp(wire::Reader& reader, const GeneralVoF::Data& data)
+void check_stamp(wire::Reader& reader, Record kind, const GeneralVoF::Data& data)
 {
-    if (reader.word() != protocol || reader.word() != data.control ||
+    packet_codec::read_header(reader, packet_codec::Family::CapillaryPlanes, protocol_version, kind);
+    if (reader.word() != data.control ||
         reader.word() != data.hierarchy->topology_generation() ||
         reader.word() != data.hierarchy->partition_generation())
         throw std::invalid_argument("Capillary plane source/topology/partition context differs.");
@@ -432,7 +435,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                 if (cell.owner != rank && !geometric_phase(cell, original.at(key)))
                 {
                     wire::Writer writer;
-                    stamp(writer, data);
+                    stamp(writer, Record::Request, data);
                     writer.bytes(AMR::encode_adaptive_key(key));
                     writer.word(cell.revision);
                     budget.packet(writer.data.capacity());
@@ -472,7 +475,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader reader{packet.bytes};
-                check_stamp(reader, data);
+                check_stamp(reader, Record::Request, data);
                 const auto bytes = reader.bytes();
                 const auto key = AMR::decode_adaptive_key(bytes);
                 const auto revision = reader.word();
@@ -484,7 +487,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                         "Capillary plane request lacks its current mixed-cell owner authority.");
                 budget.add(sizeof(std::pair<int, Key>) + bytes.size() + 4 * sizeof(void*));
                 wire::Writer writer;
-                stamp(writer, data);
+                stamp(writer, Record::Reply, data);
                 writer.bytes(bytes);
                 writer.word(revision);
                 writer.word(choices.at(key));
@@ -508,7 +511,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             for (const auto& packet : received.packets)
             {
                 wire::Reader reader{packet.bytes};
-                check_stamp(reader, data);
+                check_stamp(reader, Record::Reply, data);
                 const auto key = AMR::decode_adaptive_key(reader.bytes());
                 const auto revision = reader.word();
                 const auto face = reader.word();

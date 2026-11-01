@@ -2,6 +2,7 @@
  * @brief Authenticated complete-node fans and owner phase halo exchange.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/ProtocolTags.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
 // Every incident owner registers its actual cell once. The node authority
@@ -262,7 +263,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 cell.ordinary_quota_scale = quota;
                 cell.phase.gas_volume = real(r);
                 cell.phase.carrier_volume = real(r);
-                cell.declaration = GeneralVoFPhaseGeometry(r.word());
+                cell.declaration = protocol_tags::read_word(r, GeneralVoFPhaseGeometry::PureCarrier);
                 cell.inherited = r.word();
                 if constexpr (Mode == ArithmeticMode::Ordinary)
                 {

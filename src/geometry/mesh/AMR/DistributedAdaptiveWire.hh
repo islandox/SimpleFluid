@@ -15,6 +15,7 @@
 #include <type_traits>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+using std::uint8_t;
 struct Budget
 {
     std::size_t limit, used = 0, peak = 0, cumulative = 0;
@@ -54,7 +55,7 @@ struct Budget
 struct Writer
 {
     AdaptiveBytes data;
-    void byte(std::uint8_t value) { data.push_back(static_cast<char>(value)); }
+    void byte(uint8_t value) { data.push_back(static_cast<char>(value)); }
     void word(std::uint64_t n)
     {
         for (unsigned i = 0; i < 8; ++i)
@@ -70,11 +71,11 @@ struct Reader
 {
     std::span<const char> data;
     std::size_t offset = 0;
-    std::uint8_t byte()
+    uint8_t byte()
     {
         if (offset == data.size())
             throw std::invalid_argument("Truncated distributed adaptive tag.");
-        return static_cast<std::uint8_t>(data[offset++]);
+        return static_cast<uint8_t>(data[offset++]);
     }
     std::uint64_t word()
     {
@@ -101,12 +102,12 @@ struct Reader
     }
 };
 /** Wire records have independent versions; canonical keys never use this stamp. */
-enum class PacketFamily : std::uint8_t
+enum class PacketFamily : uint8_t
 {
     GeometryRecord = 4,
     AdaptiveBatch = 5
 };
-enum class GeometryRecordKind : std::uint8_t
+enum class GeometryRecordKind : uint8_t
 {
     Tile = 1,
     SurfaceRequest,
@@ -128,38 +129,38 @@ enum class GeometryRecordKind : std::uint8_t
 struct GeometryRecordHeader
 {
     PacketFamily family;
-    std::uint8_t version;
+    uint8_t version;
     GeometryRecordKind kind;
 };
 struct BatchHeader
 {
     PacketFamily family;
-    std::uint8_t version;
+    uint8_t version;
     std::uint64_t dictionary_count;
 };
 static_assert(std::is_standard_layout_v<GeometryRecordHeader> &&
               std::is_trivially_copyable_v<GeometryRecordHeader>);
 static_assert(std::is_standard_layout_v<BatchHeader> && std::is_trivially_copyable_v<BatchHeader>);
-inline constexpr std::uint8_t geometry_record_version = 3;
-inline constexpr std::uint8_t batch_version = 7;
+inline constexpr uint8_t geometry_record_version = 4;
+inline constexpr uint8_t batch_version = 8;
 inline constexpr std::size_t geometry_record_header_bytes = sizeof(GeometryRecordHeader);
 template<class PacketWriter> inline void write_geometry_record_header(PacketWriter& writer, GeometryRecordKind kind)
 {
-    std::array<std::uint8_t, geometry_record_header_bytes> bytes{};
-    bytes[offsetof(GeometryRecordHeader, family)] = static_cast<std::uint8_t>(PacketFamily::GeometryRecord);
+    std::array<uint8_t, geometry_record_header_bytes> bytes{};
+    bytes[offsetof(GeometryRecordHeader, family)] = static_cast<uint8_t>(PacketFamily::GeometryRecord);
     bytes[offsetof(GeometryRecordHeader, version)] = geometry_record_version;
-    bytes[offsetof(GeometryRecordHeader, kind)] = static_cast<std::uint8_t>(kind);
+    bytes[offsetof(GeometryRecordHeader, kind)] = static_cast<uint8_t>(kind);
     for (const auto byte : bytes)
         writer.byte(byte);
 }
 inline void read_geometry_record_header(Reader& reader, GeometryRecordKind kind)
 {
-    std::array<std::uint8_t, geometry_record_header_bytes> bytes{};
+    std::array<uint8_t, geometry_record_header_bytes> bytes{};
     for (auto& byte : bytes)
         byte = reader.byte();
-    if (bytes[offsetof(GeometryRecordHeader, family)] != static_cast<std::uint8_t>(PacketFamily::GeometryRecord) ||
+    if (bytes[offsetof(GeometryRecordHeader, family)] != static_cast<uint8_t>(PacketFamily::GeometryRecord) ||
         bytes[offsetof(GeometryRecordHeader, version)] != geometry_record_version ||
-        bytes[offsetof(GeometryRecordHeader, kind)] != static_cast<std::uint8_t>(kind))
+        bytes[offsetof(GeometryRecordHeader, kind)] != static_cast<uint8_t>(kind))
         throw std::invalid_argument("Unsupported adaptive geometry record family, version or kind.");
     for (std::size_t i = 0; i < geometry_record_header_bytes; ++i)
         if (i != offsetof(GeometryRecordHeader, family) && i != offsetof(GeometryRecordHeader, version) &&

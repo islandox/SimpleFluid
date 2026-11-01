@@ -3,7 +3,9 @@
  */
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
+#include "FVM/details/ProtocolTags.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -79,9 +81,9 @@ void validate_plane_metadata(const PLIC::PolyhedralInterface& p,
 void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 {
     plane_wire_detail::model_metadata(p);
-    w.word(1); // Model policy and measured quality are part of the plane protocol.
-    w.word(std::uint64_t(p.model_policy));
-    w.word(std::uint64_t(p.model_quality));
+    packet_codec::write_header(w, packet_codec::Family::InterfacePlane, 2, packet_codec::Record::Value);
+    protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+    protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
     for (auto v : p.gas.normal)
         real(w, v);
     for (auto v : p.gas.anchor)
@@ -104,10 +106,9 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
 {
     PLIC::PolyhedralInterface p;
-    if (r.word() != 1)
-        throw std::invalid_argument("Unknown General VoF interface plane protocol.");
-    p.model_policy = plane_wire_detail::model_policy(r.word());
-    p.model_quality = plane_wire_detail::model_quality(r.word());
+    packet_codec::read_header(r, packet_codec::Family::InterfacePlane, 2, packet_codec::Record::Value);
+    p.model_policy = protocol_tags::read(r, PLIC::PlicModelPolicy::ConservativeApproximation);
+    p.model_quality = protocol_tags::read(r, PLIC::PlicModelQuality::AboveThreshold);
     if (mode && *mode != ArithmeticMode::Ordinary &&
         p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement)
         throw std::invalid_argument("General VoF interface model policy has a foreign arithmetic mode.");

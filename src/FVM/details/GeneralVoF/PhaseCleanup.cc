@@ -2,6 +2,7 @@
  * @brief Owner-only transactional physical relabeling and persistent global budget.
  */
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "geometry/VoFWireProtocol.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
 namespace
@@ -80,7 +81,7 @@ void validate(const State& state, const GeneralVoFPhaseCleanupOptions* options =
 }
 void write(wire::Writer& w, const State& state)
 {
-    w.word(1);
+    packet_codec::write_header(w, packet_codec::Family::PhaseCleanup, 2, packet_codec::Record::Value);
     w.word(state.cleaned_cells);
     w.word(state.policy_bound);
     real(w, state.policy.relative_cutoff);
@@ -92,8 +93,7 @@ void write(wire::Writer& w, const State& state)
 }
 State read(wire::Reader& r)
 {
-    if (r.word() != 1)
-        throw std::invalid_argument("General VoF phase cleanup checkpoint version differs.");
+    packet_codec::read_header(r, packet_codec::Family::PhaseCleanup, 2, packet_codec::Record::Value);
     State state;
     state.cleaned_cells = r.word();
     const auto bound = r.word();

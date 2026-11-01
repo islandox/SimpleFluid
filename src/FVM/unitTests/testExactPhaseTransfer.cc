@@ -616,4 +616,51 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     result.validate_observations();
 }
 
+TEST(ExactPhaseTransfer, OwnershipMigrationRetainsMoreThan255IndependentChannels)
+{
+    AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    CartesianAMR root(grid);
+    auto h = bootstrap(root, 8);
+    std::vector<AdaptiveCellKey> keys;
+    std::vector<double> gas, carrier;
+    for (const auto& [key, leaf] : h->owned())
+    {
+        keys.push_back(key);
+        gas.push_back(0);
+        carrier.push_back(h->metrics(leaf).volume);
+    }
+    GeneralVoF state(h, keys, gas, carrier, exact_options());
+    auto source = state.export_transfer_source(false);
+    std::vector<ExactTransferChannel> schema;
+    for (unsigned channel = 0; channel < 300; ++channel)
+        schema.push_back({"bulk_" + std::to_string(channel), ExactTransferCarrier::BulkVolume, true});
+    std::vector<ExactTransferOwnedChannels> owned;
+    for (const auto& capsule : source.owned())
+    {
+        ExactTransferOwnedChannels values;
+        values.key = capsule.key;
+        for (unsigned channel = 0; channel < 300; ++channel)
+            values.amounts.push_back(M::from_value(capsule.phases.bulk).scaled(channel + 1));
+        owned.push_back(std::move(values));
+    }
+    source = source.with_channels(std::move(schema), std::move(owned));
+    const auto hierarchy = source.hierarchy();
+    const auto comm = hierarchy->communicator();
+    std::vector<int> destinations(source.owned().size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
+    const auto migration = hierarchy->plan_migration(destinations);
+    auto target = bind(*hierarchy, migration);
+    const auto moved = ExactPhaseTransfer::prepare(source, migration, target);
+    ASSERT_EQ(moved.channels().size(), 300u);
+    for (const auto& capsule : moved.owned())
+    {
+        ASSERT_EQ(capsule.amounts.size(), 300u);
+        const auto bulk = M::from_value(target->metrics(target->owned().at(capsule.key)).volume);
+        for (unsigned channel = 0; channel < 300; ++channel)
+            EXPECT_EQ(capsule.amounts[channel].compare(bulk.scaled(channel + 1)), 0);
+    }
+    EXPECT_EQ(source.channels().size(), 300u);
+    EXPECT_EQ(state.accepted_control(), source.control());
+}
+
 } // namespace

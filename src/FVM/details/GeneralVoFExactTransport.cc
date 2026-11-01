@@ -3,14 +3,27 @@
  */
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeometryWireProtocol.hh"
+#include "FVM/details/ProtocolTags.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/VoFWireProtocol.hh"
 namespace SimpleFluid::VoF
 {
 namespace Exact
 {
 namespace
 {
+enum class ExactControlKind : uint8_t
+{
+    Node = 0,
+    Face = 1,
+    Algorithm = 2
+};
+enum class ReferenceKind : uint8_t
+{
+    Serialized = 0,
+    Local = 1
+};
 namespace sweep = geometry::swept_volume;
 using Trajectory = sweep::NodeTrajectory<ArithmeticMode::Exact>;
 using PlanarFacePtr = PLIC::PlanarFacePtr<ArithmeticMode::Exact>;
@@ -74,10 +87,10 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 const auto coordinate = PLIC::encode_identity(node.coordinate_identity);
                 const auto departure = PLIC::encode_identity(trajectory.departure);
                 budget.add(coordinate.capacity() + departure.capacity());
-                budget.packet(56 + geometry_wire::header_bytes + coordinate.size());
+                budget.packet(49 + geometry_wire::header_bytes + coordinate.size());
                 wire::Writer w;
                 geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
-                w.word(0);
+                protocol_tags::write(w, ExactControlKind::Node, ExactControlKind::Algorithm);
                 w.word(node.gid);
                 w.bytes(coordinate);
                 for (auto x : v)
@@ -103,19 +116,19 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                     throw std::invalid_argument("General VoF physical boundary has nonzero flux.");
                 auto face = tile.geometry->encode_incidence(data.options.byte_budget);
                 auto exact_phi = phi.encode(data.options.byte_budget);
-                budget.packet(face.size() + exact_phi.size() + 32 + geometry_wire::header_bytes);
+                budget.packet(face.size() + exact_phi.size() + 25 + geometry_wire::header_bytes);
                 wire::Writer w;
                 geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
-                w.word(1);
+                protocol_tags::write(w, ExactControlKind::Face, ExactControlKind::Algorithm);
                 w.word(tile.face_gid);
                 w.bytes(face);
                 w.bytes(exact_phi);
                 packets.push_back({int(tile.face_gid % comm->getSize()), std::move(w.data)});
             }
-            budget.packet(32 + geometry_wire::header_bytes);
+            budget.packet(25 + geometry_wire::header_bytes);
             wire::Writer w;
             geometry_wire::write_header(w, geometry_wire::Record::ExactControls);
-            w.word(2);
+            protocol_tags::write(w, ExactControlKind::Algorithm, ExactControlKind::Algorithm);
             w.word(0);
             real(w, dt);
             w.word(data.control);
@@ -131,12 +144,13 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
             {
                 wire::Reader r{packet.bytes};
                 geometry_wire::read_header(r, geometry_wire::Record::ExactControls);
-                auto type = r.word(), id = r.word();
-                if (type > 2 || int(id % comm->getSize()) != comm->getRank())
+                const auto type = protocol_tags::read(r, ExactControlKind::Algorithm);
+                const auto id = r.word();
+                if (int(id % comm->getSize()) != comm->getRank())
                     throw std::invalid_argument("General VoF control reached wrong authority.");
                 budget.add(packet.bytes.size() +
                            sizeof(std::pair<const std::pair<std::uint64_t, std::uint64_t>, std::vector<char>>));
-                auto [found, inserted] = canonical.emplace(std::pair{type, id}, packet.bytes);
+                auto [found, inserted] = canonical.emplace(std::pair{std::uint64_t(type), id}, packet.bytes);
                 if (!inserted && found->second != packet.bytes)
                     throw std::invalid_argument("General VoF shared node/face controls disagree.");
             }
@@ -629,7 +643,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 std::vector<char> geometry;
                 if (!local)
                     geometry = atom.geometry->encode(limit);
-                budget.packet(dk.size() + rk.size() + geometry.size() + 64 + geometry_wire::header_bytes);
+                budget.packet(dk.size() + rk.size() + geometry.size() + 57 + geometry_wire::header_bytes);
                 wire::Writer w;
                 geometry_wire::write_header(w, geometry_wire::Record::ExactAtomRoute);
                 w.bytes(dk);
@@ -637,7 +651,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 w.word(donor.gid);
                 w.bytes(rk);
                 w.word(recipient.gid);
-                w.word(local ? 1 : 0);
+                protocol_tags::write(w, local ? ReferenceKind::Local : ReferenceKind::Serialized, ReferenceKind::Local);
                 if (local)
                     w.word(index);
                 else
@@ -668,12 +682,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 auto revision = r.word(), gid = r.word();
                 auto rk = AMR::decode_adaptive_key(r.bytes());
                 auto recipient = r.word();
-                const auto tag = r.word();
+                const auto tag = protocol_tags::read(r, ReferenceKind::Local);
                 const auto& donor = data.cells.at(dk);
                 if (donor.owner != comm->getRank() || donor.revision != revision || donor.gid != gid)
                     throw std::invalid_argument("General VoF atom donor authentication failed.");
                 FragmentPtr fragment;
-                if (tag == 1)
+                if (tag == ReferenceKind::Local)
                 {
                     // Only a self packet can name this invocation's immutable,
                     // already certified local atom. Remote data never acquires
@@ -692,7 +706,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     fragment = original.geometry;
                     budget.add(sizeof(Routed));
                 }
-                else if (tag == 0)
+                else if (tag == ReferenceKind::Serialized)
                 {
                     if (packet.peer == comm->getRank())
                         throw std::invalid_argument("General VoF self atom omitted its local reference.");
@@ -937,7 +951,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                             carrier.capacity() > 2 * carrier_bound)
                             throw std::invalid_argument("Donor phase encoded capacity exceeds its admission.");
                     }
-                    const auto payload_bound = dk.size() + rk.size() + bulk.size() + gas.size() + carrier.size() + 72;
+                    const auto payload_bound = dk.size() + rk.size() + bulk.size() + gas.size() + carrier.size() + 65 +
+                                               geometry_wire::header_bytes;
                     if (payload_bound > limit / 2)
                         throw std::invalid_argument("Donor phase packet capacity exceeds its budget.");
                     transport_charge(budget, 3 * sizeof(OwnerPacket), "donor phase packet metadata");
@@ -946,12 +961,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     w.data.reserve(payload_bound);
                     if (w.data.capacity() > 2 * payload_bound)
                         throw std::invalid_argument("Donor phase writer capacity exceeds admission.");
+                    geometry_wire::write_header(w, geometry_wire::Record::ExactPhaseAmount);
                     w.bytes(dk);
                     w.word(donor.gid);
                     w.word(donor.revision);
                     w.bytes(rk);
                     w.word(recipient_gid);
-                    w.word(self ? 1 : 0);
+                    protocol_tags::write(
+                        w, self ? ReferenceKind::Local : ReferenceKind::Serialized, ReferenceKind::Local);
                     if (self)
                     {
                         // Keep immutable exact handles until this invocation's
@@ -997,6 +1014,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
+                geometry_wire::read_header(r, geometry_wire::Record::ExactPhaseAmount);
                 auto dk = AMR::decode_adaptive_key(r.bytes());
                 auto gid = r.word(), revision = r.word();
                 auto rk = AMR::decode_adaptive_key(r.bytes());
@@ -1006,8 +1024,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     !seen.emplace(dk, rk).second)
                     throw std::invalid_argument("General VoF positive transfer recipient differs.");
                 ExactAmounts amount;
-                const auto tag = r.word();
-                if (tag == 1)
+                const auto tag = protocol_tags::read(r, ReferenceKind::Local);
+                if (tag == ReferenceKind::Local)
                 {
                     const auto index = r.word();
                     r.done();
@@ -1021,7 +1039,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         throw std::invalid_argument("General VoF local amount metadata mismatch.");
                     amount = original.amount;
                 }
-                else if (tag == 0)
+                else if (tag == ReferenceKind::Serialized)
                 {
                     if (packet.peer == comm->getRank())
                         throw std::invalid_argument("General VoF self amount omitted its local reference.");

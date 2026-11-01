@@ -6,6 +6,7 @@
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoFCurvature.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -17,11 +18,13 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::detail::general_vof
 {
 namespace
 {
+using std::uint8_t;
 using Key = VoF::GeneralVoFSurfaceKey;
 using Patch = VoF::GeneralVoFSurfacePatch;
 using Point = std::array<long double, 3>;
@@ -29,8 +32,27 @@ using LO = DefaultTpetraTypes::local_ordinal_type;
 using GO = DefaultTpetraTypes::global_ordinal_type;
 constexpr auto absent_cell = std::numeric_limits<std::uint64_t>::max();
 constexpr long double geometry_tolerance = 64 * std::numeric_limits<double>::epsilon();
-constexpr std::uint64_t packet_version = 0x5346435552560001ULL;
-constexpr std::size_t stamp_words = 14, request_bytes = stamp_words * 8, response_bytes = request_bytes + 8;
+using Record = packet_codec::Record;
+constexpr uint8_t packet_version = 2;
+using Model = VoF::GeneralVoFCapillaryModel;
+using PatchKind = VoF::GeneralVoFSurfaceKind;
+constexpr std::size_t stamp_words = 11;
+constexpr std::size_t request_bytes = packet_codec::header_bytes<Record> + sizeof(Model) + sizeof(PatchKind) +
+                                      stamp_words * sizeof(std::uint64_t);
+constexpr std::size_t response_bytes = request_bytes + sizeof(std::uint64_t);
+
+Model checked_model(Model model)
+{
+    if (model != Model::Reconstructed && model != Model::FilteredBinary)
+        throw std::invalid_argument("Capillary owner packet has an invalid model.");
+    return model;
+}
+PatchKind checked_patch_kind(PatchKind kind)
+{
+    if (kind != PatchKind::MixedCell && kind != PatchKind::AlignedFace && kind != PatchKind::FilteredCell)
+        throw std::invalid_argument("Capillary owner packet has an invalid patch kind.");
+    return kind;
+}
 
 struct Budget
 {
@@ -168,12 +190,46 @@ std::uint64_t read_word(const std::vector<char>& bytes, std::size_t offset)
         result |= std::uint64_t(static_cast<unsigned char>(bytes.at(offset + a))) << (8 * a);
     return result;
 }
-Key read_key(const std::vector<char>& bytes)
+struct PacketWriter
 {
-    const auto kind = read_word(bytes, 5 * 8);
-    if (kind > static_cast<std::uint64_t>(VoF::GeneralVoFSurfaceKind::FilteredCell))
-        throw std::runtime_error("Capillary owner packet has an invalid patch kind.");
-    return {static_cast<VoF::GeneralVoFSurfaceKind>(kind), read_word(bytes, 6 * 8), read_word(bytes, 7 * 8)};
+    std::vector<char>& bytes;
+    void byte(uint8_t value) { bytes.push_back(static_cast<char>(value)); }
+    void word(std::uint64_t value) { append_word(bytes, value); }
+};
+struct PacketReader
+{
+    const std::vector<char>& bytes;
+    std::size_t offset = 0;
+    uint8_t byte()
+    {
+        if (offset == bytes.size())
+            throw std::invalid_argument("Truncated capillary owner packet.");
+        return static_cast<uint8_t>(bytes[offset++]);
+    }
+    std::uint64_t word()
+    {
+        const auto value = read_word(bytes, offset);
+        offset += sizeof(std::uint64_t);
+        return value;
+    }
+};
+std::pair<Model, PatchKind> read_categories(PacketReader& reader, Record record)
+{
+    packet_codec::read_header(reader, packet_codec::Family::OrdinaryCurvature, packet_version, record);
+    const auto model = checked_model(static_cast<Model>(reader.byte()));
+    const auto kind = checked_patch_kind(static_cast<PatchKind>(reader.byte()));
+    return {model, kind};
+}
+Key read_key(const std::vector<char>& bytes, Record record)
+{
+    PacketReader reader{bytes};
+    const auto [model, kind] = read_categories(reader, record);
+    (void) model;
+    reader.word(); // Source control.
+    reader.word(); // Geometry epoch.
+    reader.word(); // Filter width.
+    const auto identity = reader.word(), ordinal = reader.word();
+    return {kind, identity, ordinal};
 }
 } // namespace
 
@@ -446,17 +502,28 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
         "ordinary_capillary_fit");
     const auto stamp = [&](const Patch& patch)
     {
-        return std::array<std::uint64_t, stamp_words>{packet_version, control, epoch,
-            static_cast<std::uint64_t>(options.model), std::bit_cast<std::uint64_t>(options.filter_width),
-            static_cast<std::uint64_t>(patch.key.kind), patch.key.identity, patch.key.ordinal,
+        return std::array<std::uint64_t, stamp_words>{control, epoch,
+            std::bit_cast<std::uint64_t>(options.filter_width), patch.key.identity, patch.key.ordinal,
             std::uint64_t(patch.owner), patch.first_cell, cells.at(patch.first_cell).revision, patch.second_cell,
             patch.second_cell == absent_cell ? 0 : cells.at(patch.second_cell).revision, patch.component};
     };
-    const auto validate_stamp = [&](const std::vector<char>& bytes, const Patch& patch)
+    const auto write_stamp = [&](std::vector<char>& bytes, const Patch& patch, Record record)
     {
-        const auto expected = stamp(patch);
-        for (std::size_t word = 0; word < expected.size(); ++word)
-            if (read_word(bytes, word * 8) != expected[word])
+        PacketWriter writer{bytes};
+        packet_codec::write_header(writer, packet_codec::Family::OrdinaryCurvature, packet_version, record);
+        writer.byte(static_cast<uint8_t>(checked_model(options.model)));
+        writer.byte(static_cast<uint8_t>(checked_patch_kind(patch.key.kind)));
+        for (auto word : stamp(patch))
+            writer.word(word);
+    };
+    const auto validate_stamp = [&](const std::vector<char>& bytes, const Patch& patch, Record record)
+    {
+        PacketReader reader{bytes};
+        const auto [model, kind] = read_categories(reader, record);
+        if (model != checked_model(options.model) || kind != checked_patch_kind(patch.key.kind))
+            throw std::runtime_error("Capillary owner packet model/key category disagreement.");
+        for (auto expected : stamp(patch))
+            if (reader.word() != expected)
                 throw std::runtime_error("Capillary owner packet source/epoch/model/key/revision disagreement.");
     };
     std::vector<OwnerPacket> packets;
@@ -475,8 +542,7 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
                     OwnerPacket packet;
                     packet.peer = patch.owner;
                     packet.bytes.reserve(request_bytes);
-                    for (auto word : stamp(patch))
-                        append_word(packet.bytes, word);
+                    write_stamp(packet.bytes, patch, Record::Request);
                     packets.push_back(std::move(packet));
                 }
         },
@@ -499,17 +565,17 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
             {
                 if (request.bytes.size() != request_bytes)
                     throw std::runtime_error("Invalid capillary owner request width.");
-                const auto key = read_key(request.bytes);
+                const auto key = read_key(request.bytes, Record::Request);
                 const auto p = index.at(key);
                 const auto& patch = catalog.patches[p];
                 if (patch.owner != rank || request.peer == rank || !std::isfinite(values[p]) ||
                     !seen.emplace(request.peer, key).second)
                     throw std::runtime_error("Capillary request has a wrong owner, duplicate key or absent fit.");
-                validate_stamp(request.bytes, patch);
+                validate_stamp(request.bytes, patch, Record::Request);
                 OwnerPacket response;
                 response.peer = request.peer;
                 response.bytes.reserve(response_bytes);
-                response.bytes.insert(response.bytes.end(), request.bytes.begin(), request.bytes.end());
+                write_stamp(response.bytes, patch, Record::Reply);
                 append_word(response.bytes, std::bit_cast<std::uint64_t>(values[p]));
                 packets.push_back(std::move(response));
             }
@@ -525,11 +591,11 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
             {
                 if (response.bytes.size() != response_bytes)
                     throw std::runtime_error("Invalid capillary owner response width.");
-                const auto p = index.at(read_key(response.bytes));
+                const auto p = index.at(read_key(response.bytes, Record::Reply));
                 const auto& patch = catalog.patches[p];
                 if (response.peer != patch.owner || patch.owner == rank || std::isfinite(values[p]))
                     throw std::runtime_error("Capillary publication has a wrong authority or duplicate patch key.");
-                validate_stamp(response.bytes, patch);
+                validate_stamp(response.bytes, patch, Record::Reply);
                 const auto value = std::bit_cast<double>(read_word(response.bytes, request_bytes));
                 if (!std::isfinite(value))
                     throw std::runtime_error("Capillary owner published nonfinite curvature.");

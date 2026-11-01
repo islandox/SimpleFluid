@@ -1,9 +1,11 @@
 #include "general_vof_finite_test_helpers.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "plic_cleanup_capture.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <limits>
 namespace
 {
+using std::uint8_t;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 using Declaration = GeneralVoFPhaseGeometry;
 using Backend = GeneralVoFTransportBackend;
@@ -587,6 +589,36 @@ TEST(GeneralVoFPhaseCleanup, EnabledCleanupRejectsBoundedAndExactArithmetic)
             EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options),
                 std::invalid_argument);
         }
+}
+
+TEST(GeneralVoFPhaseCleanup, CheckpointRejectsUnknownByteHeadersAndRetainsWideCleanedCount)
+{
+    namespace packet = SimpleFluid::packet_codec;
+    using Header = packet::Header<packet::Record>;
+    const auto input = fixture();
+    const auto options = cleanup_options();
+    GeneralVoF initial(input.hierarchy, input.order, input.gas, input.carrier, options);
+    auto ledger = initial.phase_cleanup_state();
+    ledger.cleaned_cells = (std::uint64_t{1} << 40) + 300;
+    GeneralVoF restored(
+        input.hierarchy, input.order, input.gas, input.carrier, options, initial.phase_geometry_declarations(), ledger);
+    const auto bytes = restored.phase_cleanup_checkpoint();
+    const auto accepted = GeneralVoF::decode_phase_cleanup_checkpoint(bytes);
+    EXPECT_EQ(accepted.cleaned_cells, ledger.cleaned_cells);
+    EXPECT_EQ(accepted.absolute_volume, ledger.absolute_volume);
+    EXPECT_EQ(accepted.signed_volume, ledger.signed_volume);
+    for (const auto [offset, invalid] :
+        {std::pair{offsetof(Header, version), uint8_t{1}}, std::pair{offsetof(Header, kind), uint8_t{255}}})
+    {
+        auto malformed = bytes;
+        malformed[offset] = char(invalid);
+        EXPECT_THROW((void) GeneralVoF::decode_phase_cleanup_checkpoint(malformed), std::invalid_argument);
+    }
+    for (std::size_t size = 0; size < bytes.size(); ++size)
+        EXPECT_THROW((void) GeneralVoF::decode_phase_cleanup_checkpoint(std::span<const char>(bytes).first(size)),
+            std::invalid_argument);
+    const std::array<char, 16> legacy_empty{};
+    EXPECT_THROW((void) GeneralVoF::decode_phase_cleanup_checkpoint(legacy_empty), std::invalid_argument);
 }
 
 } // namespace

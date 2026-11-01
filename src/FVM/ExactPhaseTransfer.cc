@@ -6,6 +6,8 @@
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/PhaseArithmetic.hh"
+#include "FVM/details/ProtocolTags.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
 #include <array>
@@ -180,8 +182,8 @@ long double wide(wire::Reader& r)
 void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 {
     plane_wire_detail::model_metadata(p);
-    w.word(std::uint64_t(p.model_policy));
-    w.word(std::uint64_t(p.model_quality));
+    protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+    protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
     for (auto x : p.gas.normal)
         real(w, x);
     for (auto x : p.gas.anchor)
@@ -206,8 +208,8 @@ bool boolean(wire::Reader& r)
 PLIC::PolyhedralInterface plane(wire::Reader& r)
 {
     PLIC::PolyhedralInterface p;
-    p.model_policy = plane_wire_detail::model_policy(r.word());
-    p.model_quality = plane_wire_detail::model_quality(r.word());
+    p.model_policy = protocol_tags::read(r, PLIC::PlicModelPolicy::ConservativeApproximation);
+    p.model_quality = protocol_tags::read(r, PLIC::PlicModelQuality::AboveThreshold);
     for (auto& x : p.gas.normal)
         x = real(r);
     for (auto& x : p.gas.anchor)
@@ -238,11 +240,10 @@ AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
 {
     wire::Budget budget{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    budget.add(304 + key_bytes.size());
+    budget.add(267 + packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
     wire::Writer w;
-    w.word(0x5346455054523731ULL);
-    w.word(6);
-    w.word(std::uint64_t(c.policy));
+    packet_codec::write_header(w, packet_codec::Family::ExactPhaseWorking, 7, packet_codec::Record::Value);
+    protocol_tags::write(w, c.policy, PhaseInventoryPolicy::ExperimentalExact);
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
     w.word(std::numeric_limits<long double>::max_exponent);
@@ -283,16 +284,13 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Exact phase capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346455054523731ULL || r.word() != 6)
-        throw std::invalid_argument("Unknown policy-pinned working capsule format.");
-    const auto policy = r.word();
-    if (policy > 1)
-        throw std::invalid_argument("Invalid working policy.");
+    packet_codec::read_header(r, packet_codec::Family::ExactPhaseWorking, 7, packet_codec::Record::Value);
+    const auto policy = protocol_tags::read(r, PhaseInventoryPolicy::ExperimentalExact);
     if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
         throw std::invalid_argument("Unknown exact phase capsule format.");
     WorkingCapsule c;
-    c.policy = PhaseInventoryPolicy(policy);
+    c.policy = policy;
     c.key = AMR::decode_adaptive_key(r.bytes());
     c.revision = r.word();
     c.geometry_ready = boolean(r);
@@ -408,11 +406,10 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
 {
     wire::Budget capacity{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    capacity.add(560 + key_bytes.size());
+    capacity.add(523 + packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
     wire::Writer w;
-    w.word(0x5346465054523731ULL);
-    w.word(6);
-    w.word(std::uint64_t(c.policy));
+    packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Value);
+    protocol_tags::write(w, c.policy, PhaseInventoryPolicy::ExperimentalExact);
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
     w.word(std::numeric_limits<long double>::max_exponent);
@@ -461,16 +458,13 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Finite source capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346465054523731ULL || r.word() != 6)
-        throw std::invalid_argument("Unknown policy-pinned source capsule format.");
-    const auto policy = r.word();
-    if (policy > 1)
-        throw std::invalid_argument("Invalid source policy.");
+    packet_codec::read_header(r, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Value);
+    const auto policy = protocol_tags::read(r, PhaseInventoryPolicy::ExperimentalExact);
     if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
         throw std::invalid_argument("Unknown finite source capsule format.");
     ExactPhaseTransferCapsule c;
-    c.policy = PhaseInventoryPolicy(policy);
+    c.policy = policy;
     c.key = AMR::decode_adaptive_key(r.bytes());
     c.revision = r.word();
     c.geometry_ready = boolean(r);
@@ -581,8 +575,9 @@ void agree(std::uint64_t control, PhaseInventoryPolicy policy, std::span<const E
                 !std::isfinite(options.maximum_relative_target_fit) || options.maximum_relative_target_fit < 0)
                 throw std::invalid_argument("Invalid exact phase transfer controls.");
             wire::Writer w;
+            packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Request);
             w.word(control);
-            w.word(std::uint64_t(policy));
+            protocol_tags::write(w, policy, PhaseInventoryPolicy::ExperimentalExact);
             real(w, options.maximum_relative_target_defect);
             real(w, options.maximum_relative_target_fit);
             w.word(channels.size());
@@ -592,7 +587,7 @@ void agree(std::uint64_t control, PhaseInventoryPolicy policy, std::span<const E
                 if (c.name.empty() || !names.insert(c.name).second || std::uint64_t(c.carrier) > 3)
                     throw std::invalid_argument("Invalid exact transfer channel schema.");
                 w.bytes(std::span(c.name));
-                w.word(std::uint64_t(c.carrier));
+                protocol_tags::write(w, c.carrier, ExactTransferCarrier::MixtureMass);
                 w.word(c.nonnegative);
             }
             wire::Budget budget{options.byte_budget};

@@ -15,6 +15,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "utils/ArithmeticMode.hh"
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -23,6 +24,7 @@
 #include <vector>
 namespace SimpleFluid::VoF
 {
+using std::uint8_t;
 namespace Exact
 {
 struct GeneralVoF;
@@ -31,7 +33,7 @@ namespace general_vof_detail
 {
 struct LocalTransportControls;
 }
-enum class GeneralVoFPhaseGeometry
+enum class GeneralVoFPhaseGeometry : uint8_t
 {
     Infer,
     PureGas,
@@ -39,7 +41,12 @@ enum class GeneralVoFPhaseGeometry
 };
 /** One coherent Eulerian backend per step. SweptPartition is the primary
  * default; the algebraic face backends remain explicit alternatives. */
-enum class GeneralVoFTransportBackend { SweptPartition, DonorCell, GeometricFace };
+enum class GeneralVoFTransportBackend : uint8_t
+{
+    SweptPartition,
+    DonorCell,
+    GeometricFace
+};
 struct GeneralVoFDirectedStream
 {
     std::uint64_t face = 0, donor = 0, recipient = 0;

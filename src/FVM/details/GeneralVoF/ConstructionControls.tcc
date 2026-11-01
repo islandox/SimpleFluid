@@ -5,45 +5,56 @@
 #pragma once
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/ProtocolTags.hh"
 #include "geometry/PLIC/ConstructionRegistry.hh"
+#include "geometry/VoFWireProtocol.hh"
 
 namespace SimpleFluid::VoF::construction_controls
 {
 using Records = std::map<std::pair<std::uint64_t, std::uint64_t>, AMR::AdaptiveBytes>;
 using FaceAuthority = GeneralVoF::Data::FaceAuthority;
-constexpr std::uint64_t version = 5; // Includes the plane-model admission policy.
+enum class ControlKind : uint8_t
+{
+    Node = 0,
+    Face = 1,
+    Algorithm = 2
+};
+constexpr uint8_t version = 6;
 
-inline void header(wire::Writer& writer, std::uint64_t kind, std::uint64_t id,
-    const PLIC::GeometryPacketContext& context, ArithmeticMode mode)
+inline void header(wire::Writer& writer, ControlKind kind, std::uint64_t id, const PLIC::GeometryPacketContext& context,
+    ArithmeticMode mode)
 {
     if (mode != ArithmeticMode::Ordinary && mode != ArithmeticMode::BoundedCertification)
         throw std::invalid_argument("Finite VoF construction control has a foreign arithmetic mode.");
-    writer.word(kind);
+    if (uint8_t(kind) > uint8_t(ControlKind::Algorithm))
+        throw std::invalid_argument("Unknown finite VoF construction-control kind.");
+    packet_codec::write_header(writer, packet_codec::Family::ConstructionControls, version, kind);
     writer.word(id);
-    writer.word(version);
-    writer.word(std::uint64_t(mode));
+    protocol_tags::write(writer, mode, ArithmeticMode::BoundedCertification);
     for (const auto pin : context.publication)
         writer.word(pin);
 }
 inline std::pair<std::uint64_t, std::uint64_t> header(
     wire::Reader& reader, const PLIC::GeometryPacketContext& expected, ArithmeticMode mode)
 {
-    const auto kind = reader.word(), id = reader.word();
-    if (reader.word() != version || reader.word() != std::uint64_t(mode))
+    const auto kind = packet_codec::read_header(reader, packet_codec::Family::ConstructionControls, version,
+        {ControlKind::Node, ControlKind::Face, ControlKind::Algorithm});
+    const auto id = reader.word();
+    if (protocol_tags::read(reader, ArithmeticMode::BoundedCertification) != mode)
         throw std::invalid_argument("Finite VoF construction-control protocol or arithmetic mode differs.");
     for (const auto pin : expected.publication)
         if (reader.word() != pin)
             throw std::invalid_argument("Finite VoF construction control has stale publication pins.");
-    return {kind, id};
+    return {std::uint64_t(kind), id};
 }
 inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
 {
     wire::Writer writer;
     // Byte budgets are local admission limits, not shared algorithm semantics.
+    protocol_tags::write(writer, options.arithmetic_mode, ArithmeticMode::Exact);
+    protocol_tags::write(writer, options.reconstruction.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
     for (const auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
-             std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
-             std::uint64_t(options.reconstruction.model_policy),
-             std::uint64_t(options.reconstruction.maximum_offset_iterations),
+             std::uint64_t(options.support_rings), std::uint64_t(options.reconstruction.maximum_offset_iterations),
              std::uint64_t(options.reconstruction.maximum_fit_iterations),
              std::uint64_t(options.reconstruction.maximum_stencil_cells),
              std::uint64_t(options.reconstruction.maximum_clip_evaluations),
@@ -102,7 +113,7 @@ AMR::AdaptiveBytes node_record(const GeneralVoF::Data& data, std::uint64_t node,
     const PLIC::GeometryPacketContext& context)
 {
     wire::Writer writer;
-    header(writer, 0, node, context, Mode);
+    header(writer, ControlKind::Node, node, context, Mode);
     writer.bytes(data.topology->construction_nodes.at(node));
     point(writer, source.dynamic());
     point(writer, departed.dynamic());
@@ -125,7 +136,7 @@ inline AMR::AdaptiveBytes face_record(const GeneralVoF::Data& data, std::uint64_
 {
     const auto& face = data.topology->construction_face(id);
     wire::Writer writer;
-    header(writer, 1, id, context, data.options.arithmetic_mode);
+    header(writer, ControlKind::Face, id, context, data.options.arithmetic_mode);
     writer.bytes(face.domain);
     writer.bytes(face.surface);
     writer.bytes(face.identity);
@@ -266,7 +277,7 @@ void require_donor_ancestry(const PLIC::ConstructionRegistry<Mode>& registry,
 /** A fixed two-exchange service. Empty owners still retain and serve records
  * assigned to their modulo authority; requested geometry is never serialized.
  */
-inline std::map<std::uint64_t, AMR::AdaptiveBytes> request_records(std::uint64_t kind,
+inline std::map<std::uint64_t, AMR::AdaptiveBytes> request_records(ControlKind kind,
     const std::set<std::uint64_t>& requested, const Records& authoritative, const PLIC::GeometryPacketContext& context,
     ArithmeticMode mode, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t limit, std::size_t retained_bytes)
 {
@@ -300,7 +311,7 @@ inline std::map<std::uint64_t, AMR::AdaptiveBytes> request_records(std::uint64_t
                 wire::Reader reader{request.bytes};
                 const auto key = header(reader, context, mode);
                 reader.done();
-                if (key.first != kind || int(key.second % comm->getSize()) != comm->getRank())
+                if (key.first != std::uint64_t(kind) || int(key.second % comm->getSize()) != comm->getRank())
                     throw std::invalid_argument("Finite VoF construction request reached a foreign authority.");
                 const auto found = authoritative.find(key);
                 if (found == authoritative.end())
@@ -326,7 +337,7 @@ inline std::map<std::uint64_t, AMR::AdaptiveBytes> request_records(std::uint64_t
             {
                 wire::Reader reader{response.bytes};
                 const auto key = header(reader, context, mode);
-                if (key.first != kind || !requested.contains(key.second) ||
+                if (key.first != std::uint64_t(kind) || !requested.contains(key.second) ||
                     response.peer != int(key.second % comm->getSize()))
                     throw std::invalid_argument("Finite VoF construction response has a "
                                                 "foreign identity or sender.");

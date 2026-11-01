@@ -3,6 +3,8 @@
  */
 #include "FVM/DistributedAdaptiveState.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
+#include "FVM/details/ProtocolTags.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -28,6 +30,11 @@ struct Writer
     {
         if (n > limit - data.size())
             throw std::invalid_argument("Adaptive state wire budget exhausted.");
+    }
+    void byte(uint8_t value)
+    {
+        charge(1);
+        data.push_back(char(value));
     }
     void word(std::uint64_t value)
     {
@@ -112,7 +119,7 @@ void agree_id(std::uint64_t id, Teuchos::RCP<const Teuchos::Comm<int>> comm)
 ::SimpleFluid::Meshes::AMR::AdaptiveBytes schema(const std::vector<AdaptiveHistoryFrame>& histories, std::size_t limit)
 {
     Writer w{{}, limit};
-    w.word(0x5346414d52535431ULL);
+    packet_codec::write_header(w, packet_codec::Family::AdaptiveStateSchema, 2, packet_codec::Record::Value);
     w.word(histories.size());
     std::set<std::string> names;
     for (const auto& frame : histories)
@@ -133,7 +140,7 @@ void agree_id(std::uint64_t id, Teuchos::RCP<const Teuchos::Comm<int>> comm)
                 std::uint64_t(q.carrier) > std::uint64_t(InventoryCarrier::MixtureMass))
                 throw std::invalid_argument("Invalid or duplicated adaptive quantity schema.");
             w.bytes(std::span(q.name));
-            w.word(std::uint64_t(q.carrier));
+            protocol_tags::write(w, q.carrier, InventoryCarrier::MixtureMass);
             w.word(q.nonnegative);
         }
         w.word(frame.pairs.size());
@@ -401,7 +408,7 @@ void write_cell(Writer& w, const Data& data, const Key& key, std::size_t i)
         for (auto value : plane.anchor)
             w.word(std::bit_cast<std::uint64_t>(value));
         w.word(std::bit_cast<std::uint64_t>(plane.offset));
-        w.word(std::uint64_t(frame.phases.geometry_declaration[i]));
+        protocol_tags::write(w, frame.phases.geometry_declaration[i], AMRPhaseGeometry::PureCarrier);
         for (const auto& q : frame.inventories)
             w.word(std::bit_cast<std::uint64_t>(q.amount[i]));
     }
@@ -468,10 +475,8 @@ void read_cell(Reader& r, std::vector<AdaptiveHistoryFrame>& frames, std::size_t
         for (auto& x : plane.anchor)
             x = std::bit_cast<double>(r.word());
         plane.offset = std::bit_cast<double>(r.word());
-        const auto declaration = r.word();
-        if (declaration > 2)
-            throw std::invalid_argument("Invalid migrated phase declaration.");
-        frame.phases.geometry_declaration[i] = AMRPhaseGeometry(declaration);
+        const auto declaration = protocol_tags::read(r, AMRPhaseGeometry::PureCarrier);
+        frame.phases.geometry_declaration[i] = declaration;
         for (auto& q : frame.inventories)
             q.amount[i] = std::bit_cast<double>(r.word());
     }

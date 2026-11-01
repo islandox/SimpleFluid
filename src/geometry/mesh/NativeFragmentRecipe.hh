@@ -3,11 +3,13 @@
  */
 #pragma once
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
 namespace SimpleFluid::Meshes
 {
+using std::uint8_t;
 using NativeFragmentBytes = std::vector<char>;
 /** Immutable through shared_ptr<const>. Slots are canonical whole-byte parts:
  * Cartesian: topology + three axes; ConstructedProduct: topology base, constructed base,
@@ -15,7 +17,7 @@ using NativeFragmentBytes = std::vector<char>;
  * Legacy procedural providers use one detached descriptor part. */
 struct NativeFragmentDescriptor
 {
-    enum class Kind : std::uint64_t
+    enum class Kind : uint8_t
     {
         Cartesian,
         ConstructedProduct,

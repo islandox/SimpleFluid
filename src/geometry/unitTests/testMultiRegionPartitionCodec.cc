@@ -5,6 +5,8 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/NativePartitionWire.hh"
+#include "geometry/mesh/NativeFragmentRecipe.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <algorithm>
@@ -14,6 +16,7 @@
 
 namespace
 {
+using std::uint8_t;
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using ID = MultiRegionMesh::ID;
@@ -88,7 +91,7 @@ PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
         static_cast<uint8_t>(packet[offsetof(Header, family)]) !=
             static_cast<uint8_t>(partition_wire::Family::MultiRegionPartition) ||
         static_cast<uint8_t>(packet[offsetof(Header, version)]) != partition_wire::version)
-        throw std::logic_error("Codec test expected native packet format 10.");
+        throw std::logic_error("Codec test expected native packet format 11.");
     r.pos = offsetof(Header, region_count);
     const auto regions = r.take<uint64_t>();
     r.pos = sizeof(Header);
@@ -163,7 +166,7 @@ TEST(MultiRegionPartitionCodecTest, NativeHeaderHasDeterministicPaddingAndReject
         ASSERT_GE(packet.size(), sizeof(Header));
         EXPECT_EQ(source.serialize_partition(visible), packet);
         EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Header, family)]), 2u);
-        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Header, version)]), 10u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Header, version)]), 11u);
         uint64_t region_count;
         std::memcpy(&region_count, packet.data() + offsetof(Header, region_count), sizeof(region_count));
         EXPECT_EQ(region_count, 1u);
@@ -198,7 +201,7 @@ TEST(MultiRegionPartitionCodecTest, NativeHeaderHasDeterministicPaddingAndReject
         overwrite(bad, offsetof(Header, family), uint8_t{255});
         reject(bad);
         bad = packet;
-        overwrite(bad, offsetof(Header, version), uint8_t{9});
+        overwrite(bad, offsetof(Header, version), uint8_t{10});
         reject(bad);
         bad = packet;
         overwrite(bad, offsetof(Header, version), uint8_t{255});
@@ -220,6 +223,113 @@ TEST(MultiRegionPartitionCodecTest, NativeHeaderHasDeterministicPaddingAndReject
             reject(legacy);
         }
     }
+}
+
+TEST(MultiRegionPartitionCodecTest, NativeFragmentByteHeadersRoundTripAndRejectActualLegacyFrames)
+{
+    using Frame = packet_codec::Header<NativeFragmentDescriptor::Kind>;
+    static_assert(sizeof(NativeFragmentDescriptor::Kind) == sizeof(uint8_t));
+    const auto topology = std::make_shared<const ExtrudedTopology>(4, Arr<Arr<unsigned>>{{0, 1, 2, 3}}, 1);
+    const std::vector<MultiRegionMesh::Region> regions{
+        cartesian_region(std::string(257, 'c'), {{{0, 1}, {0, 1}, {0, 1}}}),
+        extruded_region(std::string(258, 'e'), topology, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}, {0, 2})};
+    for (const auto& region : regions)
+    {
+        NativeFragmentCache cache;
+        const auto descriptor = extract_native_fragment(region, cache);
+        const auto packet = encode_native_fragment_descriptor(*descriptor);
+        ASSERT_GE(packet.size(), sizeof(Frame));
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, family)]), 26u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, version)]), 3u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, kind)]), static_cast<uint8_t>(descriptor->kind));
+        EXPECT_EQ(encoded_native_fragment_descriptor_size(*descriptor), packet.size());
+        EXPECT_GT(descriptor->view.size(), 255u); // The name's count and complete bytes remain wide.
+        const auto decoded = decode_native_fragment_descriptor(packet, cache);
+        EXPECT_EQ(decoded->kind, descriptor->kind);
+        EXPECT_EQ(decoded->view, descriptor->view);
+        ASSERT_EQ(decoded->parts.size(), descriptor->parts.size());
+        for (size_t i = 0; i < decoded->parts.size(); ++i)
+            EXPECT_EQ(*decoded->parts[i], *descriptor->parts[i]);
+        EXPECT_EQ(encode_native_fragment(decode_native_fragment(packet)), packet);
+        const auto reject = [&](std::span<const char> bytes)
+        {
+            EXPECT_THROW((void) decode_native_fragment_descriptor(bytes, cache), std::invalid_argument);
+        };
+        for (size_t size = 0; size < sizeof(Frame); ++size)
+            reject(std::span<const char>{packet.data(), size});
+        for (const auto [offset, value] : {std::pair{offsetof(Frame, family), uint8_t{255}},
+                 std::pair{offsetof(Frame, version), uint8_t{2}}, std::pair{offsetof(Frame, kind), uint8_t{255}}})
+        {
+            auto bad = packet;
+            overwrite(bad, offset, value);
+            reject(bad);
+        }
+        auto bad = packet;
+        bad.pop_back();
+        reject(bad);
+        bad = packet;
+        bad.push_back(0);
+        reject(bad);
+        bad = packet;
+        overwrite(bad, sizeof(Frame), std::numeric_limits<uint64_t>::max());
+        reject(bad); // The part count cannot fit in the remaining payload.
+        std::vector<char> legacy(2 * sizeof(uint64_t));
+        overwrite(legacy, 0, uint64_t{0x53464e4154520002ULL});
+        overwrite(legacy, sizeof(uint64_t), static_cast<uint64_t>(descriptor->kind));
+        legacy.insert(legacy.end(), packet.begin() + sizeof(Frame), packet.end());
+        reject(legacy);
+        auto invalid = *descriptor;
+        invalid.kind = static_cast<NativeFragmentDescriptor::Kind>(255);
+        EXPECT_THROW((void) encode_native_fragment_descriptor(invalid), std::invalid_argument);
+        EXPECT_THROW((void) encoded_native_fragment_descriptor_size(invalid), std::invalid_argument);
+    }
+}
+
+TEST(MultiRegionPartitionCodecTest, SharedBaseTopologyByteHeaderRetainsWideCountsAndRejectsLegacyFrames)
+{
+    using Frame = packet_codec::Header<packet_codec::Record>;
+    Arr<unsigned> polygon;
+    for (unsigned i = 0; i < 257; ++i)
+        polygon.push_back(i);
+    const ExtrudedTopology source(257, {polygon}, 1);
+    const auto packet = source.encode_base();
+    ASSERT_GE(packet.size(), sizeof(Frame));
+    EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, family)]), 27u);
+    EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, version)]), 2u);
+    EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, kind)]), 1u);
+    const auto decoded = ExtrudedTopology::decode_base(packet);
+    EXPECT_EQ(decoded->indexer().num_nodes_per_layer, 257u);
+    EXPECT_EQ(decoded->base_cell_nodes(0).size(), 257u);
+    EXPECT_EQ(decoded->encode_base(), packet);
+    const auto reject = [](std::span<const char> bytes)
+    {
+        EXPECT_THROW((void) ExtrudedTopology::decode_base(bytes), std::invalid_argument);
+    };
+    for (size_t size = 0; size < sizeof(Frame); ++size)
+        reject(std::span<const char>{packet.data(), size});
+    for (const auto [offset, value] : {std::pair{offsetof(Frame, family), uint8_t{255}},
+             std::pair{offsetof(Frame, version), uint8_t{1}}, std::pair{offsetof(Frame, kind), uint8_t{255}},
+             std::pair{offsetof(Frame, kind), uint8_t{3}}})
+    {
+        auto bad = packet;
+        overwrite(bad, offset, value);
+        reject(bad);
+    }
+    auto bad = packet;
+    bad.pop_back();
+    reject(bad);
+    bad = packet;
+    bad.push_back(0);
+    reject(bad);
+    bad = packet;
+    std::fill_n(bad.begin() + sizeof(Frame) + sizeof(uint64_t), sizeof(uint64_t), char(255));
+    reject(bad); // Declared cell count exceeds both the policy cap and remaining bytes.
+    std::vector<char> legacy;
+    for (const uint64_t word : {uint64_t{0x5346544f50424131ULL}, uint64_t{1}})
+        for (unsigned byte = 0; byte < 8; ++byte)
+            legacy.push_back(static_cast<char>((word >> (8 * byte)) & 255));
+    legacy.insert(legacy.end(), packet.begin() + sizeof(Frame), packet.end());
+    reject(legacy);
 }
 
 TEST(MultiRegionPartitionCodecTest, MergesOverlappingShardsWithoutRetainingInputs)
