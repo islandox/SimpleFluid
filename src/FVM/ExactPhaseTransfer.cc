@@ -5,6 +5,7 @@
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "FVM/details/ProtocolTags.hh"
 #include "geometry/VoFWireProtocol.hh"
@@ -13,7 +14,6 @@
 #include <array>
 #include <bit>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -163,96 +163,26 @@ double real(wire::Reader& r)
         throw std::invalid_argument("Nonfinite exact transfer plane metadata.");
     return x;
 }
-void wide(wire::Writer& w, long double value)
+void plane(wire::Writer& writer, const PLIC::DynamicPolyhedralReconstructionResult& result)
 {
-    if (!std::isfinite(value))
-        throw std::invalid_argument("Nonfinite exact transfer diagnostic.");
-    w.bytes(std::span(reinterpret_cast<const char*>(&value), sizeof(value)));
+    general_vof_detail::plane(writer, result);
 }
-long double wide(wire::Reader& r)
+bool boolean(wire::Reader& reader)
 {
-    auto bytes = r.bytes();
-    if (bytes.size() != sizeof(long double))
-        throw std::invalid_argument("Exact transfer diagnostic format mismatch.");
-    long double value;
-    std::memcpy(&value, bytes.data(), sizeof(value));
-    if (!std::isfinite(value))
-        throw std::invalid_argument("Nonfinite exact transfer diagnostic.");
-    return value;
+    return plane_wire_detail::boolean(reader);
 }
-void plane(wire::Writer& w, const PLIC::DynamicPolyhedralReconstructionResult& result)
+PLIC::DynamicPolyhedralReconstructionResult plane(wire::Reader& reader)
 {
-    std::visit(
-        [&](const auto& p)
-        {
-            plane_wire_detail::model_metadata(p);
-            protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
-            protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
-            for (auto x : p.geometry.gas.normal)
-                real(w, x);
-            for (auto x : p.geometry.gas.anchor)
-                real(w, x);
-            real(w, p.geometry.gas.offset);
-            for (auto x :
-                {p.target_volume_residual, p.stencil_volume_residual, p.stencil_condition, p.orientation_step})
-                real(w, x);
-            plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
-            PLIC::GeometryValue<ArithmeticMode::Exact> exact_difference;
-            if constexpr (decltype(p.target_volume_difference)::arithmetic_mode == ArithmeticMode::Exact)
-                exact_difference = p.target_volume_difference;
-            wide(w, exact_difference.value);
-            wide(w, exact_difference.absolute_error);
-            w.word(exact_difference.exact_nonzero);
-            w.word(p.fit_iterations);
-            plane_wire_detail::orientation(w, p.orientation_method);
-            w.word(p.fit_converged);
-            w.word(p.geometry.pure_gas);
-            w.word(p.geometry.pure_carrier);
-        },
-        result);
-}
-bool boolean(wire::Reader& r)
-{
-    return plane_wire_detail::boolean(r);
-}
-PLIC::DynamicPolyhedralReconstructionResult plane(wire::Reader& r)
-{
-    PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact> p;
-    p.model_policy = protocol_tags::read(r, PLIC::PlicModelPolicy::ConservativeApproximation);
-    p.model_quality = protocol_tags::read(r, PLIC::PlicModelQuality::AboveThreshold);
-    for (auto& x : p.geometry.gas.normal)
-        x = real(r);
-    for (auto& x : p.geometry.gas.anchor)
-        x = real(r);
-    p.geometry.gas.offset = real(r);
-    p.target_volume_residual = real(r);
-    p.stencil_volume_residual = real(r);
-    p.stencil_condition = real(r);
-    p.orientation_step = real(r);
-    p.stencil_volume_residual_measured = plane_wire_detail::boolean(r);
-    p.target_volume_difference.value = wide(r);
-    p.target_volume_difference.absolute_error = wide(r);
-    if (p.target_volume_difference.absolute_error < 0)
-        throw std::invalid_argument("Negative diagnostic enclosure.");
-    p.target_volume_difference.exact_nonzero = boolean(r);
-    auto count = r.word();
-    if (count > std::numeric_limits<unsigned>::max())
-        throw std::invalid_argument("Exact transfer iteration count overflow.");
-    p.fit_iterations = unsigned(count);
-    p.orientation_method = plane_wire_detail::orientation(r);
-    p.fit_converged = boolean(r);
-    p.geometry.pure_gas = boolean(r);
-    p.geometry.pure_carrier = boolean(r);
-    plane_wire_detail::model_metadata(p);
-    return PLIC::to_dynamic(std::move(p));
+    return general_vof_detail::plane_for_exact_transfer(reader);
 }
 AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
 {
     wire::Budget budget{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    budget.add(267 + packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
+    budget.add(267 - 194 + general_vof_detail::reconstruction_wire_bytes(PLIC::reconstruction_mode(c.geometry)) +
+               packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
     wire::Writer w;
-    packet_codec::write_header(w, packet_codec::Family::ExactPhaseWorking, 7, packet_codec::Record::Value);
+    packet_codec::write_header(w, packet_codec::Family::ExactPhaseWorking, 8, packet_codec::Record::Value);
     protocol_tags::write(w, c.policy, PhaseInventoryPolicy::ExperimentalExact);
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -294,7 +224,7 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Exact phase capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    packet_codec::read_header(r, packet_codec::Family::ExactPhaseWorking, 7, packet_codec::Record::Value);
+    packet_codec::read_header(r, packet_codec::Family::ExactPhaseWorking, 8, packet_codec::Record::Value);
     const auto policy = protocol_tags::read(r, PhaseInventoryPolicy::ExperimentalExact);
     if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
@@ -417,9 +347,10 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
 {
     wire::Budget capacity{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    capacity.add(523 + packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
+    capacity.add(523 - 194 + general_vof_detail::reconstruction_wire_bytes(PLIC::reconstruction_mode(c.geometry)) +
+                 packet_codec::header_bytes<packet_codec::Record> + key_bytes.size());
     wire::Writer w;
-    packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Value);
+    packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 8, packet_codec::Record::Value);
     protocol_tags::write(w, c.policy, PhaseInventoryPolicy::ExperimentalExact);
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -469,7 +400,7 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Finite source capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    packet_codec::read_header(r, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Value);
+    packet_codec::read_header(r, packet_codec::Family::ExactPhaseSource, 8, packet_codec::Record::Value);
     const auto policy = protocol_tags::read(r, PhaseInventoryPolicy::ExperimentalExact);
     if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
@@ -586,7 +517,7 @@ void agree(std::uint64_t control, PhaseInventoryPolicy policy, std::span<const E
                 !std::isfinite(options.maximum_relative_target_fit) || options.maximum_relative_target_fit < 0)
                 throw std::invalid_argument("Invalid exact phase transfer controls.");
             wire::Writer w;
-            packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 7, packet_codec::Record::Request);
+            packet_codec::write_header(w, packet_codec::Family::ExactPhaseSource, 8, packet_codec::Record::Request);
             w.word(control);
             protocol_tags::write(w, policy, PhaseInventoryPolicy::ExperimentalExact);
             real(w, options.maximum_relative_target_defect);

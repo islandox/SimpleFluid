@@ -73,9 +73,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
-                auto imported =
-                    plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
-                                                                                   : data.options.arithmetic_mode);
+                auto imported = plane(r, data.options.arithmetic_mode);
                 validate_plane_metadata(imported, data.options.reconstruction, Mode);
                 if (PLIC::reconstruction_mode(imported) != Mode)
                     throw std::invalid_argument("Imported interface arithmetic mode differs from its state.");
@@ -286,9 +284,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
                 storage.charge(
                     sizeof(decltype(seen)::value_type) + 4 * sizeof(void*) + owner_plane_key_storage_bytes(key));
                 seen.insert(key);
-                auto imported =
-                    plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
-                                                                                   : data.options.arithmetic_mode);
+                auto imported = plane(r, data.options.arithmetic_mode);
                 validate_plane_metadata(imported, data.options.reconstruction, Mode);
                 if (PLIC::reconstruction_mode(imported) != Mode)
                     throw std::invalid_argument("Imported interface arithmetic mode differs from its state.");

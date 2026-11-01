@@ -211,25 +211,6 @@ template<ArithmeticMode Mode>
 {
     return std::visit([](auto& value) -> PolyhedralInterface& { return value.geometry; }, result);
 }
-/** Copy only common metadata at explicit codec/dispatch boundaries. The caller
- * must separately provide the destination's arithmetic-specific residual. */
-template<ArithmeticMode To, ArithmeticMode From>
-void copy_reconstruction_metadata(PolyhedralReconstructionResult<To>& to, const PolyhedralReconstructionResult<From>& from)
-{
-    to.geometry = from.geometry;
-    to.target_volume_residual = from.target_volume_residual;
-    to.stencil_volume_residual = from.stencil_volume_residual;
-    to.fit_converged = from.fit_converged;
-    to.stencil_volume_residual_measured = from.stencil_volume_residual_measured;
-    to.orientation_method = from.orientation_method;
-    to.model_policy = from.model_policy;
-    to.model_quality = from.model_quality;
-    to.target_volume_numerical_error_estimate = from.target_volume_numerical_error_estimate;
-    to.resolution = from.resolution;
-    to.stencil_condition = from.stencil_condition;
-    to.orientation_step = from.orientation_step;
-    to.fit_iterations = from.fit_iterations;
-}
 /** Stateless compiled kernel. The supported LS gradient supplies the normal for
  * weak angular support and supported subthreshold phases; otherwise it initializes the angular volume fit,
  * with the target offset solved anew at every angular evaluation. Curved

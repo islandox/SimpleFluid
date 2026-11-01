@@ -531,20 +531,40 @@ phase amounts or return an unconverged fit.
 ## Result, integration, and limitations
 
 `PolyhedralInterface` contains only the represented gas halfspace and pure-phase
-flags. `PolyhedralReconstructionResult<Mode>` returns that geometry in `.geometry`,
-together with the signed target-volume residual, mode-specific residual evidence, stencil RMS residual, condition
-diagnostic, orientation method, angular step, iteration count, convergence flag, RMS-measured flag, and resolution
-assessment. The signed target residual refers to the selected minority phase,
-which need not be gas. Geometry-only phase, clipping, and curvature consumers accept the smaller
-interface; owner caches, retained results and migration keep the full result.
-Runtime-selected GeneralVoF storage uses `DynamicPolyhedralReconstructionResult`,
-a variant of the three typed results, through `to_dynamic`; fixed-mode kernels return their
-mode-specific result without implicit cross-mode conversions. The explicit
-codecs preserve their existing field order and wire versions.
-Pure or reused geometry does not necessarily carry a
-fresh angular-fit convergence record. Local assessments retain directional strength,
-uncertainty and eligibility; existing plane exchange/transfer formats carry the
-plane's method, condition and measured-RMS flag, rather than the full assessment.
+flags. `PolyhedralReconstructionResult<Mode>` retains that geometry in `.geometry`
+alongside the reconstruction evidence and diagnostics. Its single
+`GeometryValue<Mode>` target-volume difference has the selected backend's
+meaning: Ordinary stores a nominal residual, BoundedCertification also stores
+its enclosure radius, and Exact stores a published enclosure plus `exact_nonzero`.
+The Exact view is not the kernel's retained rational scalar. The separate
+numerical-error estimate has numerical meaning only for Ordinary.
+
+The independently reported `target_volume_residual` keeps its existing producer
+semantics. In particular, a declared-pure cell can report a positive minority
+amount while its signed target-volume difference is negative. These fields are
+not collapsed into one value. Geometry-only phase, clipping, and curvature
+consumers accept the smaller interface; owner caches, retained results, and
+migration keep the full reconstruction record. Runtime-selected GeneralVoF
+storage uses `DynamicPolyhedralReconstructionResult`, a variant of the three
+typed results, with mode dispatch at the boundary.
+
+The shared reconstruction codec explicitly records arithmetic mode and native
+scalar profile before decoding a body. It transports every concrete result
+field, including the full resolution assessment, through the same implementation
+for GeneralVoF exchange and Exact phase transfer. No availability flags are added.
+Default or neutral diagnostics retain their producer-defined meaning; carrying
+a default `Admitted` resolution reason does not establish that an assessment ran.
+Gradient and supplied-normal records still do not claim angular convergence.
+
+Native residual/error values use lossless sign, exponent, and significand words
+rather than raw `long double` storage. This preserves supported native precision,
+subnormals, and signed zero without serializing ABI padding. The natural C++
+header has zeroed, checked padding and a checked mode-dependent body length.
+Decoding rejects wrong modes/profiles, noncanonical scalar encodings, malformed
+booleans/enums, negative enclosure radii, and overflowing count fields before
+publishing the record. The reconstruction record is version 3, Exact working and
+source capsules are version 8, and capillary-plane exchange is version 6. Previous
+affected records require regeneration and communicating consumers must be rebuilt.
 
 `solve_offset` validates a supplied normal's numerical volume fit; it does not
 perform the neighborhood support and angular-model admission of `reconstruct`.
