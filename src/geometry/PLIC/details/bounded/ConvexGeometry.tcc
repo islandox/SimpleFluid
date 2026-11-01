@@ -3,10 +3,11 @@
  * provider; Mode templates retain the compiled implementation boundary.
  */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode> long double directed_add(long double a, long double b, bool up)
 {
@@ -353,5 +354,5 @@ template void tighten_incident_coordinates<kernel_mode>(Vertex& vertex, const Fr
 template Interval square_root<kernel_mode>(Interval x);
 template void Accumulator<kernel_mode>::add(Interval term);
 template Interval Accumulator<kernel_mode>::result() const;
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -16,7 +16,7 @@ struct SIMPLEFLUID_LOCAL GeometryMeasure<ArithmeticMode::Exact>::Impl
     Q value;
 };
 
-namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_geometry_detail
 {
 P sparse_support_normal(const Poly& poly, const Face& face);
 // Axis bounds of admitted convex shells are attained at vertices. Equality
@@ -36,14 +36,14 @@ std::size_t exact_integer_bits(I value);
 void exact_measure_arithmetic_preflight(const Q& a, const Q& b, bool division, std::size_t budget);
 void exact_storage_add(std::size_t& bytes, std::size_t count, std::size_t size = 1);
 void exact_scalar_storage(std::size_t& bytes, const Q& q);
-} // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+} // namespace exact_geometry_detail
 } // namespace SimpleFluid::PLIC
 
 namespace SimpleFluid::geometry::swept_volume
 {
 using namespace ::SimpleFluid::PLIC;
 using namespace ::SimpleFluid::PLIC::exact_geometry_detail;
-namespace exact_swept_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_swept_detail
 {
 }
 using namespace exact_swept_detail;
@@ -125,7 +125,7 @@ public:
     static ConvexGeometryPtr<ArithmeticMode::Exact> retain(const ConvexCellGeometry<ArithmeticMode::Exact>& cell);
 };
 
-namespace exact_swept_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_swept_detail
 {
 PLIC::PointIdentity<ArithmeticMode::Exact> swept_point(const P& point);
 
@@ -331,5 +331,5 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
 std::optional<std::vector<TransportAtom<ArithmeticMode::Exact>>> optional_departure_fan_partition(
     std::span<const SweepDonor<ArithmeticMode::Exact>> donors,
     std::span<const SweepRecipient<ArithmeticMode::Exact>> recipients, SweepBudget& budget);
-} // namespace exact_swept_detail SIMPLEFLUID_LOCAL
+} // namespace exact_swept_detail
 } // namespace SimpleFluid::geometry::swept_volume

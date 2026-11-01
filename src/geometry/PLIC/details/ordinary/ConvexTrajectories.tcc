@@ -1,9 +1,13 @@
 /** @file ordinary/ConvexTrajectories.tcc
  * @brief Ordinary source-point construction and constrained backtracing.
  */
+
+#include "geometry/PLIC/SupportClassification.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
@@ -248,5 +252,5 @@ template DynamicPoint dynamic_point_displaced<kernel_mode>(
     const DynamicPoint& source, const DynamicPoint& displacement);
 template DynamicPoint GeometryKernel<kernel_mode>::backtrace(const DynamicPoint& source, GeometryPoint velocity,
     double timestep, std::span<const DynamicFaceConstraint> walls, GeometryLimits limits);
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

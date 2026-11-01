@@ -1,6 +1,34 @@
 /** @file GeneralVoFFiniteProjection.tcc
  * @brief Compiled finite arithmetic specialization.
  */
+#include "FVM/details/GeneralVoF/OccupancyAdmission.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "solvers/details/GeneralVoF/FlowTrace.hh"
+#include "solvers/details/GeneralVoFCompatibleProjection.hh"
+#include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
+#include "solvers/details/GeneralVoFFlowSupport.hh"
+#include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "solvers/details/GeneralVoFProjectionSupport.hh"
+#include "utils/CompensatedSum.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <array>
+#include <cfenv>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid::detail
+{
+
 template<ArithmeticMode Mode>
 void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
     std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
@@ -231,7 +259,8 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
                     if (g.boundary)
                     {
                         value = A::multiply(A::multiply(arithmetic_value(sigma, 0), arithmetic_value(kappa[c], 0)),
-                            boundary_dot(boundary_grad_f[c], convert(mesh_->face_center_vector(fid, LO(c)))));
+                            boundary_dot(
+                                boundary_grad_f[c], flow_support::convert(mesh_->face_center_vector(fid, LO(c)))));
                         value = A::multiply(value, arithmetic_value(g.area, 0));
                     }
                     else
@@ -610,7 +639,8 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
                         Value value;
                         if (g.boundary)
                             value = A::negate(
-                                boundary_dot(boundary_grad_p[c], convert(mesh_->face_center_vector(fid, LO(c)))));
+                                boundary_dot(
+                                    boundary_grad_p[c], flow_support::convert(mesh_->face_center_vector(fid, LO(c)))));
                         else
                             value = A::multiply(arithmetic_value(g.owner == LO(c) ? -1.L : 1.L, 0),
                                 A::subtract(
@@ -732,3 +762,5 @@ template void GeneralVoFFlowWorkspace::project_finite<ArithmeticMode::BoundedCer
     std::optional<std::span<const long double>> physical_mass,
     const GeneralVoFFiniteProjectionClosureTopology* closure_topology,
     std::optional<std::span<const long double>> physical_mass_error);
+
+} // namespace SimpleFluid::detail

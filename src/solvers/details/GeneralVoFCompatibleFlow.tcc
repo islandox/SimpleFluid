@@ -1,6 +1,34 @@
 /** @file GeneralVoFCompatibleFlow.tcc
  * @brief Ordinary coupled projection in the physical cell-mass metric.
  */
+#include "FVM/details/GeneralVoF/OccupancyAdmission.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "solvers/details/GeneralVoF/FlowTrace.hh"
+#include "solvers/details/GeneralVoFCompatibleProjection.hh"
+#include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
+#include "solvers/details/GeneralVoFFlowSupport.hh"
+#include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "solvers/details/GeneralVoFProjectionSupport.hh"
+#include "utils/CompensatedSum.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <array>
+#include <cfenv>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid::detail
+{
+
 void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
     std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
     const std::vector<double>& kappa, double dt, double sigma, const VoFSolverOptions& options,
@@ -152,8 +180,9 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
             for (std::size_t f = 0; f < nf; ++f)
             {
                 const auto& g = geometry_[f];
-                const auto left = convert(mesh_->face_center_vector(LO(f), g.owner));
-                const auto right = g.boundary ? Vector{} : convert(mesh_->face_center_vector(LO(f), g.neighbor));
+                const auto left = flow_support::convert(mesh_->face_center_vector(LO(f), g.owner));
+                const auto right =
+                    g.boundary ? Vector{} : flow_support::convert(mesh_->face_center_vector(LO(f), g.neighbor));
                 out << (f ? ",[" : "[") << mesh_->face_global_id(LO(f)) << ',' << mesh_->cell_global_id(g.owner) << ','
                     << (g.boundary ? -1 : mesh_->cell_global_id(g.neighbor)) << ',' << g.area << ',' << left[0] << ','
                     << left[1] << ',' << left[2] << ',' << right[0] << ',' << right[1] << ',' << right[2] << ','
@@ -451,7 +480,7 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
                 if (provenance && missing_direction && g.boundary)
                 {
                     const auto c = std::size_t(g.owner);
-                    const auto r = convert(mesh_->face_center_vector(LO(f), g.owner));
+                    const auto r = flow_support::convert(mesh_->face_center_vector(LO(f), g.owner));
                     for (unsigned a = 0; a < 3; ++a)
                         if (absent_gradient_axis_[a])
                             wall_pressure_offset[f] -=
@@ -500,3 +529,5 @@ void GeneralVoFFlowWorkspace::project_compatible(std::vector<double>& face_veloc
         provenance->closure_storage_bytes = 0;
     }
 }
+
+} // namespace SimpleFluid::detail

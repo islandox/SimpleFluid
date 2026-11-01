@@ -2,9 +2,11 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bool moments)
 {
@@ -824,5 +826,5 @@ template GeometryPoint GeometryKernel<kernel_mode>::centroid() const;
 template std::vector<DynamicPoint> GeometryKernel<kernel_mode>::local_points() const;
 template std::array<DynamicGeometryValue, 3> GeometryKernel<kernel_mode>::axis_spans() const;
 template DynamicSupport GeometryKernel<kernel_mode>::support(GeometryPoint normal, GeometryPoint anchor) const;
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

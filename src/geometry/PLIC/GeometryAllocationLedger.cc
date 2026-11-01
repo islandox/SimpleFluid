@@ -7,7 +7,7 @@
 
 namespace SimpleFluid::PLIC
 {
-namespace allocation_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL allocation_detail
 {
 enum class Kind
 {
@@ -66,7 +66,7 @@ std::size_t authorities(const std::vector<PlaneAuthority>& values)
 {
     return product(values.capacity(), sizeof(PlaneAuthority));
 }
-} // namespace allocation_detail SIMPLEFLUID_LOCAL
+} // namespace allocation_detail
 
 struct GeometryAllocationLedger::Impl
 {

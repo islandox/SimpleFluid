@@ -1,6 +1,14 @@
 /** @file ConstructionIncidence.tcc
  * @brief Durable source-edge incidence with finite rank and identity evidence.
  */
+#include "geometry/PLIC/details/GeometryKernels.hh"
+#include <array>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <utility>
+#include <vector>
+
 namespace SimpleFluid::PLIC::details
 {
 namespace ordinary_kernel::source_witness

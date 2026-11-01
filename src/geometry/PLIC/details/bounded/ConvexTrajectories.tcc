@@ -2,9 +2,11 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
@@ -233,5 +235,5 @@ template DynamicPoint dynamic_point_displaced<kernel_mode>(
     const DynamicPoint& source, const DynamicPoint& displacement);
 template DynamicPoint GeometryKernel<kernel_mode>::backtrace(const DynamicPoint& source, GeometryPoint velocity,
     double timestep, std::span<const DynamicFaceConstraint> walls, GeometryLimits limits);
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -1,7 +1,23 @@
 /** @file NativeCellGeometry.tcc
  * @brief Native finite cell import, refinement, and source-coordinate packets.
- * Included after the common typed definitions by the compiled construction provider.
  */
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
+#include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
+#include "geometry/mesh/MultiRegionMesh.hh"
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <numeric>
+#include <span>
+#include <stdexcept>
+#include <utility>
+#include <variant>
+#include <vector>
+
 namespace SimpleFluid::PLIC
 {
 namespace native_cell_detail

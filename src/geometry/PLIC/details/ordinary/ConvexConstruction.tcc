@@ -2,12 +2,13 @@
  * @brief Ordinary convex construction and compensated nominal integration.
  */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <sstream>
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 namespace
 {
@@ -815,5 +816,5 @@ template GeometryPoint GeometryKernel<kernel_mode>::centroid() const;
 template std::vector<DynamicPoint> GeometryKernel<kernel_mode>::local_points() const;
 template std::array<DynamicGeometryValue, 3> GeometryKernel<kernel_mode>::axis_spans() const;
 template DynamicSupport GeometryKernel<kernel_mode>::support(GeometryPoint normal, GeometryPoint anchor) const;
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details
