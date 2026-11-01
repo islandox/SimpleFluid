@@ -291,13 +291,14 @@ TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics
     CartesianAMR root(grid);
     const auto hierarchy = bootstrap(root, 8);
     const auto comm = hierarchy->communicator();
-    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    const auto diagnostics = [](const PLIC::DynamicPolyhedralReconstructionResult& result)
     {
-        return std::array{plane.gas.normal[0], plane.gas.normal[1], plane.gas.normal[2],
-            plane.gas.anchor[0], plane.gas.anchor[1], plane.gas.anchor[2], plane.gas.offset,
-            plane.target_volume_residual, plane.stencil_volume_residual, plane.stencil_condition,
-            plane.orientation_step, double(plane.fit_iterations), double(plane.fit_converged),
-            double(plane.orientation_method), double(plane.pure_gas), double(plane.pure_carrier),
+        const auto& plane = std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>>(result);
+        return std::array{plane.geometry.gas.normal[0], plane.geometry.gas.normal[1], plane.geometry.gas.normal[2],
+            plane.geometry.gas.anchor[0], plane.geometry.gas.anchor[1], plane.geometry.gas.anchor[2],
+            plane.geometry.gas.offset, plane.target_volume_residual, plane.stencil_volume_residual,
+            plane.stencil_condition, plane.orientation_step, double(plane.fit_iterations), double(plane.fit_converged),
+            double(plane.orientation_method), double(plane.geometry.pure_gas), double(plane.geometry.pure_carrier),
             double(plane.target_volume_difference.value), double(plane.target_volume_difference.absolute_error),
             double(plane.target_volume_difference.exact_nonzero), double(plane.stencil_volume_residual_measured)};
     };
@@ -328,15 +329,21 @@ TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics
             EXPECT_TRUE(capsule.geometry_ready);
             const auto values = diagnostics(capsule.geometry);
             std::copy(values.begin(), values.end(), local.begin() + width * ordinal(capsule.key));
-            if (!capsule.geometry.pure_gas && !capsule.geometry.pure_carrier)
+            if (!PLIC::reconstruction_geometry(capsule.geometry).pure_gas &&
+                !PLIC::reconstruction_geometry(capsule.geometry).pure_carrier)
             {
                 ++local_mixed;
-                EXPECT_EQ(capsule.geometry.orientation_method, minority < .01 ?
-                    PLIC::PolyhedralOrientationMethod::Gradient : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+                EXPECT_EQ(std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>>(capsule.geometry)
+                              .orientation_method,
+                    minority < .01 ? PLIC::PolyhedralOrientationMethod::Gradient
+                                   : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
                 if (minority < .01)
                 {
-                    EXPECT_EQ(capsule.geometry.fit_iterations, 0u);
-                    EXPECT_FALSE(capsule.geometry.fit_converged);
+                    EXPECT_EQ(std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>>(capsule.geometry)
+                                  .fit_iterations,
+                        0u);
+                    EXPECT_FALSE(std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>>(capsule.geometry)
+                            .fit_converged);
                 }
             }
         }

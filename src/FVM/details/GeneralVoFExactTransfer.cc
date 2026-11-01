@@ -82,10 +82,11 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                         if (pair.first->compare(*pair.second))
                             throw std::invalid_argument("Experimental adopted authority/provenance differs.");
                 }
-                const auto declaration = capsule.geometry.pure_gas
+                const auto declaration = PLIC::reconstruction_geometry(capsule.geometry).pure_gas
                                              ? GeneralVoFPhaseGeometry::PureGas
-                                             : (capsule.geometry.pure_carrier ? GeneralVoFPhaseGeometry::PureCarrier
-                                                                              : GeneralVoFPhaseGeometry::Infer);
+                                             : (PLIC::reconstruction_geometry(capsule.geometry).pure_carrier
+                                                       ? GeneralVoFPhaseGeometry::PureCarrier
+                                                       : GeneralVoFPhaseGeometry::Infer);
                 if (cell.revision != capsule.revision || cell.declaration != declaration ||
                     bool(cell.retained_interface) !=
                         (capsule.geometry_ready &&
@@ -120,7 +121,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
             current(*self.data_);
             wire::Budget budget{self.data_->options.byte_budget};
             const auto interfaces = prepare_geometry ? reconstruct_local<ArithmeticMode::Exact>(*self.data_)
-                                                     : std::map<Key, PLIC::PolyhedralInterface>{};
+                                                     : std::map<Key, PLIC::DynamicPolyhedralReconstructionResult>{};
             for (const auto& key : self.data_->topology->order)
             {
                 budget.add(sizeof(ExactPhaseTransferCapsule) + AMR::encode_adaptive_key(key).size());
@@ -165,9 +166,9 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer || !phase_measures(cell).gas.sign() ||
                     !phase_measures(cell).carrier.sign())
                 {
-                    capsule.geometry.pure_gas =
+                    PLIC::reconstruction_geometry(capsule.geometry).pure_gas =
                         cell.declaration == GeneralVoFPhaseGeometry::PureGas || !phase_measures(cell).carrier.sign();
-                    capsule.geometry.pure_carrier =
+                    PLIC::reconstruction_geometry(capsule.geometry).pure_carrier =
                         cell.declaration == GeneralVoFPhaseGeometry::PureCarrier || !phase_measures(cell).gas.sign();
                     capsule.geometry_ready = true;
                 }
@@ -176,9 +177,9 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
                     const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
                     const auto raw =
-                        phases(*SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
-                                   *cell.phase.geometry),
-                            capsule.geometry);
+                        phases(*SimpleFluid::geometry::swept_volume::ConvexFragment<
+                                   SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell.phase.geometry),
+                            PLIC::reconstruction_geometry(capsule.geometry));
                     const auto fit_diagnostic = detail::round_phase_residual(target - (gas ? raw.gas : raw.carrier));
                     capsule.error.fit_residual = fit_diagnostic.value;
                     const auto view =
@@ -249,10 +250,11 @@ std::shared_ptr<const VoF::GeneralVoF> GeneralVoF::adopt_transfer(
                 keys.push_back(capsule.key);
                 gas.push_back(capsule.phases.gas);
                 carrier.push_back(capsule.phases.carrier);
-                declarations.push_back(capsule.geometry.pure_gas
+                declarations.push_back(PLIC::reconstruction_geometry(capsule.geometry).pure_gas
                                            ? GeneralVoFPhaseGeometry::PureGas
-                                           : (capsule.geometry.pure_carrier ? GeneralVoFPhaseGeometry::PureCarrier
-                                                                            : GeneralVoFPhaseGeometry::Infer));
+                                           : (PLIC::reconstruction_geometry(capsule.geometry).pure_carrier
+                                                     ? GeneralVoFPhaseGeometry::PureCarrier
+                                                     : GeneralVoFPhaseGeometry::Infer));
             }
         });
     agree_transaction(comm, result.transaction());

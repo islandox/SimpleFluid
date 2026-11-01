@@ -20,7 +20,6 @@ template<ArithmeticMode Mode> void typed_physical_patch()
 {
     const auto geometry = PLIC::ConvexCellGeometry<Mode>::box({2, 3, 4}, {4, 6, 8});
     PLIC::PolyhedralInterface plane;
-    plane.finite_geometry = true;
     plane.gas = {{0, 0, 1}, {2, 3, 4}, 1};
     PLIC::reset_geometry_statistics();
     PLIC::GeometryAllocationLedger point_exports;
@@ -231,7 +230,6 @@ void report_physical_curvature_refinement(bool sphere)
                 const auto source_volume = geometry->volume().value;
                 ASSERT_GT(source_volume, 0);
                 PLIC::PolyhedralInterface plane;
-                plane.finite_geometry = true;
                 plane.gas = {normal, anchor, 0};
                 // These samples are physical clipped polygons, including their
                 // measured centroids/areas, rather than analytic point samples.

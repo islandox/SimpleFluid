@@ -455,8 +455,8 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
         const auto& minority = was_gas ? phase.carrier : phase.gas;
         const auto& capsule = source.owned()[i];
         EXPECT_TRUE(capsule.geometry_ready);
-        EXPECT_EQ(capsule.geometry.pure_gas, was_gas);
-        EXPECT_EQ(capsule.geometry.pure_carrier, !was_gas);
+        EXPECT_EQ(PLIC::reconstruction_geometry(capsule.geometry).pure_gas, was_gas);
+        EXPECT_EQ(PLIC::reconstruction_geometry(capsule.geometry).pure_carrier, !was_gas);
         const auto gid = std::uint64_t(moved->mesh()->cell_global_id(int(i)));
         const auto expected = was_gas ? delivered.at(gid).carrier : delivered.at(gid).gas;
         const auto error = was_gas ? trial.phase_roundoff_bounds()[i].carrier : trial.phase_roundoff_bounds()[i].gas;
@@ -491,7 +491,7 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
     // normal to the transported microscopic minority.
     const auto planes = moved->reconstruct();
     for (std::size_t i = 0; i < planes.size(); ++i)
-        EXPECT_EQ(planes[i].pure_gas, f.carrier[i] == 0);
+        EXPECT_EQ(PLIC::reconstruction_geometry(planes[i]).pure_gas, f.carrier[i] == 0);
 
     std::vector<GeneralVoFPhaseGeometry> infer(f.order.size(), GeneralVoFPhaseGeometry::Infer);
     GeneralVoF explicit_infer(f.hierarchy, f.order, f.gas, f.carrier, exact_reference_options(), infer);
@@ -503,8 +503,8 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
         {
             ++local_unresolved;
             EXPECT_FALSE(capsule.geometry_ready);
-            EXPECT_FALSE(capsule.geometry.pure_gas);
-            EXPECT_FALSE(capsule.geometry.pure_carrier);
+            EXPECT_FALSE(PLIC::reconstruction_geometry(capsule.geometry).pure_gas);
+            EXPECT_FALSE(PLIC::reconstruction_geometry(capsule.geometry).pure_carrier);
         }
     int unresolved = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_unresolved, &unresolved);
@@ -518,8 +518,8 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
     {
         EXPECT_GT(capsule.phases.gas, 0);
         EXPECT_FALSE(capsule.geometry_ready);
-        EXPECT_FALSE(capsule.geometry.pure_gas);
-        EXPECT_FALSE(capsule.geometry.pure_carrier);
+        EXPECT_FALSE(PLIC::reconstruction_geometry(capsule.geometry).pure_gas);
+        EXPECT_FALSE(PLIC::reconstruction_geometry(capsule.geometry).pure_carrier);
     }
 }
 

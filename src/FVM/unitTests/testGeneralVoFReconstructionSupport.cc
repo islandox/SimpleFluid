@@ -135,7 +135,7 @@ TEST(GeneralVoFReconstructionSupport, PublicCallerUsesAvailableMajorityAndRetain
         }
         const GeneralVoF state(hierarchy, order, gas, carrier, options);
         EXPECT_EQ(state.phase_cleanup_state().cleaned_cells, 0u);
-        std::vector<PLIC::PolyhedralInterface> planes;
+        std::vector<PLIC::DynamicPolyhedralReconstructionResult> planes;
         EXPECT_NO_THROW(planes = state.reconstruct());
         EXPECT_EQ(planes.size(), state.owned_order().size());
         const auto geometry = state.owned_finite_geometry<ArithmeticMode::Ordinary>();
@@ -154,12 +154,12 @@ TEST(GeneralVoFReconstructionSupport, PublicCallerUsesAvailableMajorityAndRetain
             if (centers.at(key) != target_center || i >= planes.size())
                 continue;
             ++local_target;
-            const auto& fit = planes[i];
-            EXPECT_FALSE(fit.pure_gas);
-            EXPECT_FALSE(fit.pure_carrier);
+            const auto& fit = std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(planes[i]);
+            EXPECT_FALSE(fit.geometry.pure_gas);
+            EXPECT_FALSE(fit.geometry.pure_carrier);
             EXPECT_TRUE(fit.resolution.admitted());
             EXPECT_EQ(geometry[i]->centroid(), target_center);
-            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
                 static_cast<long double>(std::min(expected[0], expected[1])) * options.reconstruction.volume_tolerance);
             if (oblique)
             {
@@ -202,10 +202,10 @@ TEST(GeneralVoFReconstructionSupport, PublicCallerUsesAvailableMajorityAndRetain
                     << " available_gas_support=" << fit.resolution.gas_support_fraction
                     << " available_carrier_support=" << fit.resolution.carrier_support_fraction
                     << " rms_measured=" << fit.stencil_volume_residual_measured << std::setprecision(21)
-                    << " target_residual=" << fit.finite_target_volume_difference.value
+                    << " target_residual=" << fit.target_volume_difference.value
                     << " numerical_indicator=" << fit.target_volume_numerical_error_estimate
                     << " target_residual_with_indicator="
-                    << std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate;
+                    << std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate;
             RecordProperty(scenario_name + "_target_metrics", metrics.str());
         }
         int global_target = 0;

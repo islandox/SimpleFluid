@@ -134,14 +134,15 @@ ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMo
         result.fragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*sample.geometry);
     return result;
 }
-PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal,
+PolyhedralReconstructionResult<ArithmeticMode::Exact> offset_fit(
+    const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations, const ReconstructionGeometry& geometry)
 {
-    PolyhedralInterface result;
+    PolyhedralReconstructionResult<ArithmeticMode::Exact> result;
     result.model_policy = options.model_policy;
-    result.pure_gas = sample.carrier_volume == 0;
-    result.pure_carrier = sample.gas_volume == 0;
-    result.gas.normal = unit(normal);
+    result.geometry.pure_gas = sample.carrier_volume == 0;
+    result.geometry.pure_carrier = sample.gas_volume == 0;
+    result.geometry.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
     const auto center = geometry.center;
     Vector support{};
@@ -149,7 +150,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
     bool have_support = false;
     for (const auto& id : geometry.vertices)
     {
-        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.gas.normal, center);
+        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.geometry.gas.normal, center);
         if (!have_support || (gas ? projection.compare(extremum) < 0 : projection.compare(extremum) > 0))
         {
             have_support = true;
@@ -159,12 +160,12 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
     }
     // The scalar offset now resolves a minority cut relative to its supporting
     // extremum, rather than adding a microscopic offset to a cell-scale distance.
-    result.gas.anchor = support;
+    result.geometry.gas.anchor = support;
     GeometryMeasure<ArithmeticMode::Exact> lower, upper;
     bool have_bounds = false;
     for (const auto& id : geometry.vertices)
     {
-        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.gas.normal, support);
+        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.geometry.gas.normal, support);
         if (!have_bounds || projection.compare(lower) < 0)
             lower = projection;
         if (!have_bounds || projection.compare(upper) > 0)
@@ -182,11 +183,11 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
             throw std::invalid_argument("PLIC supporting projection is not representable.");
         return rounded;
     };
-    if (result.pure_gas || result.pure_carrier)
+    if (result.geometry.pure_gas || result.geometry.pure_carrier)
     {
-        const auto& bound = result.pure_gas ? upper : lower;
+        const auto& bound = result.geometry.pure_gas ? upper : lower;
         // Round outward so a pure phase also contains the exact rational support.
-        result.gas.offset = outward(bound, result.pure_gas);
+        result.geometry.gas.offset = outward(bound, result.geometry.pure_gas);
         return result;
     }
     const double target = gas ? sample.gas_volume : sample.carrier_volume;
@@ -211,7 +212,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
     GeometryMeasure<ArithmeticMode::Exact> previous_volume;
     for (unsigned iteration = 0; iteration < options.maximum_offset_iterations; ++iteration)
     {
-        auto plane = result.gas;
+        auto plane = result.geometry.gas;
         plane.offset = (base + GeometryMeasure<ArithmeticMode::Exact>::from_value(gas ? distance : -distance))
                            .certified()
                            .as_double();
@@ -224,7 +225,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
         {
             have_best = true;
             best = absolute;
-            result.gas.offset = plane.offset;
+            result.geometry.gas.offset = plane.offset;
             result.target_volume_difference = residual.enclosure();
             result.target_volume_residual = double(result.target_volume_difference.value);
         }
@@ -272,7 +273,7 @@ void PolyhedralReconstruction<ArithmeticMode::Exact>::validate(
 {
     validate_sample(sample, options);
 }
-PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(
+PolyhedralReconstructionResult<ArithmeticMode::Exact> PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(
     const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal, PolyhedralReconstructionOptions options)
 {
     std::size_t evaluations = 0;
@@ -280,7 +281,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offse
     const auto geometry = prepare_geometry(sample, true, sample.gas_volume != 0 && sample.carrier_volume != 0);
     return offset_fit(sample, normal, options, evaluations, geometry);
 }
-PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(
+PolyhedralReconstructionResult<ArithmeticMode::Exact> PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(
     const PolyhedralPhaseSample<ArithmeticMode::Exact>& target,
     std::span<const PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil, PolyhedralReconstructionOptions options)
 {
@@ -334,7 +335,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
             geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*stencil[i].geometry);
     struct Evaluation
     {
-        PolyhedralInterface plane;
+        PolyhedralReconstructionResult<ArithmeticMode::Exact> plane;
         std::vector<double> residual;
         double objective = 0;
     };
@@ -350,7 +351,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
             const bool gas = sample.gas_volume <= sample.carrier_volume;
             if (evaluations++ >= options.maximum_clip_evaluations)
                 throw std::invalid_argument("PLIC clip evaluation budget exhausted.");
-            const long double measured = phase(*prepared.fragment, value.plane.gas, gas).enclosure().value;
+            const long double measured = phase(*prepared.fragment, value.plane.geometry.gas, gas).enclosure().value;
             const double residual = (measured - (gas ? sample.gas_volume : sample.carrier_volume)) / prepared.volume;
             value.residual.push_back(residual);
             value.objective += residual * residual;

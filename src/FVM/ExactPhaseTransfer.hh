@@ -51,7 +51,8 @@ struct ExactPhaseTransferCapsule
     /** Independent accumulated finite arithmetic history. Explicit reference
      * remaps transfer it with phase carriers; ExperimentalExact leaves it empty. */
     PhaseRoundoff accumulated_roundoff;
-    PLIC::PolyhedralInterface geometry;
+    PLIC::DynamicPolyhedralReconstructionResult geometry =
+        PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>{};
     bool geometry_ready = false;
     ExactTransferError error;
     std::optional<ExactTransferPhaseMass> phase_mass;

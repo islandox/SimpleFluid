@@ -641,9 +641,11 @@ TEST(GeneralVoFCapillarySurface, MixedAndAlignedPlanarSectionsShareOneImmutableS
     for (std::size_t i = 0; i < std::min(after.size(), planes.size()); ++i)
     {
         EXPECT_EQ(after[i].cell, planes[i].cell);
-        EXPECT_EQ(after[i].interface.gas.normal, planes[i].interface.gas.normal);
-        EXPECT_EQ(after[i].interface.gas.anchor, planes[i].interface.gas.anchor);
-        EXPECT_EQ(after[i].interface.gas.offset, planes[i].interface.gas.offset);
+        const auto& actual = PLIC::reconstruction_geometry(after[i].interface);
+        const auto& expected = PLIC::reconstruction_geometry(planes[i].interface);
+        EXPECT_EQ(actual.gas.normal, expected.gas.normal);
+        EXPECT_EQ(actual.gas.anchor, expected.gas.anchor);
+        EXPECT_EQ(actual.gas.offset, expected.gas.offset);
     }
     snapshot.check(*source);
     auto material = inviscid();

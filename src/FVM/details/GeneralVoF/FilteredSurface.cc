@@ -22,9 +22,9 @@ int phase(const Cell& c)
         return -1;
     if (c.retained_interface)
     {
-        if (c.retained_interface->pure_gas)
+        if (PLIC::reconstruction_geometry(*c.retained_interface).pure_gas)
             return 1;
-        if (c.retained_interface->pure_carrier)
+        if (PLIC::reconstruction_geometry(*c.retained_interface).pure_carrier)
             return -1;
         return 0;
     }

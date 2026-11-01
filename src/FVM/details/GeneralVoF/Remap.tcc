@@ -339,7 +339,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         PhaseError original_error;
         PhaseRoundoff original_roundoff;
         GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
-        std::optional<PLIC::PolyhedralInterface> retained_interface;
+        std::optional<PLIC::DynamicPolyhedralReconstructionResult> retained_interface;
     };
     std::vector<Output> outgoing;
     wire::collective(*comm,
@@ -360,13 +360,13 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 const bool whole = indices.size() == 1 &&
                                    (columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Unchanged ||
                                        columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Coarsening);
-                PLIC::PolyhedralInterface fitted;
+                PLIC::DynamicPolyhedralReconstructionResult fitted;
                 PhaseLabel<Mode> labels;
                 if (!whole)
                 {
                     fitted = reconstruct_cell<Mode>(data, key);
-                    labels = phase_label<Mode>(
-                        source, *cell_geometry.at(key), fitted, data.options.reconstruction.volume_tolerance);
+                    labels = phase_label<Mode>(source, *cell_geometry.at(key), PLIC::reconstruction_geometry(fitted),
+                        data.options.reconstruction.volume_tolerance);
                 }
                 const auto old = phase_inventory<Mode>(source, *cell_geometry.at(source.key));
                 // Carrier existence is a source contract even on ownership-only
@@ -400,13 +400,13 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                             source.declaration != GeneralVoFPhaseGeometry::PureGas};
                     }
                     else
-                        output.phases =
-                            labels.apply(*column.overlap, fitted, &output.geometry_presence, &output.fit_allocation);
+                        output.phases = labels.apply(*column.overlap, PLIC::reconstruction_geometry(fitted),
+                            &output.geometry_presence, &output.fit_allocation);
                     output.history =
                         whole ? PhaseValues{Math::make_value(data.options.arithmetic_mode, 0),
                                     Math::make_value(data.options.arithmetic_mode, source.finite_history.gas),
                                     Math::make_value(data.options.arithmetic_mode, source.finite_history.carrier)}
-                              : labels.history(*column.overlap, fitted);
+                              : labels.history(*column.overlap, PLIC::reconstruction_geometry(fitted));
                     output.declaration = source.declaration;
                     output.original_error = source.occupancy;
                     output.original_roundoff = source.roundoff;
@@ -527,7 +527,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         std::optional<GeneralVoFPhaseGeometry> declaration;
         PhaseError original_error;
         PhaseRoundoff original_roundoff;
-        std::optional<PLIC::PolyhedralInterface> retained_interface;
+        std::optional<PLIC::DynamicPolyhedralReconstructionResult> retained_interface;
         std::size_t pieces = 0;
     };
     std::map<Key, Row> rows;
@@ -619,7 +619,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     if (retained)
                     {
                         row.retained_interface = plane(r, data.options.arithmetic_mode);
-                        if (!row.retained_interface->finite_geometry)
+                        if (PLIC::reconstruction_mode(*row.retained_interface) == ArithmeticMode::Exact)
                             throw std::invalid_argument("Finite migration cannot acquire an exact interface.");
                     }
                 }
@@ -728,7 +728,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 }
                 cell.declaration = row.declaration.value_or(GeneralVoFPhaseGeometry::Infer);
                 cell.retained_interface =
-                    ownership ? row.retained_interface : std::optional<PLIC::PolyhedralInterface>{};
+                    ownership ? row.retained_interface : std::optional<PLIC::DynamicPolyhedralReconstructionResult>{};
                 cell.inherited = true;
                 if (ownership)
                     cell.occupancy = row.original_error;

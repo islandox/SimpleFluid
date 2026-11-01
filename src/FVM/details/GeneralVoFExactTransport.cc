@@ -353,7 +353,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             wire::Budget budget{limit};
             for (const auto& [key, cell] : data.cells)
             {
-                const auto raw = phases(*Fragment::from_geometry(*cell.phase.geometry), planes.at(key));
+                const auto raw = phases(
+                    *Fragment::from_geometry(*cell.phase.geometry), PLIC::reconstruction_geometry(planes.at(key)));
                 const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
                 const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
                 const auto view = Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
@@ -501,7 +502,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     return row.try_emplace(donor, raw_live).first->second;
                 };
                 for (const auto& atom : partition.atoms())
-                    row_for(atom.donor).add(phases(*atom.geometry, planes.at(data.topology->by_gid.at(atom.donor))));
+                    row_for(atom.donor)
+                        .add(phases(*atom.geometry,
+                            PLIC::reconstruction_geometry(planes.at(data.topology->by_gid.at(atom.donor)))));
                 for (const auto index : data.topology->cell_tiles.at(key))
                 {
                     const auto& tile = data.topology->tiles[index];
@@ -510,10 +513,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         continue;
                     for (const auto& piece : face_parts.at(tile.face_gid))
                         row_for(piece.donor)
-                            .add(phases(*piece.geometry, planes.at(data.topology->by_gid.at(piece.donor))),
+                            .add(phases(*piece.geometry,
+                                     PLIC::reconstruction_geometry(planes.at(data.topology->by_gid.at(piece.donor)))),
                                 sign * piece.sign);
                 }
-                const auto original = phases(*Fragment::from_geometry(*cell.phase.geometry), planes.at(key));
+                const auto original = phases(
+                    *Fragment::from_geometry(*cell.phase.geometry), PLIC::reconstruction_geometry(planes.at(key)));
                 row_for(cell.gid).add(original, -1);
                 for (const auto& [donor, amount] : row)
                 {
@@ -536,8 +541,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         if (!grouped.contains(key))
                             budget.add(sizeof(decltype(grouped)::value_type) + 4 * sizeof(void*));
                         grouped.try_emplace(key, raw_live)
-                            .first->second.add(
-                                phases(*piece.geometry, planes.at(data.topology->by_gid.at(piece.donor))));
+                            .first->second.add(phases(*piece.geometry,
+                                PLIC::reconstruction_geometry(planes.at(data.topology->by_gid.at(piece.donor)))));
                     }
                     for (const auto& [group, amount] : grouped)
                     {
@@ -793,7 +798,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 transport_charge(budget, 3 * sizeof(TransportAtom), "donor phase atom handles");
                 donor_atoms[route.donor].push_back(route.atom);
                 exact_storage.fragment(*route.atom.geometry);
-                auto raw = phases(*route.atom.geometry, planes.at(route.donor));
+                auto raw = phases(*route.atom.geometry, PLIC::reconstruction_geometry(planes.at(route.donor)));
                 detail::ExactLiveStorage::Scope raw_scope(live, {&raw.bulk, &raw.gas, &raw.carrier});
                 auto paired = labels.at(route.donor).apply(raw, live.operation_bytes());
                 detail::ExactLiveStorage::Scope paired_scope(live, {&paired.bulk, &paired.gas, &paired.carrier});

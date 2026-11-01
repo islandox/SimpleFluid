@@ -9,5 +9,6 @@ namespace SimpleFluid::VoF::general_vof_detail
  * transport planes, inventories, histories, declarations and geometry remain
  * immutable. Adopted geometry remains authoritative; an inadmissible or ambiguous
  * native-face witness retains the full-support capillary plane. */
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_capillary_planes(const GeneralVoF::Data&);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_capillary_planes(
+    const GeneralVoF::Data&);
 } // namespace SimpleFluid::VoF::general_vof_detail

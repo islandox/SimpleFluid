@@ -25,7 +25,8 @@ constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr std::size_t allowance = 1024 * 1024;
 constexpr std::uint64_t revision = 17;
 constexpr std::uint64_t test_plane_protocol = 1;
-static_assert(local::ordinary_plane_wire_bytes == 240);
+// This independent mock contains 24 words before envelope padding.
+static_assert(local::ordinary_plane_wire_bytes >= 24 * sizeof(std::uint64_t));
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Sample = PLIC::PolyhedralPhaseSample<mode>;
 using Diagnostics = GeneralVoFOwnerPlaneRequestDiagnostics;
@@ -104,21 +105,22 @@ struct PlanarFixture
                 sample.carrier_volume = 1 - gas;
             }
     }
-    void check(const PLIC::PolyhedralInterface& fitted) const
+    void check(const PLIC::DynamicPolyhedralReconstructionResult& result) const
     {
+        const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<mode>>(result);
         EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
         EXPECT_TRUE(fitted.fit_converged);
         EXPECT_EQ(fitted.model_policy, PLIC::PlicModelPolicy::RequireModelAgreement);
         EXPECT_EQ(fitted.model_quality, PLIC::PlicModelQuality::WithinThreshold);
-        EXPECT_FALSE(fitted.pure_gas);
-        EXPECT_FALSE(fitted.pure_carrier);
-        EXPECT_TRUE(fitted.finite_geometry);
-        EXPECT_NEAR(fitted.gas.normal[0], 1, 1e-8);
-        EXPECT_NEAR(fitted.gas.normal[1], 0, 1e-8);
-        EXPECT_NEAR(fitted.gas.normal[2], 0, 1e-8);
+        EXPECT_FALSE(fitted.geometry.pure_gas);
+        EXPECT_FALSE(fitted.geometry.pure_carrier);
+        EXPECT_EQ(PLIC::reconstruction_mode(result), mode);
+        EXPECT_NEAR(fitted.geometry.gas.normal[0], 1, 1e-8);
+        EXPECT_NEAR(fitted.geometry.gas.normal[1], 0, 1e-8);
+        EXPECT_NEAR(fitted.geometry.gas.normal[2], 0, 1e-8);
         // The scalar offset is relative to the represented anchor.
-        EXPECT_NEAR(fitted.gas.offset + fitted.gas.anchor[0], fraction, 1e-8);
-        const auto measured = target.geometry->phases(fitted.gas);
+        EXPECT_NEAR(fitted.geometry.gas.offset + fitted.geometry.gas.anchor[0], fraction, 1e-8);
+        const auto measured = target.geometry->phases(fitted.geometry.gas);
         EXPECT_LE(std::abs(measured.gas.value - fraction),
             fraction * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
         EXPECT_LE(std::abs(measured.carrier.value - (1 - fraction)),
@@ -126,16 +128,17 @@ struct PlanarFixture
         EXPECT_EQ(target.gas_volume, fraction);
         EXPECT_EQ(target.carrier_volume, 1 - fraction);
     }
-    PLIC::PolyhedralInterface fit(const AMR::AdaptiveCellKey&, Diagnostics& diagnostics) const
+    PLIC::DynamicPolyhedralReconstructionResult fit(const AMR::AdaptiveCellKey&, Diagnostics& diagnostics) const
     {
         ++diagnostics.owner_reconstruction_calls;
         ++diagnostics.mixed_cell_fits;
-        auto fitted = PLIC::PolyhedralReconstruction<mode>::reconstruct(target, stencil);
+        auto result = PLIC::to_dynamic(PLIC::PolyhedralReconstruction<mode>::reconstruct(target, stencil));
+        const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<mode>>(result);
         EXPECT_TRUE(fitted.resolution.admitted());
         EXPECT_TRUE(fitted.fit_converged);
         EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
-        check(fitted);
-        return fitted;
+        check(result);
+        return result;
     }
 };
 
@@ -162,8 +165,9 @@ struct ApproximateGradientFixture
                             gas, 1 - gas});
                     }
     }
-    void check(const PLIC::PolyhedralInterface& fitted) const
+    void check(const PLIC::DynamicPolyhedralReconstructionResult& result) const
     {
+        const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<mode>>(result);
         EXPECT_EQ(fitted.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
         EXPECT_EQ(fitted.model_quality, PLIC::PlicModelQuality::AboveThreshold);
         EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
@@ -172,25 +176,27 @@ struct ApproximateGradientFixture
         EXPECT_TRUE(fitted.stencil_volume_residual_measured);
         EXPECT_NEAR(fitted.stencil_volume_residual, (1 - high_fraction) * std::sqrt(4. / 7), 1e-12);
         EXPECT_GT(fitted.stencil_volume_residual, PLIC::PolyhedralReconstructionOptions{}.maximum_model_residual);
-        EXPECT_NEAR(fitted.gas.normal[0], -1, 1e-12);
-        EXPECT_NEAR(fitted.gas.normal[1], 0, 1e-12);
-        EXPECT_NEAR(fitted.gas.normal[2], 0, 1e-12);
-        const auto measured = target.geometry->phases(fitted.gas);
+        EXPECT_NEAR(fitted.geometry.gas.normal[0], -1, 1e-12);
+        EXPECT_NEAR(fitted.geometry.gas.normal[1], 0, 1e-12);
+        EXPECT_NEAR(fitted.geometry.gas.normal[2], 0, 1e-12);
+        const auto measured = target.geometry->phases(fitted.geometry.gas);
         EXPECT_LE(std::abs(measured.gas.value - low_fraction),
             low_fraction * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
         EXPECT_EQ(target.gas_volume, low_fraction);
         EXPECT_EQ(target.carrier_volume, 1 - low_fraction);
     }
-    PLIC::PolyhedralInterface fit(const AMR::AdaptiveCellKey&, Diagnostics& diagnostics) const
+    PLIC::DynamicPolyhedralReconstructionResult fit(const AMR::AdaptiveCellKey&, Diagnostics& diagnostics) const
     {
         ++diagnostics.owner_reconstruction_calls;
         ++diagnostics.mixed_cell_fits;
         PLIC::PolyhedralReconstructionOptions options;
         options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
-        const auto fitted = PLIC::PolyhedralReconstruction<mode>::reconstruct(target, stencil, options);
+        const auto result =
+            PLIC::to_dynamic(PLIC::PolyhedralReconstruction<mode>::reconstruct(target, stencil, options));
+        const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<mode>>(result);
         EXPECT_TRUE(fitted.resolution.admitted());
-        check(fitted);
-        return fitted;
+        check(result);
+        return result;
     }
 };
 
@@ -198,20 +204,21 @@ struct ApproximateGradientFixture
  * This qualifies helper reuse and storage, not the production codec.
  * All fit fields inspected below come from an actual Ordinary reconstruction.
  */
-void serialize(wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
+void serialize(wire::Writer& writer, const PLIC::DynamicPolyhedralReconstructionResult& result)
 {
+    const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<mode>>(result);
     const auto begin = writer.data.size();
     writer.word(test_plane_protocol);
     writer.word(std::uint64_t(fitted.model_policy));
     writer.word(std::uint64_t(fitted.model_quality));
     const auto real = [&](double value) { writer.word(std::bit_cast<std::uint64_t>(value)); };
-    for (const auto value : fitted.gas.normal)
+    for (const auto value : fitted.geometry.gas.normal)
         real(value);
-    for (const auto value : fitted.gas.anchor)
+    for (const auto value : fitted.geometry.gas.anchor)
         real(value);
-    real(fitted.gas.offset);
-    writer.word(fitted.pure_gas);
-    writer.word(fitted.pure_carrier);
+    real(fitted.geometry.gas.offset);
+    writer.word(fitted.geometry.pure_gas);
+    writer.word(fitted.geometry.pure_carrier);
     real(fitted.stencil_volume_residual);
     writer.word(fitted.stencil_volume_residual_measured);
     real(fitted.stencil_condition);
@@ -220,14 +227,14 @@ void serialize(wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
     writer.word(std::uint64_t(fitted.orientation_method));
     writer.word(fitted.fit_converged);
     real(double(fitted.target_volume_numerical_error_estimate));
-    writer.word(fitted.finite_geometry);
-    writer.word(std::uint64_t(fitted.finite_target_volume_difference.arithmetic_mode));
-    real(double(fitted.finite_target_volume_difference.value));
-    real(double(fitted.finite_target_volume_difference.absolute_error));
+    writer.word(true);
+    writer.word(std::uint64_t(mode));
+    real(double(fitted.target_volume_difference.value));
+    real(0);
     writer.data.resize(begin + local::ordinary_plane_wire_bytes, char(0x5a));
 }
-PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveCellKey& expected_key = key(),
-    std::uint64_t expected_revision = revision)
+PLIC::DynamicPolyhedralReconstructionResult decode(const OwnerPacket& packet,
+    const AMR::AdaptiveCellKey& expected_key = key(), std::uint64_t expected_revision = revision)
 {
     wire::Reader reader{packet.bytes};
     EXPECT_EQ(AMR::decode_adaptive_key(reader.bytes()), expected_key);
@@ -236,18 +243,18 @@ PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveC
         EXPECT_EQ(reader.word(), expected);
     const auto begin = reader.offset;
     const auto real = [&] { return std::bit_cast<double>(reader.word()); };
-    PLIC::PolyhedralInterface fitted;
+    PLIC::PolyhedralReconstructionResult<mode> fitted;
     if (reader.word() != test_plane_protocol)
         throw std::invalid_argument("Unknown test owner plane protocol.");
     fitted.model_policy = plane_wire_detail::model_policy(reader.word());
     fitted.model_quality = plane_wire_detail::model_quality(reader.word());
-    for (auto& value : fitted.gas.normal)
+    for (auto& value : fitted.geometry.gas.normal)
         value = real();
-    for (auto& value : fitted.gas.anchor)
+    for (auto& value : fitted.geometry.gas.anchor)
         value = real();
-    fitted.gas.offset = real();
-    fitted.pure_gas = reader.word();
-    fitted.pure_carrier = reader.word();
+    fitted.geometry.gas.offset = real();
+    fitted.geometry.pure_gas = reader.word();
+    fitted.geometry.pure_carrier = reader.word();
     fitted.stencil_volume_residual = real();
     fitted.stencil_volume_residual_measured = reader.word();
     fitted.stencil_condition = real();
@@ -256,16 +263,16 @@ PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveC
     fitted.orientation_method = PLIC::PolyhedralOrientationMethod(reader.word());
     fitted.fit_converged = reader.word();
     fitted.target_volume_numerical_error_estimate = real();
-    fitted.finite_geometry = reader.word();
-    fitted.finite_target_volume_difference.arithmetic_mode = ArithmeticMode(reader.word());
-    fitted.finite_target_volume_difference.value = real();
-    fitted.finite_target_volume_difference.absolute_error = real();
+    EXPECT_EQ(reader.word(), 1u);
+    const auto decoded_mode = ArithmeticMode(reader.word());
+    fitted.target_volume_difference.value = real();
+    EXPECT_EQ(real(), 0);
     EXPECT_NO_THROW(plane_wire_detail::model_metadata(fitted));
-    EXPECT_EQ(fitted.finite_target_volume_difference.arithmetic_mode, mode);
+    EXPECT_EQ(decoded_mode, mode);
     while (reader.offset < begin + local::ordinary_plane_wire_bytes)
         EXPECT_EQ(reader.data[reader.offset++], char(0x5a));
     reader.done();
-    return fitted;
+    return PLIC::to_dynamic(std::move(fitted));
 }
 void validate(const AMR::AdaptiveCellKey& requested, std::uint64_t requested_revision, int)
 {
@@ -465,7 +472,7 @@ TEST(GeneralVoFOwnerPlaneRequests, CacheAdmissionBoundaryFallsBackWithoutChangin
         {
             local::PlaneImportStorage storage(retained, diagnostics);
             const auto outgoing = replies(fixture, {}, incoming, storage, diagnostics,
-                [&](wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
+                [&](wire::Writer& writer, const PLIC::DynamicPolyhedralReconstructionResult& fitted)
                 {
                     // A successfully admitted value is still charged when serialized.
                     EXPECT_EQ(retained.bytes, 29 + mandatory + (admit ? entry : 0));
@@ -524,7 +531,7 @@ TEST(GeneralVoFOwnerPlaneRequests, SerializationExceptionRetainsCacheChargeUntil
     {
         local::PlaneImportStorage storage(retained, diagnostics);
         EXPECT_THROW((void) replies(fixture, {}, incoming, storage, diagnostics,
-                         [&](wire::Writer&, const PLIC::PolyhedralInterface& fitted)
+                         [&](wire::Writer&, const PLIC::DynamicPolyhedralReconstructionResult& fitted)
                          {
                              fixture.check(fitted);
                              EXPECT_EQ(retained.bytes, 29 + mandatory + entry);
@@ -633,7 +640,7 @@ TEST(GeneralVoFOwnerPlaneRequests, DeepKeyGrowthAndOuterWorkspaceRemainReservedA
                 const auto outgoing = local::owner_plane_replies(
                     {}, incoming, context(), 0, 3, storage, diagnostics, validate_deep,
                     [&](const auto& candidate) { return fixture.fit(candidate, diagnostics); },
-                    [&](wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
+                    [&](wire::Writer& writer, const PLIC::DynamicPolyhedralReconstructionResult& fitted)
                     {
                         EXPECT_EQ(retained.bytes, caller_bytes + mandatory + (admit ? entry : 0));
                         serialize(writer, fitted);
@@ -663,7 +670,7 @@ TEST(GeneralVoFOwnerPlaneRequests, DeepKeyGrowthAndOuterWorkspaceRemainReservedA
                 EXPECT_THROW((void) local::owner_plane_replies(
                                  {}, incoming, context(), 0, 3, storage, diagnostics, validate_deep,
                                  [&](const auto& candidate) { return fixture.fit(candidate, diagnostics); },
-                                 [&](wire::Writer&, const PLIC::PolyhedralInterface&)
+                                 [&](wire::Writer&, const PLIC::DynamicPolyhedralReconstructionResult&)
                                  {
                                      EXPECT_EQ(retained.bytes, caller_bytes + mandatory + entry);
                                      throw std::runtime_error("Test deep-key serialization rejected.");

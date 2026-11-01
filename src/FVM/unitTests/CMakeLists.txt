@@ -21,6 +21,7 @@ set(FVM_ONLY_TESTS
     testExactFaceTransfer
     testExactPhaseTransfer
     testPolyhedralReconstruction
+    testPolyhedralReconstructionResult
     testGeneralVoF
     testFvmLibrary
     testGeometricVoF
@@ -52,6 +53,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   if(TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy")
     target_sources(${TEST_NAME} PRIVATE ${GENERAL_VOF_MOTION_SOURCES})
+  endif()
+  if(TEST_NAME STREQUAL "testPolyhedralReconstructionResult")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/Wire.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFBalance")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/BalanceForecast.cc)

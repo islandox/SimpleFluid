@@ -304,14 +304,14 @@ TEST(GeneralVoFFinite, StencilResidualMeasurementWirePreservesBothValuesAndRejec
 {
     namespace codec = SimpleFluid::VoF::plane_wire_detail;
     namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
-    EXPECT_FALSE(PLIC::PolyhedralInterface{}.stencil_volume_residual_measured);
+    EXPECT_FALSE(PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>{}.stencil_volume_residual_measured);
     for (const bool measured : {false, true})
     {
         wire::Writer writer;
         codec::boolean(writer, measured);
         EXPECT_EQ(writer.data.size(), sizeof(std::uint64_t));
         wire::Reader reader{writer.data};
-        PLIC::PolyhedralInterface decoded;
+        PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary> decoded;
         decoded.stencil_volume_residual_measured = codec::boolean(reader);
         EXPECT_EQ(decoded.stencil_volume_residual_measured, measured);
         EXPECT_NO_THROW(reader.done());
@@ -354,11 +354,9 @@ TEST(GeneralVoFFinite, ModelMetadataWireRejectsUnknownEnumsAndInconsistentProven
     }
     EXPECT_THROW((void) codec::model_policy(2), std::invalid_argument);
 
-    PLIC::PolyhedralInterface plane;
+    PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary> plane;
     EXPECT_NO_THROW(codec::model_metadata(plane));
     plane.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
-    plane.finite_geometry = true;
-    plane.finite_target_volume_difference.arithmetic_mode = ArithmeticMode::Ordinary;
     plane.model_quality = PLIC::PlicModelQuality::AboveThreshold;
     plane.stencil_volume_residual = .3;
     plane.stencil_volume_residual_measured = true;
@@ -384,7 +382,7 @@ TEST(GeneralVoFFinite, ModelMetadataWireRejectsUnknownEnumsAndInconsistentProven
     plane.model_quality = PLIC::PlicModelQuality::NotMeasured;
     EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
     plane = gradient;
-    plane.pure_gas = true;
+    plane.geometry.pure_gas = true;
     EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
     plane = gradient;
     plane.stencil_volume_residual = std::numeric_limits<double>::quiet_NaN();
@@ -421,7 +419,8 @@ TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReco
         expect_static_geometry_work();
         std::uint64_t local_mixed = 0, global_mixed = 0;
         for (const auto& plane : planes)
-            local_mixed += !plane.pure_gas && !plane.pure_carrier;
+            local_mixed +=
+                !PLIC::reconstruction_geometry(plane).pure_gas && !PLIC::reconstruction_geometry(plane).pure_carrier;
         Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_mixed, &global_mixed);
         EXPECT_GT(global_mixed, 0u);
     }
@@ -895,11 +894,16 @@ TEST(GeneralVoFFinite, MixedOwnershipMigrationPreservesOrientationAndMeasuredRes
         const auto index = std::get<CartesianCellAncestry>(key.ancestry).index;
         return std::size_t(index[0] + 2 * index[1] + 4 * index[2]);
     };
-    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    const auto diagnostics = [](const PLIC::DynamicPolyhedralReconstructionResult& result)
     {
-        return std::array{double(plane.orientation_method), double(plane.fit_converged), double(plane.fit_iterations),
-            double(plane.stencil_volume_residual_measured), plane.stencil_volume_residual, plane.stencil_condition,
-            plane.orientation_step};
+        return std::visit(
+            [](const auto& plane)
+            {
+                return std::array{double(plane.orientation_method), double(plane.fit_converged),
+                    double(plane.fit_iterations), double(plane.stencil_volume_residual_measured),
+                    plane.stencil_volume_residual, plane.stencil_condition, plane.orientation_step};
+            },
+            result);
     };
     for (const double fraction : {1e-6, .1, .5})
     {
@@ -923,10 +927,13 @@ TEST(GeneralVoFFinite, MixedOwnershipMigrationPreservesOrientationAndMeasuredRes
             std::copy(fields.begin(), fields.end(), local.begin() + width * ordinal(source.owned_order()[c]));
             if (input.gas[c] != 0)
             {
-                EXPECT_EQ(before[c].orientation_method, fraction < .5
-                                                            ? PLIC::PolyhedralOrientationMethod::Gradient
-                                                            : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
-                EXPECT_EQ(before[c].stencil_volume_residual_measured, fraction >= .000125);
+                EXPECT_EQ(std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(before[c])
+                              .orientation_method,
+                    fraction < .5 ? PLIC::PolyhedralOrientationMethod::Gradient
+                                  : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+                EXPECT_EQ(std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(before[c])
+                              .stencil_volume_residual_measured,
+                    fraction >= .000125);
             }
         }
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), expected.data());
@@ -954,11 +961,17 @@ TEST(GeneralVoFFinite, ApproximateMixedOwnershipMigrationPreservesActualModelQua
         const auto index = std::get<CartesianCellAncestry>(key.ancestry).index;
         return std::size_t(index[0] + 2 * index[1] + 4 * index[2]);
     };
-    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    const auto diagnostics = [](const PLIC::DynamicPolyhedralReconstructionResult& result)
     {
-        return std::array{double(plane.orientation_method), double(plane.fit_converged), double(plane.fit_iterations),
-            double(plane.stencil_volume_residual_measured), plane.stencil_volume_residual, plane.stencil_condition,
-            plane.orientation_step, double(plane.model_policy), double(plane.model_quality)};
+        return std::visit(
+            [](const auto& plane)
+            {
+                return std::array{double(plane.orientation_method), double(plane.fit_converged),
+                    double(plane.fit_iterations), double(plane.stencil_volume_residual_measured),
+                    plane.stencil_volume_residual, plane.stencil_condition, plane.orientation_step,
+                    double(plane.model_policy), double(plane.model_quality)};
+            },
+            result);
     };
     auto input = fixture();
     for (std::size_t c = 0; c < input.order.size(); ++c)
@@ -977,7 +990,7 @@ TEST(GeneralVoFFinite, ApproximateMixedOwnershipMigrationPreservesActualModelQua
     for (std::size_t c = 0; c < source.owned_order().size(); ++c)
     {
         const auto index = std::get<CartesianCellAncestry>(source.owned_order()[c].ancestry).index;
-        const auto& plane = before[c];
+        const auto& plane = std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(before[c]);
         EXPECT_EQ(plane.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
         EXPECT_FALSE(plane.fit_converged);
         EXPECT_EQ(plane.fit_iterations, 0u);
@@ -994,7 +1007,7 @@ TEST(GeneralVoFFinite, ApproximateMixedOwnershipMigrationPreservesActualModelQua
             index[0] == 0 ? PLIC::PlicModelQuality::AboveThreshold : PLIC::PlicModelQuality::WithinThreshold);
         if (index[0] == 0)
             EXPECT_GT(plane.stencil_volume_residual, options.reconstruction.maximum_model_residual);
-        const auto fields = diagnostics(plane);
+        const auto fields = diagnostics(before[c]);
         std::copy(fields.begin(), fields.end(), local.begin() + width * ordinal(source.owned_order()[c]));
     }
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), expected.data());
@@ -1195,9 +1208,9 @@ TEST(GeneralVoFFinite, SamePureGeometryKeepsIndependentTraceInventoryWithoutInve
     {
         EXPECT_GT(moved->carrier_volumes()[i], 0);
         EXPECT_NEAR(moved->carrier_volumes()[i], 1e-18, moved->phase_roundoff_bounds()[i].carrier);
-        EXPECT_TRUE(pure[i].finite_geometry);
-        EXPECT_TRUE(pure[i].pure_gas);
-        EXPECT_FALSE(pure[i].pure_carrier);
+        EXPECT_EQ(PLIC::reconstruction_mode(pure[i]), ArithmeticMode::Ordinary);
+        EXPECT_TRUE(PLIC::reconstruction_geometry(pure[i]).pure_gas);
+        EXPECT_FALSE(PLIC::reconstruction_geometry(pure[i]).pure_carrier);
     }
 }
 TEST(GeneralVoFFinite, IncomingTinyGeometryInvalidatesPureHintAndIdentityPreservesSourceEvidence)

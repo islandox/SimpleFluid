@@ -11,7 +11,7 @@
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
-using RequestedPlaneMap = std::map<Meshes::AMR::AdaptiveCellKey, PLIC::PolyhedralInterface>;
+using RequestedPlaneMap = std::map<Meshes::AMR::AdaptiveCellKey, PLIC::DynamicPolyhedralReconstructionResult>;
 /** Temporary reservation on the caller's existing operation ledger. Declare
  * before import containers; destroy those containers before this reservation.
  * Returned plane nodes must be reserved by the caller before entering it. */

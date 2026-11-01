@@ -4,7 +4,7 @@
 #pragma once
 #include "FVM/GeneralVoFSurface.hh"
 #include "SimpleFluidExport.hh"
-#include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/PolyhedralInterface.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <optional>
 #include <span>

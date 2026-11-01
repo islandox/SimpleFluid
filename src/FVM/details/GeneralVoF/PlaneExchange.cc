@@ -7,11 +7,12 @@
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
-template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode>
+std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const GeneralVoF::Data& data)
 {
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
-    std::map<Key, PLIC::PolyhedralInterface> result;
+    std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> result;
     wire::collective(*comm,
         [&]
         {
@@ -72,38 +73,41 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
-                auto fitted =
+                auto imported =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
-                validate_plane_metadata(fitted, data.options.reconstruction, Mode);
+                validate_plane_metadata(imported, data.options.reconstruction, Mode);
+                if (PLIC::reconstruction_mode(imported) != Mode)
+                    throw std::invalid_argument("Imported interface arithmetic mode differs from its state.");
+                auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<Mode>>(imported);
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
-                    if (!fitted.finite_geometry)
-                        throw std::invalid_argument("Finite VoF imported an exact interface authority.");
-                    if (!fitted.pure_gas && !fitted.pure_carrier)
+                    if (!fitted.geometry.pure_gas && !fitted.geometry.pure_carrier)
                     {
                         const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
-                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
+                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)
+                                ->phases(fitted.geometry.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
-                        fitted.finite_target_volume_difference =
-                            fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
-                                {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
-                        fitted.target_volume_residual =
-                            static_cast<double>(fitted.finite_target_volume_difference.value);
+                        const auto difference = fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
+                            {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
+                        fitted.target_volume_difference.value = difference.value;
+                        if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                            fitted.target_volume_difference.absolute_error = difference.absolute_error;
+                        fitted.target_volume_residual = static_cast<double>(fitted.target_volume_difference.value);
                     }
                 }
-                else if (!fitted.pure_gas && !fitted.pure_carrier)
+                else if (!fitted.geometry.pure_gas && !fitted.geometry.pure_carrier)
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                     const auto measures = SimpleFluid::geometry::swept_volume::ConvexFragment<
                         SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell.phase.geometry)
-                                              ->phases(fitted.gas);
+                                              ->phases(fitted.geometry.gas);
                     const auto residual = (gas ? measures.gas : measures.carrier) -
                                           Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
                     fitted.target_volume_difference = residual.enclosure();
                     fitted.target_volume_residual = double(fitted.target_volume_difference.value);
                 }
-                result.emplace(key, std::move(fitted));
+                result.emplace(key, std::move(imported));
                 r.done();
             }
             if (seen.size() != requests.size())
@@ -112,7 +116,7 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
     return result;
 }
 
-std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
+std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_planes(const GeneralVoF::Data& data,
     const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
     GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics, GeneralVoFWorkSample* balance_work)
 {
@@ -123,10 +127,11 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
     const auto reconstruct = [&](const Key& key)
     {
         auto* row = balance_cell(balance_work, key);
-        auto fitted = reconstruct_observed_ordinary_cell(data, key, &diagnostics, row);
+        auto result = reconstruct_observed_ordinary_cell(data, key, &diagnostics, row);
+        const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<Mode>>(result);
         if (row)
         {
-            row->mixed = !fitted.pure_gas && !fitted.pure_carrier;
+            row->mixed = !fitted.geometry.pure_gas && !fitted.geometry.pure_carrier;
             row->fit_iterations = fitted.fit_iterations;
             row->request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
             // Same codec as a real reply; this calibration is outside reconstruction timing.
@@ -136,7 +141,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                 writer.data.reserve(ordinary_plane_wire_bytes);
                 if (writer.data.capacity() > ordinary_plane_wire_bytes)
                     storage.charge(writer.data.capacity() - ordinary_plane_wire_bytes);
-                plane(writer, fitted);
+                plane(writer, result);
                 if (writer.data.size() > ordinary_plane_wire_bytes)
                     throw std::invalid_argument("General VoF plane exceeds its capture envelope.");
                 row->reply_payload_bytes = row->request_payload_bytes + writer.data.size();
@@ -145,9 +150,9 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
             }
             storage.release(ordinary_plane_wire_bytes);
         }
-        return fitted;
+        return result;
     };
-    std::map<Key, PLIC::PolyhedralInterface> result;
+    std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> result;
     wire::collective(*comm,
         [&]
         {
@@ -233,7 +238,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                         throw std::invalid_argument("General VoF stale plane request.");
                 },
                 [&](const Key& key) { return reconstruct(key); },
-                [&](wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
+                [&](wire::Writer& writer, const PLIC::DynamicPolyhedralReconstructionResult& fitted)
                 {
                     plane(writer, fitted);
                     budget.packet(writer.data.size());
@@ -281,39 +286,40 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                 storage.charge(
                     sizeof(decltype(seen)::value_type) + 4 * sizeof(void*) + owner_plane_key_storage_bytes(key));
                 seen.insert(key);
-                auto fitted =
+                auto imported =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
-                validate_plane_metadata(fitted, data.options.reconstruction, Mode);
+                validate_plane_metadata(imported, data.options.reconstruction, Mode);
+                if (PLIC::reconstruction_mode(imported) != Mode)
+                    throw std::invalid_argument("Imported interface arithmetic mode differs from its state.");
+                auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<Mode>>(imported);
                 GeneralVoFWorkReceiver* receiver = nullptr;
                 if (balance_work)
                     for (auto& row : balance_work->receivers)
                         if (row.donor.key == key)
                         {
                             receiver = &row;
-                            row.mixed = !fitted.pure_gas && !fitted.pure_carrier;
+                            row.mixed = !fitted.geometry.pure_gas && !fitted.geometry.pure_carrier;
                             row.request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
                             row.reply_payload_bytes = packet.bytes.size();
                             break;
                         }
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
-                    if (!fitted.finite_geometry)
-                        throw std::invalid_argument("Finite VoF imported an exact interface authority.");
-                    if (!fitted.pure_gas && !fitted.pure_carrier)
+                    if (!fitted.geometry.pure_gas && !fitted.geometry.pure_carrier)
                     {
                         WorkObservation receiver_observation(receiver ? &receiver->remeasurement : nullptr);
                         const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
-                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
+                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)
+                                ->phases(fitted.geometry.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
-                        fitted.finite_target_volume_difference =
-                            fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
-                                {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
-                        fitted.target_volume_residual =
-                            static_cast<double>(fitted.finite_target_volume_difference.value);
+                        const auto difference = fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
+                            {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
+                        fitted.target_volume_difference.value = difference.value;
+                        fitted.target_volume_residual = static_cast<double>(fitted.target_volume_difference.value);
                     }
                 }
-                result.emplace(key, std::move(fitted));
+                result.emplace(key, std::move(imported));
                 r.done();
             }
             storage.release(key_scratch);
@@ -325,7 +331,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
     return result;
 }
 
-std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
+std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const GeneralVoF::Data& data)
 {
     if (data.options.arithmetic_mode == ArithmeticMode::Exact)
         return import_planes<ArithmeticMode::Exact>(data);
@@ -333,8 +339,10 @@ std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& d
         return import_planes<ArithmeticMode::Ordinary>(data);
     return import_planes<ArithmeticMode::BoundedCertification>(data);
 }
-template std::map<Key, PLIC::PolyhedralInterface> import_planes<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
-template std::map<Key, PLIC::PolyhedralInterface> import_planes<ArithmeticMode::BoundedCertification>(
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes<ArithmeticMode::Ordinary>(
     const GeneralVoF::Data&);
-template std::map<Key, PLIC::PolyhedralInterface> import_planes<ArithmeticMode::Exact>(const GeneralVoF::Data&);
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes<ArithmeticMode::BoundedCertification>(
+    const GeneralVoF::Data&);
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes<ArithmeticMode::Exact>(
+    const GeneralVoF::Data&);
 } // namespace SimpleFluid::VoF::general_vof_detail

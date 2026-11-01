@@ -64,61 +64,79 @@ PLIC::DynamicGeometryValue finite_value(wire::Reader& r, std::optional<Arithmeti
         throw std::invalid_argument("Finite VoF wire scalar arithmetic mode differs from its state.");
     return v;
 }
-void validate_plane_metadata(const PLIC::PolyhedralInterface& p,
+void validate_plane_metadata(const PLIC::DynamicPolyhedralReconstructionResult& result,
     const PLIC::PolyhedralReconstructionOptions& options, ArithmeticMode mode)
 {
-    plane_wire_detail::model_metadata(p);
-    if (p.model_policy != options.model_policy ||
-        (mode != ArithmeticMode::Ordinary && p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement))
-        throw std::invalid_argument("PLIC interface model policy differs from its immutable state.");
-    if (!std::isfinite(p.stencil_volume_residual) || p.stencil_volume_residual < 0 ||
-        (p.stencil_volume_residual_measured &&
-            p.model_quality != (p.stencil_volume_residual > options.maximum_model_residual
-                                   ? PLIC::PlicModelQuality::AboveThreshold
-                                   : PLIC::PlicModelQuality::WithinThreshold)))
-        throw std::invalid_argument("PLIC interface model quality differs from its measured residual.");
+    if (PLIC::reconstruction_mode(result) != mode)
+        throw std::invalid_argument("PLIC interface arithmetic mode differs from its immutable state.");
+    std::visit(
+        [&](const auto& p)
+        {
+            plane_wire_detail::model_metadata(p);
+            if (p.model_policy != options.model_policy ||
+                (mode != ArithmeticMode::Ordinary && p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement))
+                throw std::invalid_argument("PLIC interface model policy differs from its immutable state.");
+            if (!std::isfinite(p.stencil_volume_residual) || p.stencil_volume_residual < 0 ||
+                (p.stencil_volume_residual_measured &&
+                    p.model_quality != (p.stencil_volume_residual > options.maximum_model_residual
+                                               ? PLIC::PlicModelQuality::AboveThreshold
+                                               : PLIC::PlicModelQuality::WithinThreshold)))
+                throw std::invalid_argument("PLIC interface model quality differs from its measured residual.");
+        },
+        result);
 }
-void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
+void plane(wire::Writer& w, const PLIC::DynamicPolyhedralReconstructionResult& result)
 {
-    plane_wire_detail::model_metadata(p);
-    packet_codec::write_header(w, packet_codec::Family::InterfacePlane, 2, packet_codec::Record::Value);
-    protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
-    protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
-    for (auto v : p.gas.normal)
-        real(w, v);
-    for (auto v : p.gas.anchor)
-        real(w, v);
-    real(w, p.gas.offset);
-    w.word(p.pure_gas);
-    w.word(p.pure_carrier);
-    real(w, p.stencil_volume_residual);
-    plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
-    real(w, p.stencil_condition);
-    real(w, p.orientation_step);
-    w.word(p.fit_iterations);
-    plane_wire_detail::orientation(w, p.orientation_method);
-    w.word(p.fit_converged);
-    finite_real(w, p.target_volume_numerical_error_estimate);
-    w.word(p.finite_geometry);
-    if (p.finite_geometry)
-        finite_value(w, p.finite_target_volume_difference);
+    std::visit(
+        [&](const auto& p)
+        {
+            plane_wire_detail::model_metadata(p);
+            packet_codec::write_header(w, packet_codec::Family::InterfacePlane, 2, packet_codec::Record::Value);
+            protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+            protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+            for (auto v : p.geometry.gas.normal)
+                real(w, v);
+            for (auto v : p.geometry.gas.anchor)
+                real(w, v);
+            real(w, p.geometry.gas.offset);
+            w.word(p.geometry.pure_gas);
+            w.word(p.geometry.pure_carrier);
+            real(w, p.stencil_volume_residual);
+            plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
+            real(w, p.stencil_condition);
+            real(w, p.orientation_step);
+            w.word(p.fit_iterations);
+            plane_wire_detail::orientation(w, p.orientation_method);
+            w.word(p.fit_converged);
+            finite_real(w, p.target_volume_numerical_error_estimate);
+            constexpr auto Mode = decltype(p.target_volume_difference)::arithmetic_mode;
+            w.word(Mode != ArithmeticMode::Exact);
+            if constexpr (Mode != ArithmeticMode::Exact)
+            {
+                long double error = 0;
+                if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                    error = p.target_volume_difference.absolute_error;
+                finite_value(w, {p.target_volume_difference.value, error, Mode});
+            }
+        },
+        result);
 }
-PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
+PLIC::DynamicPolyhedralReconstructionResult plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
 {
-    PLIC::PolyhedralInterface p;
+    PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact> p;
     packet_codec::read_header(r, packet_codec::Family::InterfacePlane, 2, packet_codec::Record::Value);
     p.model_policy = protocol_tags::read(r, PLIC::PlicModelPolicy::ConservativeApproximation);
     p.model_quality = protocol_tags::read(r, PLIC::PlicModelQuality::AboveThreshold);
     if (mode && *mode != ArithmeticMode::Ordinary &&
         p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement)
         throw std::invalid_argument("General VoF interface model policy has a foreign arithmetic mode.");
-    for (auto& v : p.gas.normal)
+    for (auto& v : p.geometry.gas.normal)
         v = real(r);
-    for (auto& v : p.gas.anchor)
+    for (auto& v : p.geometry.gas.anchor)
         v = real(r);
-    p.gas.offset = real(r);
-    p.pure_gas = plane_wire_detail::boolean(r);
-    p.pure_carrier = plane_wire_detail::boolean(r);
+    p.geometry.gas.offset = real(r);
+    p.geometry.pure_gas = plane_wire_detail::boolean(r);
+    p.geometry.pure_carrier = plane_wire_detail::boolean(r);
     p.stencil_volume_residual = real(r);
     p.stencil_volume_residual_measured = plane_wire_detail::boolean(r);
     p.stencil_condition = real(r);
@@ -127,11 +145,26 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     p.orientation_method = plane_wire_detail::orientation(r);
     p.fit_converged = plane_wire_detail::boolean(r);
     p.target_volume_numerical_error_estimate = finite_real(r);
-    p.finite_geometry = plane_wire_detail::boolean(r);
-    if (p.finite_geometry)
-        p.finite_target_volume_difference = finite_value(r, mode);
+    const auto finite_geometry = plane_wire_detail::boolean(r);
+    if (finite_geometry)
+    {
+        const auto difference = finite_value(r, mode);
+        if (difference.arithmetic_mode == ArithmeticMode::Ordinary)
+        {
+            PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary> typed;
+            PLIC::copy_reconstruction_metadata(typed, p);
+            typed.target_volume_difference = {difference.value};
+            plane_wire_detail::model_metadata(typed);
+            return PLIC::to_dynamic(std::move(typed));
+        }
+        PLIC::PolyhedralReconstructionResult<ArithmeticMode::BoundedCertification> typed;
+        PLIC::copy_reconstruction_metadata(typed, p);
+        typed.target_volume_difference = {difference.value, difference.absolute_error};
+        plane_wire_detail::model_metadata(typed);
+        return PLIC::to_dynamic(std::move(typed));
+    }
     plane_wire_detail::model_metadata(p);
-    return p;
+    return PLIC::to_dynamic(std::move(p));
 }
 void finite_phases(wire::Writer& w, const PLIC::DynamicPhaseMeasures& p)
 {
