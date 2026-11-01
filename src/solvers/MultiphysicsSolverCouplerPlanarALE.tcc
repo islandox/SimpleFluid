@@ -7,6 +7,23 @@
  * rollback or MPI work.
  */
 
+#include "solvers/FieldStateTransaction.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/SafeguardedAitken.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <exception>
+#include <iomanip>
+#include <limits>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <vector>
+
 namespace SimpleFluid
 {
 

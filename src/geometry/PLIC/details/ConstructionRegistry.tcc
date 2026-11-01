@@ -1,9 +1,13 @@
 /** @file ConstructionRegistry.tcc
  * @brief Compact version 5 finite construction replay, rooted in independent authority.
  */
+
+#include "geometry/PLIC/ConstructionRegistry.hh"
+#include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC
 {
-namespace construction_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL construction_detail
 {
 constexpr GeometryTag category = GeometryTag::ConstructionRegistry;
 [[noreturn]] void fail(GeometryErrorCode code, const char* message)
@@ -150,7 +154,7 @@ template<ArithmeticMode Mode> Reference read_reference(Reader<Mode>& reader, std
         fail(GeometryErrorCode::ProvenanceMismatch, "Forward, cyclic or invalid construction dependency.");
     return {static_cast<std::size_t>(node), static_cast<unsigned>(side)};
 }
-} // namespace construction_detail SIMPLEFLUID_LOCAL
+} // namespace construction_detail
 
 template<ArithmeticMode Mode> struct ConstructionRegistry<Mode>::Impl
 {
@@ -366,7 +370,7 @@ std::vector<ConstructionRootKey> ConstructionRegistry<Mode>::required_roots(
     return result;
 }
 
-namespace construction_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL construction_detail
 {
 template<ArithmeticMode Mode> struct EncodePlan
 {
@@ -580,7 +584,7 @@ std::shared_ptr<const DynamicConvexGeometry::Impl> input_plane_source(
     source->surfaces.push_back({std::move(plane), 1});
     return source;
 }
-} // namespace construction_detail SIMPLEFLUID_LOCAL
+} // namespace construction_detail
 
 template<ArithmeticMode Mode>
 std::vector<char> ConvexCellGeometry<Mode>::encode(

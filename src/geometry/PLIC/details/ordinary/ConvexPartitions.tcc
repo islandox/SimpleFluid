@@ -1,9 +1,11 @@
 /** @file ordinary/ConvexPartitions.tcc
  * @brief Ordinary donor partitioning with structural coverage and physical closure checks.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode>
 bool structural_cover(
@@ -347,5 +349,5 @@ template std::vector<DynamicConvexGeometryPtr> GeometryKernel<kernel_mode>::vali
     std::span<const DynamicConvexGeometryPtr>, GeometryLimits);
 template std::vector<DynamicPartitionPiece> PartitionKernel<kernel_mode>::partition(
     const DynamicConvexGeometry& parent, std::size_t maximum_pieces) const;
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -2,13 +2,14 @@
  * @brief Ordinary convex clipping with retained topology and construction provenance.
  */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <exception>
 #include <sstream>
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b)
 {
@@ -1379,5 +1380,5 @@ template bool separated_bounds<kernel_mode>(const DynamicConvexGeometry::Impl& a
 template bool GeometryKernel<kernel_mode>::bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::intersect(const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::translated(GeometryPoint displacement) const;
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

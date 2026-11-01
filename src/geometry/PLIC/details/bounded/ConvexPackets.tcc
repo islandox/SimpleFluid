@@ -2,9 +2,11 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode>
 std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& context, std::size_t byte_budget) const
@@ -488,5 +490,5 @@ template Interval NumericalReader<kernel_mode>::interval();
 template Frame NumericalReader<kernel_mode>::frame();
 template std::vector<PlaneAuthority> NumericalReader<kernel_mode>::authorities(
     const PlaneAuthorityRegistry& registry, GeometryLimits limits);
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

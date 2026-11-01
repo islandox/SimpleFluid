@@ -1,11 +1,12 @@
 /** @file ordinary/ConvexGeometry.tcc
  * @brief Ordinary scalar geometry arithmetic and nominal-value conversion.
  */
+#include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 
 namespace source_witness
@@ -481,5 +482,5 @@ template Scalar distance<kernel_mode>(const Vertex& vertex, const Frame& frame, 
 template Scalar square_root<kernel_mode>(Scalar x);
 template void Accumulator<kernel_mode>::add(Scalar term);
 template Scalar Accumulator<kernel_mode>::result() const;
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

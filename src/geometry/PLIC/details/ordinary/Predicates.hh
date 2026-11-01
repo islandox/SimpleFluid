@@ -8,7 +8,7 @@
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_predicates SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_predicates
 {
 using Point = std::array<long double, 3>;
 struct FramedPoint
@@ -94,5 +94,5 @@ struct SupportEvaluation
     const std::array<FramedPoint, 4>& source, const std::array<SupportRow, 3>& basis, const SupportRow& query);
 /** Require a resolved sign without reinterpreting an uncertain zero as contact. */
 [[nodiscard]] int require_sign(const Result&);
-} // namespace ordinary_predicates SIMPLEFLUID_LOCAL
+} // namespace ordinary_predicates
 } // namespace SimpleFluid::PLIC::details

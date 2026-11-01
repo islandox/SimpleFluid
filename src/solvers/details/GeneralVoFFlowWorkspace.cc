@@ -717,8 +717,13 @@ std::vector<Vector> GeneralVoFFlowWorkspace::viscous_force(
     }
     return result;
 }
+} // namespace SimpleFluid::detail
+
 #include "solvers/details/GeneralVoFFiniteProjection.tcc"
 #include "solvers/details/GeneralVoFCompatibleFlow.tcc"
+
+namespace SimpleFluid::detail
+{
 void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
     std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
     const std::vector<double>& kappa, double dt, double sigma, const VoFSolverOptions& options,

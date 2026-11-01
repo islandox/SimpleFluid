@@ -1,9 +1,12 @@
 /** @file ordinary/ConvexPackets.tcc
  * @brief Ordinary geometry packets with authenticated metadata and scalar coordinates.
  */
+
+#include "geometry/PLIC/ScalarPacket.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode>
 std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& context, std::size_t byte_budget) const
@@ -440,5 +443,5 @@ template Scalar NumericalReader<kernel_mode>::scalar();
 template Frame NumericalReader<kernel_mode>::frame();
 template std::vector<PlaneAuthority> NumericalReader<kernel_mode>::authorities(
     const PlaneAuthorityRegistry& registry, GeometryLimits limits);
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

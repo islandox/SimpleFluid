@@ -47,7 +47,7 @@ using namespace exact_geometry_detail;
 namespace SimpleFluid::PLIC
 {
 
-namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_geometry_detail
 {
 using Q = boost::multiprecision::cpp_rational;
 
@@ -444,7 +444,7 @@ struct WireReader
 };
 NativeConvexShell canonical_native_shell(
     std::span<const GeometryPoint> vertices, const std::vector<Face>& outward_faces);
-} // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+} // namespace exact_geometry_detail
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
@@ -498,7 +498,7 @@ struct SIMPLEFLUID_LOCAL ExtrudedConstruction<ArithmeticMode::Exact>::Impl
 namespace SimpleFluid::PLIC
 {
 
-namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_geometry_detail
 {
 std::vector<char> topology_descriptor(const ExtrudedTopology& topology);
 MeshUtils::Vec3 rounded_point(const P& p);
@@ -547,7 +547,7 @@ struct ComplexNodeRow
     std::uint64_t region = 0;
     P point;
 };
-} // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+} // namespace exact_geometry_detail
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
@@ -564,13 +564,13 @@ struct SIMPLEFLUID_LOCAL PolyhedralComplex<ArithmeticMode::Exact>::Impl
 namespace SimpleFluid::PLIC
 {
 
-namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_geometry_detail
 {
 void complex_validate(PolyhedralComplex<ArithmeticMode::Exact>::Impl& impl);
 void write_point_recipes(WireWriter& w, const ExtrudedBaseData& base);
 void read_point_recipes(WireReader& r, std::vector<PointRecipe>& points, std::vector<std::size_t>& active);
 void read_axis_parts(std::span<const char> packet, std::vector<ScalarRecipe>& roots, std::vector<std::size_t>& active);
-} // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+} // namespace exact_geometry_detail
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
@@ -583,14 +583,14 @@ struct SIMPLEFLUID_LOCAL PlanarFace<ArithmeticMode::Exact>::Impl
 namespace SimpleFluid::PLIC
 {
 
-namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL exact_geometry_detail
 {
 void validate_planar_polygon(const Polygon& polygon);
 P authority_point(std::span<const char> packet);
 P displacement_point(std::span<const char> packet);
 const P& authority_point(const PointIdentity<ArithmeticMode::Exact>& identity);
 const P& displacement_point(const DisplacementIdentity<ArithmeticMode::Exact>& identity);
-} // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
+} // namespace exact_geometry_detail
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {

@@ -2,9 +2,11 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b)
 {
@@ -1084,5 +1086,5 @@ template bool separated_bounds<kernel_mode>(const DynamicConvexGeometry::Impl& a
 template bool GeometryKernel<kernel_mode>::bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::intersect(const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::translated(GeometryPoint displacement) const;
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -581,24 +581,12 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_impl(const std:
     require(*map, valid, "Conservative VoF transport lost inventory positivity or finiteness.");
     return result;
 }
-// Coefficients and communication plans are immutable after successful publication.
-// RHS storage and physical-defect correction remain owned by the workspace.
-struct ConservativeVoFTransport::FinitePreparation
-{
-    std::vector<long double> capacity, outgoing, capacity_error, outgoing_error, diagonal;
-    std::vector<FiniteTransfer> incoming;
-    std::vector<FiniteFaceContribution> contributions;
-    std::vector<std::map<GO, PLIC::DynamicGeometryValue>> raw;
-    Teuchos::RCP<const Pack::map_type> owned_map, overlap_map, owned_face_map, overlap_face_map, donor_map;
-    std::unique_ptr<Pack::import_type> donor_import;
-    Teuchos::RCP<const Pack::matrix_type> matrix;
-    std::uint64_t geometry_epoch = 0;
-    ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
-    FiniteOperatorMode operator_mode = FiniteOperatorMode::EquivalentRoutes;
-    std::size_t byte_budget = 0;
-    double tolerance = 0;
-};
+} // namespace SimpleFluid::detail
+
 #include "solvers/details/ConservativeVoFFiniteTransport.tcc"
+
+namespace SimpleFluid::detail
+{
 ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vector<long double>& old,
     const std::vector<long double>& source, const std::vector<long double>& capacity,
     const std::vector<long double>& outgoing, const std::vector<FiniteTransfer>& incoming,

@@ -6,7 +6,7 @@
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 namespace SimpleFluid::PLIC
 {
-namespace details SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL details
 {
 template<ArithmeticMode Mode> struct ArithmeticPolicy
 {
@@ -49,5 +49,5 @@ template<ArithmeticMode Mode> struct ArithmeticPolicy
     }
     [[noreturn]] static void reject(const char* reason) { details::reject(Mode, reason); }
 };
-} // namespace details SIMPLEFLUID_LOCAL
+} // namespace details
 } // namespace SimpleFluid::PLIC

@@ -2,12 +2,14 @@
  * @brief Ordinary planar-face clipping and nominal overlap measures.
  */
 
+#include "geometry/PLIC/details/GeometryKernels.hh"
+
 #pragma once
 
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode> Scalar planar_turn(const PlanarVertex& a, const PlanarVertex& b, const PlanarVertex& c)
 {
@@ -306,5 +308,5 @@ template PlanarVertex planar_crossing<kernel_mode>(
 template bool planar_line_contact<kernel_mode>(const PlanarPolygon& polygon, const PlaneAuthority& primary);
 template DynamicPlanarFaceOverlap dynamic_planar_face_overlap<kernel_mode>(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -1,6 +1,49 @@
 /** @file ConservativeVoFFiniteTransport.tcc
  * @brief Compiled finite arithmetic specialization.
  */
+#include "FVM/details/VoFFailure.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
+#include "parallel/SparseOwnerExchange.hh"
+#include "solvers/details/ConservativeVoFTransport.hh"
+#include "utils/CompensatedSum.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <span>
+#include <stdexcept>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+namespace SimpleFluid::detail
+{
+
+// Coefficients and communication plans are immutable after successful publication.
+// RHS storage and physical-defect correction remain owned by the workspace.
+struct ConservativeVoFTransport::FinitePreparation
+{
+    using GO = Pack::global_ordinal_type;
+    std::vector<long double> capacity, outgoing, capacity_error, outgoing_error, diagonal;
+    std::vector<FiniteTransfer> incoming;
+    std::vector<FiniteFaceContribution> contributions;
+    std::vector<std::map<GO, PLIC::DynamicGeometryValue>> raw;
+    Teuchos::RCP<const Pack::map_type> owned_map, overlap_map, owned_face_map, overlap_face_map, donor_map;
+    std::unique_ptr<Pack::import_type> donor_import;
+    Teuchos::RCP<const Pack::matrix_type> matrix;
+    std::uint64_t geometry_epoch = 0;
+    ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
+    FiniteOperatorMode operator_mode = FiniteOperatorMode::EquivalentRoutes;
+    std::size_t byte_budget = 0;
+    double tolerance = 0;
+};
+
 template<ArithmeticMode Mode>
 ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const std::vector<long double>& old,
     const std::vector<long double>& source, const std::vector<long double>& capacity,
@@ -11,6 +54,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
     std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode)
 {
     namespace fp = VoF::finite_detail;
+    using LO = Pack::local_ordinal_type;
+    using GO = Pack::global_ordinal_type;
     using A = fp::Arithmetic<Mode>;
     using Value = PLIC::DynamicGeometryValue;
     const auto map = mesh_->owned_cell_map();
@@ -681,3 +726,5 @@ template ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite
     int maximum_iterations, double tolerance, std::size_t byte_budget, std::span<const long double> old_error,
     std::span<const long double> source_error, std::span<const long double> capacity_error,
     std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode);
+
+} // namespace SimpleFluid::detail

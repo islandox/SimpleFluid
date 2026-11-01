@@ -10,7 +10,7 @@
 
 namespace SimpleFluid::PLIC::details
 {
-namespace ordinary_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 inline constexpr ArithmeticMode kernel_mode = ArithmeticMode::Ordinary;
 [[noreturn]] inline void reject(std::string_view reason)
@@ -278,13 +278,13 @@ template<ArithmeticMode Mode> bool planar_line_contact(const PlanarPolygon& poly
 template<ArithmeticMode Mode>
 DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace ordinary_kernel SIMPLEFLUID_LOCAL
+} // namespace ordinary_kernel
 
 } // namespace SimpleFluid::PLIC::details
 
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 inline constexpr ArithmeticMode kernel_mode = ArithmeticMode::BoundedCertification;
 [[noreturn]] inline void reject(std::string_view reason)
@@ -539,5 +539,5 @@ template<ArithmeticMode Mode> bool planar_line_contact(const PlanarPolygon& poly
 template<ArithmeticMode Mode>
 DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

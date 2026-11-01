@@ -2,9 +2,11 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+
+#include "geometry/PLIC/details/GeometryKernels.hh"
 namespace SimpleFluid::PLIC::details
 {
-namespace certification_kernel SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode> Interval planar_turn(const PlanarVertex& a, const PlanarVertex& b, const PlanarVertex& c)
 {
@@ -303,5 +305,5 @@ template PlanarVertex planar_crossing<kernel_mode>(
 template bool planar_line_contact<kernel_mode>(const PlanarPolygon& polygon, const PlaneAuthority& primary);
 template DynamicPlanarFaceOverlap dynamic_planar_face_overlap<kernel_mode>(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace certification_kernel SIMPLEFLUID_LOCAL
+} // namespace certification_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -117,7 +117,7 @@ public:
     static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
 };
 
-namespace details SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL details
 {
 template<ArithmeticMode Mode>
 [[nodiscard]] PlaneAuthority original_support_authority(const PlaneSupportIdentity<Mode>& identity)
@@ -362,7 +362,7 @@ template<ArithmeticMode Mode> struct StoredMomentCache
     std::once_flag prepared;
     std::optional<StoredIntegrals<Mode>> integrals;
 };
-} // namespace details SIMPLEFLUID_LOCAL
+} // namespace details
 
 struct SIMPLEFLUID_LOCAL DynamicPointExportPayload
 {
@@ -436,7 +436,7 @@ void preserve_crossing_incidence(
     StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&, const Frame&, bool numerical_only);
 } // namespace details
 
-namespace details SIMPLEFLUID_LOCAL
+namespace SIMPLEFLUID_LOCAL details
 {
 template<ArithmeticMode Mode> struct StoredPlanarVertex
 {
@@ -453,7 +453,7 @@ template<ArithmeticMode Mode> struct StoredPlanarLine
     StoredPlanarVertex<Mode> first, second;
     std::vector<PlaneAuthority> supports;
 };
-} // namespace details SIMPLEFLUID_LOCAL
+} // namespace details
 } // namespace SimpleFluid::PLIC
 
 #include "geometry/PLIC/details/ProvenanceChildren.ipp"
