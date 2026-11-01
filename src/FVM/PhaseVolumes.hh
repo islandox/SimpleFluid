@@ -2,11 +2,13 @@
  * @brief Fixed-size finite-precision accepted phase inventories and error bounds.
  */
 #pragma once
+#include <cstdint>
 namespace SimpleFluid::VoF
 {
+using std::uint8_t;
 /** ExperimentalExact is opt-in and physically/performance unqualified.
  * Finite remains the default and allocates no rational phase history. */
-enum class PhaseInventoryPolicy
+enum class PhaseInventoryPolicy : uint8_t
 {
     Finite,
     ExperimentalExact

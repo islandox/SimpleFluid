@@ -4,11 +4,13 @@
 #pragma once
 #include "FVM/AdaptiveVoF.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
+#include <cstdint>
 
 namespace SimpleFluid::VoF
 {
+using std::uint8_t;
 /** Geometry supplied by the accepted reconstruction, separate from physical inventories. */
-enum class AMRPhaseGeometry
+enum class AMRPhaseGeometry : uint8_t
 {
     Plic,
     PureGas,

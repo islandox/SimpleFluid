@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/LocalProductAMR.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -1928,7 +1929,7 @@ std::size_t count(Reader& r)
 AdaptiveBytes root_packet(const ExtrudedAMRGrid& grid)
 {
     Writer w;
-    w.word(0x534650524f4f5436ULL);
+    packet_codec::write_header(w, packet_codec::Family::ProductRoot, uint8_t{7}, packet_codec::Record::Value);
     w.word(grid.region_id);
     w.word(grid.material_id);
     w.word(grid.max_depth);
@@ -1944,11 +1945,23 @@ AdaptiveBytes root_packet(const ExtrudedAMRGrid& grid)
     }
     return std::move(w.data);
 }
+void root_identity(Writer& w, std::span<const char> capsule)
+{
+    Reader reader{capsule};
+    packet_codec::read_header(
+        reader, packet_codec::Family::ProductRoot, uint8_t{7}, packet_codec::Record::Value);
+    const auto body = capsule.subspan(reader.offset);
+    // This prefix belongs only to canonical trace identities. The transport
+    // capsule has its own byte header; neither representation reads the other.
+    constexpr std::uint64_t canonical_root_identity_prefix = 0x534650524f4f5436ULL;
+    w.word(sizeof(canonical_root_identity_prefix) + body.size());
+    w.word(canonical_root_identity_prefix);
+    w.data.insert(w.data.end(), body.begin(), body.end());
+}
 std::shared_ptr<const ExtrudedAMRGrid> root_grid(std::span<const char> packet)
 {
     Reader r{packet};
-    if (r.word() != 0x534650524f4f5436ULL)
-        throw std::invalid_argument("Invalid product root capsule.");
+    packet_codec::read_header(r, packet_codec::Family::ProductRoot, uint8_t{7}, packet_codec::Record::Value);
     auto g = std::make_shared<ExtrudedAMRGrid>();
     g->region_id = r.word();
     g->material_id = r.word();
@@ -1983,7 +1996,7 @@ AdaptiveBytes base_packet(Pool pool, const BaseCellKey& selected)
     pool.intervals.clear();
     compact(pool);
     Writer w;
-    w.word(0x5346504241534536ULL);
+    packet_codec::write_header(w, packet_codec::Family::ProductBase, uint8_t{7}, packet_codec::Record::Value);
     w.word(pool.points.size());
     for (const auto& recipe : pool.points)
     {
@@ -2021,8 +2034,7 @@ AdaptiveBytes base_packet(Pool pool, const BaseCellKey& selected)
 void read_base(Pool& pool, std::span<const char> packet)
 {
     Reader r{packet};
-    if (r.word() != 0x5346504241534536ULL)
-        throw std::invalid_argument("Invalid product base capsule.");
+    packet_codec::read_header(r, packet_codec::Family::ProductBase, uint8_t{7}, packet_codec::Record::Value);
     auto n = count(r);
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -2095,7 +2107,7 @@ AdaptiveBytes axis_packet(Pool pool, const AxialIntervalKey& selected)
     pool.intervals = {selected};
     compact(pool);
     Writer w;
-    w.word(0x5346504158495336ULL);
+    packet_codec::write_header(w, packet_codec::Family::ProductAxis, uint8_t{7}, packet_codec::Record::Value);
     w.word(pool.z.size());
     for (const auto& recipe : pool.z)
     {
@@ -2119,8 +2131,7 @@ AdaptiveBytes axis_packet(Pool pool, const AxialIntervalKey& selected)
 void read_axis(Pool& pool, std::span<const char> packet)
 {
     Reader r{packet};
-    if (r.word() != 0x5346504158495336ULL)
-        throw std::invalid_argument("Invalid product axial capsule.");
+    packet_codec::read_header(r, packet_codec::Family::ProductAxis, uint8_t{7}, packet_codec::Record::Value);
     auto n = count(r);
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -2318,7 +2329,7 @@ public:
         {
             Writer w;
             w.word(0x5346504254524336ULL);
-            w.bytes(*leaf.factor_recipe->root);
+            root_identity(w, *leaf.factor_recipe->root);
             product_detail::key(w, ancestor);
             result.faces.push_back({std::move(w.data), unsigned(product.base.path.size()), AdaptiveSplit::Base, {},
                 ancestor == product.base});
@@ -2329,7 +2340,7 @@ public:
         {
             Writer w;
             w.word(0x5346505a54524336ULL);
-            w.bytes(*leaf.factor_recipe->root);
+            root_identity(w, *leaf.factor_recipe->root);
             w.word(product.axial.root);
             result.faces.push_back(
                 {std::move(w.data), unsigned(product.axial.path.size()), AdaptiveSplit::Axial, {}, true});
@@ -2343,7 +2354,7 @@ public:
             stem.path.clear();
             Writer w;
             w.word(0x5346504554524336ULL);
-            w.bytes(*leaf.factor_recipe->root);
+            root_identity(w, *leaf.factor_recipe->root);
             product_detail::key(w, stem);
             result.faces.push_back(
                 {std::move(w.data), unsigned(depth), AdaptiveSplit::Base, shape->face_geometry(i + 2), true});

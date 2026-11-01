@@ -8,15 +8,16 @@
 
 namespace SimpleFluid::Meshes::partition_wire
 {
-enum class Family : std::uint8_t
+using std::uint8_t;
+enum class Family : uint8_t
 {
     MultiRegionPartition = 2
 };
-inline constexpr std::uint8_t version = 10;
+inline constexpr uint8_t version = 11;
 struct Header
 {
     Family family;
-    std::uint8_t version;
+    uint8_t version;
     std::uint64_t region_count;
 };
 static_assert(std::is_standard_layout_v<Header> && std::is_trivially_copyable_v<Header>);

@@ -8,6 +8,7 @@
  */
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <cmath>
 #include <numeric>
 #include <set>
@@ -304,6 +305,7 @@ namespace
 struct WireWriter
 {
     std::vector<char> bytes;
+    void byte(uint8_t value) { bytes.push_back(static_cast<char>(value)); }
     void word(std::uint64_t value)
     {
         for (unsigned i = 0; i < 8; ++i)
@@ -314,6 +316,12 @@ struct WireReader
 {
     std::span<const char> bytes;
     std::size_t cursor = 0;
+    uint8_t byte()
+    {
+        if (cursor == bytes.size())
+            throw std::invalid_argument("Truncated shared topology packet.");
+        return static_cast<uint8_t>(bytes[cursor++]);
+    }
     std::uint64_t word()
     {
         if (bytes.size() - cursor < 8)
@@ -341,8 +349,8 @@ struct WireReader
 std::vector<char> ExtrudedTopology::encode_base() const
 {
     WireWriter w;
-    w.word(0x5346544f50424131ULL);
-    w.word(1);
+    packet_codec::write_header(w, packet_codec::Family::ExtrudedTopologyBase, uint8_t{2},
+        packet_codec::Record::Value);
     w.word(indexer().num_nodes_per_layer);
     w.word(indexer().num_cells_per_layer);
     for (std::size_t c = 0; c < indexer().num_cells_per_layer; ++c)
@@ -370,8 +378,8 @@ std::vector<char> ExtrudedTopology::encode_base() const
 std::shared_ptr<const ExtrudedTopology> ExtrudedTopology::decode_base(std::span<const char> packet, unsigned layers)
 {
     WireReader r{packet};
-    if (r.word() != 0x5346544f50424131ULL || r.word() != 1)
-        throw std::invalid_argument("Unknown shared base topology packet.");
+    packet_codec::read_header(r, packet_codec::Family::ExtrudedTopologyBase, uint8_t{2},
+        packet_codec::Record::Value);
     auto nodes = r.word(), cells = r.count();
     if (nodes > std::numeric_limits<unsigned>::max())
         throw std::invalid_argument("Shared base node extent overflow.");

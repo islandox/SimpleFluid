@@ -3,6 +3,8 @@
  */
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/ProtocolTags.hh"
+#include "geometry/VoFWireProtocol.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
 std::uint64_t transaction(Teuchos::RCP<const Teuchos::Comm<int>> comm)
@@ -58,13 +60,15 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             if (!options.maximum_face_geometry_operations)
                 throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
             validate_phase_cleanup_options(options);
-            budget.packet(27 * 8);
+            budget.packet(23 * 8 + 3 + packet_codec::header_bytes<packet_codec::Record>);
             wire::Writer w;
-            w.word(8); // Includes the Ordinary plane-model admission policy.
+            packet_codec::write_header(w, packet_codec::Family::OperationAgreement, 9, packet_codec::Record::Value);
+            protocol_tags::write(w, options.arithmetic_mode, ArithmeticMode::Exact);
+            protocol_tags::write(w, options.transport_backend, GeneralVoFTransportBackend::GeometricFace);
+            protocol_tags::write(
+                w, options.reconstruction.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
-                     std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
-                     std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
-                     std::uint64_t(options.reconstruction.model_policy),
+                     std::uint64_t(options.support_rings), std::uint64_t(options.reconstruction.measure_only),
                      std::uint64_t(options.reconstruction.maximum_offset_iterations),
                      std::uint64_t(options.reconstruction.maximum_fit_iterations),
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),

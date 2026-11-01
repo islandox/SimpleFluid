@@ -4,6 +4,7 @@
 #include "FVM/details/ExperimentalPhaseBackend.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -112,9 +113,8 @@ std::vector<char> encode_experimental(const ExperimentalPhaseInventory& value, s
     capacity(value, byte_budget);
     Meshes::AMR::adaptive_detail::Writer w;
     Meshes::AMR::adaptive_detail::Budget bytes{byte_budget};
-    bytes.add(16);
-    w.word(0x5346455850493731ULL);
-    w.word(1);
+    bytes.add(packet_codec::header_bytes<packet_codec::Record>);
+    packet_codec::write_header(w, packet_codec::Family::ExperimentalPhaseInventory, 2, packet_codec::Record::Value);
     for (const auto* item : {&value.phases.bulk, &value.phases.gas, &value.phases.carrier, &value.error.difference,
              &value.error.admitted_bound, &value.error.native_conversion, &value.error.phase_input_bound,
              &value.error.fit_residual, &value.error.fit_bound, &value.error.transferred_bound,
@@ -133,8 +133,7 @@ std::shared_ptr<const ExperimentalPhaseInventory> decode_experimental(
     if (packet.size() > byte_budget)
         throw std::invalid_argument("Experimental exact packet exceeds budget.");
     Meshes::AMR::adaptive_detail::Reader r{packet};
-    if (r.word() != 0x5346455850493731ULL || r.word() != 1)
-        throw std::invalid_argument("Unknown experimental exact packet format.");
+    packet_codec::read_header(r, packet_codec::Family::ExperimentalPhaseInventory, 2, packet_codec::Record::Value);
     ExperimentalPhaseInventory value;
     for (auto* item : {&value.phases.bulk, &value.phases.gas, &value.phases.carrier, &value.error.difference,
              &value.error.admitted_bound, &value.error.native_conversion, &value.error.phase_input_bound,

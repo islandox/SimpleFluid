@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -18,6 +19,7 @@ namespace
 struct Writer
 {
     AdaptiveBytes data;
+    void byte(uint8_t value) { data.push_back(static_cast<char>(value)); }
     void word(std::uint64_t n)
     {
         for (unsigned i = 0; i < 8; ++i)
@@ -44,6 +46,7 @@ struct SizeWriter
             throw std::invalid_argument("Adaptive encoded length overflows.");
         size += n;
     }
+    void byte(uint8_t) { add(1); }
     void word(std::uint64_t) { add(8); }
     void bytes(std::span<const char> value)
     {
@@ -66,6 +69,12 @@ struct Reader
 {
     std::span<const char> data;
     std::size_t position = 0;
+    uint8_t byte()
+    {
+        if (position == data.size())
+            throw std::invalid_argument("Truncated adaptive tag.");
+        return static_cast<uint8_t>(data[position++]);
+    }
     std::uint64_t word()
     {
         if (data.size() - position < 8)
@@ -126,23 +135,28 @@ AxialIntervalKey axial(Reader& r)
     key.path = r.path();
     return key;
 }
-template<class PacketWriter> void header(PacketWriter& w, std::uint64_t kind, std::uint64_t version)
+// Canonical ancestry keys retain their original encoding and routing hashes.
+// This namespace prefix is not a decodable transport-record header.
+constexpr std::uint64_t canonical_ancestry_prefix = 0x5346414450543631ULL;
+template<class PacketWriter> void canonical_key_header(PacketWriter& w)
 {
-    w.word(0x5346414450543631ULL);
-    w.word(version);
-    w.word(kind);
+    w.word(canonical_ancestry_prefix);
+    w.word(1);
+    w.word(0);
 }
-void header(Reader& r, std::uint64_t kind, std::uint64_t version)
+void canonical_key_header(Reader& r)
 {
-    if (r.word() != 0x5346414450543631ULL || r.word() != version || r.word() != kind)
-        throw std::invalid_argument("Invalid adaptive packet version/type.");
+    if (r.word() != canonical_ancestry_prefix || r.word() != 1 || r.word() != 0)
+        throw std::invalid_argument("Invalid canonical adaptive key version/type.");
 }
+enum class RecordKind : uint8_t { Leaf = 1, Family = 2 };
+constexpr uint8_t record_version = 5;
 } // namespace
 namespace
 {
 template<class PacketWriter> void emit_adaptive_key(PacketWriter& w, const AdaptiveCellKey& key)
 {
-    header(w, 0, 1);
+    canonical_key_header(w);
     w.word(key.region);
     w.word(key.ancestry.index());
     std::visit(
@@ -184,7 +198,7 @@ AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
 AdaptiveCellKey decode_adaptive_key(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 0, 1);
+    canonical_key_header(r);
     AdaptiveCellKey key;
     key.region = r.word();
     const auto tag = r.word();
@@ -261,7 +275,7 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
         (!leaf.geometry && (!leaf.surfaces.empty() || !leaf.native_recipe)))
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
-    header(w, 1, 4);
+    packet_codec::write_header(w, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
     if constexpr (std::is_same_v<PacketWriter, Writer>)
         w.bytes(encode_adaptive_key(leaf.key));
     else
@@ -356,7 +370,7 @@ std::size_t adaptive_detail::validate_adaptive_leaf_encoding(const AdaptiveLeaf&
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 1, 4);
+    packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
     AdaptiveLeaf leaf;
     leaf.key = decode_adaptive_key(r.bytes());
     leaf.domain = r.bytes();
@@ -434,7 +448,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
     if (family.key.empty() || family.children.empty())
         throw std::invalid_argument("Invalid adaptive family.");
     Writer w;
-    header(w, 2, 4);
+    packet_codec::write_header(w, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Family);
     w.bytes(family.key);
     w.bytes(encode_adaptive_leaf(family.parent));
     w.word(std::uint64_t(family.split));
@@ -453,7 +467,7 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
 AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
 {
     Reader r{packet};
-    header(r, 2, 4);
+    packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Family);
     AdaptiveFamily family;
     family.key = r.bytes();
     family.parent = decode_adaptive_leaf(r.bytes());

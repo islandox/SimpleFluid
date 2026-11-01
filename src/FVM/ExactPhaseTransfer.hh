@@ -7,13 +7,15 @@
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include <cstdint>
 #include <optional>
 #include <string>
 namespace SimpleFluid::VoF
 {
+using std::uint8_t;
 namespace Exact { struct GeneralVoF; }
 class GeneralVoF;
-enum class ExactTransferCarrier
+enum class ExactTransferCarrier : uint8_t
 {
     BulkVolume,
     GasVolume,

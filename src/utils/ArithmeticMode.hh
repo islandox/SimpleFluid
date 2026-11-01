@@ -7,7 +7,8 @@
 
 namespace SimpleFluid
 {
-enum class ArithmeticMode : std::uint8_t
+using std::uint8_t;
+enum class ArithmeticMode : uint8_t
 {
     Ordinary,
     BoundedCertification,

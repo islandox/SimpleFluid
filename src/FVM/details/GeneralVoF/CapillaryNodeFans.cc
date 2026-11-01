@@ -2,12 +2,14 @@
  * @brief Bounded sparse subscriptions to an incident cell owner's complete fan.
  */
 #include "FVM/details/GeneralVoF/CapillaryNodeFans.hh"
+#include "geometry/VoFWireProtocol.hh"
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
 namespace
 {
-constexpr std::uint64_t request_tag = 0x5346434e46414e01ULL, reply_tag = 0x5346434e46414e02ULL;
+using Record = packet_codec::Record;
+constexpr uint8_t protocol_version = 1;
 constexpr std::size_t tree_links = 4 * sizeof(void*);
 using Supports = std::map<std::uint64_t, const Cell*>;
 using GO = MeshHandle<>::global_ordinal_type;
@@ -94,16 +96,17 @@ Key decoded_key(wire::Reader& reader, const wire::Budget& live)
     temporary.add(encoded.size());
     return AMR::decode_adaptive_key(encoded);
 }
-void stamp(wire::Writer& writer, std::uint64_t tag, const GeneralVoF::Data& data)
+void stamp(wire::Writer& writer, Record kind, const GeneralVoF::Data& data)
 {
-    writer.word(tag);
+    packet_codec::write_header(writer, packet_codec::Family::CapillaryNodeFans, protocol_version, kind);
     writer.word(data.control);
     writer.word(data.hierarchy->topology_generation());
     writer.word(data.hierarchy->partition_generation());
 }
-void stamp(wire::Reader& reader, std::uint64_t tag, const GeneralVoF::Data& data)
+void stamp(wire::Reader& reader, Record kind, const GeneralVoF::Data& data)
 {
-    if (reader.word() != tag || reader.word() != data.control ||
+    packet_codec::read_header(reader, packet_codec::Family::CapillaryNodeFans, protocol_version, kind);
+    if (reader.word() != data.control ||
         reader.word() != data.hierarchy->topology_generation() ||
         reader.word() != data.hierarchy->partition_generation())
         throw std::invalid_argument("Capillary node fan source/topology/partition context differs.");
@@ -115,15 +118,16 @@ bool same_identity(std::span<const char> a, const AMR::AdaptiveBytes& b)
 std::size_t header_size(std::uint64_t node, const Cell& cell, const GeneralVoF::Data& data)
 {
     wire::Budget size{std::numeric_limits<std::size_t>::max()};
-    size.add(8 * sizeof(std::uint64_t)); // stamp, node, identity length, key length, revision
+    size.add(packet_codec::header_bytes<Record> + 7 * sizeof(std::uint64_t));
+    // Source pins, node, identity length, key length, revision.
     size.add(data.topology->construction_nodes.at(node).size());
     size.add(key_size(cell.key));
     return size.used;
 }
-void header(wire::Writer& writer, std::uint64_t tag, std::uint64_t node, const Cell& cell, const GeneralVoF::Data& data,
+void header(wire::Writer& writer, Record kind, std::uint64_t node, const Cell& cell, const GeneralVoF::Data& data,
     const wire::Budget& live)
 {
-    stamp(writer, tag, data);
+    stamp(writer, kind, data);
     writer.word(node);
     writer.bytes(data.topology->construction_nodes.at(node));
     encoded_key(writer, cell.key, live);
@@ -228,7 +232,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                 budget.add(size);
                 wire::Writer writer;
                 writer.data.reserve(size);
-                header(writer, request_tag, node, *cell, data, budget);
+                header(writer, Record::Request, node, *cell, data, budget);
                 requests.push_back({cell->owner, std::move(writer.data)});
             }
         });
@@ -259,7 +263,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader reader{packet.bytes};
-                stamp(reader, request_tag, data);
+                stamp(reader, Record::Request, data);
                 const auto node = reader.word();
                 const auto identity = bytes(reader);
                 auto key = decoded_key(reader, budget);
@@ -307,7 +311,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                 working.add(size.used);
                 wire::Writer writer;
                 writer.data.reserve(size.used);
-                header(writer, reply_tag, node, cell, data, working);
+                header(writer, Record::Reply, node, cell, data, working);
                 writer.word(fan.size());
                 for (const auto& member : fan)
                 {
@@ -330,7 +334,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
             for (const auto& packet : returned.packets)
             {
                 wire::Reader reader{packet.bytes};
-                stamp(reader, reply_tag, data);
+                stamp(reader, Record::Reply, data);
                 const auto node = reader.word();
                 const auto identity = bytes(reader);
                 const auto support = supports.find(node);

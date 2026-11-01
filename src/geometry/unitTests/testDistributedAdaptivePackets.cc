@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "geometry/mesh/AMR/FrozenNativeDetails.hh"
@@ -14,6 +15,7 @@
 #include <set>
 namespace
 {
+using std::uint8_t;
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -174,8 +176,8 @@ TEST(DistributedAdaptivePackets, NativeBatchHeaderPreservesBoundsAndRejectsLegac
     for (const auto& packet : {empty, populated})
     {
         ASSERT_GE(packet.size(), sizeof(BatchHeader));
-        EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(BatchHeader, family)]), 5u);
-        EXPECT_EQ(static_cast<std::uint8_t>(packet[offsetof(BatchHeader, version)]), 7u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(BatchHeader, family)]), 5u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(BatchHeader, version)]), 8u);
         D::Reader count_reader{packet};
         count_reader.offset = offsetof(BatchHeader, dictionary_count);
         const auto dictionary_count = count_reader.word();
@@ -217,9 +219,9 @@ TEST(DistributedAdaptivePackets, NativeBatchHeaderPreservesBoundsAndRejectsLegac
         bad[offsetof(BatchHeader, family)] = char(255);
         reject(bad);
         bad = packet;
-        bad[offsetof(BatchHeader, version)] = 6;
+        bad[offsetof(BatchHeader, version)] = 7;
         reject(bad);
-        bad[offsetof(BatchHeader, version)] = 8;
+        bad[offsetof(BatchHeader, version)] = 9;
         reject(bad);
         bad = packet;
         std::fill_n(bad.begin() + offsetof(BatchHeader, dictionary_count), sizeof(std::uint64_t), char(255));
@@ -250,10 +252,10 @@ TEST(DistributedAdaptivePackets, GeometryRecordHeadersRejectLegacyFramesAndMalfo
         D::Writer current;
         D::write_geometry_record_header(current, kind);
         ASSERT_EQ(current.data.size(), sizeof(GeometryRecordHeader));
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(GeometryRecordHeader, family)]), 4u);
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(GeometryRecordHeader, version)]), 3u);
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(GeometryRecordHeader, kind)]),
-            static_cast<std::uint8_t>(kind));
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(GeometryRecordHeader, family)]), 4u);
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(GeometryRecordHeader, version)]), 4u);
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(GeometryRecordHeader, kind)]),
+            static_cast<uint8_t>(kind));
         D::Writer repeated;
         D::write_geometry_record_header(repeated, kind);
         EXPECT_EQ(repeated.data, current.data);
@@ -281,9 +283,9 @@ TEST(DistributedAdaptivePackets, GeometryRecordHeadersRejectLegacyFramesAndMalfo
         changed[offsetof(GeometryRecordHeader, family)] = char(255);
         reject(changed);
         changed = current.data;
-        changed[offsetof(GeometryRecordHeader, version)] = 2;
+        changed[offsetof(GeometryRecordHeader, version)] = 3;
         reject(changed);
-        changed[offsetof(GeometryRecordHeader, version)] = 4;
+        changed[offsetof(GeometryRecordHeader, version)] = 5;
         reject(changed);
         changed = current.data;
         changed[offsetof(GeometryRecordHeader, kind)] = char(255);
@@ -292,12 +294,12 @@ TEST(DistributedAdaptivePackets, GeometryRecordHeadersRejectLegacyFramesAndMalfo
                                                                D::GeometryRecordKind::Tile;
         D::Reader wrong_kind{current.data};
         EXPECT_THROW(D::read_geometry_record_header(wrong_kind, other), std::invalid_argument);
-        for (const auto version : {std::uint8_t{2}, std::uint8_t{3}})
+        for (const auto version : {uint8_t{2}, uint8_t{3}})
         {
             D::Writer legacy;
             legacy.word(0x5346414452454332ULL);
             legacy.byte(version);
-            legacy.byte(static_cast<std::uint8_t>(kind));
+            legacy.byte(static_cast<uint8_t>(kind));
             reject(legacy.data);
         }
     }
@@ -316,16 +318,19 @@ TEST(DistributedAdaptivePackets, NewContainingVersionsRejectLegacyEmptyRecordsAn
     const auto batch = A::encode_adaptive_batch({}, {}, budget);
     EXPECT_TRUE(A::decode_adaptive_batch(batch, budget).leaves.empty());
     auto old_batch = batch;
-    old_batch[offsetof(A::adaptive_detail::BatchHeader, version)] = 6;
+    old_batch[offsetof(A::adaptive_detail::BatchHeader, version)] = 7;
     // Previous batch version, including a zero-record batch.
     EXPECT_THROW(A::decode_adaptive_batch(old_batch, budget), std::invalid_argument);
     A::AdaptiveJoinCapsule capsule;
     capsule.route = 2;
     const auto join = A::encode_join_capsule(capsule, budget);
     EXPECT_TRUE(A::decode_join_capsule(join, budget).rules.empty());
-    auto old_join = join;
-    old_join[8] = 4; // Old join schema, with no nested geometry to detect it.
-    EXPECT_THROW(A::decode_join_capsule(old_join, budget), std::invalid_argument);
+    A::adaptive_detail::Writer old_join;
+    old_join.word(0x53464a4f494e3631ULL);
+    old_join.word(5);
+    old_join.data.insert(old_join.data.end(),
+        join.begin() + SimpleFluid::packet_codec::header_bytes<SimpleFluid::packet_codec::Record>, join.end());
+    EXPECT_THROW(A::decode_join_capsule(old_join.data, budget), std::invalid_argument);
     A::AMRGrid grid;
     grid.block_cells = {2, 2, 2};
     A::CartesianAMR source(grid);
@@ -334,9 +339,13 @@ TEST(DistributedAdaptivePackets, NewContainingVersionsRejectLegacyEmptyRecordsAn
     ASSERT_EQ(detached.owned.size(), 1u);
     const auto leaf = A::encode_adaptive_leaf(detached.owned.front());
     EXPECT_EQ(A::decode_adaptive_leaf(leaf).key, detached.owned.front().key);
-    auto old_leaf = leaf;
-    old_leaf[8] = 3;
-    EXPECT_THROW(A::decode_adaptive_leaf(old_leaf), std::invalid_argument);
+    A::adaptive_detail::Writer old_leaf;
+    old_leaf.word(0x5346414450543631ULL);
+    old_leaf.word(4);
+    old_leaf.word(1);
+    old_leaf.data.insert(old_leaf.data.end(),
+        leaf.begin() + SimpleFluid::packet_codec::header_bytes<SimpleFluid::packet_codec::Record>, leaf.end());
+    EXPECT_THROW(A::decode_adaptive_leaf(old_leaf.data), std::invalid_argument);
 }
 
 TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
@@ -350,7 +359,7 @@ TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
     EXPECT_EQ(restored->source, part.source);
     EXPECT_EQ(A::encode_frozen_part(*restored), packet);
     auto previous_part = packet;
-    previous_part[offsetof(A::adaptive_detail::GeometryRecordHeader, version)] = 2;
+    previous_part[offsetof(A::adaptive_detail::GeometryRecordHeader, version)] = 3;
     EXPECT_THROW(A::decode_frozen_part(previous_part), std::invalid_argument);
     const A::AdaptiveBytes old_part(packet.begin() + A::adaptive_detail::geometry_record_header_bytes, packet.end());
     EXPECT_THROW(A::decode_frozen_part(old_part), std::invalid_argument);
@@ -364,12 +373,12 @@ TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
     EXPECT_EQ(reader.word(), 0u);
     EXPECT_NO_THROW(reader.done());
     auto previous_empty = empty;
-    previous_empty[offsetof(A::adaptive_detail::GeometryRecordHeader, version)] = 2;
+    previous_empty[offsetof(A::adaptive_detail::GeometryRecordHeader, version)] = 3;
     A::adaptive_detail::Reader previous{previous_empty};
     EXPECT_THROW(
         A::adaptive_detail::read_geometry_record_header(previous, A::adaptive_detail::GeometryRecordKind::FrozenBatch),
         std::invalid_argument);
-    for (const auto version : {std::uint8_t{2}, std::uint8_t{3}})
+    for (const auto version : {uint8_t{2}, uint8_t{3}})
         for (const auto& [kind, current] :
             {std::pair{A::adaptive_detail::GeometryRecordKind::FrozenPart, packet},
                 std::pair{A::adaptive_detail::GeometryRecordKind::FrozenBatch, empty}})
@@ -377,7 +386,7 @@ TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
             A::adaptive_detail::Writer old_frame;
             old_frame.word(0x5346414452454332ULL);
             old_frame.byte(version);
-            old_frame.byte(static_cast<std::uint8_t>(kind));
+            old_frame.byte(static_cast<uint8_t>(kind));
             old_frame.data.insert(old_frame.data.end(),
                 current.begin() + A::adaptive_detail::geometry_record_header_bytes, current.end());
             if (kind == A::adaptive_detail::GeometryRecordKind::FrozenPart)

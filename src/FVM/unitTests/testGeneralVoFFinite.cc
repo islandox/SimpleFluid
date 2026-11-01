@@ -7,6 +7,7 @@
 #include "geometry/swept_volume/FiniteVoFTransport.hh"
 namespace
 {
+using std::uint8_t;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 constexpr auto overlay_mode = ArithmeticMode::BoundedCertification;
 using OverlayGeometry = PLIC::ConvexCellGeometry<overlay_mode>;
@@ -1299,7 +1300,7 @@ TEST(GeneralVoFFinite, ConstructionControlsBindEveryPinAndServeEmptyAuthorities)
     const std::uint64_t id = std::min(2, comm->getSize() - 1);
     const PLIC::GeometryPacketContext context{{101, 103, 107, 109}};
     wire::Writer writer;
-    controls::header(writer, 1, id, context, ArithmeticMode::Ordinary);
+    controls::header(writer, controls::ControlKind::Face, id, context, ArithmeticMode::Ordinary);
     writer.word(127);
     controls::Records authority;
     std::size_t retained = 0;
@@ -1313,8 +1314,8 @@ TEST(GeneralVoFFinite, ConstructionControlsBindEveryPinAndServeEmptyAuthorities)
     std::set<std::uint64_t> requested;
     if (comm->getRank() == 0)
         requested.insert(id);
-    const auto received = controls::request_records(
-        1, requested, authority, context, ArithmeticMode::Ordinary, comm, 64 * 1024, retained);
+    const auto received = controls::request_records(controls::ControlKind::Face, requested, authority, context,
+        ArithmeticMode::Ordinary, comm, 64 * 1024, retained);
     const bool complete = comm->getRank() == 0
                               ? received.contains(id) && received.at(id) == writer.data && received.size() == 1
                               : received.empty();
@@ -1327,12 +1328,12 @@ TEST(GeneralVoFFinite, ConstructionControlsBindEveryPinAndServeEmptyAuthorities)
     {
         auto stale = context;
         ++stale.publication[pin];
-        EXPECT_THROW((void) controls::request_records(
-                         1, requested, authority, stale, ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
+        EXPECT_THROW((void) controls::request_records(controls::ControlKind::Face, requested, authority, stale,
+                         ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
             std::invalid_argument);
     }
-    EXPECT_THROW((void) controls::request_records(
-                     1, requested, authority, context, ArithmeticMode::BoundedCertification, comm, 64 * 1024, retained),
+    EXPECT_THROW((void) controls::request_records(controls::ControlKind::Face, requested, authority, context,
+                     ArithmeticMode::BoundedCertification, comm, 64 * 1024, retained),
         std::invalid_argument);
     auto unknown = requested;
     if (comm->getRank() == 0)
@@ -1340,12 +1341,12 @@ TEST(GeneralVoFFinite, ConstructionControlsBindEveryPinAndServeEmptyAuthorities)
         unknown.clear();
         unknown.insert(id + comm->getSize());
     }
-    EXPECT_THROW((void) controls::request_records(
-                     1, unknown, authority, context, ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
+    EXPECT_THROW((void) controls::request_records(controls::ControlKind::Face, unknown, authority, context,
+                     ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
         std::invalid_argument);
     const std::size_t local_limit = comm->getRank() == 0 ? 1 : 64 * 1024;
-    EXPECT_THROW((void) controls::request_records(
-                     1, requested, authority, context, ArithmeticMode::Ordinary, comm, local_limit, retained),
+    EXPECT_THROW((void) controls::request_records(controls::ControlKind::Face, requested, authority, context,
+                     ArithmeticMode::Ordinary, comm, local_limit, retained),
         std::invalid_argument);
     EXPECT_EQ(authority.size(), comm->getRank() == int(id) ? 1u : 0u);
 }
@@ -1456,18 +1457,18 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
 {
     namespace protocol = SimpleFluid::VoF::geometry_wire;
     namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
-    for (const auto record :
-        {protocol::Record::NativeShellRequest, protocol::Record::NativeShellReply, protocol::Record::ExactTileRequest,
-            protocol::Record::ExactTileReply, protocol::Record::ExactFaceOutput, protocol::Record::ExactControls,
-            protocol::Record::NodeUnion, protocol::Record::NodePublication, protocol::Record::ExactAtomRoute})
+    for (const auto record : {protocol::Record::NativeShellRequest, protocol::Record::NativeShellReply,
+             protocol::Record::ExactTileRequest, protocol::Record::ExactTileReply, protocol::Record::ExactFaceOutput,
+             protocol::Record::ExactControls, protocol::Record::NodeUnion, protocol::Record::NodePublication,
+             protocol::Record::ExactAtomRoute, protocol::Record::ExactPhaseAmount})
     {
         wire::Writer current;
         protocol::write_header(current, record);
         ASSERT_EQ(current.data.size(), sizeof(protocol::Header));
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, family)]), 3u);
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, version)]), 3u);
-        EXPECT_EQ(static_cast<std::uint8_t>(current.data[offsetof(protocol::Header, record)]),
-            static_cast<std::uint8_t>(record));
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(protocol::Header, family)]), 3u);
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(protocol::Header, version)]), 4u);
+        EXPECT_EQ(static_cast<uint8_t>(current.data[offsetof(protocol::Header, record)]),
+            static_cast<uint8_t>(record));
         wire::Writer repeated;
         protocol::write_header(repeated, record);
         EXPECT_EQ(repeated.data, current.data);
@@ -1480,12 +1481,12 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
         legacy.word(0);
         wire::Reader old{legacy.data};
         EXPECT_THROW(protocol::read_header(old, record), std::invalid_argument);
-        for (const auto previous_version : {std::uint8_t{2}, std::uint8_t{3}})
+        for (const auto previous_version : {uint8_t{2}, uint8_t{3}})
         {
             wire::Writer legacy_frame;
             legacy_frame.word(0x5346564f46574952ULL);
             legacy_frame.byte(previous_version);
-            legacy_frame.byte(static_cast<std::uint8_t>(record));
+            legacy_frame.byte(static_cast<uint8_t>(record));
             wire::Reader previous_frame{legacy_frame.data};
             EXPECT_THROW(protocol::read_header(previous_frame, record), std::invalid_argument);
         }
@@ -1513,7 +1514,7 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
         wire::Reader unknown_record{changed};
         EXPECT_THROW(protocol::read_header(unknown_record, record), std::invalid_argument);
         changed = current.data;
-        changed[offsetof(protocol::Header, version)] = 2; // Immediate preceding stamp, including empty records.
+        changed[offsetof(protocol::Header, version)] = 3; // Immediate preceding stamp, including empty records.
         wire::Reader previous{changed};
         EXPECT_THROW(protocol::read_header(previous, record), std::invalid_argument);
         changed[offsetof(protocol::Header, version)] = char(protocol::version + 1);
@@ -1523,5 +1524,68 @@ TEST(GeneralVoFFinite, GeometryRecordEntriesRejectLegacyEmptyPayloadsAndWrongKin
         const auto other =
             record == protocol::Record::NodeUnion ? protocol::Record::NodePublication : protocol::Record::NodeUnion;
         EXPECT_THROW(protocol::read_header(foreign, other), std::invalid_argument);
+    }
+}
+
+TEST(GeneralVoFFinite, ConstructionControlByteHeadersKeepWideIdsAndPinsAndRejectUnknownCategories)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    namespace packet = SimpleFluid::packet_codec;
+    using Header = packet::Header<controls::ControlKind>;
+    constexpr std::uint64_t id = (std::uint64_t{1} << 45) + 301;
+    const PLIC::GeometryPacketContext context{{257, 65537, std::uint64_t{1} << 40, std::uint64_t{1} << 55}};
+    for (const auto kind : {controls::ControlKind::Node, controls::ControlKind::Face, controls::ControlKind::Algorithm})
+        for (const auto mode : {ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification})
+        {
+            wire::Writer writer;
+            controls::header(writer, kind, id, context, mode);
+            writer.word(300); // A following wide count must retain its own width and offset.
+            wire::Reader reader{writer.data};
+            EXPECT_EQ(controls::header(reader, context, mode),
+                (std::pair<std::uint64_t, std::uint64_t>{std::uint64_t(kind), id}));
+            EXPECT_EQ(reader.word(), 300u);
+            EXPECT_NO_THROW(reader.done());
+            for (const auto [offset, invalid] : {std::pair{offsetof(Header, version), uint8_t{5}},
+                     std::pair{offsetof(Header, kind), uint8_t{255}},
+                     std::pair{sizeof(Header) + sizeof(std::uint64_t), uint8_t{255}}})
+            {
+                auto malformed = writer.data;
+                malformed[offset] = char(invalid);
+                wire::Reader rejected{malformed};
+                EXPECT_THROW((void) controls::header(rejected, context, mode), std::invalid_argument);
+            }
+            for (std::size_t size = 0; size < writer.data.size() - sizeof(std::uint64_t); ++size)
+            {
+                wire::Reader truncated{std::span<const char>(writer.data).first(size)};
+                EXPECT_THROW((void) controls::header(truncated, context, mode), std::invalid_argument);
+            }
+        }
+    wire::Writer legacy;
+    for (unsigned i = 0; i < 8; ++i)
+        legacy.word(0);
+    wire::Reader old{legacy.data};
+    EXPECT_THROW((void) controls::header(old, context, ArithmeticMode::Ordinary), std::invalid_argument);
+}
+
+TEST(GeneralVoFFinite, WideCategoryFieldsRejectValuesThatWouldAliasAfterNarrowing)
+{
+    namespace tags = SimpleFluid::VoF::protocol_tags;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    for (const auto value : {GeneralVoFPhaseGeometry::Infer, GeneralVoFPhaseGeometry::PureGas,
+             GeneralVoFPhaseGeometry::PureCarrier})
+    {
+        wire::Writer writer;
+        writer.word(static_cast<std::uint64_t>(value));
+        wire::Reader reader{writer.data};
+        EXPECT_EQ(tags::read_word(reader, GeneralVoFPhaseGeometry::PureCarrier), value);
+    }
+    for (const auto invalid : {std::uint64_t{3}, std::uint64_t{255}, std::uint64_t{256},
+             std::uint64_t{257}, std::uint64_t{258}, std::numeric_limits<std::uint64_t>::max()})
+    {
+        wire::Writer writer;
+        writer.word(invalid);
+        wire::Reader reader{writer.data};
+        EXPECT_THROW(tags::read_word(reader, GeneralVoFPhaseGeometry::PureCarrier), std::invalid_argument);
     }
 }

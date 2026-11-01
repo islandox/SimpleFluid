@@ -1,22 +1,23 @@
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
+#include "geometry/VoFWireProtocol.hh"
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
 namespace
 {
-constexpr std::uint64_t request_tag = 0x5346414747433031ULL, reply_tag = 0x5346414747433032ULL;
-constexpr std::size_t packet_bytes = 8 * sizeof(std::uint64_t);
+using Record = packet_codec::Record;
+constexpr uint8_t protocol_version = 1;
+constexpr std::size_t packet_bytes = packet_codec::header_bytes<Record> + 7 * sizeof(std::uint64_t);
 using GO = MeshHandle<>::global_ordinal_type;
-void stamp(wire::Writer& writer, std::uint64_t tag, const PLIC::GeometryPacketContext& context)
+void stamp(wire::Writer& writer, Record kind, const PLIC::GeometryPacketContext& context)
 {
-    writer.word(tag);
+    packet_codec::write_header(writer, packet_codec::Family::AggregateBudgets, protocol_version, kind);
     for (auto word : context.publication)
         writer.word(word);
 }
-void stamp(wire::Reader& reader, std::uint64_t tag, const PLIC::GeometryPacketContext& context)
+void stamp(wire::Reader& reader, Record kind, const PLIC::GeometryPacketContext& context)
 {
-    if (reader.word() != tag)
-        throw std::invalid_argument("Aggregate authority packet protocol differs.");
+    packet_codec::read_header(reader, packet_codec::Family::AggregateBudgets, protocol_version, kind);
     for (auto word : context.publication)
         if (reader.word() != word)
             throw std::invalid_argument("Aggregate authority source or trial context differs.");
@@ -71,7 +72,8 @@ std::map<std::uint64_t, std::size_t> aggregate_authority_counts(const GeneralVoF
                     throw std::invalid_argument("Aggregate authority local count is zero or exceeds the wire range.");
                 budget.packet(packet_bytes);
                 wire::Writer writer;
-                stamp(writer, request_tag, context);
+                writer.data.reserve(packet_bytes);
+                stamp(writer, Record::Request, context);
                 writer.word(gid);
                 writer.word(cell.revision);
                 writer.word(local);
@@ -95,7 +97,7 @@ std::map<std::uint64_t, std::size_t> aggregate_authority_counts(const GeneralVoF
             {
                 budget.packet(packet.bytes.size());
                 wire::Reader reader{packet.bytes};
-                stamp(reader, request_tag, context);
+                stamp(reader, Record::Request, context);
                 const auto gid = reader.word(), revision = reader.word();
                 const auto demand = count(reader.word());
                 reader.done();
@@ -128,7 +130,8 @@ std::map<std::uint64_t, std::size_t> aggregate_authority_counts(const GeneralVoF
                     throw std::invalid_argument("Aggregate authority global count exceeds the wire range.");
                 budget.packet(packet_bytes);
                 wire::Writer writer;
-                stamp(writer, reply_tag, context);
+                writer.data.reserve(packet_bytes);
+                stamp(writer, Record::Reply, context);
                 writer.word(subscription.gid);
                 writer.word(subscription.revision);
                 writer.word(total);
@@ -144,7 +147,7 @@ std::map<std::uint64_t, std::size_t> aggregate_authority_counts(const GeneralVoF
             {
                 budget.packet(packet.bytes.size());
                 wire::Reader reader{packet.bytes};
-                stamp(reader, reply_tag, context);
+                stamp(reader, Record::Reply, context);
                 const auto gid = reader.word(), revision = reader.word();
                 const auto global = count(reader.word());
                 reader.done();

@@ -10,7 +10,8 @@
 #include <vector>
 namespace SimpleFluid::VoF
 {
-enum class GeneralVoFTransportBackend;
+using std::uint8_t;
+enum class GeneralVoFTransportBackend : uint8_t;
 /** Executed geometry counters; fit_iterations below is the returned angular-fit diagnostic. */
 struct GeneralVoFWorkMetrics
 {

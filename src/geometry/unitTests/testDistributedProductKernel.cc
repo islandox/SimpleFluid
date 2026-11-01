@@ -4,15 +4,18 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/unitTests/adaptive_native_draft_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
+#include <bit>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <numbers>
 namespace
 {
+using std::uint8_t;
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -61,6 +64,141 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
     EXPECT_TRUE(weak.expired());
     return std::make_shared<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy>(
         std::move(detached.owned), std::move(detached.families), detached.kernel, comm);
+}
+void append_old_word(std::vector<char>& bytes, std::uint64_t word)
+{
+    for (unsigned byte = 0; byte < 8; ++byte)
+        bytes.push_back(static_cast<char>((word >> (8 * byte)) & 255));
+}
+void append_old_bytes(std::vector<char>& bytes, std::span<const char> value)
+{
+    append_old_word(bytes, value.size());
+    bytes.insert(bytes.end(), value.begin(), value.end());
+}
+std::vector<char> old_root_identity(const ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid& g)
+{
+    // Independent original canonical root oracle; no transport encoder or
+    // current capsule bytes participate in this expected identity.
+    std::vector<char> bytes;
+    for (auto word : {std::uint64_t{0x534650524f4f5436ULL}, g.region_id, g.material_id, std::uint64_t(g.max_depth),
+             std::bit_cast<std::uint64_t>(g.minimum_scaled_area), std::uint64_t(g.z_edges.size())})
+        append_old_word(bytes, word);
+    for (double z : g.z_edges)
+        append_old_word(bytes, std::bit_cast<std::uint64_t>(z));
+    append_old_word(bytes, g.boundary_aliases.size());
+    for (const auto& [from, to] : g.boundary_aliases)
+    {
+        append_old_bytes(bytes, std::span<const char>{from.data(), from.size()});
+        append_old_bytes(bytes, std::span<const char>{to.data(), to.size()});
+    }
+    return bytes;
+}
+TEST(DistributedProductKernel, CanonicalTraceBytesRetainOriginalRootIdentityAcrossNewTransportHeaders)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    using Frame = packet_codec::Header<packet_codec::Record>;
+    auto g = grid();
+    g.region_id = 257;
+    g.material_id = 258;
+    const AMR::ExtrudedAMR source(g);
+    const std::array<std::uint64_t, 1> selected{0};
+    const auto detached = source.detach_owned(selected, {'c', 'a', 'n', 'o', 'n'});
+    ASSERT_EQ(detached.owned.size(), 1u);
+    const auto& leaf = detached.owned.front();
+    ASSERT_TRUE(leaf.factor_recipe);
+    ASSERT_TRUE(leaf.factor_recipe->root);
+    ASSERT_GE(leaf.factor_recipe->root->size(), sizeof(Frame));
+    EXPECT_EQ(static_cast<uint8_t>(leaf.factor_recipe->root->at(offsetof(Frame, family))), 23u);
+    EXPECT_EQ(static_cast<uint8_t>(leaf.factor_recipe->root->at(offsetof(Frame, version))), 7u);
+    const auto trace = detached.kernel->traces(leaf);
+    ASSERT_GE(trace.faces.size(), 2u);
+    const auto& product = std::get<AMR::ProductCellAncestry>(leaf.key.ancestry);
+    ASSERT_TRUE(product.base.path.empty());
+    const auto root = old_root_identity(g);
+    std::vector<char> base_key;
+    for (auto word : {std::uint64_t{0x5346414450543631ULL}, std::uint64_t{1}, std::uint64_t{0}, std::uint64_t{0},
+             std::uint64_t{2}, product.base.root, product.base.root_template, std::uint64_t{0}, std::uint64_t{0},
+             std::uint64_t{0}})
+        append_old_word(base_key, word);
+    std::vector<char> base_trace;
+    append_old_word(base_trace, 0x5346504254524336ULL);
+    append_old_bytes(base_trace, root);
+    append_old_bytes(base_trace, base_key);
+    EXPECT_EQ(trace.faces[0].stem, base_trace);
+    std::vector<char> axial_trace;
+    append_old_word(axial_trace, 0x5346505a54524336ULL);
+    append_old_bytes(axial_trace, root);
+    append_old_word(axial_trace, product.axial.root);
+    EXPECT_EQ(trace.faces[1].stem, axial_trace);
+
+    // The constructed-product native selector is the third public recipe path;
+    // the codec test separately covers Cartesian and legacy procedural recipes.
+    ASSERT_TRUE(leaf.native_recipe);
+    EXPECT_EQ(leaf.native_recipe->kind, NativeFragmentDescriptor::Kind::ConstructedProduct);
+    const auto packet = encode_native_fragment_descriptor(*leaf.native_recipe);
+    EXPECT_EQ(encoded_native_fragment_descriptor_size(*leaf.native_recipe), packet.size());
+    NativeFragmentCache cache;
+    const auto native = decode_native_fragment_descriptor(packet, cache);
+    EXPECT_EQ(native->kind, NativeFragmentDescriptor::Kind::ConstructedProduct);
+    EXPECT_EQ(encode_native_fragment_descriptor(*native), packet);
+    EXPECT_EQ(encode_native_fragment(decode_native_fragment(packet)), packet);
+}
+TEST(DistributedProductKernel, FactorCapsuleByteHeadersRejectMalformedAndActualOldFramesLocally)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    using Frame = packet_codec::Header<packet_codec::Record>;
+    const AMR::ExtrudedAMR source(grid());
+    const std::array<std::uint64_t, 1> selected{0};
+    const auto detached = source.detach_owned(selected, {'f', 'a', 'c', 't', 'o', 'r'});
+    ASSERT_EQ(detached.owned.size(), 1u);
+    const auto& leaf = detached.owned.front();
+    ASSERT_TRUE(leaf.factor_recipe);
+    EXPECT_NO_THROW(detached.kernel->validate(leaf));
+    using Member = std::shared_ptr<const AMR::AdaptiveBytes> AMR::AdaptiveFactorRecipe::*;
+    struct Capsule
+    {
+        Member member;
+        uint8_t family;
+        std::uint64_t old_prefix;
+    };
+    for (const auto capsule : {Capsule{&AMR::AdaptiveFactorRecipe::root, 23, 0x534650524f4f5436ULL},
+             Capsule{&AMR::AdaptiveFactorRecipe::base, 24, 0x5346504241534536ULL},
+             Capsule{&AMR::AdaptiveFactorRecipe::axis, 25, 0x5346504158495336ULL}})
+    {
+        const auto& packet = *(leaf.factor_recipe.get()->*capsule.member);
+        ASSERT_GT(packet.size(), sizeof(Frame));
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, family)]), capsule.family);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, version)]), 7u);
+        EXPECT_EQ(static_cast<uint8_t>(packet[offsetof(Frame, kind)]), 1u);
+        const auto reject = [&](AMR::AdaptiveBytes bytes)
+        {
+            auto invalid = leaf;
+            auto factors = std::make_shared<AMR::AdaptiveFactorRecipe>(*leaf.factor_recipe);
+            factors.get()->*capsule.member = std::make_shared<const AMR::AdaptiveBytes>(std::move(bytes));
+            invalid.factor_recipe = std::move(factors);
+            EXPECT_THROW((void) detached.kernel->geometry(invalid), std::invalid_argument);
+        };
+        for (size_t size = 0; size < sizeof(Frame); ++size)
+            reject(AMR::AdaptiveBytes(packet.begin(), packet.begin() + size));
+        for (const auto [offset, value] : {std::pair{offsetof(Frame, family), uint8_t{255}},
+                 std::pair{offsetof(Frame, version), uint8_t{6}}, std::pair{offsetof(Frame, kind), uint8_t{255}},
+                 std::pair{offsetof(Frame, kind), uint8_t{3}}})
+        {
+            auto bad = packet;
+            bad[offset] = static_cast<char>(value);
+            reject(std::move(bad));
+        }
+        auto bad = packet;
+        bad.pop_back();
+        reject(std::move(bad));
+        bad = packet;
+        bad.push_back(0);
+        reject(std::move(bad));
+        AMR::AdaptiveBytes legacy;
+        append_old_word(legacy, capsule.old_prefix);
+        legacy.insert(legacy.end(), packet.begin() + sizeof(Frame), packet.end());
+        reject(std::move(legacy));
+    }
 }
 TEST(DistributedProductKernel, CompactNativeDraftPreservesExactProductSupports)
 {

@@ -6,6 +6,7 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
 #include "geometry/mesh/NativePartitionWire.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include <cstring>
 #include <numeric>
 #include <set>
@@ -22,6 +23,7 @@ using Vec3 = MeshUtils::Vec3;
 struct Writer
 {
     std::vector<char> data;
+    void byte(uint8_t v) { value(v); }
     std::map<const void*, uint64_t> topology_catalog, base_catalog, axis_catalog, axis_values_catalog;
     void catalog(std::map<const void*, uint64_t>& entries, const void* identity, const std::vector<char>& packet)
     {
@@ -48,6 +50,7 @@ struct Writer
 struct Reader
 {
     std::span<const char> data;
+    uint8_t byte() { return value<uint8_t>(); }
     template<class T> T value()
     {
         static_assert(std::is_trivially_copyable_v<T>);
@@ -746,6 +749,18 @@ std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
 }
 namespace
 {
+constexpr uint8_t native_fragment_version = 3;
+NativeFragmentDescriptor::Kind checked_native_fragment_kind(NativeFragmentDescriptor::Kind kind)
+{
+    switch (kind)
+    {
+    case NativeFragmentDescriptor::Kind::Cartesian:
+    case NativeFragmentDescriptor::Kind::ConstructedProduct:
+    case NativeFragmentDescriptor::Kind::LegacyProcedural:
+        return kind;
+    }
+    throw std::invalid_argument("Unknown native fragment recipe kind.");
+}
 struct DescriptorSizeWriter
 {
     std::size_t size = 0;
@@ -755,6 +770,7 @@ struct DescriptorSizeWriter
             throw std::invalid_argument("Native descriptor encoded length overflows.");
         size += amount;
     }
+    void byte(uint8_t) { add(sizeof(uint8_t)); }
     template<class T> void value(const T&) { add(sizeof(T)); }
     void array(std::span<const char> bytes)
     {
@@ -764,8 +780,8 @@ struct DescriptorSizeWriter
 };
 template<class PacketWriter> void emit_native_descriptor(PacketWriter& w, const NativeFragmentDescriptor& descriptor)
 {
-    w.value(std::uint64_t{0x53464e4154520002ULL});
-    w.value(static_cast<std::uint64_t>(descriptor.kind));
+    packet_codec::write_header(w, packet_codec::Family::NativeFragment, native_fragment_version,
+        checked_native_fragment_kind(descriptor.kind));
     w.value(std::uint64_t(descriptor.parts.size()));
     for (const auto& part : descriptor.parts)
     {
@@ -793,13 +809,10 @@ std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descripto
     std::span<const char> bytes, NativeFragmentCache& cache)
 {
     Reader r{bytes};
-    if (r.value<std::uint64_t>() != 0x53464e4154520002ULL)
-        throw std::invalid_argument("Unsupported native fragment recipe version.");
     NativeFragmentDescriptor d;
-    const auto kind = r.value<std::uint64_t>();
-    if (kind > 2)
-        throw std::invalid_argument("Unknown native fragment recipe kind.");
-    d.kind = static_cast<NativeFragmentDescriptor::Kind>(kind);
+    d.kind = packet_codec::read_header(r, packet_codec::Family::NativeFragment, native_fragment_version,
+        {NativeFragmentDescriptor::Kind::Cartesian, NativeFragmentDescriptor::Kind::ConstructedProduct,
+            NativeFragmentDescriptor::Kind::LegacyProcedural});
     for (size_t count = r.count(sizeof(std::uint64_t)); count; --count)
         d.parts.push_back(cache.impl_->intern(r.array<char>()));
     d.view = r.array<char>();

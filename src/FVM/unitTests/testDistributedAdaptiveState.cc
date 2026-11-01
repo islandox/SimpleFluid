@@ -838,4 +838,47 @@ TEST(DistributedAdaptiveState, PeriodicPhysicalImageHistoriesRemapMigrateAndCoar
     EXPECT_EQ(coarse->hierarchy()->global_cells(), 8u);
     check(*coarse);
 }
+TEST(DistributedAdaptiveState, OwnershipMigrationRetainsMoreThan255InventoryEntries)
+{
+    auto h = detached();
+    auto order = keys(*h);
+    AdaptiveHistoryFrame frame;
+    frame.name = "wide_schema";
+    frame.carrier_density = 1000;
+    frame.gas_density = 2;
+    frame.phases.gas_volume.assign(order.size(), 0);
+    for (const auto& key : order)
+        frame.phases.carrier_volume.push_back(h->metrics(h->owned().at(key)).volume);
+    for (unsigned channel = 0; channel < 300; ++channel)
+    {
+        ConservedQuantity quantity;
+        quantity.name = "bulk_" + std::to_string(channel);
+        quantity.carrier = InventoryCarrier::BulkVolume;
+        for (const auto& key : order)
+            quantity.amount.push_back((channel + 1) * h->metrics(h->owned().at(key)).volume);
+        frame.inventories.push_back(std::move(quantity));
+    }
+    DistributedAdaptiveState source(h, order, {std::move(frame)});
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<int> destinations;
+    for (std::size_t i = 0; i < order.size(); ++i)
+        destinations.push_back(int(i % std::min(2, comm->getSize())));
+    auto moved = source.apply(source.plan_migration(destinations));
+    ASSERT_EQ(moved->histories().size(), 1u);
+    ASSERT_EQ(moved->histories().front().inventories.size(), 300u);
+    for (unsigned channel = 0; channel < 300; ++channel)
+    {
+        const auto& quantity = moved->histories().front().inventories[channel];
+        EXPECT_EQ(quantity.name, "bulk_" + std::to_string(channel));
+        EXPECT_EQ(quantity.carrier, InventoryCarrier::BulkVolume);
+        for (std::size_t i = 0; i < moved->owned_order().size(); ++i)
+        {
+            const auto& key = moved->owned_order()[i];
+            EXPECT_DOUBLE_EQ(quantity.amount[i],
+                (channel + 1) * moved->hierarchy()->metrics(moved->hierarchy()->owned().at(key)).volume);
+        }
+    }
+    EXPECT_EQ(source.histories().front().inventories.size(), 300u);
+}
+
 } // namespace

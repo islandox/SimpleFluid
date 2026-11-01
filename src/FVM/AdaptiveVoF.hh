@@ -7,6 +7,7 @@
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,9 +15,10 @@
 
 namespace SimpleFluid::VoF
 {
+using std::uint8_t;
 
 /** Extensive amounts are distributed with their named carrier during remapping. */
-enum class InventoryCarrier
+enum class InventoryCarrier : uint8_t
 {
     BulkVolume,
     GasVolume,
