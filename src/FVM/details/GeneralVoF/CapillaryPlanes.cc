@@ -18,7 +18,7 @@ using Record = packet_codec::Record;
 constexpr uint8_t protocol_version = 5;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Wide = std::array<long double, 3>;
-using Planes = std::map<Key, PLIC::PolyhedralInterface>;
+using Planes = std::map<Key, PLIC::DynamicPolyhedralReconstructionResult>;
 struct Candidate
 {
     const AMR::AdaptiveTile* tile = nullptr;
@@ -33,9 +33,9 @@ int geometric_phase(const Cell& cell, const PLIC::PolyhedralInterface& original)
         return -1;
     if (cell.retained_interface)
     {
-        if (cell.retained_interface->pure_gas)
+        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas)
             return 1;
-        if (cell.retained_interface->pure_carrier)
+        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier)
             return -1;
         return 0;
     }
@@ -122,8 +122,8 @@ std::optional<Candidate> native_candidate(
         return {};
     const auto& first = data.cells.at(tile.first);
     const auto& second = data.cells.at(*tile.second);
-    const int a = geometric_phase(first, original.at(tile.first));
-    const int b = geometric_phase(second, original.at(*tile.second));
+    const int a = geometric_phase(first, PLIC::reconstruction_geometry(original.at(tile.first)));
+    const int b = geometric_phase(second, PLIC::reconstruction_geometry(original.at(*tile.second)));
     if (a * b != -1)
         return {};
     const auto& points = tile.geometry->points();
@@ -167,7 +167,7 @@ std::optional<Candidate> native_candidate(
     {
         evaluation(data, evaluations);
         if (!pure_side(*Geometry::from_dynamic(cell->finite_geometry), candidate.gas,
-                geometric_phase(*cell, original.at(cell->key))))
+                geometric_phase(*cell, PLIC::reconstruction_geometry(original.at(cell->key)))))
             return {};
     }
     candidate.support = PLIC::planar_support<mode>(*tile.geometry);
@@ -182,7 +182,7 @@ std::optional<MinorityEvidence> admit_cell(const GeneralVoF::Data& data, const P
 {
     const auto& cell = data.cells.at(key);
     const auto geometry = Geometry::from_dynamic(cell.finite_geometry);
-    const int phase = geometric_phase(cell, original.at(key));
+    const int phase = geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key)));
     evaluation(data, evaluations);
     if (phase)
         return pure_side(*geometry, gas, phase) ? std::optional<MinorityEvidence>{MinorityEvidence{}} : std::nullopt;
@@ -230,18 +230,18 @@ bool same_plane(const Candidate& a, const Candidate& b)
     // ambiguous, even if a rounded coordinate comparison might coincide.
     return a.support == b.support && a.gas.normal == b.gas.normal;
 }
-std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
+std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_plane(
     const GeneralVoF::Data& data, const Planes& original, const Key& target, std::size_t retained_bytes)
 {
-    auto initial = original.at(target);
+    auto initial = std::get<PLIC::PolyhedralReconstructionResult<mode>>(original.at(target));
     const auto& target_cell = data.cells.at(target);
     SimpleFluid::detail::vof_failure::Scope context("capillary_plane_reconstruction");
     context.record.cell = target_cell.gid;
     context.record.cell_owner = target_cell.owner;
     context.record.mark(SimpleFluid::detail::vof_failure::Field::Cell);
     context.record.mark(SimpleFluid::detail::vof_failure::Field::CellOwner);
-    if (geometric_phase(target_cell, initial))
-        return {original_face, initial};
+    if (geometric_phase(target_cell, initial.geometry))
+        return {original_face, PLIC::to_dynamic(initial)};
     wire::Budget budget{data.options.byte_budget};
     budget.add(retained_bytes);
     PLIC::GeometryAllocationLedger retained_identity_allocations;
@@ -305,7 +305,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
         if (!valid)
             continue;
         if (selected && !same_plane(*selected, *candidate))
-            return {initial_choice, initial};
+            return {initial_choice, PLIC::to_dynamic(initial)};
         if (!selected)
         {
             retained_identity_allocations.retain(*candidate->support, budget.used, budget.limit);
@@ -315,25 +315,24 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
         }
     }
     if (!selected)
-        return {initial_choice, initial};
+        return {initial_choice, PLIC::to_dynamic(initial)};
     // A native witness is a separately admitted plane, not the old angular
     // optimizer result. Retain only the unchanged spatial-resolution evidence;
     // optimizer condition/iterations/convergence stay at their neutral defaults.
-    PLIC::PolyhedralInterface result;
+    PLIC::PolyhedralReconstructionResult<mode> result;
     result.model_policy = data.options.reconstruction.model_policy;
     result.resolution = initial.resolution;
-    result.gas = selected->gas;
+    result.geometry.gas = selected->gas;
     result.stencil_volume_residual = static_cast<double>(selected_stencil_residual);
     result.stencil_volume_residual_measured = true;
     result.model_quality = result.stencil_volume_residual > data.options.reconstruction.maximum_model_residual
                                ? PLIC::PlicModelQuality::AboveThreshold
                                : PLIC::PlicModelQuality::WithinThreshold;
-    result.finite_geometry = true;
-    result.finite_target_volume_difference = {target_evidence.difference, 0, mode};
+    result.target_volume_difference = {target_evidence.difference};
     result.target_volume_residual = static_cast<double>(target_evidence.difference);
     result.target_volume_numerical_error_estimate = target_evidence.numerical_error;
-    validate_plane_metadata(result, data.options.reconstruction, mode);
-    return {selected->tile->face_gid, result};
+    validate_plane_metadata(PLIC::to_dynamic(result), data.options.reconstruction, mode);
+    return {selected->tile->face_gid, PLIC::to_dynamic(result)};
 }
 void stamp(wire::Writer& writer, Record kind, const GeneralVoF::Data& data)
 {
@@ -384,34 +383,34 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             wire::Budget budget{limit};
             for (const auto& [key, cell] : data.cells)
             {
-                PLIC::PolyhedralInterface initial;
+                PLIC::PolyhedralReconstructionResult<mode> initial;
                 initial.model_policy = data.options.reconstruction.model_policy;
                 if (cell.retained_interface)
-                    initial = *cell.retained_interface;
+                    initial = std::get<PLIC::PolyhedralReconstructionResult<mode>>(*cell.retained_interface);
                 else
                 {
-                    initial.finite_geometry = true;
-                    initial.finite_target_volume_difference = {0, 0, mode};
-                    initial.pure_gas =
+                    initial.target_volume_difference = {};
+                    initial.geometry.pure_gas =
                         cell.declaration == GeneralVoFPhaseGeometry::PureGas ||
                         (cell.declaration == GeneralVoFPhaseGeometry::Infer && cell.phase.carrier_volume == 0);
-                    initial.pure_carrier =
+                    initial.geometry.pure_carrier =
                         cell.declaration == GeneralVoFPhaseGeometry::PureCarrier ||
                         (cell.declaration == GeneralVoFPhaseGeometry::Infer && cell.phase.gas_volume == 0);
-                    if (initial.pure_gas || initial.pure_carrier)
+                    if (initial.geometry.pure_gas || initial.geometry.pure_carrier)
                     {
-                        const auto minority = initial.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
+                        const auto minority =
+                            initial.geometry.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
                         initial.target_volume_residual = minority;
-                        initial.finite_target_volume_difference = {-static_cast<long double>(minority), 0, mode};
+                        initial.target_volume_difference = {-static_cast<long double>(minority)};
                     }
                 }
-                validate_plane_metadata(initial, data.options.reconstruction, mode);
+                validate_plane_metadata(PLIC::to_dynamic(initial), data.options.reconstruction, mode);
                 // Original/result maps and owner choices coexist throughout
                 // selection and exchange; include both sets of plane records.
                 budget.add(2 * sizeof(Planes::value_type) + sizeof(Key) + sizeof(std::uint64_t) + 12 * sizeof(void*) +
                            3 * AMR::encode_adaptive_key(key).size());
-                original.emplace(key, initial);
-                result.emplace(key, initial);
+                original.emplace(key, PLIC::to_dynamic(initial));
+                result.emplace(key, PLIC::to_dynamic(initial));
                 if (cell.owner == rank)
                     choices.emplace(key, original_face);
             }
@@ -432,7 +431,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             wire::Budget budget{limit};
             budget.add(retained_bytes);
             for (const auto& [key, cell] : data.cells)
-                if (cell.owner != rank && !geometric_phase(cell, original.at(key)))
+                if (cell.owner != rank && !geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key))))
                 {
                     wire::Writer writer;
                     stamp(writer, Record::Request, data);
@@ -481,7 +480,8 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                 const auto revision = reader.word();
                 reader.done();
                 const auto& cell = data.cells.at(key);
-                if (cell.owner != rank || cell.revision != revision || geometric_phase(cell, original.at(key)) ||
+                if (cell.owner != rank || cell.revision != revision ||
+                    geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key))) ||
                     !seen.emplace(packet.peer, key).second)
                     throw std::invalid_argument(
                         "Capillary plane request lacks its current mixed-cell owner authority.");
@@ -520,28 +520,32 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                     cell.revision != revision || !seen.insert(key).second)
                     throw std::invalid_argument("Capillary plane reply lacks its current source/cell owner authority.");
                 budget.add(sizeof(Key) + AMR::encode_adaptive_key(key).size() + 4 * sizeof(void*));
-                auto chosen = plane(reader, mode);
-                validate_plane_metadata(chosen, data.options.reconstruction, mode);
+                auto imported = plane(reader, mode);
+                validate_plane_metadata(imported, data.options.reconstruction, mode);
+                if (PLIC::reconstruction_mode(imported) != mode)
+                    throw std::invalid_argument("Capillary plane source arithmetic mode differs.");
+                auto& chosen = std::get<PLIC::PolyhedralReconstructionResult<mode>>(imported);
                 reader.done();
-                if (!chosen.finite_geometry || chosen.pure_gas || chosen.pure_carrier)
+                if (chosen.geometry.pure_gas || chosen.geometry.pure_carrier)
                     throw std::invalid_argument("Capillary plane reply differs from its mixed Ordinary source.");
                 if (face == original_face)
                 {
-                    const auto& initial = original.at(key);
-                    if (chosen.gas.normal != initial.gas.normal || chosen.gas.anchor != initial.gas.anchor ||
-                        chosen.gas.offset != initial.gas.offset)
+                    const auto& initial = std::get<PLIC::PolyhedralReconstructionResult<mode>>(original.at(key));
+                    if (chosen.geometry.gas.normal != initial.geometry.gas.normal ||
+                        chosen.geometry.gas.anchor != initial.geometry.gas.anchor ||
+                        chosen.geometry.gas.offset != initial.geometry.gas.offset)
                         throw std::invalid_argument("Capillary original-plane reply changed its source geometry.");
                     continue;
                 }
                 std::size_t evaluations = 0;
-                const auto evidence = admit_cell(data, original, key, chosen.gas, evaluations, budget);
+                const auto evidence = admit_cell(data, original, key, chosen.geometry.gas, evaluations, budget);
                 if (!evidence)
                     throw std::invalid_argument("Imported capillary plane fails its independent minority admission.");
                 chosen.target_volume_residual = static_cast<double>(evidence->difference);
-                chosen.finite_target_volume_difference = {evidence->difference, 0, mode};
+                chosen.target_volume_difference = {evidence->difference};
                 chosen.target_volume_numerical_error_estimate = evidence->numerical_error;
 
-                result.at(key) = std::move(chosen);
+                result.at(key) = std::move(imported);
             }
             if (seen.size() != requested.size())
                 throw std::invalid_argument("Capillary plane owner replies are incomplete.");

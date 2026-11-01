@@ -277,7 +277,8 @@ TEST(GeneralVoF, InferredObliquePLICDrivesActualSkewPolyhedralUnsplitTransport)
     for (std::size_t i = 0; i < reconstruction.size(); ++i)
         if (fixture.gas[i] > 0)
             for (unsigned axis = 0; axis < 3; ++axis)
-                EXPECT_NEAR(reconstruction[i].gas.normal[axis], normal[axis] / norm, 2e-7);
+                EXPECT_NEAR(
+                    PLIC::reconstruction_geometry(reconstruction[i]).gas.normal[axis], normal[axis] / norm, 2e-7);
     std::vector<GeneralVoFFaceVolume> flux;
     for (const auto& tile : source.tiles())
     {
@@ -513,11 +514,12 @@ TEST(GeneralVoF, DeclaredSubnormalInventorySurvivesWithoutInventingAnIdentifiabl
         EXPECT_EQ(published_phase_lifts(*unchanged)[i].gas.compare(published_phase_lifts(state)[i].gas), 0);
         EXPECT_EQ(published_phase_lifts(*unchanged)[i].carrier.compare(published_phase_lifts(state)[i].carrier), 0);
     }
-    for (const auto& p : state.reconstruct())
+    for (const auto& result : state.reconstruct())
     {
-        EXPECT_TRUE(p.pure_carrier);
-        EXPECT_TRUE(p.finite_geometry);
-        EXPECT_LT(p.finite_target_volume_difference.value, 0);
+        const auto& p = std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(result);
+        EXPECT_TRUE(p.geometry.pure_carrier);
+        EXPECT_EQ(PLIC::reconstruction_mode(result), ArithmeticMode::Ordinary);
+        EXPECT_LT(p.target_volume_difference.value, 0);
     }
     const auto transported = state.plan_transport(nodes(state), cycle(state), 1);
     const auto moved = state.apply(transported);

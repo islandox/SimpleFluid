@@ -783,9 +783,9 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
         });
     return result;
 }
-std::vector<PLIC::PolyhedralInterface> GeneralVoF::reconstruct() const
+std::vector<PLIC::DynamicPolyhedralReconstructionResult> GeneralVoF::reconstruct() const
 {
-    std::vector<PLIC::PolyhedralInterface> result;
+    std::vector<PLIC::DynamicPolyhedralReconstructionResult> result;
     auto comm = data_->hierarchy->communicator();
     wire::collective(*comm,
         [&]

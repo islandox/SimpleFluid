@@ -211,7 +211,7 @@ struct Cell
     PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
-    std::optional<PLIC::PolyhedralInterface> retained_interface;
+    std::optional<PLIC::DynamicPolyhedralReconstructionResult> retained_interface;
     bool inherited = false;
     // Authenticated independently of the optional owner-only retained plane.
     bool requires_interface = false;
@@ -404,15 +404,21 @@ template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
     const GeneralVoF::Data& data, const Key& key, bool complete_support = false, std::size_t* fitting_cells = nullptr);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key);
+SIMPLEFLUID_FVM_LOCAL PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell(
+    const GeneralVoF::Data& data, const Key& key);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local(
+    const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local(
+    const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
-    const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
-    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics, GeneralVoFWorkSample* balance_work = nullptr);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(
+    const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_planes(
+    const GeneralVoF::Data& data, const std::set<Key>& requested, const PLIC::GeometryPacketContext& context,
+    geometry::swept_volume::Work& work, GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics,
+    GeneralVoFWorkSample* balance_work = nullptr);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(
+    const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF

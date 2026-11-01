@@ -294,8 +294,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 for (const auto& [key, cell] : data.cells)
                 {
                     work.charge(sizeof(typename decltype(labels)::value_type) + 4 * sizeof(void*));
-                    labels.emplace(key, phase_label<Mode>(cell, *cell_geometry.at(key), planes.at(key),
-                                            data.options.reconstruction.volume_tolerance));
+                    labels.emplace(key,
+                        phase_label<Mode>(cell, *cell_geometry.at(key), PLIC::reconstruction_geometry(planes.at(key)),
+                            data.options.reconstruction.volume_tolerance));
                 }
                 std::map<std::uint64_t, PLIC::ConvexGeometryPtr<Mode>> donors;
                 std::vector<PLIC::ConvexGeometryPtr<Mode>> donor_geometries;
@@ -358,8 +359,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                             donor_context.record.mark(failure::Field::Scale);
                             work.atom(intersection.geometry);
                             if (tile.first_owner == comm->getRank())
-                                face_amounts[{tile.face_gid, cell.gid, piece.sign}].add(
-                                    labels.at(key).apply(*intersection.geometry, planes.at(key)));
+                                face_amounts[{tile.face_gid, cell.gid, piece.sign}].add(labels.at(key).apply(
+                                    *intersection.geometry, PLIC::reconstruction_geometry(planes.at(key))));
                         }
                     }
                     trial.finite_face_chain_.push_back({tile.face_gid, sweep.control, sweep.constructed_volume,
@@ -691,7 +692,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                     std::array<bool, 2> piece_presence{};
                     PhaseValue allocation;
                     const auto amount =
-                        labels.at(atom.donor).apply(*atom.geometry, plane, &piece_presence, &allocation);
+                        labels.at(atom.donor)
+                            .apply(*atom.geometry, PLIC::reconstruction_geometry(plane), &piece_presence, &allocation);
                     groups[{atom.donor, atom.recipient}].add(amount);
                     auto [evidence_entry, inserted] = evidence.try_emplace({atom.donor, atom.recipient});
                     if (inserted)
@@ -713,7 +715,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                     presence[0] = presence[0] || piece_presence[0];
                     presence[1] = presence[1] || piece_presence[1];
                     history_groups[{atom.donor, atom.recipient}].add(
-                        labels.at(atom.donor).history(*atom.geometry, plane));
+                        labels.at(atom.donor).history(*atom.geometry, PLIC::reconstruction_geometry(plane)));
                     work.atom(atom.geometry);
                 }
                 for (const auto& key : data.topology->order)

@@ -332,13 +332,14 @@ void report_assessment(std::ostream& out, const PLIC::PolyhedralResolutionAssess
         << " condition=" << a.stencil_condition << " angular_eligible=" << a.angular_fit_eligible
         << " local_span=" << a.local_cell_span << " requested_span=" << a.requested_cell_span << '\n';
 }
-void report_plane(std::ostream& out, const char* label, const PLIC::PolyhedralInterface& plane)
+void report_plane(std::ostream& out, const char* label, const PLIC::PolyhedralReconstructionResult<mode>& plane)
 {
-    out << label << " orientation_method=" << int(plane.orientation_method) << " normal=" << plane.gas.normal[0] << ','
-        << plane.gas.normal[1] << ',' << plane.gas.normal[2] << " offset=" << plane.gas.offset
-        << " anchor=" << plane.gas.anchor[0] << ',' << plane.gas.anchor[1] << ',' << plane.gas.anchor[2]
-        << " target_residual=" << plane.target_volume_residual
-        << " finite_target_difference=" << plane.finite_target_volume_difference.value
+    out << label << " orientation_method=" << int(plane.orientation_method)
+        << " normal=" << plane.geometry.gas.normal[0] << ',' << plane.geometry.gas.normal[1] << ','
+        << plane.geometry.gas.normal[2] << " offset=" << plane.geometry.gas.offset
+        << " anchor=" << plane.geometry.gas.anchor[0] << ',' << plane.geometry.gas.anchor[1] << ','
+        << plane.geometry.gas.anchor[2] << " target_residual=" << plane.target_volume_residual
+        << " finite_target_difference=" << plane.target_volume_difference.value
         << " target_numerical_error=" << plane.target_volume_numerical_error_estimate
         << " neighbor_rms_measured=" << plane.stencil_volume_residual_measured
         << " neighbor_rms=" << plane.stencil_volume_residual << " angular_converged=" << plane.fit_converged << '\n';
@@ -404,9 +405,9 @@ void diagnostic_offset(std::ostream& out, const Sample& target, const std::vecto
     const auto plane = PLIC::PolyhedralReconstruction<mode>::solve_offset(target, normal, options);
     report_plane(out, "diagnostic_LS_strict_target_offset_only", plane);
     out << "diagnostic_strict_relative_minority_residual="
-        << std::abs(plane.finite_target_volume_difference.value) / std::min(target.gas_volume, target.carrier_volume)
+        << std::abs(plane.target_volume_difference.value) / std::min(target.gas_volume, target.carrier_volume)
         << " original_volume_tolerance=" << options.volume_tolerance << '\n';
-    auto measured_plane = plane.gas;
+    auto measured_plane = plane.geometry.gas;
     const bool gas = target.gas_volume <= target.carrier_volume;
     if (!gas)
     {

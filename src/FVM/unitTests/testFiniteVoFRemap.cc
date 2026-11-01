@@ -171,7 +171,7 @@ void allocation_oracle(const GeneralVoF& source, const GeneralVoF& target, const
         ASSERT_EQ(route.source_owner, route.target_owner);
         const auto i = source_index.at(route.source_key);
         const auto& plane = planes[i];
-        if (plane.pure_gas || plane.pure_carrier)
+        if (PLIC::reconstruction_geometry(plane).pure_gas || PLIC::reconstruction_geometry(plane).pure_carrier)
         {
             EXPECT_EQ(route.fit_allocation.value, 0);
             EXPECT_EQ(route.fit_allocation.absolute_error, 0);
@@ -181,8 +181,8 @@ void allocation_oracle(const GeneralVoF& source, const GeneralVoF& target, const
             *source.hierarchy()->geometry(source.hierarchy()->owned().at(route.source_key)));
         const auto piece = OracleGeometry::from_geometry(
             *target.hierarchy()->geometry(target.hierarchy()->owned().at(route.target_key)));
-        const auto source_cut = source_geometry->clip(plane.gas);
-        const auto piece_cut = piece->clip(plane.gas);
+        const auto source_cut = source_geometry->clip(PLIC::reconstruction_geometry(plane).gas);
+        const auto piece_cut = piece->clip(PLIC::reconstruction_geometry(plane).gas);
         const auto volume = Measure::volume(*source_geometry);
         const auto piece_volume = Measure::volume(*piece);
         const auto raw_gas = Measure::volume(*source_cut.inside);

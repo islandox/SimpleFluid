@@ -492,7 +492,7 @@ struct GeneralVoFReconstructionPatch
     std::uint64_t cell = 0;
     int owner = -1;
     SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
-    PLIC::PolyhedralInterface interface;
+    PLIC::DynamicPolyhedralReconstructionResult interface;
     PLIC::DynamicConvexGeometryPtr finite_geometry;
 };
 class SIMPLEFLUID_FVM_EXPORT GeneralVoF
@@ -568,7 +568,7 @@ public:
      * locally owned; an external controller may refine/reinitialize and recheck.
      * plan_transport rejects atomically when requests remain unavailable. */
     [[nodiscard]] std::vector<GeneralVoFResolutionRequest> resolution_requests() const;
-    [[nodiscard]] std::vector<PLIC::PolyhedralInterface> reconstruct() const;
+    [[nodiscard]] std::vector<PLIC::DynamicPolyhedralReconstructionResult> reconstruct() const;
     [[nodiscard]] std::vector<GeneralVoFReconstructionPatch> reconstruction_patches() const;
     /** Explicit opposite-pure interfaces on bounded halo canonical fine subfaces.
      * Ordinary arithmetic, independent of backend. Deduplicate replicas by face ID. */

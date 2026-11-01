@@ -111,9 +111,12 @@ template<ArithmeticMode Mode> long double radius(Value<Mode> value)
     else
         return value.absolute_error;
 }
-template<ArithmeticMode Mode> PLIC::DynamicGeometryValue published_difference(Value<Mode> value)
+template<ArithmeticMode Mode> Value<Mode> published_difference(Value<Mode> value)
 {
-    return {value.value, radius<Mode>(value), Mode};
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return {value.value};
+    else
+        return {value.value, radius<Mode>(value)};
 }
 double outward(long double x, bool upper)
 {
@@ -443,7 +446,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
     return analysis;
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
+PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations, long double* best_section_area = nullptr)
 {
     if (best_section_area)
@@ -452,13 +455,12 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
     if constexpr (Mode == ArithmeticMode::Ordinary)
         if (options.measure_only)
             ordinary_measure.emplace(*sample.geometry);
-    PolyhedralInterface result;
+    PolyhedralReconstructionResult<Mode> result;
     result.model_policy = options.model_policy;
-    result.finite_geometry = true;
-    result.finite_target_volume_difference = published_difference<Mode>({});
-    result.pure_gas = sample.carrier_volume == 0;
-    result.pure_carrier = sample.gas_volume == 0;
-    result.gas.normal = unit(normal);
+    result.target_volume_difference = published_difference<Mode>({});
+    result.geometry.pure_gas = sample.carrier_volume == 0;
+    result.geometry.pure_carrier = sample.gas_volume == 0;
+    result.geometry.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
     const auto reference = sample.geometry->origin();
     const auto points = sample.geometry->local_points();
@@ -468,16 +470,16 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
     {
         long double projection = 0;
         for (unsigned axis = 0; axis < 3; ++axis)
-            projection += static_cast<long double>(result.gas.normal[axis]) * point.value[axis];
+            projection += static_cast<long double>(result.geometry.gas.normal[axis]) * point.value[axis];
         if (!have_anchor || (gas ? projection < extremum : projection > extremum))
         {
             have_anchor = true;
             extremum = projection;
             for (unsigned axis = 0; axis < 3; ++axis)
             {
-                result.gas.anchor[axis] =
+                result.geometry.gas.anchor[axis] =
                     static_cast<double>(static_cast<long double>(reference[axis]) + point.value[axis]);
-                if (!std::isfinite(result.gas.anchor[axis]))
+                if (!std::isfinite(result.geometry.gas.anchor[axis]))
                     throw std::invalid_argument("Finite PLIC support anchor exceeds its represented range.");
             }
         }
@@ -487,12 +489,12 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
     // This vertex choice only conditions the scalar representation. The full
     // enclosed support query below still proves a signed bracket, including
     // nonbinary support behind the displayed anchor. Never assume a zero bound.
-    const auto support = sample.geometry->support(result.gas.normal, result.gas.anchor);
+    const auto support = sample.geometry->support(result.geometry.gas.normal, result.geometry.gas.anchor);
     double lo = outward(lower<Mode>(support.lower), false);
     double hi = outward(upper<Mode>(support.upper), true);
-    if (result.pure_gas || result.pure_carrier)
+    if (result.geometry.pure_gas || result.geometry.pure_carrier)
     {
-        result.gas.offset = result.pure_gas ? hi : lo;
+        result.geometry.gas.offset = result.geometry.pure_gas ? hi : lo;
         return result;
     }
     if (hi < lo)
@@ -514,7 +516,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         ++offset_iterations;
         if (evaluations++ >= options.maximum_clip_evaluations)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
-        auto plane = result.gas;
+        auto plane = result.geometry.gas;
         plane.offset = offset;
         long double section_area = 0, numerical_error = 0;
         const auto measured = [&]() -> Value<Mode>
@@ -550,8 +552,8 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         {
             have_best = true;
             best_bound = error;
-            result.gas = plane;
-            result.finite_target_volume_difference = published_difference<Mode>(residual);
+            result.geometry.gas = plane;
+            result.target_volume_difference = published_difference<Mode>(residual);
             result.target_volume_residual = static_cast<double>(residual.value);
             result.target_volume_numerical_error_estimate = numerical_error;
             // Retain the sensitivity of this best represented plane, rather
@@ -616,8 +618,8 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         const bool exhausted = offset_iterations >= options.maximum_offset_iterations;
         message << (exhausted ? "Finite PLIC offset iteration budget exhausted before target-volume acceptance: target="
                               : "Finite PLIC arithmetic cannot establish the original target-volume tolerance: target=")
-                << requested << ", residual=" << result.finite_target_volume_difference.value
-                << ", radius=" << result.finite_target_volume_difference.absolute_error
+                << requested << ", residual=" << result.target_volume_difference.value
+                << ", radius=" << radius<Mode>(result.target_volume_difference)
                 << ", numerical_error_estimate=" << result.target_volume_numerical_error_estimate
                 << ", bound=" << best_bound << ", allowed=" << allowed << ", bracket=[" << lo << "," << hi << "].";
         throw GeometryError(!exhausted && arithmetic_stalled ? GeometryErrorCode::UnresolvedArithmetic
@@ -749,7 +751,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
     return result;
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
+PolyhedralReconstructionResult<Mode> PolyhedralReconstruction<Mode>::solve_offset(
     const PolyhedralPhaseSample<Mode>& sample, Vector normal, PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(sample, options);
@@ -759,7 +761,7 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
 namespace
 {
 template<ArithmeticMode Mode>
-PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target,
+PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSample<Mode>& target,
     std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
     PolyhedralReconstructionOptions options, bool allow_seed_restart)
 {
@@ -804,7 +806,7 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
         }
     struct Evaluation
     {
-        PolyhedralInterface plane;
+        PolyhedralReconstructionResult<Mode> plane;
         std::vector<double> residual;
         long double objective = 0;
         long double objective_upper = 0;
@@ -822,7 +824,7 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
         if constexpr (Mode == ArithmeticMode::Ordinary)
             if (options.measure_only)
             {
-                const auto target_residual = value.plane.finite_target_volume_difference.value;
+                const auto target_residual = value.plane.target_volume_difference.value;
                 if (!std::isfinite(target_section_area) || !(target_section_area > 0) ||
                     !std::isfinite(target_residual))
                     throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
@@ -847,7 +849,7 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
                 {
                     if (options.measure_only)
                     {
-                        auto plane = value.plane.gas;
+                        auto plane = value.plane.geometry.gas;
                         if (!gas)
                         {
                             for (auto& component : plane.normal)
@@ -860,12 +862,12 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
                         sample_section_area = measure.section_area;
                         return {measure.volume};
                     }
-                    const auto phases = sample.geometry->phases(value.plane.gas);
+                    const auto phases = sample.geometry->phases(value.plane.geometry.gas);
                     return gas ? phases.gas : phases.carrier;
                 }
                 else
                 {
-                    const auto phases = sample.geometry->phases(value.plane.gas);
+                    const auto phases = sample.geometry->phases(value.plane.geometry.gas);
                     return gas ? phases.gas : phases.carrier;
                 }
             }();
@@ -1157,7 +1159,8 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
 }
 } // namespace
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
+PolyhedralReconstructionResult<Mode> PolyhedralReconstruction<Mode>::reconstruct(
+    const PolyhedralPhaseSample<Mode>& target,
     std::span<const PolyhedralPhaseSample<Mode>> stencil, PolyhedralReconstructionOptions options)
 {
     if (target.gas_volume == 0 || target.carrier_volume == 0)
@@ -1170,7 +1173,8 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     return reconstruct_finite<Mode>(target, stencil, stencil.size(), options, false);
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
+PolyhedralReconstructionResult<Mode> PolyhedralReconstruction<Mode>::reconstruct(
+    const PolyhedralPhaseSample<Mode>& target,
     std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
     PolyhedralReconstructionOptions options)
 {

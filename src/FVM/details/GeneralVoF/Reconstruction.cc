@@ -20,7 +20,8 @@ template<ArithmeticMode Mode> PLIC::PolyhedralPhaseSample<Mode> reconstruction_s
 {
     const bool observed_mixed =
         cell.declaration == GeneralVoFPhaseGeometry::Infer &&
-        (!cell.retained_interface || (!cell.retained_interface->pure_gas && !cell.retained_interface->pure_carrier));
+        (!cell.retained_interface || (!PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
+                                         !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier));
     if constexpr (Mode == ArithmeticMode::Exact)
     {
         const auto labels = geometric_labels(cell);
@@ -167,30 +168,35 @@ struct OwnerReconstructionObservation
     }
 };
 template<ArithmeticMode Mode>
-PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, const Key& key,
+PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell_impl(const GeneralVoF::Data& data, const Key& key,
     GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics, GeneralVoFWorkCell* row = nullptr)
 {
     OwnerReconstructionObservation observation(diagnostics, row);
     const auto& cell = data.cells.at(key);
-    const auto returned = [&](PLIC::PolyhedralInterface result)
+    const auto returned = [&](PLIC::DynamicPolyhedralReconstructionResult result)
     {
         validate_plane_metadata(result, data.options.reconstruction, Mode);
-        if (diagnostics && result.stencil_volume_residual_measured)
-        {
-            ++diagnostics->measured_plane_count;
-            if (result.model_quality == PLIC::PlicModelQuality::AboveThreshold)
-                ++diagnostics->above_model_threshold_count;
-            if (diagnostics->measured_plane_count == 1 ||
-                result.stencil_volume_residual > diagnostics->maximum_model_residual ||
-                (result.stencil_volume_residual == diagnostics->maximum_model_residual &&
-                    cell.gid < diagnostics->worst_cell_gid))
+        std::visit(
+            [&](const auto& result)
             {
-                diagnostics->maximum_model_residual = result.stencil_volume_residual;
-                diagnostics->worst_cell_gid = cell.gid;
-                diagnostics->worst_orientation_method = result.orientation_method;
-                diagnostics->worst_fit_converged = result.fit_converged;
-            }
-        }
+                if (diagnostics && result.stencil_volume_residual_measured)
+                {
+                    ++diagnostics->measured_plane_count;
+                    if (result.model_quality == PLIC::PlicModelQuality::AboveThreshold)
+                        ++diagnostics->above_model_threshold_count;
+                    if (diagnostics->measured_plane_count == 1 ||
+                        result.stencil_volume_residual > diagnostics->maximum_model_residual ||
+                        (result.stencil_volume_residual == diagnostics->maximum_model_residual &&
+                            cell.gid < diagnostics->worst_cell_gid))
+                    {
+                        diagnostics->maximum_model_residual = result.stencil_volume_residual;
+                        diagnostics->worst_cell_gid = cell.gid;
+                        diagnostics->worst_orientation_method = result.orientation_method;
+                        diagnostics->worst_fit_converged = result.fit_converged;
+                    }
+                }
+            },
+            result);
         return result;
     };
     ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
@@ -205,7 +211,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
     {
         if constexpr (Mode == ArithmeticMode::Exact)
         {
-            if (!cell.retained_interface->finite_geometry)
+            if (PLIC::reconstruction_mode(*cell.retained_interface) == ArithmeticMode::Exact)
             {
                 if (diagnostics)
                     ++diagnostics->retained_interface_returns;
@@ -214,7 +220,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
         }
         else
         {
-            if (!cell.retained_interface->finite_geometry)
+            if (PLIC::reconstruction_mode(*cell.retained_interface) != Mode)
                 throw std::invalid_argument("Finite VoF cannot adopt an exact-policy interface capsule.");
             if (diagnostics)
                 ++diagnostics->retained_interface_returns;
@@ -223,27 +229,25 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
     }
     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
     {
-        PLIC::PolyhedralInterface result;
+        PLIC::PolyhedralReconstructionResult<Mode> result;
         result.model_policy = data.options.reconstruction.model_policy;
-        result.pure_gas = cell.declaration == GeneralVoFPhaseGeometry::PureGas;
-        result.pure_carrier = !result.pure_gas;
-        const auto minority = result.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
+        result.geometry.pure_gas = cell.declaration == GeneralVoFPhaseGeometry::PureGas;
+        result.geometry.pure_carrier = !result.geometry.pure_gas;
+        const auto minority = result.geometry.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
         result.target_volume_residual = minority;
         if constexpr (Mode == ArithmeticMode::Exact)
         {
             const auto difference =
-                (result.pure_gas ? phase_measures(cell).carrier : phase_measures(cell).gas).scaled(-1);
+                (result.geometry.pure_gas ? phase_measures(cell).carrier : phase_measures(cell).gas).scaled(-1);
             result.target_volume_difference = difference.enclosure();
         }
         else
         {
-            result.finite_geometry = true;
-            result.finite_target_volume_difference =
-                fp::Arithmetic<Mode>::make_value(-static_cast<long double>(minority));
+            result.target_volume_difference.value = -static_cast<long double>(minority);
         }
         if (diagnostics)
             ++diagnostics->pure_declaration_returns;
-        return returned(std::move(result));
+        return returned(PLIC::to_dynamic(std::move(result)));
     }
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
     {
@@ -251,7 +255,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
             reconstruction_sample<Mode>(cell), {1, 0, 0}, data.options.reconstruction);
         if (diagnostics)
             ++diagnostics->zero_phase_offset_returns;
-        return returned(std::move(result));
+        return returned(PLIC::to_dynamic(std::move(result)));
     }
     if (diagnostics)
         ++diagnostics->mixed_cell_fits;
@@ -267,25 +271,27 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
         auto result = PLIC::PolyhedralReconstruction<Mode>::reconstruct(
             target, stencil, fitting_cells, data.options.reconstruction);
         result.resolution = support;
-        return returned(std::move(result));
+        return returned(PLIC::to_dynamic(std::move(result)));
     }
     else
-        return returned(
-            PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, data.options.reconstruction));
+        return returned(PLIC::to_dynamic(
+            PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, data.options.reconstruction)));
 }
 } // namespace
-template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key)
+template<ArithmeticMode Mode>
+PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell(const GeneralVoF::Data& data, const Key& key)
 {
     return reconstruct_cell_impl<Mode>(data, key, nullptr);
 }
-template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode>
+std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local(const GeneralVoF::Data& data)
 {
-    std::map<Key, PLIC::PolyhedralInterface> result;
+    std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> result;
     for (const auto& key : data.topology->order)
         result.emplace(key, reconstruct_cell<Mode>(data, key));
     return result;
 }
-std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
+std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local(const GeneralVoF::Data& data)
 {
     if (data.options.arithmetic_mode == ArithmeticMode::Exact)
         return reconstruct_local<ArithmeticMode::Exact>(data);
@@ -293,8 +299,8 @@ std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Dat
         return reconstruct_local<ArithmeticMode::Ordinary>(data);
     return reconstruct_local<ArithmeticMode::BoundedCertification>(data);
 }
-PLIC::PolyhedralInterface reconstruct_observed_ordinary_cell(const GeneralVoF::Data& data, const Key& key,
-    GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics, GeneralVoFWorkCell* row)
+PLIC::DynamicPolyhedralReconstructionResult reconstruct_observed_ordinary_cell(const GeneralVoF::Data& data,
+    const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics, GeneralVoFWorkCell* row)
 {
     return reconstruct_cell_impl<ArithmeticMode::Ordinary>(data, key, diagnostics, row);
 }
@@ -302,19 +308,23 @@ template PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> reconstruction_sa
     const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary>>
 reconstruction_stencil<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
-template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&);
-template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
+template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::Ordinary>(
+    const GeneralVoF::Data&, const Key&);
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local<ArithmeticMode::Ordinary>(
+    const GeneralVoF::Data&);
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>
 reconstruction_sample<ArithmeticMode::BoundedCertification>(const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>>
 reconstruction_stencil<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
-template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::BoundedCertification>(
+template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::BoundedCertification>(
     const GeneralVoF::Data&, const Key&);
-template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::BoundedCertification>(
-    const GeneralVoF::Data&);
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult>
+reconstruct_local<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&);
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> reconstruction_sample<ArithmeticMode::Exact>(const Cell&);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> reconstruction_stencil<ArithmeticMode::Exact>(
     const GeneralVoF::Data&, const Key&, bool, std::size_t*);
-template PLIC::PolyhedralInterface reconstruct_cell<ArithmeticMode::Exact>(const GeneralVoF::Data&, const Key&);
-template std::map<Key, PLIC::PolyhedralInterface> reconstruct_local<ArithmeticMode::Exact>(const GeneralVoF::Data&);
+template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::Exact>(
+    const GeneralVoF::Data&, const Key&);
+template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local<ArithmeticMode::Exact>(
+    const GeneralVoF::Data&);
 } // namespace SimpleFluid::VoF::general_vof_detail

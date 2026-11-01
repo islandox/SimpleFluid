@@ -845,7 +845,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
         wire::collective(*comm,
             [&]
             {
-                std::map<std::uint64_t, std::optional<PLIC::PolyhedralInterface>> planes;
+                std::map<std::uint64_t, std::optional<PLIC::DynamicPolyhedralReconstructionResult>> planes;
                 std::map<std::uint64_t, std::array<long double, 3>> displacements;
                 wire::Budget budget{limit};
                 for (const auto& [face, original] : streams)
@@ -900,7 +900,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                                 budget.add(sizeof(std::pair<const std::uint64_t, std::array<long double, 3>>) + 64);
                                 displacements.emplace(s.donor, donor_displacement(data, ledger, donor_key));
                             }
-                            auto plane = planes.at(s.donor)->gas;
+                            auto plane = PLIC::reconstruction_geometry(*planes.at(s.donor)).gas;
                             const auto area_vector = tiles.at(face)->geometry->area_vector();
                             const std::array<long double, 3> av{area_vector.x, area_vector.y, area_vector.z};
                             const auto area = std::hypot(av[0], av[1], av[2]);

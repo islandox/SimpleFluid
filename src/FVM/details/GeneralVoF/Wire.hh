@@ -24,10 +24,11 @@ SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
 /** Versioned finite Ordinary plane, including its finite minority difference.
  * Budgets reserve the compact header, two model bytes and 27 eight-byte words. */
 inline constexpr std::size_t ordinary_plane_wire_bytes = 218 + packet_codec::header_bytes<packet_codec::Record>;
-SIMPLEFLUID_FVM_LOCAL void validate_plane_metadata(const PLIC::PolyhedralInterface&,
-    const PLIC::PolyhedralReconstructionOptions&, ArithmeticMode);
-SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p);
-SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
+SIMPLEFLUID_FVM_LOCAL void validate_plane_metadata(
+    const PLIC::DynamicPolyhedralReconstructionResult&, const PLIC::PolyhedralReconstructionOptions&, ArithmeticMode);
+SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::DynamicPolyhedralReconstructionResult& p);
+SIMPLEFLUID_FVM_LOCAL PLIC::DynamicPolyhedralReconstructionResult plane(
+    wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL void finite_phases(wire::Writer&, const PLIC::DynamicPhaseMeasures&);
 SIMPLEFLUID_FVM_LOCAL PLIC::DynamicPhaseMeasures finite_phases(wire::Reader&, ArithmeticMode);
 } // namespace SimpleFluid::VoF::general_vof_detail

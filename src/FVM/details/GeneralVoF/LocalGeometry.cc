@@ -91,7 +91,8 @@ struct AggregateFaceTrace
 bool needs_interface(const Cell& cell)
 {
     return cell.declaration == GeneralVoFPhaseGeometry::Infer || cell.requires_interface ||
-           (cell.retained_interface && !cell.retained_interface->pure_gas && !cell.retained_interface->pure_carrier);
+           (cell.retained_interface && !PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
+               !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier);
 }
 } // namespace
 LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const OrdinaryTraceMap& traces,
@@ -349,11 +350,13 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 auto geometry = Geometry::from_dynamic(cell.finite_geometry);
                 const auto& plane = planes.at(key);
                 record_transport_plane_quality(result.diagnostics.reconstruction_quality, cell.gid, plane);
-                if ((cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0) && !plane.pure_gas &&
-                    !plane.pure_carrier)
+                if ((cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0) &&
+                    !PLIC::reconstruction_geometry(plane).pure_gas &&
+                    !PLIC::reconstruction_geometry(plane).pure_carrier)
                     throw std::invalid_argument(
                         "Local VoF absent phase requires pure geometry for normalized history transport.");
-                labels.emplace(key, phase_label<mode>(cell, *geometry, plane, work.volume_tolerance));
+                labels.emplace(key,
+                    phase_label<mode>(cell, *geometry, PLIC::reconstruction_geometry(plane), work.volume_tolerance));
                 geometries.emplace(key, std::move(geometry));
             }
             std::size_t capture_face = 0;
@@ -451,10 +454,11 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor donor;
                             donor.id = i;
                             donor.geometry = geometries.at(cell.key);
-                            donor.pure_gas = plane.pure_gas;
-                            donor.pure_carrier = plane.pure_carrier;
-                            if (!plane.pure_gas && !plane.pure_carrier)
-                                donor.gas = plane.gas;
+                            donor.pure_gas = PLIC::reconstruction_geometry(plane).pure_gas;
+                            donor.pure_carrier = PLIC::reconstruction_geometry(plane).pure_carrier;
+                            if (!PLIC::reconstruction_geometry(plane).pure_gas &&
+                                !PLIC::reconstruction_geometry(plane).pure_carrier)
+                                donor.gas = PLIC::reconstruction_geometry(plane).gas;
                             donor.bulk_budget = quota;
                             const auto& label = labels.at(cell.key);
                             const auto phase_quota = [&](bool bulk, PhaseValue phase)

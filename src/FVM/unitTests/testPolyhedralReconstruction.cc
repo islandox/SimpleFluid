@@ -37,6 +37,15 @@ using OrdinarySample = PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary>;
 using BoundedGeometry = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
 static_assert(!std::is_convertible_v<BoundedSample, OrdinarySample>);
 
+template<ArithmeticMode Mode> long double reconstruction_difference_radius(PLIC::GeometryValue<Mode> difference)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return 0;
+    else
+        return difference.absolute_error;
+}
+
+
 std::vector<std::array<int, 3>> neighbors()
 {
     return {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, -1, -1}, {1, 1, 1}, {-1, 1, 1},
@@ -79,9 +88,9 @@ template<ArithmeticMode Mode> void typed_offset_and_reconstruction()
     PLIC::reset_geometry_statistics();
     GeneralVoF::reset_geometry_statistics();
     const auto offset = PLIC::PolyhedralReconstruction<Mode>::solve_offset(target, {1, 0, 0});
-    const auto phases = target.geometry->phases(offset.gas);
+    const auto phases = target.geometry->phases(offset.geometry.gas);
     EXPECT_LE(std::abs(phases.gas.value - .25L), .25L * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
-    EXPECT_EQ(offset.finite_target_volume_difference.arithmetic_mode, Mode);
+    EXPECT_EQ(offset.target_volume_difference.arithmetic_mode, Mode);
     EXPECT_EQ(target.gas_volume, .25);
     EXPECT_EQ(target.carrier_volume, .75);
 
@@ -98,9 +107,9 @@ template<ArithmeticMode Mode> void typed_offset_and_reconstruction()
     EXPECT_TRUE(fitted.resolution.admitted());
     EXPECT_LE(std::abs(fitted.target_volume_residual), .25 * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
     EXPECT_LE(fitted.stencil_volume_residual, PLIC::PolyhedralReconstructionOptions{}.fit_tolerance);
-    EXPECT_NEAR(fitted.gas.normal[0], 1, 1e-8);
-    EXPECT_NEAR(fitted.gas.normal[1], 0, 1e-8);
-    EXPECT_NEAR(fitted.gas.normal[2], 0, 1e-8);
+    EXPECT_NEAR(fitted.geometry.gas.normal[0], 1, 1e-8);
+    EXPECT_NEAR(fitted.geometry.gas.normal[1], 0, 1e-8);
+    EXPECT_NEAR(fitted.geometry.gas.normal[2], 0, 1e-8);
     auto invalid = target;
     invalid.carrier_volume = .8;
     EXPECT_THROW(PLIC::PolyhedralReconstruction<Mode>::validate(invalid), std::invalid_argument);
@@ -124,12 +133,12 @@ TEST(PolyhedralReconstruction, OrdinaryOffsetFitRetainsPhysicalMinorityResidualA
     {
         const auto sample = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, gas ? .25 : .75);
         const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 0, 0});
-        const auto phases = sample.geometry->phases(fit.gas);
+        const auto phases = sample.geometry->phases(fit.geometry.gas);
         const auto measured = gas ? phases.gas : phases.carrier;
         EXPECT_EQ(measured.arithmetic_mode, ArithmeticMode::Ordinary);
-        EXPECT_EQ(fit.finite_target_volume_difference.arithmetic_mode, ArithmeticMode::Ordinary);
-        EXPECT_EQ(fit.finite_target_volume_difference.absolute_error, 0);
-        EXPECT_EQ(fit.finite_target_volume_difference.value, measured.value - .25L);
+        EXPECT_EQ(fit.target_volume_difference.arithmetic_mode, ArithmeticMode::Ordinary);
+        EXPECT_EQ(reconstruction_difference_radius(fit.target_volume_difference), 0);
+        EXPECT_EQ(fit.target_volume_difference.value, measured.value - .25L);
         EXPECT_EQ(fit.target_volume_residual, static_cast<double>(measured.value - .25L));
         EXPECT_LE(std::abs(measured.value - .25L), .25L * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
         EXPECT_EQ(sample.gas_volume, gas ? .25 : .75);
@@ -273,17 +282,18 @@ template<ArithmeticMode Mode> void small_phase_gradient_orientation()
             EXPECT_EQ(fit.fit_iterations, 0u);
             EXPECT_FALSE(fit.stencil_volume_residual_measured);
             EXPECT_EQ(fit.orientation_step, 0);
-            EXPECT_FALSE(fit.pure_gas);
-            EXPECT_FALSE(fit.pure_carrier);
+            EXPECT_FALSE(fit.geometry.pure_gas);
+            EXPECT_FALSE(fit.geometry.pure_carrier);
             EXPECT_TRUE(fit.resolution.admitted());
             EXPECT_NEAR(fit.stencil_condition, 1, 2e-15);
             for (unsigned axis = 0; axis < 3; ++axis)
-                EXPECT_NEAR(fit.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
+                EXPECT_NEAR(fit.geometry.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
             // Independent tetrahedron volume: 3*x+2*y+z <= q has V=q^3/36.
             const auto minority = gas ? target.gas_volume : target.carrier_volume;
-            EXPECT_NEAR(fit.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15 * scale);
-            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) +
-                          fit.finite_target_volume_difference.absolute_error,
+            EXPECT_NEAR(
+                fit.geometry.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15 * scale);
+            EXPECT_LE(std::abs(fit.target_volume_difference.value) +
+                          reconstruction_difference_radius(fit.target_volume_difference),
                 static_cast<long double>(minority) * options.volume_tolerance);
             EXPECT_EQ(target.gas_volume, original.gas_volume);
             EXPECT_EQ(target.carrier_volume, original.carrier_volume);
@@ -418,17 +428,17 @@ template<ArithmeticMode Mode> void weak_planar_layer(bool corner, double wall_fr
             EXPECT_LE(fit.stencil_volume_residual, PLIC::PolyhedralReconstructionOptions{}.fit_tolerance);
             const auto sign = complement ? -1 : 1;
             const double nx = corner ? 1 / std::sqrt(2.) : 1;
-            EXPECT_NEAR(fit.gas.normal[0], sign * nx, 1e-12);
-            EXPECT_NEAR(fit.gas.normal[1], corner ? sign * nx : 0, 1e-12);
-            EXPECT_NEAR(fit.gas.normal[2], 0, 1e-12);
+            EXPECT_NEAR(fit.geometry.gas.normal[0], sign * nx, 1e-12);
+            EXPECT_NEAR(fit.geometry.gas.normal[1], corner ? sign * nx : 0, 1e-12);
+            EXPECT_NEAR(fit.geometry.gas.normal[2], 0, 1e-12);
             const PLIC::GeometryPoint point{corner ? h / 4 : wall_fraction * h, corner ? h / 4 : h / 2, h / 2};
-            double distance = -fit.gas.offset;
+            double distance = -fit.geometry.gas.offset;
             for (unsigned axis = 0; axis < 3; ++axis)
-                distance += fit.gas.normal[axis] * (point[axis] - fit.gas.anchor[axis]);
+                distance += fit.geometry.gas.normal[axis] * (point[axis] - fit.geometry.gas.anchor[axis]);
             EXPECT_NEAR(distance, 0, 2e-12 * h);
             const auto minority = std::min(target.gas_volume, target.carrier_volume);
-            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) +
-                          fit.finite_target_volume_difference.absolute_error +
+            EXPECT_LE(std::abs(fit.target_volume_difference.value) +
+                          reconstruction_difference_radius(fit.target_volume_difference) +
                           fit.target_volume_numerical_error_estimate,
                 static_cast<long double>(minority) * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
             EXPECT_EQ(target.gas_volume, original.gas_volume);
@@ -618,19 +628,19 @@ TEST(PolyhedralReconstruction, ConservativeApproximationAdmitsCapturedN32CornerW
             EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
             EXPECT_LE(fit.stencil_condition, options.maximum_condition);
             EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
-            const auto volumes = oracle(fit.gas);
+            const auto volumes = oracle(fit.geometry.gas);
             const auto roundoff = 64 * std::numeric_limits<long double>::epsilon() / 2048;
             const auto allowed = options.volume_tolerance * std::min(target.gas_volume, target.carrier_volume);
             EXPECT_LE(std::max(std::abs(volumes[0] - target.gas_volume),
                           std::abs(volumes[1] - target.gas_volume)) + roundoff, allowed);
             if (!original_normal)
-                original_normal = fit.gas.normal;
+                original_normal = fit.geometry.gas.normal;
             long double norm = 0;
             for (std::size_t a = 0; a < 3; ++a)
             {
-                EXPECT_TRUE(std::isfinite(fit.gas.normal[a]));
-                norm += fit.gas.normal[a] * fit.gas.normal[a];
-                EXPECT_NEAR(fit.gas.normal[a], (swapped ? -1 : 1) * (*original_normal)[a], 2e-8);
+                EXPECT_TRUE(std::isfinite(fit.geometry.gas.normal[a]));
+                norm += fit.geometry.gas.normal[a] * fit.geometry.gas.normal[a];
+                EXPECT_NEAR(fit.geometry.gas.normal[a], (swapped ? -1 : 1) * (*original_normal)[a], 2e-8);
             }
             EXPECT_NEAR(norm, 1.L, 2e-15L);
             EXPECT_EQ(target.gas_volume, swapped ? fixture::rows[0].carrier : fixture::rows[0].gas);
@@ -657,9 +667,9 @@ TEST(PolyhedralReconstruction, ConservativeApproximationRetainsGradientStatusAnd
     EXPECT_EQ(fit.model_quality, PLIC::PlicModelQuality::AboveThreshold);
     EXPECT_TRUE(fit.stencil_volume_residual_measured);
     EXPECT_NEAR(fit.stencil_volume_residual, .8 / std::sqrt(6.), 2e-14);
-    EXPECT_EQ(fit.gas.normal, (PLIC::GeometryPoint{-1, 0, 0}));
+    EXPECT_EQ(fit.geometry.gas.normal, (PLIC::GeometryPoint{-1, 0, 0}));
     // For -x on the unit target, gas occupies x >= anchor_x-offset.
-    EXPECT_NEAR(1.L - (fit.gas.anchor[0] - fit.gas.offset), .25L, .25L * options.volume_tolerance);
+    EXPECT_NEAR(1.L - (fit.geometry.gas.anchor[0] - fit.geometry.gas.offset), .25L, .25L * options.volume_tolerance);
 }
 
 TEST(PolyhedralReconstruction, ModerateWeakGradientRetainsItsConfiguredModelBound)
@@ -712,9 +722,9 @@ TEST(PolyhedralReconstruction, CapturedFull50Step3AdmitsSupportedTinyPhaseWithou
     EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
     EXPECT_FALSE(fit.fit_converged);
     EXPECT_FALSE(fit.stencil_volume_residual_measured);
-    EXPECT_FALSE(fit.pure_gas);
-    EXPECT_FALSE(fit.pure_carrier);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_FALSE(fit.geometry.pure_gas);
+    EXPECT_FALSE(fit.geometry.pure_carrier);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.gas_volume) * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
     EXPECT_EQ(target.gas_volume, cells.front().sample.gas_volume);
     EXPECT_EQ(target.carrier_volume, cells.front().sample.carrier_volume);
@@ -722,7 +732,7 @@ TEST(PolyhedralReconstruction, CapturedFull50Step3AdmitsSupportedTinyPhaseWithou
     for (const auto& sample : stencil)
     {
         const auto residual =
-            (sample.geometry->phases(fit.gas).gas.value - sample.gas_volume) / sample.geometry->volume().value;
+            (sample.geometry->phases(fit.geometry.gas).gas.value - sample.gas_volume) / sample.geometry->volume().value;
         sum += residual * residual;
     }
     const auto rms = std::sqrt(sum / stencil.size());
@@ -732,7 +742,7 @@ TEST(PolyhedralReconstruction, CapturedFull50Step3AdmitsSupportedTinyPhaseWithou
     RecordProperty("directional_strength", assessment.directional_strength);
     RecordProperty("directional_uncertainty", assessment.directional_uncertainty);
     RecordProperty("target_gas_volume", target.gas_volume);
-    RecordProperty("strict_offset_residual", double(fit.finite_target_volume_difference.value));
+    RecordProperty("strict_offset_residual", double(fit.target_volume_difference.value));
     RecordProperty("frozen_neighbor_rms", double(rms));
     auto without_small_phase_exclusion = PLIC::PolyhedralReconstructionOptions{};
     without_small_phase_exclusion.minimum_optimized_phase_length_ratio = 0;
@@ -815,11 +825,11 @@ TEST(PolyhedralReconstruction, ResolvedGrazingPlaneUsesNeighborSupport)
     options.minimum_optimized_phase_length_ratio = 0;
     const auto fit =
         PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::reconstruct(target, stencil, options);
-    EXPECT_TRUE(fit.finite_geometry);
+    EXPECT_EQ(decltype(fit.target_volume_difference)::arithmetic_mode, ArithmeticMode::BoundedCertification);
     EXPECT_TRUE(fit.resolution.admitted());
-    for (auto n : fit.gas.normal)
+    for (auto n : fit.geometry.gas.normal)
         EXPECT_NEAR(n, 1 / std::sqrt(3.), 2e-7);
-    EXPECT_TRUE(target.geometry->phases(fit.gas).gas.relative_error_at_most(target.gas_volume, 8e-15));
+    EXPECT_TRUE(target.geometry->phases(fit.geometry.gas).gas.relative_error_at_most(target.gas_volume, 8e-15));
 }
 TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
 {
@@ -855,7 +865,7 @@ TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
     const auto fit =
         PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::reconstruct(fine, fine_stencil);
     EXPECT_TRUE(fit.resolution.admitted());
-    EXPECT_NEAR(fit.gas.normal[0], -1, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[0], -1, 2e-7);
 }
 TEST(PolyhedralReconstruction, DeficientAndUnobservableStencilsRequestMoreSupport)
 {
@@ -889,13 +899,13 @@ TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
             const BoundedSample sample{numerical, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
             const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
                 sample, {direction, 0, 0});
-            ASSERT_TRUE(fit.finite_geometry);
-            const auto measured = numerical->phases(fit.gas);
+            ASSERT_EQ(decltype(fit.target_volume_difference)::arithmetic_mode, ArithmeticMode::BoundedCertification);
+            const auto measured = numerical->phases(fit.geometry.gas);
             EXPECT_TRUE((minority_gas ? measured.gas : measured.carrier).relative_error_at_most(.225, 8e-15));
             const auto reference =
                 SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
                     *exact)
-                    ->phases(fit.gas);
+                    ->phases(fit.geometry.gas);
             EXPECT_TRUE((minority_gas ? reference.gas : reference.carrier)
                     .relative_error_at_most(
                         SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.225),
@@ -912,8 +922,8 @@ TEST(PolyhedralReconstruction, PureEndpointsAndRejectedArithmeticDoNotChangePoli
         {
             const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
                 {geometry, gas ? 1. : 0., gas ? 0. : 1.}, {direction, 0, 0});
-            EXPECT_TRUE(gas ? fit.pure_gas : fit.pure_carrier);
-            const auto phases = geometry->phases(fit.gas);
+            EXPECT_TRUE(gas ? fit.geometry.pure_gas : fit.geometry.pure_carrier);
+            const auto phases = geometry->phases(fit.geometry.gas);
             EXPECT_EQ((gas ? phases.carrier : phases.gas).upper(), 0);
         }
     BoundedSample sample{geometry, .3, .7};
@@ -939,10 +949,10 @@ TEST(PolyhedralReconstruction, FarMinoritySupportRetainsOffsetPrecisionForBothLa
             const BoundedSample sample{geometry, gas ? 1e-6 : 1 - 1e-6, gas ? 1 - 1e-6 : 1e-6};
             const auto fitted = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
                 sample, {direction, 0, 0});
-            const auto phases = geometry->phases(fitted.gas);
+            const auto phases = geometry->phases(fitted.geometry.gas);
             EXPECT_TRUE((gas ? phases.gas : phases.carrier).relative_error_at_most(1e-6L, 8e-15));
-            EXPECT_LE(std::abs(fitted.finite_target_volume_difference.value) +
-                          fitted.finite_target_volume_difference.absolute_error,
+            EXPECT_LE(std::abs(fitted.target_volume_difference.value) +
+                          reconstruction_difference_radius(fitted.target_volume_difference),
                 static_cast<long double>(1e-6) * 8e-15);
         }
 }
@@ -963,16 +973,16 @@ template<ArithmeticMode Mode> void coarse_fine_passage_minority_fit()
     const PLIC::PolyhedralPhaseSample<Mode> sample{geometry, 6.3984438984441292e-8, .0078124360155610159};
     const auto fitted = PLIC::PolyhedralReconstruction<Mode>::solve_offset(
         sample, {.96128421995518143, .27109170276597788, .049415960545162486});
-    const auto actual = geometry->phases(fitted.gas);
+    const auto actual = geometry->phases(fitted.geometry.gas);
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
         EXPECT_TRUE(actual.gas.relative_error_at_most(sample.gas_volume, 8e-15));
     else
         EXPECT_LE(std::abs(actual.gas.value - sample.gas_volume), static_cast<long double>(sample.gas_volume) * 8e-15);
-    EXPECT_LE(
-        std::abs(fitted.finite_target_volume_difference.value) + fitted.finite_target_volume_difference.absolute_error,
+    EXPECT_LE(std::abs(fitted.target_volume_difference.value) +
+                  reconstruction_difference_radius(fitted.target_volume_difference),
         static_cast<long double>(sample.gas_volume) * 8e-15);
     EXPECT_EQ(sample.carrier_volume, .0078124360155610159);
-    EXPECT_EQ(fitted.finite_target_volume_difference.arithmetic_mode, Mode);
+    EXPECT_EQ(fitted.target_volume_difference.arithmetic_mode, Mode);
 }
 
 TEST(PolyhedralReconstruction, CoarseFinePassageMinorityFitDoesNotStallBetweenAdjacentOffsets)
@@ -1650,8 +1660,9 @@ OrdinarySample captured_sheared_sample(PLIC::GeometryPoint lower, PLIC::Geometry
         gas, carrier, id};
 }
 
-void record_captured_fit(const PLIC::PolyhedralInterface& fit, const PLIC::PolyhedralReconstructionOptions& options,
-    const std::string& prefix = "")
+template<ArithmeticMode Mode>
+void record_captured_fit(const PLIC::PolyhedralReconstructionResult<Mode>& fit,
+    const PLIC::PolyhedralReconstructionOptions& options, const std::string& prefix = "")
 {
     const auto record = [&](const std::string& name, long double value)
     {
@@ -1659,14 +1670,14 @@ void record_captured_fit(const PLIC::PolyhedralInterface& fit, const PLIC::Polyh
         text << std::setprecision(std::numeric_limits<long double>::max_digits10) << value;
         ::testing::Test::RecordProperty(prefix + name, text.str());
     };
-    record("normal_x", fit.gas.normal[0]);
-    record("normal_y", fit.gas.normal[1]);
-    record("normal_z", fit.gas.normal[2]);
+    record("normal_x", fit.geometry.gas.normal[0]);
+    record("normal_y", fit.geometry.gas.normal[1]);
+    record("normal_z", fit.geometry.gas.normal[2]);
     record("stencil_rms", fit.stencil_volume_residual);
     record("fit_iterations", fit.fit_iterations);
     record("qualified_step", fit.orientation_step);
     record("stencil_condition", fit.stencil_condition);
-    record("target_difference", fit.finite_target_volume_difference.value);
+    record("target_difference", fit.target_volume_difference.value);
     record("target_error_estimate", fit.target_volume_numerical_error_estimate);
     record("clip_evaluation_cap", options.maximum_clip_evaluations);
     // Statistics are local to the calling image; they may not include work
@@ -1696,10 +1707,10 @@ TEST(PolyhedralReconstruction, CapturedClosedShearPlaneConvergesWithLargeGaussNe
     EXPECT_LE(fit.fit_iterations, 24u);
     EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
     EXPECT_LT(fit.stencil_volume_residual, 2e-8);
-    EXPECT_NEAR(fit.gas.normal[0], .9710284210662322, 3e-8);
-    EXPECT_NEAR(fit.gas.normal[1], -.2389640254967681, 3e-8);
-    EXPECT_NEAR(fit.gas.normal[2], 0., 3e-8);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_NEAR(fit.geometry.gas.normal[0], .9710284210662322, 3e-8);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], -.2389640254967681, 3e-8);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], 0., 3e-8);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.gas_volume) * options.volume_tolerance);
     EXPECT_EQ(target.gas_volume, 3. / 32768);
     EXPECT_EQ(stencil[3].carrier_volume, 255. / 32768);
@@ -1733,8 +1744,8 @@ TEST(PolyhedralReconstruction, ClosedShearDyadicPlanesRetainObservableAcceptedNo
                     fit.stencil_volume_residual <= options.fit_tolerance);
         EXPECT_LT(fit.stencil_volume_residual, 2e-8);
         for (unsigned a = 0; a < 3; ++a)
-            EXPECT_NEAR(fit.gas.normal[a], expected[a], 3e-8);
-        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            EXPECT_NEAR(fit.geometry.gas.normal[a], expected[a], 3e-8);
+        EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
             static_cast<long double>(target.gas_volume) * options.volume_tolerance);
     }
 }
@@ -1760,10 +1771,10 @@ TEST(PolyhedralReconstruction, CapturedEarlyQ3CellEightRetainsGaussNewtonForLine
     EXPECT_TRUE(fit.orientation_step <= options.orientation_tolerance ||
                 fit.stencil_volume_residual <= options.fit_tolerance);
     EXPECT_LT(fit.stencil_volume_residual, 2e-9);
-    EXPECT_NEAR(fit.gas.normal[0], .9806444064005432, 3e-6);
-    EXPECT_NEAR(fit.gas.normal[1], .1644431456403562, 3e-6);
-    EXPECT_NEAR(fit.gas.normal[2], .1062779377257141, 3e-6);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_NEAR(fit.geometry.gas.normal[0], .9806444064005432, 3e-6);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], .1644431456403562, 3e-6);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], .1062779377257141, 3e-6);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.gas_volume) * options.volume_tolerance);
 }
 
@@ -1787,10 +1798,10 @@ TEST(PolyhedralReconstruction, CapturedQ3CellFourCurvedStencilConvergesWithinOri
     EXPECT_LE(fit.fit_iterations, 24u);
     EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
     EXPECT_NEAR(fit.stencil_volume_residual, .029432749204890543, 2e-9);
-    EXPECT_NEAR(fit.gas.normal[0], .9850548959227791, 3e-7);
-    EXPECT_NEAR(fit.gas.normal[1], .1608351886840540, 3e-7);
-    EXPECT_NEAR(fit.gas.normal[2], .06163516933965175, 3e-7);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_NEAR(fit.geometry.gas.normal[0], .9850548959227791, 3e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], .1608351886840540, 3e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], .06163516933965175, 3e-7);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.carrier_volume) * options.volume_tolerance);
     EXPECT_EQ(target.carrier_volume, 4.110007786049872e-05);
     EXPECT_EQ(stencil[3].gas_volume, .004123109780909433);
@@ -1816,10 +1827,10 @@ TEST(PolyhedralReconstruction, CapturedLaterQ3CellFourStrongCurvatureConvergesWi
     EXPECT_LE(fit.fit_iterations, 24u);
     EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
     EXPECT_NEAR(fit.stencil_volume_residual, .028726766961985669, 2e-11);
-    EXPECT_NEAR(fit.gas.normal[0], .987514804442455656, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[1], .157488413593679930, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[2], .003451172369582950, 2e-7);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_NEAR(fit.geometry.gas.normal[0], .987514804442455656, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], .157488413593679930, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], .003451172369582950, 2e-7);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.carrier_volume) * options.volume_tolerance);
     EXPECT_EQ(target.carrier_volume, 2.823273801241972e-6);
     EXPECT_EQ(stencil[3].gas_volume, .004602632779987267);
@@ -1850,10 +1861,10 @@ TEST(PolyhedralReconstruction, CapturedQ3CellSeventeenRetainsSubDoubleUlpMeritDe
     EXPECT_TRUE(fit.orientation_step <= options.orientation_tolerance ||
                 fit.stencil_volume_residual <= options.fit_tolerance);
     EXPECT_NEAR(fit.stencil_volume_residual, .0766444845050065432, 2e-11);
-    EXPECT_NEAR(fit.gas.normal[0], .944569482657690743, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[1], .317770032152553390, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[2], .082526959822518921, 2e-7);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_NEAR(fit.geometry.gas.normal[0], .944569482657690743, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], .317770032152553390, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], .082526959822518921, 2e-7);
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.gas_volume) * options.volume_tolerance);
     EXPECT_EQ(target.carrier_volume, .003989903173364601);
     EXPECT_EQ(stencil[5].gas_volume, 8.605053223371048e-06);
@@ -2133,7 +2144,7 @@ TEST(PolyhedralReconstruction, OrdinaryMeasureOffsetSolvesTinyPhasesWithoutCutCe
         options.measure_only = true;
         const auto fit =
             PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 1, 1}, options);
-        auto plane = fit.gas;
+        auto plane = fit.geometry.gas;
         if (!gas)
         {
             for (auto& n : plane.normal)
@@ -2278,14 +2289,14 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17ConstrainedTargetMeritConverg
             EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
             EXPECT_LE(fit.stencil_condition, options.maximum_condition);
             EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
-            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
                 static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) *
                     options.volume_tolerance);
             long double chord_squared = 0;
             for (unsigned axis = 0; axis < 3; ++axis)
             {
-                const auto difference =
-                    static_cast<long double>(fit.gas.normal[axis]) - (swapped ? -optimum[axis] : optimum[axis]);
+                const auto difference = static_cast<long double>(fit.geometry.gas.normal[axis]) -
+                                        (swapped ? -optimum[axis] : optimum[axis]);
                 chord_squared += difference * difference;
             }
             EXPECT_LE(std::sqrt(chord_squared), options.orientation_tolerance);
@@ -2296,21 +2307,21 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17ConstrainedTargetMeritConverg
                 RecordProperty(prefix + name, text.str());
             };
             for (const auto& [name, point] : std::array<std::pair<const char*, PLIC::GeometryPoint>, 2>{
-                     {{"normal", fit.gas.normal}, {"anchor", fit.gas.anchor}}})
+                     {{"normal", fit.geometry.gas.normal}, {"anchor", fit.geometry.gas.anchor}}})
             {
                 std::ostringstream text;
                 text << std::setprecision(17) << point[0] << ',' << point[1] << ',' << point[2];
                 RecordProperty(prefix + name, text.str());
             }
-            record("offset", fit.gas.offset);
+            record("offset", fit.geometry.gas.offset);
             record("rms", fit.stencil_volume_residual);
             record("step", fit.orientation_step);
             record("condition", fit.stencil_condition);
             record("iterations", fit.fit_iterations);
-            record("target_residual", fit.finite_target_volume_difference.value);
+            record("target_residual", fit.target_volume_difference.value);
             record("numerical_indicator", fit.target_volume_numerical_error_estimate);
             record("target_residual_with_indicator",
-                std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+                std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
             record("optimum_chord_distance", std::sqrt(chord_squared));
         }
         catch (const PLIC::PolyhedralFitFailure& error)
@@ -2686,7 +2697,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell34CompleteCurrentHaloRequiresQu
         EXPECT_TRUE(fit.stencil_volume_residual_measured);
         EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
         EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
-        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
             static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) * options.volume_tolerance);
         const auto record = [&](const char* name, auto value)
         {
@@ -2699,12 +2710,13 @@ TEST(PolyhedralReconstruction, CapturedNativeCell34CompleteCurrentHaloRequiresQu
         record("native_cell34_expanded_condition", fit.stencil_condition);
         record("native_cell34_expanded_iterations", fit.fit_iterations);
         std::ostringstream normal;
-        normal << std::setprecision(17) << fit.gas.normal[0] << ',' << fit.gas.normal[1] << ',' << fit.gas.normal[2];
+        normal << std::setprecision(17) << fit.geometry.gas.normal[0] << ',' << fit.geometry.gas.normal[1] << ','
+               << fit.geometry.gas.normal[2];
         RecordProperty("native_cell34_expanded_normal", normal.str());
-        record("native_cell34_expanded_target_residual", fit.finite_target_volume_difference.value);
+        record("native_cell34_expanded_target_residual", fit.target_volume_difference.value);
         record("native_cell34_expanded_numerical_indicator", fit.target_volume_numerical_error_estimate);
         record("native_cell34_expanded_target_residual_with_indicator",
-            std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+            std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
     }
     catch (const PLIC::PolyhedralFitFailure& error)
     {
@@ -2763,12 +2775,12 @@ void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<cons
         EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
         EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
         EXPECT_NEAR(fit.stencil_volume_residual, expected_rms, 2e-12);
-        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
             static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) * options.volume_tolerance);
         long double chord_squared = 0, measured_squared = 0;
         for (unsigned axis = 0; axis < 3; ++axis)
         {
-            const auto difference = static_cast<long double>(fit.gas.normal[axis]) - optimum[axis];
+            const auto difference = static_cast<long double>(fit.geometry.gas.normal[axis]) - optimum[axis];
             chord_squared += difference * difference;
         }
         EXPECT_LE(std::sqrt(chord_squared), options.orientation_tolerance);
@@ -2778,7 +2790,7 @@ void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<cons
         {
             const auto& sample = full_support[i];
             const bool gas = sample.gas_volume <= sample.carrier_volume;
-            auto plane = fit.gas;
+            auto plane = fit.geometry.gas;
             if (!gas)
             {
                 for (auto& component : plane.normal)
@@ -2799,13 +2811,13 @@ void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<cons
             testing::Test::RecordProperty(prefix + name, text.str());
         };
         for (const auto& [name, point] : std::array<std::pair<const char*, PLIC::GeometryPoint>, 2>{
-                 {{"normal", fit.gas.normal}, {"anchor", fit.gas.anchor}}})
+                 {{"normal", fit.geometry.gas.normal}, {"anchor", fit.geometry.gas.anchor}}})
         {
             std::ostringstream text;
             text << std::setprecision(17) << point[0] << ',' << point[1] << ',' << point[2];
             testing::Test::RecordProperty(prefix + name, text.str());
         }
-        record("offset", fit.gas.offset);
+        record("offset", fit.geometry.gas.offset);
         record("rms", fit.stencil_volume_residual);
         record("independent_prefix_measure_rms", prefix_rms);
         record("step", fit.orientation_step);
@@ -2814,10 +2826,10 @@ void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<cons
         record("fitting_cells", fit.resolution.stencil_cells);
         record("available_gas_support", fit.resolution.gas_support_fraction);
         record("available_carrier_support", fit.resolution.carrier_support_fraction);
-        record("target_residual", fit.finite_target_volume_difference.value);
+        record("target_residual", fit.target_volume_difference.value);
         record("numerical_indicator", fit.target_volume_numerical_error_estimate);
         record("target_residual_with_indicator",
-            std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
+            std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate);
         record("optimum_chord_distance", std::sqrt(chord_squared));
     }
     catch (const PLIC::PolyhedralFitFailure& error)
@@ -3239,7 +3251,7 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     EXPECT_EQ(offset.orientation_method, PLIC::PolyhedralOrientationMethod::SuppliedNormal);
     EXPECT_FALSE(offset.fit_converged);
     EXPECT_FALSE(offset.stencil_volume_residual_measured);
-    EXPECT_LE(std::abs(offset.finite_target_volume_difference.value) + offset.target_volume_numerical_error_estimate,
+    EXPECT_LE(std::abs(offset.target_volume_difference.value) + offset.target_volume_numerical_error_estimate,
         static_cast<long double>(std::min(target.gas_volume, target.carrier_volume)) * options.volume_tolerance);
     // A supported LS direction and a strict target offset do not establish a
     // usable one-plane neighborhood model. This measured witness is deliberately
@@ -3247,7 +3259,7 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     long double squared = 0;
     for (const auto& sample : stencil)
     {
-        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(offset.gas);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(offset.geometry.gas);
         ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
         const auto residual = (measured.volume - sample.gas_volume) / sample.geometry->volume().value;
         squared += residual * residual;
@@ -3335,14 +3347,14 @@ TEST(PolyhedralReconstruction, CapturedSinglePlaneTargetUsesCompleteFiveFaceNeig
         }
         return std::sqrt(sum / stencil.size());
     };
-    EXPECT_NEAR(rms(gradient.gas), .1953453825474781L, 2e-11L);
-    EXPECT_NEAR(rms(physical.gas), .1888730906986648L, 2e-12L);
+    EXPECT_NEAR(rms(gradient.geometry.gas), .1953453825474781L, 2e-11L);
+    EXPECT_NEAR(rms(physical.geometry.gas), .1888730906986648L, 2e-12L);
     const auto fit = Kernel::reconstruct(target, stencil, options);
     EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
     EXPECT_TRUE(fit.fit_converged);
     EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
     EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         static_cast<long double>(target.gas_volume) * options.volume_tolerance);
     RecordProperty("fitted_rms", fit.stencil_volume_residual);
     RecordProperty("fitted_step", fit.orientation_step);
@@ -3501,7 +3513,7 @@ TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSke
     EXPECT_TRUE(fit.fit_converged);
     EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
     EXPECT_LE(fit.stencil_volume_residual, options.fit_tolerance);
-    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+    EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
         target.gas_volume * options.volume_tolerance);
     // Independent stress on the same analytic 13-neighbor geometry: a positive
     // receipt in the originally pure z+ cell remains an observed mixed input,
@@ -3524,11 +3536,11 @@ TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSke
     // The unchanged one-plane target witness excludes z+ geometrically, so
     // retaining its positive phase creates a real nonzero objective residual.
     const auto physical = Kernel::solve_offset(target, {1, .17, .11}, options);
-    const auto measured = PLIC::OrdinaryPlaneMeasure(*received[1].geometry).below(physical.gas);
+    const auto measured = PLIC::OrdinaryPlaneMeasure(*received[1].geometry).below(physical.geometry.gas);
     EXPECT_EQ(measured.volume, 0);
     EXPECT_EQ((measured.volume - received[1].gas_volume) / 0x1p-7L, -0x1p-18L);
     EXPECT_LE(
-        std::abs(physical.finite_target_volume_difference.value) + physical.target_volume_numerical_error_estimate,
+        std::abs(physical.target_volume_difference.value) + physical.target_volume_numerical_error_estimate,
         target.gas_volume * options.volume_tolerance);
     EXPECT_EQ(stencil[1].gas_volume, 0);
 }
@@ -3570,11 +3582,11 @@ template<ArithmeticMode Mode> void separated_phase_context_validation()
     // Preserve the legacy explicit-stencil pure-target short circuit. Only the
     // newly explicit full context requires validation of unused outside data.
     EXPECT_TRUE(Kernel::assess_transport_support(pure, unused, options).admitted());
-    EXPECT_TRUE(Kernel::reconstruct(pure, unused, options).pure_gas);
+    EXPECT_TRUE(Kernel::reconstruct(pure, unused, options).geometry.pure_gas);
     EXPECT_THROW((void) Kernel::assess_transport_support(pure, unused, 0, options), std::invalid_argument);
     EXPECT_THROW((void) Kernel::reconstruct(pure, unused, 0, options), std::invalid_argument);
     EXPECT_TRUE(Kernel::assess_transport_support(pure, full, 0, options).admitted());
-    EXPECT_TRUE(Kernel::reconstruct(pure, full, 0, options).pure_gas);
+    EXPECT_TRUE(Kernel::reconstruct(pure, full, 0, options).geometry.pure_gas);
     for (const auto stats : {PLIC::geometry_statistics(), GeneralVoF::geometry_statistics().bounded})
     {
         EXPECT_EQ(stats.constructions, 0u);

@@ -233,7 +233,7 @@ explicit model-admission policy below. Eligible
 cells initialize the angular fit below. A later angular or arithmetic failure
 never automatically selects the gradient fallback.
 
-`PolyhedralInterface::orientation_method` distinguishes `Gradient`,
+`PolyhedralReconstructionResult<Mode>::orientation_method` distinguishes `Gradient`,
 `AngularVolumeFit` and `SuppliedNormal`. Gradient results report zero angular
 iterations and leave `fit_converged` false because no angular optimizer ran.
 `stencil_volume_residual_measured` distinguishes an evaluated residual from the
@@ -382,7 +382,7 @@ not acquire a fabricated zero-error quality claim.
 
 A large measured neighborhood RMS is then a quality outcome, not a transport
 rejection. `maximum_model_residual` remains its reference threshold. The
-`PolyhedralInterface` records `model_policy` and `model_quality` separately from
+`PolyhedralReconstructionResult<Mode>` records `model_policy` and `model_quality` separately from
 support assessment and optimizer status; quality is `NotMeasured`,
 `WithinThreshold` or `AboveThreshold`. All measured values remain available.
 The model-triggered face-seed restart is disabled for this policy: a qualified
@@ -530,11 +530,18 @@ phase amounts or return an unconverged fit.
 
 ## Result, integration, and limitations
 
-`PolyhedralInterface` returns the gas halfspace, pure-phase flags, signed target
-volume residual, finite residual evidence, stencil RMS residual, condition
+`PolyhedralInterface` contains only the represented gas halfspace and pure-phase
+flags. `PolyhedralReconstructionResult<Mode>` returns that geometry in `.geometry`,
+together with the signed target-volume residual, mode-specific residual evidence, stencil RMS residual, condition
 diagnostic, orientation method, angular step, iteration count, convergence flag, RMS-measured flag, and resolution
 assessment. The signed target residual refers to the selected minority phase,
-which need not be gas. Pure or reused geometry does not necessarily carry a
+which need not be gas. Geometry-only phase, clipping, and curvature consumers accept the smaller
+interface; owner caches, retained results and migration keep the full result.
+Runtime-selected GeneralVoF storage uses `DynamicPolyhedralReconstructionResult`,
+a variant of the three typed results, through `to_dynamic`; fixed-mode kernels return their
+mode-specific result without implicit cross-mode conversions. The explicit
+codecs preserve their existing field order and wire versions.
+Pure or reused geometry does not necessarily carry a
 fresh angular-fit convergence record. Local assessments retain directional strength,
 uncertainty and eligibility; existing plane exchange/transfer formats carry the
 plane's method, condition and measured-RMS flag, rather than the full assessment.

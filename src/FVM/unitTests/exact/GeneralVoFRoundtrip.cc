@@ -135,7 +135,7 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     PLIC::reset_geometry_statistics();
     const auto rebuilt = adopted->reconstruct();
     for (const auto& interface : rebuilt)
-        EXPECT_TRUE(interface.finite_geometry);
+        EXPECT_EQ(PLIC::reconstruction_mode(interface), ArithmeticMode::Ordinary);
     const auto observed = GeneralVoF::geometry_statistics();
     for (const auto& exact : {observed.exact, PLIC::backend_statistics<ArithmeticMode::Exact>()})
     {

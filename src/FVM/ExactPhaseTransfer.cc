@@ -56,7 +56,8 @@ struct WorkingCapsule
     std::uint64_t revision = 0;
     PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
     ExactPhases phases;
-    PLIC::PolyhedralInterface geometry;
+    PLIC::DynamicPolyhedralReconstructionResult geometry =
+        PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact>{};
     bool geometry_ready = false;
     WorkingError error;
     WorkingMass accumulated_roundoff;
@@ -179,42 +180,51 @@ long double wide(wire::Reader& r)
         throw std::invalid_argument("Nonfinite exact transfer diagnostic.");
     return value;
 }
-void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
+void plane(wire::Writer& w, const PLIC::DynamicPolyhedralReconstructionResult& result)
 {
-    plane_wire_detail::model_metadata(p);
-    protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
-    protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
-    for (auto x : p.gas.normal)
-        real(w, x);
-    for (auto x : p.gas.anchor)
-        real(w, x);
-    real(w, p.gas.offset);
-    for (auto x : {p.target_volume_residual, p.stencil_volume_residual, p.stencil_condition, p.orientation_step})
-        real(w, x);
-    plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
-    wide(w, p.target_volume_difference.value);
-    wide(w, p.target_volume_difference.absolute_error);
-    w.word(p.target_volume_difference.exact_nonzero);
-    w.word(p.fit_iterations);
-    plane_wire_detail::orientation(w, p.orientation_method);
-    w.word(p.fit_converged);
-    w.word(p.pure_gas);
-    w.word(p.pure_carrier);
+    std::visit(
+        [&](const auto& p)
+        {
+            plane_wire_detail::model_metadata(p);
+            protocol_tags::write(w, p.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+            protocol_tags::write(w, p.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+            for (auto x : p.geometry.gas.normal)
+                real(w, x);
+            for (auto x : p.geometry.gas.anchor)
+                real(w, x);
+            real(w, p.geometry.gas.offset);
+            for (auto x :
+                {p.target_volume_residual, p.stencil_volume_residual, p.stencil_condition, p.orientation_step})
+                real(w, x);
+            plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
+            PLIC::GeometryValue<ArithmeticMode::Exact> exact_difference;
+            if constexpr (decltype(p.target_volume_difference)::arithmetic_mode == ArithmeticMode::Exact)
+                exact_difference = p.target_volume_difference;
+            wide(w, exact_difference.value);
+            wide(w, exact_difference.absolute_error);
+            w.word(exact_difference.exact_nonzero);
+            w.word(p.fit_iterations);
+            plane_wire_detail::orientation(w, p.orientation_method);
+            w.word(p.fit_converged);
+            w.word(p.geometry.pure_gas);
+            w.word(p.geometry.pure_carrier);
+        },
+        result);
 }
 bool boolean(wire::Reader& r)
 {
     return plane_wire_detail::boolean(r);
 }
-PLIC::PolyhedralInterface plane(wire::Reader& r)
+PLIC::DynamicPolyhedralReconstructionResult plane(wire::Reader& r)
 {
-    PLIC::PolyhedralInterface p;
+    PLIC::PolyhedralReconstructionResult<ArithmeticMode::Exact> p;
     p.model_policy = protocol_tags::read(r, PLIC::PlicModelPolicy::ConservativeApproximation);
     p.model_quality = protocol_tags::read(r, PLIC::PlicModelQuality::AboveThreshold);
-    for (auto& x : p.gas.normal)
+    for (auto& x : p.geometry.gas.normal)
         x = real(r);
-    for (auto& x : p.gas.anchor)
+    for (auto& x : p.geometry.gas.anchor)
         x = real(r);
-    p.gas.offset = real(r);
+    p.geometry.gas.offset = real(r);
     p.target_volume_residual = real(r);
     p.stencil_volume_residual = real(r);
     p.stencil_condition = real(r);
@@ -231,10 +241,10 @@ PLIC::PolyhedralInterface plane(wire::Reader& r)
     p.fit_iterations = unsigned(count);
     p.orientation_method = plane_wire_detail::orientation(r);
     p.fit_converged = boolean(r);
-    p.pure_gas = boolean(r);
-    p.pure_carrier = boolean(r);
+    p.geometry.pure_gas = boolean(r);
+    p.geometry.pure_carrier = boolean(r);
     plane_wire_detail::model_metadata(p);
-    return p;
+    return PLIC::to_dynamic(std::move(p));
 }
 AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
 {
@@ -359,7 +369,8 @@ void validate_channels(const ExactPhaseTransferCapsule& c, std::span<const Exact
 void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<const ExactTransferChannel> channels)
 {
     plane_wire_detail::model_metadata(c.geometry);
-    if (c.geometry.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement)
+    if (std::visit([](const auto& p) { return p.model_policy; }, c.geometry) !=
+        PLIC::PlicModelPolicy::RequireModelAgreement)
         throw std::invalid_argument("Exact transfer cannot acquire an Ordinary approximation interface.");
     if (std::uint64_t(c.policy) > 1 ||
         (c.policy == PhaseInventoryPolicy::ExperimentalExact) != bool(c.experimental_exact))
@@ -382,7 +393,7 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
     if (detail::phase_signed_value(difference) != c.error.difference ||
         detail::phase_signed_value(M::from_value(c.phases.bulk) - bulk) != c.error.native_conversion ||
         abs(difference).compare(M::from_value(c.error.admitted_bound)) > 0 ||
-        (c.geometry.pure_gas && c.geometry.pure_carrier))
+        (PLIC::reconstruction_geometry(c.geometry).pure_gas && PLIC::reconstruction_geometry(c.geometry).pure_carrier))
         throw std::invalid_argument("Finite source occupancy exceeds its proven bound.");
     if (c.experimental_exact)
     {
@@ -866,13 +877,13 @@ struct ColumnRecord
 };
 ExactPhases raw_phases(const WorkingCapsule& c, const ExactFragment& fragment)
 {
-    if (!c.phases.gas.sign() || c.geometry.pure_carrier)
+    if (!c.phases.gas.sign() || PLIC::reconstruction_geometry(c.geometry).pure_carrier)
         return {fragment.volume(), {}, fragment.volume()};
-    if (!c.phases.carrier.sign() || c.geometry.pure_gas)
+    if (!c.phases.carrier.sign() || PLIC::reconstruction_geometry(c.geometry).pure_gas)
         return {fragment.volume(), fragment.volume(), {}};
     if (!c.geometry_ready)
         throw std::invalid_argument("Topology phase splitting needs an accepted source reconstruction.");
-    return fragment.phases(c.geometry.gas);
+    return fragment.phases(PLIC::reconstruction_geometry(c.geometry).gas);
 }
 M weight(const M& part, const M& whole, std::size_t limit)
 {
@@ -1205,8 +1216,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 }
                 for (std::size_t q = 0; q < out.amounts.size(); ++q)
                     out.amounts[q] = out.amounts[q] + c.amounts[q];
-                all_gas[c.key] = all_gas[c.key] && c.geometry.pure_gas;
-                all_carrier[c.key] = all_carrier[c.key] && c.geometry.pure_carrier;
+                all_gas[c.key] = all_gas[c.key] && PLIC::reconstruction_geometry(c.geometry).pure_gas;
+                all_carrier[c.key] = all_carrier[c.key] && PLIC::reconstruction_geometry(c.geometry).pure_carrier;
             }
             for (const auto& [key, leaf] : target.owned())
             {
@@ -1222,8 +1233,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 c.error.native_conversion = M::from_value(target.metrics(leaf).volume) - bulk;
                 c.error.phase_input_bound = c.error.admitted_bound + abs(c.error.native_conversion);
                 c.error.fit_bound = c.error.fit_allocation_bound;
-                c.geometry.pure_gas = all_gas.at(key);
-                c.geometry.pure_carrier = all_carrier.at(key);
+                PLIC::reconstruction_geometry(c.geometry).pure_gas = all_gas.at(key);
+                PLIC::reconstruction_geometry(c.geometry).pure_carrier = all_carrier.at(key);
                 c.geometry_ready = false;
                 validate_work_channels(c, source.channels);
                 budget.capsule(c);

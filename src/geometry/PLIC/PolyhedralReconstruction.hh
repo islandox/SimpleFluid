@@ -5,11 +5,14 @@
 #include "SimpleFluidExport.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/PolyhedralInterface.hh"
 #include <span>
 #include <stdexcept>
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <utility>
+#include <variant>
 
 namespace SimpleFluid::PLIC
 {
@@ -149,32 +152,84 @@ enum class PolyhedralOrientationMethod : uint8_t
     Gradient,
     AngularVolumeFit
 };
-struct PolyhedralInterface
+
+template <ArithmeticMode Mode>
+struct PolyhedralReconstructionResult
 {
-    GeometryHalfspace gas;
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification ||
+                  Mode == ArithmeticMode::Exact);
+    PolyhedralInterface geometry;
+
     double target_volume_residual = 0;
     /** Neighbor-volume RMS when measured. The supported small-phase gradient
      * exclusion leaves it zero and unmeasured. */
     double stencil_volume_residual = 0;
-    bool stencil_volume_residual_measured = false;
-    GeometryValue<ArithmeticMode::Exact> target_volume_difference; ///< Exact-mode signed minority residual.
-    DynamicGeometryValue finite_target_volume_difference;          ///< Finite construction/arithmetic enclosure.
-    /** Ordinary-only roundoff indicator; this is not a certified enclosure. */
-    long double target_volume_numerical_error_estimate = 0;
-    bool finite_geometry = false; ///< Selects numerical residual evidence; no exact authority is implied.
-    PolyhedralResolutionAssessment resolution;
-    double stencil_condition = 0, orientation_step = 0;
-    unsigned fit_iterations = 0;
-    PolyhedralOrientationMethod orientation_method = PolyhedralOrientationMethod::SuppliedNormal;
     /** Angular optimizer convergence only. Gradient/supplied-normal results
      * leave this false; their target offset still passes its strict gate. */
     bool fit_converged = false;
-    bool pure_gas = false, pure_carrier = false;
+    bool stencil_volume_residual_measured = false;
+
+    PolyhedralOrientationMethod orientation_method = PolyhedralOrientationMethod::SuppliedNormal;
     PlicModelPolicy model_policy = PlicModelPolicy::RequireModelAgreement;
     /** Classifies the measured neighborhood RMS against maximum_model_residual;
      * independent of orientation method and angular optimizer convergence. */
     PlicModelQuality model_quality = PlicModelQuality::NotMeasured;
+
+    GeometryValue<Mode> target_volume_difference;          ///< Finite/Exact construction/arithmetic enclosure.
+    /** Ordinary-only roundoff indicator; this is not a certified enclosure. */
+    long double target_volume_numerical_error_estimate = 0;
+    PolyhedralResolutionAssessment resolution;
+    double stencil_condition = 0, orientation_step = 0;
+    unsigned fit_iterations = 0;
 };
+
+using DynamicPolyhedralReconstructionResult =
+ std::variant<PolyhedralReconstructionResult<ArithmeticMode::Ordinary>,
+              PolyhedralReconstructionResult<ArithmeticMode::BoundedCertification>,
+              PolyhedralReconstructionResult<ArithmeticMode::Exact>>;
+
+template<ArithmeticMode Mode>
+[[nodiscard]] DynamicPolyhedralReconstructionResult to_dynamic(PolyhedralReconstructionResult<Mode> result)
+{
+    return {std::move(result)};
+}
+template<ArithmeticMode Mode>
+[[nodiscard]] constexpr ArithmeticMode reconstruction_mode(const PolyhedralReconstructionResult<Mode>&) noexcept
+{
+    return Mode;
+}
+[[nodiscard]] inline ArithmeticMode reconstruction_mode(const DynamicPolyhedralReconstructionResult& result)
+{
+    return std::visit([](const auto& value) { return reconstruction_mode(value); }, result);
+}
+/** Borrowed geometric view; the result remains its owner. */
+[[nodiscard]] inline const PolyhedralInterface& reconstruction_geometry(const DynamicPolyhedralReconstructionResult& result)
+{
+    return std::visit([](const auto& value) -> const PolyhedralInterface& { return value.geometry; }, result);
+}
+[[nodiscard]] inline PolyhedralInterface& reconstruction_geometry(DynamicPolyhedralReconstructionResult& result)
+{
+    return std::visit([](auto& value) -> PolyhedralInterface& { return value.geometry; }, result);
+}
+/** Copy only common metadata at explicit codec/dispatch boundaries. The caller
+ * must separately provide the destination's arithmetic-specific residual. */
+template<ArithmeticMode To, ArithmeticMode From>
+void copy_reconstruction_metadata(PolyhedralReconstructionResult<To>& to, const PolyhedralReconstructionResult<From>& from)
+{
+    to.geometry = from.geometry;
+    to.target_volume_residual = from.target_volume_residual;
+    to.stencil_volume_residual = from.stencil_volume_residual;
+    to.fit_converged = from.fit_converged;
+    to.stencil_volume_residual_measured = from.stencil_volume_residual_measured;
+    to.orientation_method = from.orientation_method;
+    to.model_policy = from.model_policy;
+    to.model_quality = from.model_quality;
+    to.target_volume_numerical_error_estimate = from.target_volume_numerical_error_estimate;
+    to.resolution = from.resolution;
+    to.stencil_condition = from.stencil_condition;
+    to.orientation_step = from.orientation_step;
+    to.fit_iterations = from.fit_iterations;
+}
 /** Stateless compiled kernel. The supported LS gradient supplies the normal for
  * weak angular support and supported subthreshold phases; otherwise it initializes the angular volume fit,
  * with the target offset solved anew at every angular evaluation. Curved
@@ -184,7 +239,8 @@ struct PolyhedralInterface
  * three-dimensional stencils reject rather than silently selecting an axis. */
 template<ArithmeticMode Mode> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
 {
-    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification ||
+                  Mode == ArithmeticMode::Exact);
 
 public:
     static void validate(const PolyhedralPhaseSample<Mode>&, PolyhedralReconstructionOptions = {});
@@ -212,9 +268,9 @@ public:
         PolyhedralReconstructionOptions);
     /** Offset utility for a supplied normal. Physical interface admission
      * belongs to reconstruct()/assess_resolution(). */
-    [[nodiscard]] static PolyhedralInterface solve_offset(
+    [[nodiscard]] static PolyhedralReconstructionResult<Mode> solve_offset(
         const PolyhedralPhaseSample<Mode>&, GeometryPoint, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
+    [[nodiscard]] static PolyhedralReconstructionResult<Mode> reconstruct(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
     /** Fit only full_support.first(fitting_cells), using the complete retained
      * span solely for phase availability. Its total size obeys the existing
@@ -226,7 +282,7 @@ public:
      * fits and seed queries share the original total iteration/clip budgets.
      * The three-argument overload uses the whole span for both roles and keeps
      * its original single-initialization policy. */
-    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
+    [[nodiscard]] static PolyhedralReconstructionResult<Mode> reconstruct(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>> full_support, std::size_t fitting_cells,
         PolyhedralReconstructionOptions);
 };
@@ -237,9 +293,11 @@ template<> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction<ArithmeticMode:
 {
 public:
     static void validate(const PolyhedralPhaseSample<ArithmeticMode::Exact>&, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface solve_offset(const PolyhedralPhaseSample<ArithmeticMode::Exact>&,
-        GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<ArithmeticMode::Exact>&,
+    [[nodiscard]] static PolyhedralReconstructionResult<ArithmeticMode::Exact> solve_offset(
+        const PolyhedralPhaseSample<ArithmeticMode::Exact>&, GeometryPoint gas_normal,
+        PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralReconstructionResult<ArithmeticMode::Exact> reconstruct(
+        const PolyhedralPhaseSample<ArithmeticMode::Exact>&,
         std::span<const PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil, PolyhedralReconstructionOptions = {});
 };
 extern template class PolyhedralReconstruction<ArithmeticMode::Ordinary>;

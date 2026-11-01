@@ -64,9 +64,10 @@ TEST(ExactPolyhedralReconstruction, InfersObliquePlanarNormalFromIndependentSkew
     SimpleFluid::PLIC::GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
     const double norm = std::hypot(expected[0], expected[1], expected[2]);
     for (unsigned a = 0; a < 3; ++a)
-        EXPECT_NEAR(result.gas.normal[a], expected[a] / norm, 2e-7);
+        EXPECT_NEAR(result.geometry.gas.normal[a], expected[a] / norm, 2e-7);
     EXPECT_LT(result.stencil_volume_residual, 2e-9);
-    EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
+    EXPECT_NEAR(
+        target.geometry->clip(result.geometry.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
 }
 TEST(ExactPolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedReconstruction)
 {
@@ -92,9 +93,10 @@ TEST(ExactPolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedR
     SimpleFluid::PLIC::GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
     const double norm = std::hypot(expected[0], expected[1], expected[2]);
     for (unsigned a = 0; a < 3; ++a)
-        EXPECT_NEAR(result.gas.normal[a], expected[a] / norm, 2e-7);
+        EXPECT_NEAR(result.geometry.gas.normal[a], expected[a] / norm, 2e-7);
     EXPECT_LT(result.stencil_volume_residual, 2e-9);
-    EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
+    EXPECT_NEAR(
+        target.geometry->clip(result.geometry.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
 
     auto rejected = target;
     rejected.gas_volume = -1;
@@ -102,9 +104,10 @@ TEST(ExactPolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedR
         std::invalid_argument);
     const auto repeated = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil);
     for (unsigned a = 0; a < 3; ++a)
-        EXPECT_EQ(
-            std::bit_cast<std::uint64_t>(result.gas.normal[a]), std::bit_cast<std::uint64_t>(repeated.gas.normal[a]));
-    EXPECT_EQ(std::bit_cast<std::uint64_t>(result.gas.offset), std::bit_cast<std::uint64_t>(repeated.gas.offset));
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(result.geometry.gas.normal[a]),
+            std::bit_cast<std::uint64_t>(repeated.geometry.gas.normal[a]));
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(result.geometry.gas.offset),
+        std::bit_cast<std::uint64_t>(repeated.geometry.gas.offset));
 }
 
 TEST(ExactPolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFitting)
@@ -118,13 +121,13 @@ TEST(ExactPolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFit
                 minority_gas ? minority_volume : other_volume, minority_gas ? other_volume : minority_volume};
             const auto original = sample;
             auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(sample, {1, 0, 0});
-            EXPECT_FALSE(plane.pure_gas);
-            EXPECT_FALSE(plane.pure_carrier);
+            EXPECT_FALSE(plane.geometry.pure_gas);
+            EXPECT_FALSE(plane.geometry.pure_carrier);
             EXPECT_EQ(sample.gas_volume, original.gas_volume);
             EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
             const auto fragment =
                 SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*sample.geometry);
-            const auto phases = fragment->phases(plane.gas);
+            const auto phases = fragment->phases(plane.geometry.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
             const auto requested =
                 SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(minority_volume);
@@ -165,18 +168,18 @@ TEST(ExactPolyhedralReconstruction, SmallPhaseRetainsSupportedGradientAndStrictE
         EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
         EXPECT_FALSE(fit.fit_converged);
         EXPECT_EQ(fit.fit_iterations, 0u);
-        EXPECT_FALSE(fit.pure_gas);
-        EXPECT_FALSE(fit.pure_carrier);
+        EXPECT_FALSE(fit.geometry.pure_gas);
+        EXPECT_FALSE(fit.geometry.pure_carrier);
         // Six symmetric neighbors give matrix 2I and negative gradient
         // (.6,.4,.2), independent of target alpha. Swapping phases reverses it.
         for (unsigned axis = 0; axis < 3; ++axis)
-            EXPECT_NEAR(fit.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
+            EXPECT_NEAR(fit.geometry.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
         const auto minority = gas ? target.gas_volume : target.carrier_volume;
         // Independent tetrahedron volume: 3*x+2*y+z <= q has V=q^3/36.
-        EXPECT_NEAR(fit.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15);
+        EXPECT_NEAR(fit.geometry.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15);
         const auto fragment =
             geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*target.geometry);
-        const auto phases = fragment->phases(fit.gas);
+        const auto phases = fragment->phases(fit.geometry.gas);
         EXPECT_TRUE((gas ? phases.gas : phases.carrier)
                 .relative_error_at_most(PLIC::GeometryMeasure<ArithmeticMode::Exact>::from_value(minority),
                     options.volume_tolerance));
@@ -220,9 +223,9 @@ TEST(ExactPolyhedralReconstruction, SmallPhaseThresholdIsStrictAndZeroDisablesEx
         EXPECT_EQ(fit.orientation_method,
             gradient ? PLIC::PolyhedralOrientationMethod::Gradient : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
         EXPECT_EQ(fit.fit_converged, !gradient);
-        EXPECT_NEAR(fit.gas.normal[0], 1, 2e-15);
-        EXPECT_NEAR(fit.gas.normal[1], 0, 2e-15);
-        EXPECT_NEAR(fit.gas.normal[2], 0, 2e-15);
+        EXPECT_NEAR(fit.geometry.gas.normal[0], 1, 2e-15);
+        EXPECT_NEAR(fit.geometry.gas.normal[1], 0, 2e-15);
+        EXPECT_NEAR(fit.geometry.gas.normal[2], 0, 2e-15);
         options.minimum_optimized_phase_length_ratio = 0;
         const auto angular =
             PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, options);
@@ -247,7 +250,7 @@ TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEn
             const auto original = sample;
             const auto plane =
                 PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(sample, {direction, 0, 0});
-            const auto phases = fragment->phases(plane.gas);
+            const auto phases = fragment->phases(plane.geometry.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
             EXPECT_TRUE(minority.relative_error_at_most(
                 SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.225), 8e-15));
@@ -255,15 +258,15 @@ TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEn
             EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
             EXPECT_EQ(sample.gas_volume, original.gas_volume);
             EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
-            EXPECT_FALSE(plane.pure_gas);
-            EXPECT_FALSE(plane.pure_carrier);
+            EXPECT_FALSE(plane.geometry.pure_gas);
+            EXPECT_FALSE(plane.geometry.pure_carrier);
         }
     for (const double direction : {1., -1.})
         for (const bool pure_gas : {true, false})
         {
             const auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(
                 {cell, pure_gas ? .9 : 0., pure_gas ? 0. : .9}, {direction, 0, 0});
-            const auto phases = fragment->phases(plane.gas);
+            const auto phases = fragment->phases(plane.geometry.gas);
             EXPECT_EQ((pure_gas ? phases.carrier : phases.gas).sign(), 0);
             EXPECT_EQ((pure_gas ? phases.gas : phases.carrier).compare(fragment->volume()), 0);
         }
@@ -296,9 +299,9 @@ TEST(ExactPolyhedralReconstruction, CurvedVolumeModelSeparatesAngularConvergence
     const double norm = std::hypot(linear_x, linear_y, 1);
     EXPECT_TRUE(fit.fit_converged);
     EXPECT_GT(fit.stencil_volume_residual, 1e-3);
-    EXPECT_NEAR(fit.gas.normal[0], -linear_x / norm, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[1], -linear_y / norm, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[2], 1 / norm, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[0], -linear_x / norm, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[1], -linear_y / norm, 2e-7);
+    EXPECT_NEAR(fit.geometry.gas.normal[2], 1 / norm, 2e-7);
     PLIC::PolyhedralReconstructionOptions strict;
     strict.maximum_model_residual = 1e-3;
     EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, strict),

@@ -214,8 +214,9 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 w.word(std::uint64_t(cell.declaration));
                 w.word(cell.inherited);
                 if constexpr (Mode == ArithmeticMode::Ordinary)
-                    w.word(cell.retained_interface && !cell.retained_interface->pure_gas &&
-                           !cell.retained_interface->pure_carrier);
+                    w.word(cell.retained_interface &&
+                           !PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
+                           !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier);
                 real(w, cell.roundoff.gas);
                 real(w, cell.roundoff.carrier);
                 real(w, cell.finite_history.gas);

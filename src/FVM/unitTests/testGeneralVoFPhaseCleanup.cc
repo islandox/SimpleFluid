@@ -66,7 +66,7 @@ TEST(GeneralVoFPhaseCleanup, CapturedTailChargesActualChangeAndBypassesMixedFit)
     EXPECT_TRUE(trial.candidate()->latest_phase_cleanup().empty());
     const auto pure =
         PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({geometry, 0, 0x1p-7}, normal);
-    EXPECT_TRUE(pure.pure_carrier);
+    EXPECT_TRUE(pure.geometry.pure_carrier);
 }
 TEST(GeneralVoFPhaseCleanup, SymmetricChargesUsePublishedEndpoints)
 {
@@ -106,8 +106,8 @@ TEST(GeneralVoFPhaseCleanup, DisabledAndAboveCutoffPreserveInventory)
         {
             const auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(
                 {geometry[i], small, 1 - small}, {1, 0, 0});
-            EXPECT_FALSE(plane.pure_carrier);
-            EXPECT_FALSE(plane.pure_gas);
+            EXPECT_FALSE(plane.geometry.pure_carrier);
+            EXPECT_FALSE(plane.geometry.pure_gas);
             EXPECT_LE(std::abs(plane.target_volume_residual), 8e-15 * small);
         }
     }

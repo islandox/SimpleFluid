@@ -49,9 +49,9 @@ int geometric_phase(const Cell& cell)
         return -1;
     if (cell.retained_interface)
     {
-        if (cell.retained_interface->pure_gas)
+        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas)
             return 1;
-        if (cell.retained_interface->pure_carrier)
+        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier)
             return -1;
         return 0;
     }
@@ -280,16 +280,18 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
             };
             for (const auto& [key, cell] : data_->cells)
             {
-                const auto& plane = planes.at(key);
+                const auto& plane =
+                    std::get<PLIC::PolyhedralReconstructionResult<ArithmeticMode::Ordinary>>(planes.at(key));
                 if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
                 {
                     std::cerr << std::setprecision(21) << "CAP_CELL control=" << data_->control
                               << " rank=" << comm->getRank() << " id=" << cell.gid
                               << " declaration=" << int(cell.declaration) << " gas=" << cell.phase.gas_volume
-                              << " carrier=" << cell.phase.carrier_volume << " pure=" << plane.pure_gas << ','
-                              << plane.pure_carrier << " normal=" << plane.gas.normal[0] << ',' << plane.gas.normal[1]
-                              << ',' << plane.gas.normal[2] << " anchor=" << plane.gas.anchor[0] << ','
-                              << plane.gas.anchor[1] << ',' << plane.gas.anchor[2] << " offset=" << plane.gas.offset
+                              << " carrier=" << cell.phase.carrier_volume << " pure=" << plane.geometry.pure_gas << ','
+                              << plane.geometry.pure_carrier << " normal=" << plane.geometry.gas.normal[0] << ','
+                              << plane.geometry.gas.normal[1] << ',' << plane.geometry.gas.normal[2]
+                              << " anchor=" << plane.geometry.gas.anchor[0] << ',' << plane.geometry.gas.anchor[1]
+                              << ',' << plane.geometry.gas.anchor[2] << " offset=" << plane.geometry.gas.offset
                               << " method=" << int(plane.orientation_method) << " iterations=" << plane.fit_iterations
                               << " converged=" << plane.fit_converged << " residual=" << plane.target_volume_residual
                               << " numerical_error=" << plane.target_volume_numerical_error_estimate << '\n';
@@ -312,13 +314,13 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     }
                     std::cerr << '\n';
                 }
-                if (plane.pure_gas || plane.pure_carrier)
+                if (plane.geometry.pure_gas || plane.geometry.pure_carrier)
                     continue;
                 const auto geometry =
                     PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
                 // Surface measurements require an actual closed-shell clip;
                 // phase-volume shortcuts cannot provide curvature geometry.
-                const auto section = geometry->clip(plane.gas, true).section;
+                const auto section = geometry->clip(plane.geometry.gas, true).section;
                 if (section.vertices.size() < 3 || !(section.area.value > 0) || !std::isfinite(section.area.value))
                     unresolved("A mixed capillary patch has no positive physical PLIC section.");
                 GeneralVoFSurfacePatch patch;
@@ -327,7 +329,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 patch.owner = cell.owner;
                 patch.centroid = display(section.centroid.value);
                 patch.area = section.area.as_double();
-                auto n = wide(plane.gas.normal);
+                auto n = wide(plane.geometry.gas.normal);
                 const auto magnitude = std::sqrt(dot(n, n));
                 if (!(magnitude > 0) || !std::isfinite(magnitude))
                     unresolved("A mixed capillary patch has no finite normal.");
@@ -409,8 +411,9 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     append(std::move(patch));
                 }
                 const auto left = mixed.find(tile.first), right = mixed.find(*tile.second);
-                if (left != mixed.end() && right != mixed.end() && face_trace(tile, planes.at(tile.first)) &&
-                    face_trace(tile, planes.at(*tile.second)))
+                if (left != mixed.end() && right != mixed.end() &&
+                    face_trace(tile, PLIC::reconstruction_geometry(planes.at(tile.first))) &&
+                    face_trace(tile, PLIC::reconstruction_geometry(planes.at(*tile.second))))
                     connect(left->second, right->second);
                 const auto& points = tile.geometry->points();
                 if (tile.node_gids.size() != points.size())

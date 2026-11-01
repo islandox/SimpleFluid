@@ -41,7 +41,10 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
     const auto patches = phases.reconstruction_patches();
     std::map<GO, int> phase_geometry;
     for (const auto& patch : patches)
-        phase_geometry.emplace(GO(patch.cell), patch.interface.pure_gas ? 1 : patch.interface.pure_carrier ? -1 : 0);
+    {
+        const auto& shape = PLIC::reconstruction_geometry(patch.interface);
+        phase_geometry.emplace(GO(patch.cell), shape.pure_gas ? 1 : shape.pure_carrier ? -1 : 0);
+    }
     execution.collective(
         [&]
         {
@@ -74,10 +77,11 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
                     if constexpr (Mode == ArithmeticMode::Exact)
                         return GeneralVoFCurvature::patch<ArithmeticMode::Exact>(patch.cell,
                             *PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(*patch.geometry),
-                            patch.interface);
+                            PLIC::reconstruction_geometry(patch.interface));
                     else
                         return GeneralVoFCurvature::patch<Mode>(patch.cell,
-                            *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry), patch.interface,
+                            *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry),
+                            PLIC::reconstruction_geometry(patch.interface),
                             point_exports, point_export_bytes, byte_budget);
                 }();
                 if (sample)
