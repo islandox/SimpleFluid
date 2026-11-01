@@ -703,6 +703,15 @@ differences in these and the earlier [recorded results](docs/verification/vof_so
       completing the spatial sequence and separate temporal study.
       Retain the original N16 model rejection, independent motion oracle, full
       endpoints and accuracy/order gates; omitting a failed level is not acceptance.
+      An explicit Ordinary `ConservativeApproximation` policy now separates
+      measured neighborhood-model quality from transport admission. The strict
+      policy remains default. Qualified high-residual planes retain the original
+      target-volume, orientation, convergence and resource gates; numerical
+      failures do not select donor-cell recovery under this policy. Run and
+      report the separately labeled policy candidates on the original Q2 cases
+      and oracles. Preserve strict failures and distinguish full-horizon accuracy
+      from admission of a local approximation. Optimizer/arithmetic failures
+      and incomplete spatial/time studies remain open qualification gates.
 - [ ] **4. Q3 GeometricFace coupled motion — after the applicable blockers above.**
       Complete the required eight-second horizon and original displacement,
       redistribution, limiting and physical gates at the declared timestep

@@ -92,6 +92,8 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
 template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
 {
     constexpr bool experimental = Mode == ArithmeticMode::Exact;
+    if (cell.retained_interface)
+        validate_plane_metadata(*cell.retained_interface, options.reconstruction, Mode);
     if (options.arithmetic_mode != Mode)
         throw std::invalid_argument("General VoF state arithmetic mode differs from its selected operation.");
     if (experimental != bool(cell.experimental_exact))

@@ -473,6 +473,14 @@ foreach(PROCS 2 4)
     TARGET testGeneralVoFFinite PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFinite.OrientationWirePreservesEveryMethodAndRejectsUnknownWords:GeneralVoFFinite.StencilResidualMeasurementWirePreservesBothValuesAndRejectsUnknownWords:GeneralVoFFinite.ReconstructionResolutionFailureRetainsTypedClassification:GeneralVoFFinite.SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners:GeneralVoFFinite.ConstructionAlgorithmBindsSmallPhasePolicy:GeneralVoFFinite.MixedOwnershipMigrationPreservesOrientationAndMeasuredResidual"
     LABELS "vof;reconstruction;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFApproximationPolicy_${PROCS}procs
+    TARGET testGeneralVoFFinite PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFinite.ModelPolicyIsValidatedAndAgreedOnEmptyOwners:GeneralVoFFinite.ConstructionAlgorithmBindsModelPolicy:GeneralVoFFinite.ModelMetadataWireRejectsUnknownEnumsAndInconsistentProvenance:GeneralVoFFinite.ApproximateMixedOwnershipMigrationPreservesActualModelQuality:GeneralVoFFinite.ApproximateGeometricFaceReportsTransportQualityAndPreservesIndependentPhases:GeneralVoFFinite.ApproximateDefaultSweepTransportsAboveThresholdPlanesConservatively"
+    LABELS "vof;reconstruction;approximation;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFApproximationMotionN32_${PROCS}procs
+    TARGET testGeneralVoFMotionAccuracy PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFMotionAccuracy.ConservativeApproximationRequiredPlanarPatchN32Endpoint"
+    LABELS "vof;reconstruction;approximation;qualification" TIMEOUT 1800)
 endforeach()
 
 foreach(PROCS 2 4)

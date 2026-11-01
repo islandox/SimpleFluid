@@ -8,6 +8,7 @@
 #include "FVM/details/GeneralVoF/LimiterProtocol.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoF/PhasePublication.hh"
+#include "FVM/details/GeneralVoF/Reconstruction.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -837,7 +838,9 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
     {
         // Low-order admission above is mandatory, before any candidate geometry.
         // Each donor owner fits at most one plane and measures its own incident
-        // faces. Only numerical arithmetic degeneracy can select lower order.
+        // faces. The legacy strict policy may select lower order on numerical
+        // arithmetic degeneracy. Approximation changes model admission only;
+        // numerical/optimizer failures retain their original rejection.
         packets.clear();
         wire::collective(*comm,
             [&]
@@ -857,17 +860,34 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     if (donor.declaration == GeneralVoFPhaseGeometry::Infer && donor.phase.gas_volume > 0 &&
                         donor.phase.carrier_volume > 0)
                     {
+                        namespace failure = ::SimpleFluid::detail::vof_failure;
+                        failure::Scope scope("geometric_face_prediction");
+                        scope.record.cell = donor.gid;
+                        scope.record.cell_owner = donor.owner;
+                        scope.record.face = face;
+                        scope.record.donor = s.donor;
+                        scope.record.recipient = s.recipient;
+                        scope.record.arithmetic_mode = mode;
+                        for (const auto field : {failure::Field::Cell, failure::Field::CellOwner,
+                                 failure::Field::Face, failure::Field::Donor, failure::Field::Recipient,
+                                 failure::Field::Arithmetic})
+                            scope.record.mark(field);
                         try
                         {
                             if (!planes.contains(s.donor))
                             {
                                 try
                                 {
-                                    planes.emplace(s.donor, reconstruct_cell<mode>(data, donor_key));
+                                    auto fitted = reconstruct_cell<mode>(data, donor_key);
+                                    record_transport_plane_quality(
+                                        ledger.diagnostics.reconstruction_quality, donor.gid, fitted);
+                                    planes.emplace(s.donor, std::move(fitted));
                                 }
                                 catch (const PLIC::GeometryError& e)
                                 {
-                                    if (!e.recoverable_trial())
+                                    if (data.options.reconstruction.model_policy ==
+                                            PLIC::PlicModelPolicy::ConservativeApproximation ||
+                                        !e.recoverable_trial())
                                         throw;
                                     planes.emplace(s.donor, std::nullopt);
                                 }
@@ -962,7 +982,9 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                         }
                         catch (const PLIC::GeometryError& e)
                         {
-                            if (!e.recoverable_trial())
+                            if (data.options.reconstruction.model_policy ==
+                                    PLIC::PlicModelPolicy::ConservativeApproximation ||
+                                !e.recoverable_trial())
                                 throw;
                             s.lower_order = true;
                             s.gas_high = s.gas_low;

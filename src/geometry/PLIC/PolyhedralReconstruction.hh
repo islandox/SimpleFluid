@@ -99,6 +99,18 @@ private:
     PolyhedralFitDiagnostics diagnostics_;
     bool has_fit_diagnostics_ = false;
 };
+/** Neighborhood-model acceptance is separate from strict target-volume accuracy. */
+enum class PlicModelPolicy : uint8_t
+{
+    RequireModelAgreement,
+    ConservativeApproximation
+};
+enum class PlicModelQuality : uint8_t
+{
+    NotMeasured,
+    WithinThreshold,
+    AboveThreshold
+};
 struct PolyhedralReconstructionOptions
 {
     /** Opt-in Ordinary boundary-integration path. BoundedCertification and
@@ -114,7 +126,7 @@ struct PolyhedralReconstructionOptions
     double orientation_tolerance = 2e-8, maximum_model_residual = .2;
     /** Each phase must occupy at least this fraction of some target/stencil
      * cell for angular fitting. A usable gradient remains admissible below
-     * this support threshold. The plane-model bound applies unless the
+     * this support threshold. The default plane-model bound applies unless the
      * existing small-phase exclusion below suppresses neighbor fitting. */
     double minimum_phase_support_fraction = .5;
     /** Retain the supported weighted-gradient normal when the
@@ -126,8 +138,12 @@ struct PolyhedralReconstructionOptions
      * Weak neighbors remain mixed and remain in the selected fitting objective.
      * This provisional scale criterion never changes either phase inventory. */
     double minimum_optimized_phase_length_ratio = .05;
+    /** Ordinary-only opt-in may retain an admitted gradient or converged
+     * angular fit above maximum_model_residual. All geometric, target-volume,
+     * observability, convergence and work gates remain unchanged. */
+    PlicModelPolicy model_policy = PlicModelPolicy::RequireModelAgreement;
 };
-enum class PolyhedralOrientationMethod
+enum class PolyhedralOrientationMethod : uint8_t
 {
     SuppliedNormal,
     Gradient,
@@ -154,6 +170,10 @@ struct PolyhedralInterface
      * leave this false; their target offset still passes its strict gate. */
     bool fit_converged = false;
     bool pure_gas = false, pure_carrier = false;
+    PlicModelPolicy model_policy = PlicModelPolicy::RequireModelAgreement;
+    /** Classifies the measured neighborhood RMS against maximum_model_residual;
+     * independent of orientation method and angular optimizer convergence. */
+    PlicModelQuality model_quality = PlicModelQuality::NotMeasured;
 };
 /** Stateless compiled kernel. The supported LS gradient supplies the normal for
  * weak angular support and supported subthreshold phases; otherwise it initializes the angular volume fit,
@@ -200,7 +220,7 @@ public:
      * span solely for phase availability. Its total size obeys the existing
      * maximum_stencil_cells bound; the prefix is not duplicated. Volume-model
      * residuals, clip work and diagnostic stencil IDs refer only to the prefix.
-     * After primary angular convergence fails the measured model bound, this
+     * Under RequireModelAgreement, after primary angular convergence fails the measured model bound, this
      * Ordinary measure-only entry may initialize one secondary fit from a
      * qualified, lower-search-merit original-face minority-cap normal. Both
      * fits and seed queries share the original total iteration/clip budgets.

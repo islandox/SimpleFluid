@@ -29,6 +29,17 @@ SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> skew_ce
     return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
         points, {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}});
 }
+TEST(ExactPolyhedralReconstruction, ApproximationPolicyRejectsBeforePureOffsetAdmission)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>;
+    const PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> sample{skew_cell({0, 0, 0}, {1, 1, 1}), 0, 1};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    EXPECT_THROW(Kernel::validate(sample, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::solve_offset(sample, {1, 0, 0}, options), std::invalid_argument);
+    EXPECT_THROW((void) Kernel::reconstruct(sample, {}, options), std::invalid_argument);
+}
+
 TEST(ExactPolyhedralReconstruction, InfersObliquePlanarNormalFromIndependentSkewNonuniformVolumes)
 {
     const std::array<double, 4> edges{-1, -.25, .5, 1.5};

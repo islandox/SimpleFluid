@@ -128,6 +128,9 @@ double outward(long double x, bool upper)
 template<ArithmeticMode Mode>
 void validate_sample(const PolyhedralPhaseSample<Mode>& sample, const PolyhedralReconstructionOptions& options)
 {
+    if (options.model_policy != PlicModelPolicy::RequireModelAgreement &&
+        (options.model_policy != PlicModelPolicy::ConservativeApproximation || Mode != ArithmeticMode::Ordinary))
+        throw std::invalid_argument("Finite PLIC model policy is invalid or unsupported by its arithmetic mode.");
     if (Mode == ArithmeticMode::BoundedCertification && !PLIC::certification_environment())
         throw std::invalid_argument("Finite PLIC arithmetic environment is unsupported.");
     if (!sample.geometry || !std::isfinite(sample.gas_volume) || !std::isfinite(sample.carrier_volume) ||
@@ -450,6 +453,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         if (options.measure_only)
             ordinary_measure.emplace(*sample.geometry);
     PolyhedralInterface result;
+    result.model_policy = options.model_policy;
     result.finite_geometry = true;
     result.finite_target_volume_difference = published_difference<Mode>({});
     result.pure_gas = sample.carrier_volume == 0;
@@ -933,9 +937,13 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
         current.plane.stencil_volume_residual =
             static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
         current.plane.stencil_volume_residual_measured = true;
+        current.plane.model_quality = current.plane.stencil_volume_residual > options.maximum_model_residual
+                                         ? PlicModelQuality::AboveThreshold
+                                         : PlicModelQuality::WithinThreshold;
         current.plane.stencil_condition = condition;
         current.plane.orientation_method = PolyhedralOrientationMethod::Gradient;
-        if (current.plane.stencil_volume_residual > options.maximum_model_residual)
+        if (options.model_policy == PlicModelPolicy::RequireModelAgreement &&
+            current.plane.stencil_volume_residual > options.maximum_model_residual)
         {
             resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
             throw PolyhedralResolutionRequired(resolution, evidence());
@@ -1110,7 +1118,8 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
             // Only the context/prefix Ordinary measure entry may leave a
             // qualified but incompatible basin. A single secondary solve uses
             // this same total iteration counter and the same clip allowance.
-            if (allow_seed_restart && Mode == ArithmeticMode::Ordinary && options.measure_only &&
+            if (options.model_policy == PlicModelPolicy::RequireModelAgreement && allow_seed_restart &&
+                Mode == ArithmeticMode::Ordinary && options.measure_only &&
                 !restart_attempted && iterations < options.maximum_fit_iterations &&
                 static_cast<double>(std::sqrt(current.objective_upper / stencil.size())) >
                     options.maximum_model_residual)
@@ -1127,6 +1136,9 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
     }
     current.plane.stencil_volume_residual = static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
     current.plane.stencil_volume_residual_measured = true;
+    current.plane.model_quality = current.plane.stencil_volume_residual > options.maximum_model_residual
+                                     ? PlicModelQuality::AboveThreshold
+                                     : PlicModelQuality::WithinThreshold;
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;
@@ -1134,7 +1146,8 @@ PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSample<Mode>& target
     current.plane.fit_converged = converged;
     if (!converged)
         throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::IterationLimit, evidence());
-    if (current.plane.stencil_volume_residual > options.maximum_model_residual)
+    if (options.model_policy == PlicModelPolicy::RequireModelAgreement &&
+        current.plane.stencil_volume_residual > options.maximum_model_residual)
     {
         resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
         throw PolyhedralResolutionRequired(resolution, evidence());

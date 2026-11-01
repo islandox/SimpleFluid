@@ -95,8 +95,23 @@ void read_options(std::istream& in, PLIC::PolyhedralReconstructionOptions& o)
 {
     std::string key;
     double value;
-    while (in >> key >> value)
+    while (in >> key)
     {
+        if (key == "model_policy")
+        {
+            std::string policy;
+            if (!(in >> policy))
+                throw std::runtime_error("Missing captured model policy.");
+            if (policy == "RequireModelAgreement")
+                o.model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
+            else if (policy == "ConservativeApproximation")
+                o.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+            else
+                throw std::runtime_error("Unknown captured model policy.");
+            continue;
+        }
+        if (!(in >> value))
+            throw std::runtime_error("Malformed captured reconstruction control.");
         if (key == "maximum_offset_iterations")
             o.maximum_offset_iterations = unsigned(value);
         else if (key == "maximum_fit_iterations")
@@ -471,7 +486,8 @@ TEST(GeneralVoFMotionAccuracy, ReplayCapturedAlgebraicReconstruction)
     const auto assessment = PLIC::PolyhedralReconstruction<mode>::assess_resolution(target, stencil, capture.options);
     report_assessment(report, assessment);
     report << "production_orientation_before_reconstruct=unpublished angular_fit_eligible="
-           << assessment.angular_fit_eligible << " measure_only=" << capture.options.measure_only << '\n';
+           << assessment.angular_fit_eligible << " measure_only=" << capture.options.measure_only
+           << " model_policy=" << int(capture.options.model_policy) << '\n';
     bool rejected = false;
     int rejection_reason = -1;
     try
@@ -523,6 +539,23 @@ TEST(GeneralVoFMotionAccuracy, ReplayCapturedAlgebraicReconstruction)
     ASSERT_FALSE(out.fail());
     if (rank == 0)
         std::cout << report.str();
+}
+TEST(GeneralVoFMotionAccuracy, CapturedReplayPreservesApproximationPolicyAndGates)
+{
+    PLIC::PolyhedralReconstructionOptions options;
+    std::istringstream current("measure_only 1 model_policy ConservativeApproximation "
+                               "maximum_fit_iterations 7 volume_tolerance 8e-15 maximum_model_residual .2");
+    read_options(current, options);
+    EXPECT_EQ(options.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+    EXPECT_EQ(options.maximum_fit_iterations, 7u);
+    EXPECT_EQ(options.volume_tolerance, 8e-15);
+    EXPECT_EQ(options.maximum_model_residual, .2);
+    options = {};
+    std::istringstream legacy("maximum_fit_iterations 24 maximum_model_residual .2");
+    read_options(legacy, options);
+    EXPECT_EQ(options.model_policy, PLIC::PlicModelPolicy::RequireModelAgreement);
+    std::istringstream unknown("model_policy unknown");
+    EXPECT_THROW(read_options(unknown, options), std::runtime_error);
 }
 } // namespace algebraic_replay
 

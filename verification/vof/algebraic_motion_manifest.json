@@ -177,5 +177,21 @@
     "shape_gate": 0.02,
     "centroid_gate_interface_widths": 0.25,
     "scope": "separately labelled extraction of the existing N32 case with original finest-case limits additionally checked; does not erase failed N16 or qualify N64/refinement order"
+  },
+  "ordinary_approximation_policy": {
+    "policy": "ConservativeApproximation",
+    "default": "RequireModelAgreement",
+    "arithmetic": "Ordinary only",
+    "case_namespace": "AlgebraicApproximationMotion",
+    "scope": "Explicit additional reconstruction-admission policy on original motion cases; strict results remain recorded separately.",
+    "admission": "Geometry, support, meaningful direction, conditioning, target minority-volume accuracy and actual angular convergence remain required. Model-only restart and model-residual rejection are disabled; measured RMS remains a quality indicator. Supported gradient status is not angular convergence.",
+    "unchanged": "All original meshes, physical horizons, Courant settings, resource limits, common canonical transport, independent inventories, shape/centroid and spatial/temporal gates remain unchanged.",
+    "model_threshold": 0.2,
+    "diagnostics": "Per accepted step: policy, actual owner measured/above-threshold call counts, maximum raw RMS, worst global cell, orientation method and angular convergence. Small-phase excluded residual stays NotMeasured.",
+    "endpoints": [
+      "GeneralVoFMotionAccuracy.ConservativeApproximationOriginalPlanarPatchN16Endpoint",
+      "GeneralVoFMotionAccuracy.ConservativeApproximationRequiredPlanarPatchN32Endpoint"
+    ],
+    "status": "Implemented candidate; production qualification must be recorded separately."
   }
 }

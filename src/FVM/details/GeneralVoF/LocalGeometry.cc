@@ -9,6 +9,7 @@
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoF/PendingFaceGeometry.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
+#include "FVM/details/GeneralVoF/Reconstruction.hh"
 #include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
@@ -347,6 +348,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             sizeof(typename decltype(labels)::value_type) + 8 * sizeof(void*) + sizeof(Geometry));
                 auto geometry = Geometry::from_dynamic(cell.finite_geometry);
                 const auto& plane = planes.at(key);
+                record_transport_plane_quality(result.diagnostics.reconstruction_quality, cell.gid, plane);
                 if ((cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0) && !plane.pure_gas &&
                     !plane.pure_carrier)
                     throw std::invalid_argument(

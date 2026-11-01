@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -23,6 +24,8 @@ namespace wire = local::wire;
 constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr std::size_t allowance = 1024 * 1024;
 constexpr std::uint64_t revision = 17;
+constexpr std::uint64_t test_plane_protocol = 1;
+static_assert(local::ordinary_plane_wire_bytes == 240);
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Sample = PLIC::PolyhedralPhaseSample<mode>;
 using Diagnostics = GeneralVoFOwnerPlaneRequestDiagnostics;
@@ -103,6 +106,10 @@ struct PlanarFixture
     }
     void check(const PLIC::PolyhedralInterface& fitted) const
     {
+        EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_TRUE(fitted.fit_converged);
+        EXPECT_EQ(fitted.model_policy, PLIC::PlicModelPolicy::RequireModelAgreement);
+        EXPECT_EQ(fitted.model_quality, PLIC::PlicModelQuality::WithinThreshold);
         EXPECT_FALSE(fitted.pure_gas);
         EXPECT_FALSE(fitted.pure_carrier);
         EXPECT_TRUE(fitted.finite_geometry);
@@ -132,13 +139,71 @@ struct PlanarFixture
     }
 };
 
-/** An independent test payload, padded to the production interface envelope.
- * This qualifies helper reuse and storage, not the unchanged production codec.
+/** Seven equal neighboring cubes give the exact linear LS signal +x with
+ * fractions below .5. The outward gas normal is -x; the four x-high cubes
+ * disagree with its extrapolation by 1-high_fraction. No optimizer runs. */
+struct ApproximateGradientFixture
+{
+    double low_fraction = .05, high_fraction = .25;
+    Sample target{Geometry::box({0, 0, 0}, {1, 1, 1}), low_fraction, 1 - low_fraction};
+    std::vector<Sample> stencil;
+    explicit ApproximateGradientFixture(double low = .05, double high = .25) : low_fraction(low), high_fraction(high)
+    {
+        target.gas_volume = low;
+        target.carrier_volume = 1 - low;
+        for (unsigned z = 0; z < 2; ++z)
+            for (unsigned y = 0; y < 2; ++y)
+                for (unsigned x = 0; x < 2; ++x)
+                    if (x || y || z)
+                    {
+                        const double gas = x ? high : low;
+                        stencil.push_back({Geometry::box({double(x), double(y), double(z)},
+                                               {double(x + 1), double(y + 1), double(z + 1)}),
+                            gas, 1 - gas});
+                    }
+    }
+    void check(const PLIC::PolyhedralInterface& fitted) const
+    {
+        EXPECT_EQ(fitted.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+        EXPECT_EQ(fitted.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+        EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+        EXPECT_FALSE(fitted.fit_converged);
+        EXPECT_EQ(fitted.fit_iterations, 0u);
+        EXPECT_TRUE(fitted.stencil_volume_residual_measured);
+        EXPECT_NEAR(fitted.stencil_volume_residual, (1 - high_fraction) * std::sqrt(4. / 7), 1e-12);
+        EXPECT_GT(fitted.stencil_volume_residual, PLIC::PolyhedralReconstructionOptions{}.maximum_model_residual);
+        EXPECT_NEAR(fitted.gas.normal[0], -1, 1e-12);
+        EXPECT_NEAR(fitted.gas.normal[1], 0, 1e-12);
+        EXPECT_NEAR(fitted.gas.normal[2], 0, 1e-12);
+        const auto measured = target.geometry->phases(fitted.gas);
+        EXPECT_LE(std::abs(measured.gas.value - low_fraction),
+            low_fraction * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
+        EXPECT_EQ(target.gas_volume, low_fraction);
+        EXPECT_EQ(target.carrier_volume, 1 - low_fraction);
+    }
+    PLIC::PolyhedralInterface fit(const AMR::AdaptiveCellKey&, Diagnostics& diagnostics) const
+    {
+        ++diagnostics.owner_reconstruction_calls;
+        ++diagnostics.mixed_cell_fits;
+        PLIC::PolyhedralReconstructionOptions options;
+        options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+        const auto fitted = PLIC::PolyhedralReconstruction<mode>::reconstruct(target, stencil, options);
+        EXPECT_TRUE(fitted.resolution.admitted());
+        check(fitted);
+        return fitted;
+    }
+};
+
+/** An independent test payload, padded to the versioned production interface envelope.
+ * This qualifies helper reuse and storage, not the production codec.
  * All fit fields inspected below come from an actual Ordinary reconstruction.
  */
 void serialize(wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
 {
     const auto begin = writer.data.size();
+    writer.word(test_plane_protocol);
+    writer.word(std::uint64_t(fitted.model_policy));
+    writer.word(std::uint64_t(fitted.model_quality));
     const auto real = [&](double value) { writer.word(std::bit_cast<std::uint64_t>(value)); };
     for (const auto value : fitted.gas.normal)
         real(value);
@@ -159,18 +224,23 @@ void serialize(wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
     writer.word(std::uint64_t(fitted.finite_target_volume_difference.arithmetic_mode));
     real(double(fitted.finite_target_volume_difference.value));
     real(double(fitted.finite_target_volume_difference.absolute_error));
-    writer.data.resize(begin + 216, char(0x5a));
+    writer.data.resize(begin + local::ordinary_plane_wire_bytes, char(0x5a));
 }
-PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveCellKey& expected_key = key())
+PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveCellKey& expected_key = key(),
+    std::uint64_t expected_revision = revision)
 {
     wire::Reader reader{packet.bytes};
     EXPECT_EQ(AMR::decode_adaptive_key(reader.bytes()), expected_key);
-    EXPECT_EQ(reader.word(), revision);
+    EXPECT_EQ(reader.word(), expected_revision);
     for (const auto expected : context().publication)
         EXPECT_EQ(reader.word(), expected);
     const auto begin = reader.offset;
     const auto real = [&] { return std::bit_cast<double>(reader.word()); };
     PLIC::PolyhedralInterface fitted;
+    if (reader.word() != test_plane_protocol)
+        throw std::invalid_argument("Unknown test owner plane protocol.");
+    fitted.model_policy = plane_wire_detail::model_policy(reader.word());
+    fitted.model_quality = plane_wire_detail::model_quality(reader.word());
     for (auto& value : fitted.gas.normal)
         value = real();
     for (auto& value : fitted.gas.anchor)
@@ -190,10 +260,9 @@ PLIC::PolyhedralInterface decode(const OwnerPacket& packet, const AMR::AdaptiveC
     fitted.finite_target_volume_difference.arithmetic_mode = ArithmeticMode(reader.word());
     fitted.finite_target_volume_difference.value = real();
     fitted.finite_target_volume_difference.absolute_error = real();
-    EXPECT_EQ(fitted.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
-    EXPECT_TRUE(fitted.fit_converged);
+    EXPECT_NO_THROW(plane_wire_detail::model_metadata(fitted));
     EXPECT_EQ(fitted.finite_target_volume_difference.arithmetic_mode, mode);
-    while (reader.offset < begin + 216)
+    while (reader.offset < begin + local::ordinary_plane_wire_bytes)
         EXPECT_EQ(reader.data[reader.offset++], char(0x5a));
     reader.done();
     return fitted;
@@ -332,6 +401,43 @@ TEST(GeneralVoFOwnerPlaneRequests, NextInvocationRefitsChangedPhaseOnIdenticalGe
             ASSERT_EQ(outgoing.size(), 2u);
             EXPECT_EQ(outgoing[0].bytes, outgoing[1].bytes);
             fixture.check(decode(outgoing[0]));
+            if (!previous.empty())
+                EXPECT_NE(previous, outgoing[0].bytes);
+            previous = outgoing[0].bytes;
+        }
+        EXPECT_EQ(retained.bytes, 29u);
+    }
+    EXPECT_EQ(diagnostics.owner_reconstruction_calls, 2u);
+    EXPECT_EQ(diagnostics.mixed_cell_fits, 2u);
+    EXPECT_EQ(diagnostics.peer_cache_admissions, 2u);
+    EXPECT_EQ(diagnostics.peer_cache_hits, 2u);
+}
+
+TEST(GeneralVoFOwnerPlaneRequests, ApproximateOwnerCacheAndRevisionPreserveActualGradientMetadata)
+{
+    auto retained = work();
+    Diagnostics diagnostics;
+    std::vector<char> previous;
+    for (unsigned generation = 0; generation < 2; ++generation)
+    {
+        const ApproximateGradientFixture fixture(.05 + .05 * generation, .25 + .05 * generation);
+        const auto current_revision = revision + generation;
+        const std::vector incoming{request(1, key(), current_revision), request(2, key(), current_revision)};
+        {
+            local::PlaneImportStorage storage(retained, diagnostics);
+            const auto outgoing = local::owner_plane_replies(
+                {}, incoming, context(), 0, 3, storage, diagnostics,
+                [&](const auto& requested, std::uint64_t requested_revision, int)
+                {
+                    if (requested != key() || requested_revision != current_revision)
+                        throw std::invalid_argument("Stale test owner revision.");
+                },
+                [&](const auto& requested) { return fixture.fit(requested, diagnostics); }, serialize);
+            ASSERT_EQ(outgoing.size(), 2u);
+            EXPECT_EQ(outgoing[0].bytes, outgoing[1].bytes);
+            const auto fitted = decode(outgoing[0], key(), current_revision);
+            fixture.check(fitted);
+            fixture.check(decode(outgoing[1], key(), current_revision));
             if (!previous.empty())
                 EXPECT_NE(previous, outgoing[0].bytes);
             previous = outgoing[0].bytes;
@@ -494,7 +600,7 @@ TEST(GeneralVoFOwnerPlaneRequests, DeepKeyGrowthAndOuterWorkspaceRemainReservedA
         std::size_t largest_packet = 0;
         for (const auto& packet : incoming)
         {
-            reply_envelope += packet.bytes.size() + 216;
+            reply_envelope += packet.bytes.size() + local::ordinary_plane_wire_bytes;
             outer_bytes += packet.bytes.capacity();
             largest_packet = std::max(largest_packet, packet.bytes.size());
         }

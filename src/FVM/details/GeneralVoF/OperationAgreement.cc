@@ -47,18 +47,24 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                 (options.transport_backend != GeneralVoFTransportBackend::SweptPartition &&
                     options.arithmetic_mode != ArithmeticMode::Ordinary))
                 throw std::invalid_argument("Face transport currently supports Ordinary arithmetic only.");
+            if (std::uint64_t(options.reconstruction.model_policy) >
+                    std::uint64_t(PLIC::PlicModelPolicy::ConservativeApproximation) ||
+                (options.reconstruction.model_policy == PLIC::PlicModelPolicy::ConservativeApproximation &&
+                    options.arithmetic_mode != ArithmeticMode::Ordinary))
+                throw std::invalid_argument("General VoF model policy requires Ordinary arithmetic.");
             const auto ratio = options.reconstruction.minimum_optimized_phase_length_ratio;
             if (!std::isfinite(ratio) || ratio < 0 || ratio > 1)
                 throw std::invalid_argument("General VoF optimized phase length ratio must be finite in [0,1].");
             if (!options.maximum_face_geometry_operations)
                 throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
             validate_phase_cleanup_options(options);
-            budget.packet(26 * 8);
+            budget.packet(27 * 8);
             wire::Writer w;
-            w.word(7); // Includes optional source-pinned balance work capture.
+            w.word(8); // Includes the Ordinary plane-model admission policy.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
+                     std::uint64_t(options.reconstruction.model_policy),
                      std::uint64_t(options.reconstruction.maximum_offset_iterations),
                      std::uint64_t(options.reconstruction.maximum_fit_iterations),
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),

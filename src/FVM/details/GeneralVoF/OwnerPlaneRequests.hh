@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include <map>
@@ -41,7 +42,7 @@ private:
 /** Full context, packet completeness and binding validation precede every
  * lookup, including hits. validate(key, revision, peer) authenticates owner and
  * revision against the fixed source. reconstruct(key) runs only on a miss;
- * serialize(writer, plane) uses the existing Ordinary wire codec (<=216 bytes).
+ * serialize(writer, plane) uses the versioned Ordinary wire codec (ordinary_plane_wire_bytes).
  * Reply/key scratch is mandatory; cache admission is optional and never uses
  * storage reserved for later replies. The peer map dies before return. */
 template<class Validate, class Reconstruct, class Serialize>

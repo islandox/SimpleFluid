@@ -158,7 +158,8 @@ flowchart TD
     H["Build angular Gauss-Newton system<br/>Check conditioning and observability"]
     I{"Small residual OR<br/>small angular step?"}
     J["Backtracking line search<br/>Require a smaller squared residual"]
-    K{"Final plane-model residual<br/>within allowed bound?"}
+    K{"Measured model RMS<br/>within reference threshold?"}
+    Q{"Explicit Ordinary<br/>ConservativeApproximation?"}
     L["Return plane and fit diagnostics"]
     X["Reject reconstruction"]
 
@@ -177,7 +178,9 @@ flowchart TD
     J -- No improvement or exhausted budget --> X
     I -- Yes --> K
     K -- Yes --> L
-    K -- No --> R
+    K -- No --> Q
+    Q -- No --> R
+    Q -- Yes, record AboveThreshold --> L
 ```
 
 ### Initial normal and angular objective
@@ -225,7 +228,8 @@ contracts. The finite tiny-phase branch depends on directional validity and the
 existing size threshold, not on majority eligibility. It does not claim that the
 neighborhood is accurately represented by its plane. Other finite mixed cells
 with weak majority support retain the gradient, strictly fit the target offset,
-and evaluate neighboring-volume RMS against `maximum_model_residual`. Eligible
+and evaluate neighboring-volume RMS against `maximum_model_residual`, using the
+explicit model-admission policy below. Eligible
 cells initialize the angular fit below. A later angular or arithmetic failure
 never automatically selects the gradient fallback.
 
@@ -352,18 +356,76 @@ than the minimum raw RMS of all trials. If a restart scan fails, best diagnostic
 may identify a qualified lower-merit seed; that seed remains unqualified for
 publication until angular convergence and the final gates succeed.
 
-A converged optimizer must also satisfy `maximum_model_residual`. Curved
+Under the default `PlicModelPolicy::RequireModelAgreement`, a converged optimizer
+must also satisfy `maximum_model_residual`. Curved
 interfaces can have a nonzero plane-model defect even at an angular optimum.
 Exceeding this separate bound produces an `UnresolvedPlaneModel` refinement
 request. Optimizer convergence therefore does not establish adequate spatial
 resolution.
+
+### Explicit Ordinary approximation admission
+
+`PlicModelPolicy::ConservativeApproximation` is an opt-in Ordinary reconstruction
+policy, selected through `GeneralVoFOptions::reconstruction.model_policy` for
+transport. BoundedCertification and Exact reject this policy, including pure
+inputs and empty owners. The strict policy and `SweptPartition` remain defaults.
+
+The approximation policy retains geometry validity, deterministic support and
+meaningful direction, conditioning/observability, strict target-cell minority
+volume accuracy, and every work/resource limit. An eligible angular solve must
+actually converge. Nonstationarity, exhaustion, unobservability and arithmetic
+failures still reject; no failed solve becomes a gradient or donor fallback.
+The existing supported-gradient branch retains `fit_converged=false` because
+only its target offset is solved. Its already-admitted orientation and volume
+requirements still apply. The small-phase exclusion remains unmeasured and does
+not acquire a fabricated zero-error quality claim.
+
+A large measured neighborhood RMS is then a quality outcome, not a transport
+rejection. `maximum_model_residual` remains its reference threshold. The
+`PolyhedralInterface` records `model_policy` and `model_quality` separately from
+support assessment and optimizer status; quality is `NotMeasured`,
+`WithinThreshold` or `AboveThreshold`. All measured values remain available.
+The model-triggered face-seed restart is disabled for this policy: a qualified
+stationary approximation is returned without searching solely to cross the
+reference threshold. This can select a different valid local optimum from the
+strict policy; neither policy establishes a global minimum or motion accuracy.
+
+Policy and quality survive authenticated controls, plane exchange, owner caches
+and ownership migration. Rank-divergent policies reject collectively; retained
+planes cannot bypass the state's immutable policy or diagnostic consistency.
+Actual regridding retains policy and reconstructs the new target as before.
+Owner-call diagnostics count measured and above-threshold returns and retain
+the worst residual, cell identity, orientation method and convergence status;
+these are call counts, not distinct-cell population counts.
+
+`GeneralVoFTransportDiagnostics::reconstruction_quality` separately summarizes
+the actual transport plane catalog: one entry per deduplicated GeometricFace
+donor, or per requested SweptPartition plane including imports. Catalog reuse
+does not cause another fit; imported entries may repeat across ranks. Unmeasured
+entries remain distinct from measured zero residuals. Under the approximation
+policy, GeometricFace propagates reconstruction and face-integration arithmetic
+failures instead of selecting its legacy donor-cell recovery. The strict policy's
+existing explicitly diagnosed recovery behavior is unchanged.
+
+Conservative shared face transport, limiting, independent gas/carrier inventories,
+occupancy and transactional publication remain separate mandatory gates.
+The selected reconstruction policy is propagated consistently to full-support
+surface reconstruction; capillary support, witness, coherence, radius and
+conditioning gates remain unchanged. Transport evidence does not qualify
+curvature, pressure balance or capillary continuation.
+
+Approximation-policy Q2 runs retain the original cases, endpoints, Courants,
+oracles, shape/centroid limits and mesh/time convergence studies. They are
+separately labeled policy candidates. Historical strict-policy failures remain
+failures, and a completed conservative horizon alone does not establish accuracy.
 
 A finite rectangle illustrates why support selection precedes the objective:
 a target cut by one physical edge can have a two-ring halo spanning other
 rectangle edges. A converged excessive residual on that broad halo diagnoses
 that selected neighborhood model; it is not proof that the target itself
 requires multiple planes. The complete first-ring policy retains the unchanged
-`0.2` model-defect bound. The genuine single-interface closed-shear fixture and
+`0.2` model-defect bound under strict admission and the same quality reference
+under approximation admission. The genuine single-interface closed-shear fixture and
 finite-rectangle `PlanarPatch` stress case have independent polygon oracles and
 remain distinct verification problems.
 
@@ -449,7 +511,8 @@ Defaults in `PolyhedralReconstructionOptions` are:
 | `volume_tolerance` | `8e-15` | Relative target minority-volume allowance |
 | `fit_tolerance` | `2e-9` | Dimensionless stencil RMS convergence threshold |
 | `orientation_tolerance` | `2e-8` | Tangent-step norm convergence threshold |
-| `maximum_model_residual` | `0.2` | Maximum accepted dimensionless stencil RMS defect |
+| `model_policy` | `RequireModelAgreement` | Strict model admission; Ordinary may explicitly select `ConservativeApproximation` |
+| `maximum_model_residual` | `0.2` | Strict admission threshold or approximation-quality reference for measured stencil RMS |
 | `minimum_phase_support_fraction` | `0.5` | Majority-support eligibility for angular improvement after directional admission |
 | `minimum_optimized_phase_length_ratio` | `0.05` | Below this volume-equivalent length ratio, use the supported gradient without angular fitting |
 | `maximum_condition` | `1e8` | Conditioning limit for normal estimation and angular fitting |

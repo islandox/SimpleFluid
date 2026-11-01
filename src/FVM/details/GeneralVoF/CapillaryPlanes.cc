@@ -13,7 +13,7 @@ namespace
 constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr auto original_face = std::numeric_limits<std::uint64_t>::max();
 constexpr auto full_support_plane = original_face - 1;
-constexpr std::uint64_t protocol = 0x5346434150504c03ULL;
+constexpr std::uint64_t protocol = 0x5346434150504c04ULL;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Wide = std::array<long double, 3>;
 using Planes = std::map<Key, PLIC::PolyhedralInterface>;
@@ -318,14 +318,19 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
     // optimizer result. Retain only the unchanged spatial-resolution evidence;
     // optimizer condition/iterations/convergence stay at their neutral defaults.
     PLIC::PolyhedralInterface result;
+    result.model_policy = data.options.reconstruction.model_policy;
     result.resolution = initial.resolution;
     result.gas = selected->gas;
     result.stencil_volume_residual = static_cast<double>(selected_stencil_residual);
     result.stencil_volume_residual_measured = true;
+    result.model_quality = result.stencil_volume_residual > data.options.reconstruction.maximum_model_residual
+                               ? PLIC::PlicModelQuality::AboveThreshold
+                               : PLIC::PlicModelQuality::WithinThreshold;
     result.finite_geometry = true;
     result.finite_target_volume_difference = {target_evidence.difference, 0, mode};
     result.target_volume_residual = static_cast<double>(target_evidence.difference);
     result.target_volume_numerical_error_estimate = target_evidence.numerical_error;
+    validate_plane_metadata(result, data.options.reconstruction, mode);
     return {selected->tile->face_gid, result};
 }
 void stamp(wire::Writer& writer, const GeneralVoF::Data& data)
@@ -377,11 +382,13 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             for (const auto& [key, cell] : data.cells)
             {
                 PLIC::PolyhedralInterface initial;
+                initial.model_policy = data.options.reconstruction.model_policy;
                 if (cell.retained_interface)
                     initial = *cell.retained_interface;
                 else
                 {
                     initial.finite_geometry = true;
+                    initial.finite_target_volume_difference = {0, 0, mode};
                     initial.pure_gas =
                         cell.declaration == GeneralVoFPhaseGeometry::PureGas ||
                         (cell.declaration == GeneralVoFPhaseGeometry::Infer && cell.phase.carrier_volume == 0);
@@ -395,6 +402,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                         initial.finite_target_volume_difference = {-static_cast<long double>(minority), 0, mode};
                     }
                 }
+                validate_plane_metadata(initial, data.options.reconstruction, mode);
                 // Original/result maps and owner choices coexist throughout
                 // selection and exchange; include both sets of plane records.
                 budget.add(2 * sizeof(Planes::value_type) + sizeof(Key) + sizeof(std::uint64_t) + 12 * sizeof(void*) +
@@ -510,6 +518,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                     throw std::invalid_argument("Capillary plane reply lacks its current source/cell owner authority.");
                 budget.add(sizeof(Key) + AMR::encode_adaptive_key(key).size() + 4 * sizeof(void*));
                 auto chosen = plane(reader, mode);
+                validate_plane_metadata(chosen, data.options.reconstruction, mode);
                 reader.done();
                 if (!chosen.finite_geometry || chosen.pure_gas || chosen.pure_carrier)
                     throw std::invalid_argument("Capillary plane reply differs from its mixed Ordinary source.");

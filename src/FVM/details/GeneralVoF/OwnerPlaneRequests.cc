@@ -108,7 +108,7 @@ std::size_t owner_plane_request_workspace_bytes(std::span<const OwnerPacket> inc
     std::size_t bytes = 0, key_scratch = 0;
     for (const auto& packet : incoming)
     {
-        bytes = add(bytes, add(sizeof(OwnerPacket), add(packet.bytes.size(), 216)));
+        bytes = add(bytes, add(sizeof(OwnerPacket), add(packet.bytes.size(), ordinary_plane_wire_bytes)));
         // Borrow encoded bytes. Geometric path-vector growth can overlap old
         // and new allocations; three times the wire size covers that transient.
         key_scratch =

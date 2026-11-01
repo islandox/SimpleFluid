@@ -62,8 +62,26 @@ PLIC::DynamicGeometryValue finite_value(wire::Reader& r, std::optional<Arithmeti
         throw std::invalid_argument("Finite VoF wire scalar arithmetic mode differs from its state.");
     return v;
 }
+void validate_plane_metadata(const PLIC::PolyhedralInterface& p,
+    const PLIC::PolyhedralReconstructionOptions& options, ArithmeticMode mode)
+{
+    plane_wire_detail::model_metadata(p);
+    if (p.model_policy != options.model_policy ||
+        (mode != ArithmeticMode::Ordinary && p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement))
+        throw std::invalid_argument("PLIC interface model policy differs from its immutable state.");
+    if (!std::isfinite(p.stencil_volume_residual) || p.stencil_volume_residual < 0 ||
+        (p.stencil_volume_residual_measured &&
+            p.model_quality != (p.stencil_volume_residual > options.maximum_model_residual
+                                   ? PLIC::PlicModelQuality::AboveThreshold
+                                   : PLIC::PlicModelQuality::WithinThreshold)))
+        throw std::invalid_argument("PLIC interface model quality differs from its measured residual.");
+}
 void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 {
+    plane_wire_detail::model_metadata(p);
+    w.word(1); // Model policy and measured quality are part of the plane protocol.
+    w.word(std::uint64_t(p.model_policy));
+    w.word(std::uint64_t(p.model_quality));
     for (auto v : p.gas.normal)
         real(w, v);
     for (auto v : p.gas.anchor)
@@ -86,6 +104,13 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
 {
     PLIC::PolyhedralInterface p;
+    if (r.word() != 1)
+        throw std::invalid_argument("Unknown General VoF interface plane protocol.");
+    p.model_policy = plane_wire_detail::model_policy(r.word());
+    p.model_quality = plane_wire_detail::model_quality(r.word());
+    if (mode && *mode != ArithmeticMode::Ordinary &&
+        p.model_policy != PLIC::PlicModelPolicy::RequireModelAgreement)
+        throw std::invalid_argument("General VoF interface model policy has a foreign arithmetic mode.");
     for (auto& v : p.gas.normal)
         v = real(r);
     for (auto& v : p.gas.anchor)
@@ -104,6 +129,7 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     p.finite_geometry = plane_wire_detail::boolean(r);
     if (p.finite_geometry)
         p.finite_target_volume_difference = finite_value(r, mode);
+    plane_wire_detail::model_metadata(p);
     return p;
 }
 void finite_phases(wire::Writer& w, const PLIC::DynamicPhaseMeasures& p)

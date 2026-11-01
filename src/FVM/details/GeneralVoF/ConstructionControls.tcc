@@ -11,7 +11,7 @@ namespace SimpleFluid::VoF::construction_controls
 {
 using Records = std::map<std::pair<std::uint64_t, std::uint64_t>, AMR::AdaptiveBytes>;
 using FaceAuthority = GeneralVoF::Data::FaceAuthority;
-constexpr std::uint64_t version = 4; // Includes explicit physical phase cleanup controls.
+constexpr std::uint64_t version = 5; // Includes the plane-model admission policy.
 
 inline void header(wire::Writer& writer, std::uint64_t kind, std::uint64_t id,
     const PLIC::GeometryPacketContext& context, ArithmeticMode mode)
@@ -42,6 +42,7 @@ inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
     // Byte budgets are local admission limits, not shared algorithm semantics.
     for (const auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
              std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
+             std::uint64_t(options.reconstruction.model_policy),
              std::uint64_t(options.reconstruction.maximum_offset_iterations),
              std::uint64_t(options.reconstruction.maximum_fit_iterations),
              std::uint64_t(options.reconstruction.maximum_stencil_cells),
