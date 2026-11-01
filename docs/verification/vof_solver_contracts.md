@@ -65,6 +65,34 @@ results and report unsupported capacity profiles separately. The deliberately
 smaller exchange-test budget is a diagnostic fixture, not a replacement for
 the unchanged 64 MiB construction cases.
 
+## Ordinary approximation policy
+
+`GeneralVoFOptions::reconstruction.model_policy` defaults to
+`PLIC::PlicModelPolicy::RequireModelAgreement`. The explicit Ordinary alternative,
+`ConservativeApproximation`, retains the original target-volume, directional,
+conditioning, optimizer, conservation, boundedness and resource requirements.
+It reports measured neighborhood RMS above the existing threshold as model
+quality, and skips a restart driven solely by that threshold. Arithmetic and
+optimizer failures still reject; GeometricFace donor-cell arithmetic recovery
+is disabled for this policy. BoundedCertification/Exact reject the selection.
+See [the PLIC contract](../modeling/plic.md#explicit-ordinary-approximation-admission).
+
+Focused regressions include `PolyhedralReconstruction.ConservativeApproximation*`,
+`ExactPolyhedralReconstruction.ApproximationPolicyRejectsBeforePureOffsetAdmission`,
+the `GeneralVoFApproximationPolicy_{2,4}procs` registrations, and
+`GeneralVoFFaceTransport.ApproximationArithmeticFailureRejectsWithoutDonorFallbackAndRecovers`.
+They cover native N32 target volume with an independent oracle, supported
+gradient status, real optimizer/precision/work rejection, quality telemetry from
+actual transport planes, rank agreement on empty owners, serialization and
+ownership migration.
+
+The motion manifest retains its strict cases and separately registers
+`AlgebraicApproximationMotion/*`, plus explicit original N16 and N32 endpoint
+candidates. Their physical horizons, Courants, shape/centroid and mesh/time
+convergence gates remain unchanged. High model RMS is neither a fallback nor an
+accuracy pass. The source-plane quality catalog is reported at the accepted
+step that used it; it does not remeasure the newly accepted state.
+
 ## Numerical assertions
 
 | Contract | Reproducible coverage |

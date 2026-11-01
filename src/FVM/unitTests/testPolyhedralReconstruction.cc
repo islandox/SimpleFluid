@@ -16,6 +16,7 @@
 #include "plic_algebraic_native_cell37_fixture.hh"
 #include "plic_algebraic_native_cell33_fixture.hh"
 #include "plic_algebraic_native_cell36_fixture.hh"
+#include "plic_algebraic_native_n32_corner_fixture.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "plic_full50_step3_fixture.hh"
@@ -540,6 +541,125 @@ TEST(PolyhedralReconstruction, OppositeNeighborPairsPreserveKnownOnePlaneContrad
     {
         EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
     }
+}
+
+TEST(PolyhedralReconstruction, ConservativeApproximationAdmitsCapturedN32CornerWithStrictVolume)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native certificates require the original binary80 precision.";
+    namespace fixture = captured_native_n32_corner;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    // Independent unit-square clipping, integrated by bounds at the two z
+    // endpoints. This does not call a production PLIC volume evaluator.
+    const auto oracle = [](const PLIC::GeometryHalfspace& plane)
+    {
+        std::array<long double, 2> volumes{};
+        for (unsigned z = 0; z < 2; ++z)
+        {
+            using XY = std::array<long double, 2>;
+            std::vector<XY> polygon{{0, 0}, {1, 0}, {1, 1}, {0, 1}}, clipped;
+            const auto signed_distance = [&](XY p)
+            {
+                return plane.normal[0] * (.1875L + p[0] / 32 - plane.anchor[0]) +
+                       plane.normal[1] * (.375L + p[1] / 32 - plane.anchor[1]) +
+                       plane.normal[2] * (.5L * z - plane.anchor[2]) - plane.offset;
+            };
+            for (std::size_t i = 0; i < polygon.size(); ++i)
+            {
+                const auto a = polygon[i], b = polygon[(i + 1) % polygon.size()];
+                const auto da = signed_distance(a), db = signed_distance(b);
+                if (da <= 0)
+                    clipped.push_back(a);
+                if ((da <= 0) != (db <= 0))
+                {
+                    const auto t = da / (da - db);
+                    clipped.push_back({a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])});
+                }
+            }
+            long double area = 0;
+            for (std::size_t i = 0; i < clipped.size(); ++i)
+            {
+                const auto a = clipped[i], b = clipped[(i + 1) % clipped.size()];
+                area += a[0] * b[1] - a[1] * b[0];
+            }
+            volumes[z] = std::abs(area) / 4096;
+        }
+        return volumes;
+    };
+    std::optional<PLIC::GeometryPoint> original_normal;
+    for (const bool swapped : {false, true})
+        for (const bool reversed : {false, true})
+        {
+            auto target = fixture::sample(fixture::rows.front());
+            std::vector<OrdinarySample> support;
+            for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+                support.push_back(fixture::sample(fixture::rows[i]));
+            if (swapped)
+            {
+                std::swap(target.gas_volume, target.carrier_volume);
+                for (auto& sample : support)
+                    std::swap(sample.gas_volume, sample.carrier_volume);
+            }
+            if (reversed)
+                std::reverse(support.begin(), support.end());
+            PLIC::PolyhedralReconstructionOptions options;
+            options.measure_only = true;
+            EXPECT_THROW((void) Kernel::reconstruct(target, support, support.size(), options),
+                PLIC::PolyhedralResolutionRequired);
+            options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+            const auto fit = Kernel::reconstruct(target, support, support.size(), options);
+            EXPECT_TRUE(fit.fit_converged);
+            EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+            EXPECT_EQ(fit.model_policy, options.model_policy);
+            EXPECT_EQ(fit.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+            EXPECT_TRUE(fit.stencil_volume_residual_measured);
+            EXPECT_NEAR(fit.stencil_volume_residual, .24220143877514141, 2e-12);
+            EXPECT_GT(fit.stencil_volume_residual, options.maximum_model_residual);
+            EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+            EXPECT_LE(fit.stencil_condition, options.maximum_condition);
+            EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+            const auto volumes = oracle(fit.gas);
+            const auto roundoff = 64 * std::numeric_limits<long double>::epsilon() / 2048;
+            const auto allowed = options.volume_tolerance * std::min(target.gas_volume, target.carrier_volume);
+            EXPECT_LE(std::max(std::abs(volumes[0] - target.gas_volume),
+                          std::abs(volumes[1] - target.gas_volume)) + roundoff, allowed);
+            if (!original_normal)
+                original_normal = fit.gas.normal;
+            long double norm = 0;
+            for (std::size_t a = 0; a < 3; ++a)
+            {
+                EXPECT_TRUE(std::isfinite(fit.gas.normal[a]));
+                norm += fit.gas.normal[a] * fit.gas.normal[a];
+                EXPECT_NEAR(fit.gas.normal[a], (swapped ? -1 : 1) * (*original_normal)[a], 2e-8);
+            }
+            EXPECT_NEAR(norm, 1.L, 2e-15L);
+            EXPECT_EQ(target.gas_volume, swapped ? fixture::rows[0].carrier : fixture::rows[0].gas);
+            EXPECT_EQ(target.carrier_volume, swapped ? fixture::rows[0].gas : fixture::rows[0].carrier);
+        }
+}
+
+TEST(PolyhedralReconstruction, ConservativeApproximationRetainsGradientStatusAndMeasuredQuality)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .25);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1,
+            index[0] < 0 ? 0 : index[0] > 0 ? .2 : .25));
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+    EXPECT_FALSE(fit.fit_converged);
+    EXPECT_EQ(fit.fit_iterations, 0u);
+    EXPECT_EQ(fit.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+    EXPECT_TRUE(fit.stencil_volume_residual_measured);
+    EXPECT_NEAR(fit.stencil_volume_residual, .8 / std::sqrt(6.), 2e-14);
+    EXPECT_EQ(fit.gas.normal, (PLIC::GeometryPoint{-1, 0, 0}));
+    // For -x on the unit target, gas occupies x >= anchor_x-offset.
+    EXPECT_NEAR(1.L - (fit.gas.anchor[0] - fit.gas.offset), .25L, .25L * options.volume_tolerance);
 }
 
 TEST(PolyhedralReconstruction, ModerateWeakGradientRetainsItsConfiguredModelBound)
@@ -3580,6 +3700,92 @@ TEST(PolyhedralReconstruction, OrdinaryMeasureRejectsToleranceBelowItsReportedAc
     }
     EXPECT_EQ(sample.gas_volume, .25);
     EXPECT_EQ(sample.carrier_volume, .75);
+}
+
+TEST(PolyhedralReconstruction, ConservativeApproximationPreservesOptimizerAndNumericalFailures)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native certificates require the original binary80 precision.";
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    const auto bounded_pure = uniform_sample<ArithmeticMode::BoundedCertification>({0, 0, 0}, 1, 0);
+    EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::validate(bounded_pure, options),
+        std::invalid_argument);
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> constant;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        constant.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, .5));
+    EXPECT_THROW((void) Kernel::reconstruct(target, constant, options), PLIC::PolyhedralResolutionRequired);
+    EXPECT_THROW((void) Kernel::reconstruct(target, std::span<const OrdinarySample>{}, options),
+        PLIC::PolyhedralResolutionRequired);
+    auto inaccurate = options;
+    inaccurate.volume_tolerance = 1e-25;
+    EXPECT_THROW((void) Kernel::solve_offset(target, {1, 0, 0}, inaccurate), PLIC::GeometryError);
+    namespace fixture = captured_native_n32_corner;
+    const auto native = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        support.push_back(fixture::sample(fixture::rows[i]));
+    auto exhausted = options;
+    exhausted.maximum_fit_iterations = 1;
+    try
+    {
+        (void) Kernel::reconstruct(native, support, support.size(), exhausted);
+        FAIL() << "Iteration exhaustion is not approximate convergence.";
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        EXPECT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::IterationLimit);
+        EXPECT_EQ(error.diagnostics().iterations, 1u);
+        EXPECT_TRUE(std::isfinite(error.diagnostics().rms));
+    }
+    exhausted = options;
+    exhausted.maximum_clip_evaluations = 1;
+    EXPECT_THROW((void) Kernel::reconstruct(native, support, support.size(), exhausted), PLIC::GeometryError);
+    support.clear();
+    for (std::size_t i = 1; i < captured_native_cell8::rows.size(); ++i)
+        support.push_back(captured_native_cell8::sample(captured_native_cell8::rows[i]));
+    EXPECT_THROW((void) Kernel::reconstruct(captured_native_cell8::sample(captured_native_cell8::rows.front()),
+                     support, options), PLIC::PolyhedralFitFailure);
+}
+
+TEST(PolyhedralReconstruction, ConservativeApproximationAvoidsModelOnlyRestartAndKeepsUnmeasuredStatus)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native certificates require the original binary80 precision.";
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    namespace fixture = captured_native_cell36;
+    const auto target = fixture::sample(fixture::rows.front());
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
+        support.push_back(fixture::sample(fixture::rows[i]));
+    auto options = fixture::options();
+    options.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    const auto fit = Kernel::reconstruct(target, support, fixture::first_ring_size, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_EQ(fit.model_quality, PLIC::PlicModelQuality::AboveThreshold);
+    EXPECT_NEAR(fit.stencil_volume_residual, fixture::captured_bad_rms, 2e-10);
+    EXPECT_EQ(fit.fit_iterations, 6u);
+    const auto tiny = captured_full50::cells();
+    support.clear();
+    for (std::size_t i = 1; i < tiny.size(); ++i)
+        support.push_back(tiny[i].sample);
+    options = {};
+    options.measure_only = true;
+    for (const auto policy : {PLIC::PlicModelPolicy::RequireModelAgreement,
+             PLIC::PlicModelPolicy::ConservativeApproximation})
+    {
+        options.model_policy = policy;
+        const auto small = Kernel::reconstruct(tiny.front().sample, support, options);
+        EXPECT_EQ(small.model_policy, policy);
+        EXPECT_EQ(small.model_quality, PLIC::PlicModelQuality::NotMeasured);
+        EXPECT_FALSE(small.stencil_volume_residual_measured);
+        EXPECT_FALSE(small.fit_converged);
+        EXPECT_EQ(small.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+    }
 }
 
 } // namespace

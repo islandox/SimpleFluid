@@ -58,7 +58,13 @@ struct Case
     GeneralVoFTransportBackend backend;
     double courant;
     bool temporal = false;
+    PLIC::PlicModelPolicy model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
 };
+const char* policy_name(PLIC::PlicModelPolicy policy)
+{
+    return policy == PLIC::PlicModelPolicy::ConservativeApproximation
+               ? "ConservativeApproximation" : "RequireModelAgreement";
+}
 const char* name(Motion motion)
 {
     switch (motion)
@@ -574,6 +580,7 @@ Fixture fixture(const Case& c, unsigned n)
     }
     GeneralVoFOptions options;
     options.transport_backend = c.backend;
+    options.reconstruction.model_policy = c.model_policy;
     options.phase_cleanup = {0, {0, 0}};
     double local_volume[2]{};
     for (const auto value : gas)
@@ -838,7 +845,8 @@ void dump_failure(const Fixture& f, const Case& c, unsigned n, const std::string
         << "byte_budget " << options.byte_budget << " stencil_cap " << options.maximum_stencil_cells << " halo_cap "
         << options.maximum_halo_cells << " support_rings " << options.support_rings << " arithmetic "
         << int(options.arithmetic_mode) << " mesh_shear " << mesh_shear(c) << "\nreconstruction measure_only "
-        << reconstruction.measure_only << " maximum_offset_iterations " << reconstruction.maximum_offset_iterations
+        << reconstruction.measure_only << " model_policy " << policy_name(reconstruction.model_policy)
+        << " maximum_offset_iterations " << reconstruction.maximum_offset_iterations
         << " maximum_fit_iterations " << reconstruction.maximum_fit_iterations << " maximum_stencil_cells "
         << reconstruction.maximum_stencil_cells << " maximum_clip_evaluations "
         << reconstruction.maximum_clip_evaluations << " volume_tolerance " << reconstruction.volume_tolerance
@@ -927,6 +935,15 @@ void dump_failure(const Fixture& f, const Case& c, unsigned n, const std::string
 std::optional<Result> run(const Case& c, unsigned n, double courant, const std::string& tag)
 {
     const auto comm = Tpetra::getDefaultComm();
+    testing::Test::RecordProperty("model_policy", policy_name(c.model_policy));
+    testing::Test::RecordProperty("required_endpoint", 1);
+    const auto require_no_failure = [&]
+    {
+        int local = testing::Test::HasFailure(), any = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local, &any);
+        if (any)
+            throw std::runtime_error("Qualification stopped collectively at the first failed physical assertion.");
+    };
     unsigned accepted = 0, limited_steps = 0;
     bool midpoint_reached = false;
     long double time = 0, attempted_dt = 0;
@@ -936,12 +953,14 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
         working = fixture(c, n);
         auto& f = *working;
         const auto start = measure(f, *f.state, c, 0, {}, tag + "_initial");
+        require_no_failure();
         std::map<std::uint64_t, int> owners;
         for (const auto& tile : f.state->tiles())
             owners.emplace(tile.face_gid, tile.first_owner);
         std::array<double, 16> totals{};
         double maximum_courant = 0;
         EXPECT_GT(f.maximum_rate, 0);
+        require_no_failure();
         const long double nominal_dt = courant / f.maximum_rate;
         const auto base_flux = rates(*f.state, c, 0);
         while (time < 1)
@@ -987,18 +1006,56 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
             Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local[15], &actual);
             local[15] = 0;
             Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
+            if (c.backend == GeneralVoFTransportBackend::GeometricFace)
+                EXPECT_EQ(global[13], 0) << "A fallback cannot qualify this prescribed-motion step.";
             maximum_courant = std::max(maximum_courant, actual);
             EXPECT_LE(actual, courant * (1 + 1e-12));
             if (global[10] > 0)
                 ++limited_steps;
             for (unsigned i = 0; i < totals.size(); ++i)
                 totals[i] += global[i];
+            require_no_failure();
+            const auto& quality = prepared->diagnostics.reconstruction_quality;
+            const unsigned long long local_quality[2]{
+                quality.measured_plane_count, quality.above_model_threshold_count};
+            unsigned long long global_quality[2]{};
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_quality, global_quality);
+            double worst_rms = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &quality.maximum_model_residual, &worst_rms);
+            unsigned long long local_worst =
+                quality.measured_plane_count && quality.maximum_model_residual == worst_rms
+                    ? quality.worst_cell_gid : std::numeric_limits<unsigned long long>::max();
+            unsigned long long worst_gid = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_worst, &worst_gid);
+            const bool owns_worst = quality.measured_plane_count && local_worst == worst_gid;
+            int local_method = owns_worst ? int(quality.worst_orientation_method) : 99, worst_method = 99;
+            int local_converged = owns_worst ? int(quality.worst_fit_converged) : 99, worst_converged = 99;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_method, &worst_method);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_converged, &worst_converged);
             f.state = f.state->apply(trial);
             time += step_dt;
             ++accepted;
+            testing::Test::RecordProperty("accepted_steps", accepted);
+            testing::Test::RecordProperty("accepted_time", double(time));
+            std::ostringstream quality_report;
+            quality_report << std::setprecision(17) << "policy=" << policy_name(c.model_policy)
+                           << " accepted_steps=" << accepted << " accepted_time=" << double(time)
+                           << " measured_plane_entries=" << global_quality[0]
+                           << " above_threshold_plane_entries=" << global_quality[1];
+            if (global_quality[0])
+                quality_report << " worst_rms=" << worst_rms << " worst_gid=" << worst_gid
+                               << " worst_orientation_method=" << worst_method
+                               << " worst_fit_converged=" << worst_converged;
+            else
+                quality_report << " model_quality=NotMeasured";
+            testing::Test::RecordProperty(
+                tag + "_model_quality_step_" + std::to_string(accepted), quality_report.str());
+            if (comm->getRank() == 0)
+                std::cout << "Q2_MODEL_QUALITY " << quality_report.str() << '\n' << std::flush;
             // Check inventories and resolved metrics after every accepted step.
             const auto measured =
                 measure(f, *f.state, c, time, start.center, tag + "_step_" + std::to_string(accepted));
+            require_no_failure();
             if (time == .5L)
             {
                 midpoint_reached = true;
@@ -1031,6 +1088,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
                     testing::Test::RecordProperty(tag + "_midpoint_deformation", midpoint_report.str());
                 }
             }
+            require_no_failure();
         }
         auto result = measure(f, *f.state, c, 1, start.center, tag + "_final");
         EXPECT_EQ(time, 1);
@@ -1042,6 +1100,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
             EXPECT_GE(limited_steps, 4u) << "Sustained limiting gate remains open";
         std::ostringstream report;
         report << std::setprecision(17) << "resolution=" << n << " accepted_steps=" << accepted
+               << " model_policy=" << policy_name(c.model_policy)
                << " endpoint=" << double(time) << " actual_maximum_outgoing_courant=" << maximum_courant
                << " configured_backend="
                << (c.backend == GeneralVoFTransportBackend::GeometricFace ? "GeometricFace" : "DonorCell")
@@ -1062,6 +1121,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
     {
         std::ostringstream report;
         report << "resolution=" << n << " accepted_steps=" << accepted << " accepted_time=" << double(time)
+               << " model_policy=" << policy_name(c.model_policy)
                << " required_endpoint=1 error=" << error.what();
         testing::Test::RecordProperty(tag + "_rejection", report.str());
         ADD_FAILURE() << report.str();
@@ -1077,7 +1137,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
         return std::nullopt;
     }
 }
-std::vector<Case> cases()
+std::vector<Case> cases(PLIC::PlicModelPolicy policy = PLIC::PlicModelPolicy::RequireModelAgreement)
 {
     std::vector<Case> result;
     for (const auto backend : {GeneralVoFTransportBackend::DonorCell, GeneralVoFTransportBackend::GeometricFace})
@@ -1086,8 +1146,8 @@ std::vector<Case> cases()
                      Motion::ShearReturn, Motion::ThreeDimensional})
             {
                 for (const double courant : {.2, .5, .8})
-                    result.push_back({motion, mesh, backend, courant});
-                result.push_back({motion, mesh, backend, .8, true});
+                    result.push_back({motion, mesh, backend, courant, false, policy});
+                result.push_back({motion, mesh, backend, .8, true, policy});
             }
     return result;
 }
@@ -1134,17 +1194,19 @@ TEST_P(AlgebraicMotionQualification, CompleteManufacturedHorizon)
             EXPECT_LE(results[2].centroid, .25 * results[2].width);
     }
 }
-INSTANTIATE_TEST_SUITE_P(AlgebraicMotion, AlgebraicMotionQualification, testing::ValuesIn(cases()),
-    [](const testing::TestParamInfo<Case>& info)
-    {
-        const auto& c = info.param;
-        return std::string(c.backend == GeneralVoFTransportBackend::GeometricFace ? "GeometricFace" : "DonorCell") +
-               "_" + name(c.motion) + "_" +
-               (c.mesh == Mesh::Uniform   ? "Uniform"
-                   : c.mesh == Mesh::Skew ? "Skew"
-                                          : "CoarseFine") +
-               (c.temporal ? "_Temporal" : "_C" + std::to_string(unsigned(100 * c.courant)));
-    });
+std::string case_name(const testing::TestParamInfo<Case>& info)
+{
+    const auto& c = info.param;
+    return std::string(c.backend == GeneralVoFTransportBackend::GeometricFace ? "GeometricFace" : "DonorCell") +
+           "_" + name(c.motion) + "_" +
+           (c.mesh == Mesh::Uniform   ? "Uniform"
+               : c.mesh == Mesh::Skew ? "Skew"
+                                      : "CoarseFine") +
+           (c.temporal ? "_Temporal" : "_C" + std::to_string(unsigned(100 * c.courant)));
+}
+INSTANTIATE_TEST_SUITE_P(AlgebraicMotion, AlgebraicMotionQualification, testing::ValuesIn(cases()), case_name);
+INSTANTIATE_TEST_SUITE_P(AlgebraicApproximationMotion, AlgebraicMotionQualification,
+    testing::ValuesIn(cases(PLIC::PlicModelPolicy::ConservativeApproximation)), case_name);
 } // namespace algebraic_motion
 
 namespace
@@ -1219,6 +1281,35 @@ TEST(GeneralVoFMotionAccuracy, RequiredPlanarPatchN32EndpointDiagnostic)
     RecordProperty("endpoint_centroid_error", result->centroid);
     // Apply the original finest-case limits here as an additional diagnostic,
     // without claiming that the finest resolution itself was constructed/run.
+    EXPECT_LE(result->shape, .02);
+    EXPECT_LE(result->centroid, .25 * result->width);
+}
+
+TEST(GeneralVoFMotionAccuracy, ConservativeApproximationOriginalPlanarPatchN16Endpoint)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in approximation-policy original Q2 endpoint";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5,
+        false, PLIC::PlicModelPolicy::ConservativeApproximation};
+    const auto result = run(c, 16, .5, "approximation_original_planar_patch_N16");
+    ASSERT_TRUE(result.has_value());
+    RecordProperty("endpoint_shape_error", result->shape);
+    RecordProperty("endpoint_centroid_error", result->centroid);
+    RecordProperty("scope", "Original N16 horizon; finest N64 accuracy/order gates remain separate");
+}
+
+TEST(GeneralVoFMotionAccuracy, ConservativeApproximationRequiredPlanarPatchN32Endpoint)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in approximation-policy original Q2 endpoint";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5,
+        false, PLIC::PlicModelPolicy::ConservativeApproximation};
+    const auto result = run(c, 32, .5, "approximation_required_planar_patch_N32");
+    ASSERT_TRUE(result.has_value());
+    RecordProperty("endpoint_shape_error", result->shape);
+    RecordProperty("endpoint_centroid_error", result->centroid);
     EXPECT_LE(result->shape, .02);
     EXPECT_LE(result->centroid, .25 * result->width);
 }

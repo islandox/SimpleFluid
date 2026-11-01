@@ -20,6 +20,11 @@ SIMPLEFLUID_FVM_LOCAL long double finite_real(wire::Reader& r);
 SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, PLIC::DynamicGeometryValue v);
 SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
     wire::Reader& r, std::optional<ArithmeticMode> expected = {});
+/** Versioned finite Ordinary plane: 30 eight-byte words, including its
+ * finite minority difference. Budgets reserve these actual bytes. */
+inline constexpr std::size_t ordinary_plane_wire_bytes = 240;
+SIMPLEFLUID_FVM_LOCAL void validate_plane_metadata(const PLIC::PolyhedralInterface&,
+    const PLIC::PolyhedralReconstructionOptions&, ArithmeticMode);
 SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL void finite_phases(wire::Writer&, const PLIC::DynamicPhaseMeasures&);

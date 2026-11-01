@@ -186,6 +186,58 @@ TEST(GeneralVoFFinite, ConstructionAlgorithmBindsSmallPhasePolicy)
     EXPECT_EQ(gradient_only, controls::algorithm(options));
 }
 
+TEST(GeneralVoFFinite, ModelPolicyIsValidatedAndAgreedOnEmptyOwners)
+{
+    const auto input = fixture(); // Pure inputs still validate policy collectively.
+    const auto comm = Tpetra::getDefaultComm();
+    const bool changed_rank = comm->getRank() == comm->getSize() - 1;
+    if (comm->getSize() > 2 && changed_rank)
+        EXPECT_TRUE(input.order.empty());
+    GeneralVoFOptions options;
+    for (const auto invalid : {std::uint64_t(2), std::numeric_limits<std::uint64_t>::max()})
+    {
+        options.reconstruction.model_policy =
+            changed_rank ? static_cast<PLIC::PlicModelPolicy>(invalid) : PLIC::PlicModelPolicy::RequireModelAgreement;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+    for (const auto mode : {ArithmeticMode::BoundedCertification, ArithmeticMode::Exact})
+    {
+        options.arithmetic_mode = mode;
+        options.reconstruction.model_policy = changed_rank ? PLIC::PlicModelPolicy::ConservativeApproximation
+                                                           : PLIC::PlicModelPolicy::RequireModelAgreement;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+    options.arithmetic_mode = ArithmeticMode::Ordinary;
+    if (comm->getSize() > 1)
+    {
+        options.reconstruction.model_policy = changed_rank ? PLIC::PlicModelPolicy::ConservativeApproximation
+                                                           : PLIC::PlicModelPolicy::RequireModelAgreement;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+    for (const auto policy :
+        {PLIC::PlicModelPolicy::RequireModelAgreement, PLIC::PlicModelPolicy::ConservativeApproximation})
+    {
+        options.reconstruction.model_policy = policy;
+        EXPECT_NO_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options));
+    }
+}
+
+TEST(GeneralVoFFinite, ConstructionAlgorithmBindsModelPolicy)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    GeneralVoFOptions options;
+    const auto strict = controls::algorithm(options);
+    options.reconstruction.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    const auto approximate = controls::algorithm(options);
+    EXPECT_NE(strict, approximate);
+    options.byte_budget /= 2;
+    options.sweep.byte_budget /= 2;
+    EXPECT_EQ(approximate, controls::algorithm(options));
+}
+
 TEST(GeneralVoFFinite, FaceWorkLimitIsPositiveAndAgreedIncludingEmptyOwners)
 {
     const auto input = fixture();
@@ -270,6 +322,78 @@ TEST(GeneralVoFFinite, StencilResidualMeasurementWirePreservesBothValuesAndRejec
         wire::Reader reader{writer.data};
         EXPECT_THROW((void) codec::boolean(reader), std::invalid_argument);
     }
+}
+
+TEST(GeneralVoFFinite, ModelMetadataWireRejectsUnknownEnumsAndInconsistentProvenance)
+{
+    namespace codec = SimpleFluid::VoF::plane_wire_detail;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    for (const auto policy :
+        {PLIC::PlicModelPolicy::RequireModelAgreement, PLIC::PlicModelPolicy::ConservativeApproximation})
+    {
+        wire::Writer writer;
+        writer.word(std::uint64_t(policy));
+        wire::Reader reader{writer.data};
+        EXPECT_EQ(codec::model_policy(reader.word()), policy);
+        EXPECT_NO_THROW(reader.done());
+    }
+    for (const auto quality : {PLIC::PlicModelQuality::NotMeasured, PLIC::PlicModelQuality::WithinThreshold,
+             PLIC::PlicModelQuality::AboveThreshold})
+    {
+        wire::Writer writer;
+        writer.word(std::uint64_t(quality));
+        wire::Reader reader{writer.data};
+        EXPECT_EQ(codec::model_quality(reader.word()), quality);
+        EXPECT_NO_THROW(reader.done());
+    }
+    for (const auto invalid : {std::uint64_t(3), std::numeric_limits<std::uint64_t>::max()})
+    {
+        EXPECT_THROW((void) codec::model_policy(invalid), std::invalid_argument);
+        EXPECT_THROW((void) codec::model_quality(invalid), std::invalid_argument);
+    }
+    EXPECT_THROW((void) codec::model_policy(2), std::invalid_argument);
+
+    PLIC::PolyhedralInterface plane;
+    EXPECT_NO_THROW(codec::model_metadata(plane));
+    plane.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    plane.finite_geometry = true;
+    plane.finite_target_volume_difference.arithmetic_mode = ArithmeticMode::Ordinary;
+    plane.model_quality = PLIC::PlicModelQuality::AboveThreshold;
+    plane.stencil_volume_residual = .3;
+    plane.stencil_volume_residual_measured = true;
+    plane.orientation_method = PLIC::PolyhedralOrientationMethod::Gradient;
+    EXPECT_NO_THROW(codec::model_metadata(plane));
+    const auto gradient = plane;
+    plane.fit_converged = true;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.orientation_method = PLIC::PolyhedralOrientationMethod::SuppliedNormal;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.orientation_method = PLIC::PolyhedralOrientationMethod::AngularVolumeFit;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane.fit_converged = true;
+    EXPECT_NO_THROW(codec::model_metadata(plane));
+    plane.model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.stencil_volume_residual_measured = false;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.model_quality = PLIC::PlicModelQuality::NotMeasured;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.pure_gas = true;
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.stencil_volume_residual = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.model_policy = static_cast<PLIC::PlicModelPolicy>(2);
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
+    plane = gradient;
+    plane.model_quality = static_cast<PLIC::PlicModelQuality>(3);
+    EXPECT_THROW(codec::model_metadata(plane), std::invalid_argument);
 }
 
 TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReconstruction)
@@ -819,6 +943,206 @@ TEST(GeneralVoFFinite, MixedOwnershipMigrationPreservesOrientationAndMeasuredRes
                 EXPECT_EQ(fields[field], expected[width * ordinal(moved->owned_order()[c]) + field]);
         }
     }
+}
+
+TEST(GeneralVoFFinite, ApproximateMixedOwnershipMigrationPreservesActualModelQuality)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto ordinal = [](const AdaptiveCellKey& key)
+    {
+        const auto index = std::get<CartesianCellAncestry>(key.ancestry).index;
+        return std::size_t(index[0] + 2 * index[1] + 4 * index[2]);
+    };
+    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    {
+        return std::array{double(plane.orientation_method), double(plane.fit_converged), double(plane.fit_iterations),
+            double(plane.stencil_volume_residual_measured), plane.stencil_volume_residual, plane.stencil_condition,
+            plane.orientation_step, double(plane.model_policy), double(plane.model_quality)};
+    };
+    auto input = fixture();
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        const auto index = std::get<CartesianCellAncestry>(input.order[c].ancestry).index;
+        input.gas[c] = index[0] == 0 ? .05 : .25;
+        input.carrier[c] = 1 - input.gas[c];
+    }
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0; // Coupled remap channels retain both independent inventories.
+    options.reconstruction.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto before = source.reconstruct();
+    constexpr std::size_t width = 9;
+    std::array<double, 8 * width> local{}, expected{};
+    for (std::size_t c = 0; c < source.owned_order().size(); ++c)
+    {
+        const auto index = std::get<CartesianCellAncestry>(source.owned_order()[c].ancestry).index;
+        const auto& plane = before[c];
+        EXPECT_EQ(plane.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+        EXPECT_FALSE(plane.fit_converged);
+        EXPECT_EQ(plane.fit_iterations, 0u);
+        EXPECT_TRUE(plane.stencil_volume_residual_measured);
+        EXPECT_EQ(plane.resolution.stencil_cells, 6u);
+        // All fractions are below .5, so the supported LS gradient is -x.
+        // Two complete face rings exclude only the diagonally opposite cube
+        // (three face hops). Three opposite-x cells differ by .75 (low-x
+        // target) or .05 (high-x target); three same-x cells agree exactly.
+        const double model_rms = (index[0] == 0 ? .75 : .05) * std::sqrt(3. / 6);
+        EXPECT_NEAR(plane.stencil_volume_residual, model_rms, 1e-12);
+        EXPECT_EQ(plane.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+        EXPECT_EQ(plane.model_quality,
+            index[0] == 0 ? PLIC::PlicModelQuality::AboveThreshold : PLIC::PlicModelQuality::WithinThreshold);
+        if (index[0] == 0)
+            EXPECT_GT(plane.stencil_volume_residual, options.reconstruction.maximum_model_residual);
+        const auto fields = diagnostics(plane);
+        std::copy(fields.begin(), fields.end(), local.begin() + width * ordinal(source.owned_order()[c]));
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), expected.data());
+    const std::vector<int> destinations(input.order.size(), (comm->getRank() + 1) % comm->getSize());
+    const auto plan = source.hierarchy()->plan_migration(destinations);
+    const auto target = bound_candidate(source.hierarchy(), plan);
+    const auto trial = source.plan_remap(plan, target, initial_channels(source), channel_options());
+    ASSERT_TRUE(trial.ownership_only());
+    const auto moved = trial.candidate();
+    EXPECT_EQ(moved->options().reconstruction.model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+    EXPECT_EQ(moved->options().reconstruction.maximum_model_residual, options.reconstruction.maximum_model_residual);
+    const auto after = moved->reconstruct();
+    for (std::size_t c = 0; c < moved->owned_order().size(); ++c)
+    {
+        const auto fields = diagnostics(after[c]);
+        for (std::size_t field = 0; field < width; ++field)
+            EXPECT_EQ(fields[field], expected[width * ordinal(moved->owned_order()[c]) + field]);
+        const auto index = std::get<CartesianCellAncestry>(moved->owned_order()[c].ancestry).index;
+        const double gas = index[0] == 0 ? .05 : .25;
+        EXPECT_EQ(moved->gas_volumes()[c], gas);
+        EXPECT_EQ(moved->carrier_volumes()[c], 1 - gas);
+    }
+    EXPECT_EQ(source.gas_volumes(), input.gas);
+    EXPECT_EQ(source.carrier_volumes(), input.carrier);
+}
+
+TEST(GeneralVoFFinite, ApproximateGeometricFaceReportsTransportQualityAndPreservesIndependentPhases)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    auto input = fixture();
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        const auto index = std::get<CartesianCellAncestry>(input.order[c].ancestry).index;
+        input.gas[c] = index[0] == 0 ? .05 : .25;
+        input.carrier[c] = 1 - input.gas[c];
+    }
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    options.reconstruction.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto trial = state.plan_face_transport(circulation(state), 1, {1, 1000}, 1);
+    const auto prepared = trial.prepared_transport();
+    ASSERT_TRUE(prepared);
+    const auto& q = prepared->diagnostics.reconstruction_quality;
+    std::map<std::uint64_t, double> expected_donors;
+    for (const auto& stream : prepared->streams)
+        if (stream.donor_owner == comm->getRank())
+        {
+            const bool low_x = std::abs(stream.gas_low / stream.volume - .05L) < 1e-14L;
+            expected_donors.emplace(stream.donor, (low_x ? .75 : .05) / std::sqrt(2.));
+        }
+    EXPECT_EQ(q.plane_count, expected_donors.size());
+    EXPECT_EQ(q.measured_plane_count, expected_donors.size());
+    double expected_maximum = 0;
+    std::size_t expected_above = 0;
+    for (const auto& [gid, rms] : expected_donors)
+    {
+        expected_maximum = std::max(expected_maximum, rms);
+        expected_above += rms > options.reconstruction.maximum_model_residual;
+    }
+    EXPECT_EQ(q.above_model_threshold_count, expected_above);
+    EXPECT_NEAR(q.maximum_model_residual, expected_maximum, 1e-12);
+    EXPECT_EQ(q.approximation_plane_count, q.plane_count);
+    EXPECT_EQ(q.strict_plane_count, 0u);
+    const unsigned long long local[2]{q.measured_plane_count, q.above_model_threshold_count};
+    unsigned long long global[2]{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
+    EXPECT_GT(global[0], 0u);
+    EXPECT_GT(global[1], 0u);
+    if (q.measured_plane_count)
+    {
+        EXPECT_EQ(q.worst_orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+        EXPECT_FALSE(q.worst_fit_converged);
+        EXPECT_EQ(q.worst_model_policy, PLIC::PlicModelPolicy::ConservativeApproximation);
+    }
+    for (const auto& stream : prepared->streams)
+    {
+        EXPECT_FALSE(stream.lower_order);
+        EXPECT_NEAR(stream.gas + stream.liquid, stream.volume, 1e-13L * stream.volume);
+        EXPECT_NEAR(stream.mass, stream.gas + 1000 * stream.liquid, 1e-13L * stream.mass);
+    }
+    const auto moved = state.apply(trial);
+    double local_amounts[4]{}, global_amounts[4]{};
+    for (std::size_t c = 0; c < input.gas.size(); ++c)
+    {
+        local_amounts[0] += input.gas[c];
+        local_amounts[1] += input.carrier[c];
+        local_amounts[2] += moved->gas_volumes()[c];
+        local_amounts[3] += moved->carrier_volumes()[c];
+        EXPECT_GE(moved->gas_volumes()[c], 0);
+        EXPECT_GE(moved->carrier_volumes()[c], 0);
+        EXPECT_NEAR(moved->gas_volumes()[c] + moved->carrier_volumes()[c], 1, 1e-13);
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local_amounts, global_amounts);
+    EXPECT_NEAR(global_amounts[0], global_amounts[2], 2e-11 * global_amounts[0]);
+    EXPECT_NEAR(global_amounts[1], global_amounts[3], 2e-11 * global_amounts[1]);
+}
+
+TEST(GeneralVoFFinite, ApproximateDefaultSweepTransportsAboveThresholdPlanesConservatively)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    auto input = fixture();
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        const auto index = std::get<CartesianCellAncestry>(input.order[c].ancestry).index;
+        input.gas[c] = index[0] == 0 ? .05 : .25;
+        input.carrier[c] = 1 - input.gas[c];
+    }
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    options.reconstruction.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    ASSERT_EQ(options.transport_backend, GeneralVoFTransportBackend::SweptPartition);
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto trial = state.plan_transport(stationary(state), circulation(state), 1);
+    const auto prepared = trial.prepare_transport({1, 1000}, 1);
+    ASSERT_TRUE(prepared);
+    EXPECT_EQ(prepared->backend, GeneralVoFTransportBackend::SweptPartition);
+    EXPECT_EQ(prepared->family, GeneralVoFTransportFamily::InterfaceLocalSwept);
+    const auto& d = prepared->diagnostics;
+    const auto& q = d.reconstruction_quality;
+    EXPECT_EQ(q.plane_count, d.plane_requests);
+    EXPECT_EQ(q.approximation_plane_count, q.plane_count);
+    const unsigned long long local[4]{d.geometric_faces, d.plane_requests,
+        q.measured_plane_count, q.above_model_threshold_count};
+    unsigned long long global[4]{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local, global);
+    for (const auto count : global)
+        EXPECT_GT(count, 0u);
+    check_budget_diagnostics(state, trial);
+    const auto moved = state.apply(trial);
+    double local_amounts[5]{}, global_amounts[5]{};
+    for (std::size_t c = 0; c < input.gas.size(); ++c)
+    {
+        local_amounts[0] += input.gas[c];
+        local_amounts[1] += input.carrier[c];
+        local_amounts[2] += moved->gas_volumes()[c];
+        local_amounts[3] += moved->carrier_volumes()[c];
+        local_amounts[4] += std::abs(moved->gas_volumes()[c] - input.gas[c]);
+        EXPECT_GE(moved->gas_volumes()[c], 0);
+        EXPECT_GE(moved->carrier_volumes()[c], 0);
+        EXPECT_NEAR(moved->gas_volumes()[c] + moved->carrier_volumes()[c], 1, 1e-13);
+        EXPECT_NEAR(prepared->old_mass[c], input.gas[c] + 1000 * input.carrier[c], 1e-12);
+        EXPECT_NEAR(prepared->new_mass[c], moved->gas_volumes()[c] + 1000 * moved->carrier_volumes()[c], 1e-12);
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 5, local_amounts, global_amounts);
+    EXPECT_NEAR(global_amounts[0], global_amounts[2], 2e-11 * global_amounts[0]);
+    EXPECT_NEAR(global_amounts[1], global_amounts[3], 2e-11 * global_amounts[1]);
+    EXPECT_GT(global_amounts[4], 0);
 }
 
 TEST(GeneralVoFFinite, SourceOccupancyFollowsGeometricDonorSharesAndRecordsSignedFitRedistribution)

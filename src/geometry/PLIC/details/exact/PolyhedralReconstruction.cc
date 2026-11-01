@@ -38,6 +38,8 @@ Vector unit(Vector a)
 void validate_sample(
     const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, const PolyhedralReconstructionOptions& options)
 {
+    if (options.model_policy != PlicModelPolicy::RequireModelAgreement)
+        throw std::invalid_argument("Exact PLIC requires strict neighborhood model agreement.");
     if (!sample.geometry || !std::isfinite(sample.gas_volume) || !std::isfinite(sample.carrier_volume) ||
         sample.gas_volume < 0 || sample.carrier_volume < 0 || !options.maximum_offset_iterations ||
         !options.maximum_fit_iterations || !options.maximum_stencil_cells || !options.maximum_clip_evaluations ||
@@ -136,6 +138,7 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact
     PolyhedralReconstructionOptions options, std::size_t& evaluations, const ReconstructionGeometry& geometry)
 {
     PolyhedralInterface result;
+    result.model_policy = options.model_policy;
     result.pure_gas = sample.carrier_volume == 0;
     result.pure_carrier = sample.gas_volume == 0;
     result.gas.normal = unit(normal);
@@ -423,6 +426,9 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
     }
     current.plane.stencil_volume_residual = std::sqrt(current.objective / stencil.size());
     current.plane.stencil_volume_residual_measured = true;
+    current.plane.model_quality = current.plane.stencil_volume_residual > options.maximum_model_residual
+                                     ? PlicModelQuality::AboveThreshold
+                                     : PlicModelQuality::WithinThreshold;
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;

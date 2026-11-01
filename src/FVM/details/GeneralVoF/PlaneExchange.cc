@@ -75,6 +75,7 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 auto fitted =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
+                validate_plane_metadata(fitted, data.options.reconstruction, Mode);
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
                     if (!fitted.finite_geometry)
@@ -129,20 +130,20 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
             row->fit_iterations = fitted.fit_iterations;
             row->request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
             // Same codec as a real reply; this calibration is outside reconstruction timing.
-            storage.charge(216);
+            storage.charge(ordinary_plane_wire_bytes);
             {
                 wire::Writer writer;
-                writer.data.reserve(216);
-                if (writer.data.capacity() > 216)
-                    storage.charge(writer.data.capacity() - 216);
+                writer.data.reserve(ordinary_plane_wire_bytes);
+                if (writer.data.capacity() > ordinary_plane_wire_bytes)
+                    storage.charge(writer.data.capacity() - ordinary_plane_wire_bytes);
                 plane(writer, fitted);
-                if (writer.data.size() > 216)
+                if (writer.data.size() > ordinary_plane_wire_bytes)
                     throw std::invalid_argument("General VoF plane exceeds its capture envelope.");
                 row->reply_payload_bytes = row->request_payload_bytes + writer.data.size();
-                if (writer.data.capacity() > 216)
-                    storage.release(writer.data.capacity() - 216);
+                if (writer.data.capacity() > ordinary_plane_wire_bytes)
+                    storage.release(writer.data.capacity() - ordinary_plane_wire_bytes);
             }
-            storage.release(216);
+            storage.release(ordinary_plane_wire_bytes);
         }
         return fitted;
     };
@@ -283,6 +284,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                 auto fitted =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
+                validate_plane_metadata(fitted, data.options.reconstruction, Mode);
                 GeneralVoFWorkReceiver* receiver = nullptr;
                 if (balance_work)
                     for (auto& row : balance_work->receivers)

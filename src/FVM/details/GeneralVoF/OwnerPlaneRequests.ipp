@@ -17,9 +17,9 @@ std::vector<OwnerPacket> owner_plane_replies(const RequestedPlaneMap& local_resu
     for (const auto& packet : incoming)
     {
         OwnerPacket reply;
-        reply.bytes.reserve(packet.bytes.size() + 216);
-        if (reply.bytes.capacity() > packet.bytes.size() + 216)
-            storage.charge(reply.bytes.capacity() - packet.bytes.size() - 216);
+        reply.bytes.reserve(packet.bytes.size() + ordinary_plane_wire_bytes);
+        if (reply.bytes.capacity() > packet.bytes.size() + ordinary_plane_wire_bytes)
+            storage.charge(reply.bytes.capacity() - packet.bytes.size() - ordinary_plane_wire_bytes);
         replies.push_back(std::move(reply));
     }
     std::size_t cache_bytes = 0, key_scratch = 0;
@@ -80,7 +80,7 @@ std::vector<OwnerPacket> owner_plane_replies(const RequestedPlaneMap& local_resu
                     serialize(writer, fitted);
                 }
             }
-            if (writer.data.size() > packet.bytes.size() + 216)
+            if (writer.data.size() > packet.bytes.size() + ordinary_plane_wire_bytes)
                 throw std::invalid_argument("General VoF owner plane exceeds its fixed wire envelope.");
             replies[index] = {packet.peer, std::move(writer.data)};
         }

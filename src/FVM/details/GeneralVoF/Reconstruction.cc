@@ -172,6 +172,27 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
 {
     OwnerReconstructionObservation observation(diagnostics, row);
     const auto& cell = data.cells.at(key);
+    const auto returned = [&](PLIC::PolyhedralInterface result)
+    {
+        validate_plane_metadata(result, data.options.reconstruction, Mode);
+        if (diagnostics && result.stencil_volume_residual_measured)
+        {
+            ++diagnostics->measured_plane_count;
+            if (result.model_quality == PLIC::PlicModelQuality::AboveThreshold)
+                ++diagnostics->above_model_threshold_count;
+            if (diagnostics->measured_plane_count == 1 ||
+                result.stencil_volume_residual > diagnostics->maximum_model_residual ||
+                (result.stencil_volume_residual == diagnostics->maximum_model_residual &&
+                    cell.gid < diagnostics->worst_cell_gid))
+            {
+                diagnostics->maximum_model_residual = result.stencil_volume_residual;
+                diagnostics->worst_cell_gid = cell.gid;
+                diagnostics->worst_orientation_method = result.orientation_method;
+                diagnostics->worst_fit_converged = result.fit_converged;
+            }
+        }
+        return result;
+    };
     ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
     scope.record.cell = cell.gid;
     scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Cell);
@@ -188,7 +209,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
             {
                 if (diagnostics)
                     ++diagnostics->retained_interface_returns;
-                return *cell.retained_interface;
+                return returned(*cell.retained_interface);
             }
         }
         else
@@ -197,12 +218,13 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
                 throw std::invalid_argument("Finite VoF cannot adopt an exact-policy interface capsule.");
             if (diagnostics)
                 ++diagnostics->retained_interface_returns;
-            return *cell.retained_interface;
+            return returned(*cell.retained_interface);
         }
     }
     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
     {
         PLIC::PolyhedralInterface result;
+        result.model_policy = data.options.reconstruction.model_policy;
         result.pure_gas = cell.declaration == GeneralVoFPhaseGeometry::PureGas;
         result.pure_carrier = !result.pure_gas;
         const auto minority = result.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
@@ -221,7 +243,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
         }
         if (diagnostics)
             ++diagnostics->pure_declaration_returns;
-        return result;
+        return returned(std::move(result));
     }
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
     {
@@ -229,7 +251,7 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
             reconstruction_sample<Mode>(cell), {1, 0, 0}, data.options.reconstruction);
         if (diagnostics)
             ++diagnostics->zero_phase_offset_returns;
-        return result;
+        return returned(std::move(result));
     }
     if (diagnostics)
         ++diagnostics->mixed_cell_fits;
@@ -245,10 +267,11 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(const GeneralVoF::Data& data, co
         auto result = PLIC::PolyhedralReconstruction<Mode>::reconstruct(
             target, stencil, fitting_cells, data.options.reconstruction);
         result.resolution = support;
-        return result;
+        return returned(std::move(result));
     }
     else
-        return PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, data.options.reconstruction);
+        return returned(
+            PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, data.options.reconstruction));
 }
 } // namespace
 template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key)

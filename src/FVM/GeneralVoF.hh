@@ -16,6 +16,7 @@
 #include "utils/ArithmeticMode.hh"
 #include <array>
 #include <memory>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -58,9 +59,39 @@ struct GeneralVoFOwnerPlaneRequestDiagnostics
     std::size_t local_result_hits = 0, peer_cache_hits = 0, peer_cache_admissions = 0, cache_admission_denials = 0;
     std::size_t owner_reconstruction_calls = 0, mixed_cell_fits = 0, retained_interface_returns = 0;
     std::size_t pure_declaration_returns = 0, zero_phase_offset_returns = 0;
+    /** Successful owner reconstruction returns with measured RMS, including
+     * retained-interface returns. Repeated calls after cache denial count
+     * again; local-result/peer-cache hits do not count. Rank-local invocation
+     * diagnostics describe this source's actual returned planes, not unique
+     * cells, global measurements, or new optimizer evaluations. */
+    std::size_t measured_plane_count = 0, above_model_threshold_count = 0;
+    double maximum_model_residual = 0;
+    /** Equal RMS values select the smallest persistent cell GID. */
+    std::uint64_t worst_cell_gid = std::numeric_limits<std::uint64_t>::max();
+    PLIC::PolyhedralOrientationMethod worst_orientation_method = PLIC::PolyhedralOrientationMethod::SuppliedNormal;
+    bool worst_fit_converged = false;
     std::uint64_t geometry_volume_evaluations = 0, geometry_intersections = 0;
     std::size_t peer_cache_peak_bytes = 0, workspace_peak_bytes = 0;
     double reconstruction_seconds = 0;
+};
+/** Rank-local, source-pinned plane catalog used by one Ordinary geometric
+ * transport preparation. GeometricFace counts each successful deduplicated
+ * donor-owner plane once; interface-local SweptPartition counts each requested
+ * plane once, including imports. Reuse across faces does not increment these
+ * counts; imported cells can repeat across ranks. These are neither global
+ * distinct-cell counts nor reconstruction-call/optimizer-evaluation counts.
+ * Pure or unmeasured results retain their truthful metadata. DonorCell and
+ * geometry-free paths leave this summary empty. No extra fits are performed. */
+struct GeneralVoFReconstructionQualityDiagnostics
+{
+    std::size_t plane_count = 0, strict_plane_count = 0, approximation_plane_count = 0;
+    std::size_t measured_plane_count = 0, above_model_threshold_count = 0;
+    double maximum_model_residual = 0;
+    /** Equal measured RMS values select the smallest persistent cell GID. */
+    std::uint64_t worst_cell_gid = std::numeric_limits<std::uint64_t>::max();
+    PLIC::PlicModelPolicy worst_model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
+    PLIC::PolyhedralOrientationMethod worst_orientation_method = PLIC::PolyhedralOrientationMethod::SuppliedNormal;
+    bool worst_fit_converged = false;
 };
 struct GeneralVoFTransportDiagnostics
 {
@@ -73,6 +104,7 @@ struct GeneralVoFTransportDiagnostics
     std::size_t spatial_index_builds = 0, spatial_index_reuses = 0, spatial_index_bytes = 0;
     std::size_t geometric_faces = 0, algebraic_faces = 0, swept_pieces = 0, plane_requests = 0;
     GeneralVoFOwnerPlaneRequestDiagnostics owner_plane_requests;
+    GeneralVoFReconstructionQualityDiagnostics reconstruction_quality;
     /** Ordinary interface-local scalar geometry; swept_pieces counts immutable
      * source tetrahedra, not individually measured closed solids. */
     std::size_t aggregate_groups = 0, aggregate_witnesses = 0, cancelled_boundaries = 0, aggregate_retries = 0;

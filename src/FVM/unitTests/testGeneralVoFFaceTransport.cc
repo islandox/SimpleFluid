@@ -936,4 +936,47 @@ TEST(GeneralVoFFaceTransport, NumericalFloorFallsBackButResourceExhaustionReject
     EXPECT_EQ(exhausted.accepted_identity(), before);
 }
 
+TEST(GeneralVoFFaceTransport, ApproximationArithmeticFailureRejectsWithoutDonorFallbackAndRecovers)
+{
+    auto input = fixture();
+    for (std::size_t i = 0; i < input.order.size(); ++i)
+    {
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        input.gas[i] = center[0] < 1 ? .75 : 0;
+        input.carrier[i] = 1 - input.gas[i];
+    }
+    auto options = face_options();
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    options.phase_cleanup.relative_cutoff = 0;
+    options.reconstruction.model_policy = PLIC::PlicModelPolicy::ConservativeApproximation;
+    options.reconstruction.volume_tolerance = 1e-30; // Deliberately unattainable diagnostic, not a Q2 gate.
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto identity = state.accepted_identity();
+    bool rejected = false;
+    try
+    {
+        (void) state.plan_face_transport(circulation(state), 1);
+    }
+    catch (const SimpleFluid::detail::vof_failure::Failure& error)
+    {
+        namespace failure = SimpleFluid::detail::vof_failure;
+        const auto& record = error.record();
+        EXPECT_EQ(record.category, failure::Category::Arithmetic);
+        EXPECT_EQ(record.geometry_code, int(PLIC::GeometryErrorCode::UnresolvedArithmetic));
+        EXPECT_TRUE(record.has(failure::Field::Cell));
+        EXPECT_TRUE(record.has(failure::Field::Face));
+        EXPECT_TRUE(record.has(failure::Field::Donor));
+        rejected = true;
+    }
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(state.accepted_identity(), identity);
+    EXPECT_EQ(state.gas_volumes(), input.gas);
+    EXPECT_EQ(state.carrier_volumes(), input.carrier);
+    options.reconstruction.volume_tolerance = 8e-15;
+    GeneralVoF recovered(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto valid = recovered.plan_face_transport(circulation(recovered), 1);
+    ASSERT_TRUE(valid.prepared_transport());
+    EXPECT_EQ(valid.prepared_transport()->diagnostics.fallback_streams, 0u);
+}
+
 } // namespace
