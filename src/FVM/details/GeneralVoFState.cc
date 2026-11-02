@@ -89,11 +89,13 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
     cell.occupancy.phase_input_bound = detail::phase_upper_bound(input + diagnostic_error);
     cell.occupancy.admitted_bound = detail::phase_upper_bound(absolute(conversion) + input + diagnostic_error);
 }
-template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
+template<ArithmeticMode Mode>
+void validate_cell(
+    const Cell& cell, const GeneralVoFOptions& options, const PLIC::DynamicPolyhedralReconstructionResult* retained)
 {
     constexpr bool experimental = Mode == ArithmeticMode::Exact;
-    if (cell.retained_interface)
-        validate_plane_metadata(*cell.retained_interface, options.reconstruction, Mode);
+    if (retained)
+        validate_plane_metadata(*retained, options.reconstruction, Mode);
     if (options.arithmetic_mode != Mode)
         throw std::invalid_argument("General VoF state arithmetic mode differs from its selected operation.");
     if (experimental != bool(cell.experimental_exact))
@@ -125,7 +127,8 @@ template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const General
             valid = valid && std::isfinite(bound) && bound >= 0;
         if (!valid || std::uint64_t(cell.declaration) > 2)
             throw std::invalid_argument("General VoF finite occupancy provenance is invalid.");
-        PLIC::PolyhedralReconstruction<Mode>::validate(reconstruction_sample<Mode>(cell), options.reconstruction);
+        PLIC::PolyhedralReconstruction<Mode>::validate(
+            reconstruction_sample<Mode>(cell, retained), options.reconstruction);
         if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
         {
             const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ? cell.phase.carrier_volume
@@ -158,7 +161,7 @@ template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const General
     // always uses complementary labels, not a fresh input tolerance on an
     // accepted inventory carrying explicit publication uncertainty.
     PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::validate(
-        reconstruction_sample<ArithmeticMode::Exact>(cell), options.reconstruction);
+        reconstruction_sample<ArithmeticMode::Exact>(cell, retained), options.reconstruction);
     if (std::uint64_t(cell.declaration) > 2)
         throw std::invalid_argument("General VoF invalid phase geometry declaration.");
     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
@@ -237,11 +240,14 @@ void current(const GeneralVoF::Data& data)
         throw std::invalid_argument("General VoF source geometry/control is stale.");
 }
 template void occupancy<ArithmeticMode::Ordinary>(Cell&);
-template void validate_cell<ArithmeticMode::Ordinary>(const Cell&, const GeneralVoFOptions&);
+template void validate_cell<ArithmeticMode::Ordinary>(
+    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template void occupancy<ArithmeticMode::BoundedCertification>(Cell&);
-template void validate_cell<ArithmeticMode::BoundedCertification>(const Cell&, const GeneralVoFOptions&);
+template void validate_cell<ArithmeticMode::BoundedCertification>(
+    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template void occupancy<ArithmeticMode::Exact>(Cell&);
-template void validate_cell<ArithmeticMode::Exact>(const Cell&, const GeneralVoFOptions&);
+template void validate_cell<ArithmeticMode::Exact>(
+    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template long double phase_allowance<ArithmeticMode::Ordinary>(PLIC::DynamicGeometryValue, double);
 template long double phase_allowance<ArithmeticMode::BoundedCertification>(PLIC::DynamicGeometryValue, double);
 } // namespace SimpleFluid::VoF::general_vof_detail

@@ -1069,7 +1069,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
     wire::collective(*comm,
         [&]
         {
-            candidate = std::make_shared<Data>(data);
+            candidate = copy_state(data);
+            invalidate_owned_interfaces(*candidate);
             candidate->control = trial.transaction_;
             std::map<Key, ExactAmounts> totals;
             for (std::size_t i = 0; i < transfers.size(); ++i)
@@ -1103,7 +1104,6 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 if (((total.gas + total.carrier) - total.bulk).compare((before.gas + before.carrier) - before.bulk))
                     throw std::invalid_argument(
                         "General VoF transport changed the independent source occupancy defect.");
-                cell.retained_interface.reset();
                 if (inventory_policy_for(data.options.arithmetic_mode) == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     cell.experimental_exact = detail::experimental_advance(*data.cells.at(key).experimental_exact,

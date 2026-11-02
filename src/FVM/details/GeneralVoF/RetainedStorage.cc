@@ -59,6 +59,17 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         budget.add(bytes);
     };
     budget.add(extra_retained_bytes);
+    // The result includes its inline finite/Exact enclosure; only keys have
+    // additional dynamic ancestry. Do not charge Exact inventory payloads here.
+    budget.add(data.retained_interfaces.storage_bytes());
+    for (const auto& record : data.retained_interfaces.records())
+    {
+        const auto found = data.cells.find(record.key);
+        if (found == data.cells.end() || found->second.key != record.key ||
+            found->second.owner != data.hierarchy->communicator()->getRank())
+            throw std::invalid_argument("General VoF retained interface lacks its canonical owned cell.");
+        validate_plane_metadata(record.result, data.options.reconstruction, Mode);
+    }
     std::set<const void*> geometry;
     budget.add(data.latest_phase_cleanup.capacity() * sizeof(GeneralVoFPhaseCleanupDelta));
     for (const auto& delta : data.latest_phase_cleanup)

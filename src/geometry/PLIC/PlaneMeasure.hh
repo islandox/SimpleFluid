@@ -38,7 +38,25 @@ enum class WholeFacePlaneSide
 class OrdinaryPlaneMeasure
 {
 public:
+    /** Invocation-local reusable polygons. Independent scratch objects allow
+     * simultaneous queries on one immutable preparation. */
+    class Scratch
+    {
+    public:
+        void reserve(std::size_t maximum_face_degree);
+        [[nodiscard]] std::array<std::size_t, 2> capacities() const
+        {
+            return {polygon_.capacity(), covered_.capacity()};
+        }
+
+    private:
+        friend class OrdinaryPlaneMeasure;
+        std::vector<std::array<long double, 3>> polygon_, covered_;
+    };
     explicit OrdinaryPlaneMeasure(const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
+    [[nodiscard]] Scratch make_scratch() const;
+    [[nodiscard]] std::size_t maximum_face_degree() const { return maximum_face_degree_; }
+    [[nodiscard]] PlaneVolumeMeasure below(const GeometryHalfspace&, Scratch&, bool section_area = false) const;
     [[nodiscard]] PlaneVolumeMeasure below(const GeometryHalfspace&, bool section_area = false) const;
     /** Evaluate original Ordinary vertices against both finite ordered offsets.
      * Contact or an unresolved sign yields UnknownOrContact. Malformed inputs
@@ -50,7 +68,9 @@ private:
     GeometryPoint origin_{};
     long double scale_ = 0;
     std::vector<std::array<long double, 3>> vertices_;
-    std::vector<std::vector<std::size_t>> faces_;
+    // The retained immutable geometry owns the original face loops.
+    DynamicConvexGeometryPtr owner_;
+    std::size_t maximum_face_degree_ = 0;
 };
 /** Original planar polygon coordinates are relative to origin. The loop may
  * have either orientation. Computes only the covered area of the halfspace;

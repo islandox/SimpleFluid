@@ -193,6 +193,49 @@ private:
     }
     Storage keys_;
 };
+/** Owned sparse evidence: full records exist only for explicitly retained interfaces.
+ * Keys and results are values, so copied publications never borrow mutable rows. */
+class SIMPLEFLUID_FVM_LOCAL RetainedInterfaces
+{
+public:
+    struct Record
+    {
+        Key key;
+        PLIC::DynamicPolyhedralReconstructionResult result;
+    };
+    [[nodiscard]] const PLIC::DynamicPolyhedralReconstructionResult* find(const Key& key) const
+    {
+        const auto found = lower_bound(key);
+        return found != records_.end() && found->key == key ? &found->result : nullptr;
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return records_.size(); }
+    [[nodiscard]] std::size_t capacity() const noexcept { return records_.capacity(); }
+    [[nodiscard]] std::span<const Record> records() const noexcept { return records_; }
+    [[nodiscard]] std::size_t storage_bytes() const;
+    /** Upper bound before copying owned rows and their key ancestry. */
+    [[nodiscard]] std::size_t copy_bytes() const;
+    void reserve(std::size_t count, wire::Budget& budget);
+    /** Append one admitted construction batch, then finish before lookup. */
+    void append(const Key& key, const PLIC::DynamicPolyhedralReconstructionResult& result, wire::Budget& budget);
+    void finish();
+    template<class Predicate> void erase_if(Predicate&& predicate)
+    {
+        // Compact one batch once, rather than shifting the tail for every cell.
+        std::erase_if(records_, [&](const Record& record) { return predicate(record.key); });
+        if (records_.empty())
+            clear();
+    }
+    void clear() noexcept { std::vector<Record>().swap(records_); }
+
+private:
+    [[nodiscard]] static std::size_t ancestry_bytes(const Key& key);
+    [[nodiscard]] std::vector<Record>::const_iterator lower_bound(const Key& key) const
+    {
+        return std::lower_bound(records_.begin(), records_.end(), key,
+            [](const Record& record, const Key& sought) { return record.key < sought; });
+    }
+    std::vector<Record> records_;
+};
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 namespace fp = finite_detail;
 struct LocalSpatialCache;
@@ -211,7 +254,6 @@ struct Cell
     PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
-    std::optional<PLIC::DynamicPolyhedralReconstructionResult> retained_interface;
     bool inherited = false;
     // Authenticated independently of the optional owner-only retained plane.
     bool requires_interface = false;
@@ -369,6 +411,7 @@ struct GeneralVoF::Data
     std::weak_ptr<const void> adopted_source;
     std::uint64_t adopted_source_control = 0, adopted_transaction = 0, adopted_target_control = 0;
     std::map<Key, Cell> cells;
+    RetainedInterfaces retained_interfaces;
     std::vector<double> gas, carrier;
     std::vector<PhaseVolumes> phases;
     std::vector<PhaseRoundoff> roundoff, phase_history;
@@ -378,6 +421,14 @@ struct GeneralVoF::Data
 };
 namespace general_vof_detail
 {
+/** Borrowed only while this immutable publication's sparse table is unchanged. */
+inline const PLIC::DynamicPolyhedralReconstructionResult* retained_interface(
+    const GeneralVoF::Data& data, const Cell& cell)
+{
+    return data.retained_interfaces.find(cell.key);
+}
+SIMPLEFLUID_FVM_LOCAL std::shared_ptr<GeneralVoF::Data> copy_state(const GeneralVoF::Data& source);
+SIMPLEFLUID_FVM_LOCAL void invalidate_owned_interfaces(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode);
 SIMPLEFLUID_FVM_LOCAL PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes = 64 * 1024 * 1024);
 template<ArithmeticMode Mode>
@@ -387,7 +438,8 @@ SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMo
 SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options);
+SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options,
+    const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
     const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
     const PLIC::PolyhedralInterface& p);
@@ -412,7 +464,8 @@ SIMPLEFLUID_FVM_LOCAL void agree_transaction(Teuchos::RCP<const Teuchos::Comm<in
 SIMPLEFLUID_FVM_LOCAL void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos::Comm<int>> comm);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void import_phases(GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell);
+SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(
+    const Cell& cell, const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
     const GeneralVoF::Data& data, const Key& key, bool complete_support = false, std::size_t* fitting_cells = nullptr);

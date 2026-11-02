@@ -1,5 +1,6 @@
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <algorithm>
 #include <cmath>
@@ -54,12 +55,11 @@ Vector intersection(Vector inside, Vector outside, long double di, long double d
         inside[i] += fraction * (outside[i] - inside[i]);
     return inside;
 }
-std::vector<Vector> clipped(std::span<const Vector> polygon, Vector n, long double offset)
+void clipped(std::span<const Vector> polygon, Vector n, long double offset, std::vector<Vector>& result)
 {
-    std::vector<Vector> result;
-    result.reserve(polygon.size() + 2);
+    result.clear();
     if (polygon.empty())
-        return result;
+        return;
     auto previous = polygon.back();
     auto dp = dot(n, previous) - offset;
     for (const auto& current : polygon)
@@ -73,7 +73,6 @@ std::vector<Vector> clipped(std::span<const Vector> polygon, Vector n, long doub
         previous = current;
         dp = dc;
     }
-    return result;
 }
 Vector polygon_vector_area(std::span<const Vector> polygon)
 {
@@ -129,26 +128,47 @@ WholeFacePlaneSide OrdinaryPlaneMeasure::strict_face_side(std::span<const Point<
         : positive ? WholeFacePlaneSide::StrictPositive : WholeFacePlaneSide::UnknownOrContact;
 }
 
-OrdinaryPlaneMeasure::OrdinaryPlaneMeasure(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
-    : origin_(cell.origin()), faces_(cell.faces())
+void OrdinaryPlaneMeasure::Scratch::reserve(std::size_t maximum_face_degree)
 {
-    const auto points = cell.local_points();
-    for (const auto& point : points)
-        for (const auto value : point.value)
-            scale_ = std::max(scale_, std::abs(value));
+    if (maximum_face_degree > polygon_.max_size() || maximum_face_degree > covered_.max_size() / 2)
+        throw std::length_error("Ordinary plane measure scratch degree exceeds addressable storage.");
+    polygon_.reserve(maximum_face_degree);
+    // Every original edge can emit a crossing and its retained endpoint.
+    covered_.reserve(2 * maximum_face_degree);
+}
+OrdinaryPlaneMeasure::OrdinaryPlaneMeasure(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
+    : origin_(cell.origin()), owner_(cell.dynamic_geometry())
+{
+    vertices_.reserve(cell.vertex_count());
+    details::visit_local_coordinates(cell, [&](std::size_t, const PointCoordinates<ArithmeticMode::Ordinary>& point)
+        {
+            for (const auto value : point.value)
+                scale_ = std::max(scale_, std::abs(value));
+            vertices_.push_back(point.value);
+        });
     if (!(scale_ > 0) || !std::isfinite(scale_))
         throw std::invalid_argument("Ordinary plane measure requires a nondegenerate finite cell.");
-    vertices_.reserve(points.size());
-    for (const auto& point : points)
-    {
-        auto vertex = point.value;
+    for (auto& vertex : vertices_)
         for (auto& value : vertex)
             value /= scale_;
-        vertices_.push_back(vertex);
-    }
+    for (const auto& face : owner_->faces())
+        maximum_face_degree_ = std::max(maximum_face_degree_, face.size());
+}
+OrdinaryPlaneMeasure::Scratch OrdinaryPlaneMeasure::make_scratch() const
+{
+    Scratch scratch;
+    scratch.reserve(maximum_face_degree_);
+    return scratch;
 }
 PlaneVolumeMeasure OrdinaryPlaneMeasure::below(const GeometryHalfspace& plane, bool section_area) const
 {
+    auto scratch = make_scratch();
+    return below(plane, scratch, section_area);
+}
+PlaneVolumeMeasure OrdinaryPlaneMeasure::below(
+    const GeometryHalfspace& plane, Scratch& scratch, bool section_area) const
+{
+    scratch.reserve(maximum_face_degree_);
     const auto n = normal(plane);
     const auto norm = std::hypot(static_cast<long double>(plane.normal[0]), static_cast<long double>(plane.normal[1]),
         static_cast<long double>(plane.normal[2]));
@@ -171,14 +191,14 @@ PlaneVolumeMeasure OrdinaryPlaneMeasure::below(const GeometryHalfspace& plane, b
     }
     if (!any_inside)
         return result;
-    std::vector<Vector> polygon;
-    for (const auto& face : faces_)
+    auto& polygon = scratch.polygon_;
+    auto& covered = scratch.covered_;
+    for (const auto& face : owner_->faces())
     {
         polygon.clear();
-        polygon.reserve(face.size());
         for (auto vertex : face)
             polygon.push_back(subtract(vertices_[vertex], anchor));
-        const auto covered = clipped(polygon, n, offset);
+        clipped(polygon, n, offset, covered);
         if (covered.size() < 3)
             continue;
         const auto area = polygon_vector_area(covered);
@@ -233,7 +253,11 @@ PlaneAreaMeasure ordinary_plane_face_area(
         }
         local.push_back(p);
     }
-    const auto covered = clipped(local, n, offset);
+    std::vector<Vector> covered;
+    if (vertices.size() > covered.max_size() / 2)
+        throw std::length_error("Ordinary face area scratch degree exceeds addressable storage.");
+    covered.reserve(2 * vertices.size());
+    clipped(local, n, offset, covered);
     const auto area = length(polygon_vector_area(covered));
     long double absolute_products = 0;
     for (std::size_t i = 1; i + 1 < covered.size(); ++i)

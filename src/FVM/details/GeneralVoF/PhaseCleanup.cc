@@ -317,7 +317,6 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
                         cell.occupancy.difference = static_cast<double>(difference.value());
                         cell.declaration =
                             minority == 0 ? GeneralVoFPhaseGeometry::PureCarrier : GeneralVoFPhaseGeometry::PureGas;
-                        cell.retained_interface.reset();
                         cell.requires_interface = false;
                         cell.occupancy.fit_residual = 0;
                         validate_cell<ArithmeticMode::Ordinary>(cell, data.options);
@@ -402,6 +401,7 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
             validate(result, &options);
             for (auto& [key, cell] : replacements)
                 data.cells.at(key) = std::move(cell);
+            data.retained_interfaces.erase_if([&](const Key& key) { return replacements.contains(key); });
             data.phase_cleanup = result;
             data.latest_phase_cleanup = std::move(proposed);
             // Construction has no completed phase arrays yet. Transport/remap do.

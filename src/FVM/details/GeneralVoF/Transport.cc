@@ -129,8 +129,9 @@ bool GeneralVoF::homogeneous_transport_eligible() const
             {
                 local_eligible &= cell.declaration == GeneralVoFPhaseGeometry::PureGas ||
                                   cell.declaration == GeneralVoFPhaseGeometry::PureCarrier;
-                if (cell.retained_interface && !PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
-                    !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier)
+                const auto* retained = retained_interface(*data_, cell);
+                if (retained && !PLIC::reconstruction_geometry(*retained).pure_gas &&
+                    !PLIC::reconstruction_geometry(*retained).pure_carrier)
                     local_eligible = 0;
             }
             for (const auto& tile : data_->topology->tiles)

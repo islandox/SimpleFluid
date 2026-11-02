@@ -848,7 +848,8 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     safe(
         [&]
         {
-            candidate = std::make_shared<Data>(data);
+            candidate = copy_state(data);
+            invalidate_owned_interfaces(*candidate);
             candidate->control = trial.transaction_;
             reset_finite_phase_publication(*candidate);
             for (const auto& key : data.topology->order)
@@ -939,7 +940,6 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 c.occupancy.fit_allocation_bound = fp::upper_double(provenance.fit_allocation_bound);
                 c.occupancy.phase_input_bound = fp::upper_double(fp::bound_add(inherited_input, publication));
                 c.occupancy.transferred_bound = fp::upper_double(fp::bound_add(inherited_transferred, publication));
-                c.retained_interface.reset();
                 c.requires_interface = false;
                 c.inherited = true;
                 if ((c.declaration == GeneralVoFPhaseGeometry::PureGas && update.carrier_geometry) ||

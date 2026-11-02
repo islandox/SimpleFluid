@@ -572,7 +572,6 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                     fp::upper_double(fp::bound_add(pg.second, ge)), fp::upper_double(fp::bound_add(pl.second, le))};
                 c.finite_history = {fp::upper_double(fp::bound_add(history_g[c.gid], c.roundoff.gas)),
                     fp::upper_double(fp::bound_add(history_l[c.gid], c.roundoff.carrier))};
-                c.retained_interface.reset();
                 c.inherited = true;
                 // A pure geometric hint survives same-phase trace transport only.
                 if (mixed_receipts.contains(c.gid))
@@ -815,7 +814,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                         trial.candidate_ = data_;
                     else
                     {
-                        auto identity = std::make_shared<Data>(data);
+                        auto identity = copy_state(data);
                         identity->latest_phase_cleanup.clear();
                         trial.candidate_ = std::move(identity);
                     }
@@ -1273,7 +1272,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
     wire::collective(*comm,
         [&]
         {
-            candidate = std::make_shared<Data>(data);
+            candidate = copy_state(data);
             candidate->control = trial.transaction_;
             reset_finite_phase_publication(*candidate);
         });
@@ -1288,6 +1287,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
     wire::collective(*comm,
         [&]
         {
+            invalidate_owned_interfaces(*candidate);
             for (const auto& [face, stream] : streams)
             {
                 trial.unbound_streams_.push_back(stream);

@@ -41,17 +41,17 @@ WidePoint wide(const PLIC::GeometryPoint& p)
 {
     throw GeneralVoFSurfaceResolutionError(GeneralVoFSurfaceResolutionReason::AmbiguousTopology, message);
 }
-int geometric_phase(const Cell& cell)
+int geometric_phase(const GeneralVoF::Data& data, const Cell& cell)
 {
     if (cell.declaration == GeneralVoFPhaseGeometry::PureGas)
         return 1;
     if (cell.declaration == GeneralVoFPhaseGeometry::PureCarrier)
         return -1;
-    if (cell.retained_interface)
+    if (const auto* retained = retained_interface(data, cell))
     {
-        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas)
+        if (PLIC::reconstruction_geometry(*retained).pure_gas)
             return 1;
-        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier)
+        if (PLIC::reconstruction_geometry(*retained).pure_carrier)
             return -1;
         return 0;
     }
@@ -180,7 +180,7 @@ std::vector<GeneralVoFFaceInterface> GeneralVoF::face_interfaces() const
                     continue;
                 const auto& first = data_->cells.at(tile.first);
                 const auto& second = data_->cells.at(*tile.second);
-                const auto a = geometric_phase(first), b = geometric_phase(second);
+                const auto a = geometric_phase(*data_, first), b = geometric_phase(*data_, second);
                 if (a * b != -1)
                     continue;
                 budget.add(sizeof(GeneralVoFFaceInterface));
@@ -371,7 +371,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     continue;
                 const auto& first = data_->cells.at(tile.first);
                 const auto& second = data_->cells.at(*tile.second);
-                const auto a = geometric_phase(first), b = geometric_phase(second);
+                const auto a = geometric_phase(*data_, first), b = geometric_phase(*data_, second);
                 std::optional<GeneralVoFSurfaceKey> aligned;
                 if (a * b == -1)
                 {

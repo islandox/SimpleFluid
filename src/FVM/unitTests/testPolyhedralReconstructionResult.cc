@@ -2,6 +2,7 @@
  * @brief Complete mode-aware production PLIC records and malformed input oracles.
  */
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/PolyhedralInterface.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/ScalarPacket.hh"
@@ -200,6 +201,123 @@ static_assert(decltype(PolyhedralReconstructionResult<ArithmeticMode::Ordinary>{
 static_assert(!std::is_convertible_v<PolyhedralReconstructionResult<ArithmeticMode::Ordinary>,
     PolyhedralReconstructionResult<ArithmeticMode::Exact>>);
 static_assert(std::variant_size_v<DynamicPolyhedralReconstructionResult> == 3);
+
+template<ArithmeticMode Mode> void expect_sparse_retention()
+{
+    using Data = SimpleFluid::VoF::GeneralVoF::Data;
+    using Key = codec::Key;
+    const Key first{3, codec::AMR::ConvexCellAncestry{7, {11, 23, 47}}};
+    const Key second{3, codec::AMR::ConvexCellAncestry{7, {11, 23, 48}}};
+    const Key third{3, codec::AMR::ProductCellAncestry{{9, 2, {3, 5}}, {7, {11, 13}}}};
+    const auto expected = to_dynamic(full_record<Mode>());
+    const auto expected_bytes = encode(expected);
+    std::shared_ptr<Data> candidate;
+    {
+        Data source;
+        codec::wire::Budget budget{1 << 20};
+        EXPECT_EQ(source.retained_interfaces.size(), 0u);
+        EXPECT_EQ(source.retained_interfaces.capacity(), 0u);
+        EXPECT_EQ(source.retained_interfaces.storage_bytes(), 0u);
+        source.retained_interfaces.reserve(3, budget);
+        const auto reserved = source.retained_interfaces.capacity();
+        // Opposite insertion order exercises sorted canonical lookup independently
+        // of the resident-cell order and key ancestry allocation lifetimes.
+        for (const auto& key : {third, second, first})
+            source.retained_interfaces.append(key, expected, budget);
+        source.retained_interfaces.finish();
+        EXPECT_EQ(source.retained_interfaces.capacity(), reserved);
+        EXPECT_GT(source.retained_interfaces.storage_bytes(), reserved * sizeof(codec::RetainedInterfaces::Record));
+        candidate = codec::copy_state(source);
+        for (const auto& key : {first, second, third})
+        {
+            const auto* retained = candidate->retained_interfaces.find(key);
+            ASSERT_NE(retained, nullptr);
+            EXPECT_EQ(encode(*retained), expected_bytes);
+            EXPECT_NE(retained, source.retained_interfaces.find(key));
+        }
+        candidate->retained_interfaces.erase_if([&](const Key& key) { return key == second; });
+        EXPECT_EQ(candidate->retained_interfaces.find(second), nullptr);
+        EXPECT_NE(source.retained_interfaces.find(second), nullptr);
+        EXPECT_EQ(encode(*source.retained_interfaces.find(second)), expected_bytes);
+        EXPECT_EQ(candidate->retained_interfaces.size(), 2u);
+    }
+    // Both copied key ancestry and every mode-specific metadata field survive
+    // destruction of the source, with no source publication ownership retained.
+    for (const auto& key : {first, third})
+    {
+        const auto* retained = candidate->retained_interfaces.find(key);
+        ASSERT_NE(retained, nullptr);
+        EXPECT_EQ(encode(*retained), expected_bytes);
+    }
+    candidate->retained_interfaces.erase_if([](const Key&) { return true; });
+    EXPECT_EQ(candidate->retained_interfaces.capacity(), 0u);
+    EXPECT_EQ(candidate->retained_interfaces.storage_bytes(), 0u);
+}
+TEST(PolyhedralReconstructionResultTest, SparseRetentionCopiesCompleteOrdinaryBoundedAndExactRecords)
+{
+    expect_sparse_retention<ArithmeticMode::Ordinary>();
+    expect_sparse_retention<ArithmeticMode::BoundedCertification>();
+    expect_sparse_retention<ArithmeticMode::Exact>();
+}
+TEST(PolyhedralReconstructionResultTest, SparseRetentionFinalizesReverseOrderedBatchAndRejectsDuplicateKeys)
+{
+    codec::RetainedInterfaces records;
+    codec::wire::Budget budget{1 << 20};
+    constexpr std::size_t count = 1024;
+    records.reserve(count, budget);
+    const auto capacity = records.capacity();
+    for (std::size_t i = count; i > 0; --i)
+    {
+        auto result = full_record<ArithmeticMode::Exact>();
+        result.fit_iterations = static_cast<unsigned>(i);
+        records.append(codec::Key{3, codec::AMR::StaticCellAncestry{7, i}}, to_dynamic(result), budget);
+    }
+    records.finish();
+    EXPECT_EQ(records.capacity(), capacity);
+    EXPECT_EQ(records.size(), count);
+    for (std::size_t i = 1; i <= count; ++i)
+    {
+        const auto* found = records.find(codec::Key{3, codec::AMR::StaticCellAncestry{7, i}});
+        ASSERT_NE(found, nullptr);
+        EXPECT_EQ(std::get<PolyhedralReconstructionResult<ArithmeticMode::Exact>>(*found).fit_iterations, i);
+    }
+    codec::RetainedInterfaces duplicate;
+    const codec::Key key{3, codec::AMR::StaticCellAncestry{7, 1}};
+    const auto result = to_dynamic(full_record<ArithmeticMode::Exact>());
+    duplicate.reserve(2, budget);
+    duplicate.append(key, result, budget);
+    duplicate.append(key, result, budget);
+    EXPECT_THROW(duplicate.finish(), std::invalid_argument);
+}
+TEST(PolyhedralReconstructionResultTest, SparseRetentionPreflightsGrowthAndCopyWithoutMutatingSource)
+{
+    codec::RetainedInterfaces empty;
+    codec::wire::Budget none{0};
+    EXPECT_THROW(empty.reserve(1, none), GeometryError);
+    EXPECT_EQ(empty.capacity(), 0u);
+    SimpleFluid::VoF::GeneralVoF::Data source;
+    codec::wire::Budget budget{1 << 20};
+    const codec::Key key{3, codec::AMR::ConvexCellAncestry{7, {11, 23, 47}}};
+    const auto expected = to_dynamic(full_record<ArithmeticMode::Exact>());
+    source.retained_interfaces.append(key, expected, budget);
+    source.retained_interfaces.finish();
+    const auto bytes = encode(*source.retained_interfaces.find(key));
+    const auto capacity = source.retained_interfaces.capacity();
+    codec::wire::Budget exhausted{0};
+    EXPECT_THROW(source.retained_interfaces.reserve(capacity + 1, exhausted), GeometryError);
+    EXPECT_EQ(source.retained_interfaces.capacity(), capacity);
+    EXPECT_EQ(encode(*source.retained_interfaces.find(key)), bytes);
+    const codec::Key rejected_key{3, codec::AMR::ConvexCellAncestry{7, {11, 23, 48}}};
+    EXPECT_THROW(source.retained_interfaces.append(rejected_key, expected, exhausted), GeometryError);
+    EXPECT_EQ(source.retained_interfaces.find(rejected_key), nullptr);
+    EXPECT_EQ(source.retained_interfaces.size(), 1u);
+    EXPECT_EQ(encode(*source.retained_interfaces.find(key)), bytes);
+    source.options.byte_budget =
+        source.retained_interfaces.storage_bytes() + source.retained_interfaces.copy_bytes() - 1;
+    EXPECT_THROW(codec::copy_state(source), GeometryError);
+    EXPECT_EQ(source.retained_interfaces.capacity(), capacity);
+    EXPECT_EQ(encode(*source.retained_interfaces.find(key)), bytes);
+}
 
 TEST(PolyhedralReconstructionResultTest, GeometryIsIndependentOfReconstructionMetadata)
 {

@@ -88,11 +88,11 @@ struct AggregateFaceTrace
             stats.operations);
     }
 };
-bool needs_interface(const Cell& cell)
+bool needs_interface(const GeneralVoF::Data& data, const Cell& cell)
 {
     return cell.declaration == GeneralVoFPhaseGeometry::Infer || cell.requires_interface ||
-           (cell.retained_interface && !PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
-               !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier);
+           (retained_interface(data, cell) && !PLIC::reconstruction_geometry(*retained_interface(data, cell)).pure_gas &&
+               !PLIC::reconstruction_geometry(*retained_interface(data, cell)).pure_carrier);
 }
 } // namespace
 LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const OrdinaryTraceMap& traces,
@@ -235,7 +235,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 std::optional<GeneralVoFPhaseGeometry> pure;
                 const auto classify = [&](const Cell& cell)
                 {
-                    geometric |= needs_interface(cell);
+                    geometric |= needs_interface(data, cell);
                     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
                     {
                         if (pure && *pure != cell.declaration)
@@ -256,16 +256,15 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         [&]
                         {
                             auto& scratch = workspace.setup_work();
-                            scratch.charge(3 * tile.node_gids.size() * sizeof(std::array<Point, 3>));
-                            for (const auto& triangle :
-                                SimpleFluid::geometry::swept_volume::sweep_boundary(
-                                    tile.node_gids, recipe.current, recipe.departure, recipe.center, recipe.backcenter))
+                            SimpleFluid::geometry::swept_volume::visit_sweep_triangles(
+                                tile.node_gids, recipe.current, recipe.departure, recipe.backcenter,
+                                [&](const Point& a, const Point& b, const Point& c)
                             {
                                 scratch.test();
                                 const auto v =
-                                    SimpleFluid::geometry::swept_volume::cone_determinant(recipe.center, triangle);
+                                    SimpleFluid::geometry::swept_volume::cone_determinant(recipe.center, a, b, c);
                                 zero_effect &= v.value == 0 && v.absolute_error == 0;
-                            }
+                            });
                         });
                 }
                 geometric &= !zero_effect;

@@ -214,9 +214,11 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 w.word(std::uint64_t(cell.declaration));
                 w.word(cell.inherited);
                 if constexpr (Mode == ArithmeticMode::Ordinary)
-                    w.word(cell.retained_interface &&
-                           !PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
-                           !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier);
+                {
+                    const auto* retained = retained_interface(data, cell);
+                    w.word(retained && !PLIC::reconstruction_geometry(*retained).pure_gas &&
+                           !PLIC::reconstruction_geometry(*retained).pure_carrier);
+                }
                 real(w, cell.roundoff.gas);
                 real(w, cell.roundoff.carrier);
                 real(w, cell.finite_history.gas);
@@ -287,7 +289,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 else
                     cell.experimental_exact.reset();
                 r.done();
-                validate_cell<Mode>(cell, data.options);
+                validate_cell<Mode>(cell, data.options, retained_interface(data, cell));
             }
             if (seen.size() != requests.size())
                 throw std::invalid_argument("General VoF incomplete phase replies.");

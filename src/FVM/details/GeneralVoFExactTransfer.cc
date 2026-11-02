@@ -62,6 +62,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                 if (found == self.data_->cells.end() || !self.data_->hierarchy->owned().contains(capsule.key))
                     throw std::invalid_argument("General VoF adopted transfer ownership differs.");
                 const auto& cell = found->second;
+                const auto* retained = retained_interface(*self.data_, cell);
                 if (capsule.policy != self.inventory_policy() ||
                     bool(capsule.experimental_exact) != bool(cell.experimental_exact))
                     throw std::invalid_argument("General VoF adopted policy/payload differs.");
@@ -88,7 +89,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                                                        ? GeneralVoFPhaseGeometry::PureCarrier
                                                        : GeneralVoFPhaseGeometry::Infer);
                 if (cell.revision != capsule.revision || cell.declaration != declaration ||
-                    bool(cell.retained_interface) !=
+                    bool(retained) !=
                         (capsule.geometry_ready &&
                             self.inventory_policy() == PhaseInventoryPolicy::ExperimentalExact) ||
                     cell.native_volume != capsule.phases.bulk || cell.phase.gas_volume != capsule.phases.gas ||
@@ -126,6 +127,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
             {
                 budget.add(sizeof(ExactPhaseTransferCapsule) + AMR::encode_adaptive_key(key).size());
                 const auto& cell = self.data_->cells.at(key);
+                const auto* retained = retained_interface(*self.data_, cell);
                 ExactPhaseTransferCapsule capsule;
                 capsule.key = key;
                 capsule.policy = self.inventory_policy();
@@ -157,10 +159,10 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     capsule.geometry = interfaces.at(key);
                     capsule.geometry_ready = true;
                 }
-                else if (cell.retained_interface &&
+                else if (retained &&
                          self.inventory_policy() == PhaseInventoryPolicy::ExperimentalExact)
                 {
-                    capsule.geometry = *cell.retained_interface;
+                    capsule.geometry = *retained;
                     capsule.geometry_ready = true;
                 }
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer || !phase_measures(cell).gas.sign() ||
@@ -182,9 +184,8 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                             PLIC::reconstruction_geometry(capsule.geometry));
                     const auto fit_diagnostic = detail::round_phase_residual(target - (gas ? raw.gas : raw.carrier));
                     capsule.error.fit_residual = fit_diagnostic.value;
-                    const auto view =
-                        Measure::from_value(gas ? reconstruction_sample<ArithmeticMode::Exact>(cell).gas_volume
-                                                : reconstruction_sample<ArithmeticMode::Exact>(cell).carrier_volume);
+                    const auto sample = reconstruction_sample<ArithmeticMode::Exact>(cell, retained);
+                    const auto view = Measure::from_value(gas ? sample.gas_volume : sample.carrier_volume);
                     const auto conversion = target - view;
                     auto fit_bound = view.scaled(self.data_->options.reconstruction.volume_tolerance) +
                                      (conversion.sign() < 0 ? conversion.scaled(-1) : conversion);

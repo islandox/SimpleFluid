@@ -313,7 +313,7 @@ template<ArithmeticMode Mode>
 [[nodiscard]] PointSnapshot<Mode> snapshot_points(
     std::span<const Point<Mode>>, GeometryAllocationLedger&, std::size_t& used, std::size_t limit);
 
-/** Typed owning publication; its immutable dynamic publication remains pinned. */
+/** Typed owning publication sharing immutable provenance with sibling exports. */
 template<ArithmeticMode Mode> class PointExport
 {
     static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);

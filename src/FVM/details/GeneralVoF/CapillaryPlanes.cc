@@ -25,17 +25,17 @@ struct Candidate
     PLIC::GeometryHalfspace gas;
     std::optional<PLIC::PlaneSupportIdentity<mode>> support;
 };
-int geometric_phase(const Cell& cell, const PLIC::PolyhedralInterface& original)
+int geometric_phase(const GeneralVoF::Data& data, const Cell& cell, const PLIC::PolyhedralInterface& original)
 {
     if (cell.declaration == GeneralVoFPhaseGeometry::PureGas)
         return 1;
     if (cell.declaration == GeneralVoFPhaseGeometry::PureCarrier)
         return -1;
-    if (cell.retained_interface)
+    if (const auto* retained = retained_interface(data, cell))
     {
-        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas)
+        if (PLIC::reconstruction_geometry(*retained).pure_gas)
             return 1;
-        if (PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier)
+        if (PLIC::reconstruction_geometry(*retained).pure_carrier)
             return -1;
         return 0;
     }
@@ -122,8 +122,8 @@ std::optional<Candidate> native_candidate(
         return {};
     const auto& first = data.cells.at(tile.first);
     const auto& second = data.cells.at(*tile.second);
-    const int a = geometric_phase(first, PLIC::reconstruction_geometry(original.at(tile.first)));
-    const int b = geometric_phase(second, PLIC::reconstruction_geometry(original.at(*tile.second)));
+    const int a = geometric_phase(data, first, PLIC::reconstruction_geometry(original.at(tile.first)));
+    const int b = geometric_phase(data, second, PLIC::reconstruction_geometry(original.at(*tile.second)));
     if (a * b != -1)
         return {};
     const auto& points = tile.geometry->points();
@@ -167,7 +167,7 @@ std::optional<Candidate> native_candidate(
     {
         evaluation(data, evaluations);
         if (!pure_side(*Geometry::from_dynamic(cell->finite_geometry), candidate.gas,
-                geometric_phase(*cell, PLIC::reconstruction_geometry(original.at(cell->key)))))
+                geometric_phase(data, *cell, PLIC::reconstruction_geometry(original.at(cell->key)))))
             return {};
     }
     candidate.support = PLIC::planar_support<mode>(*tile.geometry);
@@ -182,7 +182,7 @@ std::optional<MinorityEvidence> admit_cell(const GeneralVoF::Data& data, const P
 {
     const auto& cell = data.cells.at(key);
     const auto geometry = Geometry::from_dynamic(cell.finite_geometry);
-    const int phase = geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key)));
+    const int phase = geometric_phase(data, cell, PLIC::reconstruction_geometry(original.at(key)));
     evaluation(data, evaluations);
     if (phase)
         return pure_side(*geometry, gas, phase) ? std::optional<MinorityEvidence>{MinorityEvidence{}} : std::nullopt;
@@ -240,7 +240,7 @@ std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_pla
     context.record.cell_owner = target_cell.owner;
     context.record.mark(SimpleFluid::detail::vof_failure::Field::Cell);
     context.record.mark(SimpleFluid::detail::vof_failure::Field::CellOwner);
-    if (geometric_phase(target_cell, initial.geometry))
+    if (geometric_phase(data, target_cell, initial.geometry))
         return {original_face, PLIC::to_dynamic(initial)};
     wire::Budget budget{data.options.byte_budget};
     budget.add(retained_bytes);
@@ -253,13 +253,14 @@ std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_pla
     // Always estimate capillary orientation from the complete configured rings;
     // a locally full-rank transport stencil need not resolve surface bending.
     // An adopted interface capsule remains the immutable geometric authority.
-    const auto initial_choice = target_cell.retained_interface ? original_face : full_support_plane;
-    if (!target_cell.retained_interface)
+    const auto initial_choice = retained_interface(data, target_cell) ? original_face : full_support_plane;
+    if (!retained_interface(data, target_cell))
     {
         budget.add(2 * (stencil.size() - 1) * sizeof(PLIC::PolyhedralPhaseSample<mode>));
         const auto support = reconstruction_stencil<mode>(data, target, true);
         initial = PLIC::PolyhedralReconstruction<mode>::reconstruct(
-            reconstruction_sample<mode>(target_cell), support, data.options.reconstruction);
+            reconstruction_sample<mode>(target_cell, retained_interface(data, target_cell)), support,
+            data.options.reconstruction);
     }
     std::vector<const AMR::AdaptiveTile*> faces;
     for (const auto& tile : data.topology->surface_tiles())
@@ -385,8 +386,8 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             {
                 PLIC::PolyhedralReconstructionResult<mode> initial;
                 initial.model_policy = data.options.reconstruction.model_policy;
-                if (cell.retained_interface)
-                    initial = std::get<PLIC::PolyhedralReconstructionResult<mode>>(*cell.retained_interface);
+                if (const auto* retained = retained_interface(data, cell))
+                    initial = std::get<PLIC::PolyhedralReconstructionResult<mode>>(*retained);
                 else
                 {
                     initial.target_volume_difference = {};
@@ -431,7 +432,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
             wire::Budget budget{limit};
             budget.add(retained_bytes);
             for (const auto& [key, cell] : data.cells)
-                if (cell.owner != rank && !geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key))))
+                if (cell.owner != rank && !geometric_phase(data, cell, PLIC::reconstruction_geometry(original.at(key))))
                 {
                     wire::Writer writer;
                     stamp(writer, Record::Request, data);
@@ -481,7 +482,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data)
                 reader.done();
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != rank || cell.revision != revision ||
-                    geometric_phase(cell, PLIC::reconstruction_geometry(original.at(key))) ||
+                    geometric_phase(data, cell, PLIC::reconstruction_geometry(original.at(key))) ||
                     !seen.emplace(packet.peer, key).second)
                     throw std::invalid_argument(
                         "Capillary plane request lacks its current mixed-cell owner authority.");

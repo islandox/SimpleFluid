@@ -225,7 +225,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                     trial.candidate_ = data_;
                 else
                 {
-                    auto identity = std::make_shared<Data>(data);
+                    auto identity = copy_state(data);
                     identity->latest_phase_cleanup.clear();
                     trial.candidate_ = std::move(identity);
                 }
@@ -833,7 +833,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
         wire::collective(*comm,
             [&]
             {
-                candidate = std::make_shared<Data>(data);
+                candidate = copy_state(data);
+                invalidate_owned_interfaces(*candidate);
                 candidate->control = trial.transaction_;
                 std::map<Key, PhaseSum<Mode>> totals, histories;
                 std::map<Key, Evidence> evidence;
@@ -903,7 +904,6 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                     cell.occupancy.transferred_bound =
                         fp::upper_double(fp::bound_add(Math::upper(inherited[Transferred]),
                             fp::bound_add(total.gas.absolute_error, total.carrier.absolute_error)));
-                    cell.retained_interface.reset();
                     const auto presence = evidence.at(key).presence;
                     if ((cell.declaration == GeneralVoFPhaseGeometry::PureGas && presence[1]) ||
                         (cell.declaration == GeneralVoFPhaseGeometry::PureCarrier && presence[0]))

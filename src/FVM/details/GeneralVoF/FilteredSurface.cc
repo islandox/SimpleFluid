@@ -13,18 +13,18 @@ namespace SimpleFluid::VoF::general_vof_detail
 namespace
 {
 using namespace filtered_surface_kernel;
-int phase(const Cell& c)
+int phase(const GeneralVoF::Data& data, const Cell& c)
 {
     // Geometry declarations have precedence over permitted physical traces.
     if (c.declaration == GeneralVoFPhaseGeometry::PureGas)
         return 1;
     if (c.declaration == GeneralVoFPhaseGeometry::PureCarrier)
         return -1;
-    if (c.retained_interface)
+    if (const auto* retained = retained_interface(data, c))
     {
-        if (PLIC::reconstruction_geometry(*c.retained_interface).pure_gas)
+        if (PLIC::reconstruction_geometry(*retained).pure_gas)
             return 1;
-        if (PLIC::reconstruction_geometry(*c.retained_interface).pure_carrier)
+        if (PLIC::reconstruction_geometry(*retained).pure_carrier)
             return -1;
         return 0;
     }
@@ -377,7 +377,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     std::vector<std::vector<std::size_t>> components;
     reserve_exact(components, cells.size(), budget);
     for (std::size_t i = 0; i < cells.size(); ++i)
-        if (phase(*cells[i].source) > 0 && cells[i].label < 0)
+        if (phase(data, *cells[i].source) > 0 && cells[i].label < 0)
         {
             const auto label = static_cast<int>(components.size());
             components.emplace_back();
@@ -385,7 +385,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
             cells[i].label = label;
             for (std::size_t j = 0; j < components.back().size(); ++j)
                 for (auto n : cells[components.back()[j]].neighbors)
-                    if (phase(*cells[n].source) > 0 && cells[n].label < 0)
+                    if (phase(data, *cells[n].source) > 0 && cells[n].label < 0)
                     {
                         cells[n].label = label;
                         tracked_push(components.back(), n, budget);
@@ -400,7 +400,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         for (auto i : components[component])
             for (auto neighbor : cells[i].neighbors)
             {
-                const auto neighbor_phase = phase(*cells[neighbor].source);
+                const auto neighbor_phase = phase(data, *cells[neighbor].source);
                 if (neighbor_phase == 0)
                     eligible[component] = false;
                 opposite_face = opposite_face || neighbor_phase < 0;
@@ -534,7 +534,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         for (std::size_t j = 0; j < reach.size(); ++j)
         {
             const auto i = reach[j];
-            if (phase(*cells[i].source) == 0)
+            if (phase(data, *cells[i].source) == 0)
                 reject(Reason::AmbiguousTopology, "Binary filter support reaches a mixed geometric component.");
             if (cells[i].label >= 0 && cells[i].label != static_cast<int>(component))
                 reject(Reason::ComponentMerging, "Binary filter support reaches another gas component.");
@@ -696,7 +696,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
                 for (const auto& key : fan)
                 {
                     const auto i = index.at(key);
-                    if (phase(*cells[i].source) == 0)
+                    if (phase(data, *cells[i].source) == 0)
                         reject(Reason::AmbiguousTopology, "Filtered nodal support touches mixed geometry.");
                     if (cells[i].label >= 0 && cells[i].label != static_cast<int>(component))
                         reject(Reason::ComponentMerging, "Filtered nodal support touches another gas component.");
@@ -766,7 +766,7 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
                 active = active || face_q.at(faces[f]->face_gid) > 0;
             if (!active)
                 continue;
-            if (phase(*cells[i].source) == 0)
+            if (phase(data, *cells[i].source) == 0)
                 reject(Reason::AmbiguousTopology, "Filtered extraction support reaches mixed geometry.");
             if (cells[i].label >= 0 && cells[i].label != static_cast<int>(component))
                 reject(Reason::ComponentMerging, "Filtered extraction support reaches another gas component.");

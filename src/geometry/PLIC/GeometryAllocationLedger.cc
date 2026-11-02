@@ -235,7 +235,8 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = sizeof(PointExportPayload<Mode>);
                     add_bytes(bytes, payload->points.capacity(), sizeof(Point<Mode>));
                     if (admit(item, bytes, used, limit))
-                        push(Kind::DynamicPointExport, payload->dynamic, used, limit);
+                        push(Kind::PointSnapshot,
+                            std::shared_ptr<const PointSnapshotContextBase>(payload->point_context), used, limit);
                     break;
                 }
                 case Kind::CompactPointBatch: {

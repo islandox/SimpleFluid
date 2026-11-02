@@ -17,12 +17,13 @@ SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_l
     // inventories and their inherited occupancy error are never overwritten.
     return {phase_measures(cell).bulk, gas ? minority : dominant, gas ? dominant : minority};
 }
-template<ArithmeticMode Mode> PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell)
+template<ArithmeticMode Mode>
+PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(
+    const Cell& cell, const PLIC::DynamicPolyhedralReconstructionResult* retained)
 {
-    const bool observed_mixed =
-        cell.declaration == GeneralVoFPhaseGeometry::Infer &&
-        (!cell.retained_interface || (!PLIC::reconstruction_geometry(*cell.retained_interface).pure_gas &&
-                                         !PLIC::reconstruction_geometry(*cell.retained_interface).pure_carrier));
+    const bool observed_mixed = cell.declaration == GeneralVoFPhaseGeometry::Infer &&
+                                (!retained || (!PLIC::reconstruction_geometry(*retained).pure_gas &&
+                                                  !PLIC::reconstruction_geometry(*retained).pure_carrier));
     if constexpr (Mode == ArithmeticMode::Exact)
     {
         const auto labels = geometric_labels(cell);
@@ -75,7 +76,8 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
                     if constexpr (Mode != ArithmeticMode::Exact)
                         if (result.size() == data.options.reconstruction.maximum_stencil_cells)
                             throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
-                    result.push_back(reconstruction_sample<Mode>(data.cells.at(neighbor)));
+                    result.push_back(reconstruction_sample<Mode>(
+                        data.cells.at(neighbor), retained_interface(data, data.cells.at(neighbor))));
                     next.insert(neighbor);
                 }
             }
@@ -91,7 +93,8 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
     std::size_t selected = result.size();
     if constexpr (Mode != ArithmeticMode::Exact)
     {
-        const auto target = reconstruction_sample<Mode>(data.cells.at(key));
+        const auto target =
+            reconstruction_sample<Mode>(data.cells.at(key), retained_interface(data, data.cells.at(key)));
         if (complete_support)
             (void) PLIC::PolyhedralReconstruction<Mode>::assess_stencil_geometry(
                 target, result, data.options.reconstruction);
@@ -224,25 +227,26 @@ PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell_impl(const GeneralV
     scope.record.mark(::SimpleFluid::detail::vof_failure::Field::CellOwner);
     scope.record.arithmetic_mode = Mode;
     scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Arithmetic);
-    validate_cell<Mode>(cell, data.options);
-    if (cell.retained_interface)
+    const auto* retained = retained_interface(data, cell);
+    validate_cell<Mode>(cell, data.options, retained);
+    if (retained)
     {
         if constexpr (Mode == ArithmeticMode::Exact)
         {
-            if (PLIC::reconstruction_mode(*cell.retained_interface) == ArithmeticMode::Exact)
+            if (PLIC::reconstruction_mode(*retained) == ArithmeticMode::Exact)
             {
                 if (diagnostics)
                     ++diagnostics->retained_interface_returns;
-                return returned(*cell.retained_interface);
+                return returned(*retained);
             }
         }
         else
         {
-            if (PLIC::reconstruction_mode(*cell.retained_interface) != Mode)
+            if (PLIC::reconstruction_mode(*retained) != Mode)
                 throw std::invalid_argument("Finite VoF cannot adopt an exact-policy interface capsule.");
             if (diagnostics)
                 ++diagnostics->retained_interface_returns;
-            return returned(*cell.retained_interface);
+            return returned(*retained);
         }
     }
     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
@@ -270,14 +274,14 @@ PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell_impl(const GeneralV
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
     {
         auto result = PLIC::PolyhedralReconstruction<Mode>::solve_offset(
-            reconstruction_sample<Mode>(cell), {1, 0, 0}, data.options.reconstruction);
+            reconstruction_sample<Mode>(cell, retained), {1, 0, 0}, data.options.reconstruction);
         if (diagnostics)
             ++diagnostics->zero_phase_offset_returns;
         return returned(PLIC::to_dynamic(std::move(result)));
     }
     if (diagnostics)
         ++diagnostics->mixed_cell_fits;
-    const auto target = reconstruction_sample<Mode>(cell);
+    const auto target = reconstruction_sample<Mode>(cell, retained);
     std::size_t fitting_cells = 0;
     const auto stencil = reconstruction_stencil<Mode>(data, key, false, &fitting_cells);
     if constexpr (Mode != ArithmeticMode::Exact)
@@ -323,7 +327,7 @@ PLIC::DynamicPolyhedralReconstructionResult reconstruct_observed_ordinary_cell(c
     return reconstruct_cell_impl<ArithmeticMode::Ordinary>(data, key, diagnostics, row);
 }
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> reconstruction_sample<ArithmeticMode::Ordinary>(
-    const Cell&);
+    const Cell&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary>>
 reconstruction_stencil<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::Ordinary>(
@@ -331,14 +335,16 @@ template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<Arithmetic
 template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> reconstruct_local<ArithmeticMode::Ordinary>(
     const GeneralVoF::Data&);
 template PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>
-reconstruction_sample<ArithmeticMode::BoundedCertification>(const Cell&);
+reconstruction_sample<ArithmeticMode::BoundedCertification>(
+    const Cell&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::BoundedCertification>>
 reconstruction_stencil<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::BoundedCertification>(
     const GeneralVoF::Data&, const Key&);
 template std::map<Key, PLIC::DynamicPolyhedralReconstructionResult>
 reconstruct_local<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&);
-template PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> reconstruction_sample<ArithmeticMode::Exact>(const Cell&);
+template PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> reconstruction_sample<ArithmeticMode::Exact>(
+    const Cell&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> reconstruction_stencil<ArithmeticMode::Exact>(
     const GeneralVoF::Data&, const Key&, bool, std::size_t*);
 template PLIC::DynamicPolyhedralReconstructionResult reconstruct_cell<ArithmeticMode::Exact>(

@@ -777,6 +777,27 @@ template<ArithmeticMode Mode> std::vector<DynamicPoint> GeometryKernel<Mode>::lo
     return result;
 }
 
+template<ArithmeticMode Mode>
+void GeometryKernel<Mode>::visit_local_coordinates(
+    void* context, void (*visitor)(void*, std::size_t, const PointCoordinates<Mode>&)) const
+{
+    static_assert(Mode == kernel_mode);
+    for (std::size_t index = 0; index < impl_->vertices.size(); ++index)
+    {
+        const auto coordinates = scaled<Mode>(impl_->vertices[index].coordinates, impl_->frame.exponent) +
+                                 (point<Mode>(impl_->frame.origin) - point<Mode>(impl_->reference_origin));
+        PointCoordinates<Mode> result;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            const auto value = bounded<Mode>(coordinates[axis]);
+            result.value[axis] = value.value;
+            if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                result.absolute_error[axis] = value.absolute_error;
+        }
+        visitor(context, index, result);
+    }
+}
+
 template<ArithmeticMode Mode> std::array<DynamicGeometryValue, 3> GeometryKernel<Mode>::axis_spans() const
 {
     static_assert(Mode == kernel_mode);
@@ -850,6 +871,8 @@ template DynamicGeometryMoments GeometryKernel<kernel_mode>::moments() const;
 template DynamicGeometryMoments GeometryKernel<kernel_mode>::moments(GeometryPoint origin) const;
 template GeometryPoint GeometryKernel<kernel_mode>::centroid() const;
 template std::vector<DynamicPoint> GeometryKernel<kernel_mode>::local_points() const;
+template void GeometryKernel<kernel_mode>::visit_local_coordinates(
+    void*, void (*)(void*, std::size_t, const PointCoordinates<kernel_mode>&)) const;
 template std::array<DynamicGeometryValue, 3> GeometryKernel<kernel_mode>::axis_spans() const;
 template DynamicSupport GeometryKernel<kernel_mode>::support(GeometryPoint normal, GeometryPoint anchor) const;
 } // namespace ordinary_kernel

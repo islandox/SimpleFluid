@@ -2,6 +2,7 @@
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 
@@ -400,6 +401,16 @@ template std::vector<Point<ArithmeticMode::BoundedCertification>> source_points<
 
 template class Point<ArithmeticMode::Ordinary>;
 template class Point<ArithmeticMode::BoundedCertification>;
+template std::vector<PointCoordinates<ArithmeticMode::Ordinary>> details::materialize_local_coordinates(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
+template std::vector<PointCoordinates<ArithmeticMode::BoundedCertification>> details::materialize_local_coordinates(
+    const ConvexCellGeometry<ArithmeticMode::BoundedCertification>&);
+template void details::visit_local_coordinates<ArithmeticMode::Ordinary>(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>&, void*,
+    void (*)(void*, std::size_t, const PointCoordinates<ArithmeticMode::Ordinary>&));
+template void details::visit_local_coordinates<ArithmeticMode::BoundedCertification>(
+    const ConvexCellGeometry<ArithmeticMode::BoundedCertification>&, void*,
+    void (*)(void*, std::size_t, const PointCoordinates<ArithmeticMode::BoundedCertification>&));
 template class ConvexCellGeometry<ArithmeticMode::Ordinary>;
 template class ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
 template class ConvexPartition<ArithmeticMode::Ordinary>;

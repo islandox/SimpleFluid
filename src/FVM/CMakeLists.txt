@@ -10,6 +10,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
     details/GeneralVoFState.cc
     details/GeneralVoF/Reconstruction.cc
     details/GeneralVoF/RetainedStorage.cc
+    details/GeneralVoF/RetainedInterfaces.cc
     details/GeneralVoF/HaloExchange.cc
     details/GeneralVoF/PlaneExchange.cc
     details/GeneralVoF/OperationAgreement.cc

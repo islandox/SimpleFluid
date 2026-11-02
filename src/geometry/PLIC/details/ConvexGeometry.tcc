@@ -304,6 +304,34 @@ PointExport<Mode> ConvexCellGeometry<Mode>::export_points(
 {
     return DynamicGeometryAccess::export_typed<Mode>(geometry_->impl_, ledger, used, limit);
 }
+namespace details
+{
+template<ArithmeticMode Mode>
+void visit_local_coordinates(const ConvexCellGeometry<Mode>& cell, void* context,
+    void (*visitor)(void*, std::size_t, const PointCoordinates<Mode>&))
+{
+    if (!visitor)
+        throw std::invalid_argument("Local coordinate visitor requires a callback.");
+    const auto& implementation = DynamicGeometryAccess::implementation(*cell.dynamic_geometry());
+    Operation scope(implementation->limits);
+    SelectedGeometryKernel<Mode>(implementation).visit_local_coordinates(context, visitor);
+}
+template<ArithmeticMode Mode>
+std::vector<PointCoordinates<Mode>> materialize_local_coordinates(const ConvexCellGeometry<Mode>& cell)
+{
+    const auto& implementation = DynamicGeometryAccess::implementation(*cell.dynamic_geometry());
+    Operation scope(implementation->limits);
+    active_work->charge(cell.vertex_count(), sizeof(PointCoordinates<Mode>));
+    std::vector<PointCoordinates<Mode>> coordinates;
+    coordinates.reserve(cell.vertex_count());
+    if (coordinates.capacity() > cell.vertex_count())
+        active_work->charge(coordinates.capacity() - cell.vertex_count(), sizeof(PointCoordinates<Mode>));
+    SelectedGeometryKernel<Mode>(implementation).visit_local_coordinates(&coordinates,
+        [](void* context, std::size_t, const PointCoordinates<Mode>& point)
+        { static_cast<std::vector<PointCoordinates<Mode>>*>(context)->push_back(point); });
+    return coordinates;
+}
+} // namespace details
 template<ArithmeticMode Mode> std::vector<Point<Mode>> ConvexCellGeometry<Mode>::local_points() const
 {
     details::Operation scope(geometry_->impl_->limits);

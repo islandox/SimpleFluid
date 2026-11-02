@@ -296,7 +296,10 @@ contract. Native planar and Exact point APIs are separate.
 Geometry owns only fixed cache metadata: a mutex, weak export roots, a weak
 provenance snapshot and fixed local alias slots. Actual dynamic and typed point
 buffers, provenance and supports are allocated on request and admitted before cache publication. Typed
-exports retain the canonical dynamic export. Independent ledgers can share one
+and dynamic exports own independent point arrays and share the immutable provenance
+snapshot. A typed request does not materialize or pin a dynamic array. Requesting
+both representations admits both arrays and counts their shared snapshot once.
+Independent ledgers can share one
 published payload; a ledger itself is not shared across threads. Geometry-only
 admission ignores weak cache entries and has the same cost before and after an
 export. Export-specific resource failures occur at the explicit request, while
@@ -317,3 +320,27 @@ canonical export-source dependency. Deferred export therefore uses the original
 frame, coordinates, errors and sealing policy. The ledger charges that strong
 dependency. Certificate-only copies share the existing control and dependency;
 physical translations and changed shells detach. These edges remain acyclic.
+
+Numeric-only finite consumers use a synchronous coordinate visitor over stored
+vertex order. It applies the same local frame transform and arithmetic policy as
+`local_points()`, without point ownership, provenance publication or temporary
+point arrays. Coordinates are borrowed only for the callback invocation; callbacks
+must preserve the floating-point environment. Repeated indexed reconstruction
+queries retain one admitted numeric coordinate buffer for their invocation.
+
+Accepted GeneralVoF state owns retained reconstruction results in a sorted sparse
+table keyed by canonical cell key. A cell reserves no result storage when it has
+no retained evidence. Records preserve the complete mode-specific result and are
+copied with candidate state. Ownership migration transfers them through the existing
+authenticated record; geometric remapping and changed phase publications invalidate
+them at the same acceptance boundary as the corresponding cells. Cleanup and
+face-transport proposals do not erase accepted evidence before collective admission.
+Accounting includes table capacity and owned key ancestry. Published Exact result
+enclosures are inline values; rational phase inventories retain their separate
+ownership accounting.
+
+Finite sweep preparation, materialization and zero-effect checks visit triangles
+directly from the recipe's current/departure points and private backcenter. The
+canonical triangle sequence, node-ID diagonal rule and construction ordinals are
+unchanged. The traversal owns no triangle array and retains existing determinant,
+pair-work and geometric construction charges.

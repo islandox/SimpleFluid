@@ -360,7 +360,7 @@ struct SIMPLEFLUID_LOCAL DynamicPointExportPayload
 template<ArithmeticMode Mode> struct PointExportPayload
 {
     std::vector<Point<Mode>> points;
-    std::shared_ptr<const DynamicPointExportPayload> dynamic;
+    std::shared_ptr<const PointSnapshotContext<Mode>> point_context;
 };
 template<ArithmeticMode Mode> struct PointSnapshotPayload
 {

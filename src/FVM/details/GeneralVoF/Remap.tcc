@@ -411,7 +411,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     output.original_error = source.occupancy;
                     output.original_roundoff = source.roundoff;
                     if (ownership)
-                        output.retained_interface = source.retained_interface;
+                        if (const auto* retained = retained_interface(data, source))
+                            output.retained_interface = *retained;
                     const auto bulk_share = whole ? Math::make_value(data.options.arithmetic_mode, 1)
                                                   : Math::divide(output.phases.bulk, old.bulk);
                     output.inherited_occupancy = Math::multiply({source.occupancy.admitted_bound, 0}, bulk_share);
@@ -690,7 +691,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             }
         });
     const auto placeholder = std::make_shared<const GeneralVoF>(target, order, zero, native_volume, data.options);
-    auto candidate = std::make_shared<Data>(*placeholder->data_);
+    auto candidate = copy_state(*placeholder->data_);
     candidate->phase_cleanup = data.phase_cleanup;
     candidate->latest_phase_cleanup.clear();
     wire::collective(*comm,
@@ -698,6 +699,11 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         {
             reset_finite_phase_publication(*candidate);
             wire::Budget budget{limit};
+            candidate->retained_interfaces.clear();
+            if (ownership)
+                candidate->retained_interfaces.reserve(std::count_if(rows.begin(), rows.end(), [](const auto& entry)
+                                                           { return bool(entry.second.retained_interface); }),
+                    budget);
             for (const auto& key : candidate->topology->order)
             {
                 auto& cell = candidate->cells.at(key);
@@ -727,8 +733,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                         fp::upper_double(fp::upward(cell.finite_history.carrier + carrier.second));
                 }
                 cell.declaration = row.declaration.value_or(GeneralVoFPhaseGeometry::Infer);
-                cell.retained_interface =
-                    ownership ? row.retained_interface : std::optional<PLIC::DynamicPolyhedralReconstructionResult>{};
+                if (ownership && row.retained_interface)
+                    candidate->retained_interfaces.append(key, *row.retained_interface, budget);
                 cell.inherited = true;
                 if (ownership)
                     cell.occupancy = row.original_error;
@@ -770,7 +776,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                                                    ? 0
                                                    : fp::upper_double(Math::upper(row.pure_fit.value()));
                 }
-                validate_cell<Mode>(cell, data.options);
+                validate_cell<Mode>(
+                    cell, data.options, ownership && row.retained_interface ? &*row.retained_interface : nullptr);
                 append_finite_phase_publication(*candidate, cell);
                 GeneralVoFFiniteOwnedChannels output;
                 output.key = key;
@@ -784,6 +791,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 budget.add(sizeof(output) + output.amounts.size() * sizeof(PhaseValue));
                 result.channels_.push_back(std::move(output));
             }
+            candidate->retained_interfaces.finish();
             current(data);
             if (!target->geometry_unchanged() || target->observation() != target_observation)
                 throw std::invalid_argument("Finite remap target observation changed during preparation.");

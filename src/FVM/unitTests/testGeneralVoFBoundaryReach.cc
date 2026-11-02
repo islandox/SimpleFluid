@@ -201,8 +201,9 @@ TEST(GeneralVoFBoundaryReach, Face17ReplaysOriginalWallConstructionBeforeDonorCl
     record("corrected_cap_z", recipe.backcenter.value[2]);
     record("cap_displacement_over_cell_height", std::abs(recipe.backcenter.value[2] - raw.value[2]) / .5L);
     long double raw_control = 0;
-    for (const auto& triangle : sweep::sweep_boundary(nodes, recipe.current, recipe.departure, recipe.center, raw))
-        raw_control += sweep::cone_determinant(recipe.center, triangle).value / 6;
+    sweep::visit_sweep_triangles(nodes, recipe.current, recipe.departure, raw,
+        [&](const Point& a, const Point& b, const Point& c)
+        { raw_control += sweep::cone_determinant(recipe.center, a, b, c).value / 6; });
     record("control_minus_raw_sweep", recipe.control.value - raw_control);
 }
 

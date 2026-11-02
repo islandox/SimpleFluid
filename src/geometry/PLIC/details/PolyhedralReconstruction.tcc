@@ -5,6 +5,7 @@
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <array>
@@ -445,16 +446,31 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
                                   result.carrier_support_fraction >= options.minimum_phase_support_fraction;
     return analysis;
 }
+template<ArithmeticMode Mode> struct ReconstructionPreparation
+{
+    std::vector<PointCoordinates<Mode>> original_coordinates;
+    std::optional<OrdinaryPlaneMeasure> ordinary_measure;
+    OrdinaryPlaneMeasure::Scratch scratch;
+
+    ReconstructionPreparation(const PolyhedralPhaseSample<Mode>& sample, const PolyhedralReconstructionOptions& options)
+    {
+        original_coordinates = details::materialize_local_coordinates(*sample.geometry);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.measure_only)
+            {
+                ordinary_measure.emplace(*sample.geometry);
+                scratch.reserve(ordinary_measure->maximum_face_degree());
+            }
+    }
+};
 template<ArithmeticMode Mode>
 PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
-    PolyhedralReconstructionOptions options, std::size_t& evaluations, long double* best_section_area = nullptr)
+    PolyhedralReconstructionOptions options, std::size_t& evaluations, ReconstructionPreparation<Mode>& preparation,
+    long double* best_section_area = nullptr)
 {
     if (best_section_area)
         *best_section_area = 0;
-    std::optional<OrdinaryPlaneMeasure> ordinary_measure;
-    if constexpr (Mode == ArithmeticMode::Ordinary)
-        if (options.measure_only)
-            ordinary_measure.emplace(*sample.geometry);
+    const auto& ordinary_measure = preparation.ordinary_measure;
     PolyhedralReconstructionResult<Mode> result;
     result.model_policy = options.model_policy;
     result.target_volume_difference = published_difference<Mode>({});
@@ -463,7 +479,7 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
     result.geometry.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
     const auto reference = sample.geometry->origin();
-    const auto points = sample.geometry->local_points();
+    const auto& points = preparation.original_coordinates;
     long double extremum = gas ? infinity : -infinity;
     bool have_anchor = false;
     for (const auto& point : points)
@@ -532,7 +548,7 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
                             component = -component;
                         minority.offset = -minority.offset;
                     }
-                    const auto volume = ordinary_measure->below(minority, true);
+                    const auto volume = ordinary_measure->below(minority, preparation.scratch, true);
                     section_area = volume.section_area;
                     numerical_error = volume.numerical_error_estimate;
                     return {volume.volume};
@@ -774,7 +790,8 @@ PolyhedralReconstructionResult<Mode> PolyhedralReconstruction<Mode>::solve_offse
 {
     validate_sample<Mode>(sample, options);
     std::size_t evaluations = 0;
-    return offset_fit<Mode>(sample, normal, options, evaluations);
+    ReconstructionPreparation<Mode> preparation(sample, options);
+    return offset_fit<Mode>(sample, normal, options, evaluations, preparation);
 }
 namespace
 {
@@ -804,6 +821,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
     auto& volumes = direction.volumes;
     double condition = resolution.stencil_condition;
     std::size_t evaluations = 0;
+    ReconstructionPreparation<Mode> preparation(target, options);
     const auto phase_length_ratio =
         std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
         std::cbrt(target.geometry->volume().value);
@@ -812,7 +830,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
         // The stencil establishes the gradient and its support; tiny target
         // phases do not supply an angular volume-model objective. No neighbor
         // clipping, angular qualification or model-RMS gate runs on this path.
-        auto result = offset_fit<Mode>(target, normal, options, evaluations);
+        auto result = offset_fit<Mode>(target, normal, options, evaluations, preparation);
         result.orientation_method = PolyhedralOrientationMethod::Gradient;
         result.stencil_condition = condition;
         result.resolution = resolution;
@@ -824,7 +842,10 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
         {
             ordinary_stencil.reserve(stencil.size());
             for (const auto& sample : stencil)
+            {
                 ordinary_stencil.emplace_back(*sample.geometry);
+                preparation.scratch.reserve(ordinary_stencil.back().maximum_face_degree());
+            }
         }
     struct Evaluation
     {
@@ -842,7 +863,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
         if constexpr (Mode == ArithmeticMode::Ordinary)
             if (options.measure_only)
                 target_area_output = &target_section_area;
-        value.plane = offset_fit<Mode>(target, unit(n), options, evaluations, target_area_output);
+        value.plane = offset_fit<Mode>(target, unit(n), options, evaluations, preparation, target_area_output);
         if constexpr (Mode == ArithmeticMode::Ordinary)
             if (options.measure_only)
             {
@@ -880,7 +901,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
                         }
                         // The same query supplies the offset sensitivity; it
                         // adds no clipping call or polygon work buffer.
-                        const auto measure = ordinary_stencil[i].below(plane, true);
+                        const auto measure = ordinary_stencil[i].below(plane, preparation.scratch, true);
                         sample_section_area = measure.section_area;
                         return {measure.volume};
                     }
@@ -998,7 +1019,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
                 // This bank is declared by the original ordered target faces,
                 // independently of the failed model RMS. No new geometry is
                 // constructed, and no fitting row or phase inventory changes.
-                const auto points = target.geometry->local_points();
+                const auto& points = preparation.original_coordinates;
                 const int minority_sign = target.gas_volume <= target.carrier_volume ? 1 : -1;
                 const unsigned orientations = target.gas_volume == target.carrier_volume ? 2 : 1;
                 for (const auto& face : target.geometry->faces())

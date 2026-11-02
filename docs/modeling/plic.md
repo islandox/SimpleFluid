@@ -6,6 +6,23 @@ face integration and a safeguarded minority-phase offset solve; see
 Its numerical error estimates are not certified bounds. The legacy scalar and
 explicit surface construction paths described below remain available.
 
+Each reconstruction prepares its target boundary once and reuses it across trial
+normals and offset evaluations. Prepared neighbors are constructed only when the
+selected fitting path needs them. Preparation pins immutable geometry and borrows
+its face loops, while retaining normalized coordinates. Anchor and face-seed
+selection use the original local coordinates, without recovering them from the
+normalized representation.
+
+An invocation owns reusable input/output polygon scratch. Capacity follows the
+maximum admitted face degree, with checked room for up to two output vertices per
+input edge. Queries regenerate all plane-dependent intersections and preserve
+contact rules, winding, fan integration and numerical-error accumulation order.
+Separate scratch objects support independent queries on one immutable prepared
+boundary. The existing convenience query allocates its own local scratch.
+These buffers retain the existing preparation accounting boundary; measured live
+capacity is distinct from cumulative geometry admission, whose charges are never
+refunded.
+
 
 PLIC represents the gas/liquid interface inside a cell by a plane. This guide
 describes the finite `PLIC::PolyhedralReconstruction<Mode>` used by `GeneralVoF` on

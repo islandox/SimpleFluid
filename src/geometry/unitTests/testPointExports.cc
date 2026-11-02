@@ -4,6 +4,7 @@
 #include "geometry/PLIC/ConstructionRegistry.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include <algorithm>
 #include <array>
 #include <barrier>
@@ -137,10 +138,34 @@ TEST(PointExportsTest, BoundedQueriesAndPacketsLeaveGlobalPublicationCold)
     query_contract<ArithmeticMode::BoundedCertification>();
 }
 
+template<ArithmeticMode Mode> void coordinate_cache_contract()
+{
+    const auto cell = Geometry<Mode>::box({-.125, .1, -.3}, {1.75, 2.1, 3.7});
+    expect_cold(observe(*cell));
+    std::size_t visited = 0;
+    P::details::visit_local_coordinates(*cell, [&](std::size_t, const P::PointCoordinates<Mode>&) { ++visited; });
+    EXPECT_EQ(visited, cell->vertex_count());
+    expect_cold(observe(*cell));
+    const auto coordinates = P::details::materialize_local_coordinates(*cell);
+    EXPECT_EQ(coordinates.size(), cell->vertex_count());
+    expect_cold(observe(*cell));
+}
+TEST(PointExportsTest, OrdinaryCoordinateTraversalAndMaterializationLeavePublicationCold)
+{
+    coordinate_cache_contract<ArithmeticMode::Ordinary>();
+}
+TEST(PointExportsTest, BoundedCoordinateTraversalAndMaterializationLeavePublicationCold)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
+    coordinate_cache_contract<ArithmeticMode::BoundedCertification>();
+}
+
 template<ArithmeticMode Mode, bool Typed> void admission_contract()
 {
     const auto measured = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
-    std::size_t cost = 0;
+    constexpr std::size_t initial_bytes = 137;
+    std::size_t cost = initial_bytes;
     {
         P::GeometryAllocationLedger ledger;
         const auto publication = [&]
@@ -165,7 +190,7 @@ template<ArithmeticMode Mode, bool Typed> void admission_contract()
     ASSERT_GT(cost, 1u);
     const auto exact = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
     P::GeometryAllocationLedger exact_ledger;
-    std::size_t exact_bytes = 0;
+    std::size_t exact_bytes = initial_bytes;
     if constexpr (Typed)
         EXPECT_NO_THROW((void) exact->export_points(exact_ledger, exact_bytes, cost));
     else
@@ -173,20 +198,24 @@ template<ArithmeticMode Mode, bool Typed> void admission_contract()
     EXPECT_EQ(exact_bytes, cost);
     const auto rejected = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
     P::GeometryAllocationLedger failed_ledger;
-    std::size_t failed_bytes = 0;
+    std::size_t failed_bytes = initial_bytes;
     if constexpr (Typed)
     {
         EXPECT_THROW((void) rejected->export_points(failed_ledger, failed_bytes, cost - 1), P::GeometryError);
         expect_cold(observe(*rejected));
+        const auto failed_prefix = failed_bytes;
         EXPECT_THROW((void) rejected->export_points(failed_ledger, failed_bytes, export_budget), P::GeometryError);
+        EXPECT_EQ(failed_bytes, failed_prefix);
     }
     else
     {
         EXPECT_THROW((void) rejected->dynamic_geometry()->export_points(failed_ledger, failed_bytes, cost - 1),
             P::GeometryError);
         expect_cold(observe(*rejected));
+        const auto failed_prefix = failed_bytes;
         EXPECT_THROW((void) rejected->dynamic_geometry()->export_points(failed_ledger, failed_bytes, export_budget),
             P::GeometryError);
+        EXPECT_EQ(failed_bytes, failed_prefix);
     }
     expect_cold(observe(*rejected));
     if constexpr (Typed)
@@ -196,8 +225,12 @@ template<ArithmeticMode Mode, bool Typed> void admission_contract()
         std::size_t used = 0;
         const auto dynamic = geometry->dynamic_geometry()->export_points(ledger, used, export_budget);
         const auto dynamic_cost = used;
+        const auto payload_before = ledger.payload_bytes(), owners_before = ledger.owner_count();
         const auto typed = geometry->export_points(ledger, used, export_budget);
-        EXPECT_GE(used - dynamic_cost, sizeof(P::PointExportPayload<Mode>) + 8 * sizeof(P::Point<Mode>));
+        const auto typed_payload_bytes = sizeof(P::PointExportPayload<Mode>) + 8 * sizeof(P::Point<Mode>);
+        EXPECT_GE(used - dynamic_cost, typed_payload_bytes);
+        EXPECT_EQ(ledger.payload_bytes() - payload_before, typed_payload_bytes);
+        EXPECT_EQ(ledger.owner_count(), owners_before + 1);
         ASSERT_EQ(dynamic.points().size(), typed.points().size());
         for (std::size_t i = 0; i < typed.points().size(); ++i)
             EXPECT_EQ(Access::identity(dynamic.points()[i]), Access::identity(typed.points()[i].dynamic()));
@@ -303,7 +336,13 @@ template<ArithmeticMode Mode, bool Typed> void failed_export_prefix_contract()
     std::size_t used = 0;
     ledger.retain(imported, used, export_budget);
     const auto before = used;
-    const auto candidate = sizeof(P::DynamicPointExportPayload) + imported->vertex_count() * sizeof(P::DynamicPoint);
+    const auto candidate = [&]
+    {
+        if constexpr (Typed)
+            return sizeof(P::PointExportPayload<Mode>) + imported->vertex_count() * sizeof(P::Point<Mode>);
+        else
+            return sizeof(P::DynamicPointExportPayload) + imported->vertex_count() * sizeof(P::DynamicPoint);
+    }();
     const auto cap = before + candidate;
     const auto publish = [&](std::size_t limit)
     {
@@ -450,7 +489,7 @@ template<ArithmeticMode Mode> void ledger_lifetime_contract()
             const auto publication = box->export_points(ledger, used, export_budget);
             cache = observe(*box);
         }
-        EXPECT_FALSE(cache.dynamic.expired());
+        EXPECT_FALSE(has_owner(cache.dynamic));
         if constexpr (Mode == ArithmeticMode::Ordinary)
             EXPECT_FALSE(cache.ordinary.expired());
         else
@@ -470,6 +509,196 @@ TEST(PointExportsTest, BoundedLedgerPinsPublicationUntilTransactionDies)
     if (!P::certification_environment())
         GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
     ledger_lifetime_contract<ArithmeticMode::BoundedCertification>();
+}
+
+template<ArithmeticMode Mode>
+void same_publications(const P::PointExport<Mode>& typed, const P::DynamicPointExport& dynamic)
+{
+    ASSERT_EQ(typed.points().size(), dynamic.points().size());
+    for (std::size_t i = 0; i < typed.points().size(); ++i)
+    {
+        const auto point = typed.points()[i].dynamic();
+        EXPECT_EQ(point.value, dynamic.points()[i].value);
+        EXPECT_EQ(point.absolute_error, dynamic.points()[i].absolute_error);
+        EXPECT_EQ(point.supports(), dynamic.points()[i].supports());
+        const auto typed_identity = Access::identity(point);
+        const auto dynamic_identity = Access::identity(dynamic.points()[i]);
+        EXPECT_EQ(typed_identity, dynamic_identity);
+        EXPECT_EQ(typed_identity.context_identity(), dynamic_identity.context_identity());
+    }
+}
+
+template<ArithmeticMode Mode> void sibling_lifetime_contract(bool typed_first)
+{
+    const auto box = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
+    const auto cut = box->clip({{3, 0, 0}, {0, 0, 0}, 1}, false).inside;
+    ASSERT_TRUE(cut);
+    std::optional<P::GeometryAllocationLedger> typed_ledger(std::in_place), dynamic_ledger(std::in_place);
+    std::size_t typed_bytes = 113, dynamic_bytes = 197;
+    std::optional<P::PointExport<Mode>> typed;
+    std::optional<P::DynamicPointExport> dynamic;
+    const auto publish_typed = [&] { typed = cut->export_points(*typed_ledger, typed_bytes, export_budget); };
+    const auto publish_dynamic = [&]
+    { dynamic = cut->dynamic_geometry()->export_points(*dynamic_ledger, dynamic_bytes, export_budget); };
+    if (typed_first)
+    {
+        publish_typed();
+        const auto cold_sibling = observe(*cut);
+        // An expired weak pointer could have held a discarded dynamic payload.
+        // owner_before distinguishes that from never publishing one at all.
+        EXPECT_FALSE(has_owner(cold_sibling.dynamic));
+        publish_dynamic();
+    }
+    else
+    {
+        publish_dynamic();
+        const auto cold_sibling = observe(*cut);
+        EXPECT_FALSE(has_owner(cold_sibling.ordinary));
+        EXPECT_FALSE(has_owner(cold_sibling.bounded));
+        publish_typed();
+    }
+    same_publications(*typed, *dynamic);
+    const auto cache = observe(*cut);
+    const auto survivor = typed->points().front();
+    const auto support_words = [](const auto& point)
+    {
+        std::vector<std::vector<std::uint64_t>> words;
+        for (const auto& authority : point.supports())
+            words.push_back(authority.words());
+        return words;
+    };
+    const auto expected_supports = support_words(survivor);
+    // Capture identity coordinates without a second strong provenance pin.
+    const auto survivor_context = Access::identity(survivor.dynamic()).context_identity();
+    const auto survivor_token = Access::identity(survivor.dynamic()).local_ref();
+    const auto expect_survivor_identity = [&](const P::DynamicPoint& point)
+    {
+        const auto identity = Access::identity(point);
+        EXPECT_TRUE(identity);
+        EXPECT_EQ(identity.context_identity(), survivor_context);
+        EXPECT_EQ(identity.local_ref(), survivor_token);
+    };
+    EXPECT_EQ(survivor_context, cache.snapshot.lock().get());
+    // Handles can leave scope while each ledger independently pins its payload.
+    typed.reset();
+    dynamic.reset();
+    EXPECT_FALSE(cache.dynamic.expired());
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        EXPECT_FALSE(cache.ordinary.expired());
+    else
+        EXPECT_FALSE(cache.bounded.expired());
+    if (typed_first)
+    {
+        typed_ledger.reset();
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            EXPECT_TRUE(cache.ordinary.expired());
+        else
+            EXPECT_TRUE(cache.bounded.expired());
+        EXPECT_FALSE(cache.dynamic.expired());
+        publish_dynamic();
+        expect_survivor_identity(dynamic->points().front());
+        dynamic.reset();
+        dynamic_ledger.reset();
+    }
+    else
+    {
+        dynamic_ledger.reset();
+        EXPECT_TRUE(cache.dynamic.expired());
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            EXPECT_FALSE(cache.ordinary.expired());
+        else
+            EXPECT_FALSE(cache.bounded.expired());
+        publish_typed();
+        expect_survivor_identity(typed->points().front().dynamic());
+        typed.reset();
+        typed_ledger.reset();
+    }
+    EXPECT_TRUE(cache.dynamic.expired());
+    EXPECT_TRUE(cache.ordinary.expired());
+    EXPECT_TRUE(cache.bounded.expired());
+    EXPECT_FALSE(cache.snapshot.expired());
+    // A copied point owns the context, independently of both publication roots.
+    expect_survivor_identity(survivor.dynamic());
+    EXPECT_EQ(support_words(survivor), expected_supports);
+    P::GeometryAllocationLedger regenerated_ledger;
+    std::size_t regenerated_bytes = 251;
+    const auto regenerated = cut->export_points(regenerated_ledger, regenerated_bytes, export_budget);
+    expect_survivor_identity(regenerated.points().front().dynamic());
+    EXPECT_EQ(regenerated.points().front().value, survivor.value);
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        EXPECT_EQ(regenerated.points().front().absolute_error, survivor.absolute_error);
+    EXPECT_EQ(regenerated.points().front().supports(), survivor.supports());
+    EXPECT_EQ(support_words(regenerated.points().front()), expected_supports);
+    EXPECT_TRUE(observe(*cut).dynamic.expired());
+}
+TEST(PointExportsTest, OrdinarySiblingPayloadsShareContextAndExpireIndependentlyInEitherOrder)
+{
+    for (const bool typed_first : {false, true})
+    {
+        SCOPED_TRACE(typed_first);
+        sibling_lifetime_contract<ArithmeticMode::Ordinary>(typed_first);
+    }
+}
+TEST(PointExportsTest, BoundedSiblingPayloadsShareContextAndExpireIndependentlyInEitherOrder)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
+    for (const bool typed_first : {false, true})
+    {
+        SCOPED_TRACE(typed_first);
+        sibling_lifetime_contract<ArithmeticMode::BoundedCertification>(typed_first);
+    }
+}
+
+template<ArithmeticMode Mode> void concurrent_sibling_contract()
+{
+    const auto box = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
+    const auto alias = Geometry<Mode>::from_dynamic(box->dynamic_geometry());
+    std::array<P::GeometryAllocationLedger, 2> ledgers;
+    std::array<std::size_t, 2> used{127, 239};
+    std::optional<P::PointExport<Mode>> typed;
+    std::optional<P::DynamicPointExport> dynamic;
+    std::array<std::exception_ptr, 2> errors{};
+    std::barrier start(2);
+    const auto worker = [&](std::size_t index)
+    {
+        try
+        {
+            const bool rounded = std::fesetround(FE_TONEAREST) == 0;
+            start.arrive_and_wait();
+            if (!rounded || (Mode == ArithmeticMode::BoundedCertification && !P::certification_environment()))
+                throw std::runtime_error("Worker lacks its required FP environment.");
+            if (index == 0)
+                typed = box->export_points(ledgers[index], used[index], export_budget);
+            else
+                dynamic = alias->dynamic_geometry()->export_points(ledgers[index], used[index], export_budget);
+        }
+        catch (...)
+        {
+            errors[index] = std::current_exception();
+        }
+    };
+    std::thread first(worker, 0), second(worker, 1);
+    first.join();
+    second.join();
+    EXPECT_FALSE(errors[0]);
+    EXPECT_FALSE(errors[1]);
+    ASSERT_TRUE(typed);
+    ASSERT_TRUE(dynamic);
+    same_publications(*typed, *dynamic);
+    const auto cache = observe(*box);
+    EXPECT_FALSE(cache.dynamic.expired());
+    EXPECT_EQ(Access::identity(typed->points().front().dynamic()).context_identity(), cache.snapshot.lock().get());
+}
+TEST(PointExportsTest, OrdinaryConcurrentTypedAndDynamicRequestsShareOneContext)
+{
+    concurrent_sibling_contract<ArithmeticMode::Ordinary>();
+}
+TEST(PointExportsTest, BoundedConcurrentTypedAndDynamicRequestsShareOneContext)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
+    concurrent_sibling_contract<ArithmeticMode::BoundedCertification>();
 }
 
 template<ArithmeticMode Mode> void transformations_contract()

@@ -830,34 +830,39 @@ struct ExportArithmetic
         details::active_work = previous;
     }
 };
-template<ArithmeticMode Mode>
-std::shared_ptr<const DynamicPointExportPayload> materialize_dynamic(
-    const std::shared_ptr<const DynamicConvexGeometry::Impl>& original, const PointExportCache& cache,
-    ExportReservation& budget)
+template<ArithmeticMode Mode, bool Typed>
+auto materialize_points(const std::shared_ptr<const DynamicConvexGeometry::Impl>& original,
+    const PointExportCache& cache, ExportReservation& budget)
 {
     const auto canonical = original->export_source ? original->export_source : original;
     const auto geometry = details::checked_geometry_storage<Mode>(canonical);
-    budget.add(1, sizeof(DynamicPointExportPayload));
-    budget.add(geometry->vertices.size(), sizeof(DynamicPoint));
-    auto result = std::make_shared<DynamicPointExportPayload>();
-    result->mode = Mode;
+    using Payload = std::conditional_t<Typed, PointExportPayload<Mode>, DynamicPointExportPayload>;
+    using PublishedPoint = std::conditional_t<Typed, Point<Mode>, DynamicPoint>;
+    budget.add(1, sizeof(Payload));
+    budget.add(geometry->vertices.size(), sizeof(PublishedPoint));
+    auto result = std::make_shared<Payload>();
+    if constexpr (!Typed)
+        result->mode = Mode;
     result->points.reserve(geometry->vertices.size());
     if (result->points.capacity() > geometry->vertices.size())
-        budget.add(result->points.capacity() - geometry->vertices.size(), sizeof(DynamicPoint));
-    budget.keep(1, sizeof(DynamicPointExportPayload));
-    budget.keep(result->points.capacity(), sizeof(DynamicPoint));
+        budget.add(result->points.capacity() - geometry->vertices.size(), sizeof(PublishedPoint));
+    budget.keep(1, sizeof(Payload));
+    budget.keep(result->points.capacity(), sizeof(PublishedPoint));
     if (const auto existing = cache.provenance_root.lock())
     {
         if (cache.vertex_provenance.size() != geometry->vertices.size())
             throw GeometryError(GeometryErrorCode::InvalidTopology, "Point cache slot count differs from geometry.");
-        result->point_context = existing;
+        if constexpr (Typed)
+            result->point_context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(existing);
+        else
+            result->point_context = existing;
         for (const auto ref : cache.vertex_provenance)
         {
             const auto identity = bind_point(existing, ref);
             const auto view = identity.view();
             DynamicPoint point(view.value(), view.absolute_error(), view.arithmetic_mode());
             DynamicGeometryAccess::attach_identity(point, identity);
-            result->points.push_back(std::move(point));
+            result->points.emplace_back(std::move(point));
         }
         return result;
     }
@@ -898,13 +903,22 @@ std::shared_ptr<const DynamicPointExportPayload> materialize_dynamic(
                                ? builder.export_alias(point.value, point.absolute_error, source, proof, numerical)
                                : builder.sealed(point.value, point.absolute_error, proof);
         refs.push_back(builder.import(alias));
-        result->points.push_back(std::move(point));
+        result->points.emplace_back(std::move(point));
     }
     const auto context = builder.freeze();
     budget.keep(1, context->exclusive_storage_bytes());
     result->point_context = context;
     for (std::size_t index = 0; index < result->points.size(); ++index)
-        DynamicGeometryAccess::attach_identity(result->points[index], bind_point(context, refs[index]));
+    {
+        if constexpr (Typed)
+        {
+            auto point = result->points[index].dynamic();
+            DynamicGeometryAccess::attach_identity(point, bind_point(context, refs[index]));
+            result->points[index] = Point<Mode>(point);
+        }
+        else
+            DynamicGeometryAccess::attach_identity(result->points[index], bind_point(context, refs[index]));
+    }
     return result;
 }
 } // namespace
@@ -931,58 +945,49 @@ auto DynamicGeometryAccess::export_impl(const std::shared_ptr<const DynamicConve
                 return cache.bounded_root;
         }();
         if constexpr (Typed)
+        {
             if (auto existing = typed_root.lock())
             {
                 PointExport<Mode> result(std::move(existing));
                 ledger.retain(result, used, limit);
                 return result;
             }
-        auto dynamic = cache.dynamic_root.lock();
-        ExportReservation budget{used, limit, 0, arithmetic.work};
-        if (!dynamic)
-        {
-            details::FrozenExportEnvironment environment(cache);
-            dynamic = materialize_dynamic<Mode>(geometry, cache, budget);
-        }
-        if constexpr (Typed)
-        {
-            budget.add(1, sizeof(PointExportPayload<Mode>));
-            budget.add(dynamic->points.size(), sizeof(Point<Mode>));
-            auto payload = std::make_shared<PointExportPayload<Mode>>();
-            payload->dynamic = dynamic;
-            payload->points.reserve(dynamic->points.size());
-            if (payload->points.capacity() > dynamic->points.size())
-                budget.add(payload->points.capacity() - dynamic->points.size(), sizeof(Point<Mode>));
-            budget.keep(1, sizeof(PointExportPayload<Mode>));
-            budget.keep(payload->points.capacity(), sizeof(Point<Mode>));
-            for (const auto& point : dynamic->points)
-                payload->points.emplace_back(point);
-            PointExport<Mode> result(payload);
-            arithmetic.sync();
-            budget.debit_retired();
-            budget.handed_off = true;
-            ledger.retain(result, used, limit);
-            // Publication is the only cache mutation and follows complete admission.
-            cache.dynamic_root = dynamic;
-            typed_root = payload;
-            cache.provenance_root = dynamic->point_context;
-            for (std::size_t i = 0; i < dynamic->points.size(); ++i)
-                cache.vertex_provenance[i] = identity(dynamic->points[i]).local_ref();
-            return result;
         }
         else
         {
-            DynamicPointExport result(dynamic);
-            arithmetic.sync();
-            budget.debit_retired();
-            budget.handed_off = true;
-            ledger.retain(result, used, limit);
-            cache.dynamic_root = dynamic;
-            cache.provenance_root = dynamic->point_context;
-            for (std::size_t i = 0; i < dynamic->points.size(); ++i)
-                cache.vertex_provenance[i] = identity(dynamic->points[i]).local_ref();
-            return result;
+            if (auto existing = cache.dynamic_root.lock())
+            {
+                DynamicPointExport result(std::move(existing));
+                ledger.retain(result, used, limit);
+                return result;
+            }
         }
+        ExportReservation budget{used, limit, 0, arithmetic.work};
+        // Each publication owns only its requested point representation. The
+        // frozen provenance context is shared independently of either payload.
+        auto payload = [&]
+        {
+            details::FrozenExportEnvironment environment(cache);
+            return materialize_points<Mode, Typed>(geometry, cache, budget);
+        }();
+        using Publication = std::conditional_t<Typed, PointExport<Mode>, DynamicPointExport>;
+        Publication result(payload);
+        arithmetic.sync();
+        budget.debit_retired();
+        budget.handed_off = true;
+        ledger.retain(result, used, limit);
+        // Publication is the only cache mutation and follows complete admission.
+        if constexpr (Typed)
+            typed_root = payload;
+        else
+            cache.dynamic_root = payload;
+        cache.provenance_root = payload->point_context;
+        for (std::size_t i = 0; i < payload->points.size(); ++i)
+            if constexpr (Typed)
+                cache.vertex_provenance[i] = identity(payload->points[i].dynamic()).local_ref();
+            else
+                cache.vertex_provenance[i] = identity(payload->points[i]).local_ref();
+        return result;
     }
     catch (...)
     {

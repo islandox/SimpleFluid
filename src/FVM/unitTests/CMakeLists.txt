@@ -63,7 +63,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_sources(${TEST_NAME} PRIVATE ${GENERAL_VOF_MOTION_SOURCES})
   endif()
   if(TEST_NAME STREQUAL "testPolyhedralReconstructionResult")
-    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/Wire.cc)
+    target_sources(${TEST_NAME} PRIVATE
+        ../details/GeneralVoF/Wire.cc
+        ../details/GeneralVoF/RetainedInterfaces.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFBalance")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/BalanceForecast.cc)

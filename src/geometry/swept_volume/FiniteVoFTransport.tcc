@@ -59,10 +59,9 @@ Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nod
     for (std::size_t i = 0; i < nodes.size(); ++i)
         normal = Points::add(normal, Points::cross(Points::subtract(result.current[i], result.center),
                                          Points::subtract(result.current[(i + 1) % nodes.size()], result.center)));
-    const auto triangles = sweep_boundary(nodes, result.current, result.departure, result.center, result.backcenter);
     SumFor<Mode> original;
-    for (const auto& triangle : triangles)
-        original.add(cone_determinant(result.center, triangle));
+    visit_sweep_triangles(nodes, result.current, result.departure, result.backcenter,
+        [&](const auto& a, const auto& b, const auto& c) { original.add(cone_determinant(result.center, a, b, c)); });
     // Only the departure cap depends on the private center. Its linear
     // coefficient follows directly from the determinant's multilinearity.
     SumFor<Mode> coefficient;
@@ -93,14 +92,14 @@ Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t>
         context.record.mark(failure::Field::VolumeBudget);
     SumFor<Mode> check;
     SumFor<Mode> constructed(work.arithmetic_mode);
-    const auto corrected = sweep_boundary(nodes, result.current, result.departure, result.center, result.backcenter);
     std::uint64_t construction = 0;
-    for (const auto& triangle : corrected)
+    visit_sweep_triangles(nodes, result.current, result.departure, result.backcenter,
+        [&](const auto& a, const auto& b, const auto& c)
     {
         failure::Scope simplex_context("sweep_simplex");
         simplex_context.record.construction = construction++;
         simplex_context.record.mark(failure::Field::Construction);
-        const std::array<const PLIC::Point<Mode>*, 4> vertices{&result.center, &triangle[0], &triangle[1], &triangle[2]};
+        const std::array<const PLIC::Point<Mode>*, 4> vertices{&result.center, &a, &b, &c};
         for (std::size_t vertex = 0; vertex < vertices.size(); ++vertex)
         {
             const auto& point = vertices[vertex]->value;
@@ -110,9 +109,9 @@ Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t>
         simplex_context.record.mark(failure::Field::Simplex);
         simplex_context.record.bytes_used = work.bytes;
         simplex_context.record.mark(failure::Field::BytesUsed);
-        const auto volume = cone_determinant(result.center, triangle);
+        const auto volume = cone_determinant(result.center, a, b, c);
         if (volume.value == 0 && volume.absolute_error == 0)
-            continue;
+            return;
         if (!(std::abs(volume.value) > volume.absolute_error))
             throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
                 "Finite VoF swept simplex orientation is arithmetically unresolved.");
@@ -120,7 +119,7 @@ Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t>
         geometry_limits.arithmetic_mode = work.arithmetic_mode;
         geometry_limits.byte_budget = work.limits.byte_budget;
         auto geometry =
-            Geometry<Mode>::tetrahedron({result.center, triangle[0], triangle[1], triangle[2]}, geometry_limits);
+            Geometry<Mode>::tetrahedron({result.center, a, b, c}, geometry_limits);
         if (!geometry)
             throw std::invalid_argument("Finite VoF positive swept simplex disappeared.");
         work.atom(geometry);
@@ -128,7 +127,7 @@ Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t>
         constructed.add(volume.value > 0 ? measured : Math::negate(measured));
         result.pieces.push_back({std::move(geometry), volume.value > 0 ? 1 : -1});
         check.add(volume);
-    }
+    });
     const auto residual = Math::subtract(Math::divide(check.value(), {6, 0}), result.control);
     result.constructed_volume = constructed.value();
     result.signed_control_difference = Math::subtract(result.constructed_volume, result.control);

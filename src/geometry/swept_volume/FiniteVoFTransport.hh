@@ -5,6 +5,7 @@
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include <algorithm>
 #include <array>
@@ -86,35 +87,40 @@ template<ArithmeticMode Mode> inline bool same_point(const PLIC::Point<Mode>& a,
     return PLIC::points_identical<Mode>(a, b);
 }
 template<ArithmeticMode Mode>
-inline Value cone_determinant(const PLIC::Point<Mode>& origin, const std::array<PLIC::Point<Mode>, 3>& triangle)
+inline Value cone_determinant(const PLIC::Point<Mode>& origin, const PLIC::Point<Mode>& a,
+    const PLIC::Point<Mode>& b, const PLIC::Point<Mode>& c)
 {
-    return runtime_value<Mode>(PLIC::orientation<Mode>({origin, triangle[0], triangle[1], triangle[2]}));
+    return runtime_value<Mode>(PLIC::orientation<Mode>({origin, a, b, c}));
 }
 template<ArithmeticMode Mode>
-inline std::vector<std::array<PLIC::Point<Mode>, 3>> sweep_boundary(std::span<const std::uint64_t> nodes,
-    const std::vector<PLIC::Point<Mode>>& current, const std::vector<PLIC::Point<Mode>>& departure,
-    const PLIC::Point<Mode>& center, const PLIC::Point<Mode>& backcenter)
+inline Value cone_determinant(const PLIC::Point<Mode>& origin, const std::array<PLIC::Point<Mode>, 3>& triangle)
 {
-    std::vector<std::array<PLIC::Point<Mode>, 3>> result;
-    result.reserve(3 * nodes.size());
+    return cone_determinant(origin, triangle[0], triangle[1], triangle[2]);
+}
+/** Visit the canonical signed boundary in construction order. References are
+ * borrowed from the supplied recipe and must not escape the synchronous call. */
+template<ArithmeticMode Mode, class Visitor>
+inline void visit_sweep_triangles(std::span<const std::uint64_t> nodes,
+    const std::vector<PLIC::Point<Mode>>& current, const std::vector<PLIC::Point<Mode>>& departure,
+    const PLIC::Point<Mode>& backcenter, Visitor&& visitor)
+{
     for (std::size_t i = 0; i < nodes.size(); ++i)
     {
         const auto j = (i + 1) % nodes.size();
         // The source cap lies in its authenticated source plane. Its cone
         // about center has identically zero three-dimensional measure.
-        result.push_back({backcenter, departure[j], departure[i]});
+        visitor(backcenter, departure[j], departure[i]);
         if (nodes[i] < nodes[j])
         {
-            result.push_back({current[i], departure[i], departure[j]});
-            result.push_back({current[i], departure[j], current[j]});
+            visitor(current[i], departure[i], departure[j]);
+            visitor(current[i], departure[j], current[j]);
         }
         else
         {
-            result.push_back({current[j], current[i], departure[i]});
-            result.push_back({current[j], departure[i], departure[j]});
+            visitor(current[j], current[i], departure[i]);
+            visitor(current[j], departure[i], departure[j]);
         }
     }
-    return result;
 }
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
@@ -154,8 +160,11 @@ inline std::vector<OverlayFace> overlay_face_order(const Geometry<Mode>& geometr
     result.reserve(geometry.faces().size());
     for (std::size_t f = 0; f < geometry.faces().size(); ++f)
         result.push_back({f, 0});
-    charge(geometry.vertex_count(), sizeof(PLIC::Point<Mode>));
-    const auto points = geometry.local_points();
+    charge(geometry.vertex_count(), sizeof(PLIC::PointCoordinates<Mode>));
+    std::vector<PLIC::PointCoordinates<Mode>> points;
+    points.reserve(geometry.vertex_count());
+    PLIC::details::visit_local_coordinates(geometry,
+        [&](std::size_t, const PLIC::PointCoordinates<Mode>& point) { points.push_back(point); });
     long double magnitude = 0;
     for (const auto& p : points)
         for (const auto x : p.value)

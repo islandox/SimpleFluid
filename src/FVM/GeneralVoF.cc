@@ -175,6 +175,11 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             data->options = options;
             data->phase_cleanup = cleanup_state;
             current(*data);
+            if constexpr (Mode == ArithmeticMode::Exact)
+                if (capsules)
+                    data->retained_interfaces.reserve(std::count_if(capsules->begin(), capsules->end(),
+                                                          [](const auto& capsule) { return capsule.geometry_ready; }),
+                        budget);
             std::set<Key> seen;
             for (std::size_t i = 0; i < order.size(); ++i)
             {
@@ -182,6 +187,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     throw std::invalid_argument("General VoF input ownership differs.");
                 const auto& leaf = hierarchy->owned().at(order[i]);
                 Cell cell;
+                const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr;
                 cell.key = order[i];
                 cell.owner = comm->getRank();
                 cell.revision = leaf.revision;
@@ -203,7 +209,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     cell.occupancy = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound,
                         e.fit_residual, e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
                     if (capsule.geometry_ready && options.arithmetic_mode == ArithmeticMode::Exact)
-                        cell.retained_interface = capsule.geometry;
+                    {
+                        data->retained_interfaces.append(cell.key, capsule.geometry, budget);
+                        retained = &capsule.geometry;
+                    }
                 }
                 else
                     occupancy<Mode>(cell);
@@ -238,10 +247,11 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         cell.declaration = GeneralVoFPhaseGeometry::PureCarrier;
                 }
                 // Validates independent occupancy without changing represented phases.
-                validate_cell<Mode>(cell, options);
+                validate_cell<Mode>(cell, options, retained);
                 budget.add(cell.phase.geometry->storage_bytes());
                 data->cells.emplace(order[i], std::move(cell));
             }
+            data->retained_interfaces.finish();
         });
     agree_options(options, comm);
     resolve_phase_cleanup_options(*data);
@@ -781,7 +791,7 @@ std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>
             for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
-                validate_cell<ArithmeticMode::Exact>(cell, data_->options);
+                validate_cell<ArithmeticMode::Exact>(cell, data_->options, retained_interface(*data_, cell));
                 auto labels = geometric_labels(cell);
                 budget.add(sizeof(labels) + labels.bulk.storage_bytes() + labels.gas.storage_bytes() +
                            labels.carrier.storage_bytes());
@@ -806,7 +816,7 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
                     for (const auto& key : data_->topology->order)
                     {
                         const auto& cell = data_->cells.at(key);
-                        validate_cell<Mode>(cell, data_->options);
+                        validate_cell<Mode>(cell, data_->options, retained_interface(*data_, cell));
                         const auto bulk = PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume();
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         const auto minority = gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
@@ -827,7 +837,7 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
             for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
-                validate_cell<ArithmeticMode::Exact>(cell, data_->options);
+                validate_cell<ArithmeticMode::Exact>(cell, data_->options, retained_interface(*data_, cell));
                 const auto labels = geometric_labels(cell);
                 if (labels.bulk.sign() <= 0)
                     throw std::invalid_argument("General VoF geometric fraction has nonpositive actual volume.");
@@ -871,7 +881,8 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
                     std::size_t fitting_cells = 0;
                     const auto stencil = reconstruction_stencil<Mode>(*data_, key, false, &fitting_cells);
                     auto assessment = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
-                        reconstruction_sample<Mode>(cell), stencil, fitting_cells, data_->options.reconstruction);
+                        reconstruction_sample<Mode>(cell, retained_interface(*data_, cell)), stencil, fitting_cells,
+                        data_->options.reconstruction);
                     if (!assessment.admitted())
                         result.push_back({cell.gid, key, assessment});
                 }

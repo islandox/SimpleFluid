@@ -9,10 +9,12 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include <algorithm>
 #include <cmath>
+#include <cfenv>
 #include <gtest/gtest.h>
 #include <limits>
 #include <set>
@@ -630,6 +632,110 @@ TEST(FiniteNativeGeometryTest, PlaneFaceAreaCoversAnalyticPolygonAndPreservesCom
     EXPECT_EQ(moved.area, triangle.area);
     EXPECT_EQ(PLIC::ordinary_plane_face_area(square, {{1, 0, 0}, {}, -1}).area, 0);
     EXPECT_EQ(PLIC::ordinary_plane_face_area(square, {{1, 0, 0}, {}, 2}).area, 1);
+}
+
+template<ArithmeticMode Mode> void check_local_coordinate_visitor(const PLIC::ConvexCellGeometry<Mode>& cell)
+{
+    std::fenv_t initial{};
+    ASSERT_EQ(std::fegetenv(&initial), 0);
+    const auto points = cell.local_points();
+    const int expected_flags = std::fetestexcept(FE_ALL_EXCEPT);
+    ASSERT_EQ(std::fesetenv(&initial), 0);
+    const auto indexed = PLIC::details::materialize_local_coordinates(cell);
+    EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), expected_flags);
+    ASSERT_EQ(indexed.size(), points.size());
+    for (std::size_t index = 0; index < points.size(); ++index)
+    {
+        EXPECT_EQ(indexed[index].value, points[index].value);
+        if constexpr (Mode == ArithmeticMode::BoundedCertification)
+            EXPECT_EQ(indexed[index].absolute_error, points[index].absolute_error);
+    }
+    ASSERT_EQ(std::fesetenv(&initial), 0);
+    std::size_t visited = 0;
+    PLIC::details::visit_local_coordinates(cell, [&](std::size_t index, const PLIC::PointCoordinates<Mode>& point)
+        {
+            EXPECT_EQ(index, visited++);
+            ASSERT_LT(index, points.size());
+            EXPECT_EQ(point.value, points[index].value);
+            if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                EXPECT_EQ(point.absolute_error, points[index].absolute_error);
+        });
+    EXPECT_EQ(visited, points.size());
+    EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), expected_flags);
+    EXPECT_THROW(PLIC::details::visit_local_coordinates(cell,
+                     [](std::size_t, const PLIC::PointCoordinates<Mode>&) { throw std::runtime_error("callback"); }),
+        std::runtime_error);
+    visited = 0;
+    PLIC::details::visit_local_coordinates(cell,
+        [&](std::size_t, const PLIC::PointCoordinates<Mode>&) { ++visited; });
+    EXPECT_EQ(visited, points.size());
+}
+
+TEST(FiniteNativeGeometryTest, LocalCoordinateVisitorMatchesNumericsAndRecoversFromCallbackFailure)
+{
+    struct RestoreEnvironment
+    {
+        std::fenv_t saved{};
+        RestoreEnvironment() { (void) std::fegetenv(&saved); }
+        ~RestoreEnvironment() { (void) std::fesetenv(&saved); }
+    } restore;
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    const auto cell = Cell::box({-.125, .1, -.3}, {1.75, 2.1, 3.7})->translated({.25, -.5, .75});
+    for (const int rounding : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO})
+    {
+        ASSERT_EQ(std::fesetround(rounding), 0);
+        check_local_coordinate_visitor(*cell);
+        EXPECT_EQ(std::fegetround(), rounding);
+    }
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    if (PLIC::certification_environment())
+    {
+        const auto bounded = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>::box(
+            {-.125, .1, -.3}, {1.75, 2.1, 3.7})->translated({.25, -.5, .75});
+        check_local_coordinate_visitor(*bounded);
+        ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+        EXPECT_THROW((void) bounded->local_points(), std::invalid_argument);
+        EXPECT_THROW(PLIC::details::visit_local_coordinates(*bounded,
+                         [](std::size_t, const PLIC::PointCoordinates<ArithmeticMode::BoundedCertification>&) {}),
+            std::invalid_argument);
+        EXPECT_EQ(std::fegetround(), FE_DOWNWARD);
+    }
+}
+
+TEST(FiniteNativeGeometryTest, PlaneMeasureScratchReusesCapacityAcrossDegreesAndExceptions)
+{
+    const std::array<std::array<double, 2>, 8> octagon{
+        {{-1, -.5}, {-.5, -1}, {.5, -1}, {1, -.5}, {1, .5}, {.5, 1}, {-.5, 1}, {-1, .5}}};
+    auto large_cell = Cell::extruded_polygon(octagon, -1, 1);
+    const PLIC::OrdinaryPlaneMeasure large(*large_cell);
+    large_cell.reset(); // Prepared face-loop ownership survives the source handle.
+    const auto cube = Cell::box({0, 0, 0}, {1, 1, 1});
+    const PLIC::OrdinaryPlaneMeasure small(*cube);
+    auto scratch = large.make_scratch();
+    const auto capacities = scratch.capacities();
+    EXPECT_GE(capacities[0], 8u);
+    EXPECT_GE(capacities[1], 16u);
+    const PLIC::GeometryHalfspace bisector{{1, 0, 0}, {}, 0};
+    const auto first = large.below(bisector, scratch, true);
+    EXPECT_NEAR(first.volume, 3.5L, 4e-18L);
+    EXPECT_NEAR(first.section_area, 4.L, 4e-18L);
+    const auto corner = small.below({{1, 1, 1}, {}, 1}, scratch, true);
+    EXPECT_NEAR(corner.volume, 1.L / 6, 4e-18L);
+    EXPECT_NEAR(corner.section_area, std::sqrt(3.L) / 2, 4e-18L);
+    EXPECT_THROW((void) large.below({{0, 0, 0}, {}, 0}, scratch), std::invalid_argument);
+    EXPECT_THROW(scratch.reserve(std::numeric_limits<std::size_t>::max()), std::length_error);
+    const auto repeated = large.below(bisector, scratch, true);
+    EXPECT_EQ(repeated.volume, first.volume);
+    EXPECT_EQ(repeated.section_area, first.section_area);
+    EXPECT_EQ(repeated.numerical_error_estimate, first.numerical_error_estimate);
+    EXPECT_EQ(repeated.status, first.status);
+    EXPECT_EQ(scratch.capacities(), capacities);
+    auto independent = large.make_scratch();
+    const auto separate = large.below(bisector, independent, true);
+    EXPECT_EQ(separate.volume, first.volume);
+    EXPECT_EQ(separate.section_area, first.section_area);
+    EXPECT_EQ(separate.numerical_error_estimate, first.numerical_error_estimate);
+    EXPECT_EQ(scratch.capacities(), capacities);
 }
 
 } // namespace

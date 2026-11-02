@@ -201,6 +201,7 @@ public:
     DynamicGeometryMoments moments(GeometryPoint origin) const;
     GeometryPoint centroid() const;
     std::vector<DynamicPoint> local_points() const;
+    void visit_local_coordinates(void*, void (*)(void*, std::size_t, const PointCoordinates<Mode>&)) const;
     std::array<DynamicGeometryValue, 3> axis_spans() const;
     DynamicSupport support(GeometryPoint normal, GeometryPoint anchor) const;
     DynamicClipResult clip(const GeometryHalfspace& input, bool measure_section) const;
@@ -484,6 +485,7 @@ public:
     DynamicGeometryMoments moments(GeometryPoint origin) const;
     GeometryPoint centroid() const;
     std::vector<DynamicPoint> local_points() const;
+    void visit_local_coordinates(void*, void (*)(void*, std::size_t, const PointCoordinates<Mode>&)) const;
     std::array<DynamicGeometryValue, 3> axis_spans() const;
     DynamicSupport support(GeometryPoint normal, GeometryPoint anchor) const;
     DynamicClipResult clip(const GeometryHalfspace& input, bool measure_section) const;
