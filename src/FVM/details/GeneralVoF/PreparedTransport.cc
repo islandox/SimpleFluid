@@ -4,6 +4,7 @@
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 namespace SimpleFluid::VoF
 {
 namespace
@@ -110,10 +111,28 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
         reserve_key_storage(delta.key, reserve);
     reserve(cleanup_momentum.capacity(), sizeof(std::array<long double, 3>));
     reserve(node_trajectories.capacity(), sizeof(GeneralVoFFiniteNodeTrajectory));
+    PLIC::GeometryAllocationLedger point_owners;
+    std::size_t point_bytes = 0;
+    const auto point_limit = remaining;
+    const auto retain_point = [&](const PLIC::DynamicPoint& point)
+    {
+        const auto before = point_bytes;
+        try
+        {
+            point_owners.retain_point_provenance(point, point_bytes, point_limit);
+        }
+        catch (...)
+        {
+            reserve(point_bytes - before, 1);
+            context.record.bytes_used = context.record.byte_budget - remaining;
+            throw;
+        }
+        reserve(point_bytes - before, 1);
+    };
     for (const auto& trace : node_trajectories)
     {
-        reserve(PLIC::dynamic_point_storage_bytes(trace.point) - sizeof(PLIC::DynamicPoint), 1);
-        reserve(PLIC::dynamic_point_storage_bytes(trace.departure) - sizeof(PLIC::DynamicPoint), 1);
+        retain_point(trace.point);
+        retain_point(trace.departure);
     }
     for (const auto* history : {&phase_roundoff, &old_phase_history, &new_phase_history})
         reserve(history->capacity(), sizeof(PhaseRoundoff));

@@ -45,7 +45,8 @@ struct CacheObservation
     std::weak_ptr<const P::DynamicPointExportPayload> dynamic;
     std::weak_ptr<const P::PointExportPayload<ArithmeticMode::Ordinary>> ordinary;
     std::weak_ptr<const P::PointExportPayload<ArithmeticMode::BoundedCertification>> bounded;
-    std::vector<std::weak_ptr<const P::DynamicPointProvenance>> vertices;
+    std::weak_ptr<const P::PointSnapshotContextBase> snapshot;
+    std::vector<P::DynamicStoredPointRef> vertices;
 };
 CacheObservation observe(const P::DynamicConvexGeometry& geometry)
 {
@@ -53,7 +54,8 @@ CacheObservation observe(const P::DynamicConvexGeometry& geometry)
     if (!cache)
         return {};
     const std::lock_guard lock(cache->mutex);
-    return {cache->dynamic_root, cache->ordinary_root, cache->bounded_root, cache->vertex_provenance};
+    return {cache->dynamic_root, cache->ordinary_root, cache->bounded_root, cache->provenance_root,
+        cache->vertex_provenance};
 }
 template<ArithmeticMode Mode> CacheObservation observe(const Geometry<Mode>& geometry)
 {
@@ -69,8 +71,9 @@ void expect_cold(const CacheObservation& cache)
     EXPECT_FALSE(has_owner(cache.dynamic));
     EXPECT_FALSE(has_owner(cache.ordinary));
     EXPECT_FALSE(has_owner(cache.bounded));
-    for (const auto& vertex : cache.vertices)
-        EXPECT_FALSE(has_owner(vertex));
+    EXPECT_FALSE(has_owner(cache.snapshot));
+    for (const auto ref : cache.vertices)
+        EXPECT_FALSE(ref);
 }
 template<ArithmeticMode Mode> void same_points(std::span<const P::Point<Mode>> a, std::span<const P::Point<Mode>> b)
 {
@@ -213,6 +216,124 @@ TEST(PointExportsTest, BoundedDynamicAndTypedAdmissionHasExactCapsAndPoisonedFai
     admission_contract<ArithmeticMode::BoundedCertification, true>();
 }
 
+template<ArithmeticMode Mode, bool Typed> void preadmitted_import_export_contract(bool clipped)
+{
+    const auto make_cold = [&]
+    {
+        const auto native = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+        const auto imported = Geometry<Mode>::from_geometry(*native);
+        return clipped ? imported->clip({{1, 0, 0}, {}, .5}, false).inside : imported;
+    };
+    const auto publish = [](const auto& geometry, auto& ledger, auto& used, auto limit)
+    {
+        if constexpr (Typed)
+            return geometry->export_points(ledger, used, limit);
+        else
+            return geometry->dynamic_geometry()->export_points(ledger, used, limit);
+    };
+    std::size_t total = 0, retained_before = 0;
+    {
+        const auto geometry = make_cold();
+        ASSERT_TRUE(geometry);
+        P::GeometryAllocationLedger ledger;
+        ledger.retain(geometry, total, export_budget);
+        retained_before = total;
+        expect_cold(observe(*geometry));
+        const auto first = publish(geometry, ledger, total, export_budget);
+        ASSERT_EQ(first.points().size(), geometry->vertex_count());
+        // The temporary compact-ref buffer alone has this known lower bound;
+        // growth histories, support copies and construction maps add to it.
+        EXPECT_GE(total - ledger.payload_bytes() - ledger.bookkeeping_bytes(),
+            geometry->vertex_count() * sizeof(P::StoredPointRef<Mode>));
+        const auto charged = total;
+        const auto warm = publish(geometry, ledger, total, export_budget);
+        EXPECT_EQ(warm.points().data(), first.points().data());
+        EXPECT_EQ(total, charged);
+    }
+    ASSERT_GT(total, retained_before);
+    {
+        const auto geometry = make_cold();
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        ledger.retain(geometry, used, total);
+        EXPECT_EQ(used, retained_before);
+        EXPECT_NO_THROW((void) publish(geometry, ledger, used, total));
+        EXPECT_EQ(used, total);
+    }
+    {
+        const auto geometry = make_cold();
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        ledger.retain(geometry, used, total - 1);
+        EXPECT_EQ(used, retained_before);
+        EXPECT_THROW((void) publish(geometry, ledger, used, total - 1), P::GeometryError);
+        expect_cold(observe(*geometry));
+        const auto rejected = used;
+        EXPECT_THROW((void) publish(geometry, ledger, used, export_budget), P::GeometryError);
+        EXPECT_EQ(used, rejected);
+        expect_cold(observe(*geometry));
+    }
+}
+TEST(PointExportsTest, OrdinaryPreadmittedImportedAndClippedExportsChargeRetiredStorageAtExactCaps)
+{
+    for (const bool clipped : {false, true})
+    {
+        SCOPED_TRACE(clipped);
+        preadmitted_import_export_contract<ArithmeticMode::Ordinary, false>(clipped);
+        preadmitted_import_export_contract<ArithmeticMode::Ordinary, true>(clipped);
+    }
+}
+TEST(PointExportsTest, BoundedPreadmittedImportedAndClippedExportsChargeRetiredStorageAtExactCaps)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
+    for (const bool clipped : {false, true})
+    {
+        SCOPED_TRACE(clipped);
+        preadmitted_import_export_contract<ArithmeticMode::BoundedCertification, false>(clipped);
+        preadmitted_import_export_contract<ArithmeticMode::BoundedCertification, true>(clipped);
+    }
+}
+
+template<ArithmeticMode Mode, bool Typed> void failed_export_prefix_contract()
+{
+    const auto native = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto imported = Geometry<Mode>::from_geometry(*native);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(imported, used, export_budget);
+    const auto before = used;
+    const auto candidate = sizeof(P::DynamicPointExportPayload) + imported->vertex_count() * sizeof(P::DynamicPoint);
+    const auto cap = before + candidate;
+    const auto publish = [&](std::size_t limit)
+    {
+        if constexpr (Typed)
+            return imported->export_points(ledger, used, limit);
+        else
+            return imported->dynamic_geometry()->export_points(ledger, used, limit);
+    };
+    // The output owner/vector fit exactly; creating its new provenance context
+    // must fail. Those already admitted buffers remain cumulative spent bytes.
+    EXPECT_THROW((void) publish(cap), P::GeometryError);
+    EXPECT_EQ(used, cap);
+    expect_cold(observe(*imported));
+    EXPECT_THROW((void) publish(export_budget), P::GeometryError);
+    EXPECT_EQ(used, cap);
+    expect_cold(observe(*imported));
+}
+TEST(PointExportsTest, OrdinaryFailedColdExportKeepsItsAdmittedCandidatePrefixSpent)
+{
+    failed_export_prefix_contract<ArithmeticMode::Ordinary, false>();
+    failed_export_prefix_contract<ArithmeticMode::Ordinary, true>();
+}
+TEST(PointExportsTest, BoundedFailedColdExportKeepsItsAdmittedCandidatePrefixSpent)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded geometry requires its supported FP environment.";
+    failed_export_prefix_contract<ArithmeticMode::BoundedCertification, false>();
+    failed_export_prefix_contract<ArithmeticMode::BoundedCertification, true>();
+}
+
 template<ArithmeticMode Mode> void concurrent_contract()
 {
     const auto box = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
@@ -251,7 +372,13 @@ template<ArithmeticMode Mode> void concurrent_contract()
             EXPECT_TRUE(environments[i]);
         EXPECT_GT(used[i], 0u);
     }
-    EXPECT_EQ(used[0], used[1]);
+    EXPECT_EQ(ledgers[0].payload_bytes(), ledgers[1].payload_bytes());
+    EXPECT_EQ(ledgers[0].bookkeeping_bytes(), ledgers[1].bookkeeping_bytes());
+    const auto retained = ledgers[0].payload_bytes() + ledgers[0].bookkeeping_bytes();
+    // Exactly one caller constructs the cold publication. Its retired
+    // allocation history is spent; the other borrows the resulting cache.
+    EXPECT_NE(used[0] > retained, used[1] > retained);
+    EXPECT_EQ(std::min(used[0], used[1]), retained);
     EXPECT_EQ(publications[0]->points().data(), publications[1]->points().data());
     for (std::size_t i = 0; i < box->vertex_count(); ++i)
         EXPECT_EQ(Access::identity(publications[0]->points()[i].dynamic()),
@@ -295,8 +422,11 @@ TEST(PointExportsTest, CopiedUncertainPointsSurvivePayloadEvictionAndReuseProven
     }
     EXPECT_TRUE(first.dynamic.expired());
     EXPECT_TRUE(first.bounded.expired());
-    for (std::size_t i = 0; i < first.vertices.size(); ++i)
-        EXPECT_EQ(first.vertices[i].expired(), i != survivor_index);
+    // A copied point retains its entire frozen export snapshot. Dynamic/typed
+    // publication buffers can expire independently of that snapshot.
+    EXPECT_FALSE(first.snapshot.expired());
+    for (const auto ref : first.vertices)
+        EXPECT_TRUE(ref);
     const auto live_identity = Access::identity(survivor->dynamic());
     P::GeometryAllocationLedger ledger;
     std::size_t used = 0;
@@ -329,8 +459,7 @@ template<ArithmeticMode Mode> void ledger_lifetime_contract()
     EXPECT_TRUE(cache.dynamic.expired());
     EXPECT_TRUE(cache.ordinary.expired());
     EXPECT_TRUE(cache.bounded.expired());
-    for (const auto& vertex : cache.vertices)
-        EXPECT_TRUE(vertex.expired());
+    EXPECT_TRUE(cache.snapshot.expired());
 }
 TEST(PointExportsTest, OrdinaryLedgerPinsPublicationUntilTransactionDies)
 {
@@ -454,7 +583,8 @@ TEST(PointExportsTest, BoundedWarmExportRejectsUnsupportedCallerRounding)
     ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
     P::GeometryAllocationLedger unsupported_ledger;
     std::size_t unsupported_bytes = 0;
-    EXPECT_THROW((void) box->export_points(unsupported_ledger, unsupported_bytes, export_budget), std::invalid_argument);
+    EXPECT_THROW(
+        (void) box->export_points(unsupported_ledger, unsupported_bytes, export_budget), std::invalid_argument);
     EXPECT_EQ(std::fegetround(), FE_UPWARD);
 }
 

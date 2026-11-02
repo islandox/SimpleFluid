@@ -9,7 +9,8 @@ namespace SimpleFluid::PLIC::details
 namespace SIMPLEFLUID_LOCAL certification_kernel
 {
 template<ArithmeticMode Mode>
-DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+NativePointDefinition<Mode> source_point_definition(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
@@ -27,8 +28,7 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
         faces += source->num_faces();
     }
     const auto coordinates = numerical_point<ArithmeticMode::Ordinary>(identity);
-    DynamicPoint result;
-    result.arithmetic_mode = mode;
+    NativePointDefinition<Mode> result;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
         result.value[axis] = coordinates[axis].value;
@@ -39,8 +39,18 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
     // The public native-input boundary independently checked membership before
     // entering this kernel. Only the exact represented input point is shared;
     // no ordinary support keys or clipping provenance are imported.
-    active_work->charge(1, sizeof(DynamicPointProvenance));
-    DynamicGeometryAccess::seal_represented_source(result, {});
+    return result;
+}
+
+template<ArithmeticMode Mode>
+DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
+{
+    static_assert(Mode == kernel_mode);
+    Operation scope(mode_limits(mode));
+    auto definition = source_point_definition<Mode>(sources, identity, mode);
+    DynamicPoint result{definition.value, definition.absolute_error, mode};
+    DynamicGeometryAccess::seal_represented_source(result, std::move(definition.supports));
     return result;
 }
 
@@ -137,7 +147,7 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
         const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
         bool authenticated = false;
-        for (const auto& key : plane->authorities)
+        for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
             if (std::find(source.supports().begin(), source.supports().end(), key) != source.supports().end())
             {
                 authenticated = true;
@@ -152,9 +162,11 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         // Every catalog entry is authenticated above, including duplicates.
         // A collision-free original support identity proves equal planes even
         // when independently scaled normals have different numerical bounds.
-        const bool repeated_support = std::any_of(plane->authorities.begin(), plane->authorities.end(),
+        const bool repeated_support = std::any_of(resolve_authorities(plane->point_context, plane->authorities).begin(),
+            resolve_authorities(plane->point_context, plane->authorities).end(),
             [&](const auto& key) { return independent_supports.contains(key); });
-        independent_supports.insert(plane->authorities.begin(), plane->authorities.end());
+        independent_supports.insert(resolve_authorities(plane->point_context, plane->authorities).begin(),
+            resolve_authorities(plane->point_context, plane->authorities).end());
         if (zero_motion || repeated_support || rank == 3)
             continue; // Every catalog incidence is still authenticated above.
         const auto& normal = plane->normal;
@@ -223,6 +235,9 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
     return result;
 }
 
+template NativePointDefinition<kernel_mode> source_point_definition<kernel_mode>(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template DynamicPoint source_point_fan<kernel_mode>(
     std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);

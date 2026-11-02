@@ -273,12 +273,12 @@ TEST(GeneralVoFFaceWorkspace, PendingScalarFacesReleaseOwnersAndPreserveInterlea
     using Point = PLIC::Point<mode>;
     auto work = retained_work(1024 * 1024, 0);
     local::PendingFaceGeometry pending;
-    std::array<std::weak_ptr<const PLIC::DynamicPointProvenance>, 4> owners;
+    std::array<std::weak_ptr<const PLIC::PointSnapshotContextBase>, 4> owners;
     for (unsigned i = 0; i < owners.size(); ++i)
     {
         sweep::Sweep<mode> recipe;
         recipe.center = PLIC::point_average<mode>(std::array{Point({static_cast<long double>(i), 0, 0})});
-        owners[i] = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic());
+        owners[i] = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic()).context_pin();
         recipe.control.value = i + 1;
         recipe.ordinary_volume_budget = (i + 1) / 1024.L;
         recipe.current = {Point({0, 0, 0}), Point({1, 0, 0})};
@@ -314,11 +314,11 @@ TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoes
     using Point = PLIC::Point<mode>;
     auto work = retained_work(1024 * 1024, 0);
     local::PendingFaceGeometry pending;
-    std::weak_ptr<const PLIC::DynamicPointProvenance> owner;
+    std::weak_ptr<const PLIC::PointSnapshotContextBase> owner;
     {
         sweep::Sweep<mode> recipe;
         recipe.center = PLIC::point_average<mode>(std::array{Point({.5L, .5L, 0})});
-        owner = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic());
+        owner = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic()).context_pin();
         recipe.backcenter = Point({.5L, .5L, 1});
         recipe.current = {Point({0, 0, 0}), Point({1, 0, 0}), Point({1, 1, 0}), Point({0, 1, 0})};
         recipe.departure = {Point({0, 0, 1}), Point({1, 0, 1}), Point({1, 1, 1}), Point({0, 1, 1})};

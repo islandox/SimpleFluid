@@ -10,6 +10,42 @@
 
 namespace SimpleFluid::PLIC
 {
+const PlaneAuthority& PointAuthorityRange::Iterator::operator*() const
+{
+    return lookup ? lookup(source, position) : static_cast<const PlaneAuthority*>(source)[position];
+}
+const PlaneAuthority& PointAuthorityRange::operator[](std::size_t index) const
+{
+    return *Iterator{source_, lookup_, first_ + index};
+}
+bool PointAuthorityRange::operator==(const PointAuthorityRange& other) const
+{
+    return size() == other.size() && std::equal(begin(), end(), other.begin());
+}
+bool PointAuthorityRange::operator==(const std::vector<PlaneAuthority>& other) const
+{
+    return size() == other.size() && std::equal(begin(), end(), other.begin());
+}
+
+PointProvenanceRef::PointProvenanceRef(std::shared_ptr<const PointSnapshotContextBase> owner, DynamicStoredPointRef ref)
+{
+    const PointProvenanceView resolved(owner.get(), ref);
+    if (!resolved)
+        return;
+    if (!owner->frozen)
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "An unfinished point snapshot cannot escape.");
+    if (ref.dependency_slot)
+        owner = owner->dependencies.at(ref.dependency_slot - 1);
+    owner_ = std::move(owner);
+    ref_ = resolved.local_ref();
+}
+PointProvenanceView PointProvenanceRef::view() const
+{
+    return {owner_.get(), ref_};
+}
+template class TypedPointProvenanceRef<ArithmeticMode::Ordinary>;
+template class TypedPointProvenanceRef<ArithmeticMode::BoundedCertification>;
+
 void details::charge_geometry_identity_scratch(std::size_t count, std::size_t bytes)
 {
     if (active_work)
@@ -24,10 +60,14 @@ bool has_support(const DynamicPoint& point, const PlaneAuthority& authority)
     return std::find(supports.begin(), supports.end(), authority) != supports.end();
 }
 
-bool has_any_support(const DynamicPoint& point, std::span<const PlaneAuthority> authorities)
+bool has_any_support(const DynamicPoint& point, PointAuthorityRange authorities)
 {
     return std::any_of(
         authorities.begin(), authorities.end(), [&](const auto& authority) { return has_support(point, authority); });
+}
+bool has_any_support(const DynamicPoint& point, std::span<const PlaneAuthority> keys)
+{
+    return has_any_support(point, DynamicGeometryAccess::boundary_keys(keys));
 }
 
 PlaneAuthority PlaneAuthority::opaque(std::vector<std::uint64_t> words)
@@ -234,13 +274,14 @@ OrdinaryBoundary::OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary> boun
         native_authority_ = details::original_support_authority(*plane.native_support);
 }
 
-std::span<const PlaneAuthority> OrdinaryBoundary::authorities() const
+PointAuthorityRange OrdinaryBoundary::authorities() const
 {
     const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
         DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
-    const auto& keys = storage->surfaces.at(boundary_.face).plane->authorities;
+    const auto& plane = *storage->surfaces.at(boundary_.face).plane;
+    const auto keys = resolve_authorities(plane.point_context, plane.authorities);
     if (keys.empty() && !native_authority_.empty())
-        return {&native_authority_, 1};
+        return DynamicGeometryAccess::boundary_keys({&native_authority_, 1});
     return keys;
 }
 
@@ -281,19 +322,16 @@ OrdinaryBoundaryClass OrdinaryBoundary::classify(const Point<ArithmeticMode::Ord
 
 namespace
 {
-bool provenance_matches(const DynamicPoint& point, const DynamicPointProvenance* provenance) noexcept
+bool provenance_matches(const DynamicPoint& point, PointProvenanceView provenance) noexcept
 {
-    return provenance && provenance->value == point.value && provenance->absolute_error == point.absolute_error &&
-           provenance->arithmetic_mode == point.arithmetic_mode;
+    return provenance && provenance.value() == point.value && provenance.absolute_error() == point.absolute_error &&
+           provenance.arithmetic_mode() == point.arithmetic_mode;
 }
 } // namespace
 
-const std::vector<PlaneAuthority>& DynamicPoint::supports() const
+PointAuthorityRange DynamicPoint::supports() const
 {
-    static const std::vector<PlaneAuthority> empty;
-    if (!provenance_matches(*this, provenance_.get()))
-        return empty;
-    return provenance_->supports();
+    return provenance_matches(*this, provenance_.view()) ? provenance_.view().supports() : PointAuthorityRange{};
 }
 } // namespace SimpleFluid::PLIC
 
@@ -341,193 +379,167 @@ void operation()
 {
     ++statistics.floating_operations;
 }
+void charge_point_snapshot(std::size_t count, std::size_t size)
+{
+    if (active_work)
+        active_work->charge(count, size);
+}
 } // namespace SimpleFluid::PLIC::details
 
 namespace SimpleFluid::PLIC
 {
-std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::identity(const DynamicPoint& p)
+PointProvenanceRef DynamicGeometryAccess::identity(const DynamicPoint& point)
 {
-    return provenance_matches(p, p.provenance_.get()) ? p.provenance_ : nullptr;
+    return provenance_matches(point, point.provenance_.view()) ? point.provenance_ : PointProvenanceRef{};
 }
-
-std::size_t DynamicGeometryAccess::identity_bytes(
-    const std::shared_ptr<const DynamicPointProvenance>& p, bool include_support_payloads)
+std::size_t DynamicGeometryAccess::identity_bytes(const PointProvenanceRef& point, bool include_support_payloads)
 {
-    if (!p)
+    return identity_bytes(point.view(), include_support_payloads);
+}
+std::size_t DynamicGeometryAccess::identity_bytes(PointProvenanceView point, bool include_support_payloads)
+{
+    if (!point)
         return 0;
-    std::size_t bytes = 0, retained_bytes = 0;
-    GeometryAllocationLedger attachments;
-    std::set<const DynamicPointProvenance*> visited;
-    std::set<const DynamicPointSupportPayload*> visited_supports;
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{p};
-    for (std::size_t i = 0; i < pending.size(); ++i)
+    GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    const auto limit = std::numeric_limits<std::size_t>::max();
+    if (point.arithmetic_mode() == ArithmeticMode::Ordinary)
+        ledger.retain_snapshot<ArithmeticMode::Ordinary>(point.owning().context_pin(), used, limit);
+    else
+        ledger.retain_snapshot<ArithmeticMode::BoundedCertification>(point.owning().context_pin(), used, limit);
+    if (!include_support_payloads)
     {
-        const auto point = pending[i];
-        if (!point || !visited.insert(point.get()).second)
-            continue;
-        bytes += sizeof(DynamicPointProvenance) + point->source_edges.capacity() * sizeof(point->source_edges.front());
-        if (const auto& payload = point->support_payload; payload && visited_supports.insert(payload.get()).second)
-        {
-            bytes += sizeof(DynamicPointSupportPayload) + payload->authorities.capacity() * sizeof(PlaneAuthority);
-            for (const auto& key : payload->authorities)
-            {
-                if (include_support_payloads)
-                    attachments.retain(key, retained_bytes, std::numeric_limits<std::size_t>::max());
-            }
-        }
-        details::visit_provenance_children(*point, [&](const auto& child) { pending.push_back(child); });
+        GeometryAllocationLedger attachments;
+        std::size_t retained = 0;
+        retain_supports(point, attachments, retained, limit);
+        return ledger.payload_bytes() - attachments.payload_bytes();
     }
-    return bytes + attachments.payload_bytes();
+    return ledger.payload_bytes();
 }
-
-void DynamicGeometryAccess::retain_supports(const std::shared_ptr<const DynamicPointProvenance>& root,
-    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+void DynamicGeometryAccess::retain_supports(
+    PointProvenanceView root, GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
 {
     if (!root)
         return;
-    std::set<const DynamicPointProvenance*> visited;
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{root};
+    // Context dependencies are a frozen DAG. Visit each context once; a copied
+    // point owns its complete snapshot, including all registered key payloads.
+    std::set<const PointSnapshotContextBase*> seen;
+    std::vector<const PointSnapshotContextBase*> pending{root.context()};
     for (std::size_t i = 0; i < pending.size(); ++i)
     {
-        const auto point = pending[i];
-        if (!point || !visited.insert(point.get()).second)
+        const auto* context = pending[i];
+        if (!seen.insert(context).second)
             continue;
-        for (const auto& authority : point->supports())
-            ledger.retain(authority, used, limit);
-        details::visit_provenance_children(*point, [&](const auto& child) { pending.push_back(child); });
+        snapshot_detail::dispatch(context,
+            [&](const auto& typed)
+            {
+                for (const auto& key : typed.authority_table)
+                    ledger.retain(key, used, limit);
+            });
+        for (const auto& parent : context->dependencies)
+            pending.push_back(parent.get());
     }
 }
-
-std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& p, bool include_support_payloads)
+std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& point, bool include_support_payloads)
 {
-    std::size_t bytes = sizeof(DynamicPoint);
-    if (p.provenance_)
-    {
-        bytes += identity_bytes(p.provenance_, include_support_payloads);
-    }
-    return bytes;
+    return sizeof(DynamicPoint) + identity_bytes(point.provenance_, include_support_payloads);
 }
-
 bool DynamicGeometryAccess::same_source(const DynamicPoint& a, const DynamicPoint& b)
 {
-    return a.provenance_ == b.provenance_ && provenance_matches(a, a.provenance_.get()) &&
-           provenance_matches(b, b.provenance_.get());
+    return a.provenance_ == b.provenance_ && provenance_matches(a, a.provenance_.view()) &&
+           provenance_matches(b, b.provenance_.view());
 }
-
 namespace
 {
-std::shared_ptr<const DynamicPointProvenance> point_provenance(const DynamicPoint& point,
-    std::shared_ptr<const DynamicPointSupportPayload> payload,
-    const std::shared_ptr<const DynamicPointProvenance>& source, bool export_seal, bool numerical_only)
+void normalize_supports(std::vector<PlaneAuthority>& supports)
 {
-    auto record = std::make_shared<DynamicPointProvenance>(
-        DynamicPointProvenance{point.value, point.absolute_error, std::move(payload), point.arithmetic_mode});
-    if (export_seal)
-    {
-        record->numerical_only = numerical_only || (source && source->numerical_only);
-        record->constructed = record->numerical_only || !source || source->constructed ||
-                              source->value != point.value || source->absolute_error != point.absolute_error;
-        if (!record->numerical_only)
-            record->source_origin = source;
-    }
-    return record;
+    accept_authorities(supports);
+    std::sort(supports.begin(), supports.end());
+    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
 }
-
-std::shared_ptr<const DynamicPointSupportPayload> support_payload(std::vector<PlaneAuthority> supports)
+template<ArithmeticMode Mode>
+PointProvenanceRef single_source(const DynamicPoint& point, std::span<const PlaneAuthority> supports)
 {
-    if (supports.empty())
-        return {};
-    if (details::active_work)
-        details::active_work->charge(1, sizeof(DynamicPointSupportPayload));
-    if (supports.capacity() > supports.size())
-    {
-        // Account the replacement while the old outer buffer remains alive.
-        // Moving authority handles preserves their immutable shared payloads.
-        if (details::active_work)
-            details::active_work->charge(supports.size(), sizeof(PlaneAuthority));
-        std::vector<PlaneAuthority> compact(supports.size());
-        std::move(supports.begin(), supports.end(), compact.begin());
-        supports = std::move(compact);
-    }
-    return std::make_shared<DynamicPointSupportPayload>(std::move(supports));
+    PointSnapshotBuilder<Mode> builder;
+    const auto previous = DynamicGeometryAccess::identity(point);
+    const auto facts = previous && previous.view().local_ref().role == PointProvenanceRole::Native
+                           ? previous.view()
+                           : PointProvenanceView{};
+    const auto view = builder.native_source(
+        point.value, point.absolute_error, DynamicGeometryAccess::admit_incidence<Mode>(supports), facts);
+    const auto ref = builder.import(view);
+    return bind_point(builder.freeze(), ref);
+}
+template<ArithmeticMode Mode>
+PointProvenanceRef single_sealed(const DynamicPoint& point, std::span<const PlaneAuthority> supports)
+{
+    PointSnapshotBuilder<Mode> builder;
+    const auto view =
+        builder.sealed(point.value, point.absolute_error, DynamicGeometryAccess::admit_incidence<Mode>(supports));
+    const auto ref = builder.import(view);
+    return bind_point(builder.freeze(), ref);
+}
+template<ArithmeticMode Mode>
+PointProvenanceRef single_export(
+    const DynamicPoint& point, PointProvenanceView source, std::span<const PlaneAuthority> supports, bool numerical)
+{
+    PointSnapshotBuilder<Mode> builder;
+    const auto view = builder.export_alias(
+        point.value, point.absolute_error, source, DynamicGeometryAccess::admit_incidence<Mode>(supports), numerical);
+    const auto ref = builder.import(view);
+    return bind_point(builder.freeze(), ref);
+}
+template<ArithmeticMode Mode>
+PointProvenanceRef single_generated(const DynamicPoint& point,
+    std::span<const std::array<PointProvenanceView, 2>> edges, std::span<const PlaneAuthority> supports, bool numerical)
+{
+    PointSnapshotBuilder<Mode> builder;
+    const auto view = numerical ? builder.numerical(point.value, point.absolute_error)
+                                : builder.generated(point.value, point.absolute_error, edges,
+                                      DynamicGeometryAccess::admit_incidence<Mode>(supports));
+    const auto ref = builder.import(view);
+    return bind_point(builder.freeze(), ref);
 }
 } // namespace
-
 void DynamicGeometryAccess::seal(DynamicPoint& point, std::vector<PlaneAuthority> supports)
 {
-    accept_authorities(supports);
-    std::sort(supports.begin(), supports.end());
-    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
-    point.provenance_ = point_provenance(point, support_payload(std::move(supports)), {}, false, false);
+    normalize_supports(supports);
+    point.provenance_ = point.arithmetic_mode == ArithmeticMode::Ordinary
+                            ? single_sealed<ArithmeticMode::Ordinary>(point, supports)
+                            : single_sealed<ArithmeticMode::BoundedCertification>(point, supports);
 }
-
-const std::shared_ptr<const DynamicPointProvenance>& DynamicGeometryAccess::borrowed_original_source(
-    const std::shared_ptr<const DynamicPointProvenance>& point)
+PointProvenanceView DynamicGeometryAccess::borrowed_original_source(PointProvenanceView point)
 {
-    static const std::shared_ptr<const DynamicPointProvenance> empty;
-    // The caller's owner pins every immutable source_origin slot. Packet replay
-    // validates dependency order before any such links are created.
-    const auto* current = &point;
-    while (*current && (*current)->source_origin)
+    while (point && point.source_origin())
     {
-        if ((*current)->numerical_only || (*current)->source_origin->arithmetic_mode != (*current)->arithmetic_mode)
-            return empty;
-        if (active_work)
-            active_work->pair();
-        current = &(*current)->source_origin;
+        const auto source = point.source_origin();
+        if (point.numerical_only() || source.arithmetic_mode() != point.arithmetic_mode())
+            return {};
+        if (details::active_work)
+            details::active_work->pair();
+        point = source;
     }
-    return *current && !(*current)->numerical_only ? *current : empty;
+    return point && !point.numerical_only() ? point : PointProvenanceView{};
 }
-
-std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::original_source(
-    const std::shared_ptr<const DynamicPointProvenance>& point)
+void DynamicGeometryAccess::seal_export(
+    DynamicPoint& point, PointProvenanceView source, std::vector<PlaneAuthority> supports, bool numerical)
 {
-    return borrowed_original_source(point);
+    normalize_supports(supports);
+    point.provenance_ = point.arithmetic_mode == ArithmeticMode::Ordinary
+                            ? single_export<ArithmeticMode::Ordinary>(point, source, supports, numerical)
+                            : single_export<ArithmeticMode::BoundedCertification>(point, source, supports, numerical);
 }
-
-void DynamicGeometryAccess::seal_export(DynamicPoint& point,
-    const std::shared_ptr<const DynamicPointProvenance>& source, std::vector<PlaneAuthority> supports,
-    bool numerical_only)
+void DynamicGeometryAccess::seal_generated(DynamicPoint& point, std::vector<std::array<PointProvenanceView, 2>> edges,
+    std::vector<PlaneAuthority> supports, bool numerical)
 {
-    if (numerical_only || (source && source->numerical_only))
-    {
-        seal_numerical(point);
-        return;
-    }
-    accept_authorities(supports);
-    std::sort(supports.begin(), supports.end());
-    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
-    // Identical immutable support sequences may share storage. Point identity,
-    // numerical enclosures and source ancestry remain separate records.
-    auto payload =
-        source && source->supports() == supports ? source->support_payload : support_payload(std::move(supports));
-    point.provenance_ = point_provenance(point, std::move(payload), source, true, false);
+    normalize_supports(supports);
+    point.provenance_ = point.arithmetic_mode == ArithmeticMode::Ordinary
+                            ? single_generated<ArithmeticMode::Ordinary>(point, edges, supports, numerical)
+                            : single_generated<ArithmeticMode::BoundedCertification>(point, edges, supports, numerical);
 }
-
-void DynamicGeometryAccess::seal_generated(DynamicPoint& point,
-    std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> edges,
-    std::vector<PlaneAuthority> supports, bool numerical_only)
-{
-    if (numerical_only)
-    {
-        seal_numerical(point);
-        return;
-    }
-    accept_authorities(supports);
-    auto record = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
-        point.value, point.absolute_error, support_payload(std::move(supports)), point.arithmetic_mode});
-    record->constructed = true;
-    record->source_edges = std::move(edges);
-    point.provenance_ = std::move(record);
-}
-
 void DynamicGeometryAccess::seal_numerical(DynamicPoint& point)
 {
-    auto record = std::make_shared<DynamicPointProvenance>(
-        DynamicPointProvenance{point.value, point.absolute_error, {}, point.arithmetic_mode});
-    record->constructed = true;
-    record->numerical_only = true;
-    point.provenance_ = std::move(record);
+    seal_generated(point, {}, {}, true);
 }
 
 const std::shared_ptr<const DynamicConvexGeometry::Impl>& DynamicGeometryAccess::implementation(
@@ -607,103 +619,30 @@ namespace SimpleFluid::PLIC
 {
 void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point)
 {
-    seal_represented_source(point, point.supports());
+    const auto supports = point.supports();
+    seal_represented_source(point, {supports.begin(), supports.end()});
 }
 void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point, std::vector<PlaneAuthority> supports)
 {
-    accept_authorities(supports);
-    std::sort(supports.begin(), supports.end());
-    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
-    const bool represented =
-        (point.arithmetic_mode == ArithmeticMode::Ordinary ||
-            point.arithmetic_mode == ArithmeticMode::BoundedCertification) &&
-        point.absolute_error == std::array<long double, 3>{} &&
-        std::all_of(point.value.begin(), point.value.end(), [](long double x) { return std::isfinite(x); });
-    point.provenance_ = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
-        point.value, point.absolute_error, support_payload(std::move(supports)), point.arithmetic_mode, represented});
+    normalize_supports(supports);
+    point.provenance_ = point.arithmetic_mode == ArithmeticMode::Ordinary
+                            ? single_source<ArithmeticMode::Ordinary>(point, supports)
+                            : single_source<ArithmeticMode::BoundedCertification>(point, supports);
 }
-bool DynamicGeometryAccess::same_represented_source(
-    const std::shared_ptr<const DynamicPointProvenance>& a, const std::shared_ptr<const DynamicPointProvenance>& b)
+bool DynamicGeometryAccess::same_represented_source(PointProvenanceView a, PointProvenanceView b)
 {
-    // Explicit exact represented-input triples identify a point, not a native
-    // support, ownership, epoch or trial. Generated/uncertain inputs do not
-    // acquire this relation merely because their nominal coordinates agree.
-    if ((a && a->numerical_only) || (b && b->numerical_only) || (a && b && a->arithmetic_mode != b->arithmetic_mode))
+    if ((a && a.numerical_only()) || (b && b.numerical_only()) ||
+        (a && b && a.arithmetic_mode() != b.arithmetic_mode()))
         return false;
-    const auto& first = borrowed_original_source(a);
-    const auto& second = borrowed_original_source(b);
+    const auto first = borrowed_original_source(a), second = borrowed_original_source(b);
     return first && second &&
            (first == second ||
-               (first->represented_native_source && second->represented_native_source && !first->constructed &&
-                   !second->constructed && first->arithmetic_mode == second->arithmetic_mode &&
-                   first->absolute_error == std::array<long double, 3>{} &&
-                   second->absolute_error == std::array<long double, 3>{} && first->value == second->value));
+               (first.represented_native_source() && second.represented_native_source() && !first.constructed() &&
+                   !second.constructed() && first.arithmetic_mode() == second.arithmetic_mode() &&
+                   first.absolute_error() == std::array<long double, 3>{} &&
+                   second.absolute_error() == std::array<long double, 3>{} && first.value() == second.value()));
 }
 } // namespace SimpleFluid::PLIC
-
-namespace SimpleFluid::PLIC::details
-{
-namespace
-{
-std::vector<PlaneAuthority> copied_vertex_authorities(
-    const std::vector<PlaneAuthority>& source, const PlaneAuthority* appended = nullptr)
-{
-    // Precharge every new buffer before allocating. The immutable owner stays
-    // pinned by the caller, including when appended aliases one of its keys.
-    if (active_work)
-    {
-        active_work->charge(source.size(), sizeof(PlaneAuthority));
-        if (appended)
-            active_work->charge(1, sizeof(PlaneAuthority));
-        for (const auto& authority : source)
-            active_work->retain_identity(authority);
-        if (appended)
-            active_work->retain_identity(*appended);
-    }
-    std::vector<PlaneAuthority> result;
-    result.reserve(source.size() + (appended ? 1 : 0));
-    for (const auto& authority : source)
-        result.push_back(authority);
-    if (appended)
-        result.push_back(*appended);
-    return result;
-}
-} // namespace
-
-void StoredVertexAuthorities::share_if_equal(const std::shared_ptr<const DynamicPointSupportPayload>& payload)
-{
-    if (payload && values() == payload->authorities)
-        storage_ = payload;
-}
-
-void StoredVertexAuthorities::detach()
-{
-    if (const auto& shared = shared_payload())
-    {
-        const auto owner = shared;
-        storage_ = copied_vertex_authorities(owner->authorities);
-    }
-}
-
-void StoredVertexAuthorities::append(const PlaneAuthority& authority)
-{
-    if (auto* owned = std::get_if<std::vector<PlaneAuthority>>(&storage_))
-        owned->push_back(authority);
-    else
-    {
-        const auto owner = shared_payload();
-        storage_ = copied_vertex_authorities(owner ? owner->authorities : values(), &authority);
-    }
-}
-
-void StoredVertexAuthorities::clear()
-{
-    if (auto* owned = std::get_if<std::vector<PlaneAuthority>>(&storage_))
-        owned->clear();
-    else
-        storage_ = std::vector<PlaneAuthority>{};
-}
-} // namespace SimpleFluid::PLIC::details
 
 namespace SimpleFluid::PLIC
 {
@@ -718,7 +657,93 @@ template<ArithmeticMode Mode> std::span<const Point<Mode>> PointExport<Mode>::po
 template class PointExport<ArithmeticMode::Ordinary>;
 template class PointExport<ArithmeticMode::BoundedCertification>;
 
-void DynamicGeometryAccess::attach_identity(DynamicPoint& point, std::shared_ptr<const DynamicPointProvenance> identity)
+template<ArithmeticMode Mode> std::size_t PointSnapshot<Mode>::size() const noexcept
+{
+    return payload_ ? payload_->refs.size() : 0;
+}
+template<ArithmeticMode Mode> const void* PointSnapshot<Mode>::context_identity() const noexcept
+{
+    return payload_ ? payload_->context.get() : nullptr;
+}
+template<ArithmeticMode Mode> Point<Mode> PointSnapshot<Mode>::point(std::size_t index) const
+{
+    if (!payload_)
+        throw std::out_of_range("Point snapshot index exceeds its empty batch.");
+    const auto ref = payload_->refs.at(index);
+    const auto view = resolve_point(payload_->context, ref);
+    DynamicPoint result(view.value(), view.absolute_error(), Mode);
+    DynamicGeometryAccess::attach_identity(result, bind_point(payload_->context, ref));
+    return Point<Mode>(result);
+}
+template class PointSnapshot<ArithmeticMode::Ordinary>;
+template class PointSnapshot<ArithmeticMode::BoundedCertification>;
+
+template<ArithmeticMode Mode>
+PointSnapshot<Mode> DynamicGeometryAccess::capture_snapshot(
+    std::span<const Point<Mode>> points, GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        ledger.begin_admission(used, limit, !points.empty());
+        if (points.empty())
+            return {};
+        std::shared_ptr<const PointSnapshotContext<Mode>> context;
+        // Validate the whole caller span before allocating any candidate. Only
+        // exact existing tokens are copied; no context or authority is issued.
+        for (const auto& point : points)
+        {
+            const auto token = identity(point.dynamic());
+            if (!token || !token.context_pin()->frozen || token.view().arithmetic_mode() != Mode)
+                throw GeometryError(GeometryErrorCode::ProvenanceMismatch,
+                    "Point snapshot requires sealed, unmodified points in its arithmetic mode.");
+            if (!context)
+                context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(token.context_pin());
+            else if (context.get() != token.context_identity())
+                throw GeometryError(GeometryErrorCode::ProvenanceMismatch,
+                    "Point snapshot cannot combine independently owned provenance contexts.");
+        }
+        // Admit the existing context first. A foreign ledger mode or an
+        // exhausted context budget rejects before any compact payload exists.
+        ledger.retain_snapshot<Mode>(context, used, limit);
+        const auto remaining = limit - std::min(used, limit);
+        constexpr auto owner_bytes = sizeof(PointSnapshotPayload<Mode>) + 2 * sizeof(void*);
+        if (owner_bytes > remaining || points.size() > (remaining - owner_bytes) / sizeof(StoredPointRef<Mode>))
+            throw GeometryError(
+                GeometryErrorCode::ResourceLimit, "Point snapshot candidate exceeds caller byte budget.");
+        auto payload = std::make_shared<PointSnapshotPayload<Mode>>();
+        payload->context = std::move(context);
+        payload->refs.reserve(points.size());
+        if (payload->refs.capacity() > (remaining - owner_bytes) / sizeof(StoredPointRef<Mode>))
+            throw GeometryError(
+                GeometryErrorCode::ResourceLimit, "Point snapshot reference capacity exceeds caller byte budget.");
+        for (const auto& point : points)
+        {
+            const auto token = identity(point.dynamic());
+            const auto ref = token.local_ref();
+            payload->refs.push_back(StoredPointRef<Mode>{ref.dependency_slot, ref.index, ref.role});
+        }
+        PointSnapshot<Mode> result(payload);
+        ledger.retain(result, used, limit);
+        return result;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+template<ArithmeticMode Mode>
+PointSnapshot<Mode> snapshot_points(
+    std::span<const Point<Mode>> points, GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    return DynamicGeometryAccess::capture_snapshot<Mode>(points, ledger, used, limit);
+}
+template PointSnapshot<ArithmeticMode::Ordinary> snapshot_points<ArithmeticMode::Ordinary>(
+    std::span<const Point<ArithmeticMode::Ordinary>>, GeometryAllocationLedger&, std::size_t&, std::size_t);
+template PointSnapshot<ArithmeticMode::BoundedCertification> snapshot_points<ArithmeticMode::BoundedCertification>(
+    std::span<const Point<ArithmeticMode::BoundedCertification>>, GeometryAllocationLedger&, std::size_t&, std::size_t);
+
+void DynamicGeometryAccess::attach_identity(DynamicPoint& point, PointProvenanceRef identity)
 {
     point.provenance_ = std::move(identity);
 }
@@ -732,6 +757,22 @@ struct ExportReservation
     std::size_t& used;
     std::size_t limit, reserved;
     details::Work& work;
+    std::size_t retained_exclusive = 0;
+    bool handed_off = false;
+    ~ExportReservation()
+    {
+        if (!handed_off)
+        {
+            // Every admitted candidate becomes retired if construction fails
+            // before final-ledger handoff. Preflights reserve this complete
+            // prefix alongside all arithmetic scratch, including on unwind.
+            used = std::max(used, work.bytes);
+            assert(used <= limit && reserved <= limit - used);
+            used += reserved;
+            work.bytes = used;
+            work.limits.byte_budget = limit;
+        }
+    }
     void add(std::size_t count, std::size_t size)
     {
         used = std::max(used, work.bytes);
@@ -740,6 +781,25 @@ struct ExportReservation
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Point export candidate exceeds caller byte budget.");
         reserved += count * size;
         // Scratch preflights must leave every live candidate allocation covered.
+        work.limits.byte_budget = limit - reserved;
+    }
+    void keep(std::size_t count, std::size_t size)
+    {
+        if (size && count > (reserved - std::min(retained_exclusive, reserved)) / size)
+            throw GeometryError(GeometryErrorCode::ResourceLimit,
+                "Retained point export candidate exceeds its allocation reservation.");
+        retained_exclusive += count * size;
+    }
+    void debit_retired()
+    {
+        used = std::max(used, work.bytes);
+        const auto retired = reserved - retained_exclusive;
+        if (retired > limit - std::min(used, limit))
+            throw GeometryError(
+                GeometryErrorCode::ResourceLimit, "Retired point export storage exceeds caller budget.");
+        used += retired;
+        work.bytes = used;
+        reserved = retained_exclusive;
         work.limits.byte_budget = limit - reserved;
     }
 };
@@ -770,31 +830,6 @@ struct ExportArithmetic
         details::active_work = previous;
     }
 };
-bool same_support_set(const std::vector<PlaneAuthority>& a, const std::vector<PlaneAuthority>& b)
-{
-    return std::all_of(
-               a.begin(), a.end(), [&](const auto& key) { return std::find(b.begin(), b.end(), key) != b.end(); }) &&
-           std::all_of(
-               b.begin(), b.end(), [&](const auto& key) { return std::find(a.begin(), a.end(), key) != a.end(); });
-}
-std::shared_ptr<const DynamicPointSupportPayload> export_supports(const std::vector<PlaneAuthority>& authorities,
-    const std::shared_ptr<const DynamicPointProvenance>& source, ExportReservation& budget)
-{
-    if (source && same_support_set(authorities, source->supports()))
-        return source->support_payload;
-    if (authorities.empty())
-        return {};
-    budget.add(1, sizeof(DynamicPointSupportPayload));
-    budget.add(authorities.size(), sizeof(PlaneAuthority));
-    std::vector<PlaneAuthority> copied;
-    copied.reserve(authorities.size());
-    if (copied.capacity() > authorities.size())
-        budget.add(copied.capacity() - authorities.size(), sizeof(PlaneAuthority));
-    copied.insert(copied.end(), authorities.begin(), authorities.end());
-    std::sort(copied.begin(), copied.end());
-    copied.erase(std::unique(copied.begin(), copied.end()), copied.end());
-    return std::make_shared<DynamicPointSupportPayload>(std::move(copied));
-}
 template<ArithmeticMode Mode>
 std::shared_ptr<const DynamicPointExportPayload> materialize_dynamic(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>& original, const PointExportCache& cache,
@@ -809,16 +844,33 @@ std::shared_ptr<const DynamicPointExportPayload> materialize_dynamic(
     result->points.reserve(geometry->vertices.size());
     if (result->points.capacity() > geometry->vertices.size())
         budget.add(result->points.capacity() - geometry->vertices.size(), sizeof(DynamicPoint));
-    for (std::size_t i = 0; i < geometry->vertices.size(); ++i)
+    budget.keep(1, sizeof(DynamicPointExportPayload));
+    budget.keep(result->points.capacity(), sizeof(DynamicPoint));
+    if (const auto existing = cache.provenance_root.lock())
     {
-        if (const auto existing = cache.vertex_provenance[i].lock())
+        if (cache.vertex_provenance.size() != geometry->vertices.size())
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Point cache slot count differs from geometry.");
+        result->point_context = existing;
+        for (const auto ref : cache.vertex_provenance)
         {
-            DynamicPoint point(existing->value, existing->absolute_error, existing->arithmetic_mode);
-            DynamicGeometryAccess::attach_identity(point, existing);
+            const auto identity = bind_point(existing, ref);
+            const auto view = identity.view();
+            DynamicPoint point(view.value(), view.absolute_error(), view.arithmetic_mode());
+            DynamicGeometryAccess::attach_identity(point, identity);
             result->points.push_back(std::move(point));
-            continue;
         }
-        const auto& vertex = geometry->vertices[i];
+        return result;
+    }
+    PointSnapshotBuilder<Mode> builder(
+        PointSnapshotAllocation{&budget, [](void* state, std::size_t count, std::size_t size)
+            { static_cast<ExportReservation*>(state)->add(count, size); }});
+    budget.add(geometry->vertices.size(), sizeof(StoredPointRef<Mode>));
+    std::vector<StoredPointRef<Mode>> refs;
+    refs.reserve(geometry->vertices.size());
+    if (refs.capacity() > geometry->vertices.size())
+        budget.add(refs.capacity() - geometry->vertices.size(), sizeof(StoredPointRef<Mode>));
+    for (const auto& vertex : geometry->vertices)
+    {
         DynamicPoint point;
         if constexpr (Mode == ArithmeticMode::Ordinary)
             point = details::ordinary_kernel::bounded<Mode>(details::ordinary_kernel::operator+(
@@ -828,17 +880,31 @@ std::shared_ptr<const DynamicPointExportPayload> materialize_dynamic(
             point = details::certification_kernel::bounded<Mode>(details::certification_kernel::operator+(
                 details::certification_kernel::scaled<Mode>(vertex.coordinates, geometry->frame.exponent),
                 details::certification_kernel::point<Mode>(geometry->frame.origin)));
-        budget.add(1, sizeof(DynamicPointProvenance));
-        const auto& source = vertex.source_identity;
+        const auto source = resolve_point(geometry->point_context, vertex.source_identity);
         const bool export_seal = bool(source) || geometry->export_seal;
-        const bool numerical = export_seal && (geometry->numerical_only || (source && source->numerical_only));
-        auto supports = numerical
-                            ? std::shared_ptr<const DynamicPointSupportPayload>{}
-                            : export_supports(vertex.authorities.values(), export_seal ? source : nullptr, budget);
-        DynamicGeometryAccess::attach_identity(
-            point, point_provenance(point, std::move(supports), source, export_seal, numerical));
+        const bool numerical = export_seal && (geometry->numerical_only || (source && source.numerical_only()));
+        const auto admitted = resolve_authorities(geometry->point_context, vertex.authorities);
+        budget.add(admitted.size(), sizeof(PlaneAuthority));
+        std::vector<PlaneAuthority> supports(admitted.begin(), admitted.end());
+        if (supports.capacity() > admitted.size())
+            budget.add(supports.capacity() - admitted.size(), sizeof(PlaneAuthority));
+        // These keys already belong to admitted geometry CSR rows. Preserve
+        // canonical ordering without a second Work ownership walk over their
+        // borrowed backing payloads; builder issuance validates boundaries.
+        std::sort(supports.begin(), supports.end());
+        supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
+        const auto proof = DynamicGeometryAccess::admit_incidence<Mode>(std::span<const PlaneAuthority>(supports));
+        const auto alias = export_seal
+                               ? builder.export_alias(point.value, point.absolute_error, source, proof, numerical)
+                               : builder.sealed(point.value, point.absolute_error, proof);
+        refs.push_back(builder.import(alias));
         result->points.push_back(std::move(point));
     }
+    const auto context = builder.freeze();
+    budget.keep(1, context->exclusive_storage_bytes());
+    result->point_context = context;
+    for (std::size_t index = 0; index < result->points.size(); ++index)
+        DynamicGeometryAccess::attach_identity(result->points[index], bind_point(context, refs[index]));
     return result;
 }
 } // namespace
@@ -887,26 +953,34 @@ auto DynamicGeometryAccess::export_impl(const std::shared_ptr<const DynamicConve
             payload->points.reserve(dynamic->points.size());
             if (payload->points.capacity() > dynamic->points.size())
                 budget.add(payload->points.capacity() - dynamic->points.size(), sizeof(Point<Mode>));
+            budget.keep(1, sizeof(PointExportPayload<Mode>));
+            budget.keep(payload->points.capacity(), sizeof(Point<Mode>));
             for (const auto& point : dynamic->points)
                 payload->points.emplace_back(point);
             PointExport<Mode> result(payload);
             arithmetic.sync();
+            budget.debit_retired();
+            budget.handed_off = true;
             ledger.retain(result, used, limit);
             // Publication is the only cache mutation and follows complete admission.
             cache.dynamic_root = dynamic;
             typed_root = payload;
+            cache.provenance_root = dynamic->point_context;
             for (std::size_t i = 0; i < dynamic->points.size(); ++i)
-                cache.vertex_provenance[i] = identity(dynamic->points[i]);
+                cache.vertex_provenance[i] = identity(dynamic->points[i]).local_ref();
             return result;
         }
         else
         {
             DynamicPointExport result(dynamic);
             arithmetic.sync();
+            budget.debit_retired();
+            budget.handed_off = true;
             ledger.retain(result, used, limit);
             cache.dynamic_root = dynamic;
+            cache.provenance_root = dynamic->point_context;
             for (std::size_t i = 0; i < dynamic->points.size(); ++i)
-                cache.vertex_provenance[i] = identity(dynamic->points[i]);
+                cache.vertex_provenance[i] = identity(dynamic->points[i]).local_ref();
             return result;
         }
     }

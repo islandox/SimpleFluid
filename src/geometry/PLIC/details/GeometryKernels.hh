@@ -10,6 +10,74 @@
 
 namespace SimpleFluid::PLIC::details
 {
+template<ArithmeticMode Mode> struct NativePointDefinition
+{
+    std::array<long double, 3> value{}, absolute_error{};
+    std::vector<PlaneAuthority> supports;
+};
+inline std::vector<PlaneAuthority> normalized_point_authorities(PointAuthorityRange values)
+{
+    active_work->charge(values.size(), sizeof(PlaneAuthority));
+    std::vector<PlaneAuthority> result;
+    result.reserve(values.size());
+    if (result.capacity() > values.size())
+        active_work->charge(result.capacity() - values.size(), sizeof(PlaneAuthority));
+    result.insert(result.end(), values.begin(), values.end());
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+template<ArithmeticMode Mode>
+void append_admitted_authority(
+    LocalAuthorityRange<Mode>& destination, const PlaneAuthority& key, PointSnapshotBuilder<Mode>& points)
+{
+    destination = points.append_authority(
+        destination, DynamicGeometryAccess::admit_incidence<Mode>(std::span<const PlaneAuthority>(&key, 1)));
+}
+template<ArithmeticMode Mode>
+void import_vertex_provenance(std::vector<StoredVertex<Mode>>& vertices, const PointSnapshotContext<Mode>* source,
+    PointSnapshotBuilder<Mode>& points)
+{
+    for (auto& vertex : vertices)
+    {
+        vertex.source_identity = points.import(resolve_point(source, vertex.source_identity));
+        vertex.authorities = points.import_authority_range(resolve_authorities(source, vertex.authorities));
+        for (const auto& plane : vertex.incident)
+            points.retain_context(plane->point_context);
+    }
+}
+/** Intersect already-admitted point authority rows in the original face order.
+ * Native draft views belong to the same builder used by the import; this does
+ * not infer membership from equal numerical coordinates or registered keys. */
+inline std::vector<PlaneAuthority> source_face_authorities(
+    const Face& face, std::span<const DynamicPoint> vertices, std::span<const PointProvenanceView> identities)
+{
+    const auto supports = [&](std::size_t index)
+    { return !identities.empty() && identities[index] ? identities[index].supports() : vertices[index].supports(); };
+    std::vector<PlaneAuthority> result;
+    active_work->charge(supports(face.front()).size(), sizeof(PlaneAuthority));
+    result.reserve(supports(face.front()).size());
+    if (result.capacity() > supports(face.front()).size())
+        active_work->charge(result.capacity() - supports(face.front()).size(), sizeof(PlaneAuthority));
+    for (const auto& key : supports(face.front()))
+        if (!key.empty() && std::all_of(face.begin() + 1, face.end(),
+                                [&](auto index)
+                                {
+                                    const auto row = supports(index);
+                                    return std::find(row.begin(), row.end(), key) != row.end();
+                                }))
+        {
+            auto attached = key;
+            for (const auto index : face)
+                for (const auto& candidate : supports(index))
+                    if (candidate == key)
+                        OriginalSupportAuthorityAccess::merge(attached, candidate);
+            result.push_back(std::move(attached));
+        }
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
 namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 inline constexpr ArithmeticMode kernel_mode = ArithmeticMode::Ordinary;
@@ -193,17 +261,20 @@ template<ArithmeticMode Mode> Point transform(const Point& p, const Frame& from,
 template<ArithmeticMode Mode> CoordinateBox transform(const CoordinateBox& box, const Frame& from, const Frame& to);
 template<ArithmeticMode Mode> DynamicPoint converted_point(const DynamicPoint& input, ArithmeticMode mode);
 template<ArithmeticMode Mode> Scalar raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template<ArithmeticMode Mode> Scalar distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
+template<ArithmeticMode Mode>
+Scalar distance(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context);
 template<ArithmeticMode Mode> Scalar square_root(Scalar x);
-std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint& relative,
-    const DynamicPointProvenance* original, const Frame& frame, const Point& stored, bool authenticated_shell);
+std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint& relative, PointProvenanceView original,
+    const Frame& frame, const Point& stored, bool authenticated_shell);
 std::optional<long double> source_normal_error(
     const std::array<Point, 3>& vertices, const std::array<std::array<long double, 3>, 3>& errors, const Point& normal);
 bool independent_source_normals(const Plane& a, const Plane& b, const Plane& c);
 // Zero means that the construction-aware determinant sign is unresolved.
 int source_normal_orientation(const Plane& a, const Plane& b, const Plane& c);
-bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent = nullptr,
-    const Vertex* edge_first = nullptr, const Vertex* edge_second = nullptr);
+bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent, const Vertex* edge_first,
+    const Vertex* edge_second, PointSnapshotBuilder<kernel_mode>& points,
+    const PointSnapshotContext<kernel_mode>* edge_context);
 bool same_source_plane(const Plane& a, const Plane& b);
 namespace source_witness
 {
@@ -225,14 +296,15 @@ void validate_connected_boundary(std::size_t vertex_count, const std::vector<Fac
 template<ArithmeticMode Mode>
 std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const DynamicPoint> vertices,
     const std::vector<Face>& faces, GeometryLimits limits, bool authenticated_planarity,
-    std::span<const std::shared_ptr<const DynamicPointProvenance>> identities = {});
+    std::span<const PointProvenanceView> identities = {}, PointSnapshotBuilder<Mode>* point_builder = nullptr);
 template<ArithmeticMode Mode> DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_point_interpolate(const DynamicPoint& a, const DynamicPoint& b, long double fraction);
 template<ArithmeticMode Mode> bool dynamic_points_identical(const DynamicPoint& a, const DynamicPoint& b);
 template<ArithmeticMode Mode> DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>& vertices);
 template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b);
-template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& plane);
+template<ArithmeticMode Mode>
+bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context);
 template<ArithmeticMode Mode>
 DynamicGeometrySection section(
     const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
@@ -245,6 +317,10 @@ bool separated_bounds(const DynamicConvexGeometry::Impl& a, const DynamicConvexG
 template<ArithmeticMode Mode>
 bool structural_cover(
     const std::shared_ptr<const Ancestry>& root, const std::vector<std::shared_ptr<const Ancestry>>& leaves);
+template<ArithmeticMode Mode>
+NativePointDefinition<Mode> source_point_definition(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
@@ -472,7 +548,9 @@ template<ArithmeticMode Mode> CoordinateBox transform(const CoordinateBox& box, 
 template<ArithmeticMode Mode> Point interval_box(const CoordinateBox& box);
 template<ArithmeticMode Mode> DynamicPoint converted_point(const DynamicPoint& input, ArithmeticMode mode);
 template<ArithmeticMode Mode> Interval raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
+template<ArithmeticMode Mode>
+Interval distance(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context);
 template<ArithmeticMode Mode> void tighten_incident_coordinates(Vertex& vertex, const Frame& frame);
 template<ArithmeticMode Mode> Interval square_root(Interval x);
 template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bool moments);
@@ -483,17 +561,19 @@ void validate_connected_boundary(std::size_t vertex_count, const std::vector<Fac
 template<ArithmeticMode Mode>
 std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const DynamicPoint> vertices,
     const std::vector<Face>& faces, GeometryLimits limits, bool authenticated_planarity,
-    std::span<const std::shared_ptr<const DynamicPointProvenance>> identities = {});
+    std::span<const PointProvenanceView> identities = {}, PointSnapshotBuilder<Mode>* point_builder = nullptr);
 template<ArithmeticMode Mode> DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices);
 template<ArithmeticMode Mode>
 DynamicPoint dynamic_point_interpolate(const DynamicPoint& a, const DynamicPoint& b, long double fraction);
 template<ArithmeticMode Mode> bool dynamic_points_identical(const DynamicPoint& a, const DynamicPoint& b);
 template<ArithmeticMode Mode> DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>& vertices);
 template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b);
-template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& plane);
+template<ArithmeticMode Mode>
+bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context);
 template<ArithmeticMode Mode>
 Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, const Vertex& a, const Vertex& b,
-    const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation, Interval result);
+    const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation, Interval result,
+    const PointSnapshotContext<Mode>* context);
 template<ArithmeticMode Mode>
 DynamicGeometrySection section(
     const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
@@ -506,6 +586,10 @@ bool separated_bounds(const DynamicConvexGeometry::Impl& a, const DynamicConvexG
 template<ArithmeticMode Mode>
 bool structural_cover(
     const std::shared_ptr<const Ancestry>& root, const std::vector<std::shared_ptr<const Ancestry>>& leaves);
+template<ArithmeticMode Mode>
+NativePointDefinition<Mode> source_point_definition(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template<ArithmeticMode Mode>
 DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);

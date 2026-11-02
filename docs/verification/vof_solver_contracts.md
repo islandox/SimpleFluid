@@ -87,11 +87,45 @@ actual transport planes, rank agreement on empty owners, serialization and
 ownership migration.
 
 The motion manifest retains its strict cases and separately registers
-`AlgebraicApproximationMotion/*`, plus explicit original N16 and N32 endpoint
+`AlgebraicApproximationMotion/*`, plus explicit original N16, N32 and N64 endpoint
 candidates. Their physical horizons, Courants, shape/centroid and mesh/time
 convergence gates remain unchanged. High model RMS is neither a fallback nor an
 accuracy pass. The source-plane quality catalog is reported at the accepted
 step that used it; it does not remeasure the newly accepted state.
+
+The practical Q2 candidate combines `ConservativeApproximation` with
+`SIMPLEFLUID_QUALIFICATION_PHASE_CLEANUP=1`. Use the existing cutoff and
+cumulative budgets described below; retain the original endpoint, independent
+shape/centroid, spatial/time convergence, physical drift and zero-fallback gates.
+Reconstruction of a trace removed by this declared, budgeted cleanup policy is
+not a prerequisite for that practical scope. Numerical failures in the remaining
+represented phases still reject. Report zero-cleanup runs separately as strict
+raw-inventory results, preserving their failures and their actual reconstruction
+policy; zero cleanup does not imply `RequireModelAgreement`.
+Use separate artifact directories for each policy and rank count because the
+motion failure-capture filenames do not encode the cleanup selection.
+
+The compact practical Q2 angular regressions compare the native target volume
+with an independent box integral and the N16 normal with an analytic local
+minimum. Synthetic residuals additionally guard against false stationarity from
+one or two cancelling coarse probes and against rejection caused solely by
+roundoff growth under refinement. Finer-probe agreement uses the original angular
+tolerance and work caps; it does not replace endpoint motion or convergence gates.
+
+`PolyhedralGradientSelection.*` checks the explicit practical choice of a valid
+gradient when configured rings cannot supply angular support. Existing expanded
+angular fits remain preferred; strict support rejection and numerical-failure
+handling remain distinct. A method choice is made before measuring fit RMS.
+
+The extra N32 two-percent endpoint diagnostic remains separately reported and
+does not prevent the original N64 evaluation. Finest-grid acceptance still needs
+N64 shape error at most `.02`, centroid error at most `.25` of its minimum
+interface-cell width, and matched `log(E32/E64)/log(2) >= .9`; order alone does
+not satisfy the finest accuracy gate. Matched standalone endpoint results may
+be combined for the order calculation with exact source/configuration provenance.
+With `SIMPLEFLUID_QUALIFICATION_ARTIFACT_DIR` set, the motion harness writes
+owned-cell initial, midpoint and endpoint fields with both independent phase
+inventories, geometric volume, declaration, histories and analytic reference.
 
 ## Numerical assertions
 
@@ -420,9 +454,10 @@ switch, these controlled fixtures explicitly disable cleanup regardless of the
 library's automatic defaults. The enabled variant uses
 the documented `1e-14` cell-relative cutoff and cumulative absolute caps of
 `1e-13` times each original global phase inventory. Initialization and later
-cleanup remain inside the original physical drift comparison; signed/absolute
-phase changes and raw/cleaned mass and momentum corrections are reported
-separately. Cleanup-enabled transport does not qualify cleanup-enabled coupled
+cleanup remain inside the original physical drift comparison. The motion runner
+reports signed/absolute phase changes and inventories; raw/cleaned mass and
+momentum corrections require separate coupled/component evidence.
+Cleanup-enabled transport does not qualify cleanup-enabled coupled
 AMR: auxiliary-channel remap still rejects, so GeometricFace Q5 is unsupported in
 this variant. Its coupled transaction fixtures report an explicit unsupported
 skip when this switch is enabled; they never silently run the cleanup-disabled

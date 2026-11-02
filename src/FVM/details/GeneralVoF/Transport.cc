@@ -2,6 +2,7 @@
  * @brief Operation dispatch and trial publication validation.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 namespace SimpleFluid::VoF
 {
 std::shared_ptr<const GeneralVoFTransportControls> GeneralVoF::make_transport_controls(ArithmeticMode mode,
@@ -181,9 +182,12 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
             retain(finite_cell_closure_);
             for (const auto& closure : finite_cell_closure_)
                 budget.add(AMR::encode_adaptive_key(closure.key).size());
+            PLIC::GeometryAllocationLedger point_owners;
             for (const auto& trace : finite_trajectories_)
-                budget.add(PLIC::dynamic_point_storage_bytes(trace.point) +
-                           PLIC::dynamic_point_storage_bytes(trace.departure) - 2 * sizeof(PLIC::DynamicPoint));
+            {
+                point_owners.retain_point_provenance(trace.point, budget.used, budget.limit);
+                point_owners.retain_point_provenance(trace.departure, budget.used, budget.limit);
+            }
         });
 }
 } // namespace SimpleFluid::VoF

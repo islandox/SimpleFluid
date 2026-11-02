@@ -210,6 +210,22 @@ the ledger pins those owners and includes its bookkeeping in admission.
 Allocation measurements report their scope and exclusions separately from these
 conservative admission estimates; neither metric is process RSS.
 
+Ordinary procedural Cartesian cells perform the existing authenticated source
+import before selecting their retained owners. When the original leaf has no
+explicit geometry owner, an exact representation check can make that imported
+root serve both native and numerical queries. The check preserves frame and
+reference origin, ordered vertices/faces/incidence, native support identities,
+plane coefficients, volume, canonical exports and moments; it uses no geometric
+tolerance. Constructed, rebased, numerical-only and explicit native roots retain
+their original ownership. BoundedCertification still retains its separately
+certified geometry. A failed equivalence proof keeps both roots.
+
+This selection retires an unnecessary native shell rather than discounting a
+live owner. Import and comparison retain their operation and storage admissions;
+destruction does not refund cumulative construction charges. The final retained
+audit visits the actual surviving owners, including shared support payloads and
+its tracking storage.
+
 The allocation ledger stores a strong pin for each kind-qualified owner address.
 Payload and bookkeeping totals belong to the admission scope rather than to
 individual map entries. Node charges use the actual entry representation;
@@ -234,11 +250,41 @@ Finite construction history retains shared immutable recipes. Each recipe stores
 only its active operation payload: a source geometry owner, a shared clip operation
 and side, or an exclusively owned Rebase payload with its parent and full input
 halfspace. The large Rebase payload is allocated only for that operation and is
-charged once with its recipe owner. Shared clip records retain source-point pins;
+charged once with its recipe owner. Shared clip records retain one point context
+and compact source-point references;
 the general recipe node has no retained-point vector. Both finite modes and
 authenticated replay use the same creation and accounting rules. Construction
 packet version 5, root ordering and replayed shells are independent of this private
 storage layout.
+
+Finite point provenance is a mode-typed immutable snapshot, independent of
+geometric identity and of the geometry replay graph. Native-source references,
+generated recipes, export aliases, numerical-only values and optional error
+witnesses have separate arrays. A vertex retains a compact local point reference
+and a typed incidence range; the geometry pins their context once. Native rows
+reference shared coordinate fact blocks, rather than retaining an old geometry
+or copying its construction graph. Generated edges reference the records they
+need. Older frozen contexts are pinned once per dependency table, making the
+ownership graph acyclic without a global interner.
+
+Existing typed identities and canonical keys still name geometric entities.
+Privately issued `PrivateAuthorityRef<Mode>` values name registered authority
+entries in their context. Registration creates no point membership: separate
+incidence rows come only from validated source topology or trusted construction
+proofs. Ordinary evidence does not certify a Bounded source. Public boundary
+tokens remain authenticated by their supplied registries. Local indices never
+enter wire packets and cannot be rebound as public point tokens in a foreign
+context. Failed builders are poisoned, and freezing prevents further mutation.
+
+Owning `Point<Mode>` values retain a typed context and exact role/index token;
+`DynamicPoint` erases mode only at the explicit runtime boundary. Changing a
+point's numerical fields invalidates its proof but does not release its owner.
+`PointSnapshot<Mode>` stores one context pin and compact ordered references,
+without another numerical point array. The FVM canonical-node catalog uses such
+a snapshot with local node-to-slot mappings. Materializing one owning point is
+allocation-free and preserves its token. Source fans are validated in their
+existing per-request numerical scopes while batch storage admission accounts
+shared snapshot arrays and overlapping query storage.
 
 Finite global point exports are explicit owners. `export_points(ledger, used,
 limit)` admits a `DynamicPointExport` or `PointExport<Mode>` into the caller's
@@ -247,9 +293,9 @@ The handle or ledger pin must survive the view. `vertex_count()` and numerical
 queries need no global export; `local_points()` retains its authority-free
 contract. Native planar and Exact point APIs are separate.
 
-Geometry owns only fixed cache metadata: a mutex, weak export roots, and fixed
-weak provenance slots. Actual dynamic and typed point buffers, provenance and
-supports are allocated on request and admitted before cache publication. Typed
+Geometry owns only fixed cache metadata: a mutex, weak export roots, a weak
+provenance snapshot and fixed local alias slots. Actual dynamic and typed point
+buffers, provenance and supports are allocated on request and admitted before cache publication. Typed
 exports retain the canonical dynamic export. Independent ledgers can share one
 published payload; a ledger itself is not shared across threads. Geometry-only
 admission ignores weak cache entries and has the same cost before and after an
@@ -257,8 +303,11 @@ export. Export-specific resource failures occur at the explicit request, while
 malformed geometry, support and coordinate-range checks remain at construction.
 
 After all export handles and ledger pins expire, later queries rebuild a payload.
-Any individual point or descendant provenance still alive is reused through its
-weak vertex slot, preserving identity even for uncertain bounded coordinates.
+Any copied point or descendant that remains alive pins its complete provenance
+snapshot. Re-export reuses that snapshot and the same alias slots, preserving
+identity even for uncertain bounded coordinates. This deliberately replaces
+individual per-vertex expiry with publication-snapshot lifetime; it does not pin
+the original geometry payload through point provenance.
 Failed admission publishes neither new roots nor provenance slots and preserves
 ledger poisoning. Scratch spending and retained owners share the caller's limit;
 cumulative charges are never refunded when an owner expires.

@@ -397,16 +397,24 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             // their conservative baseline separately from the admitted builder
             // state, and measure their actual overlap before destroying them.
             diagnostics.tile_input_bytes = tiles.capacity() * sizeof(AdaptiveTile);
-            for (const auto& tile : tiles)
             {
-                diagnostics.tile_input_bytes +=
-                    tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
-                    tile.second_image_identity.payload_bytes() + tile.boundary.capacity() + 1 +
-                    (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
-                    key_capacity(tile.first) + (tile.second ? key_capacity(*tile.second) : 0);
-                if (tile.geometry)
+                ImmutableSequenceLedger tile_metadata;
+                Budget tile_accounting{std::numeric_limits<std::size_t>::max()};
+                for (const auto& tile : tiles)
+                {
                     diagnostics.tile_input_bytes +=
-                        tile.geometry->storage_bytes() + sizeof(*tile.geometry) + 8 * sizeof(void*);
+                        tile.identity.capacity() + tile.second_image_identity.payload_bytes() +
+                        tile.boundary.capacity() + 1 + key_capacity(tile.first) +
+                        (tile.second ? key_capacity(*tile.second) : 0);
+                    tile_metadata.retain(tile.domain, tile_accounting);
+                    tile_metadata.retain(tile.surface, tile_accounting);
+                    tile_metadata.retain(tile.node_gids, tile_accounting);
+                    tile_metadata.retain(tile.second_node_gids, tile_accounting);
+                    if (tile.geometry)
+                        diagnostics.tile_input_bytes +=
+                            tile.geometry->storage_bytes() + sizeof(*tile.geometry) + 8 * sizeof(void*);
+                }
+                diagnostics.tile_input_bytes += tile_accounting.used;
             }
             diagnostics.tile_input_live = true;
             struct CataloguedNode
@@ -433,7 +441,7 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                 if (tile.node_gids.size() != count || (tile.second && tile.second_node_gids.size() != count) ||
                     (!tile.second && !tile.second_node_gids.empty()))
                     throw std::invalid_argument("Incomplete closure tile node incidence.");
-                auto record_points = [&](const AdaptiveCellKey& cell, const std::vector<std::uint64_t>& gids)
+                auto record_points = [&](const AdaptiveCellKey& cell, std::span<const std::uint64_t> gids)
                 {
                     auto found = points.find(cell);
                     if (found == points.end())

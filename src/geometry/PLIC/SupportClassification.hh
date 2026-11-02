@@ -10,6 +10,7 @@ namespace SimpleFluid::PLIC
  * mutation invalidates it. Keys identify geometric supports only. The caller
  * authenticates geometry revision, ownership and transaction independently. */
 [[nodiscard]] bool has_support(const DynamicPoint&, const PlaneAuthority&);
+[[nodiscard]] bool has_any_support(const DynamicPoint&, PointAuthorityRange);
 [[nodiscard]] bool has_any_support(const DynamicPoint&, std::span<const PlaneAuthority>);
 /** Uses the identical original native support packet as source-point export. */
 [[nodiscard]] PlaneAuthority original_support_authority(const PlanarFace<ArithmeticMode::Ordinary>&);
@@ -33,7 +34,7 @@ class OrdinaryBoundary
 {
 public:
     explicit OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary>);
-    [[nodiscard]] std::span<const PlaneAuthority> authorities() const;
+    [[nodiscard]] PointAuthorityRange authorities() const;
     [[nodiscard]] OrdinaryBoundaryClass classify(const Point<ArithmeticMode::Ordinary>&) const;
     /** Wrapper and opaque fallback payload only; retained immutable cell storage
      * belongs to the caller's geometry accounting. */

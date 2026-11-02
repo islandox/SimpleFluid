@@ -19,7 +19,7 @@ long double sum_gap(long double, long double, long double);
 } // namespace ordinary_kernel::source_witness
 namespace construction_incidence
 {
-using Identity = std::shared_ptr<const DynamicPointProvenance>;
+using Identity = PointProvenanceView;
 using Edge = std::array<Identity, 2>;
 
 template<class T> void retain(std::vector<T>& values, T value)
@@ -54,30 +54,30 @@ template<ArithmeticMode Mode> bool distinct(const Identity& first, const Identit
 {
     const auto& a = DynamicGeometryAccess::borrowed_original_source(first);
     const auto& b = DynamicGeometryAccess::borrowed_original_source(second);
-    if (!a || !b || a->constructed || b->constructed || a->numerical_only || b->numerical_only ||
-        a->arithmetic_mode != Mode || b->arithmetic_mode != Mode ||
+    if (!a || !b || a.constructed() || b.constructed() || a.numerical_only() || b.numerical_only() ||
+        a.arithmetic_mode() != Mode || b.arithmetic_mode() != Mode ||
         DynamicGeometryAccess::same_represented_source(a, b) || !certification_environment())
         return false;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        if (!std::isfinite(a->value[axis]) || !std::isfinite(b->value[axis]) ||
-            !std::isfinite(a->absolute_error[axis]) || !std::isfinite(b->absolute_error[axis]) ||
-            a->absolute_error[axis] < 0 || b->absolute_error[axis] < 0)
+        if (!std::isfinite(a.value()[axis]) || !std::isfinite(b.value()[axis]) ||
+            !std::isfinite(a.absolute_error()[axis]) || !std::isfinite(b.absolute_error()[axis]) ||
+            a.absolute_error()[axis] < 0 || b.absolute_error()[axis] < 0)
             return false;
         if constexpr (Mode == ArithmeticMode::Ordinary)
         {
             using namespace ordinary_kernel::source_witness;
-            const auto difference = add(a->value[axis], -b->value[axis]);
-            const auto error = add_up(add_up(a->absolute_error[axis], b->absolute_error[axis]),
-                sum_gap(a->value[axis], -b->value[axis], difference));
+            const auto difference = add(a.value()[axis], -b.value()[axis]);
+            const auto error = add_up(add_up(a.absolute_error()[axis], b.absolute_error()[axis]),
+                sum_gap(a.value()[axis], -b.value()[axis], difference));
             if (std::isfinite(difference) && std::isfinite(error) && std::abs(difference) > error)
                 return true;
         }
         else
         {
             const auto difference =
-                certification_kernel::enclosure<Mode>({a->value[axis], a->absolute_error[axis], Mode}) -
-                certification_kernel::enclosure<Mode>({b->value[axis], b->absolute_error[axis], Mode});
+                certification_kernel::enclosure<Mode>({a.value()[axis], a.absolute_error()[axis], Mode}) -
+                certification_kernel::enclosure<Mode>({b.value()[axis], b.absolute_error()[axis], Mode});
             if (difference.lo() > 0 || difference.hi() < 0)
                 return true;
         }
@@ -107,19 +107,19 @@ template<ArithmeticMode Mode> bool independent(const StoredPlane<Mode>& a, const
 
 template<ArithmeticMode Mode> bool directly_on(const Identity& token, const StoredPlane<Mode>& plane)
 {
-    if (!token || token->numerical_only || token->arithmetic_mode != Mode)
+    if (!token || token.numerical_only() || token.arithmetic_mode() != Mode)
         return false;
-    for (const auto& weak : plane.source_vertices)
+    for (const auto& ref : plane.source_vertices)
     {
         active_work->pair();
-        const auto owner = weak.lock();
+        const auto owner = resolve_point(plane.point_context, ref);
         if (DynamicGeometryAccess::same_represented_source(token, owner))
             return true;
     }
-    for (const auto* point = token.get(); point; point = point->source_origin.get())
-        for (const auto& key : plane.authorities)
+    for (auto point = token; point; point = point.source_origin())
+        for (const auto& key : resolve_authorities(plane.point_context, plane.authorities))
             if (!key.empty())
-                for (const auto& support : point->supports())
+                for (const auto& support : point.supports())
                 {
                     active_work->pair();
                     if (key == support)
@@ -133,11 +133,11 @@ template<ArithmeticMode Mode> bool point_on(const Identity& token, const StoredP
     if (directly_on<Mode>(token, plane))
         return true;
     const auto& point = DynamicGeometryAccess::borrowed_original_source(token);
-    if (!point || point->numerical_only || point->arithmetic_mode != Mode)
+    if (!point || point.numerical_only() || point.arithmetic_mode() != Mode)
         return false;
     // Retained edge records already passed distinctness and rank admission;
     // their endpoints are original roots, so this does not recurse on incidence.
-    for (const auto& edge : point->source_edges)
+    for (const auto& edge : point.source_edges())
     {
         active_work->pair();
         if (directly_on<Mode>(edge[0], plane) && directly_on<Mode>(edge[1], plane))
@@ -152,8 +152,8 @@ bool point_on_edge(const Identity& token, const Edge& edge)
         DynamicGeometryAccess::same_represented_source(token, edge[1]))
         return true;
     const auto& point = DynamicGeometryAccess::borrowed_original_source(token);
-    if (point && !point->numerical_only)
-        for (const auto& other : point->source_edges)
+    if (point && !point.numerical_only())
+        for (const auto& other : point.source_edges())
             if (same_edge(other, edge))
                 return true;
     return false;
@@ -169,12 +169,12 @@ std::vector<Edge> infer_edges(const StoredVertex<Mode>& vertex, const StoredPlan
     std::vector<Identity> candidates;
     const auto include = [&](const StoredPlane<Mode>& plane)
     {
-        for (const auto& weak : plane.source_vertices)
+        for (const auto& ref : plane.source_vertices)
         {
             active_work->pair();
-            const auto owner = weak.lock();
+            const auto owner = resolve_point(plane.point_context, ref);
             const auto& point = DynamicGeometryAccess::borrowed_original_source(owner);
-            if (!point || point->constructed || point->numerical_only || point->arithmetic_mode != Mode)
+            if (!point || point.constructed() || point.numerical_only() || point.arithmetic_mode() != Mode)
                 continue;
             bool duplicate = false;
             for (const auto& previous : candidates)
@@ -233,28 +233,30 @@ std::vector<Edge> infer_edges(const StoredVertex<Mode>& vertex, const StoredPlan
 } // namespace construction_incidence
 
 template<ArithmeticMode Mode>
-bool construction_edge_incident(const StoredVertex<Mode>& vertex, const StoredPlanePtr<Mode>& plane)
+bool construction_edge_incident(
+    const StoredVertex<Mode>& vertex, const StoredPlanePtr<Mode>& plane, const PointSnapshotContext<Mode>* context)
 {
     using namespace construction_incidence;
     if (vertex.numerical_only)
         return false;
-    if (vertex.source_identity && point_on<Mode>(vertex.source_identity, *plane))
+    if (vertex.source_identity && point_on<Mode>(resolve_point(context, vertex.source_identity), *plane))
         return true;
     return !infer_edges<Mode>(vertex, plane.get()).empty();
 }
 
 template<ArithmeticMode Mode>
 void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<Mode>& a, const StoredVertex<Mode>& b,
-    const Frame& frame, bool numerical_only)
+    const Frame& frame, bool numerical_only, PointSnapshotBuilder<Mode>& points)
 {
     using namespace construction_incidence;
     if (vertex.source_identity)
         return;
     auto edges = numerical_only ? std::vector<Edge>{} : infer_edges<Mode>(vertex, nullptr);
     if (!numerical_only)
-        if (const auto& first = DynamicGeometryAccess::borrowed_original_source(a.source_identity))
-            for (const auto& edge : first->source_edges)
-                if (point_on_edge(b.source_identity, edge))
+        if (const auto& first =
+                DynamicGeometryAccess::borrowed_original_source(resolve_point(points.context(), a.source_identity)))
+            for (const auto& edge : first.source_edges())
+                if (point_on_edge(resolve_point(points.context(), b.source_identity), edge))
                     retain_edge(edges, edge);
     DynamicPoint point;
     if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -269,19 +271,24 @@ void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<
         point = bounded<Mode>(
             scaled<Mode>(vertex.coordinates, frame.exponent) + certification_kernel::point<Mode>(frame.origin));
     }
-    DynamicGeometryAccess::seal_generated(point, std::move(edges), vertex.authorities.values(), numerical_only);
-    active_work->charge(DynamicGeometryAccess::identity_bytes(DynamicGeometryAccess::identity(point)), 1);
-    vertex.source_identity = DynamicGeometryAccess::identity(point);
+    const auto supports = normalized_point_authorities(resolve_authorities(points.context(), vertex.authorities));
+    const auto generated = numerical_only ? points.numerical(point.value, point.absolute_error)
+                                          : points.generated(point.value, point.absolute_error, edges,
+                                                DynamicGeometryAccess::admit_incidence<Mode>(supports));
+    vertex.source_identity = points.import(generated);
 }
 
-template bool construction_edge_incident<ArithmeticMode::Ordinary>(
-    const StoredVertex<ArithmeticMode::Ordinary>&, const StoredPlanePtr<ArithmeticMode::Ordinary>&);
+template bool construction_edge_incident<ArithmeticMode::Ordinary>(const StoredVertex<ArithmeticMode::Ordinary>&,
+    const StoredPlanePtr<ArithmeticMode::Ordinary>&, const PointSnapshotContext<ArithmeticMode::Ordinary>*);
 template bool construction_edge_incident<ArithmeticMode::BoundedCertification>(
     const StoredVertex<ArithmeticMode::BoundedCertification>&,
-    const StoredPlanePtr<ArithmeticMode::BoundedCertification>&);
+    const StoredPlanePtr<ArithmeticMode::BoundedCertification>&,
+    const PointSnapshotContext<ArithmeticMode::BoundedCertification>*);
 template void preserve_crossing_incidence<ArithmeticMode::Ordinary>(StoredVertex<ArithmeticMode::Ordinary>&,
-    const StoredVertex<ArithmeticMode::Ordinary>&, const StoredVertex<ArithmeticMode::Ordinary>&, const Frame&, bool);
+    const StoredVertex<ArithmeticMode::Ordinary>&, const StoredVertex<ArithmeticMode::Ordinary>&, const Frame&, bool,
+    PointSnapshotBuilder<ArithmeticMode::Ordinary>&);
 template void preserve_crossing_incidence<ArithmeticMode::BoundedCertification>(
     StoredVertex<ArithmeticMode::BoundedCertification>&, const StoredVertex<ArithmeticMode::BoundedCertification>&,
-    const StoredVertex<ArithmeticMode::BoundedCertification>&, const Frame&, bool);
+    const StoredVertex<ArithmeticMode::BoundedCertification>&, const Frame&, bool,
+    PointSnapshotBuilder<ArithmeticMode::BoundedCertification>&);
 } // namespace SimpleFluid::PLIC::details

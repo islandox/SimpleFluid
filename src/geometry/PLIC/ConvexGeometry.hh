@@ -5,6 +5,7 @@
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/GeometryBackendTypes.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
+#include "geometry/PLIC/PointProvenanceRef.hh"
 #include "utils/ArithmeticMode.hh"
 #include <array>
 #include <cstddef>
@@ -21,8 +22,10 @@ template<ArithmeticMode> class ConstructionRegistry;
 class GeometryAllocationLedger;
 class DynamicPointExport;
 template<ArithmeticMode> class PointExport;
+template<ArithmeticMode> class PointSnapshot;
 struct DynamicPointExportPayload;
 template<ArithmeticMode> struct PointExportPayload;
+template<ArithmeticMode> struct PointSnapshotPayload;
 namespace details
 {
 class NativeSupportAccess;
@@ -105,7 +108,6 @@ private:
     explicit PlaneAuthority(Native support) : storage_(std::move(support)) {}
     std::variant<std::monostate, Native, Opaque> storage_;
 };
-struct DynamicPointProvenance;
 class DynamicGeometryAccess;
 struct DynamicPoint
 {
@@ -118,12 +120,13 @@ struct DynamicPoint
     {
     }
     /** Changing coordinates/error invalidates the sealed source provenance. */
-    [[nodiscard]] const std::vector<PlaneAuthority>& supports() const;
+    [[nodiscard]] PointAuthorityRange supports() const;
 
 private:
     friend class DynamicGeometryAccess;
+    friend class GeometryAllocationLedger;
     template<ArithmeticMode> friend class Point;
-    std::shared_ptr<const DynamicPointProvenance> provenance_;
+    PointProvenanceRef provenance_;
 };
 [[nodiscard]] std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint>);
 struct DynamicSupport
@@ -180,7 +183,8 @@ struct GeometryStatistics
 void reset_geometry_statistics();
 void record_ledger_operations(std::uint64_t count = 1);
 [[nodiscard]] bool certification_environment();
-/** Retained point allocation, including sealed provenance/support keys. */
+/** Standalone retained footprint, including the complete pinned provenance
+ * snapshot and support owners. Collections must deduplicate snapshot owners. */
 [[nodiscard]] std::size_t dynamic_point_storage_bytes(const DynamicPoint&);
 
 /** Owning finite global-point publication admitted by an explicit allocation ledger. */
@@ -277,11 +281,37 @@ public:
     /** Checked conversion at a runtime policy boundary, preserving source identity. */
     explicit Point(const DynamicPoint&);
     [[nodiscard]] DynamicPoint dynamic() const;
-    [[nodiscard]] const std::vector<PlaneAuthority>& supports() const { return dynamic().supports(); }
+    [[nodiscard]] PointAuthorityRange supports() const { return dynamic().supports(); }
 
 private:
-    std::shared_ptr<const DynamicPointProvenance> provenance_;
+    TypedPointProvenanceRef<Mode> provenance_;
 };
+
+/** Compact owning batch over one frozen provenance context. The payload owns
+ * only compact token slots; point() materializes an owning value without
+ * allocation, and that value may outlive this handle. */
+template<ArithmeticMode Mode> class PointSnapshot
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+
+public:
+    PointSnapshot() = default;
+    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] Point<Mode> point(std::size_t index) const;
+    [[nodiscard]] const void* context_identity() const noexcept;
+
+private:
+    friend class DynamicGeometryAccess;
+    friend class GeometryAllocationLedger;
+    explicit PointSnapshot(std::shared_ptr<const PointSnapshotPayload<Mode>> payload) : payload_(std::move(payload)) {}
+    std::shared_ptr<const PointSnapshotPayload<Mode>> payload_;
+};
+/** Capture sealed, unmodified points from one existing context. Equal values
+ * from independent contexts are rejected. Empty input produces an empty batch.
+ * The supplied ledger admits the complete payload before publication. */
+template<ArithmeticMode Mode>
+[[nodiscard]] PointSnapshot<Mode> snapshot_points(
+    std::span<const Point<Mode>>, GeometryAllocationLedger&, std::size_t& used, std::size_t limit);
 
 /** Typed owning publication; its immutable dynamic publication remains pinned. */
 template<ArithmeticMode Mode> class PointExport
@@ -377,6 +407,15 @@ public:
     [[nodiscard]] bool quality_above(double minimum_scaled_volume) const;
     [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&, std::size_t axis, double ratio) const;
     [[nodiscard]] bool equivalent(const ConvexCellGeometry&) const;
+    /** Exact native represented-query equality for fresh Ordinary source roots.
+     * This permits authority enrichment by an explicit source import; it does
+     * not prove shared ownership or authorize promotion of constructed inputs.
+     * Canonical coordinate and lazy moment queries retain their normal work
+     * accounting and may prepare the existing inline moment caches.
+     * Callers must separately establish that replacing their native handle
+     * releases its owner and preserves the application's source lifetime. */
+    [[nodiscard]] bool same_native_representation(const ConvexCellGeometry&) const
+        requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] std::vector<char> encode_certificate(std::size_t byte_budget = geometry_packet_default_budget) const
         requires(Mode == ArithmeticMode::Ordinary);
     /** Same complete certificate traversal without packet/body buffers.
@@ -476,6 +515,22 @@ template<ArithmeticMode Mode>
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>,
     const PointIdentity<ArithmeticMode::Ordinary>& point_identity);
+/** Ordered native-source request. The range indexes a caller-owned flat table
+ * of source-geometry slots, never physical node or cell IDs. */
+struct NativeSourcePointRequest
+{
+    PointIdentity<ArithmeticMode::Ordinary> identity;
+    std::size_t first_source = 0, source_count = 0;
+};
+/** Validate source fans in request order and publish one immutable point
+ * snapshot for the entire batch. Equal coordinates do not merge point tokens.
+ * Returned points independently pin that snapshot after input owners expire.
+ * This is an outer publication boundary; nested kernels use their existing
+ * snapshot builder rather than opening another independent batch allowance. */
+template<ArithmeticMode Mode>
+[[nodiscard]] std::vector<Point<Mode>> source_points(
+    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources, std::span<const std::size_t> source_indices,
+    std::span<const NativeSourcePointRequest> requests, GeometryLimits limits = {});
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> backtrace_constrained(const Point<Mode>&, GeometryPoint velocity, double timestep,
     std::span<const FaceConstraint<Mode>>, GeometryLimits = {});

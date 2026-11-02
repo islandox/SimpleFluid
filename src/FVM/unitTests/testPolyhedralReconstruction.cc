@@ -17,6 +17,7 @@
 #include "plic_algebraic_native_cell33_fixture.hh"
 #include "plic_algebraic_native_cell36_fixture.hh"
 #include "plic_algebraic_native_n32_corner_fixture.hh"
+#include "plic_algebraic_native_angular_probe_fixture.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "plic_full50_step3_fixture.hh"
@@ -1069,6 +1070,167 @@ TEST(PolyhedralReconstruction, AngularNonlinearNonzeroResidualOptimumUsesBounded
     EXPECT_NEAR(std::sqrt(current.objective / 3), std::sqrt((.1 * .1 + (1. / 30) * (1. / 30)) / 3), 1e-11);
 }
 
+/** Nonzero residual hides a real angular gradient at one or two coarse scales.
+ * In ratio coordinates, r1-r2 = d+2a and r1+r2 = .2+2Ka^3+2La^5.
+ * Thus the exact initial GN step is -d/2 even when symmetric differences cancel. */
+AngularEvaluation angular_cancelled_probe_model(AngularVector normal, double cubic, double quintic)
+{
+    constexpr double difference = 6e-8;
+    const double a = normal[1] / normal[0], b = normal[2] / normal[0];
+    const double common = a * a * a * (cubic + quintic * a * a);
+    AngularEvaluation result{{.1 + difference / 2 + a + common, .1 - difference / 2 - a + common, b}};
+    for (const auto value : result.residual)
+        result.objective += value * value;
+    result.objective_upper = result.objective;
+    return result;
+}
+
+double angular_cancelled_probe_true_step(const AngularVector& normal, double cubic, double quintic)
+{
+    const long double a = static_cast<long double>(normal[1]) / normal[0];
+    const long double common = a * a * a * (cubic + quintic * a * a);
+    const long double derivative = a * a * (3 * cubic + 5 * quintic * a * a);
+    const long double gradient = 6e-8L + 2 * a + (.2L + 2 * common) * derivative;
+    // All accepted iterates have b=0. Convert the exact ratio-coordinate GN
+    // displacement to the unit-normal tangent coordinate, da/dtheta=1+a^2.
+    return static_cast<double>(std::abs(gradient) / (2 * (1 + derivative * derivative) * (1 + a * a)));
+}
+
+TEST(PolyhedralReconstruction, AngularCancelledCoarseProbesCannotCertifyNonzeroResidualStationarity)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const auto coefficients : {std::array<double, 2>{-30, 0}, std::array<double, 2>{-150, 1.2e10}})
+    {
+        SCOPED_TRACE(coefficients[0]);
+        const auto [cubic, quintic] = coefficients;
+        AngularVector normal{1, 0, 0};
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations > 32768)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+            return angular_cancelled_probe_model(candidate, cubic, quintic);
+        };
+        auto current = evaluate(normal);
+        const auto initial_objective = current.objective;
+        ASSERT_NEAR(angular_cancelled_probe_true_step(normal, cubic, quintic), 3e-8, 1e-22);
+        angular::Qualification qualification;
+        ASSERT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+            angular::IterationResult::Advanced);
+        EXPECT_LT(current.objective, initial_objective);
+        EXPECT_LT(normal[1], 0);
+        EXPECT_EQ(normal[2], 0);
+        bool converged = false;
+        for (unsigned iteration = 1; iteration < 24; ++iteration)
+        {
+            const auto status =
+                angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+            ASSERT_NE(status, angular::IterationResult::Stalled);
+            if (status == angular::IterationResult::Converged)
+            {
+                converged = true;
+                break;
+            }
+        }
+        EXPECT_TRUE(converged);
+        EXPECT_LE(evaluations, 32768u);
+        EXPECT_LE(qualification.step, 2e-8);
+        EXPECT_LE(angular_cancelled_probe_true_step(normal, cubic, quintic), 2e-8);
+        EXPECT_EQ(normal[2], 0);
+        EXPECT_GT(current.objective, .019); // Convergence requires angular evidence despite finite residual.
+    }
+}
+
+TEST(PolyhedralReconstruction, AngularStationaryFinitePrecisionProbesUseAbsoluteAgreement)
+{
+    namespace angular = PLIC::angular_detail;
+    constexpr double coefficient = .44217760506663917;
+    AngularVector normal{1, 0, 0};
+    const auto model = [&](AngularVector candidate)
+    {
+        const double a = candidate[1] / candidate[0], b = candidate[2] / candidate[0];
+        AngularEvaluation result{{coefficient + a, -1 + coefficient * a, b}};
+        for (const auto value : result.residual)
+            result.objective += value * value;
+        result.objective_upper = result.objective;
+        return result;
+    };
+    auto current = model(normal);
+    current.stamp = 73;
+    const auto original = current;
+    // Independently expanding the residual squares gives
+    // (1+c*c)*(1+a*a)+b*b, with its exact minimum at a=b=0.
+    // This c makes binary64 centered-probe correction differences grow at
+    // some finer scales, although their absolute values are far below 2e-8.
+    ASSERT_EQ(current.objective, 1 + coefficient * coefficient);
+    ASSERT_GT(current.objective, 1.);
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector candidate)
+    {
+        ++evaluations;
+        return model(candidate);
+    };
+    angular::Qualification qualification;
+    ASSERT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+        angular::IterationResult::Converged);
+    EXPECT_GE(evaluations, 12u); // Required quartet and at least two finer quartets.
+    EXPECT_LE(evaluations, 44u); // Required quartet and at most ten finer quartets.
+    EXPECT_LE(qualification.step, 2e-8);
+    EXPECT_EQ(normal, (AngularVector{1, 0, 0}));
+    EXPECT_EQ(current.residual, original.residual);
+    EXPECT_EQ(current.objective, original.objective);
+    EXPECT_EQ(current.objective_upper, original.objective_upper);
+    EXPECT_EQ(current.stamp, original.stamp);
+}
+
+TEST(PolyhedralReconstruction, AngularFailedFinerProbesCannotCertifyCancelledCoarseStationarity)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const auto scenario : {0, 1, 2})
+    {
+        SCOPED_TRACE(scenario);
+        AngularVector normal{1, 0, 0};
+        auto current = angular_cancelled_probe_model(normal, -150, 1.2e10);
+        current.stamp = 41;
+        const auto original = current;
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations <= 4)
+                return angular_cancelled_probe_model(candidate, -150, 1.2e10);
+            if (scenario == 2)
+                return AngularEvaluation{original.residual, original.objective, original.objective_upper};
+            throw PLIC::GeometryError(
+                scenario == 0 ? PLIC::GeometryErrorCode::UnresolvedArithmetic : PLIC::GeometryErrorCode::ResourceLimit,
+                "finer derivative probe failed");
+        };
+        angular::Qualification qualification;
+        try
+        {
+            const auto status =
+                angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+            EXPECT_EQ(scenario, 0); // Rank and resource failures remain fatal.
+            EXPECT_EQ(status, angular::IterationResult::Stalled);
+        }
+        catch (const angular::Unobservable&)
+        {
+            EXPECT_EQ(scenario, 2);
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            EXPECT_NE(scenario, 2);
+            EXPECT_EQ(error.code(),
+                scenario == 0 ? PLIC::GeometryErrorCode::UnresolvedArithmetic : PLIC::GeometryErrorCode::ResourceLimit);
+        }
+        EXPECT_GT(evaluations, 4u);
+        EXPECT_EQ(normal, (AngularVector{1, 0, 0}));
+        EXPECT_EQ(current.residual, original.residual);
+        EXPECT_EQ(current.objective, original.objective);
+        EXPECT_EQ(current.objective_upper, original.objective_upper);
+        EXPECT_EQ(current.stamp, original.stamp);
+    }
+}
+
 TEST(PolyhedralReconstruction, AngularOptionalFinerArithmeticFailureRetainsValidCoarseSearch)
 {
     namespace angular = PLIC::angular_detail;
@@ -1207,6 +1369,123 @@ TEST(PolyhedralReconstruction, AngularStrongResidualCurvatureConvergesWithinOrig
     EXPECT_NEAR(std::sqrt(current.objective / 3), .3 / std::sqrt(3.), 1e-12);
 }
 
+TEST(PolyhedralReconstruction, AngularPositiveCurvatureBacktracksToFirstImprovingNewtonRadius)
+{
+    namespace angular = PLIC::angular_detail;
+    const auto model = [](AngularVector normal)
+    {
+        const double a = normal[1] / normal[0], b = normal[2] / normal[0];
+        AngularEvaluation result{{a * a - 1, b, .1}};
+        for (const auto value : result.residual)
+            result.objective += value * value;
+        result.objective_upper = result.objective;
+        return result;
+    };
+    for (const unsigned scenario : {0u, 1u, 2u, 3u})
+    {
+        SCOPED_TRACE(scenario);
+        AngularVector normal = angular_unit({1, .75, 0});
+        const auto initial_normal = normal;
+        const AngularVector tangent{-normal[1], normal[0], 0};
+        auto current = model(normal);
+        current.stamp = 61;
+        const auto original = current;
+        // In the unit tangent chart a(t)=(a+t)/(1-a*t): a'=1+a*a,
+        // a''=2*a*(1+a*a). The half-Hessian of (a*a-1)^2 is
+        // (2*a*a')^2 + (a*a-1)*(2*a'^2+2*a*a''). At a=3/4 it is
+        // positive, and the exact Newton displacement is about .563758.
+        constexpr long double a = .75L, da = 1 + a * a, dda = 2 * a * da;
+        constexpr long double residual = a * a - 1, derivative = 2 * a * da;
+        constexpr long double hessian = derivative * derivative + residual * (2 * da * da + 2 * a * dda);
+        constexpr long double newton = -residual * derivative / hessian;
+        static_assert(hessian > 0 && newton > .5L && newton < 1);
+        const auto trial = [&](long double scale)
+        {
+            auto candidate = initial_normal;
+            for (unsigned axis = 0; axis < 3; ++axis)
+                candidate[axis] += static_cast<double>(scale * newton * tangent[axis]);
+            return angular_unit(candidate);
+        };
+        ASSERT_GT(model(trial(1)).objective, original.objective);
+        ASSERT_GT(model(trial(.5L)).objective, original.objective);
+        ASSERT_LT(model(trial(.25L)).objective, original.objective);
+        unsigned evaluations = 0;
+        std::vector<unsigned> newton_trials;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            if (++evaluations > 32768)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+            EXPECT_EQ(normal, initial_normal);
+            EXPECT_EQ(current.residual, original.residual);
+            EXPECT_EQ(current.objective, original.objective);
+            EXPECT_EQ(current.stamp, original.stamp);
+            const double projection = candidate[0] * initial_normal[0] + candidate[1] * initial_normal[1];
+            const double coordinate = (candidate[0] * tangent[0] + candidate[1] * tangent[1]) / projection;
+            // Ignore axial/mixed derivative probes and the accepted trial's
+            // rank probes; identify only the three independently known radii.
+            if (std::abs(candidate[2]) < 1e-14)
+                for (unsigned halving = 0; halving < 3; ++halving)
+                    if (std::abs(coordinate - std::ldexp(static_cast<double>(newton), -int(halving))) < 1e-6)
+                    {
+                        newton_trials.push_back(halving);
+                        if (halving == 0 && (scenario == 1 || scenario == 2))
+                            throw PLIC::GeometryError(scenario == 1 ? PLIC::GeometryErrorCode::UnresolvedArithmetic
+                                                                    : PLIC::GeometryErrorCode::ResourceLimit,
+                                "full Newton trial failure");
+                        if (halving == 0 && scenario == 3)
+                        {
+                            auto malformed = model(candidate);
+                            malformed.residual.pop_back();
+                            return malformed;
+                        }
+                    }
+            auto result = model(candidate);
+            result.stamp = evaluations;
+            return result;
+        };
+        angular::Qualification qualification;
+        if (scenario < 2)
+        {
+            ASSERT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+                angular::IterationResult::Advanced);
+            EXPECT_EQ(newton_trials, (std::vector<unsigned>{0, 1, 2}));
+            const auto expected = trial(.25L);
+            for (unsigned axis = 0; axis < 3; ++axis)
+                EXPECT_NEAR(normal[axis], expected[axis], 2e-7);
+            EXPECT_LT(current.objective, original.objective);
+            EXPECT_EQ(current.residual, model(normal).residual);
+            EXPECT_EQ(current.objective, model(normal).objective);
+            EXPECT_GT(current.stamp, 0u);
+            EXPECT_LE(current.stamp, evaluations);
+            // Independent Jacobian rank: dr1/da=2a and db/dtheta=1/nx
+            // are both nonzero at the accepted quarter-radius plane.
+            EXPECT_GT(normal[0], 0);
+            EXPECT_GT(std::abs(normal[1] / normal[0]), .9);
+            EXPECT_GE(evaluations, 15u); // Four axial, four mixed, three trials, four trial rank probes.
+        }
+        else
+        {
+            try
+            {
+                (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+                FAIL() << "Fatal or malformed full Newton trial must propagate.";
+            }
+            catch (const PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(),
+                    scenario == 2 ? PLIC::GeometryErrorCode::ResourceLimit : PLIC::GeometryErrorCode::InvalidInput);
+            }
+            EXPECT_EQ(newton_trials, (std::vector<unsigned>{0}));
+            EXPECT_EQ(normal, initial_normal);
+            EXPECT_EQ(current.residual, original.residual);
+            EXPECT_EQ(current.objective, original.objective);
+            EXPECT_EQ(current.objective_upper, original.objective_upper);
+            EXPECT_EQ(current.stamp, original.stamp);
+        }
+        EXPECT_LE(evaluations, 32768u);
+    }
+}
+
 TEST(PolyhedralReconstruction, AngularCurvatureTrialsPreserveFailureAndAccountingContracts)
 {
     namespace angular = PLIC::angular_detail;
@@ -1253,7 +1532,7 @@ TEST(PolyhedralReconstruction, AngularCurvatureTrialsPreserveFailureAndAccountin
             {
                 EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
                     angular::IterationResult::Advanced);
-                EXPECT_EQ(evaluations, failed_call + 5); // GN trial and its four qualification probes.
+                EXPECT_EQ(evaluations, failed_call + 5); // Next valid Newton/GN trial and four qualification probes.
                 EXPECT_LT(current.objective, initial_objective);
             }
         }
@@ -2446,8 +2725,10 @@ void expect_native_cell8_optimizer_rejection(
     EXPECT_TRUE(std::isfinite(d.rms)); // Diagnostics retain the raw measured volume-model RMS.
     EXPECT_GE(d.rms, 0);
     EXPECT_LT(d.rms, options.maximum_model_residual);
-    EXPECT_TRUE(
-        d.finite_difference_scale == 1e-4 || d.finite_difference_scale == 5e-5 || d.finite_difference_scale == 2.5e-5);
+    bool documented_probe_scale = false;
+    for (unsigned halving = 0; halving <= 10; ++halving)
+        documented_probe_scale |= d.finite_difference_scale == std::ldexp(1e-4, -static_cast<int>(halving));
+    EXPECT_TRUE(documented_probe_scale); // Bounded derivative verification uses only these exact dyadic scales.
     EXPECT_EQ(options.maximum_condition, 1e8);
     EXPECT_EQ(options.maximum_model_residual, .2);
     EXPECT_EQ(options.maximum_fit_iterations, 24u);
@@ -2741,6 +3022,352 @@ TEST(PolyhedralReconstruction, CapturedNativeCell34CompleteCurrentHaloRequiresQu
     }
     EXPECT_EQ(target.gas_volume, fixture::rows.front().gas);
     EXPECT_EQ(target.carrier_volume, fixture::rows.front().carrier);
+}
+
+/** Integrate a plane cutting all four x-edges of a captured Cartesian box.
+ * The mean cut location is its value at the yz center because it is affine.
+ * This uses retained point bounds and the published plane, without clipping,
+ * offset solving, or the production target residual/error indicator. */
+long double captured_angular_slab_volume(
+    const captured_native_angular_probe::Row& row, const PLIC::GeometryHalfspace& plane)
+{
+    const auto& lower = row.lower;
+    const auto& upper = row.upper;
+    for (const auto y : {lower[1], upper[1]})
+        for (const auto z : {lower[2], upper[2]})
+        {
+            const auto x =
+                plane.anchor[0] + (static_cast<long double>(plane.offset) - plane.normal[1] * (y - plane.anchor[1]) -
+                                      plane.normal[2] * (z - plane.anchor[2])) /
+                                      plane.normal[0];
+            EXPECT_GT(x, lower[0]);
+            EXPECT_LT(x, upper[0]);
+        }
+    const long double boundary = plane.normal[0] > 0 ? lower[0] : upper[0];
+    const long double y = (lower[1] + upper[1]) / 2, z = (lower[2] + upper[2]) / 2;
+    const long double boundary_projection = plane.normal[0] * (boundary - plane.anchor[0]) +
+                                            plane.normal[1] * (y - plane.anchor[1]) +
+                                            plane.normal[2] * (z - plane.anchor[2]);
+    return (static_cast<long double>(plane.offset) - boundary_projection) / std::abs(plane.normal[0]) *
+           (upper[1] - lower[1]) * (upper[2] - lower[2]);
+}
+
+/** Exact-form box CDF: inclusion-exclusion integrates the positive-part power
+ * for each nonzero axis coefficient. Local anchored projections avoid losing
+ * a small cut to a global plane translation. No production measure is used. */
+long double captured_angular_box_volume(
+    const captured_native_angular_probe::Row& row, const PLIC::GeometryHalfspace& plane)
+{
+    std::array<long double, 3> widths{};
+    unsigned dimension = 0;
+    long double minimum_projection = 0, total_width = 0, denominator = 1, box_volume = 1;
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        const auto extent = row.upper[axis] - row.lower[axis];
+        box_volume *= extent;
+        const auto coefficient = static_cast<long double>(plane.normal[axis]);
+        minimum_projection +=
+            coefficient * ((coefficient >= 0 ? row.lower[axis] : row.upper[axis]) - plane.anchor[axis]);
+        if (coefficient != 0)
+        {
+            const auto width = std::abs(coefficient) * extent;
+            widths[dimension++] = width;
+            total_width += width;
+            denominator *= width;
+        }
+    }
+    const auto distance = static_cast<long double>(plane.offset) - minimum_projection;
+    if (distance <= 0)
+        return 0;
+    if (distance >= total_width)
+        return box_volume;
+    for (unsigned factor = 2; factor <= dimension; ++factor)
+        denominator *= factor;
+    long double integral = 0;
+    for (unsigned mask = 0; mask < (1u << dimension); ++mask)
+    {
+        long double remainder = distance;
+        bool negative = false;
+        for (unsigned axis = 0; axis < dimension; ++axis)
+            if (mask & (1u << axis))
+            {
+                remainder -= widths[axis];
+                negative = !negative;
+            }
+        if (remainder > 0)
+        {
+            long double power = 1;
+            for (unsigned exponent = 0; exponent < dimension; ++exponent)
+                power *= remainder;
+            integral += negative ? -power : power;
+        }
+    }
+    return box_volume * integral / denominator;
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeAngularProbesQualifyActualN16AndN32SelectedPrefixes)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native certificates require the original binary80 precision.";
+    namespace fixture = captured_native_angular_probe;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    // Independent Decimal85 box analysis finds a true 3.07267742459743e-8
+    // correction at the rejected N16 normal, while its old h=2.5e-5 probe
+    // points uphill. The exact local ratio minimum uses alpha107-alpha111
+    // and alpha108-alpha109, rather than an optimizer-produced golden.
+    constexpr PLIC::GeometryPoint n16_optimum{
+        -.999982834398916283825, -.005859133339061938021, -.000038262575249053013243};
+    for (const auto* rows : {&fixture::n16, &fixture::n32})
+    {
+        SCOPED_TRACE(rows->front().id);
+        PLIC::GeometryHalfspace reference;
+        for (const unsigned scenario : {0u, 1u, 2u, 3u})
+        {
+            SCOPED_TRACE(scenario);
+            const bool swapped = scenario == 2;
+            auto target = fixture::sample(rows->front());
+            std::vector<OrdinarySample> support;
+            for (std::size_t i = 1; i < rows->size(); ++i)
+                support.push_back(fixture::sample((*rows)[i]));
+            ASSERT_EQ(support.size(), 17u);
+            if (swapped)
+            {
+                std::swap(target.gas_volume, target.carrier_volume);
+                for (auto& sample : support)
+                    std::swap(sample.gas_volume, sample.carrier_volume);
+            }
+            if (scenario == 3)
+            {
+                // Permute only within each population: the same selected five
+                // remain the objective; all seventeen remain availability.
+                std::reverse(support.begin(), support.begin() + fixture::fitting_cells);
+                std::reverse(support.begin() + fixture::fitting_cells, support.end());
+            }
+            const auto original_target = target;
+            const auto original_support = support;
+            auto options = fixture::options();
+            options.model_policy = scenario == 1 ? PLIC::PlicModelPolicy::ConservativeApproximation
+                                                 : PLIC::PlicModelPolicy::RequireModelAgreement;
+            ASSERT_EQ(options.maximum_fit_iterations, 24u);
+            ASSERT_EQ(options.maximum_clip_evaluations, 32768u);
+            ASSERT_EQ(options.orientation_tolerance, 2e-8);
+            ASSERT_EQ(options.volume_tolerance, 8e-15);
+            ASSERT_EQ(options.maximum_model_residual, .2);
+            const auto assessment = Kernel::assess_transport_support(target, support, fixture::fitting_cells, options);
+            ASSERT_TRUE(assessment.admitted());
+            ASSERT_TRUE(assessment.angular_fit_eligible);
+            EXPECT_EQ(assessment.stencil_cells, fixture::fitting_cells);
+            try
+            {
+                const auto fit = Kernel::reconstruct(target, support, fixture::fitting_cells, options);
+                EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+                EXPECT_EQ(fit.model_policy, options.model_policy);
+                EXPECT_EQ(fit.model_quality, PLIC::PlicModelQuality::WithinThreshold);
+                EXPECT_TRUE(fit.fit_converged);
+                EXPECT_TRUE(fit.stencil_volume_residual_measured);
+                EXPECT_LE(fit.stencil_volume_residual, .2);
+                EXPECT_EQ(fit.resolution.stencil_cells, fixture::fitting_cells);
+                EXPECT_GT(fit.fit_iterations, 0u);
+                EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+                EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+                EXPECT_LE(fit.stencil_condition, options.maximum_condition);
+                const long double minority = std::min(target.gas_volume, target.carrier_volume);
+                EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+                    minority * options.volume_tolerance);
+                auto minority_plane = fit.geometry.gas;
+                if (target.gas_volume > target.carrier_volume)
+                {
+                    for (auto& component : minority_plane.normal)
+                        component = -component;
+                    minority_plane.offset = -minority_plane.offset;
+                }
+                const auto independent_volume = captured_angular_slab_volume(rows->front(), minority_plane);
+                EXPECT_LE(std::abs(independent_volume - minority), minority * options.volume_tolerance);
+                if (scenario == 0)
+                    reference = fit.geometry.gas;
+                long double invariant_chord_squared = 0, optimum_chord_squared = 0;
+                for (unsigned axis = 0; axis < 3; ++axis)
+                {
+                    const long double normal = swapped ? -fit.geometry.gas.normal[axis] : fit.geometry.gas.normal[axis];
+                    const auto invariant_difference = normal - reference.normal[axis];
+                    invariant_chord_squared += invariant_difference * invariant_difference;
+                    const auto optimum_difference = normal - n16_optimum[axis];
+                    optimum_chord_squared += optimum_difference * optimum_difference;
+                }
+                EXPECT_LE(std::sqrt(invariant_chord_squared), 2 * options.orientation_tolerance);
+                if (rows->front().id == 109)
+                    EXPECT_LE(std::sqrt(optimum_chord_squared), options.orientation_tolerance);
+                std::ostringstream evidence;
+                evidence << std::setprecision(21) << "target=" << target.id << " scenario=" << scenario
+                         << " iterations=" << fit.fit_iterations << " step=" << fit.orientation_step
+                         << " rms=" << fit.stencil_volume_residual
+                         << " independent_target_volume=" << independent_volume << " target_minority=" << minority;
+                RecordProperty(
+                    "captured_angular_" + std::to_string(target.id) + "_" + std::to_string(scenario), evidence.str());
+            }
+            catch (const PLIC::PolyhedralFitFailure& error)
+            {
+                const auto& d = error.diagnostics();
+                ADD_FAILURE() << "Captured angular prefix did not qualify: " << error.what()
+                              << " reason=" << int(error.reason()) << " step=" << std::setprecision(17)
+                              << d.angular_step << " fd=" << d.finite_difference_scale << " rms=" << d.rms
+                              << " iterations=" << d.iterations << " clips=" << d.clip_evaluations;
+            }
+            EXPECT_EQ(target.geometry, original_target.geometry);
+            EXPECT_EQ(target.gas_volume, original_target.gas_volume);
+            EXPECT_EQ(target.carrier_volume, original_target.carrier_volume);
+            for (std::size_t i = 0; i < support.size(); ++i)
+            {
+                EXPECT_EQ(support[i].geometry, original_support[i].geometry);
+                EXPECT_EQ(support[i].id, original_support[i].id);
+                EXPECT_EQ(support[i].gas_volume, original_support[i].gas_volume);
+                EXPECT_EQ(support[i].carrier_volume, original_support[i].carrier_volume);
+                EXPECT_EQ(support[i].observed_mixed, original_support[i].observed_mixed);
+            }
+        }
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedNativeN32ContinuationBacktracksCurvatureWithinOriginalBudgets)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured native certificates require the original binary80 precision.";
+    namespace fixture = captured_native_angular_probe;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    // Check the independent integral against elementary slab, triangular-prism,
+    // tetrahedron, and centrally symmetric half-cube volumes.
+    fixture::Row unit_box{};
+    unit_box.upper = {1, 1, 1};
+    EXPECT_NEAR(captured_angular_box_volume(unit_box, {{1, 0, 0}, {}, .25}), .25L, 1e-18L);
+    EXPECT_NEAR(captured_angular_box_volume(unit_box, {{1, 1, 0}, {}, .5}), .125L, 1e-18L);
+    EXPECT_NEAR(captured_angular_box_volume(unit_box, {{1, 1, 1}, {}, .5}), 1.L / 48, 1e-18L);
+    EXPECT_NEAR(captured_angular_box_volume(unit_box, {{1, 1, 1}, {}, 1.5}), .5L, 1e-18L);
+    const auto& rows = fixture::n32_continuation;
+    const auto target = fixture::sample(rows.front());
+    const auto original_target = target;
+    ASSERT_EQ(target.id, 1186u);
+    std::vector<OrdinarySample> support;
+    for (std::size_t i = 1; i < rows.size(); ++i)
+        support.push_back(fixture::sample(rows[i]));
+    const auto original_support = support;
+    ASSERT_EQ(support.size(), 17u);
+    const auto record = [&](const char* policy, const char* outcome, const PLIC::PolyhedralFitDiagnostics& d)
+    {
+        std::ostringstream evidence;
+        evidence << std::setprecision(21) << "outcome=" << outcome << " rms=" << d.rms << " step=" << d.angular_step
+                 << " iterations=" << d.iterations << " clips=" << d.clip_evaluations << " normal=" << d.normal[0]
+                 << ',' << d.normal[1] << ',' << d.normal[2] << " condition=" << d.condition;
+        RecordProperty(std::string("native_n32_continuation_") + policy, evidence.str());
+    };
+    for (const bool approximate : {true, false})
+    {
+        SCOPED_TRACE(approximate);
+        const char* policy = approximate ? "approximation" : "strict";
+        auto options = fixture::options();
+        options.model_policy = approximate ? PLIC::PlicModelPolicy::ConservativeApproximation
+                                           : PLIC::PlicModelPolicy::RequireModelAgreement;
+        ASSERT_EQ(options.maximum_fit_iterations, 24u);
+        ASSERT_EQ(options.maximum_clip_evaluations, 32768u);
+        ASSERT_EQ(options.orientation_tolerance, 2e-8);
+        ASSERT_EQ(options.volume_tolerance, 8e-15);
+        ASSERT_EQ(options.maximum_model_residual, .2);
+        const auto assessment = Kernel::assess_transport_support(target, support, fixture::fitting_cells, options);
+        ASSERT_TRUE(assessment.admitted());
+        ASSERT_TRUE(assessment.angular_fit_eligible);
+        try
+        {
+            const auto fit = Kernel::reconstruct(target, support, fixture::fitting_cells, options);
+            EXPECT_TRUE(fit.fit_converged);
+            EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+            EXPECT_EQ(fit.model_policy, options.model_policy);
+            EXPECT_EQ(fit.resolution.stencil_cells, fixture::fitting_cells);
+            EXPECT_GT(fit.fit_iterations, 0u);
+            EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+            EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+            EXPECT_LE(fit.stencil_condition, options.maximum_condition);
+            EXPECT_TRUE(fit.stencil_volume_residual_measured);
+            if (!approximate)
+                EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
+            EXPECT_EQ(fit.model_quality, fit.stencil_volume_residual <= options.maximum_model_residual
+                                             ? PLIC::PlicModelQuality::WithinThreshold
+                                             : PLIC::PlicModelQuality::AboveThreshold);
+            const long double minority = std::min(target.gas_volume, target.carrier_volume);
+            EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+                minority * options.volume_tolerance);
+            auto minority_plane = fit.geometry.gas;
+            if (target.gas_volume > target.carrier_volume)
+            {
+                for (auto& component : minority_plane.normal)
+                    component = -component;
+                minority_plane.offset = -minority_plane.offset;
+            }
+            const auto independent_volume = captured_angular_box_volume(rows.front(), minority_plane);
+            EXPECT_LE(std::abs(independent_volume - minority), minority * options.volume_tolerance);
+            std::ostringstream evidence;
+            evidence << std::setprecision(21) << "outcome=accepted rms=" << fit.stencil_volume_residual
+                     << " step=" << fit.orientation_step << " iterations=" << fit.fit_iterations
+                     << " independent_target_volume=" << independent_volume << " minority=" << minority;
+            RecordProperty(std::string("native_n32_continuation_") + policy, evidence.str());
+        }
+        catch (const PLIC::PolyhedralResolutionRequired& error)
+        {
+            EXPECT_FALSE(approximate) << "Approximation must converge on this captured continuation input.";
+            EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+            ASSERT_TRUE(error.has_fit_diagnostics());
+            const auto& d = error.diagnostics();
+            EXPECT_GT(d.rms, options.maximum_model_residual);
+            EXPECT_LE(d.angular_step, options.orientation_tolerance);
+            EXPECT_LE(d.condition, options.maximum_condition);
+            EXPECT_LE(d.iterations, options.maximum_fit_iterations);
+            EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+            record(policy, "UnresolvedPlaneModel", d);
+        }
+        catch (const PLIC::PolyhedralFitFailure& error)
+        {
+            EXPECT_FALSE(approximate) << "Approximation must converge on this captured continuation input.";
+            const auto& d = error.diagnostics();
+            using Reason = PLIC::PolyhedralFitFailure::Reason;
+            switch (error.reason())
+            {
+                case Reason::IterationLimit:
+                    EXPECT_EQ(d.iterations, options.maximum_fit_iterations);
+                    EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+                    record(policy, "IterationLimit", d);
+                    break;
+                case Reason::Nonstationary:
+                    EXPECT_GT(d.angular_step, options.orientation_tolerance);
+                    EXPECT_LE(d.iterations, options.maximum_fit_iterations);
+                    EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+                    record(policy, "Nonstationary", d);
+                    break;
+                case Reason::Geometry:
+                    EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+                    EXPECT_FALSE(error.recoverable_trial());
+                    EXPECT_EQ(d.clip_evaluations, options.maximum_clip_evaluations + 1);
+                    record(policy, "Geometry/ResourceLimit", d);
+                    break;
+                case Reason::Unobservable:
+                    EXPECT_TRUE(!std::isfinite(d.angular_step) || d.condition > options.maximum_condition);
+                    EXPECT_LE(d.iterations, options.maximum_fit_iterations);
+                    EXPECT_LE(d.clip_evaluations, options.maximum_clip_evaluations);
+                    record(policy, "Unobservable", d);
+                    break;
+            }
+        }
+        EXPECT_EQ(target.geometry, original_target.geometry);
+        EXPECT_EQ(target.gas_volume, original_target.gas_volume);
+        EXPECT_EQ(target.carrier_volume, original_target.carrier_volume);
+        EXPECT_EQ(target.id, original_target.id);
+        EXPECT_EQ(target.observed_mixed, original_target.observed_mixed);
+        for (std::size_t i = 0; i < support.size(); ++i)
+        {
+            EXPECT_EQ(support[i].geometry, original_support[i].geometry);
+            EXPECT_EQ(support[i].gas_volume, original_support[i].gas_volume);
+            EXPECT_EQ(support[i].carrier_volume, original_support[i].carrier_volume);
+            EXPECT_EQ(support[i].id, original_support[i].id);
+            EXPECT_EQ(support[i].observed_mixed, original_support[i].observed_mixed);
+        }
+    }
 }
 
 void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<const OrdinarySample> full_support,
@@ -3063,6 +3690,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36RestartSharesIterationAndClip
     namespace fixture = captured_native_cell36;
     using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
     const auto target = fixture::sample(fixture::rows.front());
+    const auto original_target = target;
     std::vector<OrdinarySample> support;
     for (std::size_t i = 1; i < fixture::rows.size(); ++i)
         support.push_back(fixture::sample(fixture::rows[i]));
@@ -3080,6 +3708,9 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36RestartSharesIterationAndClip
     };
     auto primary_only = fixture::options();
     primary_only.maximum_fit_iterations = 6;
+    ASSERT_EQ(primary_only.maximum_clip_evaluations, 32768u);
+    constexpr std::size_t historical_primary_clips = 2808;
+    RecordProperty("native_cell36_historical_primary_clips", std::to_string(historical_primary_clips));
     std::size_t primary_clips = 0;
     PLIC::PolyhedralFitDiagnostics primary_diagnostics;
     try
@@ -3099,10 +3730,26 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36RestartSharesIterationAndClip
         EXPECT_GT(d.rms, primary_only.maximum_model_residual);
         primary_clips = d.clip_evaluations;
         primary_diagnostics = d;
-        EXPECT_EQ(primary_clips, 2808u); // Preserve the recorded unchanged primary work baseline.
+        EXPECT_LE(primary_clips, primary_only.maximum_clip_evaluations);
         record("native_cell36_primary_six_iterations", "UnresolvedPlaneModel", d);
     }
     ASSERT_GT(primary_clips, 0u);
+    auto historical_budget = fixture::options();
+    historical_budget.maximum_clip_evaluations = historical_primary_clips;
+    try
+    {
+        (void) Kernel::reconstruct(target, support, fixture::first_ring_size, historical_budget);
+        ADD_FAILURE() << "Additional derivative probes must be charged against the pinned historical clip budget.";
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        EXPECT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::Geometry);
+        EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+        EXPECT_FALSE(error.recoverable_trial());
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.clip_evaluations, historical_primary_clips + 1);
+        record("native_cell36_historical_clip_exhaustion", "Geometry/ResourceLimit", d);
+    }
     auto one_secondary = fixture::options();
     one_secondary.maximum_fit_iterations = 7;
     try
@@ -3144,6 +3791,9 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36RestartSharesIterationAndClip
         EXPECT_EQ(d.best_rms, primary_diagnostics.rms); // Not even a qualified seed precedes the charged failure.
         record("native_cell36_shared_clip_exhaustion", "Geometry/ResourceLimit", d);
     }
+    EXPECT_EQ(target.geometry, original_target.geometry);
+    EXPECT_EQ(target.id, original_target.id);
+    EXPECT_EQ(target.observed_mixed, original_target.observed_mixed);
     EXPECT_EQ(target.gas_volume, fixture::rows.front().gas);
     EXPECT_EQ(target.carrier_volume, fixture::rows.front().carrier);
     for (std::size_t i = 0; i < support.size(); ++i)
@@ -3736,16 +4386,23 @@ TEST(PolyhedralReconstruction, ConservativeApproximationPreservesOptimizerAndNum
     auto inaccurate = options;
     inaccurate.volume_tolerance = 1e-25;
     EXPECT_THROW((void) Kernel::solve_offset(target, {1, 0, 0}, inaccurate), PLIC::GeometryError);
-    namespace fixture = captured_native_n32_corner;
-    const auto native = fixture::sample(fixture::rows.front());
+    namespace fixture = captured_native_angular_probe;
+    const auto native = fixture::sample(fixture::n32.front());
     std::vector<OrdinarySample> support;
-    for (std::size_t i = 1; i < fixture::rows.size(); ++i)
-        support.push_back(fixture::sample(fixture::rows[i]));
+    for (std::size_t i = 1; i < fixture::n32.size(); ++i)
+        support.push_back(fixture::sample(fixture::n32[i]));
+    // This captured local objective has two resolved angular directions and
+    // requires several actual angular advances with the original fit budget.
+    // A one-iteration rejection cannot become a supported-gradient choice.
+    const auto angular_support = Kernel::assess_transport_support(native, support, fixture::fitting_cells, options);
+    ASSERT_TRUE(angular_support.admitted());
+    ASSERT_TRUE(angular_support.angular_fit_eligible);
+    ASSERT_GE(angular_support.angular_support_cells, 2u);
     auto exhausted = options;
     exhausted.maximum_fit_iterations = 1;
     try
     {
-        (void) Kernel::reconstruct(native, support, support.size(), exhausted);
+        (void) Kernel::reconstruct(native, support, fixture::fitting_cells, exhausted);
         FAIL() << "Iteration exhaustion is not approximate convergence.";
     }
     catch (const PLIC::PolyhedralFitFailure& error)
@@ -3756,12 +4413,36 @@ TEST(PolyhedralReconstruction, ConservativeApproximationPreservesOptimizerAndNum
     }
     exhausted = options;
     exhausted.maximum_clip_evaluations = 1;
-    EXPECT_THROW((void) Kernel::reconstruct(native, support, support.size(), exhausted), PLIC::GeometryError);
+    EXPECT_THROW((void) Kernel::reconstruct(native, support, fixture::fitting_cells, exhausted), PLIC::GeometryError);
     support.clear();
     for (std::size_t i = 1; i < captured_native_cell8::rows.size(); ++i)
         support.push_back(captured_native_cell8::sample(captured_native_cell8::rows[i]));
-    EXPECT_THROW((void) Kernel::reconstruct(captured_native_cell8::sample(captured_native_cell8::rows.front()),
-                     support, options), PLIC::PolyhedralFitFailure);
+    const auto gradient_target = captured_native_cell8::sample(captured_native_cell8::rows.front());
+    auto strict = options;
+    strict.model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
+    const auto missing_angular_support = Kernel::assess_transport_support(gradient_target, support, strict);
+    ASSERT_EQ(missing_angular_support.reason,
+        PLIC::PolyhedralResolutionAssessment::Reason::RankDeficientAngularSupport);
+    ASSERT_EQ(missing_angular_support.angular_support_cells, 1u);
+    ASSERT_GT(missing_angular_support.directional_strength, missing_angular_support.directional_uncertainty);
+    // Practical admission chooses this qualified gradient before running an
+    // angular optimizer; it does not rescue the former optimizer's failure.
+    const auto gradient = Kernel::reconstruct(gradient_target, support, options);
+    EXPECT_EQ(gradient.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+    EXPECT_FALSE(gradient.fit_converged);
+    EXPECT_EQ(gradient.fit_iterations, 0u);
+    EXPECT_TRUE(gradient.resolution.admitted());
+    EXPECT_FALSE(gradient.resolution.angular_fit_eligible);
+    EXPECT_EQ(gradient.resolution.angular_support_cells, 1u);
+    EXPECT_TRUE(std::isinf(gradient.resolution.angular_support_condition));
+    EXPECT_TRUE(gradient.stencil_volume_residual_measured);
+    EXPECT_EQ(gradient.model_policy, options.model_policy);
+    EXPECT_EQ(gradient.model_quality,
+        gradient.stencil_volume_residual > options.maximum_model_residual ? PLIC::PlicModelQuality::AboveThreshold
+                                                                         : PLIC::PlicModelQuality::WithinThreshold);
+    const long double requested = std::min(gradient_target.gas_volume, gradient_target.carrier_volume);
+    EXPECT_LE(std::abs(gradient.target_volume_difference.value) + gradient.target_volume_numerical_error_estimate,
+        requested * options.volume_tolerance);
 }
 
 TEST(PolyhedralReconstruction, ConservativeApproximationAvoidsModelOnlyRestartAndKeepsUnmeasuredStatus)

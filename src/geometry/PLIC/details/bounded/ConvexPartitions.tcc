@@ -133,8 +133,9 @@ void GeometryKernel<Mode>::certify_partition(
                 for (const auto& vertex : checked_geometry_storage<Mode>(piece->impl_)->vertices)
                 {
                     active_work->pair();
-                    const auto d =
-                        distance<Mode>(vertex, piece->impl_->frame, surface.plane) * Interval(surface.orientation);
+                    const auto d = distance<Mode>(vertex, piece->impl_->frame, surface.plane,
+                                       checked_geometry_storage<Mode>(piece->impl_)->point_context.get()) *
+                                   Interval(surface.orientation);
                     if (sign<Mode>(d) > 0)
                         reject("partition piece escapes its parent.");
                 }

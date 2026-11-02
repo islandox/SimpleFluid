@@ -21,9 +21,16 @@ Qualification qualify_normal(const Vector& normal, const Vector& tangent, const 
     using Evaluation = std::invoke_result_t<Evaluate&, Vector>;
     std::optional<std::array<Evaluation, 4>> probes;
     double h = 0;
-    for (const auto attempted_h : {1e-4, 5e-5, 2.5e-5})
+    if (!std::isfinite(maximum_probe_step) || !(maximum_probe_step > 0))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "PLIC angular probe scale must be finite and positive.");
+    // The required arithmetic retry sequence is unchanged. Finer derivative
+    // verification is an explicit, single-scale request from advance().
+    const auto steps = maximum_probe_step < 2.5e-5
+                           ? std::array<double, 3>{maximum_probe_step, 0, 0}
+                           : std::array<double, 3>{1e-4, 5e-5, 2.5e-5};
+    for (const auto attempted_h : steps)
     {
-        if (attempted_h > maximum_probe_step)
+        if (!(attempted_h > 0) || attempted_h > maximum_probe_step)
             continue;
         if (evidence)
         {
@@ -319,18 +326,32 @@ std::optional<Evaluation> curvature_trial(const Vector& normal, const Vector& ta
         const long double a = (-bb * ga + ab * gb) / det, b = (ab * ga - aa * gb) / det;
         if (!std::isfinite(a) || !std::isfinite(b) || !(ga * a + gb * b < 0) || std::hypot(a, b) > 1)
             return std::nullopt;
-        Vector trial = normal;
-        for (unsigned i = 0; i < 3; ++i)
-            trial[i] += static_cast<double>(a * tangent[i] + b * second[i]);
-        trial = normalize(trial);
-        auto next = evaluate(trial);
-        if (next.residual.size() != current.residual.size())
-            throw GeometryError(GeometryErrorCode::InvalidInput, "PLIC angular trial residual shape differs.");
-        if (next.objective < current.objective &&
-            observable_trial(trial, next, current.residual.size(), maximum_condition, evaluate, normalize))
+        // A positive local Hessian does not guarantee descent at the full
+        // Newton displacement across clipping events. Reuse the same bounded
+        // dyadic radii as the other trial paths before falling back to GN.
+        for (double scale = 1; scale >= 1. / 128; scale *= .5)
         {
-            accepted_normal = trial;
-            return next;
+            try
+            {
+                Vector trial = normal;
+                for (unsigned i = 0; i < 3; ++i)
+                    trial[i] += static_cast<double>(scale * (a * tangent[i] + b * second[i]));
+                trial = normalize(trial);
+                auto next = evaluate(trial);
+                if (next.residual.size() != current.residual.size())
+                    throw GeometryError(GeometryErrorCode::InvalidInput, "PLIC angular trial residual shape differs.");
+                if (next.objective < current.objective &&
+                    observable_trial(trial, next, current.residual.size(), maximum_condition, evaluate, normalize))
+                {
+                    accepted_normal = trial;
+                    return next;
+                }
+            }
+            catch (const GeometryError& error)
+            {
+                if (!error.recoverable_trial())
+                    throw;
+            }
         }
     }
     catch (const GeometryError& error)
@@ -355,12 +376,20 @@ IterationResult advance(Vector& normal, Evaluation& current, double maximum_cond
     tangent = normalize(tangent);
     const Vector second{normal[1] * tangent[2] - normal[2] * tangent[1],
         normal[2] * tangent[0] - normal[0] * tangent[2], normal[0] * tangent[1] - normal[1] * tangent[0]};
-    // A nonzero-residual optimum can expose the O(h^2) derivative bias before
-    // the unchanged angular-step gate is met. Reassess sub-probe steps and
-    // stalled searches using the existing finer scales and shared budget.
+    // Clipped volumes are piecewise smooth. A probe can cross a vertex event
+    // even when the requested correction stays inside the current local piece.
+    // Verify sub-probe corrections, stalled searches and every nonzero-residual
+    // stationarity claim at finer scales. Two finer quartets guard against an
+    // accidentally cancelling derivative at one scale or one agreeing pair.
+    constexpr unsigned maximum_halvings = 10;
     bool deferred_line_search = false;
-    for (const auto maximum_probe_step : {1e-4, 5e-5, 2.5e-5})
+    bool refinement_required = false, derivative_resolved = false;
+    unsigned complete_qualifications = 0;
+    double previous_change = std::numeric_limits<double>::infinity();
+    double correction_error = std::numeric_limits<double>::infinity();
+    for (unsigned halving = 0; halving <= maximum_halvings; ++halving)
     {
+        const double maximum_probe_step = std::ldexp(1e-4, -static_cast<int>(halving));
         // Arithmetic fallback may already have reached a finer scale.
         if (qualification.probe_step != 0 && maximum_probe_step >= qualification.probe_step)
             continue;
@@ -380,10 +409,34 @@ IterationResult advance(Vector& normal, Evaluation& current, double maximum_cond
             qualification = previous;
         }
         deferred_line_search = false;
-        if (std::sqrt(current.objective_upper / current.residual.size()) <= fit_tolerance ||
-            qualification.step <= orientation_tolerance)
+        if (!refinement_failure && std::sqrt(current.objective_upper / current.residual.size()) <= fit_tolerance)
             return IterationResult::Converged;
-        if (!refinement_failure && qualification.step < qualification.probe_step && qualification.probe_step > 2.5e-5)
+        if (!refinement_failure)
+        {
+            const double change = complete_qualifications
+                                      ? std::hypot(qualification.first_step - previous.first_step,
+                                            qualification.second_step - previous.second_step)
+                                      : std::numeric_limits<double>::infinity();
+            ++complete_qualifications;
+            // This is a numerical consistency estimate, not a certified bound.
+            // Retain both observed differences instead of assuming smooth
+            // Richardson scaling across an unknown clipping breakpoint.
+            correction_error = std::max(change, previous_change);
+            // Absolute agreement at the requested resolution also admits
+            // roundoff-limited differences which need not decrease with h.
+            derivative_resolved = complete_qualifications >= 3 &&
+                                  correction_error <= .25 * std::max(orientation_tolerance, qualification.step);
+            previous_change = change;
+            refinement_required = refinement_required || qualification.step < qualification.probe_step ||
+                                  qualification.step <= orientation_tolerance;
+        }
+        if (!refinement_failure && derivative_resolved &&
+            qualification.step + correction_error <= orientation_tolerance)
+            return IterationResult::Converged;
+        const bool unresolved_stationarity = qualification.step <= orientation_tolerance &&
+                                            qualification.step + correction_error > orientation_tolerance;
+        if (!refinement_failure && refinement_required && (!derivative_resolved || unresolved_stationarity) &&
+            halving < maximum_halvings)
         {
             deferred_line_search = true;
             continue;
@@ -428,7 +481,11 @@ IterationResult advance(Vector& normal, Evaluation& current, double maximum_cond
         }
         if (refinement_failure)
             std::rethrow_exception(refinement_failure);
+        refinement_required = true;
     }
+    if (!derivative_resolved || qualification.step <= orientation_tolerance)
+        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+            "PLIC angular derivative refinement could not resolve stationarity within its bounded probes.");
     return IterationResult::Stalled;
 }
 } // namespace SimpleFluid::PLIC::angular_detail

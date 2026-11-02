@@ -741,13 +741,31 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
     if (result.angular_support_cells < 2 || !(determinant > std::numeric_limits<double>::epsilon() * aa * bb))
     {
         result.reason = PolyhedralResolutionAssessment::Reason::RankDeficientAngularSupport;
+        result.angular_support_condition = std::numeric_limits<double>::infinity();
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.model_policy == PlicModelPolicy::ConservativeApproximation)
+            {
+                // Geometry, weighted-gradient conditioning and directional
+                // signal have already passed. Select that supported method
+                // before any clipping or angular optimizer evaluation.
+                result.reason = PolyhedralResolutionAssessment::Reason::Admitted;
+                result.angular_fit_eligible = false;
+            }
         return result;
     }
     const auto largest = .5 * (aa + bb + std::hypot(aa - bb, 2 * ab));
     result.angular_support_condition = largest * largest / determinant;
     if (!std::isfinite(result.angular_support_condition) ||
         result.angular_support_condition > options.maximum_condition)
+    {
         result.reason = PolyhedralResolutionAssessment::Reason::IllConditionedAngularSupport;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.model_policy == PlicModelPolicy::ConservativeApproximation)
+            {
+                result.reason = PolyhedralResolutionAssessment::Reason::Admitted;
+                result.angular_fit_eligible = false;
+            }
+    }
     return result;
 }
 template<ArithmeticMode Mode>
@@ -770,6 +788,10 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
     const auto stencil = full_support.first(fitting_cells);
     auto direction = analyze_direction<Mode>(target, stencil, options, false, full_support);
     auto resolution = direction.resolution;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (options.model_policy == PlicModelPolicy::ConservativeApproximation)
+            resolution = PolyhedralReconstruction<Mode>::assess_transport_support(
+                target, full_support, fitting_cells, options);
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
     if (target.gas_volume == 0 || target.carrier_volume == 0)

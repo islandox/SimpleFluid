@@ -22,29 +22,31 @@ template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, con
     return equal ? 1 : reversed ? -1 : 0;
 }
 
-template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& plane)
+template<ArithmeticMode Mode>
+bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     if (std::find(v.incident.begin(), v.incident.end(), plane) != v.incident.end())
         return true;
     if (v.source_identity)
-    for (const auto& weak : plane->source_vertices)
-    {
-        active_work->pair();
-        const auto identity = weak.lock();
-        if (DynamicGeometryAccess::same_represented_source(identity, v.source_identity))
-            return true;
-    }
-    return construction_edge_incident<Mode>(v, plane);
+        for (const auto& ref : plane->source_vertices)
+        {
+            active_work->pair();
+            const auto identity = resolve_point(plane->point_context, ref);
+            if (DynamicGeometryAccess::same_represented_source(identity, resolve_point(context, v.source_identity)))
+                return true;
+        }
+    return construction_edge_incident<Mode>(v, plane, context);
 }
 
 template<ArithmeticMode Mode>
 Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, const Vertex& a, const Vertex& b,
-    const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation, Interval result)
+    const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation, Interval result,
+    const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     active_work->pair();
-    if (!incident<Mode>(a, plane) || !incident<Mode>(b, plane) || !incident<Mode>(c, plane))
+    if (!incident<Mode>(a, plane, context) || !incident<Mode>(b, plane, context) || !incident<Mode>(c, plane, context))
         return result;
     auto w = transform<Mode>(coordinates, frame, triangle_frame) - a.coordinates;
     for (std::size_t k = 0; k < 3; ++k)
@@ -204,49 +206,51 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         support.orientation = orientation_override;
     }
     const auto& plane = support.plane;
+    PointSnapshotBuilder<Mode> points;
+    points.retain_context(plane->point_context);
     const auto refine_face_distance = [&](const Point& coordinates, const Frame& frame, Interval result)
     {
         const auto& face = source->faces[plane_id];
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
         {
-            result =
-                refine_triangle_distance<Mode>(coordinates, frame, source->vertices[face[0]], source->vertices[face[i]],
-                    source->vertices[face[i + 1]], source->frame, plane, support.orientation, result);
+            result = refine_triangle_distance<Mode>(coordinates, frame, source->vertices[face[0]],
+                source->vertices[face[i]], source->vertices[face[i + 1]], source->frame, plane, support.orientation,
+                result, source->point_context.get());
             if (result.lo() > 0 || result.hi() < 0 || result.zero())
                 break;
         }
         return result;
     };
-    const auto original_point = [&](const std::shared_ptr<const DynamicPointProvenance>& identity)
+    const auto original_point = [&](const PointProvenanceView& identity)
     {
         Vertex result;
         result.coordinates = transform<Mode>(
-            point<Mode>(DynamicPoint{identity->value, identity->absolute_error}), Frame{}, source->frame);
-        result.source_identity = identity;
-        active_work->charge(identity->supports().size(), sizeof(PlaneAuthority));
-        for (const auto& key : identity->supports())
+            point<Mode>(DynamicPoint{identity.value(), identity.absolute_error()}), Frame{}, source->frame);
+        result.source_identity = points.import(identity);
+        for (const auto& key : identity.supports())
             active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
-        result.authorities = identity->supports();
+        result.authorities = points.import_authority_range(identity.supports());
         return result;
     };
-    const auto retained_endpoint_distance = [&](const Vertex& endpoint, const PlanePtr& original)
+    const auto retained_endpoint_distance =
+        [&](const Vertex& endpoint, const PlanePtr& original, const PointSnapshotContext<Mode>* endpoint_context)
     {
-        auto result = distance<Mode>(endpoint, source->frame, original);
+        auto result = distance<Mode>(endpoint, source->frame, original, endpoint_context);
         if (result.lo() > 0 || result.hi() < 0 || result.zero())
             return result;
         active_work->charge(original->source_vertices.size(), sizeof(Vertex));
         std::vector<Vertex> defining;
         defining.reserve(original->source_vertices.size());
-        for (const auto& weak : original->source_vertices)
+        for (const auto& ref : original->source_vertices)
         {
             active_work->pair();
-            if (const auto identity = weak.lock())
+            if (const auto identity = resolve_point(original->point_context, ref))
                 defining.push_back(original_point(identity));
         }
         for (std::size_t i = 1; i + 1 < defining.size(); ++i)
         {
             result = refine_triangle_distance<Mode>(endpoint.coordinates, source->frame, defining[0], defining[i],
-                defining[i + 1], source->frame, original, 1, result);
+                defining[i + 1], source->frame, original, 1, result, points.context());
             if (result.lo() > 0 || result.hi() < 0 || result.zero())
                 break;
         }
@@ -254,7 +258,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     };
     const auto endpoint_distance = [&](const Vertex& endpoint)
     {
-        auto result = distance<Mode>(endpoint, source->frame, plane) * Interval(support.orientation);
+        auto result = distance<Mode>(endpoint, source->frame, plane, points.context()) * Interval(support.orientation);
         if (result.lo() <= 0 && result.hi() >= 0 && !result.zero())
             result = refine_face_distance(endpoint.coordinates, source->frame, result);
         return result;
@@ -264,7 +268,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     bool negative = false, positive = false;
     for (const auto& vertex : impl_->vertices)
     {
-        auto d = distance<Mode>(vertex, impl_->frame, plane) * Interval(support.orientation);
+        auto d =
+            distance<Mode>(vertex, impl_->frame, plane, impl_->point_context.get()) * Interval(support.orientation);
         if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // Three noncollinear shared points determine the same affine
@@ -275,17 +280,21 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             for (const auto& original : vertex.incident)
             {
                 active_work->pair();
-                if (!incident<Mode>(a, plane) ||
-                    !(incident<Mode>(a, original) || raw_distance<Mode>(a, source->frame, original).zero()))
+                if (!incident<Mode>(a, plane, source->point_context.get()) ||
+                    !(incident<Mode>(a, original, source->point_context.get()) ||
+                        raw_distance<Mode>(a, source->frame, original).zero()))
                     continue;
                 for (std::size_t i = 1; i + 1 < face.size() && !d.zero(); ++i)
                 {
                     active_work->pair();
                     const auto& b = source->vertices[face[i]];
                     const auto& c = source->vertices[face[i + 1]];
-                    if (incident<Mode>(b, plane) && incident<Mode>(c, plane) &&
-                        (incident<Mode>(b, original) || raw_distance<Mode>(b, source->frame, original).zero()) &&
-                        (incident<Mode>(c, original) || raw_distance<Mode>(c, source->frame, original).zero()) &&
+                    if (incident<Mode>(b, plane, source->point_context.get()) &&
+                        incident<Mode>(c, plane, source->point_context.get()) &&
+                        (incident<Mode>(b, original, source->point_context.get()) ||
+                            raw_distance<Mode>(b, source->frame, original).zero()) &&
+                        (incident<Mode>(c, original, source->point_context.get()) ||
+                            raw_distance<Mode>(c, source->frame, original).zero()) &&
                         nonzero<Mode>(cross<Mode>(b.coordinates - a.coordinates, c.coordinates - a.coordinates)))
                         d = Interval{};
                 }
@@ -303,13 +312,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             {
                 active_work->pair();
                 const auto& candidate = source->vertices[index];
-                if (!incident<Mode>(candidate, plane))
+                if (!incident<Mode>(candidate, plane, source->point_context.get()))
                     continue;
                 active_work->charge(vertex.incident.size(), sizeof(PlanePtr));
                 std::vector<PlanePtr> common;
                 common.reserve(vertex.incident.size());
                 for (const auto& original : vertex.incident)
-                    if (incident<Mode>(candidate, original) ||
+                    if (incident<Mode>(candidate, original, source->point_context.get()) ||
                         raw_distance<Mode>(candidate, source->frame, original).zero())
                         common.push_back(original);
                 bool identical = false;
@@ -345,15 +354,18 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 active_work->pair();
                 const auto& a = source->vertices[face[i]];
                 const auto& b = source->vertices[face[(i + 1) % face.size()]];
-                if (!incident<Mode>(a, plane) || !incident<Mode>(b, plane) ||
+                if (!incident<Mode>(a, plane, source->point_context.get()) ||
+                    !incident<Mode>(b, plane, source->point_context.get()) ||
                     !nonzero<Mode>(a.coordinates - b.coordinates))
                     continue;
                 active_work->charge(vertex.incident.size(), sizeof(PlanePtr));
                 std::vector<PlanePtr> common;
                 common.reserve(vertex.incident.size());
                 for (const auto& original : vertex.incident)
-                    if ((incident<Mode>(a, original) || raw_distance<Mode>(a, source->frame, original).zero()) &&
-                        (incident<Mode>(b, original) || raw_distance<Mode>(b, source->frame, original).zero()))
+                    if ((incident<Mode>(a, original, source->point_context.get()) ||
+                            raw_distance<Mode>(a, source->frame, original).zero()) &&
+                        (incident<Mode>(b, original, source->point_context.get()) ||
+                            raw_distance<Mode>(b, source->frame, original).zero()))
                         common.push_back(original);
                 for (std::size_t first = 0; first < common.size() && !d.zero(); ++first)
                     for (std::size_t second = first + 1; second < common.size() && !d.zero(); ++second)
@@ -380,15 +392,18 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                     active_work->pair();
                     const auto& a = source->vertices[face[i]];
                     const auto& b = source->vertices[face[(i + 1) % face.size()]];
-                    if (!incident<Mode>(a, plane) || !incident<Mode>(b, plane) ||
-                        !(incident<Mode>(a, original) || raw_distance<Mode>(a, source->frame, original).zero()) ||
-                        !(incident<Mode>(b, original) || raw_distance<Mode>(b, source->frame, original).zero()))
+                    if (!incident<Mode>(a, plane, source->point_context.get()) ||
+                        !incident<Mode>(b, plane, source->point_context.get()) ||
+                        !(incident<Mode>(a, original, source->point_context.get()) ||
+                            raw_distance<Mode>(a, source->frame, original).zero()) ||
+                        !(incident<Mode>(b, original, source->point_context.get()) ||
+                            raw_distance<Mode>(b, source->frame, original).zero()))
                         continue;
                     const auto edge = b.coordinates - a.coordinates;
-                    for (const auto& weak : original->source_vertices)
+                    for (const auto& ref : original->source_vertices)
                     {
                         active_work->pair();
-                        const auto identity = weak.lock();
+                        const auto identity = resolve_point(original->point_context, ref);
                         if (!identity)
                             continue;
                         // The immutable global snapshot was validated before
@@ -429,9 +444,11 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                                 if (constraint == original)
                                     continue;
                                 active_work->pair();
-                                const auto at_a = retained_endpoint_distance(a, constraint);
-                                const auto at_b = retained_endpoint_distance(b, constraint);
-                                const auto at_p = retained_endpoint_distance(p, constraint);
+                                const auto at_a =
+                                    retained_endpoint_distance(a, constraint, source->point_context.get());
+                                const auto at_b =
+                                    retained_endpoint_distance(b, constraint, source->point_context.get());
+                                const auto at_p = retained_endpoint_distance(p, constraint, points.context());
                                 rows.push_back({at_a, at_b - at_a, at_p - at_a});
                             }
                             for (std::size_t first = 0; first < rows.size(); ++first)
@@ -492,20 +509,20 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                     for (std::size_t i = 0; i < first->source_vertices.size(); ++i)
                     {
                         active_work->pair();
-                        const auto first_identity = first->source_vertices[i].lock();
+                        const auto first_identity = resolve_point(first->point_context, first->source_vertices[i]);
                         if (!first_identity)
                             continue;
                         const auto a = original_point(first_identity);
-                        if (!distance<Mode>(a, source->frame, second).zero())
+                        if (!distance<Mode>(a, source->frame, second, points.context()).zero())
                             continue;
                         for (std::size_t j = i + 1; j < first->source_vertices.size(); ++j)
                         {
                             active_work->pair();
-                            const auto second_identity = first->source_vertices[j].lock();
+                            const auto second_identity = resolve_point(first->point_context, first->source_vertices[j]);
                             if (!second_identity)
                                 continue;
                             const auto b = original_point(second_identity);
-                            if (!distance<Mode>(b, source->frame, second).zero())
+                            if (!distance<Mode>(b, source->frame, second, points.context()).zero())
                                 continue;
                             const auto edge = b.coordinates - a.coordinates;
                             std::size_t axis = 3;
@@ -614,6 +631,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     }
 
     std::vector<Vertex> vertices = impl_->vertices;
+    import_vertex_provenance(vertices, impl_->point_context.get(), points);
     // Authenticate every zero-distance input incidence on the new shared plane.
     for (std::size_t i = 0; i < signs.size(); ++i)
         if (signs[i] == 0)
@@ -624,10 +642,11 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), plane) ==
                 vertices[i].incident.end())
                 vertices[i].incident.push_back(plane);
-            for (const auto& key : plane->authorities)
-                if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
-                    vertices[i].authorities.end())
-                    vertices[i].authorities.append(key);
+            for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+                if (std::find(resolve_authorities(points.context(), vertices[i].authorities).begin(),
+                        resolve_authorities(points.context(), vertices[i].authorities).end(),
+                        key) == resolve_authorities(points.context(), vertices[i].authorities).end())
+                    append_admitted_authority(vertices[i].authorities, key, points);
         }
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
     const auto crossing = [&](std::size_t a, std::size_t b)
@@ -655,20 +674,23 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 denominator;
         }
         for (const auto& p : vertices[a].incident)
-            if (incident<Mode>(vertices[b], p))
+            if (incident<Mode>(vertices[b], p, points.context()))
                 vertex.incident.push_back(p);
         if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
             vertex.incident.push_back(plane);
-        for (const auto& key : vertices[a].authorities)
-            if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
-                vertices[b].authorities.end())
-                vertex.authorities.append(key);
-        for (const auto& key : plane->authorities)
-            if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
-                vertex.authorities.append(key);
+        for (const auto& key : resolve_authorities(points.context(), vertices[a].authorities))
+            if (std::find(resolve_authorities(points.context(), vertices[b].authorities).begin(),
+                    resolve_authorities(points.context(), vertices[b].authorities).end(),
+                    key) != resolve_authorities(points.context(), vertices[b].authorities).end())
+                append_admitted_authority(vertex.authorities, key, points);
+        for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+            if (std::find(resolve_authorities(points.context(), vertex.authorities).begin(),
+                    resolve_authorities(points.context(), vertex.authorities).end(),
+                    key) == resolve_authorities(points.context(), vertex.authorities).end())
+                append_admitted_authority(vertex.authorities, key, points);
         tighten_incident_coordinates<Mode>(vertex, impl_->frame);
-        preserve_crossing_incidence<Mode>(vertex, vertices[a], vertices[b], impl_->frame,
-            impl_->numerical_only || source->numerical_only);
+        preserve_crossing_incidence<Mode>(
+            vertex, vertices[a], vertices[b], impl_->frame, impl_->numerical_only || source->numerical_only, points);
         if (vertices.size() >= impl_->limits.maximum_vertices)
             reject("intersection vertex cap exhausted.");
         const auto index = vertices.size();
@@ -698,8 +720,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 if (signs[a] * signs[b] < 0)
                     loop.push_back(crossing(a, b));
             }
-            if (loop.size() >= 3 &&
-                !std::all_of(loop.begin(), loop.end(), [&](auto i) { return incident<Mode>(vertices[i], plane); }))
+            if (loop.size() >= 3 && !std::all_of(loop.begin(), loop.end(),
+                                        [&](auto i) { return incident<Mode>(vertices[i], plane, points.context()); }))
             {
                 // A source face can meet the cut in an edge containing three
                 // or more propagated collinear vertices. It is not a positive
@@ -711,7 +733,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                     for (std::size_t i = 0; i < loop.size(); ++i)
                     {
                         const auto a = loop[i], b = loop[(i + 1) % loop.size()];
-                        if (a != b && incident<Mode>(vertices[a], plane) && incident<Mode>(vertices[b], plane))
+                        if (a != b && incident<Mode>(vertices[a], plane, points.context()) &&
+                            incident<Mode>(vertices[b], plane, points.context()))
                         {
                             active_work->pair();
                             const std::pair key{std::min(a, b), std::max(a, b)};
@@ -813,10 +836,17 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     construction->measure_section = measure_section;
     construction->construct_outside = construct_outside;
     construction->partition_proof = partition_proof;
-    active_work->charge(plane->source_vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    for (const auto& weak : plane->source_vertices)
-        if (const auto point = weak.lock())
-            construction->retained_points.push_back(point);
+    active_work->charge(plane->source_vertices.size(), sizeof(DynamicStoredPointRef));
+    construction->retained_points.reserve(plane->source_vertices.size());
+    if (construction->retained_points.capacity() > plane->source_vertices.size())
+        active_work->charge(
+            construction->retained_points.capacity() - plane->source_vertices.size(), sizeof(DynamicStoredPointRef));
+    for (const auto& ref : plane->source_vertices)
+        if (resolve_point(plane->point_context, ref))
+            construction->retained_points.push_back(erase_point_ref(ref));
+    if (plane->point_context)
+        construction->point_context = plane->point_context->shared_from_this();
+    const auto point_context = points.freeze();
     const auto resize_scratch = [](auto& buffer, std::size_t count)
     {
         using Value = typename std::remove_reference_t<decltype(buffer)>::value_type;
@@ -848,6 +878,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         {
             active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
             auto poly = std::make_shared<Impl>();
+            poly->point_context = point_context;
             poly->frame = impl_->frame;
             poly->reference_origin = impl_->reference_origin;
             poly->limits = impl_->limits;
@@ -986,12 +1017,15 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::intersect(const DynamicConvexGeom
                 normal_orientation = matching_input<Mode>(*a.plane->input, *b.plane->input);
             if (!normal_orientation)
             {
-                const bool common_authority = std::any_of(a.plane->authorities.begin(), a.plane->authorities.end(),
-                    [&](const auto& key)
-                    {
-                        return std::find(b.plane->authorities.begin(), b.plane->authorities.end(), key) !=
-                               b.plane->authorities.end();
-                    });
+                const bool common_authority =
+                    std::any_of(resolve_authorities(a.plane->point_context, a.plane->authorities).begin(),
+                        resolve_authorities(a.plane->point_context, a.plane->authorities).end(),
+                        [&](const auto& key)
+                        {
+                            return std::find(resolve_authorities(b.plane->point_context, b.plane->authorities).begin(),
+                                       resolve_authorities(b.plane->point_context, b.plane->authorities).end(),
+                                       key) != resolve_authorities(b.plane->point_context, b.plane->authorities).end();
+                        });
                 if (common_authority)
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
@@ -1046,7 +1080,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
                 auto shifted = std::make_shared<Plane>(*plane);
                 shifted->anchor = shifted->anchor + scaled<Mode>(point<Mode>(displacement), -shifted->frame.exponent);
                 shifted->input.reset();
-                shifted->authorities.clear();
+                shifted->authorities = {};
+                shifted->point_context = nullptr;
                 shifted->source_vertices.clear();
                 planes.emplace(plane, shifted);
             }
@@ -1057,18 +1092,20 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
     for (auto& vertex : result->vertices)
     {
         vertex.coordinates = vertex.coordinates + scaled<Mode>(point<Mode>(displacement), -result->frame.exponent);
-        vertex.authorities.clear();
-        vertex.source_identity.reset();
+        vertex.authorities = {};
+        vertex.source_identity = {};
     }
+    result->point_context.reset();
     finish<Mode>(*result, false, true);
     return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
 }
 
 template int matching_input<kernel_mode>(const GeometryHalfspace& a, const GeometryHalfspace& b);
-template bool incident<kernel_mode>(const Vertex& v, const PlanePtr& plane);
+template bool incident<kernel_mode>(
+    const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
 template Interval refine_triangle_distance<kernel_mode>(const Point& coordinates, const Frame& frame, const Vertex& a,
     const Vertex& b, const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation,
-    Interval result);
+    Interval result, const PointSnapshotContext<kernel_mode>* context);
 template DynamicGeometrySection section<kernel_mode>(
     const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
 template DynamicClipResult GeometryKernel<kernel_mode>::clip(

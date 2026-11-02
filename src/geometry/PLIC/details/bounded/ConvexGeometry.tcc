@@ -189,14 +189,18 @@ template<ArithmeticMode Mode> Interval raw_distance(const Vertex& vertex, const 
            plane->offset;
 }
 
-template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
+template<ArithmeticMode Mode>
+Interval distance(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     ++statistics.support_distances;
-    if (incident<Mode>(vertex, plane))
+    if (incident<Mode>(vertex, plane, context))
         return Interval{};
-    for (const auto& key : plane->authorities)
-        if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) != vertex.authorities.end())
+    for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+        if (std::find(resolve_authorities(context, vertex.authorities).begin(),
+                resolve_authorities(context, vertex.authorities).end(),
+                key) != resolve_authorities(context, vertex.authorities).end())
             return Interval{};
     if (plane->input)
         for (const auto& original : vertex.incident)
@@ -349,7 +353,8 @@ template CoordinateBox transform<kernel_mode>(const CoordinateBox& box, const Fr
 template Point interval_box<kernel_mode>(const CoordinateBox& box);
 template DynamicPoint converted_point<kernel_mode>(const DynamicPoint& input, ArithmeticMode mode);
 template Interval raw_distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template Interval distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
+template Interval distance<kernel_mode>(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
 template void tighten_incident_coordinates<kernel_mode>(Vertex& vertex, const Frame& frame);
 template Interval square_root<kernel_mode>(Interval x);
 template void Accumulator<kernel_mode>::add(Interval term);

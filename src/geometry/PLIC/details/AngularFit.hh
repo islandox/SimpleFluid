@@ -31,16 +31,18 @@ enum class IterationResult
     Advanced,
     Stalled
 };
-/** Required derivative probes use only the three fixed step sizes. Arithmetic
- * fallback and refinement of sub-probe steps or stalled searches share evaluator accounting.
- * A computed rank/conditioning failure is never retried. */
+/** Required derivative probes retain the three fixed arithmetic retry sizes.
+ * A requested scale below that range performs one optional refinement quartet.
+ * All probes share evaluator accounting; computed rank/conditioning failures
+ * are never retried. */
 template<class Evaluate>
 Qualification qualify_normal(const Vector& normal, const Vector& tangent, const Vector& second,
     std::span<const double> residual, double maximum_condition, Evaluate& evaluate, double maximum_probe_step = 1e-4,
     Qualification* evidence = nullptr, AxialProbes* axial = nullptr);
-/** Qualification precedes convergence. An optional bounded curvature trial
- * may improve the qualified normal. Failed optional trials retain current
- * normal/evaluation and consume the existing work allowance. */
+/** Qualification precedes convergence. Nonzero-residual angular stationarity
+ * additionally requires agreement of finer derivative probes, with at most ten
+ * halvings of the initial scale. An optional bounded curvature trial may improve
+ * the qualified normal. All trials consume the existing work allowance. */
 template<class Evaluation, class Evaluate, class Normalize>
 IterationResult advance(Vector& normal, Evaluation& current, double maximum_condition, double fit_tolerance,
     double orientation_tolerance, Evaluate& evaluate, Normalize normalize, Qualification& qualification);

@@ -213,7 +213,7 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                 retain_tile(tile);
             for (const auto& tile : data.topology->frontier_tiles())
                 retain_tile(tile);
-            for (const auto& [node, coordinate] : data.topology->finite_nodes)
+            for (const auto& [node, slot] : data.topology->finite_nodes.slots)
                 if (!data.topology->node_fans.contains(node) && !supports.contains(node))
                     throw std::invalid_argument("Retained finite node lacks a full supporting cell.");
             support_bytes = budget.used;

@@ -125,12 +125,12 @@ long double product_error(long double a, long double b, long double ea, long dou
 }
 } // namespace source_witness
 
-std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint& relative,
-    const DynamicPointProvenance* original, const Frame& frame, const Point& stored, bool authenticated_shell)
+std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint& relative, PointProvenanceView original,
+    const Frame& frame, const Point& stored, bool authenticated_shell)
 {
     using namespace source_witness;
     if (!certification_environment() || (!authenticated_shell && !original) ||
-        (original && original->arithmetic_mode != ArithmeticMode::Ordinary))
+        (original && original.arithmetic_mode() != ArithmeticMode::Ordinary))
         return std::nullopt;
     std::array<long double, 3> error;
     for (std::size_t axis = 0; axis < 3; ++axis)
@@ -140,15 +140,15 @@ std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint&
             e = relative.absolute_error[axis];
         else
         {
-            e = original->absolute_error[axis];
+            e = original.absolute_error()[axis];
             if (!(e >= 0) || !std::isfinite(e))
                 return std::nullopt;
             // The private importer formed relative from this original token.
             // Reject a foreign expression instead of inferring it from proximity.
-            const auto difference = add(original->value[axis], -static_cast<long double>(frame.origin[axis]));
+            const auto difference = add(original.value()[axis], -static_cast<long double>(frame.origin[axis]));
             if (difference != relative.value[axis])
                 return std::nullopt;
-            e = add_up(e, sum_gap(original->value[axis], -static_cast<long double>(frame.origin[axis]), difference));
+            e = add_up(e, sum_gap(original.value()[axis], -static_cast<long double>(frame.origin[axis]), difference));
         }
         if (!(e >= 0) || !std::isfinite(e))
             return std::nullopt;
@@ -420,14 +420,18 @@ template<ArithmeticMode Mode> Scalar raw_distance(const Vertex& vertex, const Fr
     return Scalar(result.value);
 }
 
-template<ArithmeticMode Mode> Scalar distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
+template<ArithmeticMode Mode>
+Scalar distance(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     ++statistics.support_distances;
-    if (incident<Mode>(vertex, plane))
+    if (incident<Mode>(vertex, plane, context))
         return Scalar{};
-    for (const auto& key : plane->authorities)
-        if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) != vertex.authorities.end())
+    for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+        if (std::find(resolve_authorities(context, vertex.authorities).begin(),
+                resolve_authorities(context, vertex.authorities).end(),
+                key) != resolve_authorities(context, vertex.authorities).end())
             return Scalar{};
     if (plane->input)
         for (const auto& original : vertex.incident)
@@ -478,7 +482,8 @@ template Point transform<kernel_mode>(const Point& p, const Frame& from, const F
 template CoordinateBox transform<kernel_mode>(const CoordinateBox& box, const Frame& from, const Frame& to);
 template DynamicPoint converted_point<kernel_mode>(const DynamicPoint& input, ArithmeticMode mode);
 template Scalar raw_distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template Scalar distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
+template Scalar distance<kernel_mode>(
+    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
 template Scalar square_root<kernel_mode>(Scalar x);
 template void Accumulator<kernel_mode>::add(Scalar term);
 template Scalar Accumulator<kernel_mode>::result() const;

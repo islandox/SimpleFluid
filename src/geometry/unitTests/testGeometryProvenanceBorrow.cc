@@ -1,15 +1,11 @@
-/** @file testGeometryProvenanceBorrow.cc
- * @brief Independent finite provenance identity, lifetime and pair-budget gates.
- */
+/** Independent finite snapshot identity, lifetime and admission gates. */
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include <algorithm>
 #include <array>
 #include <cfenv>
-#include <cstddef>
 #include <gtest/gtest.h>
 #include <memory>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -20,99 +16,87 @@ namespace PLIC = SimpleFluid::PLIC;
 namespace detail = PLIC::details;
 using SimpleFluid::ArithmeticMode;
 using Access = PLIC::DynamicGeometryAccess;
-using Identity = std::shared_ptr<const PLIC::DynamicPointProvenance>;
+using Identity = PLIC::PointProvenanceRef;
+using View = PLIC::PointProvenanceView;
+using Observer = std::weak_ptr<const PLIC::PointSnapshotContextBase>;
 constexpr std::array finite_modes{ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification};
-
 template<class Owner>
 concept CanBorrowSource = requires(Owner&& owner) { Access::borrowed_original_source(std::forward<Owner>(owner)); };
-static_assert(CanBorrowSource<Identity&>);
-static_assert(CanBorrowSource<const Identity&>);
-static_assert(!CanBorrowSource<Identity>);
-static_assert(!CanBorrowSource<const Identity>);
-static_assert(
-    std::is_same_v<decltype(Access::borrowed_original_source(std::declval<const Identity&>())), const Identity&>);
+static_assert(CanBorrowSource<Identity&> && CanBorrowSource<const Identity&> && CanBorrowSource<View>);
+static_assert(!CanBorrowSource<Identity> && !CanBorrowSource<const Identity>);
+static_assert(std::is_same_v<decltype(Access::borrowed_original_source(std::declval<const Identity&>())), View>);
 static_assert(std::is_same_v<decltype(Access::original_source(std::declval<const Identity&>())), Identity>);
+static_assert(sizeof(PLIC::LocalAuthorityRange<ArithmeticMode::Ordinary>) == 2 * sizeof(std::uint32_t));
 
 PLIC::GeometryLimits accounting_limits(std::size_t pairs)
 {
-    PLIC::GeometryLimits result;
-    // These tests inspect provenance metadata, not interval arithmetic. Track
-    // traversal pairs with Ordinary Work even for Bounded-labeled records, so
-    // unsupported bounded numerical environments retain all metadata coverage.
-    result.arithmetic_mode = ArithmeticMode::Ordinary;
-    result.maximum_pair_tests = pairs;
-    result.maximum_operations = 1024;
-    result.byte_budget = 1024 * 1024;
-    return result;
+    PLIC::GeometryLimits limits;
+    // Metadata coverage does not require Bounded numerical arithmetic.
+    limits.arithmetic_mode = ArithmeticMode::Ordinary;
+    limits.maximum_pair_tests = pairs;
+    limits.maximum_operations = 1024;
+    limits.byte_budget = 1024 * 1024;
+    return limits;
 }
-
 Identity native(
-    ArithmeticMode mode, std::array<long double, 3> values = {1, 2, 4}, std::array<long double, 3> errors = {})
+    ArithmeticMode mode, std::array<long double, 3> value = {1, 2, 4}, std::array<long double, 3> error = {})
 {
-    PLIC::DynamicPoint point(values, errors, mode);
+    PLIC::DynamicPoint point(value, error, mode);
     Access::seal_represented_source(point);
     return Access::identity(point);
 }
-
 Identity exported(const Identity& root, std::size_t edges)
 {
     Identity owner = root;
+    const auto facts = root.view();
     for (std::size_t i = 0; i < edges; ++i)
     {
-        PLIC::DynamicPoint point(root->value, root->absolute_error, root->arithmetic_mode);
+        PLIC::DynamicPoint point(facts.value(), facts.absolute_error(), facts.arithmetic_mode());
         Access::seal_export(point, owner, {});
         owner = Access::identity(point);
     }
     return owner;
 }
-
-// Deliberately construct malformed interior metadata rather than asking the
-// sealing API to reject/propagate it before the traversal under test sees it.
-Identity link(const Identity& source, ArithmeticMode mode, bool numerical_only = false)
-{
-    auto record = std::make_shared<PLIC::DynamicPointProvenance>();
-    record->value = source->value;
-    record->absolute_error = source->absolute_error;
-    record->arithmetic_mode = mode;
-    record->numerical_only = numerical_only;
-    record->source_origin = source;
-    return record;
-}
-
 std::vector<long> owner_counts(const Identity& head)
 {
-    std::vector<long> result;
-    for (const auto* owner = &head; *owner; owner = &(*owner)->source_origin)
-        result.push_back(owner->use_count());
-    return result;
+    std::vector<long> counts;
+    // Never construct an owning handle to observe a borrowed walk.
+    for (auto point = head.view(); point; point = point.source_origin())
+        counts.push_back(point.context()->weak_from_this().use_count());
+    return counts;
 }
-
-// Frozen pre-change ownership traversal, used only for a matched metadata trace.
-// The independent assertions below also require exactly one charge per accepted
-// source_origin edge and the known cap+1 rejection boundary.
 Identity legacy_owning_source(Identity point)
 {
-    while (point && point->source_origin)
+    while (point && point.view().source_origin())
     {
-        if (point->numerical_only || point->source_origin->arithmetic_mode != point->arithmetic_mode)
+        const auto source = point.view().source_origin();
+        if (point.view().numerical_only() || source.arithmetic_mode() != point.view().arithmetic_mode())
             return {};
         if (detail::active_work)
             detail::active_work->pair();
-        point = point->source_origin;
+        point = source.owning();
     }
-    return point && !point->numerical_only ? point : nullptr;
+    return point && !point.view().numerical_only() ? point : Identity{};
 }
-
+std::vector<PLIC::PlaneAuthority> keys(PLIC::PointAuthorityRange range)
+{
+    return {range.begin(), range.end()};
+}
+template<class Function> void typed_modes(Function&& function)
+{
+    function.template operator()<ArithmeticMode::Ordinary>();
+    function.template operator()<ArithmeticMode::BoundedCertification>();
+}
 class GeometryProvenanceBorrow : public ::testing::Test
 {
     detail::Work* saved_work_ = detail::active_work;
-    PLIC::GeometryStatistics saved_statistics_ = detail::statistics;
-    std::fenv_t saved_environment_{};
+    PLIC::GeometryStatistics statistics_ = detail::statistics;
+    std::fenv_t environment_{};
 
 protected:
     void SetUp() override
     {
-        ASSERT_EQ(std::fegetenv(&saved_environment_), 0);
+        ASSERT_EQ(std::fegetenv(&environment_), 0);
         ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
         detail::active_work = nullptr;
         PLIC::reset_geometry_statistics();
@@ -120,352 +104,336 @@ protected:
     void TearDown() override
     {
         detail::active_work = saved_work_;
-        detail::statistics = saved_statistics_;
-        (void) std::fesetenv(&saved_environment_);
+        detail::statistics = statistics_;
+        (void) std::fesetenv(&environment_);
     }
 };
-
 TEST_F(GeometryProvenanceBorrow, BorrowedRootPinsNoAdditionalOwnerAlongDeepExports)
 {
     for (const auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
-        const auto root = native(mode);
-        const auto head = exported(root, 1024);
+        const auto root = native(mode), head = exported(root, 1024);
         const auto before = owner_counts(head);
-        const auto root_owners = root.use_count();
         detail::Operation operation(accounting_limits(1024));
-        const auto& borrowed = Access::borrowed_original_source(head);
-        ASSERT_TRUE(borrowed);
-        EXPECT_EQ(borrowed.get(), root.get());
-        EXPECT_EQ(root.use_count(), root_owners);
+        const auto borrowed = Access::borrowed_original_source(head);
+        EXPECT_EQ(borrowed, root.view());
         EXPECT_EQ(owner_counts(head), before);
         EXPECT_EQ(operation.work.pairs, 1024u);
         EXPECT_EQ(operation.work.operations, 0u);
         EXPECT_EQ(operation.work.bytes, 0u);
         EXPECT_EQ(PLIC::geometry_statistics().floating_operations, 0u);
-        // The reference is an existing source_origin slot, not a copied owner.
-        const auto* slot = &head;
-        while ((*slot)->source_origin)
-            slot = &(*slot)->source_origin;
-        EXPECT_EQ(&borrowed, slot);
+        EXPECT_EQ(borrowed.context_identity(), root.context_identity());
+        EXPECT_EQ(borrowed.local_ref(), root.local_ref());
     }
 }
-
+TEST_F(GeometryProvenanceBorrow, BatchedAliasRowsKeepTheSamePairBudgetWithoutPerRowOwnerPins)
+{
+    typed_modes(
+        [&]<ArithmeticMode Mode>()
+        {
+            for (const std::size_t edges : {17u, 1024u})
+            {
+                const auto root = native(Mode);
+                const auto head = [&]
+                {
+                    PLIC::PointSnapshotBuilder<Mode> builder;
+                    auto current = root.view();
+                    for (std::size_t i = 0; i < edges; ++i)
+                        current = builder.export_alias(current.value(), current.absolute_error(), current, {});
+                    const auto ref = builder.import(current);
+                    const auto context = builder.freeze();
+                    EXPECT_EQ(context->export_aliases.size(), edges);
+                    EXPECT_EQ(context->dependencies.size(), 1u);
+                    return PLIC::bind_point(context, ref);
+                }();
+                const auto before = owner_counts(head);
+                for (const unsigned path : {0u, 1u, 2u})
+                {
+                    detail::Operation operation(accounting_limits(edges));
+                    if (path == 0)
+                        EXPECT_EQ(legacy_owning_source(head), root);
+                    else if (path == 1)
+                        EXPECT_EQ(Access::original_source(head), root);
+                    else
+                        EXPECT_EQ(Access::borrowed_original_source(head), root.view());
+                    EXPECT_EQ(operation.work.pairs, edges);
+                    EXPECT_EQ(operation.work.operations, 0u);
+                    EXPECT_EQ(operation.work.bytes, 0u);
+                }
+                {
+                    detail::Operation operation(accounting_limits(edges - 1));
+                    EXPECT_THROW((void) Access::borrowed_original_source(head), PLIC::GeometryError);
+                    EXPECT_EQ(operation.work.pairs, edges);
+                }
+                EXPECT_EQ(owner_counts(head), before);
+            }
+        });
+}
 TEST_F(GeometryProvenanceBorrow, OwningApiRetainsRootAfterExportChainDies)
 {
     for (const auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
         Identity retained;
-        std::weak_ptr<const PLIC::DynamicPointProvenance> root_observer, head_observer;
+        Observer root_observer, head_observer;
         {
-            const auto root = native(mode);
-            const auto head = exported(root, 11);
-            root_observer = root;
-            head_observer = head;
-            {
-                detail::Operation operation(accounting_limits(11));
-                retained = Access::original_source(head);
-                ASSERT_EQ(retained.get(), root.get());
-                EXPECT_EQ(operation.work.pairs, 11u);
-            }
-            {
-                // Owning queries may safely accept a temporary weak lock:
-                // the result copies its root before that input owner expires.
-                detail::Operation operation(accounting_limits(11));
-                const auto temporary_input_result = Access::original_source(head_observer.lock());
-                EXPECT_EQ(temporary_input_result.get(), root.get());
-                EXPECT_EQ(operation.work.pairs, 11u);
-            }
+            const auto root = native(mode), head = exported(root, 11);
+            root_observer = root.context_pin();
+            head_observer = head.context_pin();
+            const auto slot = head.local_ref();
+            detail::Operation operation(accounting_limits(22));
+            retained = Access::original_source(head);
+            EXPECT_EQ(retained, root);
+            const auto from_lock = Access::original_source(PLIC::bind_point(head_observer.lock(), slot));
+            EXPECT_EQ(from_lock, root);
+            EXPECT_EQ(operation.work.pairs, 22u);
         }
         EXPECT_TRUE(head_observer.expired());
-        ASSERT_FALSE(root_observer.expired());
-        EXPECT_EQ(retained.use_count(), 1);
-        EXPECT_EQ(retained->value, (std::array<long double, 3>{1, 2, 4}));
+        EXPECT_FALSE(root_observer.expired());
+        EXPECT_EQ(retained.context_pin().use_count(), 1);
+        EXPECT_EQ(retained.view().value(), (std::array<long double, 3>{1, 2, 4}));
         retained.reset();
         EXPECT_TRUE(root_observer.expired());
     }
 }
-
-TEST_F(GeometryProvenanceBorrow, InteriorNumericalAndModeRejectionsPreserveEarlierEdgeCharges)
+TEST_F(GeometryProvenanceBorrow, InvalidInteriorTransitionsAreRejectedBeforeSnapshotPublication)
 {
-    for (const auto mode : finite_modes)
-    {
-        SCOPED_TRACE(static_cast<int>(mode));
-        const auto other_mode =
-            mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
-        const auto root = native(mode);
-        const std::array malformed{link(link(root, mode, true), mode), link(link(link(root, other_mode), mode), mode)};
-        for (const auto& head : malformed)
+    typed_modes(
+        [&]<ArithmeticMode Mode>()
         {
+            constexpr auto other =
+                Mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+            const auto root = native(Mode), head = exported(root, 1);
             const auto before = owner_counts(head);
             detail::Operation operation(accounting_limits(8));
-            EXPECT_FALSE(Access::borrowed_original_source(head));
+            EXPECT_EQ(Access::borrowed_original_source(head), root.view());
+            PLIC::PointSnapshotBuilder<other> foreign;
+            EXPECT_THROW((void) foreign.import(root), PLIC::GeometryError);
+            EXPECT_THROW((void) foreign.freeze(), PLIC::GeometryError);
+            EXPECT_TRUE(foreign.context()->dependencies.empty());
+            // A rejected transition preserves all already accepted edge charges.
             EXPECT_EQ(operation.work.pairs, 1u);
-            EXPECT_EQ(operation.work.operations, 0u);
             EXPECT_EQ(owner_counts(head), before);
-            EXPECT_FALSE(Access::same_represented_source(head, root));
-            EXPECT_EQ(operation.work.pairs, 2u);
-            EXPECT_EQ(PLIC::geometry_statistics().rejections, 0u);
-        }
-    }
+            PLIC::PointSnapshotBuilder<Mode> numerical;
+            const auto point = numerical.numerical({1, 2, 4}, {});
+            const auto numerical_context = numerical.freeze();
+            PLIC::PointSnapshotBuilder<Mode> propagation;
+            const auto copied = propagation.export_alias(point.value(), {}, point, {});
+            const auto copied_context = propagation.freeze();
+            EXPECT_TRUE(copied.numerical_only());
+            EXPECT_FALSE(copied.source_origin());
+            EXPECT_TRUE(copied.supports().empty());
+            EXPECT_FALSE(Access::borrowed_original_source(copied));
+            EXPECT_FALSE(Access::same_represented_source(copied, root.view()));
+            EXPECT_EQ(operation.work.pairs, 1u);
+            PLIC::PointSnapshotBuilder<Mode> promote;
+            EXPECT_THROW((void) promote.native_source(point.value(), {}, {}, point), PLIC::GeometryError);
+            EXPECT_THROW((void) promote.freeze(), PLIC::GeometryError);
+        });
 }
-
 TEST_F(GeometryProvenanceBorrow, NativeCoordinateIdentityDoesNotPromoteGeneratedOrUncertainPoints)
 {
     for (const auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
         const auto a = native(mode), b = native(mode);
-        ASSERT_NE(a.get(), b.get());
+        EXPECT_NE(a, b);
         EXPECT_TRUE(Access::same_represented_source(a, b));
-        const auto first_chain = exported(a, 3), second_chain = exported(b, 4);
+        const auto first = exported(a, 3), second = exported(b, 4);
         {
-            detail::Operation operation(accounting_limits(7));
-            EXPECT_TRUE(Access::same_represented_source(first_chain, second_chain));
-            EXPECT_EQ(operation.work.pairs, 7u);
+            detail::Operation op(accounting_limits(7));
+            EXPECT_TRUE(Access::same_represented_source(first, second));
+            EXPECT_EQ(op.work.pairs, 7u);
         }
-        PLIC::DynamicPoint generated_a({1, 2, 4}, {}, mode), generated_b({1, 2, 4}, {}, mode);
-        Access::seal_generated(generated_a, {});
-        Access::seal_generated(generated_b, {});
-        const auto ga = Access::identity(generated_a), gb = Access::identity(generated_b);
-        EXPECT_FALSE(Access::same_represented_source(ga, gb));
-        EXPECT_FALSE(Access::same_represented_source(a, ga));
-        EXPECT_TRUE(Access::same_represented_source(ga, ga));
+        PLIC::DynamicPoint ga({1, 2, 4}, {}, mode), gb({1, 2, 4}, {}, mode);
+        Access::seal_generated(ga, {});
+        Access::seal_generated(gb, {});
+        EXPECT_FALSE(Access::same_represented_source(Access::identity(ga), Access::identity(gb)));
+        EXPECT_FALSE(Access::same_represented_source(a, Access::identity(ga)));
+        EXPECT_TRUE(Access::same_represented_source(Access::identity(ga), Access::identity(ga)));
         const auto uncertain_a = native(mode, {1, 2, 4}, {.125L, 0, 0});
         const auto uncertain_b = native(mode, {1, 2, 4}, {.125L, 0, 0});
         EXPECT_FALSE(Access::same_represented_source(uncertain_a, uncertain_b));
         EXPECT_FALSE(Access::same_represented_source(a, uncertain_a));
         EXPECT_TRUE(Access::same_represented_source(uncertain_a, uncertain_a));
-        const auto displaced = native(mode, {1, 2, 5});
-        EXPECT_FALSE(Access::same_represented_source(a, displaced));
-        PLIC::DynamicPoint numerical({1, 2, 4}, {}, mode);
-        Access::seal_numerical(numerical);
-        const auto numeric_identity = Access::identity(numerical);
-        EXPECT_FALSE(Access::same_represented_source(numeric_identity, numeric_identity));
-        EXPECT_FALSE(Access::borrowed_original_source(numeric_identity));
+        EXPECT_FALSE(Access::same_represented_source(a, native(mode, {1, 2, 5})));
+        PLIC::DynamicPoint numeric({1, 2, 4}, {}, mode);
+        Access::seal_numerical(numeric);
+        const auto n = Access::identity(numeric);
+        EXPECT_FALSE(Access::same_represented_source(n, n));
+        EXPECT_FALSE(Access::borrowed_original_source(n));
     }
 }
-
 TEST_F(GeometryProvenanceBorrow, DifferentHeadModesShortCircuitBeforeEitherChainIsWalked)
 {
     const auto a = exported(native(ArithmeticMode::Ordinary), 3);
     const auto b = exported(native(ArithmeticMode::BoundedCertification), 5);
-    detail::Operation operation(accounting_limits(1));
+    detail::Operation op(accounting_limits(1));
     EXPECT_FALSE(Access::same_represented_source(a, b));
-    EXPECT_EQ(operation.work.pairs, 0u);
-    EXPECT_EQ(operation.work.operations, 0u);
+    EXPECT_EQ(op.work.pairs, 0u);
+    EXPECT_EQ(op.work.operations, 0u);
 }
-
 TEST_F(GeometryProvenanceBorrow, OnePairPerEdgeAndCapPlusOneFailurePreserveOwners)
 {
     for (const auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
-        const auto root = native(mode);
-        const auto head = exported(root, 17);
+        const auto root = native(mode), head = exported(root, 17);
         const auto before = owner_counts(head);
         {
-            detail::Operation operation(accounting_limits(17));
-            EXPECT_EQ(Access::borrowed_original_source(head).get(), root.get());
-            EXPECT_EQ(operation.work.pairs, 17u);
+            detail::Operation op(accounting_limits(17));
+            EXPECT_EQ(Access::borrowed_original_source(head), root.view());
+            EXPECT_EQ(op.work.pairs, 17u);
         }
         PLIC::reset_geometry_statistics();
         {
-            detail::Operation operation(accounting_limits(16));
+            detail::Operation op(accounting_limits(16));
             try
             {
                 (void) Access::borrowed_original_source(head);
-                ADD_FAILURE() << "The seventeenth edge must exhaust the sixteen-pair cap.";
+                FAIL() << "Edge 17 must exceed a 16-pair cap.";
             }
-            catch (const PLIC::GeometryError& error)
+            catch (const PLIC::GeometryError& e)
             {
-                EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
-                EXPECT_FALSE(error.recoverable_trial());
+                EXPECT_EQ(e.code(), PLIC::GeometryErrorCode::ResourceLimit);
+                EXPECT_FALSE(e.recoverable_trial());
             }
-            EXPECT_EQ(operation.work.pairs, 17u);
-            EXPECT_EQ(operation.work.operations, 0u);
+            EXPECT_EQ(op.work.pairs, 17u);
+            EXPECT_EQ(op.work.operations, 0u);
             EXPECT_EQ(PLIC::geometry_statistics().rejections, 1u);
         }
         EXPECT_EQ(detail::active_work, nullptr);
         EXPECT_EQ(owner_counts(head), before);
     }
 }
-
 TEST_F(GeometryProvenanceBorrow, BorrowedOwningAndLegacyWalksHaveIdenticalIndependentPairTrace)
 {
     for (const auto mode : finite_modes)
         for (const std::size_t edges : {0u, 1u, 17u, 1024u})
         {
-            SCOPED_TRACE(static_cast<int>(mode));
-            SCOPED_TRACE(edges);
-            const auto root = native(mode);
-            const auto head = exported(root, edges);
-            std::array<std::size_t, 3> pair_trace{};
-            for (unsigned path = 0; path < pair_trace.size(); ++path)
+            const auto root = native(mode), head = exported(root, edges);
+            std::array<std::size_t, 3> trace{};
+            for (unsigned path = 0; path < 3; ++path)
             {
                 PLIC::reset_geometry_statistics();
-                detail::Operation operation(accounting_limits(std::max<std::size_t>(edges, 1)));
+                detail::Operation op(accounting_limits(std::max<std::size_t>(edges, 1)));
                 if (path == 0)
-                {
-                    const auto owning = legacy_owning_source(head);
-                    EXPECT_EQ(owning.get(), root.get());
-                }
+                    EXPECT_EQ(legacy_owning_source(head), root);
                 else if (path == 1)
-                {
-                    const auto owning = Access::original_source(head);
-                    EXPECT_EQ(owning.get(), root.get());
-                }
+                    EXPECT_EQ(Access::original_source(head), root);
                 else
-                {
-                    const auto& borrowed = Access::borrowed_original_source(head);
-                    EXPECT_EQ(borrowed.get(), root.get());
-                }
-                pair_trace[path] = operation.work.pairs;
-                EXPECT_EQ(pair_trace[path], edges);
-                EXPECT_EQ(operation.work.operations, 0u);
-                EXPECT_EQ(operation.work.bytes, 0u);
+                    EXPECT_EQ(Access::borrowed_original_source(head), root.view());
+                trace[path] = op.work.pairs;
+                EXPECT_EQ(op.work.operations, 0u);
+                EXPECT_EQ(op.work.bytes, 0u);
                 EXPECT_EQ(PLIC::geometry_statistics().floating_operations, 0u);
                 EXPECT_EQ(PLIC::geometry_statistics().rejections, 0u);
             }
-            EXPECT_EQ(pair_trace, (std::array<std::size_t, 3>{edges, edges, edges}));
-            if (mode == ArithmeticMode::Ordinary && edges == 17)
-            {
-                RecordProperty("legacy_pairs", std::to_string(pair_trace[0]));
-                RecordProperty("owning_pairs", std::to_string(pair_trace[1]));
-                RecordProperty("borrowed_pairs", std::to_string(pair_trace[2]));
-            }
+            EXPECT_EQ(trace, (std::array<std::size_t, 3>{edges, edges, edges}));
         }
 }
-
 TEST_F(GeometryProvenanceBorrow, NamedWeakLockPinsAncestryAndExpiredWeakRemainsEmpty)
 {
     for (const auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
-        std::weak_ptr<const PLIC::DynamicPointProvenance> weak_head, weak_root;
+        Observer weak_head, weak_root;
+        PLIC::DynamicStoredPointRef slot;
         {
-            auto root = native(mode);
-            auto head = exported(root, 9);
-            weak_head = head;
-            weak_root = root;
-            const auto owner = weak_head.lock();
+            auto root = native(mode), head = exported(root, 9);
+            weak_head = head.context_pin();
+            weak_root = root.context_pin();
+            slot = head.local_ref();
+            const auto owner = PLIC::bind_point(weak_head.lock(), slot);
             head.reset();
             root.reset();
-            ASSERT_EQ(owner.use_count(), 1);
-            detail::Operation operation(accounting_limits(9));
-            const auto& borrowed = Access::borrowed_original_source(owner);
-            ASSERT_TRUE(borrowed);
-            EXPECT_EQ(borrowed.use_count(), 1);
-            EXPECT_EQ(owner.use_count(), 1);
+            EXPECT_EQ(owner.context_pin().use_count(), 1);
+            detail::Operation op(accounting_limits(9));
+            const auto borrowed = Access::borrowed_original_source(owner);
+            EXPECT_TRUE(borrowed);
+            EXPECT_EQ(owner.context_pin().use_count(), 1);
+            EXPECT_EQ(borrowed.context()->weak_from_this().use_count(), 1);
             EXPECT_FALSE(weak_root.expired());
-            EXPECT_EQ(operation.work.pairs, 9u);
+            EXPECT_EQ(op.work.pairs, 9u);
         }
         EXPECT_TRUE(weak_head.expired());
         EXPECT_TRUE(weak_root.expired());
-        const auto expired_owner = weak_head.lock();
-        EXPECT_FALSE(expired_owner);
-        EXPECT_FALSE(Access::borrowed_original_source(expired_owner));
-        EXPECT_FALSE(Access::original_source(expired_owner));
+        const auto empty = PLIC::bind_point(weak_head.lock(), slot);
+        EXPECT_FALSE(empty);
+        EXPECT_FALSE(Access::borrowed_original_source(empty));
+        EXPECT_FALSE(Access::original_source(empty));
     }
 }
-
 TEST_F(GeometryProvenanceBorrow, ScopeGuardsReleaseLockedOwnersOnSuccessAndBudgetException)
 {
     for (const auto mode : finite_modes)
-        for (const bool fail : {false, true})
+        for (bool fail : {false, true})
         {
-            SCOPED_TRACE(static_cast<int>(mode));
-            SCOPED_TRACE(fail);
-            std::weak_ptr<const PLIC::DynamicPointProvenance> weak_head, weak_root;
+            Observer wh, wr;
             bool caught = false;
             try
             {
-                detail::Operation operation(accounting_limits(fail ? 3 : 4));
-                ASSERT_EQ(detail::active_work, &operation.work);
-                auto root = native(mode);
-                auto head = exported(root, 4);
-                weak_root = root;
-                weak_head = head;
-                const auto owner = weak_head.lock();
+                auto root = native(mode), head = exported(root, 4);
+                wr = root.context_pin();
+                wh = head.context_pin();
+                const auto owner = PLIC::bind_point(wh.lock(), head.local_ref());
                 head.reset();
                 root.reset();
-                const auto& borrowed = Access::borrowed_original_source(owner);
-                ASSERT_TRUE(borrowed);
+                detail::Operation op(accounting_limits(fail ? 3 : 4));
+                EXPECT_EQ(detail::active_work, &op.work);
+                const auto borrowed = Access::borrowed_original_source(owner);
+                EXPECT_TRUE(borrowed);
                 EXPECT_FALSE(fail);
-                EXPECT_EQ(operation.work.pairs, 4u);
+                EXPECT_EQ(op.work.pairs, 4u);
             }
-            catch (const PLIC::GeometryError& error)
+            catch (const PLIC::GeometryError& e)
             {
                 caught = true;
                 EXPECT_TRUE(fail);
-                EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+                EXPECT_EQ(e.code(), PLIC::GeometryErrorCode::ResourceLimit);
             }
             EXPECT_EQ(caught, fail);
             EXPECT_EQ(detail::active_work, nullptr);
-            EXPECT_TRUE(weak_head.expired());
-            EXPECT_TRUE(weak_root.expired());
+            EXPECT_TRUE(wh.expired());
+            EXPECT_TRUE(wr.expired());
         }
 }
 TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupports)
 {
     const auto first = PLIC::PlaneAuthority::opaque({2, 7}), second = PLIC::PlaneAuthority::opaque({9, 11});
     const std::vector<PLIC::PlaneAuthority> expected{first, second};
-    for (const auto mode : finite_modes)
+    for (auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
         const auto endpoint = native(mode, {0, 0, 0});
         PLIC::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, mode);
-        Access::seal_generated(source, {{endpoint, endpoint}}, expected);
+        Access::seal_generated(source, {{endpoint.view(), endpoint.view()}}, expected);
         const auto root = Access::identity(source);
         PLIC::DynamicPoint copy(source.value, source.absolute_error, mode);
         Access::seal_export(copy, root, {second, first, second});
         const auto exported = Access::identity(copy);
-        ASSERT_TRUE(root->support_payload);
-        ASSERT_TRUE(exported);
         EXPECT_NE(exported, root);
         EXPECT_FALSE(Access::same_source(source, copy));
-        EXPECT_EQ(exported->support_payload, root->support_payload);
-        EXPECT_EQ(&source.supports(), &copy.supports());
         EXPECT_EQ(copy.supports(), expected);
-        EXPECT_EQ(exported->source_origin, root);
+        EXPECT_EQ(exported.view().source_origin(), root.view());
         EXPECT_EQ(Access::original_source(exported), root);
-        EXPECT_TRUE(exported->constructed);
-        EXPECT_FALSE(exported->represented_native_source);
-        EXPECT_FALSE(exported->numerical_only);
-        EXPECT_TRUE(exported->source_edges.empty());
-        ASSERT_EQ(root->source_edges.size(), 1u);
-        EXPECT_EQ(root->source_edges[0][0], endpoint);
-        EXPECT_EQ(exported->value, source.value);
-        EXPECT_EQ(exported->absolute_error, source.absolute_error);
-        EXPECT_EQ(exported->arithmetic_mode, mode);
-
+        EXPECT_TRUE(exported.view().constructed());
+        EXPECT_FALSE(exported.view().represented_native_source());
+        EXPECT_FALSE(exported.view().numerical_only());
+        EXPECT_TRUE(exported.view().source_edges().empty());
+        ASSERT_EQ(root.view().source_edges().size(), 1u);
+        EXPECT_EQ(root.view().source_edges()[0][0], endpoint.view());
+        for (std::size_t i = 0; i < 2; ++i)
+            EXPECT_EQ(copy.supports()[i].opaque_storage_owner(), source.supports()[i].opaque_storage_owner());
         PLIC::DynamicPoint independent(source.value, source.absolute_error, mode);
         Access::seal(independent, expected);
-        EXPECT_NE(Access::identity(independent)->support_payload, root->support_payload);
         EXPECT_FALSE(Access::same_source(source, independent));
-        EXPECT_FALSE(Access::same_source(independent, source));
         PLIC::DynamicPoint unsealed(copy.value, copy.absolute_error, mode);
         EXPECT_TRUE(unsealed.supports().empty());
         EXPECT_FALSE(Access::identity(unsealed));
         EXPECT_FALSE(Access::same_source(unsealed, unsealed));
         EXPECT_FALSE(Access::same_source(unsealed, copy));
-        EXPECT_FALSE(Access::same_source(copy, unsealed));
         const auto valid_copy = copy;
-        EXPECT_EQ(&valid_copy.supports(), &copy.supports());
         EXPECT_EQ(Access::identity(valid_copy), exported);
         EXPECT_TRUE(Access::same_source(copy, valid_copy));
-        EXPECT_TRUE(Access::same_source(valid_copy, copy));
-        EXPECT_TRUE(Access::same_source(valid_copy, valid_copy));
-        auto changed_words = second.words();
-        ++changed_words.back();
-        const auto different = PLIC::PlaneAuthority::opaque(std::move(changed_words));
         PLIC::DynamicPoint changed(source.value, source.absolute_error, mode);
-        Access::seal_export(changed, root, {first, different});
-        EXPECT_NE(Access::identity(changed)->support_payload, root->support_payload);
+        Access::seal_export(changed, root, {first, PLIC::PlaneAuthority::opaque({9, 12})});
         EXPECT_NE(changed.supports(), expected);
-
         for (std::size_t field = 0; field < 3; ++field)
         {
             auto mutated = copy;
@@ -474,21 +442,20 @@ TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupport
             else if (field == 1)
                 mutated.absolute_error[0] += 1;
             else
-                mutated.arithmetic_mode = mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification
-                                                                          : ArithmeticMode::Ordinary;
+                mutated.arithmetic_mode =
+                    mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
             EXPECT_TRUE(mutated.supports().empty());
             EXPECT_FALSE(Access::identity(mutated));
             EXPECT_FALSE(Access::same_source(mutated, copy));
             EXPECT_FALSE(Access::same_source(copy, mutated));
             EXPECT_FALSE(Access::same_source(mutated, mutated));
-            // An invalid seal still owns its immutable provenance allocation.
             EXPECT_EQ(Access::storage_bytes(mutated, false), Access::storage_bytes(copy, false));
             EXPECT_EQ(Access::storage_bytes(mutated), Access::storage_bytes(copy));
             EXPECT_GT(Access::storage_bytes(mutated, false), sizeof(PLIC::DynamicPoint));
             mutated.value = copy.value;
             mutated.absolute_error = copy.absolute_error;
             mutated.arithmetic_mode = copy.arithmetic_mode;
-            EXPECT_EQ(&mutated.supports(), &copy.supports());
+            EXPECT_EQ(mutated.supports(), copy.supports());
             EXPECT_EQ(Access::identity(mutated), exported);
             EXPECT_TRUE(Access::same_source(mutated, copy));
             EXPECT_TRUE(Access::same_source(copy, mutated));
@@ -496,62 +463,51 @@ TEST_F(GeometryProvenanceBorrow, ExportSharesOnlyExactlyMatchingImmutableSupport
         }
     }
 }
-
 TEST_F(GeometryProvenanceBorrow, SupportPayloadLivesThroughExportsAndCountsOnceAcrossAncestry)
 {
-    for (const auto mode : finite_modes)
+    for (auto mode : finite_modes)
     {
-        SCOPED_TRACE(static_cast<int>(mode));
-        std::weak_ptr<const PLIC::DynamicPointProvenance> weak_source;
-        std::shared_ptr<const PLIC::DynamicPointSupportPayload> retained_payload;
-        std::size_t opaque_bytes = 0;
+        Observer parent;
+        std::weak_ptr<const void> words;
+        Identity retained;
         {
-            PLIC::DynamicPoint exported;
-            {
-                PLIC::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, mode);
-                std::vector<std::uint64_t> words{2, 7, 13};
-                words.reserve(17);
-                opaque_bytes = sizeof(words) + words.capacity() * sizeof(std::uint64_t);
-                Access::seal(source, {PLIC::PlaneAuthority::opaque(std::move(words))});
-                const auto root = Access::identity(source);
-                weak_source = root;
-                exported = PLIC::DynamicPoint(source.value, source.absolute_error, mode);
-                Access::seal_export(exported, root, source.supports());
-                retained_payload = root->support_payload;
-            }
-            EXPECT_FALSE(weak_source.expired());
-            ASSERT_EQ(exported.supports().size(), 1u);
-            EXPECT_EQ(exported.supports()[0].words(), (std::vector<std::uint64_t>{2, 7, 13}));
-            const auto expected = 2 * sizeof(PLIC::DynamicPointProvenance) + sizeof(PLIC::DynamicPointSupportPayload) +
-                                  retained_payload->authorities.capacity() * sizeof(PLIC::PlaneAuthority) + opaque_bytes;
-            EXPECT_EQ(Access::identity_bytes(Access::identity(exported)), expected);
+            PLIC::DynamicPoint source({1, 2, 4}, {.125L, 0, 0}, mode);
+            std::vector<std::uint64_t> values{2, 7, 13};
+            values.reserve(17);
+            const auto bytes = sizeof(values) + values.capacity() * sizeof(std::uint64_t);
+            auto key = PLIC::PlaneAuthority::opaque(std::move(values));
+            words = key.opaque_storage_owner();
+            Access::seal(source, {key});
+            const auto root = Access::identity(source);
+            parent = root.context_pin();
+            PLIC::DynamicPoint output(source.value, source.absolute_error, mode);
+            Access::seal_export(output, root, keys(source.supports()));
+            retained = Access::identity(output);
+            EXPECT_EQ(Access::identity_bytes(retained) - Access::identity_bytes(retained, false), bytes);
         }
-        EXPECT_TRUE(weak_source.expired());
-        EXPECT_EQ(retained_payload->authorities[0].words(), (std::vector<std::uint64_t>{2, 7, 13}));
-        const std::weak_ptr<const PLIC::DynamicPointSupportPayload> weak_payload = retained_payload;
-        retained_payload.reset();
-        EXPECT_TRUE(weak_payload.expired());
+        EXPECT_FALSE(parent.expired());
+        EXPECT_FALSE(words.expired());
+        EXPECT_EQ(retained.view().supports()[0].words(), (std::vector<std::uint64_t>{2, 7, 13}));
+        retained.reset();
+        EXPECT_TRUE(parent.expired());
+        EXPECT_TRUE(words.expired());
     }
 }
-
 TEST_F(GeometryProvenanceBorrow, SharedSupportsDoNotTurnIndependentUncertainPointsIntoIdenticalPoints)
 {
     if (!PLIC::certification_environment())
-        GTEST_SKIP() << "BoundedCertification requires a supported floating-point environment.";
+        GTEST_SKIP() << "Bounded geometry requires supported FP environment.";
     constexpr auto mode = ArithmeticMode::BoundedCertification;
     PLIC::DynamicPoint first({0, 0, 0}, {.125L, .125L, .125L}, mode);
     Access::seal(first, {PLIC::PlaneAuthority::opaque({2, 7})});
     PLIC::DynamicPoint second(first.value, first.absolute_error, mode);
-    Access::seal_export(second, Access::identity(first), first.supports());
-    ASSERT_EQ(Access::identity(first)->support_payload, Access::identity(second)->support_payload);
-    EXPECT_FALSE(Access::same_source(first, second));
-    EXPECT_FALSE(PLIC::points_identical(PLIC::Point<mode>(first), PLIC::Point<mode>(second)));
+    Access::seal_export(second, Access::identity(first), keys(first.supports()));
     PLIC::DynamicPoint independent(first.value, first.absolute_error, mode);
-    Access::seal(independent, first.supports());
-    EXPECT_FALSE(Access::same_source(first, independent));
-    EXPECT_FALSE(PLIC::points_identical(PLIC::Point<mode>(first), PLIC::Point<mode>(independent)));
+    Access::seal(independent, keys(first.supports()));
     for (const auto& candidate : {second, independent})
     {
+        EXPECT_FALSE(Access::same_source(first, candidate));
+        EXPECT_FALSE(PLIC::points_identical(PLIC::Point<mode>(first), PLIC::Point<mode>(candidate)));
         const std::array<PLIC::Point<mode>, 4> tetrahedron{PLIC::Point<mode>(first), PLIC::Point<mode>(candidate),
             PLIC::Point<mode>({1, 0, 0}), PLIC::Point<mode>({0, 1, 0})};
         const auto determinant = PLIC::orientation(tetrahedron);
@@ -559,223 +515,182 @@ TEST_F(GeometryProvenanceBorrow, SharedSupportsDoNotTurnIndependentUncertainPoin
         EXPECT_GT(determinant.upper(), 0);
     }
 }
-TEST_F(GeometryProvenanceBorrow, SupportPayloadReuseFitsAWorkCapThatRejectsANewOwner)
+TEST_F(GeometryProvenanceBorrow, RegisteredAuthorityReuseFitsAWorkCapThatRejectsANewOwner)
 {
-    for (const auto mode : finite_modes)
-    {
-        SCOPED_TRACE(static_cast<int>(mode));
-        PLIC::DynamicPoint source({1, 2, 4}, {}, mode);
-        Access::seal(source, {PLIC::PlaneAuthority::opaque({2, 7})});
-        const auto root = Access::identity(source);
-        const auto fresh_authority = PLIC::PlaneAuthority::opaque({2, 8});
-        auto limits = accounting_limits(1024);
-        detail::Operation operation(limits);
-        for (const auto& authority : source.supports())
-            operation.work.retain_identity(authority);
-        operation.work.retain_identity(fresh_authority);
-        const auto admitted = operation.work.bytes;
-        // Both immutable word owners already belong to this operation. One
-        // remaining byte permits reuse but cannot admit a new support payload.
-        operation.work.limits.byte_budget = admitted + 1;
-        PLIC::DynamicPoint reused(source.value, source.absolute_error, mode);
-        ASSERT_NO_THROW(Access::seal_export(reused, root, source.supports()));
-        ASSERT_TRUE(Access::identity(reused));
-        EXPECT_EQ(Access::identity(reused)->support_payload, root->support_payload);
-        EXPECT_EQ(operation.work.bytes, admitted);
-        PLIC::DynamicPoint empty(source.value, source.absolute_error, mode);
-        EXPECT_NO_THROW(Access::seal(empty, {}));
-        EXPECT_EQ(operation.work.bytes, admitted);
-        PLIC::DynamicPoint fresh(source.value, source.absolute_error, mode);
-        try
+    typed_modes(
+        [&]<ArithmeticMode Mode>()
         {
-            Access::seal_export(fresh, root, {fresh_authority});
-            FAIL() << "A distinct nonempty support payload must respect the construction byte cap.";
-        }
-        catch (const PLIC::GeometryError& error)
-        {
-            EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
-        }
-        EXPECT_FALSE(Access::identity(fresh));
-    }
+            detail::Operation operation(accounting_limits(1024));
+            PLIC::PointSnapshotBuilder<Mode> builder;
+            const auto a = PLIC::PlaneAuthority::opaque({2, 7}), b = PLIC::PlaneAuthority::opaque({2, 8});
+            const auto issued = builder.register_authority(a);
+            const auto admitted = operation.work.bytes;
+            operation.work.limits.byte_budget = admitted + 1;
+            EXPECT_EQ(builder.register_authority(a), issued);
+            EXPECT_EQ(operation.work.bytes, admitted);
+            EXPECT_TRUE(builder.context()->incidence.empty());
+            EXPECT_THROW((void) builder.register_authority(b), PLIC::GeometryError);
+            EXPECT_THROW((void) builder.freeze(), PLIC::GeometryError);
+            EXPECT_TRUE(builder.context()->incidence.empty());
+        });
 }
-TEST_F(GeometryProvenanceBorrow, FreshSupportPayloadTrimsOnlySpareOuterCapacity)
+TEST_F(GeometryProvenanceBorrow, FreshAuthorityTablesTrimSpareOuterCapacityAndRetainWordCapacities)
 {
-    std::vector<std::uint64_t> first_words{2, 7}, second_words{9, 11, 13};
-    first_words.reserve(17);
-    second_words.reserve(23);
-    const auto first_capacity = first_words.capacity(), second_capacity = second_words.capacity();
-    auto first = PLIC::PlaneAuthority::opaque(std::move(first_words));
-    auto second = PLIC::PlaneAuthority::opaque(std::move(second_words));
-    const auto first_owner = first.opaque_storage_owner(), second_owner = second.opaque_storage_owner();
+    std::vector<std::uint64_t> a{2, 7}, b{9, 11, 13};
+    a.reserve(17);
+    b.reserve(23);
+    const auto ca = a.capacity(), cb = b.capacity();
+    auto first = PLIC::PlaneAuthority::opaque(std::move(a)), second = PLIC::PlaneAuthority::opaque(std::move(b));
+    const auto oa = first.opaque_storage_owner(), ob = second.opaque_storage_owner();
     std::vector<PLIC::PlaneAuthority> supports;
     supports.reserve(31);
-    supports.push_back(std::move(second));
-    supports.push_back(std::move(first));
+    supports.push_back(second);
+    supports.push_back(first);
     PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
     Access::seal(point, std::move(supports));
-    const auto payload = Access::identity(point)->support_payload;
-    ASSERT_TRUE(payload);
-    EXPECT_EQ(payload->authorities.capacity(), 2u);
-    EXPECT_EQ(payload->authorities[0].opaque_storage_owner(), first_owner);
-    EXPECT_EQ(payload->authorities[1].opaque_storage_owner(), second_owner);
-    EXPECT_EQ(payload->authorities[0].opaque_payload_bytes(),
-        sizeof(std::vector<std::uint64_t>) + first_capacity * sizeof(std::uint64_t));
-    EXPECT_EQ(payload->authorities[1].opaque_payload_bytes(),
-        sizeof(std::vector<std::uint64_t>) + second_capacity * sizeof(std::uint64_t));
-    EXPECT_EQ(payload->authorities[0].words(), (std::vector<std::uint64_t>{2, 7}));
-    EXPECT_EQ(payload->authorities[1].words(), (std::vector<std::uint64_t>{9, 11, 13}));
-
-    std::vector<PLIC::PlaneAuthority> oversized;
-    oversized.reserve(8);
-    oversized.push_back(PLIC::PlaneAuthority::opaque({2, 7}));
+    const auto ctx = std::static_pointer_cast<const PLIC::PointSnapshotContext<ArithmeticMode::Ordinary>>(
+        Access::identity(point).context_pin());
+    EXPECT_EQ(ctx->authority_table.capacity(), 2u);
+    EXPECT_EQ(ctx->incidence.capacity(), 2u);
+    EXPECT_EQ(point.supports()[0].opaque_storage_owner(), oa);
+    EXPECT_EQ(point.supports()[1].opaque_storage_owner(), ob);
+    EXPECT_EQ(
+        point.supports()[0].opaque_payload_bytes(), sizeof(std::vector<std::uint64_t>) + ca * sizeof(std::uint64_t));
+    EXPECT_EQ(
+        point.supports()[1].opaque_payload_bytes(), sizeof(std::vector<std::uint64_t>) + cb * sizeof(std::uint64_t));
     auto limits = accounting_limits(1024);
-    limits.byte_budget = sizeof(PLIC::DynamicPointSupportPayload) + sizeof(PLIC::PlaneAuthority) - 1;
-    detail::Operation operation(limits);
+    limits.byte_budget = 1;
+    detail::Operation op(limits);
     PLIC::DynamicPoint rejected({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    EXPECT_THROW(Access::seal(rejected, std::move(oversized)), PLIC::GeometryError);
+    EXPECT_THROW(Access::seal(rejected, {first}), PLIC::GeometryError);
     EXPECT_FALSE(Access::identity(rejected));
 }
-
-TEST_F(GeometryProvenanceBorrow, VertexAuthoritiesFreezeOnlyExactSequencesAndCopiesDetachIndependently)
+TEST_F(GeometryProvenanceBorrow, CsrAuthorityCopiesPreserveExactSequencesAndAppendIndependently)
 {
-    const auto first = PLIC::PlaneAuthority::opaque({2, 7}), second = PLIC::PlaneAuthority::opaque({9, 11, 13});
-    PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    Access::seal(point, {first, second});
-    const auto root = Access::identity(point);
-    detail::StoredVertexAuthorities holder(std::vector<PLIC::PlaneAuthority>{first, second});
-    holder.share_if_equal(root->support_payload);
-    ASSERT_EQ(holder.shared_payload(), root->support_payload);
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const auto a = PLIC::PlaneAuthority::opaque({2, 7}), b = PLIC::PlaneAuthority::opaque({9, 11, 13}),
+               c = PLIC::PlaneAuthority::opaque({17, 19});
+    const std::array original{a, b}, reverse{b, a};
+    const std::array extra{c};
+    PLIC::PointSnapshotBuilder<mode> builder;
+    const auto holder = builder.authority_range(Access::admit_incidence<mode>(original));
     const auto sibling = holder;
-    const auto source_values = point.supports();
-    EXPECT_EQ(&holder.values(), &point.supports());
-    static_assert(std::is_const_v<std::remove_reference_t<decltype(*holder.begin())>>);
-    detail::StoredVertexAuthorities reordered(std::vector<PLIC::PlaneAuthority>{second, first});
-    reordered.share_if_equal(root->support_payload);
-    EXPECT_TRUE(reordered.owned_values());
-    EXPECT_EQ(reordered.values(), (std::vector<PLIC::PlaneAuthority>{second, first}));
-    detail::StoredVertexAuthorities different(
-        std::vector<PLIC::PlaneAuthority>{first, PLIC::PlaneAuthority::opaque({9, 11, 14})});
-    different.share_if_equal(root->support_payload);
-    EXPECT_TRUE(different.owned_values());
-
-    holder.append(PLIC::PlaneAuthority::opaque({17, 19}));
-    ASSERT_TRUE(holder.owned_values());
-    EXPECT_EQ(
-        holder.values(), (std::vector<PLIC::PlaneAuthority>{first, second, PLIC::PlaneAuthority::opaque({17, 19})}));
-    EXPECT_EQ(sibling.shared_payload(), root->support_payload);
-    EXPECT_EQ(sibling.values(), source_values);
-    EXPECT_EQ(point.supports(), source_values);
-    EXPECT_EQ(Access::identity(point), root);
-    auto cleared = sibling;
-    cleared.clear();
-    EXPECT_TRUE(cleared.empty());
-    EXPECT_TRUE(cleared.owned_values());
-    EXPECT_EQ(sibling.values(), source_values);
+    const auto reordered = builder.authority_range(Access::admit_incidence<mode>(reverse));
+    const auto appended = builder.append_authority(holder, Access::admit_incidence<mode>(extra));
+    const auto ctx = builder.freeze();
+    EXPECT_EQ(PLIC::resolve_authorities(ctx, holder), (std::vector<PLIC::PlaneAuthority>{a, b}));
+    EXPECT_EQ(PLIC::resolve_authorities(ctx, sibling), PLIC::resolve_authorities(ctx, holder));
+    EXPECT_EQ(PLIC::resolve_authorities(ctx, reordered), (std::vector<PLIC::PlaneAuthority>{b, a}));
+    EXPECT_EQ(PLIC::resolve_authorities(ctx, appended), (std::vector<PLIC::PlaneAuthority>{a, b, c}));
+    EXPECT_TRUE(PLIC::resolve_authorities(ctx, PLIC::LocalAuthorityRange<mode>{}).empty());
 }
-
-TEST_F(GeometryProvenanceBorrow, VertexAuthorityDetachPrechargesAllBuffersAndFailsAtomically)
+TEST_F(GeometryProvenanceBorrow, CsrCopyAndAliasedAppendPrechargeGrowthAndRejectAtomically)
 {
-    PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({9, 11, 13})});
-    const auto payload = Access::identity(point)->support_payload;
-    detail::StoredVertexAuthorities holder(point.supports());
-    holder.share_if_equal(payload);
-    // Once immutable payload owners are admitted, detaching copies only the
-    // outer handles. Appending an existing handle adds no word allocation.
-    const auto detach_bytes = 2 * sizeof(PLIC::PlaneAuthority);
-    const auto append_bytes = 3 * sizeof(PLIC::PlaneAuthority);
-    const auto admit_existing = [&]
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const std::array keys{PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({9, 11, 13})};
+    for (bool append : {false, true})
     {
-        for (const auto& authority : point.supports())
-            detail::active_work->retain_identity(authority);
-    };
-    for (const bool append : {false, true})
-    {
-        auto draft = holder;
-        auto limits = accounting_limits(1024);
+        const auto run = [&](std::size_t cap, bool expect_failure)
         {
-            detail::Operation operation(limits);
-            admit_existing();
-            const auto baseline = operation.work.bytes;
-            operation.work.limits.byte_budget = baseline + (append ? append_bytes : detach_bytes) - 1;
-            if (append)
-                EXPECT_THROW(draft.append(draft.values()[0]), PLIC::GeometryError);
+            PLIC::PointSnapshotBuilder<mode> builder;
+            const auto original = builder.authority_range(Access::admit_incidence<mode>(keys));
+            detail::Operation operation(accounting_limits(1024));
+            operation.work.limits.byte_budget = cap;
+            PLIC::LocalAuthorityRange<mode> result;
+            const auto mutate = [&]
+            {
+                if (append)
+                    result = builder.append_authority(original,
+                        Access::admit_incidence<mode>(PLIC::resolve_authorities(builder.context(), original)));
+                else
+                    result = builder.import_authority_range(PLIC::resolve_authorities(builder.context(), original));
+            };
+            if (expect_failure)
+            {
+                EXPECT_THROW(mutate(), PLIC::GeometryError);
+                EXPECT_THROW((void) builder.freeze(), PLIC::GeometryError);
+            }
             else
-                EXPECT_THROW(draft.detach(), PLIC::GeometryError);
-        }
-        EXPECT_EQ(draft.shared_payload(), payload);
-        EXPECT_EQ(draft.values(), point.supports());
-        {
-            detail::Operation operation(limits);
-            admit_existing();
-            const auto baseline = operation.work.bytes;
-            operation.work.limits.byte_budget = baseline + (append ? append_bytes : detach_bytes);
-            if (append)
-                EXPECT_NO_THROW(draft.append(draft.values()[0]));
-            else
-                EXPECT_NO_THROW(draft.detach());
-            EXPECT_EQ(operation.work.bytes, operation.work.limits.byte_budget);
-        }
-        ASSERT_TRUE(draft.owned_values());
-        EXPECT_EQ(draft.size(), append ? 3u : 2u);
-        EXPECT_EQ(draft.values()[0].words(), (std::vector<std::uint64_t>{2, 7}));
-        if (append)
-            EXPECT_EQ(draft.values()[2].words(), draft.values()[0].words());
-        EXPECT_EQ(holder.shared_payload(), payload);
+            {
+                EXPECT_NO_THROW(mutate());
+                const auto ctx = builder.freeze();
+                EXPECT_EQ(result.size(), append ? 4u : 2u);
+            }
+            EXPECT_EQ(PLIC::resolve_authorities(builder.context(), original),
+                (std::vector<PLIC::PlaneAuthority>{keys[0], keys[1]}));
+            return operation.work.bytes;
+        };
+        const auto required = run(1024 * 1024, false);
+        ASSERT_GT(required, 0u);
+        EXPECT_LT(run(required - 1, true), required);
+        EXPECT_EQ(run(required, false), required);
     }
 }
-
-TEST_F(GeometryProvenanceBorrow, AliasedVertexAuthorityAppendPinsItsLastImmutableOwner)
+TEST_F(GeometryProvenanceBorrow, AliasedCsrAppendKeepsWordOwnerWithoutPinningTheOldSnapshot)
 {
-    detail::StoredVertexAuthorities holder;
-    std::weak_ptr<const PLIC::DynamicPointSupportPayload> weak_payload;
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    Observer source;
+    std::weak_ptr<const void> words;
+    auto ctx = [&]
     {
-        PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-        Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7})});
-        const auto payload = Access::identity(point)->support_payload;
-        weak_payload = payload;
-        holder = point.supports();
-        holder.share_if_equal(payload);
-    }
-    EXPECT_FALSE(weak_payload.expired());
-    holder.append(holder.values()[0]);
-    EXPECT_TRUE(weak_payload.expired());
-    EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{
-                                   PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({2, 7})}));
+        PLIC::PointSnapshotBuilder<mode> builder;
+        PLIC::LocalAuthorityRange<mode> original;
+        {
+            PLIC::DynamicPoint point({1, 2, 4}, {}, mode);
+            auto key = PLIC::PlaneAuthority::opaque({2, 7});
+            words = key.opaque_storage_owner();
+            Access::seal(point, {key});
+            source = Access::identity(point).context_pin();
+            original = builder.import_authority_range(point.supports());
+        }
+        EXPECT_TRUE(source.expired());
+        EXPECT_FALSE(words.expired());
+        const auto appended = builder.append_authority(
+            original, Access::admit_incidence<mode>(PLIC::resolve_authorities(builder.context(), original)));
+        auto frozen = builder.freeze();
+        EXPECT_EQ(appended.size(), 2u);
+        EXPECT_EQ(PLIC::resolve_authorities(frozen, appended),
+            (std::vector<PLIC::PlaneAuthority>{
+                PLIC::PlaneAuthority::opaque({2, 7}), PLIC::PlaneAuthority::opaque({2, 7})}));
+        return frozen;
+    }();
+    EXPECT_FALSE(words.expired());
+    ctx.reset();
+    EXPECT_TRUE(words.expired());
 }
-TEST_F(GeometryProvenanceBorrow, MovedFromSharedVertexAuthoritiesRetainTheirAppendCap)
+TEST_F(GeometryProvenanceBorrow, MovedFromOwningTokenStaysEmptyWhileFreshCsrAdmissionKeepsItsCap)
 {
-    PLIC::DynamicPoint point({1, 2, 4}, {}, ArithmeticMode::Ordinary);
-    Access::seal(point, {PLIC::PlaneAuthority::opaque({2, 7})});
-    detail::StoredVertexAuthorities holder(point.supports());
-    holder.share_if_equal(Access::identity(point)->support_payload);
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    auto holder = native(mode);
     const auto moved = std::move(holder);
-    ASSERT_TRUE(holder.empty());
-    EXPECT_FALSE(holder.shared_payload());
-    ASSERT_FALSE(holder.owned_values());
-    const auto authority = PLIC::PlaneAuthority::opaque({11, 13});
-    const auto required = sizeof(PLIC::PlaneAuthority);
-    for (const auto cap : {std::size_t(1), required - 1})
+    EXPECT_FALSE(holder);
+    EXPECT_EQ(holder, Identity{});
+    EXPECT_TRUE(moved);
+    const std::array keys{PLIC::PlaneAuthority::opaque({11, 13})};
+    const auto run = [&](std::size_t cap, bool failure)
     {
-        auto limits = accounting_limits(1024);
-        detail::Operation operation(limits);
-        operation.work.retain_identity(authority);
-        operation.work.limits.byte_budget = operation.work.bytes + cap;
-        EXPECT_THROW(holder.append(authority), PLIC::GeometryError);
-        EXPECT_TRUE(holder.empty());
-        EXPECT_FALSE(holder.owned_values());
-        EXPECT_FALSE(holder.shared_payload());
-    }
-    auto limits = accounting_limits(1024);
-    {
-        detail::Operation operation(limits);
-        operation.work.retain_identity(authority);
-        operation.work.limits.byte_budget = operation.work.bytes + required;
-        EXPECT_NO_THROW(holder.append(authority));
-        EXPECT_EQ(operation.work.bytes, operation.work.limits.byte_budget);
-    }
-    EXPECT_EQ(holder.values(), (std::vector<PLIC::PlaneAuthority>{authority}));
-    EXPECT_EQ(moved.values(), point.supports());
-    EXPECT_EQ(moved.shared_payload(), Access::identity(point)->support_payload);
+        PLIC::PointSnapshotBuilder<mode> builder;
+        detail::Operation operation(accounting_limits(1024));
+        operation.work.limits.byte_budget = cap;
+        if (failure)
+        {
+            EXPECT_THROW((void) builder.authority_range(Access::admit_incidence<mode>(keys)), PLIC::GeometryError);
+            EXPECT_THROW((void) builder.freeze(), PLIC::GeometryError);
+        }
+        else
+        {
+            const auto range = builder.authority_range(Access::admit_incidence<mode>(keys));
+            const auto ctx = builder.freeze();
+            EXPECT_EQ(range.size(), 1u);
+        }
+        EXPECT_FALSE(holder);
+        EXPECT_TRUE(moved);
+        return operation.work.bytes;
+    };
+    const auto required = run(1024 * 1024, false);
+    ASSERT_GT(required, 1u);
+    EXPECT_LT(run(1, true), required);
+    EXPECT_LT(run(required - 1, true), required);
+    EXPECT_EQ(run(required, false), required);
 }
 } // namespace

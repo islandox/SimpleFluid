@@ -9,6 +9,166 @@ using namespace SimpleFluid::VoF;
 using Topology = GeneralVoF::Data::Topology;
 using Tile = SimpleFluid::Meshes::AMR::AdaptiveTile;
 using Owner = Topology::SurfaceTileOwner;
+namespace metadata = SimpleFluid::Meshes::AMR::adaptive_detail;
+TEST(GeneralVoFTileMetadata, ImmutableSnapshotsRejectEscapedBuilderMutationAndCopiesKeepTheirOwner)
+{
+    std::vector<char> builder{'a', 'b', 'c'};
+    builder.reserve(64);
+    auto* escaped = builder.data();
+    metadata::ImmutableSequence<char> first(std::move(builder));
+    *escaped = 'x';
+    EXPECT_EQ(first, (std::vector<char>{'a', 'b', 'c'}));
+    auto copy = first;
+    EXPECT_EQ(first.storage_identity(), copy.storage_identity());
+    const auto* values = copy.data();
+    first = metadata::ImmutableSequence<char>{};
+    EXPECT_EQ(copy.data(), values);
+    EXPECT_EQ(copy.front(), 'a');
+    static_assert(std::is_same_v<decltype(copy.data()), const char*>);
+    static_assert(std::is_same_v<decltype(*copy.begin()), const char&>);
+    static_assert(!std::is_convertible_v<decltype(copy)&, std::vector<char>&>);
+}
+TEST(GeneralVoFTileMetadata, LocalPoolsCompareCompleteValuesAndPreserveOrderedLoopIdentity)
+{
+    metadata::ImmutableSequence<char> a{'d', 'a'}, equal{'d', 'a'}, other{'d', 'b'};
+    EXPECT_NE(a.storage_identity(), equal.storage_identity());
+    general_vof_detail::wire::Budget budget{4096};
+    {
+        metadata::ImmutableSequencePool<char> pool;
+        pool.intern(a, budget);
+        pool.intern(equal, budget);
+        pool.intern(other, budget);
+        pool.finalize(budget);
+        for (auto* values : {&a, &equal, &other})
+            pool.rebind(*values);
+    }
+    EXPECT_EQ(a.storage_identity(), equal.storage_identity());
+    EXPECT_EQ(a.storage_identity(), other.storage_identity());
+    EXPECT_EQ(a.data(), equal.data());
+    EXPECT_NE(a.data(), other.data());
+    EXPECT_EQ(a.storage_size(), 4u);
+    EXPECT_NE(a, other);
+    metadata::ImmutableSequence<std::uint64_t> loop{1, 2, 3, 4}, same{1, 2, 3, 4};
+    metadata::ImmutableSequence<std::uint64_t> rotated{2, 3, 4, 1}, reversed{4, 3, 2, 1};
+    {
+        metadata::ImmutableSequencePool<std::uint64_t> pool;
+        for (auto* values : {&loop, &same, &rotated, &reversed})
+            pool.intern(*values, budget);
+        pool.finalize(budget);
+        for (auto* values : {&loop, &same, &rotated, &reversed})
+            pool.rebind(*values);
+    }
+    EXPECT_EQ(loop.storage_identity(), same.storage_identity());
+    EXPECT_EQ(loop.storage_identity(), rotated.storage_identity());
+    EXPECT_EQ(loop.storage_identity(), reversed.storage_identity());
+    EXPECT_EQ(loop.data(), same.data());
+    EXPECT_NE(loop.data(), rotated.data());
+    EXPECT_NE(loop.data(), reversed.data());
+    EXPECT_NE(loop, rotated);
+    EXPECT_NE(loop, reversed);
+    EXPECT_EQ(loop.storage_size(), 12u);
+    std::weak_ptr<const void> temporary;
+    {
+        metadata::ImmutableSequencePool<char> pool;
+        metadata::ImmutableSequence<char> scoped{'t'};
+        temporary = scoped.owner_pin();
+        pool.intern(scoped, budget);
+        scoped = metadata::ImmutableSequence<char>{};
+        EXPECT_FALSE(temporary.expired());
+    }
+    EXPECT_TRUE(temporary.expired());
+}
+TEST(GeneralVoFTileMetadata, UniqueOwnerAccountingIncludesCapacityControlAndTrackingAtExactBoundary)
+{
+    metadata::ImmutableSequence<std::uint64_t> values{1, 2, 3, 4};
+    const auto copy = values;
+    const auto owner = values.storage_bytes();
+    EXPECT_EQ(owner, values.owner_bytes() + values.capacity() * sizeof(std::uint64_t));
+    const auto required = owner + sizeof(std::shared_ptr<const void>) + 4 * sizeof(void*);
+    general_vof_detail::wire::Budget budget{required};
+    metadata::ImmutableSequenceLedger ledger;
+    EXPECT_EQ(ledger.retain(values, budget), owner);
+    EXPECT_EQ(ledger.retain(copy, budget), 0u);
+    EXPECT_EQ(budget.used, required);
+    values = metadata::ImmutableSequence<std::uint64_t>{};
+    EXPECT_EQ(ledger.retain(copy, budget), 0u);
+    general_vof_detail::wire::Budget short_budget{required - 1};
+    metadata::ImmutableSequenceLedger short_ledger;
+    EXPECT_THROW(short_ledger.retain(copy, short_budget), std::invalid_argument);
+    metadata::ImmutableSequence<char> empty;
+    general_vof_detail::wire::Budget zero{0};
+    EXPECT_EQ(short_ledger.retain(empty, zero), 0u);
+    EXPECT_EQ(zero.used, 0u);
+}
+TEST(GeneralVoFTileMetadata, SnapshotAndTrustedBuilderFreezeAdmitBeforeAllocationAtExactBoundary)
+{
+    using Sequence = metadata::ImmutableSequence<std::uint64_t>;
+    const std::vector<std::uint64_t> input{7, 11, 19, 29};
+    const auto required = Sequence::owner_bytes() + input.size() * sizeof(std::uint64_t);
+    general_vof_detail::wire::Budget exact{required};
+    const auto snapshot = Sequence::snapshot(input, exact);
+    EXPECT_EQ(snapshot, input);
+    EXPECT_EQ(snapshot.storage_bytes(), required);
+    EXPECT_EQ(exact.used, required);
+    general_vof_detail::wire::Budget short_snapshot{required - 1};
+    EXPECT_THROW(Sequence::snapshot(input, short_snapshot), std::invalid_argument);
+    EXPECT_EQ(short_snapshot.used, 0u);
+    std::vector<std::uint64_t> builder{31, 37, 41};
+    const auto* original = builder.data();
+    general_vof_detail::wire::Budget short_owner{Sequence::owner_bytes() - 1};
+    EXPECT_THROW(Sequence::freeze_builder(std::move(builder), short_owner), std::invalid_argument);
+    EXPECT_EQ(builder.data(), original);
+    EXPECT_EQ(builder, (std::vector<std::uint64_t>{31, 37, 41}));
+    general_vof_detail::wire::Budget owner{Sequence::owner_bytes()};
+    const auto frozen = Sequence::freeze_builder(std::move(builder), owner);
+    EXPECT_EQ(frozen.data(), original);
+    EXPECT_EQ(owner.used, Sequence::owner_bytes());
+    EXPECT_EQ(frozen, (std::vector<std::uint64_t>{31, 37, 41}));
+    EXPECT_THROW(Sequence::allocation_bytes(std::numeric_limits<std::size_t>::max()), std::length_error);
+}
+TEST(GeneralVoFTileMetadata, PooledSlicesChargeTheWholeBackingOnceAndCheckLastSliceBounds)
+{
+    using Sequence = metadata::ImmutableSequence<char>;
+    Sequence low{'a', 'b', 'c'}, last{'x', 'y'}, independently_equal{'a', 'b', 'c'};
+    general_vof_detail::wire::Budget construction{4096};
+    {
+        metadata::ImmutableSequencePool<char> pool;
+        pool.intern(low, construction);
+        pool.intern(last, construction);
+        pool.finalize(construction);
+        pool.rebind(low);
+        pool.rebind(last);
+    }
+    EXPECT_EQ(low, independently_equal);
+    EXPECT_NE(low.storage_identity(), independently_equal.storage_identity());
+    EXPECT_EQ(low.storage_identity(), last.storage_identity());
+    EXPECT_EQ(low.storage_size(), 5u);
+    EXPECT_EQ(last.storage_capacity(), 5u);
+    EXPECT_EQ(last.size(), 2u);
+    EXPECT_EQ(last.data(), low.data() + 3);
+    auto moved_from = last;
+    const auto moved = std::move(moved_from);
+    EXPECT_EQ(moved, last);
+    EXPECT_TRUE(moved_from.empty());
+    EXPECT_EQ(moved_from.begin(), moved_from.end());
+    EXPECT_THROW(moved_from.at(0), std::out_of_range);
+    EXPECT_EQ(last.slice(1, 1).front(), 'y');
+    EXPECT_TRUE(last.slice(2, 0).empty());
+    EXPECT_THROW(last.slice(2, 1), std::out_of_range);
+    EXPECT_THROW(last.slice(std::numeric_limits<std::size_t>::max(), 1), std::out_of_range);
+    const auto required = Sequence::owner_bytes() + 5 + sizeof(std::shared_ptr<const void>) + 4 * sizeof(void*);
+    general_vof_detail::wire::Budget retained{required};
+    metadata::ImmutableSequenceLedger ledger;
+    EXPECT_EQ(ledger.retain(last, retained), Sequence::owner_bytes() + 5);
+    EXPECT_EQ(ledger.retain(low, retained), 0u);
+    EXPECT_EQ(retained.used, required);
+    low = Sequence{};
+    EXPECT_EQ(last, (std::vector<char>{'x', 'y'}));
+    EXPECT_EQ(ledger.retain(last, retained), 0u);
+    general_vof_detail::wire::Budget short_retained{required - 1};
+    metadata::ImmutableSequenceLedger short_ledger;
+    EXPECT_THROW(short_ledger.retain(last, short_retained), std::invalid_argument);
+}
 Tile tile(std::uint64_t face)
 {
     Tile result;

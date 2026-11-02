@@ -804,6 +804,68 @@ void write_key(std::ostream& out, const AMR::AdaptiveCellKey& key)
             out << step << ',';
     }
 }
+// Accepted fields and the independent reference are captured without any new
+// reconstruction, so evidence acquisition cannot select a different method.
+void dump_fields(const Fixture& f, const Case& c, unsigned n, const std::string& tag, unsigned accepted,
+    long double time, double courant, const char* checkpoint)
+{
+    const auto* destination = std::getenv("SIMPLEFLUID_QUALIFICATION_ARTIFACT_DIR");
+    if (!destination)
+        return;
+    const auto comm = Tpetra::getDefaultComm();
+    SimpleFluid::detail::vof_failure::collective(*comm, [&]
+    {
+        std::filesystem::create_directories(destination);
+        const auto stem = tag + "_N" + std::to_string(n) + "_" + checkpoint + "_rank" +
+                          std::to_string(comm->getRank());
+        const auto path = std::filesystem::path(destination);
+        const auto& state = *f.state;
+        std::ofstream out(path / (stem + ".fields.csv"));
+        out << std::setprecision(std::numeric_limits<long double>::max_digits10);
+        out << "gid,owner,key,x,y,z,volume,width,gas,carrier,reference_gas,reference_carrier,gas_error,"
+               "declaration,gas_history,carrier_history\n";
+        std::map<AMR::AdaptiveCellKey, const GeneralVoFSupportCell*> support;
+        const auto support_cells = state.support_cells();
+        for (const auto& sample : support_cells)
+            support.emplace(sample.key, &sample);
+        const auto polygon = reference_polygon(c.motion, time);
+        const auto declarations = state.phase_geometry_declarations();
+        for (std::size_t i = 0; i < state.owned_order().size(); ++i)
+        {
+            const auto& key = state.owned_order()[i];
+            const auto& sample = *support.at(key);
+            const auto& cell = f.cells[i];
+            const auto volume = cell.volume(), reference = phase(cell, c.motion, time, polygon);
+            out << sample.cell << ',' << sample.owner << ",\"";
+            write_key(out, key);
+            out << "\"," << cell.center[0] << ',' << cell.center[1] << ',' << cell.center[2] << ','
+                << volume << ',' << cell.width << ',' << state.gas_volumes()[i] << ','
+                << state.carrier_volumes()[i] << ',' << reference << ',' << volume - reference << ','
+                << state.gas_volumes()[i] - reference << ',' << int(declarations[i]) << ','
+                << state.accumulated_phase_errors()[i].gas << ','
+                << state.accumulated_phase_errors()[i].carrier << '\n';
+        }
+        out.flush();
+        if (!out)
+            throw std::runtime_error("Qualification field snapshot write failed.");
+        std::ofstream metadata(path / (stem + ".metadata.txt"));
+        metadata << std::setprecision(std::numeric_limits<long double>::max_digits10)
+                 << "accepted_steps=" << accepted << " time=" << time << " required_endpoint=1 resolution=" << n
+                 << " rank=" << comm->getRank() << " ranks=" << comm->getSize()
+                 << " model_policy=" << policy_name(c.model_policy) << " courant_target=" << courant
+                 << " original_gas=" << f.original_volume[0] << " original_carrier=" << f.original_volume[1]
+                 << cleanup_metrics(state) << '\n';
+        metadata.flush();
+        if (!metadata)
+            throw std::runtime_error("Qualification field metadata write failed.");
+        const auto cleanup = state.phase_cleanup_checkpoint();
+        std::ofstream checkpoint_file(path / (stem + ".cleanup.bin"), std::ios::binary);
+        checkpoint_file.write(cleanup.data(), static_cast<std::streamsize>(cleanup.size()));
+        checkpoint_file.flush();
+        if (!checkpoint_file)
+            throw std::runtime_error("Qualification field cleanup checkpoint write failed.");
+    }, "qualification_field_snapshot");
+}
 void dump_failure(const Fixture& f, const Case& c, unsigned n, const std::string& tag, unsigned accepted,
     long double time, long double attempted_dt, const std::string& error)
 {
@@ -954,6 +1016,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
         auto& f = *working;
         const auto start = measure(f, *f.state, c, 0, {}, tag + "_initial");
         require_no_failure();
+        dump_fields(f, c, n, tag, accepted, time, courant, "initial");
         std::map<std::uint64_t, int> owners;
         for (const auto& tile : f.state->tiles())
             owners.emplace(tile.face_gid, tile.first_owner);
@@ -1041,7 +1104,15 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
             quality_report << std::setprecision(17) << "policy=" << policy_name(c.model_policy)
                            << " accepted_steps=" << accepted << " accepted_time=" << double(time)
                            << " measured_plane_entries=" << global_quality[0]
-                           << " above_threshold_plane_entries=" << global_quality[1];
+                           << " above_threshold_plane_entries=" << global_quality[1]
+                           << " actual_outgoing_courant=" << actual
+                           << " maximum_outgoing_courant=" << maximum_courant
+                           << " cumulative_limited_steps=" << limited_steps
+                           << " cumulative_limited_streams=" << totals[10]
+                           << " cumulative_limited_bulk_volume=" << totals[11]
+                           << " cumulative_discarded_gas_correction=" << totals[12]
+                           << " cumulative_fallback_streams=" << totals[13]
+                           << " cumulative_fallback_bulk_volume=" << totals[14];
             if (global_quality[0])
                 quality_report << " worst_rms=" << worst_rms << " worst_gid=" << worst_gid
                                << " worst_orientation_method=" << worst_method
@@ -1059,6 +1130,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
             if (time == .5L)
             {
                 midpoint_reached = true;
+                dump_fields(f, c, n, tag, accepted, time, courant, "midpoint");
                 if (c.motion == Motion::FullRotation)
                 {
                     // The exact midpoint centroid moves -.3 in physical x for
@@ -1091,6 +1163,7 @@ std::optional<Result> run(const Case& c, unsigned n, double courant, const std::
             require_no_failure();
         }
         auto result = measure(f, *f.state, c, 1, start.center, tag + "_final");
+        dump_fields(f, c, n, tag, accepted, time, courant, "endpoint");
         EXPECT_EQ(time, 1);
         EXPECT_TRUE(midpoint_reached) << "Preregistered midpoint checkpoint must be an accepted step boundary";
         if (c.backend == GeneralVoFTransportBackend::GeometricFace)
@@ -1310,6 +1383,23 @@ TEST(GeneralVoFMotionAccuracy, ConservativeApproximationRequiredPlanarPatchN32En
     ASSERT_TRUE(result.has_value());
     RecordProperty("endpoint_shape_error", result->shape);
     RecordProperty("endpoint_centroid_error", result->centroid);
+    EXPECT_LE(result->shape, .02);
+    EXPECT_LE(result->centroid, .25 * result->width);
+}
+
+TEST(GeneralVoFMotionAccuracy, ConservativeApproximationRequiredPlanarPatchN64Endpoint)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in original finest-grid Q2 endpoint";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5,
+        false, PLIC::PlicModelPolicy::ConservativeApproximation};
+    const auto result = run(c, 64, .5, "approximation_required_planar_patch_N64");
+    ASSERT_TRUE(result.has_value());
+    RecordProperty("endpoint_shape_error", result->shape);
+    RecordProperty("endpoint_centroid_error", result->centroid);
+    RecordProperty("endpoint_interface_width", result->width);
+    RecordProperty("scope", "Original N64 finest accuracy; order requires matched N32 error, not its extra 2% pass");
     EXPECT_LE(result->shape, .02);
     EXPECT_LE(result->centroid, .25 * result->width);
 }

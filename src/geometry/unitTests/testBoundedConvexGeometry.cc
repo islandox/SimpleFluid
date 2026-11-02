@@ -31,6 +31,23 @@ using BoundedGeometryPtr = SimpleFluid::PLIC::ConvexGeometryPtr<ArithmeticMode::
 using BoundedPartition = SimpleFluid::PLIC::ConvexPartition<ArithmeticMode::BoundedCertification>;
 template<ArithmeticMode Mode> using Geometry = SimpleFluid::PLIC::ConvexCellGeometry<Mode>;
 template<ArithmeticMode Mode> using GeometryPtr = SimpleFluid::PLIC::ConvexGeometryPtr<Mode>;
+template<ArithmeticMode Mode>
+void fixture_plane_sources(SimpleFluid::PLIC::details::StoredPlane<Mode>& plane,
+    SimpleFluid::PLIC::PointSnapshotBuilder<Mode>& points,
+    std::initializer_list<SimpleFluid::PLIC::PointProvenanceRef> sources)
+{
+    plane.point_context = points.context();
+    plane.source_vertices.clear();
+    for (const auto& source : sources)
+        plane.source_vertices.push_back(points.import(source));
+}
+template<ArithmeticMode Mode>
+auto fixture_authorities(SimpleFluid::PLIC::PointSnapshotBuilder<Mode>& points,
+    std::initializer_list<SimpleFluid::PLIC::PlaneAuthority> keys)
+{
+    return points.authority_range(SimpleFluid::PLIC::DynamicGeometryAccess::admit_incidence<Mode>(
+        std::span<const SimpleFluid::PLIC::PlaneAuthority>(keys.begin(), keys.size())));
+}
 SimpleFluid::PLIC::GeometryLimits geometry_limits(ArithmeticMode mode)
 {
     SimpleFluid::PLIC::GeometryLimits limits;
@@ -1087,37 +1104,37 @@ TEST(BoundedConvexGeometryTest, OrdinarySourcePlaneIdentityRejectsLookAlikesAndU
             selected_point_average<ArithmeticMode::Ordinary>(input));
     };
     const std::array points{token({0, 0, 0}), token({1, 0, 0}), token({0, 1, 0})};
+    SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> issuer;
     ordinary::Plane a, b;
     a.normal[2] = ordinary::StorageScalar(1);
     b.normal[2] = ordinary::StorageScalar(-1);
     a.normal_error = b.normal_error = 0;
-    a.source_vertices = {points[0], points[1], points[2]};
-    b.source_vertices = {points[2], points[1], points[0]};
+    fixture_plane_sources(a, issuer, {points[0], points[1], points[2]});
+    fixture_plane_sources(b, issuer, {points[2], points[1], points[0]});
     const auto limits = geometry_limits(ArithmeticMode::Ordinary);
     {
         arithmetic::Operation scope(limits);
         EXPECT_TRUE(ordinary::same_source_plane(a, b));
         const auto look_alike = token({0, 1, 0});
-        b.source_vertices[0] = look_alike;
+        b.source_vertices[0] = issuer.import(look_alike);
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
-        b.source_vertices[0] = points[2];
-        b.source_vertices[1] = points[2];
+        b.source_vertices[0] = issuer.import(points[2]);
+        b.source_vertices[1] = issuer.import(points[2]);
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
-        b.source_vertices[1] = points[1];
+        b.source_vertices[1] = issuer.import(points[1]);
         b.normal_error.reset();
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
         b.normal_error = 1;
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
         b.normal_error = 0;
-        b.source_vertices.push_back(points[0]);
+        b.source_vertices.push_back(issuer.import(points[0]));
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
         b.source_vertices.pop_back();
-        {
-            const auto expired = token({0, 1, 0});
-            b.source_vertices[0] = expired;
-        }
+        // Compact refs require a live bound context. An absent original
+        // witness is represented explicitly instead of a dangling weak token.
+        b.source_vertices[0] = {};
         EXPECT_FALSE(ordinary::same_source_plane(a, b));
-        b.source_vertices[0] = points[2];
+        b.source_vertices[0] = issuer.import(points[2]);
     }
     auto capped = limits;
     capped.maximum_pair_tests = 1;
@@ -1168,19 +1185,19 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceWitnessKeepsUnderflowAndInputUncer
     const auto identity = SimpleFluid::PLIC::DynamicGeometryAccess::identity(original);
     SimpleFluid::PLIC::DynamicPoint relative({1, 2, 4}, {}, ArithmeticMode::Ordinary);
     ordinary::Point stored{ordinary::Scalar(.5L), ordinary::Scalar(1), ordinary::Scalar(2)};
-    const auto exact = ordinary::source_point_error(relative, identity.get(), frame, stored, false);
+    const auto exact = ordinary::source_point_error(relative, identity.view(), frame, stored, false);
     ASSERT_TRUE(exact);
     for (const auto error : *exact)
         EXPECT_EQ(error, 0);
     relative.absolute_error[0] = .125L;
-    const auto uncertain = ordinary::source_point_error(relative, nullptr, frame, stored, true);
+    const auto uncertain = ordinary::source_point_error(relative, {}, frame, stored, true);
     ASSERT_TRUE(uncertain);
     EXPECT_GE((*uncertain)[0], .0625L);
     relative.absolute_error[0] = -1;
-    EXPECT_FALSE(ordinary::source_point_error(relative, nullptr, frame, stored, true));
+    EXPECT_FALSE(ordinary::source_point_error(relative, {}, frame, stored, true));
     relative = SimpleFluid::PLIC::DynamicPoint({tiny, 0, 0}, {}, ArithmeticMode::Ordinary);
     stored = {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(0)};
-    const auto underflow = ordinary::source_point_error(relative, nullptr, {{}, 1}, stored, true);
+    const auto underflow = ordinary::source_point_error(relative, {}, {{}, 1}, stored, true);
     ASSERT_TRUE(underflow);
     EXPECT_GE((*underflow)[0], tiny);
     const auto previous_rounding = std::fegetround();
@@ -1335,8 +1352,9 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
             Access::seal_export(exported, original, {});
             token = Access::identity(exported);
         }
+        SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> points;
         auto vertex = edge_vertex(.5L);
-        vertex.authorities.append(SimpleFluid::PLIC::PlaneAuthority::opaque({190}));
+        vertex.authorities = fixture_authorities(points, {SimpleFluid::PLIC::PlaneAuthority::opaque({190})});
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             auto plane = std::make_shared<ordinary::Plane>();
@@ -1344,7 +1362,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
             plane->normal_error = 0;
             for (std::size_t coordinate = 0; coordinate < 3; ++coordinate)
                 plane->anchor[coordinate] = ordinary::StorageScalar(source.value[coordinate]);
-            plane->source_vertices = {token};
+            fixture_plane_sources(*plane, points, {token});
             vertex.incident.push_back(std::move(plane));
         }
         const auto before = vertex;
@@ -1352,14 +1370,15 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
         if (!original)
         {
             EXPECT_TRUE(std::isnan(test.error));
-            EXPECT_FALSE(
-                ordinary::recover_source_identity(vertex, parent_impl->frame, parent_impl.get(), &first, &second));
+            EXPECT_FALSE(ordinary::recover_source_identity(
+                vertex, parent_impl->frame, parent_impl.get(), &first, &second, points, points.context()));
         }
         else if (test.accepted)
         {
-            EXPECT_TRUE(
-                ordinary::recover_source_identity(vertex, parent_impl->frame, parent_impl.get(), &first, &second));
-            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, original));
+            EXPECT_TRUE(ordinary::recover_source_identity(
+                vertex, parent_impl->frame, parent_impl.get(), &first, &second, points, points.context()));
+            EXPECT_TRUE(Access::same_represented_source(
+                SimpleFluid::PLIC::resolve_point(points.context(), vertex.source_identity), original.view()));
             const auto expected = edge_vertex(test.original_x);
             for (std::size_t axis = 0; axis < 3; ++axis)
                 EXPECT_EQ(vertex.coordinates[axis].value, expected.coordinates[axis].value);
@@ -1369,7 +1388,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdg
             try
             {
                 (void) ordinary::recover_source_identity(
-                    vertex, parent_impl->frame, parent_impl.get(), &first, &second);
+                    vertex, parent_impl->frame, parent_impl.get(), &first, &second, points, points.context());
                 FAIL() << "Recovery must reject an inadmissible original source point.";
             }
             catch (const SimpleFluid::PLIC::GeometryError& error)
@@ -1409,15 +1428,18 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
     Access::seal_represented_source(a);
     Access::seal_represented_source(b);
     const auto a_token = Access::identity(a), b_token = Access::identity(b);
+    SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> points;
     const auto plane = [&](std::array<long double, 3> normal, long double anchor_x,
-                           std::vector<std::weak_ptr<const SimpleFluid::PLIC::DynamicPointProvenance>> tokens)
+                           std::vector<SimpleFluid::PLIC::PointProvenanceRef> tokens)
     {
         auto result = std::make_shared<ordinary::Plane>();
         for (std::size_t axis = 0; axis < 3; ++axis)
             result->normal[axis] = ordinary::StorageScalar(normal[axis]);
         result->anchor[0] = ordinary::StorageScalar(anchor_x);
         result->normal_error = 0;
-        result->source_vertices = std::move(tokens);
+        result->point_context = points.context();
+        for (const auto& token : tokens)
+            result->source_vertices.push_back(points.import(token));
         return result;
     };
     const auto p = plane({0, 1, 0}, 0, {a_token, b_token});
@@ -1431,8 +1453,8 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
         result.coordinates = ordinary::transform<ArithmeticMode::Ordinary>(
             {ordinary::Scalar(x), ordinary::Scalar(0), ordinary::Scalar(0)}, {}, impl->frame);
         SimpleFluid::PLIC::DynamicPoint point({x, 0, 0}, {}, ArithmeticMode::Ordinary);
-        Access::seal_generated(point, {{a_token, b_token}});
-        result.source_identity = Access::identity(point);
+        Access::seal_generated(point, {{a_token.view(), b_token.view()}});
+        result.source_identity = points.import(Access::identity(point));
         result.incident = {p, q};
         return result;
     };
@@ -1453,8 +1475,8 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
             for (std::size_t axis = 0; axis < 3; ++axis)
                 rounded.value[axis] =
                     std::scalbn(second.coordinates[axis].value, impl->frame.exponent) + impl->frame.origin[axis];
-            Access::seal_generated(rounded, {{a_token, b_token}});
-            second.source_identity = Access::identity(rounded);
+            Access::seal_generated(rounded, {{a_token.view(), b_token.view()}});
+            second.source_identity = points.import(Access::identity(rounded));
             second.incident.push_back(endpoint_plane);
         }
         if (control == 2)
@@ -1469,15 +1491,16 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
         if (control == 5)
             endpoint_plane->source_vertices.clear(); // Bare coefficients do not authenticate an anchor.
         auto vertex = second;
-        vertex.source_identity.reset();
+        vertex.source_identity = {};
         vertex.incident = {p, q, query};
-        vertex.authorities =
-            std::vector<SimpleFluid::PLIC::PlaneAuthority>{SimpleFluid::PLIC::PlaneAuthority::opaque({191})};
+        vertex.authorities = fixture_authorities(points, {SimpleFluid::PLIC::PlaneAuthority::opaque({191})});
         const auto before = vertex;
         if (control == 0)
         {
-            EXPECT_TRUE(ordinary::recover_source_identity(vertex, impl->frame, impl.get(), &first, &second));
-            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, b_token));
+            EXPECT_TRUE(ordinary::recover_source_identity(
+                vertex, impl->frame, impl.get(), &first, &second, points, points.context()));
+            EXPECT_TRUE(Access::same_represented_source(
+                SimpleFluid::PLIC::resolve_point(points.context(), vertex.source_identity), b_token.view()));
             const auto expected = generated_vertex(0);
             for (std::size_t axis = 0; axis < 3; ++axis)
                 EXPECT_EQ(vertex.coordinates[axis].value, expected.coordinates[axis].value);
@@ -1486,7 +1509,8 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSh
         {
             try
             {
-                (void) ordinary::recover_source_identity(vertex, impl->frame, impl.get(), &first, &second);
+                (void) ordinary::recover_source_identity(
+                    vertex, impl->frame, impl.get(), &first, &second, points, points.context());
                 FAIL() << "A shared root edge is not an endpoint-placement proof.";
             }
             catch (const SimpleFluid::PLIC::GeometryError& error)
@@ -1520,7 +1544,8 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
     detail::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
     const auto p = impl->surfaces[0].plane, q = impl->surfaces[2].plane;
     const auto lower = impl->surfaces[4].plane, upper = impl->surfaces[5].plane;
-    const auto a = impl->vertices[0].source_identity, b = impl->vertices[4].source_identity;
+    const auto a = SimpleFluid::PLIC::resolve_point(impl->point_context, impl->vertices[0].source_identity);
+    const auto b = SimpleFluid::PLIC::resolve_point(impl->point_context, impl->vertices[4].source_identity);
     ASSERT_TRUE(a);
     ASSERT_TRUE(b);
     ASSERT_FALSE(p->authorities.empty());
@@ -1528,6 +1553,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
     for (unsigned control = 0; control < 8; ++control)
     {
         SCOPED_TRACE(control);
+        SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> points;
         auto context = std::make_shared<ordinary::StoredGeometry>(*impl);
         auto end_plane = std::make_shared<ordinary::Plane>(*upper);
         const auto endpoint = [&](long double z, ordinary::PlanePtr bound)
@@ -1544,7 +1570,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
                 point.value[axis] =
                     std::scalbn(result.coordinates[axis].value, impl->frame.exponent) + impl->frame.origin[axis];
             Access::seal_generated(point, {{a, b}});
-            result.source_identity = Access::identity(point);
+            result.source_identity = points.import(Access::identity(point));
             result.incident = {p, q, std::move(bound)};
             return result;
         };
@@ -1568,7 +1594,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
                 bound->normal[2] = ordinary::StorageScalar(-1);
                 bound->anchor[2] = ordinary::StorageScalar(bound_anchors[end].value[2]);
                 bound->normal_error = 0;
-                bound->source_vertices = {Access::identity(bound_anchors[end])};
+                fixture_plane_sources(*bound, points, {Access::identity(bound_anchors[end])});
                 context->surfaces[4 + end] = {bound, 1};
                 (end ? second : first).incident.back() = bound;
             }
@@ -1584,20 +1610,21 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         }
         const long double z = control == 5 ? -.25L : control == 6 ? 1.25L : .5L;
         SimpleFluid::PLIC::DynamicPoint original({0, 0, z}, {}, ArithmeticMode::Ordinary);
-        auto supports = p->authorities;
-        supports.insert(supports.end(), q->authorities.begin(), q->authorities.end());
+        const auto p_keys = SimpleFluid::PLIC::resolve_authorities(p->point_context, p->authorities);
+        const auto q_keys = SimpleFluid::PLIC::resolve_authorities(q->point_context, q->authorities);
+        std::vector<SimpleFluid::PLIC::PlaneAuthority> supports(p_keys.begin(), p_keys.end());
+        supports.insert(supports.end(), q_keys.begin(), q_keys.end());
         Access::seal_represented_source(original, std::move(supports));
         const auto token = Access::identity(original);
         auto query = std::make_shared<ordinary::Plane>();
         query->normal[2] = ordinary::StorageScalar(1);
         query->anchor[2] = ordinary::StorageScalar(z);
         query->normal_error = 0;
-        query->source_vertices = {token};
+        fixture_plane_sources(*query, points, {token});
         auto vertex = first;
-        vertex.source_identity.reset();
+        vertex.source_identity = {};
         vertex.incident = {p, q, query};
-        vertex.authorities =
-            std::vector<SimpleFluid::PLIC::PlaneAuthority>{SimpleFluid::PLIC::PlaneAuthority::opaque({192})};
+        vertex.authorities = fixture_authorities(points, {SimpleFluid::PLIC::PlaneAuthority::opaque({192})});
         const auto before = vertex;
         const int lower_direction =
             ordinary::source_normal_orientation(*p, *q, *context->surfaces[4].plane) * context->surfaces[4].orientation;
@@ -1609,16 +1636,18 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         if (control == 3)
         {
             ordinary::Vertex candidate;
-            candidate.source_identity = token;
+            candidate.source_identity = points.import(token);
             for (std::size_t axis = 0; axis < 3; ++axis)
                 candidate.coordinates[axis] = ordinary::StorageScalar(original.value[axis]);
             for (std::size_t end = 0; end < 2; ++end)
             {
                 const auto& surface = context->surfaces[4 + end];
-                EXPECT_LT(ordinary::distance<ArithmeticMode::Ordinary>(candidate, {}, surface.plane).value *
-                              surface.orientation,
+                EXPECT_LT(
+                    ordinary::distance<ArithmeticMode::Ordinary>(candidate, {}, surface.plane, points.context()).value *
+                        surface.orientation,
                     0);
-                EXPECT_LT(ordinary::distance<ArithmeticMode::Ordinary>(end ? first : second, impl->frame, surface.plane)
+                EXPECT_LT(ordinary::distance<ArithmeticMode::Ordinary>(
+                              end ? first : second, impl->frame, surface.plane, points.context())
                                   .value *
                               surface.orientation,
                     0);
@@ -1626,8 +1655,10 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         }
         if (control == 0)
         {
-            EXPECT_TRUE(ordinary::recover_source_identity(vertex, impl->frame, context.get(), &first, &second));
-            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, token));
+            EXPECT_TRUE(ordinary::recover_source_identity(
+                vertex, impl->frame, context.get(), &first, &second, points, points.context()));
+            EXPECT_TRUE(Access::same_represented_source(
+                SimpleFluid::PLIC::resolve_point(points.context(), vertex.source_identity), token.view()));
             const auto expected = ordinary::transform<ArithmeticMode::Ordinary>(
                 {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(z)}, {}, impl->frame);
             for (std::size_t axis = 0; axis < 3; ++axis)
@@ -1637,7 +1668,8 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         {
             try
             {
-                (void) ordinary::recover_source_identity(vertex, impl->frame, context.get(), &first, &second);
+                (void) ordinary::recover_source_identity(
+                    vertex, impl->frame, context.get(), &first, &second, points, points.context());
                 FAIL() << "An unproved or excluding current edge bound must not admit recovery.";
             }
             catch (const SimpleFluid::PLIC::GeometryError& error)
@@ -1699,6 +1731,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryRejectsMissingAmbiguousAnd
     const auto look_alike =
         SimpleFluid::PLIC::DynamicGeometryAccess::identity(selected_point_average<ArithmeticMode::Ordinary>(input));
     ASSERT_NE(token, look_alike);
+    SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> points;
     ordinary::Vertex vertex;
     std::array<std::shared_ptr<ordinary::Plane>, 3> planes;
     for (std::size_t axis = 0; axis < 3; ++axis)
@@ -1706,7 +1739,7 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryRejectsMissingAmbiguousAnd
         auto p = std::make_shared<ordinary::Plane>();
         p->normal[axis] = ordinary::StorageScalar(1);
         p->normal_error = 0;
-        p->source_vertices = {token};
+        fixture_plane_sources(*p, points, {token});
         for (std::size_t coordinate = 0; coordinate < 3; ++coordinate)
             p->anchor[coordinate] = ordinary::StorageScalar(source.value[coordinate]);
         vertex.coordinates[axis] = ordinary::StorageScalar(std::nextafter(source.value[axis], 0.L));
@@ -1717,19 +1750,23 @@ TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryRejectsMissingAmbiguousAnd
     {
         arithmetic::Operation scope(limits);
         planes[2]->source_vertices.clear();
-        EXPECT_FALSE(ordinary::recover_source_identity(vertex, {}));
-        planes[2]->source_vertices = {token};
+        EXPECT_FALSE(
+            ordinary::recover_source_identity(vertex, {}, nullptr, nullptr, nullptr, points, points.context()));
+        fixture_plane_sources(*planes[2], points, {token});
         for (auto& p : planes)
-            p->source_vertices.push_back(look_alike);
-        EXPECT_FALSE(ordinary::recover_source_identity(vertex, {}));
+            p->source_vertices.push_back(points.import(look_alike));
+        EXPECT_FALSE(
+            ordinary::recover_source_identity(vertex, {}, nullptr, nullptr, nullptr, points, points.context()));
         for (auto& p : planes)
-            p->source_vertices = {token};
+            fixture_plane_sources(*p, points, {token});
     }
     auto capped = limits;
     capped.maximum_pair_tests = 1;
     {
         arithmetic::Operation limited(capped);
-        EXPECT_THROW((void) ordinary::recover_source_identity(vertex, {}), std::invalid_argument);
+        EXPECT_THROW(
+            (void) ordinary::recover_source_identity(vertex, {}, nullptr, nullptr, nullptr, points, points.context()),
+            std::invalid_argument);
     }
     EXPECT_FALSE(vertex.source_identity);
     for (std::size_t axis = 0; axis < 3; ++axis)
@@ -3962,16 +3999,18 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
     const auto global_points = point_export.points();
     ASSERT_EQ(global_points.size(), storage->vertices.size());
     std::vector<std::vector<PLIC::PlaneAuthority>> original_keys;
-    std::vector<std::shared_ptr<const PLIC::DynamicPointProvenance>> original_sources;
+    std::vector<PLIC::PointProvenanceView> original_sources;
     for (std::size_t i = 0; i < storage->vertices.size(); ++i)
     {
         const auto& vertex = storage->vertices[i];
         ASSERT_TRUE(vertex.source_identity);
-        EXPECT_EQ(vertex.authorities.shared_payload(), vertex.source_identity->support_payload);
-        EXPECT_EQ(Access::original_source(Access::identity(global_points[i].dynamic())), vertex.source_identity);
-        EXPECT_NE(Access::identity(global_points[i].dynamic()), vertex.source_identity);
-        original_keys.push_back(vertex.authorities.values());
-        original_sources.push_back(vertex.source_identity);
+        const auto source = PLIC::resolve_point(storage->point_context, vertex.source_identity);
+        const auto keys = PLIC::resolve_authorities(storage->point_context, vertex.authorities);
+        EXPECT_EQ(keys, source.supports());
+        EXPECT_EQ(Access::original_source(Access::identity(global_points[i].dynamic())).view(), source);
+        EXPECT_NE(Access::identity(global_points[i].dynamic()).view(), source);
+        original_keys.emplace_back(keys.begin(), keys.end());
+        original_sources.push_back(source);
     }
     const PLIC::GeometryPacketContext context{{71, 2, 3, 11}};
     PLIC::ConstructionRegistry<mode> registry(context);
@@ -3992,16 +4031,19 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
     EXPECT_EQ(parent->encode(context), parent_numerical_packet);
     for (std::size_t i = 0; i < storage->vertices.size(); ++i)
     {
-        EXPECT_EQ(storage->vertices[i].source_identity, original_sources[i]);
-        EXPECT_EQ(storage->vertices[i].authorities.shared_payload(), original_sources[i]->support_payload);
-        EXPECT_EQ(storage->vertices[i].authorities.values(), original_keys[i]);
+        EXPECT_EQ(
+            PLIC::resolve_point(storage->point_context, storage->vertices[i].source_identity), original_sources[i]);
+        const auto keys = PLIC::resolve_authorities(storage->point_context, storage->vertices[i].authorities);
+        EXPECT_EQ(keys, original_sources[i].supports());
+        EXPECT_EQ(keys, original_keys[i]);
     }
     const auto child_storage = detail::checked_geometry_storage<mode>(
         Access::implementation(*split.inside->dynamic_geometry()));
     bool contact_gained_support = false;
     for (const auto& child : child_storage->vertices)
         for (std::size_t i = 0; i < storage->vertices.size(); ++i)
-            if (child.source_identity == original_sources[i] && child.authorities.size() > original_keys[i].size())
+            if (PLIC::resolve_point(child_storage->point_context, child.source_identity) == original_sources[i] &&
+                child.authorities.size() > original_keys[i].size())
                 contact_gained_support = true;
     EXPECT_TRUE(contact_gained_support);
     const auto restored = Geometry<mode>::decode(first_child_packet, registry);
@@ -4030,7 +4072,7 @@ template<ArithmeticMode mode> void shared_vertex_support_contact_contract()
         EXPECT_TRUE(numerical_points[i].supports().empty());
         const auto owner = Access::identity(numerical_points[i].dynamic());
         ASSERT_TRUE(owner);
-        EXPECT_TRUE(owner->numerical_only);
+        EXPECT_TRUE(owner.view().numerical_only());
     }
     EXPECT_THROW((void) Geometry<mode>::make_points(numerical_points, numerical->faces()), PLIC::GeometryError);
     EXPECT_EQ(parent->encode(context), parent_numerical_packet);

@@ -17,9 +17,10 @@ enum class Kind
     ExportCache,
     DynamicPointExport,
     TypedPointExport,
+    CompactPointBatch,
     Plane,
-    Point,
-    SupportPayload,
+    PointSnapshot,
+    NativeFactBlock,
     Moment,
     Ancestry,
     Split,
@@ -66,7 +67,7 @@ std::size_t authorities(const std::vector<PlaneAuthority>& values)
 {
     return product(values.capacity(), sizeof(PlaneAuthority));
 }
-} // namespace allocation_detail
+} // namespace SIMPLEFLUID_LOCAL allocation_detail
 
 struct GeometryAllocationLedger::Impl
 {
@@ -188,27 +189,22 @@ struct GeometryAllocationLedger::Impl
                     add_bytes(bytes, geometry->faces.capacity(), sizeof(Face));
                     add_bytes(bytes, geometry->surfaces.capacity(), sizeof(StoredSurface<Mode>));
                     for (const auto& vertex : geometry->vertices)
-                    {
                         add_bytes(bytes, vertex.incident.capacity(), sizeof(StoredPlanePtr<Mode>));
-                        if (const auto* owned = vertex.authorities.owned_values())
-                            bytes = add(bytes, authorities(*owned));
-                    }
                     for (const auto& face : geometry->faces)
                         add_bytes(bytes, face.capacity(), sizeof(std::size_t));
                     if (!admit(item, bytes, used, limit))
                         break;
                     for (const auto& vertex : geometry->vertices)
                     {
-                        retain_authorities(vertex.authorities.values(), used, limit);
-                        push(Kind::SupportPayload, vertex.authorities.shared_payload(), used, limit);
-                        push(Kind::Point, vertex.source_identity, used, limit);
                         for (const auto& plane : vertex.incident)
                             push(Kind::Plane, plane, used, limit);
                     }
                     for (const auto& surface : geometry->surfaces)
                         push(Kind::Plane, surface.plane, used, limit);
-                    push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(geometry->point_export_cache),
+                    push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(geometry->point_context),
                         used, limit);
+                    push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(geometry->point_export_cache), used,
+                        limit);
                     push(Kind::Geometry, geometry->export_source, used, limit);
                     push(Kind::Moment, std::shared_ptr<const StoredMomentCache<Mode>>(geometry->moment_cache), used,
                         limit);
@@ -220,8 +216,7 @@ struct GeometryAllocationLedger::Impl
                 case Kind::ExportCache: {
                     const auto cache = std::static_pointer_cast<const PointExportCache>(item.owner);
                     auto bytes = sizeof(PointExportCache);
-                    add_bytes(bytes, cache->vertex_provenance.capacity(),
-                        sizeof(std::weak_ptr<const DynamicPointProvenance>));
+                    add_bytes(bytes, cache->vertex_provenance.capacity(), sizeof(DynamicStoredPointRef));
                     // Fixed weak slots and roots never retain their publication owners.
                     (void) admit(item, bytes, used, limit);
                     break;
@@ -232,8 +227,7 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = sizeof(DynamicPointExportPayload);
                     add_bytes(bytes, payload->points.capacity(), sizeof(DynamicPoint));
                     if (admit(item, bytes, used, limit))
-                        for (const auto& point : payload->points)
-                            push(Kind::Point, DynamicGeometryAccess::identity(point), used, limit);
+                        push(Kind::PointSnapshot, payload->point_context, used, limit);
                     break;
                 }
                 case Kind::TypedPointExport: {
@@ -244,38 +238,51 @@ struct GeometryAllocationLedger::Impl
                         push(Kind::DynamicPointExport, payload->dynamic, used, limit);
                     break;
                 }
+                case Kind::CompactPointBatch: {
+                    const auto payload = std::static_pointer_cast<const PointSnapshotPayload<Mode>>(item.owner);
+                    std::size_t bytes = sizeof(PointSnapshotPayload<Mode>) + 2 * sizeof(void*);
+                    add_bytes(bytes, payload->refs.capacity(), sizeof(StoredPointRef<Mode>));
+                    if (admit(item, bytes, used, limit))
+                        push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(payload->context),
+                            used, limit);
+                    break;
+                }
                 case Kind::Plane: {
                     const auto plane = std::static_pointer_cast<const StoredPlane<Mode>>(item.owner);
-                    auto bytes = add(sizeof(StoredPlane<Mode>), authorities(plane->authorities));
-                    add_bytes(
-                        bytes, plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
+                    auto bytes = sizeof(StoredPlane<Mode>);
+                    add_bytes(bytes, plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
                     // Weak source references do not retain or pin their pointees.
                     if (admit(item, bytes, used, limit))
                     {
-                        retain_authorities(plane->authorities, used, limit);
+                        if (plane->point_context)
+                            push(Kind::PointSnapshot, plane->point_context->shared_from_this(), used, limit);
                         if constexpr (Mode == ArithmeticMode::Ordinary)
                             if (plane->native_support)
                                 retain_identity(*plane->native_support, used, limit);
                     }
                     break;
                 }
-                case Kind::Point: {
-                    const auto point = std::static_pointer_cast<const DynamicPointProvenance>(item.owner);
-                    auto bytes = sizeof(DynamicPointProvenance);
-                    add_bytes(bytes, point->source_edges.capacity(), sizeof(point->source_edges.front()));
+                case Kind::PointSnapshot: {
+                    const auto base = std::static_pointer_cast<const PointSnapshotContextBase>(item.owner);
+                    require_mode(base->mode, Mode);
+                    const auto context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(base);
+                    const auto bytes = context->exclusive_storage_bytes();
                     if (admit(item, bytes, used, limit))
                     {
-                        push(Kind::SupportPayload, point->support_payload, used, limit);
-                        details::visit_provenance_children(
-                            *point, [&](const auto& child) { push(Kind::Point, child, used, limit); });
+                        retain_authorities(context->authority_table, used, limit);
+                        for (const auto& parent : context->dependencies)
+                            push(Kind::PointSnapshot, parent, used, limit);
+                        for (const auto& block : context->native_fact_blocks)
+                            push(Kind::NativeFactBlock, block, used, limit);
                     }
                     break;
                 }
-                case Kind::SupportPayload: {
-                    const auto payload = std::static_pointer_cast<const DynamicPointSupportPayload>(item.owner);
-                    if (admit(item, add(sizeof(DynamicPointSupportPayload), authorities(payload->authorities)), used,
-                            limit))
-                        retain_authorities(payload->authorities, used, limit);
+                case Kind::NativeFactBlock: {
+                    const auto block = std::static_pointer_cast<const NativePointFactBlock<Mode>>(item.owner);
+                    std::size_t bytes = sizeof(NativePointFactBlock<Mode>) + 2 * sizeof(void*);
+                    add_bytes(bytes, block->points.capacity(), sizeof(PointCoordinates<Mode>));
+                    add_bytes(bytes, block->witnesses.capacity(), sizeof(PointErrorWitness));
+                    (void) admit(item, bytes, used, limit);
                     break;
                 }
                 case Kind::Moment:
@@ -328,14 +335,12 @@ struct GeometryAllocationLedger::Impl
                     const auto clip = std::static_pointer_cast<const GeometryClipConstruction>(item.owner);
                     require_mode(clip->mode, Mode);
                     auto bytes = sizeof(GeometryClipConstruction);
-                    add_bytes(
-                        bytes, clip->retained_points.capacity(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+                    add_bytes(bytes, clip->retained_points.capacity(), sizeof(DynamicStoredPointRef));
                     if (admit(item, bytes, used, limit))
                     {
                         push(Kind::Recipe, clip->parent, used, limit);
                         push(Kind::Plane, std::static_pointer_cast<const StoredPlane<Mode>>(clip->plane), used, limit);
-                        for (const auto& point : clip->retained_points)
-                            push(Kind::Point, point, used, limit);
+                        push(Kind::PointSnapshot, clip->point_context, used, limit);
                     }
                     break;
                 }
@@ -436,6 +441,86 @@ void GeometryAllocationLedger::retain(const DynamicConvexGeometryPtr& geometry, 
     }
 }
 
+template<ArithmeticMode Mode>
+void GeometryAllocationLedger::retain_snapshot(
+    const std::shared_ptr<const PointSnapshotContextBase>& context, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (!context || !context->frozen)
+            throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Only frozen point snapshots may be admitted.");
+        details::require_mode(context->mode, Mode);
+        begin_admission(used, limit);
+        if (impl_->mode)
+            details::require_mode(*impl_->mode, Mode);
+        else
+            impl_->mode = Mode;
+        impl_->push(allocation_detail::Kind::PointSnapshot, context, used, limit);
+        impl_->walk<Mode>(used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+template void GeometryAllocationLedger::retain_snapshot<ArithmeticMode::Ordinary>(
+    const std::shared_ptr<const PointSnapshotContextBase>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain_snapshot<ArithmeticMode::BoundedCertification>(
+    const std::shared_ptr<const PointSnapshotContextBase>&, std::size_t&, std::size_t);
+
+template<ArithmeticMode Mode>
+void DynamicGeometryAccess::retain_geometry_storage(const std::shared_ptr<const DynamicConvexGeometry::Impl>& storage,
+    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (!storage)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null geometry storage allocation admission.");
+        details::require_mode(storage->limits.arithmetic_mode, Mode);
+        ledger.begin_admission(used, limit);
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, Mode);
+        else
+            ledger.impl_->mode = Mode;
+        ledger.impl_->push(allocation_detail::Kind::Geometry, storage, used, limit);
+        ledger.impl_->walk<Mode>(used, limit);
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+template void DynamicGeometryAccess::retain_geometry_storage<ArithmeticMode::Ordinary>(
+    const std::shared_ptr<const DynamicConvexGeometry::Impl>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
+template void DynamicGeometryAccess::retain_geometry_storage<ArithmeticMode::BoundedCertification>(
+    const std::shared_ptr<const DynamicConvexGeometry::Impl>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
+
+void GeometryAllocationLedger::retain_point_provenance(const DynamicPoint& point, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        const auto& context = point.provenance_.context_pin();
+        if (!context)
+        {
+            begin_admission(used, limit, false);
+            return;
+        }
+        if (context->mode == ArithmeticMode::Ordinary)
+            retain_snapshot<ArithmeticMode::Ordinary>(context, used, limit);
+        else
+            retain_snapshot<ArithmeticMode::BoundedCertification>(context, used, limit);
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
 void GeometryAllocationLedger::retain(const DynamicPointExport& points, std::size_t& used, std::size_t limit)
 {
     try
@@ -488,6 +573,34 @@ template void GeometryAllocationLedger::retain<ArithmeticMode::Ordinary>(
     const PointExport<ArithmeticMode::Ordinary>&, std::size_t&, std::size_t);
 template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertification>(
     const PointExport<ArithmeticMode::BoundedCertification>&, std::size_t&, std::size_t);
+
+template<ArithmeticMode Mode>
+void GeometryAllocationLedger::retain(const PointSnapshot<Mode>& points, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        begin_admission(used, limit, bool(points.payload_));
+        if (!points.payload_)
+            return;
+        details::require_mode(points.payload_->context->mode, Mode);
+        if (impl_->mode)
+            details::require_mode(*impl_->mode, Mode);
+        else
+            impl_->mode = Mode;
+        impl_->push(allocation_detail::Kind::CompactPointBatch, points.payload_, used, limit);
+        impl_->walk<Mode>(used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+template void GeometryAllocationLedger::retain<ArithmeticMode::Ordinary>(
+    const PointSnapshot<ArithmeticMode::Ordinary>&, std::size_t&, std::size_t);
+template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertification>(
+    const PointSnapshot<ArithmeticMode::BoundedCertification>&, std::size_t&, std::size_t);
 
 void GeometryAllocationLedger::retain(const PlaneAuthority& authority, std::size_t& used, std::size_t limit)
 {

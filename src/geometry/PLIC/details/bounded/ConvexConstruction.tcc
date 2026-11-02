@@ -167,43 +167,39 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
     active_work->charge(poly.vertices.size(), sizeof(Vertex));
     active_work->charge(poly.faces.size(), sizeof(Face) + sizeof(Surface));
     active_work->charge(1, sizeof(PointExportCache));
-    active_work->charge(poly.vertices.size(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
     poly.point_export_cache = std::make_shared<PointExportCache>();
     if (std::fegetenv(&poly.point_export_cache->environment) != 0)
         reject("cannot capture global-coordinate arithmetic environment.");
+    active_work->charge(poly.vertices.size(), sizeof(DynamicStoredPointRef));
     poly.point_export_cache->vertex_provenance.resize(poly.vertices.size());
     if (poly.point_export_cache->vertex_provenance.capacity() > poly.vertices.size())
         active_work->charge(poly.point_export_cache->vertex_provenance.capacity() - poly.vertices.size(),
-            sizeof(std::weak_ptr<const DynamicPointProvenance>));
+            sizeof(DynamicStoredPointRef));
     poly.export_source.reset();
     // Recipe attachment after finish must not change the point publication policy.
     poly.export_seal = bool(poly.construction) || poly.numerical_only;
     for (auto& v : poly.vertices)
     {
-        if (v.source_identity)
-            v.authorities.share_if_equal(v.source_identity->support_payload);
         // Validate physical-coordinate range now without allocating a publication.
         (void) bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
-        active_work->charge(v.authorities.size(), sizeof(PlaneAuthority));
-        DynamicGeometryAccess::retain_supports(
-            v.source_identity, active_work->allocations, active_work->bytes, active_work->limits.byte_budget);
-        active_work->charge(DynamicGeometryAccess::identity_bytes(v.source_identity, false), 1);
-        for (const auto& key : v.authorities)
+        for (const auto& key : resolve_authorities(poly.point_context, v.authorities))
         {
             OriginalSupportAuthorityAccess::validate_boundary(key);
             active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
         }
     }
+    if (poly.point_context)
+        active_work->allocations.template retain_snapshot<Mode>(
+            poly.point_context, active_work->bytes, active_work->limits.byte_budget);
     std::set<PlanePtr> retained_planes;
     for (const auto& v : poly.vertices)
         retained_planes.insert(v.incident.begin(), v.incident.end());
     for (const auto& plane : retained_planes)
     {
         active_work->charge(1, sizeof(Plane));
-        active_work->charge(plane->source_vertices.capacity(), sizeof(std::weak_ptr<const DynamicPointProvenance>));
-        active_work->charge(plane->authorities.size(), sizeof(PlaneAuthority));
-        for (const auto& key : plane->authorities)
+        active_work->charge(plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
+        for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
             active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
     }
     for (const auto& f : poly.faces)
@@ -281,7 +277,7 @@ template<ArithmeticMode Mode> void validate_connected_boundary(std::size_t verte
 template<ArithmeticMode Mode>
 std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const DynamicPoint> vertices,
     const std::vector<Face>& faces, GeometryLimits limits, bool authenticated_planarity,
-    std::span<const std::shared_ptr<const DynamicPointProvenance>> identities)
+    std::span<const PointProvenanceView> identities, PointSnapshotBuilder<Mode>* point_builder)
 {
     static_assert(Mode == kernel_mode);
     if (!identities.empty() && identities.size() != vertices.size())
@@ -291,6 +287,10 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         reject("invalid or excessive convex shell size.");
     for (const auto& face : faces)
         active_work->charge(face.size(), 4 * sizeof(std::size_t) + 4 * sizeof(void*));
+    std::optional<PointSnapshotBuilder<Mode>> local_points;
+    if (!point_builder)
+        local_points.emplace();
+    auto& points = point_builder ? *point_builder : *local_points;
     auto result = std::make_shared<StoredGeometry>();
     result->frame.origin = origin;
     result->reference_origin = origin;
@@ -307,8 +307,12 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         reject("degenerate shell extent.");
     std::frexp(extent, &result->frame.exponent);
     for (std::size_t i = 0; i < input.size(); ++i)
-        result->vertices.push_back({scaled<Mode>(input[i], -result->frame.exponent), {}, vertices[i].supports(),
-            identities.empty() ? nullptr : identities[i]});
+    {
+        const auto authority = !identities.empty() && identities[i] ? identities[i].supports() : vertices[i].supports();
+        result->vertices.push_back(
+            {scaled<Mode>(input[i], -result->frame.exponent), {}, points.import_authority_range(authority),
+                identities.empty() ? StoredPointRef<Mode>{} : points.import(identities[i])});
+    }
     result->faces = faces;
     std::map<std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>> edges;
     for (const auto& face : faces)
@@ -326,6 +330,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
             edge.second += a < b ? 1 : -1;
         }
         auto plane = std::make_shared<Plane>();
+        plane->point_context = points.context();
         plane->frame = result->frame;
         plane->anchor = result->vertices[face[0]].coordinates;
         std::size_t second = 1, third = 2;
@@ -338,10 +343,8 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         }
         if (third == face.size())
             reject("face normal unresolved or degenerate.");
-        std::vector<DynamicPoint> face_points;
-        for (const auto index : face)
-            face_points.push_back(vertices[index]);
-        plane->authorities = dynamic_common_supports(face_points);
+        const auto common_authorities = source_face_authorities(face, vertices, identities);
+        plane->authorities = points.authority_range(DynamicGeometryAccess::admit_incidence<Mode>(common_authorities));
         for (const auto index : face)
         {
             const auto& coordinate = result->vertices[index].coordinates;
@@ -370,7 +373,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         const auto& face = result->faces[f];
         const auto& plane = result->surfaces[f].plane;
         for (const auto& vertex : result->vertices)
-            if (sign<Mode>(distance<Mode>(vertex, result->frame, plane)) > 0)
+            if (sign<Mode>(distance<Mode>(vertex, result->frame, plane, points.context())) > 0)
                 reject("shell is not convex/outward.");
         // Each edge bounds a convex face, including a collinear prefix.
         for (std::size_t i = 0; i < face.size(); ++i)
@@ -395,6 +398,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
             }
         }
     }
+    result->point_context = points.freeze();
     finish<Mode>(*result);
     return result;
 }
@@ -536,19 +540,18 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::make(
         reject("invalid or excessive shell size before conversion allocation.");
     active_work->charge(vertices.size(), sizeof(DynamicPoint));
     std::vector<DynamicPoint> relative;
-    active_work->charge(vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    active_work->charge(vertices.size(), sizeof(PointProvenanceView));
+    PointSnapshotBuilder<Mode> points;
+    std::vector<PointProvenanceView> identities;
     identities.reserve(vertices.size());
     for (const auto& vertex : vertices)
     {
         DynamicPoint source{{vertex[0], vertex[1], vertex[2]}, {}, Mode};
-        active_work->charge(1, sizeof(DynamicPointProvenance));
-        DynamicGeometryAccess::seal_represented_source(source, {});
-        identities.push_back(DynamicGeometryAccess::identity(source));
+        identities.push_back(points.native_source(source.value, source.absolute_error, {}));
         relative.push_back(bounded<Mode>(point<Mode>(vertex) - point<Mode>(vertices.front())));
     }
     return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(vertices.front(), relative, faces, limits, false, identities)));
+        new DynamicConvexGeometry(import<Mode>(vertices.front(), relative, faces, limits, false, identities, &points)));
 }
 
 template<ArithmeticMode Mode>
@@ -569,19 +572,20 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::make_bounded(
             reject("input anchor outside binary64 source-coordinate range.");
     }
     std::vector<DynamicPoint> relative;
-    active_work->charge(vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    active_work->charge(vertices.size(), sizeof(PointProvenanceView));
+    PointSnapshotBuilder<Mode> points;
+    std::vector<PointProvenanceView> identities;
     identities.reserve(vertices.size());
     for (const auto& vertex : vertices)
     {
         const auto input = converted_point<Mode>(vertex, limits.arithmetic_mode);
-        identities.push_back(DynamicGeometryAccess::identity(input));
+        const auto original = DynamicGeometryAccess::identity(input);
+        identities.push_back(resolve_point(points.context(), points.import(original)));
         auto p = bounded<Mode>(point<Mode>(input) - point<Mode>(origin));
-        DynamicGeometryAccess::seal(p, input.supports());
         relative.push_back(std::move(p));
     }
     return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(origin, relative, faces, limits, false, identities)));
+        new DynamicConvexGeometry(import<Mode>(origin, relative, faces, limits, false, identities, &points)));
 }
 
 template<ArithmeticMode Mode>
@@ -630,19 +634,18 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
     // Ordinary source topology is not an interval certificate. Treat the
     // represented local coordinates as fresh inputs and independently establish
     // planarity/convexity; inherited source IDs cannot force a zero residual.
-    active_work->charge(relative.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    PointSnapshotBuilder<Mode> points;
+    active_work->charge(relative.size(), sizeof(PointProvenanceView));
+    std::vector<PointProvenanceView> identities;
     identities.reserve(relative.size());
     for (const auto& point : relative)
     {
         auto global = bounded<Mode>(certification_kernel::point<Mode>(point) +
                                     certification_kernel::point<Mode>(shell.origin));
-        active_work->charge(1, sizeof(DynamicPointProvenance));
-        DynamicGeometryAccess::seal_represented_source(global, {});
-        identities.push_back(DynamicGeometryAccess::identity(global));
+        identities.push_back(points.native_source(global.value, global.absolute_error, {}));
     }
-    return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(shell.origin, relative, shell.outward_faces, limits, false, identities)));
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(
+        import<Mode>(shell.origin, relative, shell.outward_faces, limits, false, identities, &points)));
 }
 
 template<ArithmeticMode Mode>
@@ -797,7 +800,8 @@ template void finish<kernel_mode>(StoredGeometry& poly, bool partition_proof, bo
 template void validate_connected_boundary<kernel_mode>(std::size_t vertex_count, const std::vector<Face>& faces);
 template std::shared_ptr<StoredGeometry> import<kernel_mode>(GeometryPoint origin,
     std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits,
-    bool authenticated_planarity, std::span<const std::shared_ptr<const DynamicPointProvenance>> identities);
+    bool authenticated_planarity, std::span<const PointProvenanceView> identities,
+    PointSnapshotBuilder<kernel_mode>* point_builder);
 template DynamicPoint dynamic_point_average<kernel_mode>(std::span<const DynamicPoint> vertices);
 template DynamicPoint dynamic_point_interpolate<kernel_mode>(
     const DynamicPoint& a, const DynamicPoint& b, long double fraction);
