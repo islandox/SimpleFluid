@@ -2457,7 +2457,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17RetainsRepresentedShellAndFit
         EXPECT_EQ(sample.gas_volume, row.gas);
         EXPECT_EQ(sample.carrier_volume, row.carrier);
         EXPECT_EQ(cell.origin(), row.origin);
-        EXPECT_EQ(cell.faces(), fixture::faces);
+        EXPECT_TRUE(std::ranges::equal(cell.faces(), fixture::faces,
+            [](const auto& actual, const auto& expected) { return std::ranges::equal(actual, expected); }));
         // The raw capture has reference_origin == frame.origin on all rows.
         // Compare ordered public relative coordinates to the captured normalized
         // storage scaled by its exact power-of-two frame, without double rounding.
@@ -2643,7 +2644,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell8RetainsActualCandidateShellAnd
         EXPECT_EQ(sample.gas_volume, row.gas);
         EXPECT_EQ(sample.carrier_volume, row.carrier);
         EXPECT_EQ(cell.origin(), row.origin);
-        EXPECT_EQ(cell.faces(), fixture::faces);
+        EXPECT_TRUE(std::ranges::equal(cell.faces(), fixture::faces,
+            [](const auto& actual, const auto& expected) { return std::ranges::equal(actual, expected); }));
         const auto relative = cell.local_points();
         const auto physical = PLIC::test::exported_points(cell);
         ASSERT_EQ(relative.size(), row.stored_vertices.size());

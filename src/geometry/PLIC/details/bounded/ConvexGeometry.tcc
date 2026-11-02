@@ -177,7 +177,7 @@ template<ArithmeticMode Mode> DynamicPoint converted_point(const DynamicPoint& i
     return input;
 }
 
-template<ArithmeticMode Mode> Interval raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
+template<ArithmeticMode Mode> Interval raw_distance(const VertexView& vertex, const Frame& frame, const PlanePtr& plane)
 {
     static_assert(Mode == kernel_mode);
     // Move the plane anchor into the vertex frame before forming the small
@@ -191,7 +191,7 @@ template<ArithmeticMode Mode> Interval raw_distance(const Vertex& vertex, const 
 
 template<ArithmeticMode Mode>
 Interval distance(
-    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
+    const VertexView& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     ++statistics.support_distances;
@@ -352,9 +352,9 @@ template Point transform<kernel_mode>(const Point& p, const Frame& from, const F
 template CoordinateBox transform<kernel_mode>(const CoordinateBox& box, const Frame& from, const Frame& to);
 template Point interval_box<kernel_mode>(const CoordinateBox& box);
 template DynamicPoint converted_point<kernel_mode>(const DynamicPoint& input, ArithmeticMode mode);
-template Interval raw_distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template Interval distance<kernel_mode>(
-    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
+template Interval raw_distance<kernel_mode>(const VertexView& vertex, const Frame& frame, const PlanePtr& plane);
+template Interval distance<kernel_mode>(const VertexView& vertex, const Frame& frame, const PlanePtr& plane,
+    const PointSnapshotContext<kernel_mode>* context);
 template void tighten_incident_coordinates<kernel_mode>(Vertex& vertex, const Frame& frame);
 template Interval square_root<kernel_mode>(Interval x);
 template void Accumulator<kernel_mode>::add(Interval term);

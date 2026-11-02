@@ -173,7 +173,7 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
             retain(finite_faces_);
             retain(finite_transfers_);
             retain(finite_budgets_);
-            retain(finite_trajectories_);
+            budget.add(finite_trajectories_.storage_bytes());
             retain(roundoff_);
             retain(signed_receipts_);
             retain(signed_budgets_);
@@ -184,11 +184,7 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
             for (const auto& closure : finite_cell_closure_)
                 budget.add(AMR::encode_adaptive_key(closure.key).size());
             PLIC::GeometryAllocationLedger point_owners;
-            for (const auto& trace : finite_trajectories_)
-            {
-                point_owners.retain_point_provenance(trace.point, budget.used, budget.limit);
-                point_owners.retain_point_provenance(trace.departure, budget.used, budget.limit);
-            }
+            finite_trajectories_.retain_provenance(point_owners, budget.used, budget.limit);
         });
 }
 } // namespace SimpleFluid::VoF

@@ -1,4 +1,5 @@
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
+#include "geometry/swept_volume/details/OrdinaryVertexArena.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
@@ -119,6 +120,23 @@ struct AggregateWork
     std::size_t indirect_calls = 0, indirect_bytes = 0, indirect_reuses = 0;
     OrdinaryAggregateStage stage = OrdinaryAggregateStage::Source;
     std::size_t live_witnesses = 0, live_witness_bytes = 0;
+    std::size_t live_arena_bytes = 0, live_slot_bytes = 0, live_incidence_bytes = 0;
+    std::size_t live_face_scratch_bytes = 0;
+    void observe_geometry(std::size_t transient_bytes = 0) noexcept
+    {
+        stats.live_arena_bytes = live_arena_bytes;
+        stats.live_slot_bytes = live_slot_bytes;
+        stats.live_incidence_bytes = live_incidence_bytes;
+        stats.live_connectivity_bytes = live_witness_bytes + live_face_scratch_bytes;
+        stats.peak_arena_bytes = std::max(stats.peak_arena_bytes, live_arena_bytes);
+        stats.peak_slot_bytes = std::max(stats.peak_slot_bytes, live_slot_bytes);
+        stats.peak_incidence_bytes = std::max(stats.peak_incidence_bytes, live_incidence_bytes);
+        stats.peak_connectivity_bytes = std::max(stats.peak_connectivity_bytes, stats.live_connectivity_bytes);
+        const auto combined = stats.live_connectivity_bytes + live_arena_bytes + live_slot_bytes + live_incidence_bytes + transient_bytes;
+        stats.peak_combined_geometry_bytes = std::max(stats.peak_combined_geometry_bytes, combined);
+        stats.peak_live_witness_bytes = stats.peak_combined_geometry_bytes;
+        sync();
+    }
     GeometryAllocationLedger allocations;
     template<class Identity> void retain_identity(const Identity& identity)
     {
@@ -363,119 +381,172 @@ struct SourceTetra
         return batch->points[recipe->vertices[local].value];
     }
 };
+using VertexArena = details::OrdinaryVertexArena<Support, AggregateWork>;
 struct Poly
 {
-    std::vector<B> vertices;
-    std::vector<B> errors;
-    std::vector<std::vector<const Support*>> supports;
+    std::vector<VertexArena::Handle> vertices;
     SourceTetra source;
+    VertexArena* arena = nullptr;
     DefiningCache* defining_cache = nullptr;
-    // Only face-referenced vertices are stored. Defining support evidence and
-    // the immutable source recipe do not depend on a source-leaf index prefix.
+    // Local numbering and face/support ordering remain independent of arena slots.
     std::vector<Face> faces;
     AggregateWork* tracking = nullptr;
     std::size_t tracked_bytes = 0;
 
     Poly() = default;
-    Poly(const Poly& p)
-        : vertices(p.vertices), errors(p.errors), supports(p.supports), source(p.source),
-          defining_cache(p.defining_cache), faces(p.faces)
+    Poly(const Poly& p) : source(p.source), arena(p.arena), defining_cache(p.defining_cache)
     {
-        if (p.tracking)
-            watch(*p.tracking);
+        if (!p.tracking)
+            return;
+        watch(*p.tracking);
+        try
+        {
+            reserve(vertices, p.vertices.size());
+            vertices.insert(vertices.end(), p.vertices.begin(), p.vertices.end());
+            tracking->stats.vertices_copied += vertices.size();
+            tracking->stats.copied_vertex_bytes += vertices.size() * sizeof(VertexArena::Handle);
+            reserve(faces, p.faces.size());
+            for (const auto& face : p.faces)
+            {
+                Face copy;
+                copy.source = face.source;
+                tracking->charge(face.vertices.size() * sizeof(std::size_t));
+                copy.vertices = face.vertices;
+                faces.push_back(std::move(copy));
+            }
+            observe();
+        }
+        catch (...)
+        {
+            release_vertices();
+            if (tracking)
+            {
+                --tracking->live_witnesses;
+                tracking->live_witness_bytes -= tracked_bytes;
+                tracking->observe_geometry();
+            }
+            throw;
+        }
     }
     Poly(Poly&& p) noexcept { swap(p); }
-    Poly& operator=(Poly p) noexcept
-    {
-        swap(p);
-        return *this;
-    }
+    Poly& operator=(Poly p) noexcept { swap(p); return *this; }
     ~Poly()
     {
+        release_vertices();
         if (tracking)
         {
             --tracking->live_witnesses;
             tracking->live_witness_bytes -= tracked_bytes;
+            tracking->observe_geometry();
         }
+    }
+    // Reverse local order usually releases the newest dense records first.
+    // This changes reclamation only; local numbering stays intact while live.
+    void release_vertices() noexcept
+    {
+        while (!vertices.empty())
+            vertices.pop_back();
     }
     void swap(Poly& p) noexcept
     {
         vertices.swap(p.vertices);
-        errors.swap(p.errors);
-        supports.swap(p.supports);
         faces.swap(p.faces);
         std::swap(source, p.source);
+        std::swap(arena, p.arena);
         std::swap(defining_cache, p.defining_cache);
         std::swap(tracking, p.tracking);
         std::swap(tracked_bytes, p.tracked_bytes);
     }
     void watch(AggregateWork& work)
     {
+        work.charge(sizeof(Poly));
         tracking = &work;
         ++tracking->live_witnesses;
         observe();
     }
-    /** Owned witness object/buffer capacities only, excluding allocator metadata,
-     * split maps, expression caches and native geometry. Never an admission cap. */
+    template<class T> void reserve(std::vector<T>& values, std::size_t n)
+    {
+        if (n <= values.capacity())
+            return;
+        tracking->charge(n * sizeof(T));
+        tracking->observe_geometry(n * sizeof(T));
+        values.reserve(n);
+        tracking->charge((values.capacity() - n) * sizeof(T));
+        observe();
+    }
+    void append(VertexArena::Handle handle)
+    {
+        if (vertices.size() == vertices.capacity())
+            reserve(vertices, std::max(std::size_t{1}, 2 * vertices.capacity()));
+        vertices.push_back(std::move(handle));
+        observe();
+    }
+    void append_face(Face face)
+    {
+        if (faces.size() == faces.capacity())
+            reserve(faces, std::max(std::size_t{1}, 2 * faces.capacity()));
+        faces.push_back(std::move(face));
+        observe();
+    }
+    const B& weights(std::size_t i) const { return vertices[i].get().weights; }
+    const B& errors(std::size_t i) const { return vertices[i].get().errors; }
+    const std::vector<const Support*>& supports(std::size_t i) const { return vertices[i].get().supports; }
     void observe()
     {
         if (!tracking)
             return;
-        auto bytes = sizeof(Poly) + (vertices.capacity() + errors.capacity()) * sizeof(B) +
-                     supports.capacity() * sizeof(std::vector<const Support*>) + faces.capacity() * sizeof(Face);
-        for (const auto& support : supports)
-            bytes += support.capacity() * sizeof(const Support*);
+        auto bytes = sizeof(Poly) + vertices.capacity() * sizeof(VertexArena::Handle) + faces.capacity() * sizeof(Face);
         for (const auto& face : faces)
             bytes += face.vertices.capacity() * sizeof(std::size_t);
         tracking->live_witness_bytes -= tracked_bytes;
         tracking->live_witness_bytes += bytes;
         tracked_bytes = bytes;
         tracking->stats.peak_live_witnesses = std::max(tracking->stats.peak_live_witnesses, tracking->live_witnesses);
-        tracking->stats.peak_live_witness_bytes =
-            std::max(tracking->stats.peak_live_witness_bytes, tracking->live_witness_bytes);
-        tracking->sync();
+        tracking->observe_geometry();
     }
 };
-void charge_poly_points(const Poly& p, AggregateWork& work)
+/** Close retained containers in reverse construction order after their last
+ * numerical consumer, including exceptional exits. The arena still compacts
+ * immediately at each last-handle release. */
+template<class Container> struct ReverseDrain
 {
-    const auto before = work.bytes;
-    work.charge(p.vertices.size() * 2 * sizeof(B) + p.supports.size() * sizeof(std::vector<const Support*>));
-    for (const auto& support : p.supports)
-        work.charge(support.size() * sizeof(const Support*));
-    work.stats.vertices_copied += p.vertices.size();
-    work.stats.copied_vertex_bytes += work.bytes - before;
-    work.sync();
-}
-void charge_poly_copy(const Poly& p, AggregateWork& work)
-{
-    charge_poly_points(p, work);
-    work.charge(sizeof(Poly) + p.faces.size() * sizeof(Face));
-    for (const auto& face : p.faces)
-        work.charge(face.vertices.size() * sizeof(std::size_t));
-}
+    Container& values;
+    explicit ReverseDrain(Container& container) : values(container) {}
+    ReverseDrain(const ReverseDrain&) = delete;
+    ~ReverseDrain()
+    {
+        while (!values.empty())
+            values.pop_back();
+    }
+};
 constexpr std::array<std::array<unsigned, 3>, 4> tetra_faces{{{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}}};
-Poly tetra(SourceTetra source, const std::array<Support, 4>& supports, DefiningCache& cache, AggregateWork& work)
+Poly tetra(SourceTetra source, const std::array<Support, 4>& supports, DefiningCache& cache,
+    VertexArena& arena, AggregateWork& work)
 {
     work.witness();
-    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(std::vector<const Support*>) + 4 * sizeof(Face) +
-                12 * sizeof(std::size_t) + 12 * sizeof(const Support*));
     Poly p;
     p.watch(work);
     p.source = source;
+    p.arena = &arena;
     p.defining_cache = &cache;
-    p.vertices.resize(4);
-    p.errors.resize(4);
-    p.supports.resize(4);
+    p.reserve(p.vertices, 4);
+    p.reserve(p.faces, 4);
     for (unsigned i = 0; i < 4; ++i)
     {
-        p.vertices[i][i] = 1;
-        p.supports[i].reserve(3);
+        B weights{};
+        weights[i] = 1;
+        std::array<const Support*, 3> incidence;
+        unsigned next = 0;
         for (unsigned j = 0; j < 4; ++j)
             if (i != j)
-                p.supports[i].push_back(&supports[j]);
+                incidence[next++] = &supports[j];
+        p.append(arena.create_span(weights, {}, incidence, source.batch, source.recipe));
     }
     for (unsigned i = 0; i < 4; ++i)
-        p.faces.push_back({{tetra_faces[i].begin(), tetra_faces[i].end()}, static_cast<int>(i)});
+    {
+        work.charge(3 * sizeof(std::size_t));
+        p.append_face({{tetra_faces[i].begin(), tetra_faces[i].end()}, static_cast<int>(i)});
+    }
     p.observe();
     return p;
 }
@@ -540,7 +611,7 @@ std::optional<predicates::Result> defining_distance(
                 "Aggregate defining-support distance has no usable represented magnitude.");
         return result;
     };
-    const auto& supports = p.supports.at(vertex);
+    const auto& supports = p.supports(vertex);
     for (std::size_t a = 0; a < supports.size(); ++a)
         for (std::size_t b = a + 1; b < supports.size(); ++b)
             for (std::size_t c = b + 1; c < supports.size(); ++c)
@@ -596,6 +667,66 @@ std::optional<predicates::Result> defining_distance(
             }
     return std::nullopt;
 }
+/** Owns only the observation of a separately admitted temporary buffer. */
+struct ScopedIncidenceCapacity
+{
+    AggregateWork& work;
+    std::size_t bytes;
+    ScopedIncidenceCapacity(AggregateWork& w, std::size_t n) : work(w), bytes(n)
+    {
+        work.live_incidence_bytes += bytes;
+        work.observe_geometry();
+    }
+    ~ScopedIncidenceCapacity()
+    {
+        work.live_incidence_bytes -= bytes;
+        work.observe_geometry();
+    }
+};
+/** A face under construction owns connectivity before its Poly accepts it. */
+struct FaceBuilder
+{
+    Face face;
+    AggregateWork& work;
+    std::size_t tracked = 0;
+    explicit FaceBuilder(AggregateWork& w) : work(w) {}
+    FaceBuilder(const FaceBuilder&) = delete;
+    ~FaceBuilder()
+    {
+        work.live_face_scratch_bytes -= tracked;
+        work.observe_geometry();
+    }
+    void push(std::size_t vertex)
+    {
+        auto& ids = face.vertices;
+        if (ids.size() == ids.capacity())
+        {
+            const auto maximum = std::min(ids.max_size(), std::numeric_limits<std::size_t>::max() / sizeof(std::size_t));
+            if (ids.size() == maximum)
+                work_limit("face_connectivity", ids.size(), 1, maximum);
+            const auto capacity = ids.capacity() > maximum / 2 ? maximum
+                : std::max(std::size_t{1}, 2 * ids.capacity());
+            // Admit each allocation before growth, including discarded contact
+            // faces. Moving an accepted buffer into a Poly is not a new charge.
+            work.charge(capacity * sizeof(std::size_t));
+            work.observe_geometry(capacity * sizeof(std::size_t));
+            ids.reserve(capacity);
+            work.charge((ids.capacity() - capacity) * sizeof(std::size_t));
+            work.live_face_scratch_bytes -= tracked;
+            tracked = ids.capacity() * sizeof(std::size_t);
+            work.live_face_scratch_bytes += tracked;
+            work.observe_geometry();
+        }
+        ids.push_back(vertex);
+    }
+    Face finish()
+    {
+        work.live_face_scratch_bytes -= tracked;
+        tracked = 0;
+        work.observe_geometry();
+        return std::move(face);
+    }
+};
 struct Split
 {
     Poly inside, outside;
@@ -630,8 +761,8 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
         if (!active[i])
             continue;
         ++work.stats.vertices_classified;
-        if (std::find(p.supports[i].begin(), p.supports[i].end(), d.support) == p.supports[i].end())
-            distances[i] = distance(p.vertices[i], p.errors[i], d, work);
+        if (std::find(p.supports(i).begin(), p.supports(i).end(), d.support) == p.supports(i).end())
+            distances[i] = distance(p.weights(i), p.errors(i), d, work);
         bool classified = resolved(distances[i]);
         if (!classified)
             if (const auto direct = defining_distance(p, i, d, work))
@@ -645,7 +776,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
             message.precision(std::numeric_limits<long double>::max_digits10);
             message << "Ordinary aggregate cut classification is unresolved: vertex=" << i
                     << " distance=" << distances[i].value << " estimate=" << distances[i].absolute_error << " weights=";
-            for (auto b : p.vertices[i])
+            for (auto b : p.weights(i))
                 message << b << ',';
             throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, message.str());
         }
@@ -657,16 +788,15 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
             "Ordinary aggregate full-dimensional witness collapsed onto a cut.");
     if (!inside && !complementary)
         return {};
+    for (std::size_t i = 0; i < p.vertices.size(); ++i)
+        if (active[i] && distances[i].value == 0 &&
+            std::find(p.supports(i).begin(), p.supports(i).end(), d.support) == p.supports(i).end())
+        {
+            p.arena->replace_with_extended_evidence(p.vertices[i], d.support);
+            p.observe();
+        }
     if (!inside || !outside)
     {
-        for (std::size_t i = 0; i < p.vertices.size(); ++i)
-            if (active[i] && distances[i].value == 0 &&
-                std::find(p.supports[i].begin(), p.supports[i].end(), d.support) == p.supports[i].end())
-            {
-                work.charge(sizeof(const Support*));
-                p.supports[i].push_back(d.support);
-                p.observe();
-            }
         p.observe();
         Split result;
         (inside ? result.inside : result.outside) = std::move(p);
@@ -679,6 +809,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
     {
         child.watch(work);
         child.source = p.source;
+        child.arena = p.arena;
         child.defining_cache = p.defining_cache;
     };
     initialize(negative);
@@ -729,52 +860,42 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
             ++cap_count;
         }
     };
-    const auto append_point =
-        [&](Poly& child, const B& b, const B& error, const std::vector<const Support*>& supports, bool copied)
+    const auto append_point = [&](Poly& child, VertexArena::Handle handle, bool copied)
     {
-        const auto bytes =
-            2 * sizeof(B) + sizeof(std::vector<const Support*>) + supports.size() * sizeof(const Support*);
-        work.charge(bytes);
         if (copied)
         {
             ++work.stats.vertices_copied;
-            work.stats.copied_vertex_bytes += bytes;
+            work.stats.copied_vertex_bytes += sizeof(VertexArena::Handle);
         }
         const auto index = child.vertices.size();
-        child.vertices.push_back(b);
-        child.errors.push_back(error);
-        child.supports.push_back(supports);
-        child.observe();
+        child.append(std::move(handle));
         return index;
     };
     // Faces use shared source/crossing IDs until accepted, so discarded contact
     // edges cannot leave an unreferenced point in either compact child.
-    const auto retain_face = [&](Poly& child, std::vector<std::size_t>& indices, Face face)
+    const auto retain_face = [&](Poly& child, std::vector<std::size_t>& indices, FaceBuilder& builder)
     {
+        auto& face = builder.face;
         if (face.vertices.size() < 3)
             return;
-        work.charge(sizeof(Face) + face.vertices.size() * sizeof(std::size_t));
         for (auto& id : face.vertices)
         {
             if (indices[id] == absent)
             {
-                indices[id] = append_point(child, p.vertices[id], p.errors[id], p.supports[id], true);
-                if (distances[id].value == 0 && std::find(child.supports.back().begin(), child.supports.back().end(),
-                                                    d.support) == child.supports.back().end())
-                {
-                    work.charge(sizeof(const Support*));
-                    child.supports.back().push_back(d.support);
-                    child.observe();
-                }
+                indices[id] = append_point(child, p.vertices[id], true);
             }
             id = indices[id];
         }
-        child.faces.push_back(std::move(face));
+        if (child.faces.size() == child.faces.capacity())
+            child.reserve(child.faces, std::max(std::size_t{1}, 2 * child.faces.capacity()));
+        child.faces.push_back(builder.finish());
         child.observe();
     };
     for (const auto& face : p.faces)
     {
-        Face below, above;
+        FaceBuilder below_builder(work), above_builder(work);
+        auto& below = below_builder.face;
+        auto& above = above_builder.face;
         below.source = above.source = face.source;
         auto previous = face.vertices.back();
         for (auto current : face.vertices)
@@ -804,8 +925,8 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
                     for (unsigned k = 0; k < 4; ++k)
                     {
                         const auto coordinate =
-                            construction_sum(construction_product(complement, {p.vertices[i][k], p.errors[i][k]}, work),
-                                construction_product(t, {p.vertices[j][k], p.errors[j][k]}, work), work);
+                            construction_sum(construction_product(complement, {p.weights(i)[k], p.errors(i)[k]}, work),
+                                construction_product(t, {p.weights(j)[k], p.errors(j)[k]}, work), work);
                         b[k] = coordinate.value;
                         error[k] = coordinate.absolute_error;
                         if (!std::isfinite(b[k]) || !std::isfinite(error[k]))
@@ -814,26 +935,36 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
                     }
                     // This list is the defining evidence, independent of rounded
                     // barycentric weights and of which complementary child owns it.
-                    std::vector<const Support*> supports{d.support};
-                    for (auto id : p.supports[i])
-                        if (std::find(p.supports[j].begin(), p.supports[j].end(), id) != p.supports[j].end() &&
+                    std::vector<const Support*> supports;
+                    const auto maximum_supports = std::min(supports.max_size(), absent / sizeof(const Support*));
+                    const auto common_bound = std::min(p.supports(i).size(), p.supports(j).size());
+                    if (common_bound >= maximum_supports)
+                        work_limit("crossing_supports", common_bound, 1, maximum_supports);
+                    const auto capacity = 1 + common_bound;
+                    work.charge(capacity * sizeof(const Support*));
+                    supports.reserve(capacity);
+                    ScopedIncidenceCapacity incidence_capacity(work, supports.capacity() * sizeof(const Support*));
+                    work.charge((supports.capacity() - capacity) * sizeof(const Support*));
+                    supports.push_back(d.support);
+                    for (auto id : p.supports(i))
+                        if (std::find(p.supports(j).begin(), p.supports(j).end(), id) != p.supports(j).end() &&
                             id != d.support)
                             supports.push_back(id);
-                    work.charge(supports.size() * sizeof(const Support*));
-                    negative_indices.push_back(append_point(negative, b, error, supports, false));
+                    auto crossing = p.arena->create(b, error, supports, p.source.batch, p.source.recipe);
+                    negative_indices.push_back(append_point(negative, crossing, false));
                     if (complementary)
-                        positive_indices.push_back(append_point(positive, b, error, supports, true));
+                        positive_indices.push_back(append_point(positive, crossing, true));
                     work.op(20);
                 }
-                below.vertices.push_back(it->second);
+                below_builder.push(it->second);
                 if (complementary)
-                    above.vertices.push_back(it->second);
+                    above_builder.push(it->second);
                 add_cap(it->second);
             }
             if (dc <= 0)
-                below.vertices.push_back(current);
+                below_builder.push(current);
             if (complementary && dc >= 0)
-                above.vertices.push_back(current);
+                above_builder.push(current);
             if (dc == 0)
                 add_cap(current);
             previous = current;
@@ -853,19 +984,20 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
                     ring_start = std::min(ring_start, b);
                 }
             }
-        retain_face(negative, negative_indices, std::move(below));
+        retain_face(negative, negative_indices, below_builder);
         if (complementary)
-            retain_face(positive, positive_indices, std::move(above));
+            retain_face(positive, positive_indices, above_builder);
     }
     if (cap_count < 3)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cut lost its retained boundary.");
     if (ring_count != cap_count)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is incomplete.");
-    Face boundary;
+    FaceBuilder boundary_builder(work);
+    auto& boundary = boundary_builder.face;
     auto current = ring_start;
     do
     {
-        boundary.vertices.push_back(current);
+        boundary_builder.push(current);
         if (current >= cap_ring.size() || cap_ring[current] == absent)
             fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is open.");
         current = cap_ring[current];
@@ -874,11 +1006,15 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is disconnected.");
     if (complementary)
     {
-        auto opposite = boundary;
+        FaceBuilder opposite_builder(work);
+        opposite_builder.face.source = boundary.source;
+        for (const auto vertex : boundary.vertices)
+            opposite_builder.push(vertex);
+        auto& opposite = opposite_builder.face;
         std::reverse(opposite.vertices.begin() + 1, opposite.vertices.end());
-        retain_face(positive, positive_indices, std::move(opposite));
+        retain_face(positive, positive_indices, opposite_builder);
     }
-    retain_face(negative, negative_indices, std::move(boundary));
+    retain_face(negative, negative_indices, boundary_builder);
     for (const auto* child : {&negative, &positive})
         if (child->vertices.size() > work.geometry.maximum_vertices ||
             child->faces.size() > work.geometry.maximum_faces)
@@ -1001,14 +1137,14 @@ void integrate(const Poly& p, const std::array<predicates::Result, 4>& coefficie
     {
         if (f.source >= 0 && cancelled[f.source])
             continue;
-        const auto& a = p.vertices[f.vertices[0]];
+        const auto& a = p.weights(f.vertices[0]);
         for (std::size_t triangle = 1; triangle + 1 < f.vertices.size(); ++triangle)
         {
-            const auto& b = p.vertices[f.vertices[triangle]];
-            const auto& c = p.vertices[f.vertices[triangle + 1]];
-            const auto& ea = p.errors[f.vertices[0]];
-            const auto& eb = p.errors[f.vertices[triangle]];
-            const auto& ec = p.errors[f.vertices[triangle + 1]];
+            const auto& b = p.weights(f.vertices[triangle]);
+            const auto& c = p.weights(f.vertices[triangle + 1]);
+            const auto& ea = p.errors(f.vertices[0]);
+            const auto& eb = p.errors(f.vertices[triangle]);
+            const auto& ec = p.errors(f.vertices[triangle + 1]);
             for (unsigned omitted = 0; omitted < 4; ++omitted)
             {
                 const auto j = axes(omitted);
@@ -1059,9 +1195,9 @@ void integrate_source_reference(
     for (const auto& face : p.faces)
         for (auto vertex : face.vertices)
             for (unsigned axis = 0; axis < 4; ++axis)
-                if (p.vertices[vertex][axis] > largest)
+                if (p.weights(vertex)[axis] > largest)
                 {
-                    largest = p.vertices[vertex][axis];
+                    largest = p.weights(vertex)[axis];
                     dominant = axis;
                     reference = vertex;
                 }
@@ -1072,7 +1208,7 @@ void integrate_source_reference(
     const auto parity = dominant % 2 ? -1.L : 1.L;
     V q{};
     for (unsigned axis = 0; axis < 3; ++axis)
-        q[axis] = p.vertices[reference][chart[axis]];
+        q[axis] = p.weights(reference)[chart[axis]];
     for (const auto& face : p.faces)
         for (std::size_t triangle = 1; triangle + 1 < face.vertices.size(); ++triangle)
         {
@@ -1087,12 +1223,12 @@ void integrate_source_reference(
                 for (unsigned axis = 0; axis < 3; ++axis)
                 {
                     const auto coordinate = chart[axis];
-                    point[i][axis] = p.vertices[vertex[i]][coordinate];
+                    point[i][axis] = p.weights(vertex[i])[coordinate];
                     const auto delta = std::abs(sum_values(point[i][axis], -q[axis]));
                     difference[i][axis] =
                         delta == 0 ? 0
                                    : represented(std::nextafter(delta, std::numeric_limits<long double>::infinity()));
-                    error[i][axis] = sum_values(p.errors[vertex[i]][coordinate], p.errors[reference][coordinate]);
+                    error[i][axis] = sum_values(p.errors(vertex[i])[coordinate], p.errors(reference)[coordinate]);
                 }
             const auto determinant =
                 predicate([&] { return predicates::orientation({q, point[0], point[1], point[2]}); }, work);
@@ -1575,9 +1711,11 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             context.retry = retry;
             try
             {
+                VertexArena arena(work);
                 std::vector<Poly> remainder;
+                ReverseDrain drain_remainder(remainder);
                 remainder.push_back(
-                    tetra(source_tetra(ordinal), source_faces[ordinal], defining_caches[ordinal], work));
+                    tetra(source_tetra(ordinal), source_faces[ordinal], defining_caches[ordinal], arena, work));
                 work.stats.peak_remainders = std::max(work.stats.peak_remainders, remainder.size());
                 for (std::size_t donor_index = 0; donor_index < cuts.size(); ++donor_index)
                 {
@@ -1585,6 +1723,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     context.donor = donors[donor_ordinal].id;
                     const auto& dc = cuts[donor_ordinal];
                     std::vector<Poly> next;
+                    ReverseDrain drain_next(next);
                     auto unprocessed = remainder.size();
                     for (auto& retained : remainder)
                     {
@@ -1700,7 +1839,9 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         Poly bulk, gas, carrier;
                         std::array<predicates::Result, 4> coefficients;
                     };
+                    VertexArena arena(work);
                     std::vector<Witness> witnesses;
+                    ReverseDrain drain_witnesses(witnesses);
                     work.charge(impl_->batch.tetrahedra.size() * sizeof(Witness));
                     for (std::size_t ti = 0; ti < impl_->batch.tetrahedra.size(); ++ti)
                     {
@@ -1708,7 +1849,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         const auto& t = impl_->batch.tetrahedra[ti];
                         if (t.sign != sign)
                             continue;
-                        auto bulk = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], work);
+                        auto bulk = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
                         // Replay immutable supports in reverse order on the single
                         // reconstruction retry; rounded child coordinates are not inputs.
                         for (std::size_t k = 0; k < cuts[di].size() && !bulk.faces.empty(); ++k)
@@ -1734,12 +1875,11 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             // donor intersections introduce dependent crossings.
                             Poly phase_source;
                             if (retry)
-                                phase_source = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], work);
+                                phase_source = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
                             else
                             {
                                 // Bulk remains immutable for its own channel.
                                 // The consuming split shares all phase work.
-                                charge_poly_copy(bulk, work);
                                 phase_source = bulk;
                             }
                             auto phases = split(std::move(phase_source), d, work, true);

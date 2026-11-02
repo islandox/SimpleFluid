@@ -14,6 +14,7 @@ enum class Kind
     TypedWrapper,
     DynamicWrapper,
     Geometry,
+    Topology,
     ExportCache,
     DynamicPointExport,
     TypedPointExport,
@@ -67,6 +68,28 @@ std::size_t authorities(const std::vector<PlaneAuthority>& values)
 {
     return product(values.capacity(), sizeof(PlaneAuthority));
 }
+template<ArithmeticMode Mode> struct NativeBindingPrepaid
+{
+    const void* typed = nullptr;
+    const void* dynamic = nullptr;
+    const void* geometry = nullptr;
+    const details::FrozenTopology<Mode>* topology = nullptr;
+    bool contains(Kind kind, const void* owner) const noexcept
+    {
+        if (kind == Kind::TypedWrapper)
+            return owner == typed;
+        if (kind == Kind::DynamicWrapper)
+            return owner == dynamic;
+        if (kind == Kind::Geometry)
+            return owner == geometry;
+        if (kind == Kind::Topology)
+            return owner == topology;
+        if (kind == Kind::Plane)
+            return std::any_of(topology->planes.begin(), topology->planes.end(),
+                [&](const auto& plane) { return plane.get() == owner; });
+        return false;
+    }
+};
 } // namespace SIMPLEFLUID_LOCAL allocation_detail
 
 struct GeometryAllocationLedger::Impl
@@ -114,7 +137,8 @@ struct GeometryAllocationLedger::Impl
         }
         pending.push_back({kind, pointer});
     }
-    bool admit(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit)
+    bool admit(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit,
+        bool prepaid = false)
     {
         using namespace allocation_detail;
         const Key key{item.kind, item.owner.get()};
@@ -122,7 +146,10 @@ struct GeometryAllocationLedger::Impl
             return false;
         // Charge before publishing the seen identity. A failed call cannot
         // make an uncharged allocation disappear from a later admission.
-        account(bytes, false, used, limit);
+        if (prepaid)
+            payload = add(payload, bytes); // Allocation was charged before construction; retain its strong pin below.
+        else
+            account(bytes, false, used, limit);
         account(sizeof(typename decltype(owners)::value_type) + 4 * sizeof(void*), true, used, limit);
         owners.emplace(key, Entry{item.owner});
         return true;
@@ -153,12 +180,16 @@ struct GeometryAllocationLedger::Impl
             admit({allocation_detail::Kind::AuthorityPayload, owner}, authority.opaque_payload_bytes(), used, limit);
     }
 
-    template<ArithmeticMode Mode> void walk(std::size_t& used, std::size_t limit)
+    template<ArithmeticMode Mode>
+    void walk(
+        std::size_t& used, std::size_t limit, const allocation_detail::NativeBindingPrepaid<Mode>* prepaid = nullptr)
     {
         using namespace allocation_detail;
         using namespace details;
         const auto add_bytes = [](std::size_t& bytes, std::size_t count, std::size_t size)
         { bytes = add(bytes, product(count, size)); };
+        const auto admit_owner = [&](const Item& item, std::size_t bytes, std::size_t& counter, std::size_t cap)
+        { return admit(item, bytes, counter, cap, prepaid && prepaid->contains(item.kind, item.owner.get())); };
         while (!pending.empty())
         {
             const auto item = std::move(pending.back());
@@ -170,14 +201,14 @@ struct GeometryAllocationLedger::Impl
                 case Kind::TypedWrapper: {
                     const auto geometry = std::static_pointer_cast<const ConvexCellGeometry<Mode>>(item.owner);
                     require_mode(geometry->arithmetic_mode(), Mode);
-                    if (admit(item, sizeof(ConvexCellGeometry<Mode>), used, limit))
+                    if (admit_owner(item, sizeof(ConvexCellGeometry<Mode>), used, limit))
                         push(Kind::DynamicWrapper, geometry->dynamic_geometry(), used, limit);
                     break;
                 }
                 case Kind::DynamicWrapper: {
                     const auto geometry = std::static_pointer_cast<const DynamicConvexGeometry>(item.owner);
                     require_mode(geometry->arithmetic_mode(), Mode);
-                    if (admit(item, sizeof(DynamicConvexGeometry), used, limit))
+                    if (admit_owner(item, sizeof(DynamicConvexGeometry), used, limit))
                         push(Kind::Geometry, DynamicGeometryAccess::implementation(*geometry), used, limit);
                     break;
                 }
@@ -185,22 +216,10 @@ struct GeometryAllocationLedger::Impl
                     const auto base = std::static_pointer_cast<const DynamicConvexGeometry::Impl>(item.owner);
                     const auto geometry = checked_geometry_storage<Mode>(base);
                     std::size_t bytes = sizeof(GeometryStorage<Mode>);
-                    add_bytes(bytes, geometry->vertices.capacity(), sizeof(StoredVertex<Mode>));
-                    add_bytes(bytes, geometry->faces.capacity(), sizeof(Face));
-                    add_bytes(bytes, geometry->surfaces.capacity(), sizeof(StoredSurface<Mode>));
-                    for (const auto& vertex : geometry->vertices)
-                        add_bytes(bytes, vertex.incident.capacity(), sizeof(StoredPlanePtr<Mode>));
-                    for (const auto& face : geometry->faces)
-                        add_bytes(bytes, face.capacity(), sizeof(std::size_t));
-                    if (!admit(item, bytes, used, limit))
+                    add_bytes(bytes, geometry->vertices.capacity(), sizeof(FrozenVertex<Mode>));
+                    if (!admit_owner(item, bytes, used, limit))
                         break;
-                    for (const auto& vertex : geometry->vertices)
-                    {
-                        for (const auto& plane : vertex.incident)
-                            push(Kind::Plane, plane, used, limit);
-                    }
-                    for (const auto& surface : geometry->surfaces)
-                        push(Kind::Plane, surface.plane, used, limit);
+                    push(Kind::Topology, geometry->topology, used, limit);
                     push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(geometry->point_context),
                         used, limit);
                     push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(geometry->point_export_cache), used,
@@ -213,12 +232,19 @@ struct GeometryAllocationLedger::Impl
                     push(Kind::Recipe, geometry->construction, used, limit);
                     break;
                 }
+                case Kind::Topology: {
+                    const auto topology = std::static_pointer_cast<const FrozenTopology<Mode>>(item.owner);
+                    if (admit_owner(item, topology->bytes(), used, limit))
+                        for (const auto& plane : topology->planes)
+                            push(Kind::Plane, plane, used, limit);
+                    break;
+                }
                 case Kind::ExportCache: {
                     const auto cache = std::static_pointer_cast<const PointExportCache>(item.owner);
                     auto bytes = sizeof(PointExportCache);
                     add_bytes(bytes, cache->vertex_provenance.capacity(), sizeof(DynamicStoredPointRef));
                     // Fixed weak slots and roots never retain their publication owners.
-                    (void) admit(item, bytes, used, limit);
+                    (void) admit_owner(item, bytes, used, limit);
                     break;
                 }
                 case Kind::DynamicPointExport: {
@@ -226,7 +252,7 @@ struct GeometryAllocationLedger::Impl
                     require_mode(payload->mode, Mode);
                     auto bytes = sizeof(DynamicPointExportPayload);
                     add_bytes(bytes, payload->points.capacity(), sizeof(DynamicPoint));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                         push(Kind::PointSnapshot, payload->point_context, used, limit);
                     break;
                 }
@@ -234,7 +260,7 @@ struct GeometryAllocationLedger::Impl
                     const auto payload = std::static_pointer_cast<const PointExportPayload<Mode>>(item.owner);
                     auto bytes = sizeof(PointExportPayload<Mode>);
                     add_bytes(bytes, payload->points.capacity(), sizeof(Point<Mode>));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                         push(Kind::PointSnapshot,
                             std::shared_ptr<const PointSnapshotContextBase>(payload->point_context), used, limit);
                     break;
@@ -243,7 +269,7 @@ struct GeometryAllocationLedger::Impl
                     const auto payload = std::static_pointer_cast<const PointSnapshotPayload<Mode>>(item.owner);
                     std::size_t bytes = sizeof(PointSnapshotPayload<Mode>) + 2 * sizeof(void*);
                     add_bytes(bytes, payload->refs.capacity(), sizeof(StoredPointRef<Mode>));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                         push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(payload->context),
                             used, limit);
                     break;
@@ -253,7 +279,7 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = sizeof(StoredPlane<Mode>);
                     add_bytes(bytes, plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
                     // Weak source references do not retain or pin their pointees.
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                     {
                         if (plane->point_context)
                             push(Kind::PointSnapshot, plane->point_context->shared_from_this(), used, limit);
@@ -268,7 +294,7 @@ struct GeometryAllocationLedger::Impl
                     require_mode(base->mode, Mode);
                     const auto context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(base);
                     const auto bytes = context->exclusive_storage_bytes();
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                     {
                         retain_authorities(context->authority_table, used, limit);
                         for (const auto& parent : context->dependencies)
@@ -283,15 +309,15 @@ struct GeometryAllocationLedger::Impl
                     std::size_t bytes = sizeof(NativePointFactBlock<Mode>) + 2 * sizeof(void*);
                     add_bytes(bytes, block->points.capacity(), sizeof(PointCoordinates<Mode>));
                     add_bytes(bytes, block->witnesses.capacity(), sizeof(PointErrorWitness));
-                    (void) admit(item, bytes, used, limit);
+                    (void) admit_owner(item, bytes, used, limit);
                     break;
                 }
                 case Kind::Moment:
-                    (void) admit(item, sizeof(StoredMomentCache<Mode>), used, limit);
+                    (void) admit_owner(item, sizeof(StoredMomentCache<Mode>), used, limit);
                     break;
                 case Kind::Ancestry: {
                     const auto ancestry = std::static_pointer_cast<const Ancestry>(item.owner);
-                    if (admit(item, sizeof(Ancestry), used, limit))
+                    if (admit_owner(item, sizeof(Ancestry), used, limit))
                     {
                         push(Kind::Ancestry, ancestry->parent, used, limit);
                         push(Kind::Split, ancestry->split, used, limit);
@@ -300,7 +326,7 @@ struct GeometryAllocationLedger::Impl
                 }
                 case Kind::Split: {
                     const auto split = std::static_pointer_cast<const Split>(item.owner);
-                    if (admit(item, sizeof(Split), used, limit))
+                    if (admit_owner(item, sizeof(Split), used, limit))
                         push(Kind::Ancestry, split->parent, used, limit);
                     break;
                 }
@@ -308,7 +334,7 @@ struct GeometryAllocationLedger::Impl
                     const auto certificate = std::static_pointer_cast<const PartitionCertificate>(item.owner);
                     auto bytes = sizeof(PartitionCertificate);
                     add_bytes(bytes, certificate->members.capacity(), sizeof(std::weak_ptr<const Ancestry>));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                         push(Kind::Ancestry, certificate->parent, used, limit);
                     break;
                 }
@@ -317,7 +343,7 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = sizeof(GeometryConstruction);
                     if (recipe->kind() == GeometryConstruction::Kind::Rebase)
                         add_bytes(bytes, 1, sizeof(GeometryConstruction::Rebase));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                     {
                         if (recipe->kind() == GeometryConstruction::Kind::Source)
                             push(Kind::Geometry, recipe->source().source, used, limit);
@@ -337,7 +363,7 @@ struct GeometryAllocationLedger::Impl
                     require_mode(clip->mode, Mode);
                     auto bytes = sizeof(GeometryClipConstruction);
                     add_bytes(bytes, clip->retained_points.capacity(), sizeof(DynamicStoredPointRef));
-                    if (admit(item, bytes, used, limit))
+                    if (admit_owner(item, bytes, used, limit))
                     {
                         push(Kind::Recipe, clip->parent, used, limit);
                         push(Kind::Plane, std::static_pointer_cast<const StoredPlane<Mode>>(clip->plane), used, limit);
@@ -441,6 +467,38 @@ void GeometryAllocationLedger::retain(const DynamicConvexGeometryPtr& geometry, 
         throw;
     }
 }
+
+template<ArithmeticMode Mode>
+void DynamicGeometryAccess::retain_prepaid_native_binding(
+    const ConvexGeometryPtr<Mode>& geometry, GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    static_assert(Mode == ArithmeticMode::Ordinary);
+    try
+    {
+        if (!geometry)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null prepaid native binding.");
+        details::require_mode(geometry->arithmetic_mode(), Mode);
+        const auto& dynamic = geometry->dynamic_geometry();
+        const auto storage = details::checked_geometry_storage<Mode>(implementation(*dynamic));
+        const allocation_detail::NativeBindingPrepaid<Mode> prepaid{
+            geometry.get(), dynamic.get(), storage.get(), storage->topology.get()};
+        ledger.begin_admission(used, limit);
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, Mode);
+        else
+            ledger.impl_->mode = Mode;
+        ledger.impl_->push(allocation_detail::Kind::TypedWrapper, geometry, used, limit);
+        ledger.impl_->walk<Mode>(used, limit, &prepaid);
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+template void DynamicGeometryAccess::retain_prepaid_native_binding<ArithmeticMode::Ordinary>(
+    const ConvexGeometryPtr<ArithmeticMode::Ordinary>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
 
 template<ArithmeticMode Mode>
 void GeometryAllocationLedger::retain_snapshot(

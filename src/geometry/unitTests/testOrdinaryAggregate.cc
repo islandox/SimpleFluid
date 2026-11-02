@@ -1,6 +1,7 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
+#include "geometry/swept_volume/details/OrdinaryVertexArena.hh"
 #include <algorithm>
 #include <cfenv>
 #include <cmath>
@@ -757,6 +758,14 @@ TEST(OrdinaryAggregateTest, SharedCapIdDomainCanExceedBothCompactChildVertexCaps
     const auto first = source.measure(donors);
     expect_split(first, 1.L / 6, 7.L / 48);
     expect_compact_accounting(first.statistics);
+    // One coverage tetra and one metric tetra each introduce four original
+    // records. The x=1/2 phase plane crosses exactly three edges; both phase
+    // children retain those same three constructions. Contact evidence may
+    // add immutable versions, but must never duplicate a numerical crossing.
+    EXPECT_EQ(first.statistics.retries, 0u);
+    EXPECT_EQ(first.statistics.vertex_record_constructions - first.statistics.vertex_evidence_extensions, 11u);
+    EXPECT_EQ(first.statistics.peak_live_vertex_records, 7u);
+    EXPECT_EQ(first.statistics.peak_vertex_record_capacity, 8u);
     const auto again = source.measure(donors);
     expect_identical_results(first, again);
 }
@@ -1367,4 +1376,346 @@ TEST(OrdinaryAggregateTest, CapturedPositiveThinEdgeRequiresMinorityAccuracyOrEx
     }
     expect_no_exact_work(before);
 }
+
 } // namespace
+
+namespace
+{
+struct ArenaTestWork
+{
+    SimpleFluid::geometry::swept_volume::OrdinaryAggregateStatistics stats;
+    std::size_t live_arena_bytes = 0, live_slot_bytes = 0, live_incidence_bytes = 0;
+    std::size_t charges = 0, charged_bytes = 0, fail_at = std::numeric_limits<std::size_t>::max();
+    std::size_t byte_budget = std::numeric_limits<std::size_t>::max();
+    void charge(std::size_t bytes)
+    {
+        if (charges++ == fail_at || bytes > byte_budget || charged_bytes > byte_budget - bytes)
+            throw std::bad_alloc();
+        charged_bytes += bytes;
+    }
+    void observe_geometry(std::size_t transient_bytes = 0) noexcept
+    {
+        stats.live_incidence_bytes = live_incidence_bytes;
+        stats.peak_incidence_bytes = std::max(stats.peak_incidence_bytes, live_incidence_bytes);
+        stats.peak_combined_geometry_bytes = std::max(stats.peak_combined_geometry_bytes,
+            live_arena_bytes + live_slot_bytes + live_incidence_bytes + transient_bytes);
+    }
+};
+using TestArena = SimpleFluid::geometry::swept_volume::details::OrdinaryVertexArena<int, ArenaTestWork>;
+}
+
+TEST(OrdinaryAggregateArena, ContactEvidenceUsesFiveTransientRecordsAndReleasesTheEmptyPage)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, cut = 0;
+    std::array<TestArena::Handle, 4> points;
+    for (unsigned i = 0; i < points.size(); ++i)
+    {
+        TestArena::Weights weights{}, errors{};
+        weights[i] = 1;
+        errors[i] = std::ldexp(1.L, -60 - static_cast<int>(i));
+        points[i] = arena.create(weights, errors, {}, &source, &chart);
+    }
+    // Four retained vertices plus one new contact-evidence version require
+    // five simultaneous records. At most one unused physical position remains.
+    const auto construction = points[0].get().construction;
+    points[0] = arena.extend(points[0], &cut);
+    EXPECT_EQ(arena.live_records(), 4u);
+    EXPECT_EQ(work.stats.peak_live_vertex_records, 5u);
+    EXPECT_EQ(work.stats.peak_vertex_record_capacity, 6u);
+    EXPECT_EQ(arena.record_capacity(), 4u);
+    EXPECT_EQ(arena.slot_capacity(), 8u);
+    EXPECT_EQ(points[0].get().construction, construction);
+    EXPECT_EQ(points[0].get().supports, std::vector<const int*>{&cut});
+    for (unsigned i = 1; i < points.size(); ++i)
+    {
+        EXPECT_EQ(points[i].get().weights[i], 1);
+        EXPECT_EQ(points[i].get().errors[i], std::ldexp(1.L, -60 - static_cast<int>(i)));
+    }
+}
+
+TEST(OrdinaryAggregateArena, SharedEvidenceIsImmutableAndSlotReuseKeepsSwapLastHandlesValid)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    auto original = arena.create({1, 2, 3, 4}, {5, 6, 7, 8}, {&first}, &source, &chart);
+    auto sibling = original;
+    original = arena.extend(original, &second);
+    EXPECT_EQ(sibling.get().supports, std::vector<const int*>{&first});
+    EXPECT_EQ(original.get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_EQ(original.get().weights, sibling.get().weights);
+    EXPECT_EQ(original.get().errors, sibling.get().errors);
+    EXPECT_EQ(original.get().construction, sibling.get().construction);
+    EXPECT_EQ(original.get().source, &source);
+    EXPECT_EQ(original.get().chart, &chart);
+    sibling = {};
+    for (unsigned i = 0; i < 100; ++i)
+    {
+        auto temporary = arena.create({static_cast<long double>(i), 0, 0, 0}, {}, {}, &source, &chart);
+        EXPECT_LT(temporary.slot_id().value, 4u);
+        auto last = arena.create({0, static_cast<long double>(i), 0, 0}, {}, {}, &source, &chart);
+        temporary = {}; // Moves last into the released physical position.
+        EXPECT_EQ(last.get().weights[1], i);
+        EXPECT_EQ(original.get().weights, (TestArena::Weights{1, 2, 3, 4}));
+    }
+    EXPECT_EQ(arena.slot_capacity(), 4u);
+    EXPECT_GT(work.stats.vertex_relocation_bytes, 0u);
+}
+
+TEST(OrdinaryAggregateArena, EveryAdmissionExceptionRetainsExistingEvidenceAndAllowsReuse)
+{
+    for (std::size_t failure = 0; failure < 14; ++failure)
+    {
+        ArenaTestWork work;
+        TestArena arena(work);
+        int source = 0, chart = 0, first = 1, second = 2;
+        auto original = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+        std::array<TestArena::Handle, 3> other;
+        for (auto& point : other)
+            point = arena.create({}, {}, {}, &source, &chart);
+        work.fail_at = work.charges + failure;
+        try
+        {
+            auto extended = arena.extend(original, &second);
+            EXPECT_EQ(extended.get().supports, (std::vector<const int*>{&first, &second}));
+        }
+        catch (const std::bad_alloc&)
+        {
+        }
+        EXPECT_EQ(original.get().weights, (TestArena::Weights{1, 2, 3, 4}));
+        EXPECT_EQ(original.get().supports, std::vector<const int*>{&first});
+        work.fail_at = std::numeric_limits<std::size_t>::max();
+        auto reused = arena.extend(original, &second);
+        EXPECT_EQ(reused.get().errors, (TestArena::Weights{4, 3, 2, 1}));
+        EXPECT_EQ(reused.get().supports, (std::vector<const int*>{&first, &second}));
+    }
+}
+
+
+TEST(OrdinaryAggregateArena, PageFirstUseCreditsFollowPhysicalStorageRatherThanReusedMetadata)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0;
+    auto first = arena.create({}, {}, {}, &source, &chart);
+    const auto reused_slot = first.slot_id();
+    first = {};
+    ASSERT_EQ(arena.record_capacity(), 0u);
+    const auto before_fresh_page = work.charged_bytes;
+    first = arena.create({}, {}, {}, &source, &chart);
+    EXPECT_EQ(first.slot_id(), reused_slot);
+    // Reusing the identity slot does not add a construction charge to the new
+    // two-record page reservation. The retained directories need no growth.
+    EXPECT_EQ(work.charged_bytes - before_fresh_page, (sizeof(std::array<std::optional<TestArena::Record>, 2>)));
+    const auto before_virgin_second = work.charged_bytes;
+    auto second = arena.create({}, {}, {}, &source, &chart);
+    EXPECT_EQ(work.charged_bytes, before_virgin_second);
+    ASSERT_EQ(arena.record_capacity(), 2u);
+    second = {};
+    ASSERT_EQ(arena.record_capacity(), 2u);
+    const auto before_recycled_second = work.charged_bytes;
+    second = arena.create({}, {}, {}, &source, &chart);
+    EXPECT_EQ(work.charged_bytes - before_recycled_second, sizeof(TestArena::Record));
+}
+
+TEST(OrdinaryAggregateArena, FailedAdmissionDoesNotConsumeTheVirginPhysicalPosition)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0;
+    auto first = arena.create({}, {}, {}, &source, &chart);
+    const auto admitted = work.charged_bytes;
+    work.fail_at = work.charges;
+    EXPECT_THROW((void) arena.create({}, {}, {}, &source, &chart), std::bad_alloc);
+    EXPECT_EQ(work.charged_bytes, admitted);
+    work.fail_at = std::numeric_limits<std::size_t>::max();
+    auto second = arena.create({}, {}, {}, &source, &chart);
+    EXPECT_EQ(work.charged_bytes, admitted);
+    EXPECT_EQ(arena.live_records(), 2u);
+}
+
+
+TEST(OrdinaryAggregateArena, UniqueEvidenceReplacementRetainsFourRecordsAndObservesBothSupportBuffers)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    std::array<TestArena::Handle, 4> points;
+    points[0] = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+    for (unsigned i = 1; i < points.size(); ++i)
+        points[i] = arena.create({}, {}, {}, &source, &chart);
+    const auto slot = points[0].slot_id();
+    const auto construction = points[0].get().construction;
+    const auto version = points[0].get().evidence_version;
+    const auto copies = work.stats.vertex_handle_copies;
+    arena.replace_with_extended_evidence(points[0], &second);
+    EXPECT_EQ(points[0].slot_id(), slot);
+    EXPECT_EQ(points[0].get().weights, (TestArena::Weights{1, 2, 3, 4}));
+    EXPECT_EQ(points[0].get().errors, (TestArena::Weights{4, 3, 2, 1}));
+    EXPECT_EQ(points[0].get().source, &source);
+    EXPECT_EQ(points[0].get().chart, &chart);
+    EXPECT_EQ(points[0].get().construction, construction);
+    EXPECT_GT(points[0].get().evidence_version, version);
+    EXPECT_EQ(points[0].get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_EQ(arena.live_records(), 4u);
+    EXPECT_EQ(arena.record_capacity(), 4u);
+    EXPECT_EQ(arena.slot_capacity(), 4u);
+    EXPECT_EQ(work.stats.peak_live_vertex_records, 4u);
+    EXPECT_EQ(work.stats.peak_vertex_record_capacity, 4u);
+    EXPECT_EQ(work.stats.peak_vertex_slot_capacity, 4u);
+    EXPECT_EQ(work.stats.vertex_relocation_bytes, 0u);
+    EXPECT_EQ(work.stats.vertex_handle_copies, copies);
+    EXPECT_EQ(work.stats.vertex_record_constructions, 5u);
+    EXPECT_EQ(work.stats.vertex_evidence_extensions, 1u);
+    // One original pointer plus two replacement pointers coexist at commit.
+    EXPECT_EQ(work.stats.peak_incidence_bytes, 3 * sizeof(const int*));
+    EXPECT_EQ(work.stats.peak_combined_geometry_bytes,
+        work.live_arena_bytes + work.live_slot_bytes + 3 * sizeof(const int*));
+    EXPECT_EQ(work.live_incidence_bytes, 2 * sizeof(const int*));
+    RecordProperty("vertex_record_bytes", static_cast<int>(sizeof(TestArena::Record)));
+}
+
+TEST(OrdinaryAggregateArena, SharedEvidenceReplacementPreservesTheSiblingVersion)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    auto target = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+    auto sibling = target;
+    const auto sibling_slot = sibling.slot_id();
+    const auto version = sibling.get().evidence_version;
+    arena.replace_with_extended_evidence(target, &second);
+    EXPECT_EQ(sibling.slot_id(), sibling_slot);
+    EXPECT_EQ(sibling.get().evidence_version, version);
+    EXPECT_EQ(sibling.get().supports, std::vector<const int*>{&first});
+    EXPECT_EQ(target.get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_GT(target.get().evidence_version, version);
+    EXPECT_EQ(target.get().construction, sibling.get().construction);
+    EXPECT_EQ(target.get().weights, sibling.get().weights);
+    EXPECT_EQ(target.get().errors, sibling.get().errors);
+    EXPECT_EQ(arena.live_records(), 2u);
+}
+
+TEST(OrdinaryAggregateArena, OneByteShortEvidenceReplacementPreservesEveryHandleAndAllowsRetry)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    std::array<TestArena::Handle, 4> points;
+    points[0] = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+    for (unsigned i = 1; i < points.size(); ++i)
+        points[i] = arena.create({static_cast<long double>(i), 0, 0, 0}, {}, {}, &source, &chart);
+    const auto version = points[0].get().evidence_version;
+    const auto construction = points[0].get().construction;
+    const auto slot = points[0].slot_id();
+    const auto admitted = work.charged_bytes;
+    work.byte_budget = admitted + sizeof(TestArena::Record) + 2 * sizeof(const int*) - 1;
+    EXPECT_THROW(arena.replace_with_extended_evidence(points[0], &second), std::bad_alloc);
+    EXPECT_EQ(work.charged_bytes, admitted);
+    EXPECT_EQ(points[0].get().evidence_version, version);
+    EXPECT_EQ(points[0].get().construction, construction);
+    EXPECT_EQ(points[0].slot_id(), slot);
+    EXPECT_EQ(points[0].get().supports, std::vector<const int*>{&first});
+    EXPECT_EQ(points[0].get().weights, (TestArena::Weights{1, 2, 3, 4}));
+    EXPECT_EQ(points[0].get().errors, (TestArena::Weights{4, 3, 2, 1}));
+    for (unsigned i = 1; i < points.size(); ++i)
+        EXPECT_EQ(points[i].get().weights[0], i);
+    EXPECT_EQ(arena.live_records(), 4u);
+    EXPECT_EQ(arena.record_capacity(), 4u);
+    EXPECT_EQ(arena.slot_capacity(), 4u);
+    EXPECT_EQ(work.live_incidence_bytes, sizeof(const int*));
+    work.byte_budget = std::numeric_limits<std::size_t>::max();
+    arena.replace_with_extended_evidence(points[0], &second);
+    EXPECT_GT(points[0].get().evidence_version, version);
+    EXPECT_EQ(points[0].get().supports, (std::vector<const int*>{&first, &second}));
+}
+
+TEST(OrdinaryAggregateArena, SwapLastPreservesTheReplacedEvidenceVersion)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    auto hole = arena.create({}, {}, {}, &source, &chart);
+    auto last = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+    arena.replace_with_extended_evidence(last, &second);
+    const auto version = last.get().evidence_version;
+    const auto construction = last.get().construction;
+    const auto slot = last.slot_id();
+    hole = {};
+    EXPECT_EQ(last.get().evidence_version, version);
+    EXPECT_EQ(last.get().construction, construction);
+    EXPECT_EQ(last.slot_id(), slot);
+    EXPECT_EQ(last.get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_EQ(last.get().weights, (TestArena::Weights{1, 2, 3, 4}));
+    EXPECT_EQ(work.stats.vertex_relocation_bytes, sizeof(TestArena::Record));
+}
+
+TEST(OrdinaryAggregateArena, EvidenceCounterExhaustionRejectsBeforeReplacementCommit)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    auto target = arena.create({}, {}, {&first}, &source, &chart);
+    const auto version = target.get().evidence_version;
+    const auto admitted = work.charged_bytes;
+    work.stats.vertex_record_constructions = std::numeric_limits<std::size_t>::max();
+    expect_error([&] { arena.replace_with_extended_evidence(target, &second); }, GeometryErrorCode::ResourceLimit);
+    work.stats.vertex_record_constructions = 1;
+    work.stats.vertex_evidence_extensions = std::numeric_limits<std::size_t>::max();
+    expect_error([&] { arena.replace_with_extended_evidence(target, &second); }, GeometryErrorCode::ResourceLimit);
+    work.stats.vertex_evidence_extensions = 0;
+    EXPECT_EQ(work.charged_bytes, admitted);
+    EXPECT_EQ(target.get().evidence_version, version);
+    EXPECT_EQ(target.get().supports, std::vector<const int*>{&first});
+    arena.replace_with_extended_evidence(target, &second);
+    EXPECT_GT(target.get().evidence_version, version);
+}
+
+TEST(OrdinaryAggregateArena, SecondChargeFailureReleasesScratchAndRetainsSpentPrefixAndTargetVersion)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2;
+    std::array<TestArena::Handle, 4> points;
+    points[0] = arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &source, &chart);
+    for (unsigned i = 1; i < points.size(); ++i)
+        points[i] = arena.create({static_cast<long double>(i), 0, 0, 0}, {}, {}, &source, &chart);
+    const auto version = points[0].get().evidence_version;
+    const auto construction = points[0].get().construction;
+    const auto slot = points[0].slot_id();
+    const auto admitted = work.charged_bytes;
+    const auto replacement_charge = sizeof(TestArena::Record) + 2 * sizeof(const int*);
+    // The complete replacement was admitted and allocated before this second
+    // charge checks actual reserve capacity. Its spent prefix is never refunded.
+    work.fail_at = work.charges + 1;
+    EXPECT_THROW(arena.replace_with_extended_evidence(points[0], &second), std::bad_alloc);
+    EXPECT_EQ(work.charged_bytes, admitted + replacement_charge);
+    EXPECT_EQ(work.live_incidence_bytes, sizeof(const int*));
+    EXPECT_GE(work.stats.peak_incidence_bytes, 3 * sizeof(const int*));
+    EXPECT_EQ(points[0].get().evidence_version, version);
+    EXPECT_EQ(points[0].get().construction, construction);
+    EXPECT_EQ(points[0].slot_id(), slot);
+    EXPECT_EQ(points[0].get().source, &source);
+    EXPECT_EQ(points[0].get().chart, &chart);
+    EXPECT_EQ(points[0].get().supports, std::vector<const int*>{&first});
+    EXPECT_EQ(points[0].get().weights, (TestArena::Weights{1, 2, 3, 4}));
+    EXPECT_EQ(points[0].get().errors, (TestArena::Weights{4, 3, 2, 1}));
+    for (unsigned i = 1; i < points.size(); ++i)
+        EXPECT_EQ(points[i].get().weights[0], i);
+    EXPECT_EQ(arena.live_records(), 4u);
+    EXPECT_EQ(arena.record_capacity(), 4u);
+    EXPECT_EQ(arena.slot_capacity(), 4u);
+    EXPECT_EQ(work.stats.vertex_record_constructions, 4u);
+    EXPECT_EQ(work.stats.vertex_evidence_extensions, 0u);
+    EXPECT_EQ(work.stats.vertex_relocation_bytes, 0u);
+    work.fail_at = std::numeric_limits<std::size_t>::max();
+    arena.replace_with_extended_evidence(points[0], &second);
+    EXPECT_EQ(work.charged_bytes, admitted + 2 * replacement_charge);
+    EXPECT_GT(points[0].get().evidence_version, version);
+    EXPECT_EQ(points[0].get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_EQ(work.live_incidence_bytes, 2 * sizeof(const int*));
+    EXPECT_EQ(work.stats.vertex_record_constructions, 5u);
+    EXPECT_EQ(work.stats.vertex_evidence_extensions, 1u);
+}

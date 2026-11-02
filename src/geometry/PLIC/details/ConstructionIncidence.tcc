@@ -160,7 +160,7 @@ bool point_on_edge(const Identity& token, const Edge& edge)
 }
 
 template<ArithmeticMode Mode>
-std::vector<Edge> infer_edges(const StoredVertex<Mode>& vertex, const StoredPlane<Mode>* query)
+std::vector<Edge> infer_edges(const FrozenVertex<Mode>& vertex, const StoredPlane<Mode>* query)
 {
     if (vertex.incident.size() < 2)
         return {};
@@ -234,7 +234,7 @@ std::vector<Edge> infer_edges(const StoredVertex<Mode>& vertex, const StoredPlan
 
 template<ArithmeticMode Mode>
 bool construction_edge_incident(
-    const StoredVertex<Mode>& vertex, const StoredPlanePtr<Mode>& plane, const PointSnapshotContext<Mode>* context)
+    const FrozenVertex<Mode>& vertex, const StoredPlanePtr<Mode>& plane, const PointSnapshotContext<Mode>* context)
 {
     using namespace construction_incidence;
     if (vertex.numerical_only)
@@ -245,7 +245,7 @@ bool construction_edge_incident(
 }
 
 template<ArithmeticMode Mode>
-void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<Mode>& a, const StoredVertex<Mode>& b,
+void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const FrozenVertex<Mode>& a, const FrozenVertex<Mode>& b,
     const Frame& frame, bool numerical_only, PointSnapshotBuilder<Mode>& points)
 {
     using namespace construction_incidence;
@@ -278,17 +278,17 @@ void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<
     vertex.source_identity = points.import(generated);
 }
 
-template bool construction_edge_incident<ArithmeticMode::Ordinary>(const StoredVertex<ArithmeticMode::Ordinary>&,
+template bool construction_edge_incident<ArithmeticMode::Ordinary>(const FrozenVertex<ArithmeticMode::Ordinary>&,
     const StoredPlanePtr<ArithmeticMode::Ordinary>&, const PointSnapshotContext<ArithmeticMode::Ordinary>*);
 template bool construction_edge_incident<ArithmeticMode::BoundedCertification>(
-    const StoredVertex<ArithmeticMode::BoundedCertification>&,
+    const FrozenVertex<ArithmeticMode::BoundedCertification>&,
     const StoredPlanePtr<ArithmeticMode::BoundedCertification>&,
     const PointSnapshotContext<ArithmeticMode::BoundedCertification>*);
 template void preserve_crossing_incidence<ArithmeticMode::Ordinary>(StoredVertex<ArithmeticMode::Ordinary>&,
-    const StoredVertex<ArithmeticMode::Ordinary>&, const StoredVertex<ArithmeticMode::Ordinary>&, const Frame&, bool,
+    const FrozenVertex<ArithmeticMode::Ordinary>&, const FrozenVertex<ArithmeticMode::Ordinary>&, const Frame&, bool,
     PointSnapshotBuilder<ArithmeticMode::Ordinary>&);
 template void preserve_crossing_incidence<ArithmeticMode::BoundedCertification>(
-    StoredVertex<ArithmeticMode::BoundedCertification>&, const StoredVertex<ArithmeticMode::BoundedCertification>&,
-    const StoredVertex<ArithmeticMode::BoundedCertification>&, const Frame&, bool,
+    StoredVertex<ArithmeticMode::BoundedCertification>&, const FrozenVertex<ArithmeticMode::BoundedCertification>&,
+    const FrozenVertex<ArithmeticMode::BoundedCertification>&, const Frame&, bool,
     PointSnapshotBuilder<ArithmeticMode::BoundedCertification>&);
 } // namespace SimpleFluid::PLIC::details

@@ -404,7 +404,7 @@ template<ArithmeticMode Mode> DynamicPoint converted_point(const DynamicPoint& i
     return DynamicPoint(input.value, {}, mode); // Explicit conversion drops provenance and radii.
 }
 
-template<ArithmeticMode Mode> Scalar raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
+template<ArithmeticMode Mode> Scalar raw_distance(const VertexView& vertex, const Frame& frame, const PlanePtr& plane)
 {
     static_assert(Mode == kernel_mode);
     const auto coordinates = [](const Point& point)
@@ -422,7 +422,7 @@ template<ArithmeticMode Mode> Scalar raw_distance(const Vertex& vertex, const Fr
 
 template<ArithmeticMode Mode>
 Scalar distance(
-    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
+    const VertexView& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     ++statistics.support_distances;
@@ -481,9 +481,9 @@ template int sign<kernel_mode>(Scalar a);
 template Point transform<kernel_mode>(const Point& p, const Frame& from, const Frame& to);
 template CoordinateBox transform<kernel_mode>(const CoordinateBox& box, const Frame& from, const Frame& to);
 template DynamicPoint converted_point<kernel_mode>(const DynamicPoint& input, ArithmeticMode mode);
-template Scalar raw_distance<kernel_mode>(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-template Scalar distance<kernel_mode>(
-    const Vertex& vertex, const Frame& frame, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
+template Scalar raw_distance<kernel_mode>(const VertexView& vertex, const Frame& frame, const PlanePtr& plane);
+template Scalar distance<kernel_mode>(const VertexView& vertex, const Frame& frame, const PlanePtr& plane,
+    const PointSnapshotContext<kernel_mode>* context);
 template Scalar square_root<kernel_mode>(Scalar x);
 template void Accumulator<kernel_mode>::add(Scalar term);
 template Scalar Accumulator<kernel_mode>::result() const;

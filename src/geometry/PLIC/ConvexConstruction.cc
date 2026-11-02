@@ -127,7 +127,7 @@ std::size_t DynamicConvexGeometry::vertex_count() const noexcept
 
 namespace SimpleFluid::PLIC
 {
-const std::vector<Face>& DynamicConvexGeometry::faces() const
+FaceRange DynamicConvexGeometry::faces() const&
 {
     return impl_->faces;
 }

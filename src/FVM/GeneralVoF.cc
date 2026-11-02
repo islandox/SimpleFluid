@@ -992,7 +992,45 @@ const std::vector<GeneralVoFFiniteDonorBudget>& GeneralVoF::Trial::finite_donor_
 {
     return finite_budgets_;
 }
-const std::vector<GeneralVoFFiniteNodeTrajectory>& GeneralVoF::Trial::finite_node_trajectories() const noexcept
+std::size_t GeneralVoFFiniteTrajectories::size() const noexcept
+{
+    if (const auto* shared = std::get_if<std::shared_ptr<const Snapshot>>(&storage_))
+        return *shared ? (*shared)->size() : 0;
+    return std::get<std::vector<value_type>>(storage_).size();
+}
+GeneralVoFFiniteTrajectories::value_type GeneralVoFFiniteTrajectories::at(std::size_t index) const
+{
+    if (const auto* shared = std::get_if<std::shared_ptr<const Snapshot>>(&storage_))
+    {
+        if (!*shared)
+            throw std::out_of_range("Finite VoF trajectory index is out of range.");
+        const auto& entry = (*shared)->at(index);
+        return {entry.node, entry.current.dynamic(), entry.departure.dynamic()};
+    }
+    return std::get<std::vector<value_type>>(storage_).at(index);
+}
+std::size_t GeneralVoFFiniteTrajectories::storage_bytes() const noexcept
+{
+    if (const auto* shared = std::get_if<std::shared_ptr<const Snapshot>>(&storage_))
+        return *shared ? (*shared)->storage_bytes() : 0;
+    return std::get<std::vector<value_type>>(storage_).capacity() * sizeof(value_type);
+}
+void GeneralVoFFiniteTrajectories::retain_provenance(
+    PLIC::GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit) const
+{
+    if (const auto* shared = std::get_if<std::shared_ptr<const Snapshot>>(&storage_))
+    {
+        if (*shared)
+            (*shared)->retain_provenance(ledger, used, limit);
+    }
+    else
+        for (const auto& trace : std::get<std::vector<value_type>>(storage_))
+        {
+            ledger.retain_point_provenance(trace.point, used, limit);
+            ledger.retain_point_provenance(trace.departure, used, limit);
+        }
+}
+const GeneralVoFFiniteTrajectories& GeneralVoF::Trial::finite_node_trajectories() const noexcept
 {
     return finite_trajectories_;
 }

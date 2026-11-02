@@ -99,7 +99,7 @@ TEST(ConstructionRegistryTest, CapturedWallSourceEdgeSurvivesComplementExportAnd
         {
             const auto identity =
                 P::DynamicGeometryAccess::original_source(P::DynamicGeometryAccess::identity(point.dynamic()));
-            generated_edge |= identity && identity->constructed && !identity->source_edges.empty();
+            generated_edge |= identity && identity.view().constructed() && !identity.view().source_edges().empty();
         }
     EXPECT_TRUE(generated_edge);
     const auto split = parent->clip_by_face(*query, 3, false);

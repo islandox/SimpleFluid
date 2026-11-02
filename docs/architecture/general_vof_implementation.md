@@ -231,6 +231,29 @@ Payload and bookkeeping totals belong to the admission scope rather than to
 individual map entries. Node charges use the actual entry representation;
 admission still precedes publication and a failed scope remains poisoned.
 
+Finite published geometry uses immutable flat topology. Face offsets and vertex
+indices, vertex-to-plane incidence, and surface plane slots/orientations share
+one topology owner with a unique owning plane table. Plane slots follow first
+encounter in vertex/incidence order and deduplicate actual plane objects only;
+equal coefficients or authority values do not merge independent plane objects.
+Checked actual counts and terminal offsets select 32-bit arrays or their 64-bit
+alternative. Global identities, wire indices and provenance limits are separate.
+
+Construction uses mutable drafts. Publication freezes only after validation,
+recovery and measurement have completed, and prepares both requested clip children
+before publishing either. The ledger accounts shared topology once, including
+capacity, while construction admission covers draft/frozen overlap and lookup
+scratch. Numerical rebases and certificate-only copies share topology; physical
+translation and native-support replacement establish new immutable bindings.
+
+The finite `faces()` API returns borrowed immutable `FaceRange` and
+`FaceVertexRange` values. They are sized and indexable, with vertex indices yielded
+as `size_t`, and do not expose contiguous `size_t` storage. A row keeps its own view
+state after the temporary outer range disappears; a geometry owner must still
+remain alive. Traversal allocates nothing. Nested-vector construction inputs remain
+supported, range inputs are accepted, and owning numerical shells explicitly copy
+their face loops. There is no nested-vector compatibility cache.
+
 Finite clipping compacts each child through local used flags and an old-to-new
 index array over the completed source/crossing vertex domain. Scanning old IDs in
 ascending order preserves point numbering. The arrays are reused only between

@@ -110,30 +110,21 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
     for (const auto& delta : phase_cleanup)
         reserve_key_storage(delta.key, reserve);
     reserve(cleanup_momentum.capacity(), sizeof(std::array<long double, 3>));
-    reserve(node_trajectories.capacity(), sizeof(GeneralVoFFiniteNodeTrajectory));
+    reserve(node_trajectories.storage_bytes(), 1);
     PLIC::GeometryAllocationLedger point_owners;
     std::size_t point_bytes = 0;
     const auto point_limit = remaining;
-    const auto retain_point = [&](const PLIC::DynamicPoint& point)
+    try
     {
-        const auto before = point_bytes;
-        try
-        {
-            point_owners.retain_point_provenance(point, point_bytes, point_limit);
-        }
-        catch (...)
-        {
-            reserve(point_bytes - before, 1);
-            context.record.bytes_used = context.record.byte_budget - remaining;
-            throw;
-        }
-        reserve(point_bytes - before, 1);
-    };
-    for (const auto& trace : node_trajectories)
-    {
-        retain_point(trace.point);
-        retain_point(trace.departure);
+        node_trajectories.retain_provenance(point_owners, point_bytes, point_limit);
     }
+    catch (...)
+    {
+        reserve(point_bytes, 1);
+        context.record.bytes_used = context.record.byte_budget - remaining;
+        throw;
+    }
+    reserve(point_bytes, 1);
     for (const auto* history : {&phase_roundoff, &old_phase_history, &new_phase_history})
         reserve(history->capacity(), sizeof(PhaseRoundoff));
     for (const auto* mass :
@@ -362,7 +353,7 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             reserve(signed_budgets_.size(), sizeof(GeneralVoFSignedDonorBudget));
             reserve(numerical_support_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
             reserve(numerical_support_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
-            reserve(finite_trajectories_.size(), sizeof(GeneralVoFFiniteNodeTrajectory));
+            reserve(finite_trajectories_.storage_bytes(), 1);
             reserve(finite_face_chain_.size(), sizeof(GeneralVoFFaceChainDiagnostic));
             reserve(finite_cell_closure_.size(), sizeof(GeneralVoFCellClosureDiagnostic));
             for (const auto& closure : finite_cell_closure_)

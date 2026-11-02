@@ -33,6 +33,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_configure_test_executable(${TEST_NAME})
   if((TEST_NAME STREQUAL "testOrdinaryPredicateAccounting" OR TEST_NAME STREQUAL "testGeometryProvenanceBorrow"
       OR TEST_NAME STREQUAL "testPointSnapshot"
+      OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${TEST_NAME} PRIVATE -fno-fast-math -ffp-contract=off -frounding-math -fno-lto)

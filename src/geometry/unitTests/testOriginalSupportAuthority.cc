@@ -145,7 +145,14 @@ P::ConvexGeometryPtr<Mode> authority_fixture(const P::ConvexCellGeometry<ordinar
         // clone: the labels never establish its planarity or convexity.
         const auto before = P::details::checked_geometry_storage<Mode>(
             P::DynamicGeometryAccess::implementation(*result->dynamic_geometry()));
-        auto copy = std::make_shared<P::details::GeometryStorage<Mode>>(*before);
+        std::vector<P::PlaneAuthority> native_labels;
+        native_labels.reserve(native.num_faces());
+        for (std::size_t face = 0; face < native.num_faces(); ++face)
+            native_labels.push_back(Access::issue(P::planar_support<ordinary>(*native.face_geometry(face))));
+        P::GeometryLimits draft_limits;
+        draft_limits.arithmetic_mode = Mode;
+        P::details::Operation draft_operation(draft_limits);
+        auto copy = P::details::draft_geometry<Mode>(*before);
         P::PointSnapshotBuilder<Mode> points;
         std::map<P::details::StoredPlanePtr<Mode>, P::details::StoredPlanePtr<Mode>> replacements;
         for (std::size_t f = 0; f < copy->surfaces.size(); ++f)
@@ -154,7 +161,7 @@ P::ConvexGeometryPtr<Mode> authority_fixture(const P::ConvexCellGeometry<ordinar
             auto plane = std::make_shared<P::details::StoredPlane<Mode>>(*original);
             const auto previous = P::resolve_authorities(original->point_context, original->authorities);
             std::vector<P::PlaneAuthority> keys(previous.begin(), previous.end());
-            keys.push_back(Access::issue(P::planar_support<ordinary>(*native.face_geometry(f))));
+            keys.push_back(native_labels[f]);
             plane->authorities = points.authority_range(P::DynamicGeometryAccess::admit_incidence<Mode>(keys));
             plane->point_context = points.context();
             plane->source_vertices.clear();
@@ -180,7 +187,8 @@ P::ConvexGeometryPtr<Mode> authority_fixture(const P::ConvexCellGeometry<ordinar
             vertex.authorities = points.authority_range(P::DynamicGeometryAccess::admit_incidence<Mode>(authorities));
         }
         copy->point_context = points.freeze();
-        result = Cell::from_dynamic(P::DynamicGeometryAccess::geometry(std::move(copy)));
+        result =
+            Cell::from_dynamic(P::DynamicGeometryAccess::geometry(P::details::freeze_geometry<Mode>(std::move(*copy))));
     }
     return result;
 }
@@ -191,10 +199,10 @@ template<ArithmeticMode Mode> void authenticated_rebind()
     const auto source = authority_fixture<Mode>(*native);
     const auto before = P::details::checked_geometry_storage<Mode>(
         P::DynamicGeometryAccess::implementation(*source->dynamic_geometry()));
-    ASSERT_FALSE(before->surfaces.front().plane->authorities.empty());
-    const auto& authority = P::resolve_authorities(
-        before->surfaces.front().plane->point_context, before->surfaces.front().plane->authorities)
-                                .front();
+    ASSERT_FALSE(before->surfaces[0].plane->authorities.empty());
+    const auto& authority =
+        P::resolve_authorities(before->surfaces[0].plane->point_context, before->surfaces[0].plane->authorities)
+            .front();
     ASSERT_NE(Access::get(authority), nullptr);
     const P::GeometryPacketContext context{};
     const auto bytes = source->encode(context);
@@ -203,8 +211,7 @@ template<ArithmeticMode Mode> void authenticated_rebind()
     const auto after = P::details::checked_geometry_storage<Mode>(
         P::DynamicGeometryAccess::implementation(*restored->dynamic_geometry()));
     const auto& rebound =
-        P::resolve_authorities(after->surfaces.front().plane->point_context, after->surfaces.front().plane->authorities)
-            .front();
+        P::resolve_authorities(after->surfaces[0].plane->point_context, after->surfaces[0].plane->authorities).front();
     ASSERT_NE(Access::get(rebound), nullptr);
     EXPECT_EQ(authority, rebound);
     EXPECT_EQ(Access::get(authority)->storage_identity(), Access::get(rebound)->storage_identity());
@@ -308,9 +315,9 @@ template<ArithmeticMode Mode> void operation_rebind_budget()
     const auto source = authority_fixture<Mode>(*native);
     const auto stored = P::details::checked_geometry_storage<Mode>(
         P::DynamicGeometryAccess::implementation(*source->dynamic_geometry()));
-    ASSERT_FALSE(stored->surfaces.front().plane->authorities.empty());
-    const auto* carrier = Access::get(P::resolve_authorities(
-        stored->surfaces.front().plane->point_context, stored->surfaces.front().plane->authorities)
+    ASSERT_FALSE(stored->surfaces[0].plane->authorities.empty());
+    const auto* carrier = Access::get(
+        P::resolve_authorities(stored->surfaces[0].plane->point_context, stored->surfaces[0].plane->authorities)
             .front());
     ASSERT_NE(carrier, nullptr);
     EXPECT_EQ(P::canonical_key(*carrier), P::canonical_key(supports.front()));
@@ -376,7 +383,11 @@ TEST(OriginalSupportAuthorityTest, ReconstructionIsPreflightedAgainstTheSameRema
         parsed.retain(support, fields, budget);
     }
     const auto minimum_output =
-        sizeof(P::details::GeometryStorage<ordinary>) +
+        sizeof(P::details::GeometryDraft<ordinary>) + sizeof(P::details::GeometryStorage<ordinary>) +
+        sizeof(P::details::FrozenTopology<ordinary>) + 8 * sizeof(P::details::FrozenVertex<ordinary>) +
+        6 * (sizeof(P::details::StoredPlanePtr<ordinary>) + sizeof(int) +
+                sizeof(std::pair<const P::details::StoredPlane<ordinary>* const, std::size_t>) + 4 * sizeof(void*)) +
+        (8 + 6 + 2 + 2 * 24 + 6) * sizeof(std::uint32_t) +
         8 * (sizeof(P::details::StoredVertex<ordinary>) + sizeof(P::DynamicPoint)) +
         6 * (sizeof(P::details::StoredPlane<ordinary>) + sizeof(P::details::StoredSurface<ordinary>) +
                 sizeof(std::vector<std::size_t>)) +

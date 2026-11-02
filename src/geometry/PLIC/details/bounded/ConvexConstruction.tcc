@@ -8,7 +8,7 @@ namespace SimpleFluid::PLIC::details
 {
 namespace SIMPLEFLUID_LOCAL certification_kernel
 {
-template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bool moments)
+template<ArithmeticMode Mode, class Geometry> Integrals integrate(const Geometry& poly, bool moments)
 {
     static_assert(Mode == kernel_mode);
     if (poly.vertices.size() == 4 && poly.faces.size() == 4 &&
@@ -157,15 +157,21 @@ template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bo
     return sum;
 }
 
-template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_proof, bool positive_construction)
+template<ArithmeticMode Mode> void finish(DraftGeometry& poly, bool partition_proof, bool positive_construction)
 {
     static_assert(Mode == kernel_mode);
     if (poly.vertices.size() > std::min(poly.limits.maximum_vertices, active_work->limits.maximum_vertices) ||
         poly.faces.size() > std::min(poly.limits.maximum_faces, active_work->limits.maximum_faces))
         reject("vertex/face cap exhausted.");
     active_work->charge(1, sizeof(MomentCache));
-    active_work->charge(poly.vertices.size(), sizeof(Vertex));
-    active_work->charge(poly.faces.size(), sizeof(Face) + sizeof(Surface));
+    if (!poly.moment_cache)
+        poly.moment_cache = std::make_shared<MomentCache>();
+    if (!poly.buffers_prepaid)
+    {
+        active_work->charge(poly.vertices.capacity(), sizeof(Vertex));
+        active_work->charge(poly.faces.capacity(), sizeof(Face));
+        active_work->charge(poly.surfaces.capacity(), sizeof(Surface));
+    }
     active_work->charge(1, sizeof(PointExportCache));
     poly.point_export_cache = std::make_shared<PointExportCache>();
     if (std::fegetenv(&poly.point_export_cache->environment) != 0)
@@ -182,7 +188,8 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
     {
         // Validate physical-coordinate range now without allocating a publication.
         (void) bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
-        active_work->charge(v.incident.size(), sizeof(PlanePtr));
+        if (!poly.buffers_prepaid)
+            active_work->charge(v.incident.capacity(), sizeof(PlanePtr));
         for (const auto& key : resolve_authorities(poly.point_context, v.authorities))
         {
             OriginalSupportAuthorityAccess::validate_boundary(key);
@@ -194,16 +201,24 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
             poly.point_context, active_work->bytes, active_work->limits.byte_budget);
     std::set<PlanePtr> retained_planes;
     for (const auto& v : poly.vertices)
-        retained_planes.insert(v.incident.begin(), v.incident.end());
+        for (const auto& plane : v.incident)
+            if (!retained_planes.contains(plane))
+            {
+                active_work->charge(1, sizeof(PlanePtr) + 4 * sizeof(void*));
+                retained_planes.insert(plane);
+            }
     for (const auto& plane : retained_planes)
     {
-        active_work->charge(1, sizeof(Plane));
-        active_work->charge(plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
+        if (!poly.planes_prepaid)
+            active_work->charge(1, sizeof(Plane));
+        if (!poly.planes_prepaid)
+            active_work->charge(plane->source_vertices.capacity(), sizeof(StoredPointRef<Mode>));
         for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
             active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
     }
-    for (const auto& f : poly.faces)
-        active_work->charge(f.size(), sizeof(std::size_t));
+    if (!poly.buffers_prepaid)
+        for (const auto& f : poly.faces)
+            active_work->charge(f.capacity(), sizeof(std::size_t));
     // Local coordinate bounds retain the full construction enclosure. Compare
     // in one local frame later, avoiding cancellation at large global origins.
     for (std::size_t axis = 0; axis < 3; ++axis)
@@ -291,7 +306,8 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
     if (!point_builder)
         local_points.emplace();
     auto& points = point_builder ? *point_builder : *local_points;
-    auto result = std::make_shared<StoredGeometry>();
+    active_work->charge(1, sizeof(DraftGeometry) + sizeof(Ancestry));
+    auto result = std::make_shared<DraftGeometry>();
     result->frame.origin = origin;
     result->reference_origin = origin;
     result->limits = limits;
@@ -400,7 +416,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
     }
     result->point_context = points.freeze();
     finish<Mode>(*result);
-    return result;
+    return freeze_geometry<Mode>(std::move(*result));
 }
 
 template<ArithmeticMode Mode> DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices)
@@ -817,7 +833,8 @@ DynamicSupport GeometryKernel<Mode>::support(GeometryPoint normal, GeometryPoint
 }
 
 template Integrals integrate<kernel_mode>(const StoredGeometry& poly, bool moments);
-template void finish<kernel_mode>(StoredGeometry& poly, bool partition_proof, bool positive_construction);
+template Integrals integrate<kernel_mode>(const DraftGeometry& poly, bool moments);
+template void finish<kernel_mode>(DraftGeometry& poly, bool partition_proof, bool positive_construction);
 template void validate_connected_boundary<kernel_mode>(std::size_t vertex_count, const std::vector<Face>& faces);
 template std::shared_ptr<StoredGeometry> import<kernel_mode>(GeometryPoint origin,
     std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits,

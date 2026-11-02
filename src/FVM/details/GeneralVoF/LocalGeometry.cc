@@ -72,6 +72,11 @@ struct AggregateFaceTrace
             "\"stage_charged_bytes\":{\"source\":%zu,\"donor_validation\":%zu,\"coverage\":%zu,\"metric\":%zu},"
             "\"aggregate_requested_failed_charge_bytes\":%zu,\"vertices_classified\":%zu,\"vertices_copied\":%zu,"
             "\"copied_vertex_bytes\":%zu,"
+            "\"copied_vertex_handle_bytes\":%zu,\"vertex_record_constructions\":%zu,"
+            "\"vertex_handle_copies\":%zu,\"vertex_evidence_extensions\":%zu,\"vertex_relocation_bytes\":%zu,"
+            "\"peak_live_vertex_records\":%zu,\"peak_vertex_record_capacity\":%zu,\"peak_vertex_slot_capacity\":%zu,"
+            "\"peak_arena_bytes\":%zu,\"peak_slot_bytes\":%zu,\"peak_incidence_bytes\":%zu,"
+            "\"peak_connectivity_bytes\":%zu,\"peak_combined_geometry_bytes\":%zu,"
             "\"active_vertices_seen\":%zu,\"stored_vertices_seen\":%zu,\"peak_active_vertices\":%zu,"
             "\"peak_stored_vertices\":%zu,\"peak_remainders\":%zu,\"witness_admissions\":%zu,"
             "\"peak_live_witnesses\":%zu,\"peak_live_witness_capacity_bytes\":%zu,"
@@ -82,7 +87,11 @@ struct AggregateFaceTrace
             workspace.construction_bytes(), workspace.operations(), original_budget, initial_remaining_budget,
             stats.stage_charged_bytes[0], stats.stage_charged_bytes[1], stats.stage_charged_bytes[2],
             stats.stage_charged_bytes[3], stats.failed_charge_bytes, stats.vertices_classified, stats.vertices_copied,
-            stats.copied_vertex_bytes, stats.active_vertices_seen, stats.stored_vertices_seen,
+            stats.copied_vertex_bytes, stats.copied_vertex_bytes, stats.vertex_record_constructions,
+            stats.vertex_handle_copies, stats.vertex_evidence_extensions, stats.vertex_relocation_bytes,
+            stats.peak_live_vertex_records, stats.peak_vertex_record_capacity, stats.peak_vertex_slot_capacity,
+            stats.peak_arena_bytes, stats.peak_slot_bytes, stats.peak_incidence_bytes, stats.peak_connectivity_bytes,
+            stats.peak_combined_geometry_bytes, stats.active_vertices_seen, stats.stored_vertices_seen,
             stats.peak_active_vertices, stats.peak_stored_vertices, stats.peak_remainders, stats.witnesses,
             stats.peak_live_witnesses, stats.peak_live_witness_bytes, stats.source_pieces, stats.pair_tests,
             stats.operations);
@@ -95,7 +104,8 @@ bool needs_interface(const GeneralVoF::Data& data, const Cell& cell)
                !PLIC::reconstruction_geometry(*retained_interface(data, cell)).pure_carrier);
 }
 } // namespace
-LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const OrdinaryTraceMap& traces,
+LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data,
+    const std::shared_ptr<const geometry::swept_volume::OrdinaryTrajectorySnapshot>& trajectories,
     const OrdinaryFluxMap& flux, const std::map<std::uint64_t, long double>& face_budgets,
     const PLIC::GeometryPacketContext& context)
 {
@@ -133,6 +143,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
             current(data);
             if (data.options.arithmetic_mode != mode)
                 throw std::invalid_argument("Local VoF geometry requires Ordinary arithmetic.");
+            work.retain_trajectories(trajectories);
             spatial = retained_spatial_cache(data, work, result.diagnostics,
                 [](const GeneralVoF::Data& source, std::size_t bytes) { retained_budget<mode>(source, bytes); });
             for (const auto& identity : spatial->cells)
@@ -184,10 +195,6 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 failure::Scope face_context("interface_local_reach");
                 face_context.record.face = tile.face_gid;
                 face_context.record.mark(failure::Field::Face);
-                if (tile.node_gids.size() > std::numeric_limits<std::size_t>::max() / (2 * sizeof(Point)))
-                    throw PLIC::GeometryError(
-                        PLIC::GeometryErrorCode::ResourceLimit, "Pending sweep point array capacity overflows.");
-                work.charge(2 * tile.node_gids.size() * sizeof(Point));
                 auto recipe = [&]
                 {
                     SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext progress;
@@ -196,26 +203,21 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         [&]
                         {
                             auto& scratch = workspace.setup_work();
-                            // prepare_sweep retains the point arrays charged above, but
-                            // its unique-node set and triangle buffer end with the call.
-                            scratch.charge(tile.node_gids.size() * (sizeof(std::uint64_t) + 4 * sizeof(void*) +
-                                                                       3 * sizeof(std::array<Point, 3>)));
-                            return SimpleFluid::geometry::swept_volume::prepare_sweep<mode>(tile.face_gid,
-                                tile.node_gids, traces, flux.at(tile.face_gid), scratch,
+                            const auto retained_entry = work.bytes;
+                            auto result = SimpleFluid::geometry::swept_volume::prepare_sweep<mode>(tile.face_gid,
+                                tile.node_gids, trajectories, flux.at(tile.face_gid), work, scratch,
                                 face_budgets.at(tile.face_gid));
+                            const auto retained_delta = work.bytes - retained_entry;
+                            workspace.validate_retained_commit(retained_delta);
+                            workspace.commit_retained(retained_delta);
+                            return result;
                         });
                 }();
-                // Sealed centers own provenance beyond inline point arrays.
-                // Keep their conservative charge even when classification lets
-                // us destroy a scalar face's recipe before plane import.
-                work.charge(2 * sizeof(PLIC::DynamicPoint));
-                work.allocations.retain_point_provenance(recipe.center, work.bytes, work.limits.byte_budget);
-                work.allocations.retain_point_provenance(recipe.backcenter, work.bytes, work.limits.byte_budget);
                 Box bounds;
-                for (const auto& p : recipe.current)
-                    bounds.add(p.value);
-                for (const auto& p : recipe.departure)
-                    bounds.add(p.value);
+                for (std::size_t i = 0; i < recipe.node_count(); ++i)
+                    bounds.add(recipe.current(i).value);
+                for (std::size_t i = 0; i < recipe.node_count(); ++i)
+                    bounds.add(recipe.departure(i).value);
                 bounds.add(recipe.center.value);
                 bounds.add(recipe.backcenter.value);
                 {
@@ -257,7 +259,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         {
                             auto& scratch = workspace.setup_work();
                             SimpleFluid::geometry::swept_volume::visit_sweep_triangles(
-                                tile.node_gids, recipe.current, recipe.departure, recipe.backcenter,
+                                tile.node_gids, recipe, recipe.backcenter,
                                 [&](const Point& a, const Point& b, const Point& c)
                             {
                                 scratch.test();

@@ -1,5 +1,7 @@
 #include "FVM/details/VoFFailure.hh"
 #include "general_vof_finite_test_helpers.hh"
+#include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include <ranges>
 #include <type_traits>
 namespace
 {
@@ -7,6 +9,10 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 using Prepared = GeneralVoFPreparedTransport;
 static_assert(
     std::is_same_v<decltype(std::declval<GeneralVoF::Trial>().prepare_transport()), std::shared_ptr<const Prepared>>);
+static_assert(std::ranges::input_range<const GeneralVoFFiniteTrajectories>);
+static_assert(!std::is_reference_v<std::ranges::range_reference_t<const GeneralVoFFiniteTrajectories>>);
+static_assert(!std::is_constructible_v<GeneralVoFFiniteTrajectories,
+    std::shared_ptr<const geometry::swept_volume::OrdinaryTrajectorySnapshot>>);
 void check_capacities(const GeneralVoF& source, const GeneralVoF& next, const Prepared& prepared)
 {
     ASSERT_EQ(prepared.old_mass.size(), source.phase_volumes().size());
@@ -234,6 +240,111 @@ TEST(GeneralVoFPreparedTransport, TypedViewsRetainModeDiagnosticsAndImmutableLif
     int empty = input.order.empty(), total_empty = 0;
     Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &empty, &total_empty);
     EXPECT_EQ(total_empty, std::max(0, Tpetra::getDefaultComm()->getSize() - 2));
+}
+TEST(GeneralVoFPreparedTransport, TrajectoryRangeAndCopiesSurviveTrialAndInputBuffers)
+{
+    const auto input = fixture();
+    for (const auto mode : {ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification})
+    {
+        GeneralVoFOptions options;
+        options.arithmetic_mode = mode;
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        GeneralVoFFiniteTrajectories detached;
+        const auto prepared = [&]
+        {
+            const auto trial = source.plan_transport(stationary(source), circulation(source, true), .25);
+            detached = trial.finite_node_trajectories();
+            auto result = trial.prepare_transport({1, 1000}, 31);
+            EXPECT_EQ(result->node_trajectories.size(), detached.size());
+            return result;
+        }();
+        const auto copied = *prepared;
+        EXPECT_EQ(detached.size(), source.nodes().size());
+        EXPECT_EQ(copied.node_trajectories.size(), detached.size());
+        if (!detached.empty())
+        {
+            const auto owner = PLIC::DynamicGeometryAccess::identity(detached.at(0).point).context_pin();
+            ASSERT_TRUE(owner);
+            const auto before = owner.use_count();
+            {
+                const auto trajectory_copy = detached;
+                // Ordinary copies share one snapshot without cloning per-node
+                // owning point references. Bounded copies clone every record.
+                if (mode == ArithmeticMode::Ordinary)
+                    EXPECT_EQ(owner.use_count(), before);
+                else
+                    EXPECT_GT(owner.use_count(), before);
+                EXPECT_EQ(trajectory_copy.size(), detached.size());
+            }
+            EXPECT_EQ(owner.use_count(), before);
+        }
+        std::map<std::uint64_t, std::array<long double, 3>> expected;
+        for (const auto& node : source.nodes())
+            expected.emplace(node.gid,
+                std::array<long double, 3>{node.coordinate[0], node.coordinate[1], node.coordinate[2]});
+        std::size_t ordinal = 0;
+        for (auto trace : detached)
+        {
+            EXPECT_EQ(trace.node, detached.at(ordinal).node);
+            EXPECT_EQ(trace.point.arithmetic_mode, mode);
+            EXPECT_EQ(trace.point.value, expected.at(trace.node));
+            EXPECT_EQ(trace.departure.value, expected.at(trace.node));
+            EXPECT_EQ(copied.node_trajectories.at(ordinal).point.value, expected.at(trace.node));
+            trace.point.value[0] += 10;
+            EXPECT_EQ(detached.at(ordinal).point.value, expected.at(trace.node));
+            ++ordinal;
+        }
+        EXPECT_EQ(ordinal, expected.size());
+        EXPECT_THROW((void) detached.at(detached.size()), std::out_of_range);
+        EXPECT_NO_THROW(prepared->validate_byte_budget(source.options().byte_budget));
+        EXPECT_NO_THROW(copied.validate_byte_budget(source.options().byte_budget));
+    }
+}
+TEST(GeneralVoFPreparedTransport, FailedControlsAndNewTimestepKeepTrajectoriesIsolated)
+{
+    auto input = fixture();
+    std::fill(input.gas.begin(), input.gas.end(), 0);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
+    auto velocities = stationary(source);
+    for (auto& velocity : velocities)
+    {
+        const auto node = std::find_if(source.nodes().begin(), source.nodes().end(),
+            [&](const auto& item) { return item.gid == velocity.node; });
+        if (node->coordinate == PLIC::GeometryPoint{1, 1, 1})
+            velocity.velocity = {.125L, 0, 0};
+    }
+    const auto faces = circulation(source, true);
+    const auto first = source.plan_transport(velocities, faces, 1);
+    const auto prepared = first.prepare_transport();
+    auto invalid = faces;
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+    {
+        ASSERT_GE(invalid.size(), 2u);
+        invalid.back().face = invalid.front().face;
+    }
+    EXPECT_THROW((void) source.plan_transport(velocities, invalid, .5), std::invalid_argument);
+    const auto retry = source.plan_transport(velocities, faces, .5);
+    const auto retry_prepared = retry.prepare_transport();
+    EXPECT_THROW(retry.validate_prepared_transport(*prepared, {1, 1}, 0), std::invalid_argument);
+    int moving = 0, all_moving = 0;
+    for (std::size_t i = 0; i < prepared->node_trajectories.size(); ++i)
+    {
+        const auto before = prepared->node_trajectories.at(i);
+        const auto after = retry_prepared->node_trajectories.at(i);
+        EXPECT_EQ(before.node, after.node);
+        EXPECT_EQ(before.point.value, after.point.value);
+        if (before.point.value == std::array<long double, 3>{1, 1, 1})
+        {
+            EXPECT_EQ(before.departure.value, (std::array<long double, 3>{.875L, 1, 1}));
+            EXPECT_EQ(after.departure.value, (std::array<long double, 3>{.9375L, 1, 1}));
+            ++moving;
+        }
+        else
+            EXPECT_EQ(before.departure.value, after.departure.value);
+    }
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &moving, &all_moving);
+    EXPECT_GT(all_moving, 0);
 }
 TEST(GeneralVoFPreparedTransport, TypedFactoriesRejectWrongModeOnAnEmptyOwnerCollectively)
 {

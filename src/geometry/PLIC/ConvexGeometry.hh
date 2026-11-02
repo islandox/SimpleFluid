@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/ConvexCellGeometry.hh"
+#include "geometry/PLIC/FaceRange.hh"
 #include "geometry/PLIC/GeometryBackendTypes.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PointProvenanceRef.hh"
@@ -233,7 +234,8 @@ public:
     [[nodiscard]] std::size_t vertex_count() const noexcept;
     [[nodiscard]] DynamicPointExport export_points(
         GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
-    [[nodiscard]] const std::vector<std::vector<std::size_t>>& faces() const;
+    [[nodiscard]] FaceRange faces() const&;
+    FaceRange faces() const&& = delete;
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
     template<ArithmeticMode Mode> [[nodiscard]] std::size_t storage_bytes() const;
 
@@ -376,6 +378,11 @@ public:
         std::span<const Point<Mode>>, const std::vector<std::vector<std::size_t>>&, GeometryLimits = {});
     [[nodiscard]] static ConvexGeometryPtr<Mode> make_local(GeometryPoint origin, std::span<const Point<Mode>>,
         const std::vector<std::vector<std::size_t>>&, GeometryLimits = {});
+    [[nodiscard]] static ConvexGeometryPtr<Mode> make(std::span<const GeometryPoint>, FaceRange, GeometryLimits = {});
+    [[nodiscard]] static ConvexGeometryPtr<Mode> make_points(
+        std::span<const Point<Mode>>, FaceRange, GeometryLimits = {});
+    [[nodiscard]] static ConvexGeometryPtr<Mode> make_local(
+        GeometryPoint origin, std::span<const Point<Mode>>, FaceRange, GeometryLimits = {});
     [[nodiscard]] static ConvexGeometryPtr<Mode> from_geometry(
         const ConvexCellGeometry<ArithmeticMode::Ordinary>&, GeometryLimits = {});
     [[nodiscard]] static ConvexGeometryPtr<Mode> box(GeometryPoint, GeometryPoint, GeometryLimits = {});
@@ -436,7 +443,8 @@ public:
     [[nodiscard]] PointExport<Mode> export_points(
         GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     [[nodiscard]] std::vector<Point<Mode>> local_points() const;
-    [[nodiscard]] const std::vector<std::vector<std::size_t>>& faces() const { return geometry_->faces(); }
+    [[nodiscard]] FaceRange faces() const& { return geometry_->faces(); }
+    FaceRange faces() const&& = delete;
     [[nodiscard]] std::array<GeometryValue<Mode>, 3> axis_spans() const;
     [[nodiscard]] Support<Mode> support(GeometryPoint normal, GeometryPoint anchor) const;
     [[nodiscard]] ClipResult<Mode> clip(const GeometryHalfspace&, bool measure_section = true) const;

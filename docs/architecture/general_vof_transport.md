@@ -248,9 +248,11 @@ the original budget. Reuse does not reduce the count of work already executed.
 
 ### Compact complementary witnesses and construction cost
 
-Each child stores only vertices referenced by its surviving face loops. Compaction
-preserves all four barycentric components, their numerical errors, every support
-incidence, inherited source-face tags and the immutable source/cache references.
+Each child stores handles only for vertices referenced by its surviving face
+loops. Immutable records preserve all four barycentric components, all four
+numerical errors, every ordered support incidence, and source/construction identity.
+Inherited source-face tags and immutable source/cache references remain attached
+to the child.
 Child indices no longer identify original source leaves; the source tetrahedron
 remains available independently for predicates and integration.
 
@@ -259,15 +261,50 @@ active input vertex once and constructs each crossed edge once, publishing the
 same crossing coordinates, errors and support evidence to both children. One cap
 loop supplies opposite windings. An unchanged child moves its existing storage;
 direct metric clipping requests only the inside child. Phase integration retains
-the bulk witness and accounts for the copy needed before consuming its phase
-split. Source-face cancellation and the structural donor-cover proof are unchanged.
+the bulk witness and shares its records while copying the connectivity needed
+before consuming its phase split. Additional incidence creates an immutable
+evidence replacement for that branch; it does not mutate a surviving sibling.
+Source-face cancellation and the structural donor-cover proof are unchanged.
+
+Evidence versions are distinct from construction and allocation-slot identity.
+When a branch consumes the sole owner of a version, it can replace that version
+in the same slot after admitting and constructing the complete new support list.
+The numerical fields remain untouched. Shared versions still require a separate
+record, and every successful replacement invalidates borrowed record/support
+references. Failed admission leaves the target version and all live handles intact.
+
+Stable slots refer to densely packed two-record pages, with non-atomic references
+and four-entry metadata blocks. Last release destroys incidence storage, moves the
+last live record into the vacant physical position, updates that record's slot,
+and releases an empty final page. This relocation preserves local vertex numbering
+and the order of predicates and integration. Record borrows cannot cross a release
+that may relocate storage. Coverage arenas belong to one source/retry; metric
+arenas belong to one donor/sign/retry and outlive all channel witnesses. Existing
+support catalogs and defining-expression caches retain their measure lifetime.
+
+Page and metadata allocation is admitted before use. Initial slots consume their
+page reservation; constructing into recycled storage incurs a new construction
+charge. Reclamation never refunds that charge. Relocation traffic is observed
+separately from new construction. Combined witness high-water accounting includes
+arena, slot, incidence, handle and connectivity capacities and their growth overlap;
+the existing split maps, cap arrays and predicate caches remain outside this
+diagnostic category. Whole-scope allocator measurements report those exclusions.
+The legacy `copied_vertex_bytes` statistic now describes copied handles and is
+also emitted as `copied_vertex_handle_bytes` in face traces. Record construction,
+evidence extension and numerical relocation traffic have separate counters;
+old payload-copy bytes and new handle-copy bytes are not interchangeable metrics.
 
 Ordinary interface-local preparation preserves ordered scalar metadata for every
 pending face. Reach, classification and zero-effect checks run before a scalar
 face releases its recipe and candidates. Only geometric faces retain those owners;
-each geometric slot is consumed into the current face scope. Its complete points
-move into the source table in center/backcenter/current/departure order, its old
-recipe buffers are destroyed, and candidates are released after donor preparation.
+each geometric slot is consumed into the current face scope. Ordinary recipes
+share one immutable canonical-node trajectory snapshot with their Trial and prepared
+ledger. Face-order slots borrow those typed points while centers and corrected
+backcenters remain face-private. Scalar release destroys its recipe metadata;
+the shared snapshot survives while another consumer owns it.
+At the aggregate boundary, private centers move and shared nodes copy into the
+independently owned source table in center/backcenter/current/departure order.
+The recipe owner is released and candidates are released after donor preparation.
 Face order remains aligned with optional work-capture rows.
 
 Phase quotas retain the numerical donor-vector order. A separate sorted
@@ -587,7 +624,23 @@ consumes the immutable preparation produced by the trial factory.
 
 Prepared transport also retains node trajectories, face-chain diagnostics,
 cell-closure diagnostics and local transport work counters. These records share
-the ledger's lifetime and allocation admission. Face-chain records may include
+the ledger's lifetime and allocation admission. `GeneralVoFFiniteTrajectories`
+provides immutable sized iteration and checked indexed access, returning dynamic
+records by value. Ordinary copies share their typed snapshot without retaining a
+dynamic mirror; Bounded copies retain their owned-vector behavior and later node
+import workflow. Exact trajectories retain their separate API.
+
+Ordinary snapshot freezing follows control authentication and completes all
+destination admission/allocation before moving the canonical trace map. Snapshot
+ownership does not confer transport authority: source, topology, partition,
+transaction, timestep and algorithm checks remain at the existing FVM boundary.
+Prepared views pin the snapshot after Trial destruction. Changed-timestep retries
+create new snapshots. Snapshot capacity and point provenance are admitted in each
+applicable budget domain; each face additionally admits its slots, private centers
+and ordered averaging scratch. Shared storage is counted once within a domain,
+and destruction does not refund cumulative construction spending.
+
+Face-chain records may include
 replicated retained tiles: deduplicate canonical face IDs before global diagnostic
 sums. Counters describe local work, not physical accuracy or runtime scaling.
 

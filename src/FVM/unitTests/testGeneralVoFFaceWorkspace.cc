@@ -281,8 +281,9 @@ TEST(GeneralVoFFaceWorkspace, PendingScalarFacesReleaseOwnersAndPreserveInterlea
         owners[i] = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic()).context_pin();
         recipe.control.value = i + 1;
         recipe.ordinary_volume_budget = (i + 1) / 1024.L;
-        recipe.current = {Point({0, 0, 0}), Point({1, 0, 0})};
-        recipe.departure = {Point({0, 0, 1}), Point({1, 0, 1})};
+        recipe.trajectories = sweep::OrdinaryTrajectorySnapshot::create(
+            {{0, Point({0, 0, 0}), Point({0, 0, 1})}, {1, Point({1, 0, 0}), Point({1, 0, 1})}});
+        recipe.node_slots = {0, 1};
         pending.push(nullptr, std::move(recipe), {i, i + 10}, i % 2 == 1, work);
         EXPECT_EQ(owners[i].expired(), i % 2 == 0);
     }
@@ -320,8 +321,10 @@ TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoes
         recipe.center = PLIC::point_average<mode>(std::array{Point({.5L, .5L, 0})});
         owner = PLIC::DynamicGeometryAccess::identity(recipe.center.dynamic()).context_pin();
         recipe.backcenter = Point({.5L, .5L, 1});
-        recipe.current = {Point({0, 0, 0}), Point({1, 0, 0}), Point({1, 1, 0}), Point({0, 1, 0})};
-        recipe.departure = {Point({0, 0, 1}), Point({1, 0, 1}), Point({1, 1, 1}), Point({0, 1, 1})};
+        recipe.trajectories = sweep::OrdinaryTrajectorySnapshot::create(
+            {{0, Point({0, 0, 0}), Point({0, 0, 1})}, {1, Point({1, 0, 0}), Point({1, 0, 1})},
+                {2, Point({1, 1, 0}), Point({1, 1, 1})}, {3, Point({0, 1, 0}), Point({0, 1, 1})}});
+        recipe.node_slots = {0, 1, 2, 3};
         pending.push(nullptr, std::move(recipe), {0, 1}, true, work);
     }
     const auto entry_charge = work.bytes;
@@ -336,8 +339,8 @@ TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoes
             EXPECT_EQ(points[1].value, (std::array<long double, 3>{.5L, .5L, 1}));
             EXPECT_EQ(points[2].value, (std::array<long double, 3>{0, 0, 0}));
             EXPECT_EQ(points[9].value, (std::array<long double, 3>{0, 1, 1}));
-            EXPECT_EQ(geometric.recipe.current.capacity(), 0u);
-            EXPECT_EQ(geometric.recipe.departure.capacity(), 0u);
+            EXPECT_EQ(geometric.recipe.node_count(), 0u);
+            EXPECT_FALSE(geometric.recipe.trajectories);
             EXPECT_FALSE(owner.expired());
             transferred_charge = work.bytes;
             EXPECT_EQ(transferred_charge - entry_charge, points.capacity() * sizeof(Point));
@@ -347,6 +350,61 @@ TEST(GeneralVoFFaceWorkspace, PendingPointTransferReleasesRecipeAndExceptionDoes
     EXPECT_TRUE(owner.expired());
     EXPECT_EQ(work.bytes, transferred_charge);
     EXPECT_THROW((void) pending.take_geometry(0), std::logic_error);
+}
+TEST(GeneralVoFFaceWorkspace, SharedNodeTableAndOwningSourceBatchCoexistAtExactCap)
+{
+    using Point = PLIC::Point<mode>;
+    const auto snapshot = sweep::OrdinaryTrajectorySnapshot::create(
+        {{10, Point({0, 0, 0}), Point({0, 0, 1})}, {20, Point({1, 0, 0}), Point({1, 0, 1})},
+            {30, Point({0, 1, 0}), Point({0, 1, 1})}});
+    const auto populate = [&](sweep::Work& work, local::PendingFaceGeometry& pending)
+    {
+        work.retain_trajectories(snapshot);
+        sweep::Sweep<mode> recipe;
+        recipe.trajectories = snapshot;
+        recipe.node_slots = {0, 1, 2};
+        work.charge(recipe.node_slots.capacity() * sizeof(std::size_t));
+        recipe.center = Point({.25L, .25L, 0});
+        recipe.backcenter = Point({.25L, .25L, 1});
+        pending.push(nullptr, std::move(recipe), {}, true, work);
+    };
+    auto probe = retained_work(1024 * 1024, 0);
+    local::PendingFaceGeometry pending_probe;
+    populate(probe, pending_probe);
+    const auto retained = probe.bytes;
+    // The source owns [center,backcenter,current...,departure...] while
+    // the canonical-node table and pending recipe are still admitted.
+    const auto source_probe = pending_probe.take_geometry(0).take_points(probe);
+    ASSERT_EQ(source_probe.size(), 8u);
+    const auto expected = retained + source_probe.capacity() * sizeof(Point);
+    EXPECT_EQ(probe.bytes, expected);
+    for (const auto limit : {expected, expected - 1})
+    {
+        auto work = retained_work(limit, 0);
+        local::PendingFaceGeometry pending;
+        populate(work, pending);
+        auto geometric = pending.take_geometry(0);
+        EXPECT_EQ(work.bytes, retained);
+        if (limit == expected)
+        {
+            {
+                const auto points = geometric.take_points(work);
+                ASSERT_EQ(points.size(), 8u);
+                EXPECT_NE(&points[2], &snapshot->at(0).current);
+                EXPECT_EQ(points[2].value, snapshot->at(0).current.value);
+                EXPECT_FALSE(geometric.recipe.trajectories);
+                EXPECT_EQ(work.bytes, expected);
+            }
+            EXPECT_EQ(work.bytes, expected);
+        }
+        else
+        {
+            EXPECT_THROW((void) geometric.take_points(work), PLIC::GeometryError);
+            EXPECT_EQ(work.bytes, retained);
+            EXPECT_EQ(geometric.recipe.trajectories, snapshot);
+        }
+        EXPECT_EQ(work.trajectory_owners.size(), 1u);
+    }
 }
 TEST(GeneralVoFFaceWorkspace, SparseDonorIdsResolveUnchangedQuotaSlots)
 {

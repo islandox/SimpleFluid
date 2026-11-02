@@ -28,14 +28,12 @@ struct PendingGeometricFace
     geometry::swept_volume::Sweep<mode> recipe;
     std::vector<std::size_t> candidates;
 
-    /** Move complete points in source-index order and destroy the old recipe
+    /** Copy shared node points and move private centers in source-index order and destroy the old recipe
      * buffers. Their cumulative admission charges are deliberately retained. */
     [[nodiscard]] std::vector<Point> take_points(geometry::swept_volume::Work& work)
     {
-        const auto n = recipe.current.size();
+        const auto n = recipe.node_count();
         std::vector<Point> points;
-        if (recipe.departure.size() != n)
-            throw std::invalid_argument("Pending sweep point arrays have different sizes.");
         if (n > (points.max_size() - 2) / 2 || n > (std::numeric_limits<std::size_t>::max() / sizeof(Point) - 2) / 2)
             throw PLIC::GeometryError(
                 PLIC::GeometryErrorCode::ResourceLimit, "Pending sweep point table capacity overflows.");
@@ -46,10 +44,10 @@ struct PendingGeometricFace
         static_assert(std::is_nothrow_move_constructible_v<Point>);
         points.push_back(std::move(recipe.center));
         points.push_back(std::move(recipe.backcenter));
-        for (auto& point : recipe.current)
-            points.push_back(std::move(point));
-        for (auto& point : recipe.departure)
-            points.push_back(std::move(point));
+        for (std::size_t i = 0; i < n; ++i)
+            points.push_back(recipe.current(i));
+        for (std::size_t i = 0; i < n; ++i)
+            points.push_back(recipe.departure(i));
         recipe = {};
         return points;
     }

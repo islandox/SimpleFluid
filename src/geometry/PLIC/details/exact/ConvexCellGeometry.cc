@@ -1193,7 +1193,9 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ConvexCellGeometry<ArithmeticMode::Exac
             p[axis] = origin[axis] + exact_wide(vertex.value[axis]);
         impl->poly.vertices.push_back(std::move(p));
     }
-    impl->poly.faces = source.faces();
+    impl->poly.faces.reserve(source.faces().size());
+    for (const auto face : source.faces())
+        impl->poly.faces.emplace_back(face.begin(), face.end());
     validate(impl->poly);
     impl->origin = source.origin();
     impl->product = product_description(impl->poly);

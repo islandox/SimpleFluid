@@ -7,6 +7,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
+#include "geometry/swept_volume/OrdinaryTrajectorySnapshot.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -24,6 +25,18 @@ struct Work
     double volume_tolerance = 8e-15;
     std::size_t bytes = 0, pair_tests = 0;
     PLIC::GeometryAllocationLedger allocations;
+    std::vector<std::shared_ptr<const OrdinaryTrajectorySnapshot>> trajectory_owners;
+    void charge_items(std::size_t count, std::size_t width)
+    {
+        if (count > std::numeric_limits<std::size_t>::max() / width)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "Finite VoF storage capacity overflows.");
+        charge(count * width);
+    }
+    SIMPLEFLUID_FVM_EXPORT void retain_trajectories(
+        const std::shared_ptr<const OrdinaryTrajectorySnapshot>& snapshot);
+    SIMPLEFLUID_FVM_EXPORT std::shared_ptr<const OrdinaryTrajectorySnapshot> copy_face_trajectories(
+        std::span<const std::uint64_t> nodes, const OrdinaryTrajectorySnapshot::TraceMap& traces);
     void charge(std::size_t n)
     {
         if (n > limits.byte_budget - std::min(bytes, limits.byte_budget))
@@ -81,6 +94,33 @@ template<ArithmeticMode Mode> struct Sweep
     Value control;
     Value constructed_volume, signed_control_difference;
     long double ordinary_volume_budget = 0;
+    [[nodiscard]] std::size_t node_count() const noexcept { return current.size(); }
+    [[nodiscard]] const PLIC::Point<Mode>& current_point(std::size_t i) const { return current.at(i); }
+    [[nodiscard]] const PLIC::Point<Mode>& departure_point(std::size_t i) const { return departure.at(i); }
+};
+template<> struct Sweep<ArithmeticMode::Ordinary>
+{
+    static constexpr auto mode = ArithmeticMode::Ordinary;
+    std::uint64_t face = 0;
+    std::vector<SignedPiece<mode>> pieces;
+    std::shared_ptr<const OrdinaryTrajectorySnapshot> trajectories;
+    std::vector<std::size_t> node_slots;
+    PLIC::Point<mode> center, backcenter;
+    Value control;
+    Value constructed_volume, signed_control_difference;
+    long double ordinary_volume_budget = 0;
+    [[nodiscard]] std::size_t node_count() const noexcept { return node_slots.size(); }
+    [[nodiscard]] std::uint64_t node_id(std::size_t i) const { return trajectories->at(node_slots.at(i)).node; }
+    [[nodiscard]] const PLIC::Point<mode>& current(std::size_t i) const
+    {
+        return trajectories->at(node_slots.at(i)).current;
+    }
+    [[nodiscard]] const PLIC::Point<mode>& departure(std::size_t i) const
+    {
+        return trajectories->at(node_slots.at(i)).departure;
+    }
+    [[nodiscard]] const PLIC::Point<mode>& current_point(std::size_t i) const { return current(i); }
+    [[nodiscard]] const PLIC::Point<mode>& departure_point(std::size_t i) const { return departure(i); }
 };
 template<ArithmeticMode Mode> inline bool same_point(const PLIC::Point<Mode>& a, const PLIC::Point<Mode>& b)
 {
@@ -122,6 +162,34 @@ inline void visit_sweep_triangles(std::span<const std::uint64_t> nodes,
         }
     }
 }
+/** The indexed recipe borrows only immutable node points; private corrected
+ * centers remain face-local. The visitor must not retain point references. */
+template<ArithmeticMode Mode, class Visitor>
+inline void visit_sweep_triangles(std::span<const std::uint64_t> nodes, const Sweep<Mode>& recipe,
+    const PLIC::Point<Mode>& backcenter, Visitor&& visitor)
+{
+    for (std::size_t i = 0; i < nodes.size(); ++i)
+    {
+        const auto j = (i + 1) % nodes.size();
+        visitor(backcenter, recipe.departure_point(j), recipe.departure_point(i));
+        if (nodes[i] < nodes[j])
+        {
+            visitor(recipe.current_point(i), recipe.departure_point(i), recipe.departure_point(j));
+            visitor(recipe.current_point(i), recipe.departure_point(j), recipe.current_point(j));
+        }
+        else
+        {
+            visitor(recipe.current_point(j), recipe.current_point(i), recipe.departure_point(i));
+            visitor(recipe.current_point(j), recipe.departure_point(i), recipe.departure_point(j));
+        }
+    }
+}
+template<ArithmeticMode Mode>
+    requires(Mode == ArithmeticMode::Ordinary)
+SIMPLEFLUID_FVM_LOCAL Sweep<Mode> prepare_sweep(std::uint64_t face,
+    std::span<const std::uint64_t> nodes, std::shared_ptr<const OrdinaryTrajectorySnapshot> trajectories,
+    Value control, Work& retained_work, Work& scratch_work, long double ordinary_volume_budget);
+
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
     const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,

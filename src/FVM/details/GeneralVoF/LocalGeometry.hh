@@ -5,8 +5,6 @@
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
-using OrdinaryTraceMap =
-    std::map<std::uint64_t, std::pair<PLIC::Point<ArithmeticMode::Ordinary>, PLIC::Point<ArithmeticMode::Ordinary>>>;
 using OrdinaryFluxMap = std::map<std::uint64_t, PLIC::DynamicGeometryValue>;
 struct LocalGeometricGroup
 {
@@ -28,6 +26,7 @@ struct LocalGeometryResult
     GeneralVoFTransportDiagnostics diagnostics;
     std::shared_ptr<GeneralVoFWorkSample> balance_work;
 };
-SIMPLEFLUID_FVM_LOCAL LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data&, const OrdinaryTraceMap&,
+SIMPLEFLUID_FVM_LOCAL LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data&,
+    const std::shared_ptr<const geometry::swept_volume::OrdinaryTrajectorySnapshot>&,
     const OrdinaryFluxMap&, const std::map<std::uint64_t, long double>&, const PLIC::GeometryPacketContext&);
 } // namespace SimpleFluid::VoF::general_vof_detail

@@ -95,8 +95,8 @@ sweep::Sweep<mode> point_recipe(Point current, Point departure)
 {
     sweep::Sweep<mode> recipe;
     recipe.face = 17;
-    recipe.current = {current};
-    recipe.departure = {departure};
+    recipe.trajectories = sweep::OrdinaryTrajectorySnapshot::create({{0, current, departure}});
+    recipe.node_slots = {0};
     recipe.center = current;
     recipe.backcenter = departure;
     return recipe;
@@ -196,12 +196,15 @@ TEST(GeneralVoFBoundaryReach, Face17ReplaysOriginalWallConstructionBeforeDonorCl
         testing::Test::RecordProperty(name, text.str());
     };
     record("coordinate_orientation", orientation);
-    const auto raw = PLIC::point_average<mode>(recipe.departure);
+    std::vector<Point> departure_order;
+    for (std::size_t i = 0; i < recipe.node_count(); ++i)
+        departure_order.push_back(recipe.departure(i));
+    const auto raw = PLIC::point_average<mode>(departure_order);
     record("raw_cap_z", raw.value[2]);
     record("corrected_cap_z", recipe.backcenter.value[2]);
     record("cap_displacement_over_cell_height", std::abs(recipe.backcenter.value[2] - raw.value[2]) / .5L);
     long double raw_control = 0;
-    sweep::visit_sweep_triangles(nodes, recipe.current, recipe.departure, raw,
+    sweep::visit_sweep_triangles(nodes, recipe, raw,
         [&](const Point& a, const Point& b, const Point& c)
         { raw_control += sweep::cone_determinant(recipe.center, a, b, c).value / 6; });
     record("control_minus_raw_sweep", recipe.control.value - raw_control);
@@ -280,8 +283,8 @@ TEST(GeneralVoFBoundaryReach, FluxMatchedCapEscapeDropsInheritedWallSupportAndRe
     EXPECT_TRUE(recipe.backcenter.supports().empty());
     EXPECT_LT(recipe.backcenter.value[2], 0);
     EXPECT_EQ(boundary.classify(recipe.backcenter), Class::Outside);
-    for (const auto& p : recipe.departure)
-        EXPECT_EQ(boundary.classify(p), Class::ConstructionContact);
+    for (std::size_t i = 0; i < recipe.node_count(); ++i)
+        EXPECT_EQ(boundary.classify(recipe.departure(i)), Class::ConstructionContact);
     const auto message = rejection(trial, data, recipe);
     EXPECT_NE(message.find("center"), std::string::npos) << message;
 }

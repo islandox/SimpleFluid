@@ -239,6 +239,45 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::make_local(GeometryPoint origi
     return from_dynamic(SelectedGeometryKernel<Mode>::make_bounded_local(
         origin, points, faces, typed_limits<Mode>(limits)));
 }
+inline std::vector<std::vector<std::size_t>> own_face_rows(FaceRange faces, std::size_t vertices)
+{
+    std::vector<std::vector<std::size_t>> rows;
+    details::reserve_topology(rows, faces.size());
+    for (const auto face : faces)
+    {
+        if (face.size() > vertices)
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Face row exceeds shell vertex count.");
+        std::vector<std::size_t> row;
+        details::reserve_topology(row, face.size());
+        row.assign(face.begin(), face.end());
+        rows.push_back(std::move(row));
+    }
+    return rows;
+}
+template<ArithmeticMode Mode>
+ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::make(
+    std::span<const GeometryPoint> vertices, FaceRange faces, GeometryLimits limits)
+{
+    details::Operation scope(typed_limits<Mode>(limits));
+    preflight_shell(vertices.size(), faces.size());
+    return make(vertices, own_face_rows(faces, vertices.size()), limits);
+}
+template<ArithmeticMode Mode>
+ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::make_points(
+    std::span<const Point<Mode>> vertices, FaceRange faces, GeometryLimits limits)
+{
+    details::Operation scope(typed_limits<Mode>(limits));
+    preflight_shell(vertices.size(), faces.size());
+    return make_points(vertices, own_face_rows(faces, vertices.size()), limits);
+}
+template<ArithmeticMode Mode>
+ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::make_local(
+    GeometryPoint origin, std::span<const Point<Mode>> vertices, FaceRange faces, GeometryLimits limits)
+{
+    details::Operation scope(typed_limits<Mode>(limits));
+    preflight_shell(vertices.size(), faces.size());
+    return make_local(origin, vertices, own_face_rows(faces, vertices.size()), limits);
+}
 template<ArithmeticMode Mode>
 ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::from_geometry(
     const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, GeometryLimits limits)

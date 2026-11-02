@@ -217,7 +217,9 @@ NumericalConvexShell<Mode> ConvexCellGeometry<Mode>::numerical_shell() const
 {
     NumericalConvexShell<Mode> shell;
     shell.origin = origin();
-    shell.outward_faces = faces();
+    shell.outward_faces.reserve(faces().size());
+    for (const auto face : faces())
+        shell.outward_faces.emplace_back(face.begin(), face.end());
     for (const auto& p : local_points())
         shell.relative_vertices.push_back(
             {GeometryValue<Mode>{p.value[0]}, GeometryValue<Mode>{p.value[1]}, GeometryValue<Mode>{p.value[2]}});
@@ -448,6 +450,13 @@ std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
     // Snapshot owner traversal uses a small explicit pending stack as well as
     // the identity ledger's ordered owner nodes.
     add(15, 2 * sizeof(void*) + sizeof(std::shared_ptr<const void>));
+    // Final freeze retains the draft through all admissions and allocations.
+    add(1, sizeof(GeometryDraft<Mode>) + sizeof(FrozenTopology<Mode>) + sizeof(GeometryStorage<Mode>));
+    add(8, sizeof(FrozenVertex<Mode>));
+    add(6, sizeof(PlanePtr));
+    add(7 + 24 + 9 + 24 + 6, sizeof(std::uint32_t));
+    add(6, sizeof(int));
+    add(6, sizeof(std::pair<const StoredPlane<Mode>* const, std::size_t>) + 4 * sizeof(void*));
     add(1, sizeof(DynamicConvexGeometry) + sizeof(ConvexCellGeometry));
     return bytes;
 }
@@ -629,7 +638,17 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
             on::reject("cell reconstruction exceeds the remaining native record budget.");
         reconstruction += count * size;
     };
-    require(1, sizeof(details::GeometryStorage<Mode>));
+    require(1, sizeof(details::GeometryDraft<Mode>) + sizeof(details::GeometryStorage<Mode>) +
+                   sizeof(details::FrozenTopology<Mode>));
+    require(n, sizeof(details::FrozenVertex<Mode>));
+    require(nf, sizeof(details::StoredPlanePtr<Mode>) + sizeof(int) +
+                    sizeof(std::pair<const details::StoredPlane<Mode>* const, std::size_t>) + 4 * sizeof(void*));
+    // Native shells have one incidence per face vertex; use the actual selected width.
+    const auto index_bytes = details::compact_topology({n, nf, nf, index_count, index_count}) ? sizeof(std::uint32_t)
+                                                                                              : sizeof(std::uint64_t);
+    require(details::topology_sum(details::topology_sum(n, nf), 2), index_bytes);
+    require(index_count, 2 * index_bytes);
+    require(nf, index_bytes);
     require(n, sizeof(details::StoredVertex<Mode>) + sizeof(DynamicPoint));
     require(nf,
         sizeof(details::StoredPlane<Mode>) + sizeof(details::StoredSurface<Mode>) + sizeof(std::vector<std::size_t>));
@@ -654,24 +673,23 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
         details::reject(Mode, "native support count differs from cell faces.");
     details::Operation scope(old->limits);
     details::active_work->retain_geometry<Mode>(geometry_);
-    auto copy = std::make_shared<details::GeometryStorage<Mode>>(*old);
-    std::map<details::StoredPlanePtr<Mode>, details::StoredPlanePtr<Mode>> replacement;
-    for (std::size_t f = 0; f < copy->surfaces.size(); ++f)
+    auto copy = details::clone_geometry_metadata<Mode>(*old);
+    auto topology = details::clone_topology<Mode>(*old->topology);
+    // Every face keeps its existing slot; no identity-map allocation or owner merge is needed.
+    for (std::size_t f = 0; f < old->surfaces.size(); ++f)
     {
-        const auto source = copy->surfaces[f].plane;
-        auto plane = std::make_shared<details::StoredPlane<Mode>>(*source);
+        const auto slot = std::visit(
+            [&](const auto& arrays) { return static_cast<std::size_t>(arrays.surface_planes[f]); }, topology->arrays);
         details::active_work->retain_identity(supports[f]);
+        auto plane = details::clone_plane<Mode>(*old->surfaces[f].plane);
         plane->native_support = supports[f];
-        replacement[source] = plane;
-        copy->surfaces[f].plane = std::move(plane);
+        topology->planes[slot] = std::move(plane);
     }
-    for (auto& vertex : copy->vertices)
-        for (auto& plane : vertex.incident)
-            if (replacement.contains(plane))
-                plane = replacement.at(plane);
+    details::bind_topology<Mode>(*copy, std::move(topology));
+    details::active_work->charge(1, sizeof(DynamicConvexGeometry));
     auto result = from_dynamic(DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(copy))));
-    details::active_work->allocations.retain(
-        result, details::active_work->bytes, details::active_work->limits.byte_budget);
+    DynamicGeometryAccess::retain_prepaid_native_binding<Mode>(result, details::active_work->allocations,
+        details::active_work->bytes, details::active_work->limits.byte_budget);
     return result;
 }
 

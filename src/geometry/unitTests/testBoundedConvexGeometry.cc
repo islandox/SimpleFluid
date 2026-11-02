@@ -80,6 +80,12 @@ auto selected_make_points(std::span<const SimpleFluid::PLIC::DynamicPoint> input
     return Geometry<Mode>::make_points(typed_points<Mode>(input), faces, limits);
 }
 template<ArithmeticMode Mode>
+auto selected_make_points(std::span<const SimpleFluid::PLIC::DynamicPoint> input, SimpleFluid::PLIC::FaceRange faces,
+    SimpleFluid::PLIC::GeometryLimits limits = {})
+{
+    return Geometry<Mode>::make_points(typed_points<Mode>(input), faces, limits);
+}
+template<ArithmeticMode Mode>
 auto selected_make_local(SimpleFluid::PLIC::GeometryPoint origin,
     std::span<const SimpleFluid::PLIC::DynamicPoint> input, const Faces& faces,
     SimpleFluid::PLIC::GeometryLimits limits = {})
@@ -207,7 +213,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryNonpositiveVolumeDiagnosticReportsComput
     // these collapsed/inverted shells before the volume gate is reached.
     for (const long double height : {0.L, -1.L, 1.L})
     {
-        ordinary::StoredGeometry poly;
+        ordinary::DraftGeometry poly;
         poly.vertices.resize(4);
         poly.vertices[1].coordinates[0] = ordinary::StorageScalar(1);
         poly.vertices[2].coordinates[1] = ordinary::StorageScalar(1);
@@ -1555,6 +1561,18 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
         SCOPED_TRACE(control);
         SimpleFluid::PLIC::PointSnapshotBuilder<ArithmeticMode::Ordinary> points;
         auto context = std::make_shared<ordinary::StoredGeometry>(*impl);
+        const auto replace_surface = [&](std::size_t face, ordinary::Surface surface)
+        {
+            auto topology = std::make_shared<detail::FrozenTopology<ArithmeticMode::Ordinary>>(*context->topology);
+            std::visit(
+                [&](auto& arrays)
+                {
+                    topology->planes[arrays.surface_planes[face]] = surface.plane;
+                    arrays.surface_orientations[face] = surface.orientation;
+                },
+                topology->arrays);
+            detail::bind_topology<ArithmeticMode::Ordinary>(*context, std::move(topology));
+        };
         auto end_plane = std::make_shared<ordinary::Plane>(*upper);
         const auto endpoint = [&](long double z, ordinary::PlanePtr bound)
         {
@@ -1595,7 +1613,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
                 bound->anchor[2] = ordinary::StorageScalar(bound_anchors[end].value[2]);
                 bound->normal_error = 0;
                 fixture_plane_sources(*bound, points, {Access::identity(bound_anchors[end])});
-                context->surfaces[4 + end] = {bound, 1};
+                replace_surface(4 + end, {bound, 1});
                 (end ? second : first).incident.back() = bound;
             }
         }
@@ -1605,7 +1623,7 @@ TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCu
                 end_plane->normal_error = std::numeric_limits<long double>::epsilon();
             else
                 end_plane->source_vertices.clear();
-            context->surfaces[5].plane = end_plane;
+            replace_surface(5, {end_plane, context->surfaces[5].orientation});
             second.incident.back() = end_plane;
         }
         const long double z = control == 5 ? -.25L : control == 6 ? 1.25L : .5L;

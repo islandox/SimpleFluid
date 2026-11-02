@@ -243,10 +243,10 @@ void prove_retained(const GeneralVoF::Data& data, const LocalSpatialCache& cache
         }
         reach_failure(frontier, "unknown boundary classification", recipe.face, role, index, "Unresolved");
     };
-    for (std::size_t i = 0; i < recipe.current.size(); ++i)
-        check(recipe.current[i], "current-node", i);
-    for (std::size_t i = 0; i < recipe.departure.size(); ++i)
-        check(recipe.departure[i], "departure-node", i);
+    for (std::size_t i = 0; i < recipe.node_count(); ++i)
+        check(recipe.current(i), "current-node", i);
+    for (std::size_t i = 0; i < recipe.node_count(); ++i)
+        check(recipe.departure(i), "departure-node", i);
     check(recipe.center, "current-center", 0);
     check(recipe.backcenter, "corrected-departure-center", 0);
 }

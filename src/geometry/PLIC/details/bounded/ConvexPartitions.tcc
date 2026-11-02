@@ -334,7 +334,9 @@ std::vector<DynamicPartitionPiece> PartitionKernel<Mode>::partition(
         certificate->members.push_back(piece.geometry->impl_->ancestry);
     for (auto& piece : result)
     {
-        active_work->charge(piece.geometry->template storage_bytes<Mode>() + sizeof(DynamicConvexGeometry), 1);
+        active_work->charge(geometry_metadata_copy_bytes<Mode>(*checked_geometry_storage<Mode>(piece.geometry->impl_)) +
+                                sizeof(DynamicConvexGeometry),
+            1);
         auto certified = std::make_shared<StoredGeometry>(*checked_geometry_storage<Mode>(piece.geometry->impl_));
         certified->partition_certificate = certificate;
         piece.geometry = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(certified)));

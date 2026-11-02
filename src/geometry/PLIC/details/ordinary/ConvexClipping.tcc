@@ -77,7 +77,7 @@ bool same_source_plane(const Plane& a, const Plane& b)
 }
 
 template<ArithmeticMode Mode>
-bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
+bool incident(const VertexView& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     if (std::find(v.incident.begin(), v.incident.end(), plane) != v.incident.end())
@@ -99,8 +99,8 @@ bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext
     return construction_edge_incident<Mode>(v, plane, context);
 }
 
-bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent, const Vertex* edge_first,
-    const Vertex* edge_second, PointSnapshotBuilder<kernel_mode>& points,
+bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent,
+    const VertexView* edge_first, const VertexView* edge_second, PointSnapshotBuilder<kernel_mode>& points,
     const PointSnapshotContext<kernel_mode>* edge_context)
 {
     if (vertex.numerical_only || vertex.source_identity || vertex.incident.size() < 3 || !certification_environment())
@@ -211,7 +211,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
             }
         }
         const ordinary_predicates::FramedPoint proposed{source_point.value(), {}, 0};
-        const auto endpoint = [&](const Vertex& v)
+        const auto endpoint = [&](const VertexView& v)
         {
             return ordinary_predicates::FramedPoint{
                 {v.coordinates[0].value, v.coordinates[1].value, v.coordinates[2].value}, parent->frame.origin,
@@ -274,8 +274,8 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 bool coincident = false;
                 unsigned directions = 0;
             };
-            const auto endpoint_bounds = [&](const Vertex& endpoint, const Vertex& other, const PlanePtr& first_support,
-                                             const PlanePtr& second_support)
+            const auto endpoint_bounds = [&](const VertexView& endpoint, const VertexView& other,
+                                             const PlanePtr& first_support, const PlanePtr& second_support)
             {
                 EndpointBounds result;
                 for (const auto& bound : endpoint.incident)
@@ -411,9 +411,9 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
     return true;
 }
 
-template<ArithmeticMode Mode>
+template<ArithmeticMode Mode, class Vertices>
 DynamicGeometrySection section(
-    const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop)
+    const DynamicConvexGeometry::Impl& poly, const Vertices& vertices, const std::vector<std::size_t>& loop)
 {
     static_assert(Mode == kernel_mode);
     DynamicGeometrySection result;
@@ -463,10 +463,8 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
             if (existing->input)
                 if (const int orientation = matching_input<Mode>(input, *existing->input))
                 {
-                    auto source = std::make_shared<Impl>();
-                    source->limits = impl_->limits;
-                    source->surfaces.push_back({existing, orientation});
-                    return clip_impl(source, 0, measure_section);
+                    return clip_plane(
+                        CutPlaneDescriptor<Mode>(existing, orientation, impl_->limits), 0, measure_section);
                 }
     // A numerical rebase is not physical motion. Subtract the original frame
     // anchors directly before adding local coordinates; a world-coordinate
@@ -475,11 +473,12 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     // valid volume cache. First moments belong to the new numerical frame.
     if (impl_->frame.origin != input.anchor)
     {
-        active_work->charge(storage_bytes(), 1);
+        active_work->charge(geometry_metadata_copy_bytes<Mode>(*impl_), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
         rebased->export_source = impl_->export_source ? impl_->export_source : impl_;
         rebased->frame.origin = input.anchor;
         rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
+        active_work->charge(1, sizeof(MomentCache));
         rebased->moment_cache = std::make_shared<MomentCache>();
         for (auto& vertex : rebased->vertices)
             vertex.coordinates = transform<Mode>(vertex.coordinates, impl_->frame, rebased->frame);
@@ -487,6 +486,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
         ++statistics.constructions;
         return GeometryKernel<Mode>(std::move(rebased)).clip(input, measure_section);
     }
+    active_work->charge(1, sizeof(Plane));
     auto plane = std::make_shared<Plane>();
     plane->frame = impl_->frame;
     plane->normal = point<Mode>(input.normal);
@@ -494,10 +494,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     plane->offset = scaled<Mode>(Scalar(input.offset), -impl_->frame.exponent);
     plane->input = input;
     plane->native_support = details::ordinary_native::make_input_support(input.normal, input.anchor, input.offset);
-    auto source = std::make_shared<Impl>();
-    source->limits = impl_->limits;
-    source->surfaces.push_back({plane, 1});
-    return clip_impl(source, 0, measure_section);
+    return clip_plane(CutPlaneDescriptor<Mode>(std::move(plane), 1, impl_->limits), 0, measure_section);
 }
 
 template<ArithmeticMode Mode>
@@ -517,12 +514,21 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof, int orientation_override) const
 {
     static_assert(Mode == kernel_mode);
-    const auto source = checked_geometry_storage<Mode>(source_base);
+    return clip_plane(CutPlaneDescriptor<Mode>(checked_geometry_storage<Mode>(source_base), plane_id), plane_id,
+        measure_section, construct_outside, partition_proof, orientation_override);
+}
+
+template<ArithmeticMode Mode>
+DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode>& descriptor, std::size_t plane_id,
+    bool measure_section, bool construct_outside, bool partition_proof, int orientation_override) const
+{
+    static_assert(Mode == kernel_mode);
+    const auto* source = &descriptor;
     require_mode(impl_->limits.arithmetic_mode, source->limits.arithmetic_mode);
     if ((impl_->partition_proof_only && !partition_proof) ||
         (partition_proof && (measure_section || !construct_outside)))
         reject("invalid private partition witness clip mode.");
-    auto support = source->surfaces.at(plane_id);
+    auto support = descriptor.support;
     if (orientation_override)
     {
         if (orientation_override != 1 && orientation_override != -1)
@@ -683,7 +689,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         result.section.area = bounded<Mode>(Scalar{});
         result.section.centroid = bounded<Mode>(Point{});
         PointSnapshotBuilder<Mode> points;
-        std::vector<Vertex> vertices = impl_->vertices;
+        std::vector<Vertex> vertices = draft_vertices<Mode>(*impl_);
         import_vertex_provenance(vertices, impl_->point_context.get(), points);
         points.retain_context(plane->point_context);
         for (std::size_t i = 0; i < reframed.size(); ++i)
@@ -952,7 +958,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             }
             buffer.resize(count);
         };
-        std::array<std::shared_ptr<Impl>, 2> drafts;
+        std::array<std::shared_ptr<DraftGeometry>, 2> drafts;
         {
             // Crossing construction is complete. Include generated vertex IDs and
             // reuse these arrays only across the requested children of this split.
@@ -962,8 +968,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             resize_scratch(old_to_new, vertices.size());
             const auto draft_child = [&](unsigned outside)
             {
-                active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
-                auto poly = std::make_shared<Impl>();
+                active_work->charge(1, sizeof(DraftGeometry) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
+                auto poly = std::make_shared<DraftGeometry>();
                 poly->point_context = point_context;
                 poly->frame = frame;
                 poly->reference_origin = impl_->reference_origin;
@@ -1001,7 +1007,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         // Validate the whole requested split before evaluating either child. The
         // cap already has the directed winding inherited from the parent faces;
         // no near-degenerate numerical normal is needed to orient it again.
-        const auto validate_draft = [&](const Impl& poly)
+        const auto validate_draft = [&](const DraftGeometry& poly)
         {
             if (poly.vertices.size() < 4 || poly.faces.size() < 4 || poly.faces.size() != poly.surfaces.size())
                 reject("positive complementary child has an incomplete boundary.");
@@ -1199,9 +1205,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         for (const auto& draft : drafts)
             if (draft)
                 ++statistics.constructions;
-        result.inside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(drafts[0])));
+        std::array<std::shared_ptr<StoredGeometry>, 2> frozen;
+        for (std::size_t side = 0; side < drafts.size(); ++side)
+            if (drafts[side])
+                frozen[side] = freeze_geometry<Mode>(std::move(*drafts[side]));
+        result.inside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(frozen[0])));
         if (construct_outside)
-            result.outside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(drafts[1])));
+            result.outside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(frozen[1])));
         return result;
     };
     if (aligned_frame.origin != impl_->frame.origin)
@@ -1348,10 +1358,11 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
     Operation scope(impl_->limits);
     if (impl_->partition_proof_only)
         reject("private partition witness cannot supply translated measured geometry.");
-    auto result = std::make_shared<Impl>(*impl_);
-    result->moment_cache = std::make_shared<MomentCache>();
+    auto result = draft_geometry<Mode>(*impl_);
+    result->moment_cache.reset();
     // Translation is a new source expression, with a fresh structural root.
     // Both vertex and support anchors carry the same displacement.
+    active_work->charge(1, sizeof(Ancestry));
     result->ancestry = std::make_shared<Ancestry>();
     result->partition_certificate.reset();
     result->construction.reset();
@@ -1361,7 +1372,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
         {
             if (!planes.contains(plane))
             {
-                auto shifted = std::make_shared<Plane>(*plane);
+                active_work->charge(1, sizeof(typename decltype(planes)::value_type) + 4 * sizeof(void*));
+                auto shifted = clone_plane<Mode>(*plane);
                 shifted->anchor = shifted->anchor + scaled<Mode>(point<Mode>(displacement), -shifted->frame.exponent);
                 shifted->input.reset();
                 shifted->normal_error.reset();
@@ -1375,6 +1387,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
             }
             plane = planes.at(plane);
         }
+    result->planes_prepaid = true;
     for (auto& surface : result->surfaces)
         surface.plane = planes.at(surface.plane);
     for (auto& vertex : result->vertices)
@@ -1385,14 +1398,16 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
     }
     result->point_context.reset();
     finish<Mode>(*result, false, true);
-    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(freeze_geometry<Mode>(std::move(*result))));
 }
 
 template int matching_input<kernel_mode>(const GeometryHalfspace& a, const GeometryHalfspace& b);
 template bool incident<kernel_mode>(
-    const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
+    const VertexView& v, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
 template DynamicGeometrySection section<kernel_mode>(
-    const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
+    const DynamicConvexGeometry::Impl& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
+template DynamicGeometrySection section<kernel_mode>(const DynamicConvexGeometry::Impl& poly,
+    const std::vector<VertexView>& vertices, const std::vector<std::size_t>& loop);
 template DynamicClipResult GeometryKernel<kernel_mode>::clip(
     const GeometryHalfspace& input, bool measure_section) const;
 template DynamicClipResult GeometryKernel<kernel_mode>::clip_by_face(
@@ -1400,6 +1415,9 @@ template DynamicClipResult GeometryKernel<kernel_mode>::clip_by_face(
 template DynamicClipResult GeometryKernel<kernel_mode>::clip_impl(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>& source, std::size_t plane_id, bool measure_section,
     bool construct_outside, bool partition_proof, int orientation_override) const;
+template DynamicClipResult GeometryKernel<kernel_mode>::clip_plane(const CutPlaneDescriptor<kernel_mode>& source,
+    std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof,
+    int orientation_override) const;
 template DynamicPhaseMeasures GeometryKernel<kernel_mode>::phases(const GeometryHalfspace& gas) const;
 template bool construction_contains<kernel_mode>(
     const std::shared_ptr<const Ancestry>& parent, std::shared_ptr<const Ancestry> child);

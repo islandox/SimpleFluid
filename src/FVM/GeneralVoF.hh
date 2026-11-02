@@ -11,6 +11,9 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
+#include "geometry/swept_volume/OrdinaryTrajectorySnapshot.hh"
+#include <iterator>
+#include <variant>
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "utils/ArithmeticMode.hh"
@@ -362,6 +365,46 @@ struct GeneralVoFFiniteNodeTrajectory
     std::uint64_t node = 0;
     PLIC::DynamicPoint point, departure;
 };
+/** Finite trajectory input range. Ordinary copies share immutable typed
+ * points; BoundedCertification copies retain their owning dynamic records. */
+class SIMPLEFLUID_FVM_EXPORT GeneralVoFFiniteTrajectories
+{
+public:
+    using value_type = GeneralVoFFiniteNodeTrajectory;
+    using Snapshot = geometry::swept_volume::OrdinaryTrajectorySnapshot;
+    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+    [[nodiscard]] value_type at(std::size_t index) const;
+    class const_iterator
+    {
+    public:
+        using value_type = GeneralVoFFiniteNodeTrajectory;
+        using difference_type = std::ptrdiff_t;
+        using iterator_concept = std::input_iterator_tag;
+        using iterator_category = std::input_iterator_tag;
+        const_iterator() = default;
+        value_type operator*() const { return owner_->at(index_); }
+        const_iterator& operator++() { ++index_; return *this; }
+        void operator++(int) { ++*this; }
+        friend bool operator==(const const_iterator&, const const_iterator&) = default;
+    private:
+        friend GeneralVoFFiniteTrajectories;
+        const_iterator(const GeneralVoFFiniteTrajectories* owner, std::size_t index) : owner_(owner), index_(index) {}
+        const GeneralVoFFiniteTrajectories* owner_ = nullptr;
+        std::size_t index_ = 0;
+    };
+    [[nodiscard]] const_iterator begin() const noexcept { return {this, 0}; }
+    [[nodiscard]] const_iterator end() const noexcept { return {this, size()}; }
+    [[nodiscard]] std::size_t storage_bytes() const noexcept;
+    void retain_provenance(PLIC::GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit) const;
+private:
+    friend class GeneralVoF;
+    explicit GeneralVoFFiniteTrajectories(std::shared_ptr<const Snapshot> snapshot) : storage_(std::move(snapshot)) {}
+    explicit GeneralVoFFiniteTrajectories(std::vector<value_type> records) : storage_(std::move(records)) {}
+    std::variant<std::shared_ptr<const Snapshot>, std::vector<value_type>> storage_;
+public:
+    GeneralVoFFiniteTrajectories() = default;
+};
 /** Actual nominal face-chain quantities. The allowance is allocated from the
  * frozen incident cells, never inferred from the observed construction defect. */
 struct GeneralVoFFaceChainDiagnostic
@@ -418,7 +461,7 @@ struct GeneralVoFPreparedTransport
     /** Donor-cell numerical support only; never physical signed receipts. */
     std::vector<GeneralVoFFiniteTransfer> numerical_support_transfers;
     std::vector<GeneralVoFFiniteDonorBudget> numerical_support_budgets;
-    std::vector<GeneralVoFFiniteNodeTrajectory> node_trajectories;
+    GeneralVoFFiniteTrajectories node_trajectories;
     std::vector<PhaseRoundoff> phase_roundoff, old_phase_history, new_phase_history;
     std::vector<long double> old_mass, new_mass, old_mass_error, new_mass_error;
     std::vector<GeneralVoFPhaseCleanupDelta> phase_cleanup;
@@ -660,7 +703,7 @@ public:
          * empty; use its prepared signed receipts/budgets and numerical support. */
         [[nodiscard]] const std::vector<GeneralVoFFiniteTransfer>& finite_transfers() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteDonorBudget>& finite_donor_budgets() const noexcept;
-        [[nodiscard]] const std::vector<GeneralVoFFiniteNodeTrajectory>& finite_node_trajectories() const noexcept;
+        [[nodiscard]] const GeneralVoFFiniteTrajectories& finite_node_trajectories() const noexcept;
         /** All locally retained canonical tiles; MPI shared-face replicas repeat.
          * Deduplicate by canonical face ID before forming a global diagnostic sum. */
         [[nodiscard]] const std::vector<GeneralVoFFaceChainDiagnostic>& finite_face_chain_diagnostics() const noexcept;
@@ -724,7 +767,7 @@ public:
         std::vector<GeneralVoFFiniteFaceContribution> finite_faces_;
         std::vector<GeneralVoFFiniteTransfer> finite_transfers_;
         std::vector<GeneralVoFFiniteDonorBudget> finite_budgets_;
-        std::vector<GeneralVoFFiniteNodeTrajectory> finite_trajectories_;
+        GeneralVoFFiniteTrajectories finite_trajectories_;
         std::vector<GeneralVoFFaceChainDiagnostic> finite_face_chain_;
         std::vector<GeneralVoFCellClosureDiagnostic> finite_cell_closure_;
     };

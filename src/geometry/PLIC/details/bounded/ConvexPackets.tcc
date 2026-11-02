@@ -131,7 +131,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         if (reader.word() != pin)
             reject("stale or foreign numerical geometry publication/trial pins.");
     PointSnapshotBuilder<Mode> points;
-    auto result = std::make_shared<Impl>();
+    active_work->charge(1, sizeof(DraftGeometry) + sizeof(Ancestry));
+    auto result = std::make_shared<DraftGeometry>();
     result->numerical_only = true;
     result->frame = reader.frame();
     const auto reference = reader.frame();
@@ -303,7 +304,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     }
     result->point_context = points.freeze();
     finish<Mode>(*result);
-    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(freeze_geometry<Mode>(std::move(*result))));
 }
 
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::byte(std::uint8_t value)

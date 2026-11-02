@@ -10,6 +10,7 @@
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
@@ -130,6 +131,10 @@ public:
     static auto export_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>&, GeometryAllocationLedger&,
         std::size_t&, std::size_t);
 
+    /** Private construction handoff: every new binding owner is already charged before allocation. */
+    template<ArithmeticMode Mode>
+    static void retain_prepaid_native_binding(
+        const ConvexGeometryPtr<Mode>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
     static const std::shared_ptr<const DynamicConvexGeometry::Impl>& implementation(const DynamicConvexGeometry&);
     static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
     template<ArithmeticMode Mode>
@@ -338,6 +343,154 @@ template<ArithmeticMode Mode> struct StoredSurface
     int orientation = 1;
 };
 
+template<ArithmeticMode Mode> struct FrozenTopology;
+template<ArithmeticMode Mode> class IncidentPlaneRange
+{
+    // A transient draft view borrows its vector object. Published views borrow
+    // topology + row number; neither representation owns incidence storage.
+    const void* source_ = nullptr;
+    std::size_t row_ = std::numeric_limits<std::size_t>::max();
+
+public:
+    using value_type = StoredPlanePtr<Mode>;
+    using iterator = ValueRangeIterator<IncidentPlaneRange>;
+    IncidentPlaneRange() = default;
+    explicit IncidentPlaneRange(const std::vector<StoredPlanePtr<Mode>>& planes) : source_(&planes) {}
+    IncidentPlaneRange(const FrozenTopology<Mode>* topology, std::size_t row) : source_(topology), row_(row) {}
+    std::size_t size() const noexcept;
+    bool empty() const noexcept { return size() == 0; }
+    const StoredPlanePtr<Mode>& operator[](std::size_t i) const;
+    const StoredPlanePtr<Mode>& front() const { return (*this)[0]; }
+    iterator begin() const { return {*this, 0}; }
+    iterator end() const { return {*this, static_cast<std::ptrdiff_t>(size())}; }
+};
+/** Immutable coordinate/provenance payload; incidence only borrows the shared topology. */
+template<ArithmeticMode Mode> struct FrozenVertex
+{
+    StoredPoint<Mode> coordinates;
+    IncidentPlaneRange<Mode> incident;
+    LocalAuthorityRange<Mode> authorities;
+    StoredPointRef<Mode> source_identity;
+    bool numerical_only = false;
+    FrozenVertex() = default;
+    FrozenVertex(const StoredVertex<Mode>& vertex)
+        : coordinates(vertex.coordinates), incident(vertex.incident), authorities(vertex.authorities),
+          source_identity(vertex.source_identity), numerical_only(vertex.numerical_only)
+    {
+    }
+};
+
+struct TopologyCounts
+{
+    std::size_t vertices = 0, faces = 0, planes = 0, face_slots = 0, incident_slots = 0;
+};
+inline std::size_t topology_sum(std::size_t a, std::size_t b)
+{
+    if (b > std::numeric_limits<std::size_t>::max() - a)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Frozen topology offset overflows.");
+    return a + b;
+}
+inline std::size_t topology_product(std::size_t a, std::size_t b)
+{
+    if (b && a > std::numeric_limits<std::size_t>::max() / b)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Frozen topology allocation size overflows.");
+    return a * b;
+}
+inline bool compact_topology(const TopologyCounts& counts, bool force_wide = false)
+{
+    (void) topology_sum(counts.vertices, 1);
+    (void) topology_sum(counts.faces, 1);
+    const auto max = std::numeric_limits<std::uint32_t>::max();
+    return !force_wide && counts.vertices <= max && counts.faces <= max && counts.planes <= max &&
+           counts.face_slots <= max && counts.incident_slots <= max;
+}
+template<class Index> struct TopologyArrays
+{
+    std::vector<Index> face_offsets, face_vertices, incident_offsets, incident_planes, surface_planes;
+    std::vector<int> surface_orientations;
+    std::size_t bytes() const
+    {
+        auto count = topology_sum(face_offsets.capacity(), face_vertices.capacity());
+        count = topology_sum(count, incident_offsets.capacity());
+        count = topology_sum(count, incident_planes.capacity());
+        count = topology_sum(count, surface_planes.capacity());
+        return topology_sum(
+            topology_product(count, sizeof(Index)), topology_product(surface_orientations.capacity(), sizeof(int)));
+    }
+};
+template<ArithmeticMode Mode> struct FrozenTopology
+{
+    std::variant<TopologyArrays<std::uint32_t>, TopologyArrays<std::uint64_t>> arrays;
+    std::vector<StoredPlanePtr<Mode>> planes;
+    FaceRange faces() const
+    {
+        return std::visit(
+            [](const auto& a)
+            {
+                return FaceRange(a.face_offsets.data(), a.face_vertices.data(), a.face_offsets.size() - 1,
+                    sizeof(typename std::remove_cvref_t<decltype(a.face_offsets)>::value_type));
+            },
+            arrays);
+    }
+    IncidentPlaneRange<Mode> incidence(std::size_t vertex) const { return {this, vertex}; }
+    std::size_t incident_count(std::size_t vertex) const
+    {
+        return std::visit([&](const auto& a)
+            { return static_cast<std::size_t>(a.incident_offsets[vertex + 1] - a.incident_offsets[vertex]); }, arrays);
+    }
+    const StoredPlanePtr<Mode>& incident_plane(std::size_t vertex, std::size_t index) const
+    {
+        return std::visit([&](const auto& a) -> const StoredPlanePtr<Mode>&
+            { return planes[a.incident_planes[a.incident_offsets[vertex] + index]]; }, arrays);
+    }
+    StoredSurface<Mode> surface(std::size_t face) const
+    {
+        return std::visit([&](const auto& a)
+            { return StoredSurface<Mode>{planes[a.surface_planes[face]], a.surface_orientations[face]}; }, arrays);
+    }
+    std::size_t bytes() const
+    {
+        return topology_sum(
+            sizeof(FrozenTopology), topology_sum(topology_product(planes.capacity(), sizeof(StoredPlanePtr<Mode>)),
+                                        std::visit([](const auto& a) { return a.bytes(); }, arrays)));
+    }
+};
+template<ArithmeticMode Mode> std::size_t IncidentPlaneRange<Mode>::size() const noexcept
+{
+    if (!source_)
+        return 0;
+    return row_ == std::numeric_limits<std::size_t>::max()
+               ? static_cast<const std::vector<StoredPlanePtr<Mode>>*>(source_)->size()
+               : static_cast<const FrozenTopology<Mode>*>(source_)->incident_count(row_);
+}
+template<ArithmeticMode Mode> const StoredPlanePtr<Mode>& IncidentPlaneRange<Mode>::operator[](std::size_t i) const
+{
+    return row_ == std::numeric_limits<std::size_t>::max()
+               ? (*static_cast<const std::vector<StoredPlanePtr<Mode>>*>(source_))[i]
+               : static_cast<const FrozenTopology<Mode>*>(source_)->incident_plane(row_, i);
+}
+template<ArithmeticMode Mode> class SurfaceRange
+{
+    const FrozenTopology<Mode>* topology_ = nullptr;
+
+public:
+    using value_type = StoredSurface<Mode>;
+    using iterator = ValueRangeIterator<SurfaceRange>;
+    SurfaceRange() = default;
+    explicit SurfaceRange(const FrozenTopology<Mode>* topology) : topology_(topology) {}
+    std::size_t size() const { return topology_ ? topology_->faces().size() : 0; }
+    bool empty() const { return size() == 0; }
+    value_type operator[](std::size_t i) const { return topology_->surface(i); }
+    value_type at(std::size_t i) const
+    {
+        if (i >= size())
+            throw std::out_of_range("surface index");
+        return (*this)[i];
+    }
+    iterator begin() const { return {*this, 0}; }
+    iterator end() const { return {*this, static_cast<std::ptrdiff_t>(size())}; }
+};
+
 template<ArithmeticMode Mode> struct StoredIntegrals
 {
     StoredValue<Mode> volume;
@@ -383,7 +536,7 @@ struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
 {
     Frame frame;
     GeometryPoint reference_origin{};
-    std::vector<Face> faces;
+    FaceRange faces;
     std::shared_ptr<PointExportCache> point_export_cache;
     std::shared_ptr<const Impl> export_source;
     bool export_seal = false;
@@ -398,15 +551,41 @@ struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
 
 namespace details
 {
-template<ArithmeticMode Mode> struct GeometryStorage : DynamicConvexGeometry::Impl
+template<ArithmeticMode Mode> struct GeometryMetadata : DynamicConvexGeometry::Impl
 {
-    GeometryStorage() { limits.arithmetic_mode = Mode; }
+    GeometryMetadata() { limits.arithmetic_mode = Mode; }
     std::shared_ptr<const PointSnapshotContext<Mode>> point_context;
+    StoredValue<Mode> volume;
+    std::shared_ptr<StoredMomentCache<Mode>> moment_cache;
+};
+template<ArithmeticMode Mode> struct GeometryStorage : GeometryMetadata<Mode>
+{
+    std::shared_ptr<const FrozenTopology<Mode>> topology;
+    std::vector<FrozenVertex<Mode>> vertices;
+    SurfaceRange<Mode> surfaces;
+    GeometryStorage() = default;
+    GeometryStorage(GeometryMetadata<Mode>&& metadata, std::shared_ptr<const FrozenTopology<Mode>> owner,
+        std::vector<FrozenVertex<Mode>>&& payload)
+        : GeometryMetadata<Mode>(std::move(metadata)), topology(std::move(owner)), vertices(std::move(payload)),
+          surfaces(topology.get())
+    {
+        this->faces = topology->faces();
+    }
+};
+/** Mutable construction only. No draft instance is ever published. */
+template<ArithmeticMode Mode> struct GeometryDraft : GeometryMetadata<Mode>
+{
+    std::vector<Face> faces;
     std::vector<StoredVertex<Mode>> vertices;
     std::vector<StoredSurface<Mode>> surfaces;
-    StoredValue<Mode> volume;
-    std::shared_ptr<StoredMomentCache<Mode>> moment_cache = std::make_shared<StoredMomentCache<Mode>>();
+    // Set only by fully reserved draft_geometry(); its translation caller changes values, never capacities.
+    bool buffers_prepaid = false;
+    bool planes_prepaid = false;
+    GeometryDraft() = default;
+    explicit GeometryDraft(const GeometryMetadata<Mode>& metadata) : GeometryMetadata<Mode>(metadata) {}
 };
+
+#include "geometry/PLIC/details/FrozenTopology.ipp"
 
 template<ArithmeticMode Mode>
 std::shared_ptr<const GeometryStorage<Mode>> checked_geometry_storage(
@@ -415,6 +594,34 @@ std::shared_ptr<const GeometryStorage<Mode>> checked_geometry_storage(
     require_mode(source->limits.arithmetic_mode, Mode);
     return std::static_pointer_cast<const GeometryStorage<Mode>>(source);
 }
+/** A cut pins one plane and its provenance without pretending to be a published shell. */
+template<ArithmeticMode Mode> struct CutPlaneDescriptor
+{
+    std::shared_ptr<const GeometryStorage<Mode>> owner;
+    StoredSurface<Mode> support;
+    GeometryLimits limits;
+    Frame frame;
+    FaceRange faces;
+    std::span<const FrozenVertex<Mode>> vertices;
+    std::shared_ptr<const PointSnapshotContext<Mode>> point_context;
+    bool numerical_only = false;
+    CutPlaneDescriptor(StoredPlanePtr<Mode> plane, int orientation, GeometryLimits requested)
+        : support{std::move(plane), orientation}, limits(requested), frame(support.plane->frame)
+    {
+        if (support.plane->point_context)
+        {
+            require_mode(support.plane->point_context->mode, Mode);
+            point_context = std::static_pointer_cast<const PointSnapshotContext<Mode>>(
+                support.plane->point_context->shared_from_this());
+        }
+    }
+    CutPlaneDescriptor(std::shared_ptr<const GeometryStorage<Mode>> source, std::size_t face)
+        : owner(std::move(source)), support(owner->surfaces.at(face)), limits(owner->limits), frame(owner->frame),
+          faces(owner->faces), vertices(owner->vertices), point_context(owner->point_context),
+          numerical_only(owner->numerical_only)
+    {
+    }
+};
 template<ArithmeticMode Mode>
 std::shared_ptr<const GeometryConstruction> construction_source(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
@@ -427,9 +634,9 @@ template<ArithmeticMode Mode>
 std::size_t geometry_allocation_footprint(const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
 template<ArithmeticMode Mode>
 bool construction_edge_incident(
-    const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&, const PointSnapshotContext<Mode>*);
+    const FrozenVertex<Mode>&, const StoredPlanePtr<Mode>&, const PointSnapshotContext<Mode>*);
 template<ArithmeticMode Mode>
-void preserve_crossing_incidence(StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&,
+void preserve_crossing_incidence(StoredVertex<Mode>&, const FrozenVertex<Mode>&, const FrozenVertex<Mode>&,
     const Frame&, bool numerical_only, PointSnapshotBuilder<Mode>&);
 } // namespace details
 

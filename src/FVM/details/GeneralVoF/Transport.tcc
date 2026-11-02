@@ -199,12 +199,25 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
         [&]
         {
             wire::Budget budget{limit};
-            budget.add(traces.size() * sizeof(GeneralVoFFiniteNodeTrajectory));
-            trial.finite_trajectories_.reserve(traces.size());
-            for (const auto& [id, trace] : traces)
+            if constexpr (Mode == ArithmeticMode::Ordinary)
             {
-                local_motion |= !SimpleFluid::geometry::swept_volume::same_point(trace.first, trace.second);
-                trial.finite_trajectories_.push_back({id, trace.first.dynamic(), trace.second.dynamic()});
+                using Snapshot = geometry::swept_volume::OrdinaryTrajectorySnapshot;
+                auto snapshot = Snapshot::freeze(traces, budget.used, budget.limit);
+                for (const auto& trace : snapshot->entries())
+                    local_motion |= !geometry::swept_volume::same_point(trace.current, trace.departure);
+                trial.finite_trajectories_ = GeneralVoFFiniteTrajectories(std::move(snapshot));
+            }
+            else
+            {
+                budget.add(traces.size() * sizeof(GeneralVoFFiniteNodeTrajectory));
+                std::vector<GeneralVoFFiniteNodeTrajectory> records;
+                records.reserve(traces.size());
+                for (const auto& [id, trace] : traces)
+                {
+                    local_motion |= !geometry::swept_volume::same_point(trace.first, trace.second);
+                    records.push_back({id, trace.first.dynamic(), trace.second.dynamic()});
+                }
+                trial.finite_trajectories_ = GeneralVoFFiniteTrajectories(std::move(records));
             }
             for (const auto& [face, value] : flux)
                 local_motion |= value.value != 0;
@@ -246,6 +259,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                     trial.finite_budgets_.push_back({cell.gid, old, {zero, zero, zero}, old});
                 }
             });
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            trial.validate_retained_algebraic_payload();
         return trial;
     }
     if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -257,7 +272,10 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             algebraic.validate_retained_algebraic_payload();
             return algebraic;
         }
-        return plan_interface_transport(std::move(trial), {face_volume, traces, flux, face_budgets, packet_context});
+        const auto trajectories = std::get<std::shared_ptr<const GeneralVoFFiniteTrajectories::Snapshot>>(
+            trial.finite_trajectories_.storage_);
+        return plan_interface_transport(
+            std::move(trial), {face_volume, trajectories, flux, face_budgets, packet_context});
     }
     else
     {

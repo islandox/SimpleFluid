@@ -212,7 +212,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     // Admit the donor-cell support without constructing a discarded candidate.
     auto low = admit_low_order_ledger(data, controls.face_volume, trial.timestep_);
     auto geometry =
-        prepare_local_sweeps(data, controls.traces, controls.flux, controls.face_budgets, controls.packet_context);
+        prepare_local_sweeps(data, controls.trajectories, controls.flux, controls.face_budgets, controls.packet_context);
     const auto capture_bytes = geometry.balance_work ? geometry.balance_work->retained_bytes : 0;
     // Capture remains alive through every packet exchange and ledger construction.
     const auto limit = data.options.byte_budget - capture_bytes;

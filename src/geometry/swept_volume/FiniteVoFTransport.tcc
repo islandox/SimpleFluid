@@ -4,9 +4,25 @@ namespace SimpleFluid::geometry::swept_volume
 {
 using VoF::finite_detail::SumFor;
 template<ArithmeticMode Mode>
-Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
-    const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
+void validate_sweep_controls(std::span<const std::uint64_t> nodes, Value control, const Work& work,
     long double ordinary_volume_budget)
+{
+    if (work.arithmetic_mode != Mode)
+        throw std::invalid_argument("Finite VoF kernel arithmetic mode differs from its work scope.");
+    if (nodes.size() < 3 || nodes.size() > work.limits.maximum_simplices / 4)
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF face simplex limit is exhausted.");
+    if (!std::isfinite(work.volume_tolerance) || !(work.volume_tolerance > 0))
+        throw std::invalid_argument("Finite VoF sweep volume tolerance is invalid.");
+    VoF::finite_detail::validate(control);
+    if (control.arithmetic_mode != work.arithmetic_mode)
+        throw std::invalid_argument("Finite VoF sweep control arithmetic mode differs.");
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (!std::isfinite(ordinary_volume_budget) || !(ordinary_volume_budget > 0))
+            throw std::invalid_argument("Ordinary VoF sweep needs a positive cell-derived volume budget.");
+}
+template<ArithmeticMode Mode, class Traces>
+Sweep<Mode> prepare_sweep_impl(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const Traces& traces, Value control, Work& retained, Work& work, long double ordinary_volume_budget)
 {
     using Math = Arithmetic<Mode>;
     using Points = PointArithmetic<Mode>;
@@ -23,44 +39,86 @@ Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nod
     context.record.mark(failure::Field::ByteBudget);
     context.record.control = control.value;
     context.record.mark(failure::Field::Control);
-    if (work.arithmetic_mode != Mode)
-        throw std::invalid_argument("Finite VoF kernel arithmetic mode differs from its work scope.");
-    if (nodes.size() < 3 || nodes.size() > work.limits.maximum_simplices / 4)
-        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF face simplex limit is exhausted.");
-    if (!std::isfinite(work.volume_tolerance) || !(work.volume_tolerance > 0))
-        throw std::invalid_argument("Finite VoF sweep volume tolerance is invalid.");
-    VoF::finite_detail::validate(control);
-    if (control.arithmetic_mode != work.arithmetic_mode)
-        throw std::invalid_argument("Finite VoF sweep control arithmetic mode differs.");
-    if constexpr (Mode == ArithmeticMode::Ordinary)
-        if (!std::isfinite(ordinary_volume_budget) || !(ordinary_volume_budget > 0))
-            throw std::invalid_argument("Ordinary VoF sweep needs a positive cell-derived volume budget.");
+    validate_sweep_controls<Mode>(nodes, control, work, ordinary_volume_budget);
     Sweep<Mode> result;
     result.face = face;
     result.control = control;
     result.ordinary_volume_budget = ordinary_volume_budget;
+    const auto retained_entry = retained.bytes;
+    const auto scratch_entry_limit = work.limits.byte_budget;
+    const auto reserve_overlap = [&]
+    {
+        if (&retained != &work)
+        {
+            const auto delta = retained.bytes - retained_entry;
+            work.limits.byte_budget = scratch_entry_limit - std::min(delta, scratch_entry_limit);
+            if (work.bytes > work.limits.byte_budget)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                    "Finite VoF retained trajectories and face scratch exceed their combined byte budget.");
+        }
+    };
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        retained.retain_trajectories(traces);
+        result.trajectories = traces;
+        retained.charge_items(nodes.size(), sizeof(std::size_t));
+        result.node_slots.reserve(nodes.size());
+        retained.charge((result.node_slots.capacity() - nodes.size()) * sizeof(std::size_t));
+        reserve_overlap();
+        work.charge_items(nodes.size(), sizeof(std::uint64_t) + 4 * sizeof(void*));
+    }
     std::set<std::uint64_t> unique;
     for (auto node : nodes)
     {
         if (!unique.insert(node).second)
             throw std::invalid_argument("Finite VoF canonical face repeats a node.");
-        const auto& trace = traces.at(node);
-        if (trace.first.arithmetic_mode != work.arithmetic_mode ||
-            trace.second.arithmetic_mode != work.arithmetic_mode)
-            throw std::invalid_argument("Finite VoF sweep trajectory arithmetic mode differs.");
-        result.current.push_back(trace.first);
-        result.departure.push_back(trace.second);
-        result.center = Points::add(result.center, trace.first);
-        result.backcenter = Points::add(result.backcenter, trace.second);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            result.node_slots.push_back(traces->slot(node));
+            const auto i = result.node_count() - 1;
+            result.center = Points::add(result.center, result.current(i));
+            result.backcenter = Points::add(result.backcenter, result.departure(i));
+        }
+        else
+        {
+            const auto& trace = traces.at(node);
+            if (trace.first.arithmetic_mode != work.arithmetic_mode ||
+                trace.second.arithmetic_mode != work.arithmetic_mode)
+                throw std::invalid_argument("Finite VoF sweep trajectory arithmetic mode differs.");
+            result.current.push_back(trace.first);
+            result.departure.push_back(trace.second);
+            result.center = Points::add(result.center, trace.first);
+            result.backcenter = Points::add(result.backcenter, trace.second);
+        }
     }
-    result.center = PLIC::point_average<Mode>(result.current);
-    result.backcenter = PLIC::point_average<Mode>(result.departure);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        // Preserve point_average's compensated order and sealed provenance.
+        // The same allocated face-ordered temporary is reused without growing.
+        work.charge_items(nodes.size(), sizeof(PLIC::Point<Mode>));
+        std::vector<PLIC::Point<Mode>> ordered;
+        ordered.reserve(nodes.size());
+        work.charge((ordered.capacity() - nodes.size()) * sizeof(PLIC::Point<Mode>));
+        for (std::size_t i = 0; i < nodes.size(); ++i)
+            ordered.push_back(result.current(i));
+        result.center = PLIC::point_average<Mode>(ordered);
+        ordered.clear();
+        for (std::size_t i = 0; i < nodes.size(); ++i)
+            ordered.push_back(result.departure(i));
+        result.backcenter = PLIC::point_average<Mode>(ordered);
+    }
+    else
+    {
+        result.center = PLIC::point_average<Mode>(result.current);
+        result.backcenter = PLIC::point_average<Mode>(result.departure);
+    }
     PLIC::Point<Mode> normal{};
     for (std::size_t i = 0; i < nodes.size(); ++i)
-        normal = Points::add(normal, Points::cross(Points::subtract(result.current[i], result.center),
-                                         Points::subtract(result.current[(i + 1) % nodes.size()], result.center)));
+        normal = Points::add(normal,
+            Points::cross(Points::subtract(result.current_point(i), result.center),
+                Points::subtract(result.current_point((i + 1) % nodes.size()), result.center)));
     SumFor<Mode> original;
-    visit_sweep_triangles(nodes, result.current, result.departure, result.backcenter,
+    visit_sweep_triangles(nodes, result, result.backcenter,
         [&](const auto& a, const auto& b, const auto& c) { original.add(cone_determinant(result.center, a, b, c)); });
     // Only the departure cap depends on the private center. Its linear
     // coefficient follows directly from the determinant's multilinearity.
@@ -68,14 +126,66 @@ Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nod
     for (std::size_t i = 0; i < nodes.size(); ++i)
     {
         const auto j = (i + 1) % nodes.size();
-        coefficient.add(Points::dot(normal, Points::cross(Points::subtract(result.departure[j], result.center),
-                                                Points::subtract(result.departure[i], result.center))));
+        coefficient.add(Points::dot(normal, Points::cross(Points::subtract(result.departure_point(j), result.center),
+                                                Points::subtract(result.departure_point(i), result.center))));
     }
     const auto difference = Math::subtract(Math::multiply(control, {6, 0}), original.value());
     if (difference.value != 0 || difference.absolute_error != 0)
         result.backcenter = PLIC::point_displaced<Mode>(
             result.backcenter, Points::scale(normal, Math::divide(difference, coefficient.value())));
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        // Sealed private centers retain provenance beyond their inline points.
+        // Admit it while the cumulative face gather charge is still live.
+        const auto center_limit = &retained == &work ? retained.limits.byte_budget :
+            retained.limits.byte_budget - std::min(work.bytes, retained.limits.byte_budget);
+        const auto inline_bytes = 2 * sizeof(PLIC::DynamicPoint);
+        if (inline_bytes > center_limit - std::min(retained.bytes, center_limit))
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "Finite VoF private centers exceed the remaining combined face byte budget.");
+        retained.charge(inline_bytes);
+        retained.allocations.retain_point_provenance(result.center, retained.bytes, center_limit);
+        retained.allocations.retain_point_provenance(result.backcenter, retained.bytes, center_limit);
+        reserve_overlap();
+    }
     return result;
+}
+template<ArithmeticMode Mode>
+    requires(Mode == ArithmeticMode::Ordinary)
+Sweep<Mode> prepare_sweep(std::uint64_t face,
+    std::span<const std::uint64_t> nodes, std::shared_ptr<const OrdinaryTrajectorySnapshot> trajectories,
+    Value control, Work& retained_work, Work& scratch_work, long double ordinary_volume_budget)
+{
+    return prepare_sweep_impl<ArithmeticMode::Ordinary>(face, nodes, trajectories, control,
+        retained_work, scratch_work, ordinary_volume_budget);
+}
+template<ArithmeticMode Mode>
+Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
+    long double ordinary_volume_budget)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        namespace failure = ::SimpleFluid::detail::vof_failure;
+        failure::Scope context("sweep_construction");
+        context.record.face = face;
+        context.record.mark(failure::Field::Face);
+        context.record.arithmetic_mode = Mode;
+        context.record.mark(failure::Field::Arithmetic);
+        context.record.volume_budget = ordinary_volume_budget;
+        context.record.mark(failure::Field::VolumeBudget);
+        context.record.byte_budget = work.limits.byte_budget;
+        context.record.mark(failure::Field::ByteBudget);
+        context.record.control = control.value;
+        context.record.mark(failure::Field::Control);
+        validate_sweep_controls<Mode>(nodes, control, work, ordinary_volume_budget);
+        // Admission and cheap identity checks precede destination allocation.
+        // Only requested canonical nodes survive the owning adapter.
+        auto snapshot = work.copy_face_trajectories(nodes, traces);
+        return prepare_sweep<Mode>(face, nodes, std::move(snapshot), control, work, work, ordinary_volume_budget);
+    }
+    else
+        return prepare_sweep_impl<Mode>(face, nodes, traces, control, work, work, ordinary_volume_budget);
 }
 template<ArithmeticMode Mode>
 Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t> nodes, Work& work)
@@ -93,7 +203,7 @@ Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t>
     SumFor<Mode> check;
     SumFor<Mode> constructed(work.arithmetic_mode);
     std::uint64_t construction = 0;
-    visit_sweep_triangles(nodes, result.current, result.departure, result.backcenter,
+    visit_sweep_triangles(nodes, result, result.backcenter,
         [&](const auto& a, const auto& b, const auto& c)
     {
         failure::Scope simplex_context("sweep_simplex");

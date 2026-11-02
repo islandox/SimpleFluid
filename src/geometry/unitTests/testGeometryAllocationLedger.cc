@@ -393,7 +393,7 @@ template<ArithmeticMode Mode> void shared_support_payload_contract()
             context->authority_table.capacity() * sizeof(P::PlaneAuthority) +
             context->incidence.capacity() * sizeof(P::PrivateAuthorityRef<Mode>);
         const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
-                              storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + added_context +
+                              storage->vertices.capacity() * sizeof(P::details::FrozenVertex<Mode>) + added_context +
                               Access::identity_bytes(copy);
         P::GeometryAllocationLedger ledger;
         std::size_t used = 0;
@@ -500,7 +500,7 @@ template<ArithmeticMode Mode> void provenance_dag_contract()
     storage->vertices[0].source_identity = fixture.root_slot;
     auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
     const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
-                          storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) +
+                          storage->vertices.capacity() * sizeof(P::details::FrozenVertex<Mode>) +
                           Access::identity_bytes(fixture.root);
     {
         P::GeometryAllocationLedger ledger;

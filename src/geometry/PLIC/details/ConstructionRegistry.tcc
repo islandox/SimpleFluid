@@ -529,10 +529,11 @@ DynamicConvexGeometryPtr rebase_geometry(const DynamicConvexGeometryPtr& source,
 {
     const auto& original = DynamicGeometryAccess::implementation(*source);
     const auto typed = details::checked_geometry_storage<Mode>(original);
-    details::active_work->charge(source->template storage_bytes<Mode>(), 1);
+    details::active_work->charge(details::geometry_metadata_copy_bytes<Mode>(*typed), 1);
     auto rebased = std::make_shared<details::GeometryStorage<Mode>>(*typed);
     rebased->export_source = original->export_source ? original->export_source : original;
     rebased->frame.origin = input.anchor;
+    details::active_work->charge(1, sizeof(details::StoredMomentCache<Mode>));
     rebased->moment_cache = std::make_shared<details::StoredMomentCache<Mode>>();
     for (auto& vertex : rebased->vertices)
     {
@@ -554,15 +555,11 @@ DynamicConvexGeometryPtr rebase_geometry(const DynamicConvexGeometryPtr& source,
 }
 
 template<ArithmeticMode Mode>
-std::shared_ptr<const DynamicConvexGeometry::Impl> input_plane_source(
+details::CutPlaneDescriptor<Mode> input_plane_source(
     const GeometryHalfspace& input, details::Frame frame, GeometryLimits limits)
 {
-    using Storage = details::GeometryStorage<Mode>;
     using Plane = details::StoredPlane<Mode>;
-    details::active_work->charge(1, sizeof(Storage) + sizeof(Plane));
-    auto source = std::make_shared<Storage>();
-    source->frame = frame;
-    source->limits = limits_for<Mode>(limits);
+    details::active_work->charge(1, sizeof(Plane));
     auto plane = std::make_shared<Plane>();
     plane->frame = frame;
     if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -581,8 +578,7 @@ std::shared_ptr<const DynamicConvexGeometry::Impl> input_plane_source(
         plane->offset = scaled<Mode>(Interval(input.offset), -frame.exponent);
     }
     plane->input = input;
-    source->surfaces.push_back({std::move(plane), 1});
-    return source;
+    return details::CutPlaneDescriptor<Mode>(std::move(plane), 1, limits_for<Mode>(limits));
 }
 } // namespace construction_detail
 
@@ -809,13 +805,15 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
         else
         {
             const auto parent = resolve(record.parent);
-            const auto source =
-                record.input
-                    ? input_plane_source<Mode>(registry.impl_->planes.at(key), record.frame, limits)
-                    : DynamicGeometryAccess::implementation(*registry.impl_->geometries.at(key)->dynamic_geometry());
+            const auto source = record.input
+                                    ? input_plane_source<Mode>(registry.impl_->planes.at(key), record.frame, limits)
+                                    : details::CutPlaneDescriptor<Mode>(
+                                          details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(
+                                              *registry.impl_->geometries.at(key)->dynamic_geometry())),
+                                          record.face);
             const auto split = Kernel<Mode>(DynamicGeometryAccess::implementation(*parent))
-                                   .clip_impl(source, record.face, record.flags & 1, record.flags & 2, record.flags & 4,
-                                       record.orientation);
+                                   .clip_plane(source, record.face, record.flags & 1, record.flags & 2,
+                                       record.flags & 4, record.orientation);
             outputs.push_back({split.inside, split.outside});
         }
     }

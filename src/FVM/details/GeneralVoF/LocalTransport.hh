@@ -8,7 +8,7 @@ namespace SimpleFluid::VoF::general_vof_detail
 struct LocalTransportControls
 {
     std::span<const GeneralVoFFaceVolume> face_volume;
-    const OrdinaryTraceMap& traces;
+    const std::shared_ptr<const geometry::swept_volume::OrdinaryTrajectorySnapshot>& trajectories;
     const OrdinaryFluxMap& flux;
     const std::map<std::uint64_t, long double>& face_budgets;
     const PLIC::GeometryPacketContext& packet_context;
