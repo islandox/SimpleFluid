@@ -10,7 +10,8 @@ namespace SimpleFluid::PLIC::details
 namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
 template<ArithmeticMode Mode>
-DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+NativePointDefinition<Mode> source_point_definition(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
@@ -21,20 +22,22 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
     std::size_t faces = 0;
     for (const auto* source : sources)
     {
+        if (source && DynamicGeometryAccess::implementation(*source->dynamic_geometry())->numerical_only)
+            throw GeometryError(
+                GeometryErrorCode::ProvenanceMismatch, "Numerical-only geometry cannot issue native point authority.");
         if (!source || source->storage_bytes() > active_work->limits.byte_budget ||
             source->num_faces() > active_work->limits.maximum_faces - faces)
             reject("source point authority exceeds bootstrap storage/fan cap.");
         faces += source->num_faces();
     }
     const auto coordinates = numerical_point<ArithmeticMode::Ordinary>(identity);
-    DynamicPoint result;
-    result.arithmetic_mode = mode;
+    NativePointDefinition<Mode> result;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
         result.value[axis] = coordinates[axis].value;
         result.absolute_error[axis] = 0;
     }
-    std::vector<PlaneAuthority> supports;
+    auto& supports = result.supports;
     for (const auto* source : sources)
         for (std::size_t f = 0; f < source->num_faces(); ++f)
         {
@@ -48,9 +51,21 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
         }
     if (supports.empty())
         reject("source point has no authenticated source-face membership.");
-    active_work->charge(1, sizeof(DynamicPointProvenance));
     active_work->charge(supports.capacity(), sizeof(PlaneAuthority));
-    DynamicGeometryAccess::seal_represented_source(result, std::move(supports));
+    std::sort(supports.begin(), supports.end());
+    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
+    return result;
+}
+
+template<ArithmeticMode Mode>
+DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode)
+{
+    static_assert(Mode == kernel_mode);
+    Operation scope(mode_limits(mode));
+    auto definition = source_point_definition<Mode>(sources, identity, mode);
+    DynamicPoint result{definition.value, definition.absolute_error, mode};
+    DynamicGeometryAccess::seal_represented_source(result, std::move(definition.supports));
     return result;
 }
 
@@ -147,12 +162,12 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
         const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
         PlaneAuthority native_authority;
-        std::span<const PlaneAuthority> authorities = plane->authorities;
+        auto authorities = resolve_authorities(plane->point_context, plane->authorities);
         if (authorities.empty() && plane->native_support.has_value())
         {
             native_authority = details::original_support_authority(*plane->native_support);
             active_work->allocations.retain(native_authority, active_work->bytes, active_work->limits.byte_budget);
-            authorities = {&native_authority, 1};
+            authorities = DynamicGeometryAccess::boundary_keys({&native_authority, 1});
         }
         bool authenticated = false;
         for (const auto& key : authorities)
@@ -240,6 +255,9 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
     return result;
 }
 
+template NativePointDefinition<kernel_mode> source_point_definition<kernel_mode>(
+    std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
+    const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);
 template DynamicPoint source_point_fan<kernel_mode>(
     std::span<const ConvexCellGeometry<ArithmeticMode::Ordinary>* const> sources,
     const PointIdentity<ArithmeticMode::Ordinary>& identity, ArithmeticMode mode);

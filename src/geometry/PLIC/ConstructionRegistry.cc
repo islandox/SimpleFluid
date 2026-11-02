@@ -46,39 +46,40 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
 {
     if (!root)
         return 0;
-    std::size_t bytes = 0;
+    std::size_t recipe_bytes = 0, ledger_used = 0;
+    const auto recipe = [&](std::size_t count, std::size_t size)
+    {
+        if (size && count > (std::numeric_limits<std::size_t>::max() - recipe_bytes) / size)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Construction recipe payload size overflows.");
+        recipe_bytes += count * size;
+    };
     std::set<const GeometryConstruction*> nodes;
     std::set<const GeometryClipConstruction*> clips;
     std::set<const DynamicConvexGeometry::Impl*> sources;
-    std::set<const DynamicPointProvenance*> points;
+    GeometryAllocationLedger retained_allocations;
     std::vector<std::shared_ptr<const GeometryConstruction>> pending{root};
-    const auto retained = [&](const auto& values)
-    {
-        bytes += values.capacity() * sizeof(std::shared_ptr<const DynamicPointProvenance>);
-        for (const auto& point : values)
-            if (point && points.insert(point.get()).second)
-                bytes += DynamicGeometryAccess::identity_bytes(point);
-    };
     for (std::size_t i = 0; i < pending.size(); ++i)
     {
         const auto node = pending[i];
         if (!node || !nodes.insert(node.get()).second)
             continue;
-        bytes += sizeof(GeometryConstruction);
+        recipe(1, sizeof(GeometryConstruction));
         if (node->kind() == GeometryConstruction::Kind::Source)
         {
             const auto& owner = node->source().source;
             if (owner && sources.insert(owner.get()).second)
             {
-                const auto source = DynamicGeometryAccess::geometry(owner);
-                bytes += owner->limits.arithmetic_mode == ArithmeticMode::Ordinary
-                             ? source->storage_bytes<ArithmeticMode::Ordinary>()
-                             : source->storage_bytes<ArithmeticMode::BoundedCertification>();
+                if (owner->limits.arithmetic_mode == ArithmeticMode::Ordinary)
+                    DynamicGeometryAccess::retain_geometry_storage<ArithmeticMode::Ordinary>(
+                        owner, retained_allocations, ledger_used, std::numeric_limits<std::size_t>::max());
+                else
+                    DynamicGeometryAccess::retain_geometry_storage<ArithmeticMode::BoundedCertification>(
+                        owner, retained_allocations, ledger_used, std::numeric_limits<std::size_t>::max());
             }
         }
         else if (node->kind() == GeometryConstruction::Kind::Rebase)
         {
-            bytes += sizeof(GeometryConstruction::Rebase);
+            recipe(1, sizeof(GeometryConstruction::Rebase));
             pending.push_back(node->rebase().parent);
         }
         else
@@ -86,13 +87,25 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
             const auto& clip = node->clip().clip;
             if (clip && clips.insert(clip.get()).second)
             {
-                bytes += sizeof(GeometryClipConstruction);
-                retained(clip->retained_points);
+                recipe(1, sizeof(GeometryClipConstruction));
+                recipe(clip->retained_points.capacity(), sizeof(DynamicStoredPointRef));
+                if (clip->point_context)
+                {
+                    if (clip->mode == ArithmeticMode::Ordinary)
+                        retained_allocations.retain_snapshot<ArithmeticMode::Ordinary>(
+                            clip->point_context, ledger_used, std::numeric_limits<std::size_t>::max());
+                    else
+                        retained_allocations.retain_snapshot<ArithmeticMode::BoundedCertification>(
+                            clip->point_context, ledger_used, std::numeric_limits<std::size_t>::max());
+                }
                 pending.push_back(clip->parent);
             }
         }
     }
-    return bytes;
+    const auto payload = retained_allocations.payload_bytes();
+    if (payload > std::numeric_limits<std::size_t>::max() - recipe_bytes)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Construction recipe payload size overflows.");
+    return recipe_bytes + payload;
 }
 
 template std::shared_ptr<const GeometryConstruction> construction_source<ArithmeticMode::Ordinary>(

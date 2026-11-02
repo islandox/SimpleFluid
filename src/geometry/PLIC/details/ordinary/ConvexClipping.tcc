@@ -30,7 +30,7 @@ bool same_source_plane(const Plane& a, const Plane& b)
     if (a.source_vertices.size() != 3 || b.source_vertices.size() != 3 || !certification_environment())
         return false;
     const std::array<const Plane*, 2> planes{&a, &b};
-    std::array<std::array<std::shared_ptr<const DynamicPointProvenance>, 3>, 2> tokens;
+    std::array<std::array<PointProvenanceView, 3>, 2> tokens;
     for (std::size_t side = 0; side < planes.size(); ++side)
     {
         const auto& source = *planes[side];
@@ -43,8 +43,8 @@ bool same_source_plane(const Plane& a, const Plane& b)
             if (!std::isfinite(source.normal[i].value))
                 return false;
             maximum = std::max(maximum, std::abs(source.normal[i].value));
-            tokens[side][i] = source.source_vertices[i].lock();
-            if (!tokens[side][i] || tokens[side][i]->arithmetic_mode != ArithmeticMode::Ordinary)
+            tokens[side][i] = resolve_point(source.point_context, source.source_vertices[i]);
+            if (!tokens[side][i] || tokens[side][i].arithmetic_mode() != ArithmeticMode::Ordinary)
                 return false;
             for (std::size_t j = 0; j < i; ++j)
             {
@@ -76,17 +76,18 @@ bool same_source_plane(const Plane& a, const Plane& b)
     return true;
 }
 
-template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& plane)
+template<ArithmeticMode Mode>
+bool incident(const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<Mode>* context)
 {
     static_assert(Mode == kernel_mode);
     if (std::find(v.incident.begin(), v.incident.end(), plane) != v.incident.end())
         return true;
     if (v.source_identity)
-        for (const auto& weak : plane->source_vertices)
+        for (const auto& ref : plane->source_vertices)
         {
             active_work->pair();
-            const auto identity = weak.lock();
-            if (DynamicGeometryAccess::same_represented_source(identity, v.source_identity))
+            const auto identity = resolve_point(plane->point_context, ref);
+            if (DynamicGeometryAccess::same_represented_source(identity, resolve_point(context, v.source_identity)))
                 return true;
         }
     for (const auto& retained : v.incident)
@@ -95,11 +96,12 @@ template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& pla
         if (same_source_plane(*retained, *plane))
             return true;
     }
-    return construction_edge_incident<Mode>(v, plane);
+    return construction_edge_incident<Mode>(v, plane, context);
 }
 
 bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent, const Vertex* edge_first,
-    const Vertex* edge_second)
+    const Vertex* edge_second, PointSnapshotBuilder<kernel_mode>& points,
+    const PointSnapshotContext<kernel_mode>* edge_context)
 {
     if (vertex.numerical_only || vertex.source_identity || vertex.incident.size() < 3 || !certification_environment())
         return false;
@@ -109,19 +111,18 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         if (!plane->normal_error || !std::isfinite(*plane->normal_error) || *plane->normal_error < 0)
             return false;
     }
-    const auto authenticated =
-        [&](const std::shared_ptr<const DynamicPointProvenance>& candidate, const PlanePtr& plane)
+    const auto authenticated = [&](const PointProvenanceView& candidate, const PlanePtr& plane)
     {
-        for (const auto& weak : plane->source_vertices)
+        for (const auto& ref : plane->source_vertices)
         {
             active_work->pair();
-            const auto owner = weak.lock();
+            const auto owner = resolve_point(plane->point_context, ref);
             if (DynamicGeometryAccess::same_represented_source(owner, candidate))
                 return true;
         }
-        for (const auto& key : plane->authorities)
+        for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
             if (!key.empty())
-                for (const auto& original : candidate->supports())
+                for (const auto& original : candidate.supports())
                 {
                     active_work->pair();
                     if (key == original)
@@ -129,14 +130,14 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 }
         return false;
     };
-    std::shared_ptr<const DynamicPointProvenance> unique;
+    PointProvenanceView unique;
     for (const auto& plane : vertex.incident)
-        for (const auto& weak : plane->source_vertices)
+        for (const auto& ref : plane->source_vertices)
         {
             active_work->pair();
-            const auto candidate = weak.lock();
+            const auto candidate = resolve_point(plane->point_context, ref);
             if (!candidate || DynamicGeometryAccess::same_represented_source(candidate, unique) ||
-                candidate->arithmetic_mode != ArithmeticMode::Ordinary)
+                candidate.arithmetic_mode() != ArithmeticMode::Ordinary)
                 continue;
             bool covers_every_support = true;
             for (const auto& support : vertex.incident)
@@ -175,7 +176,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         throw GeometryError(
             GeometryErrorCode::ProvenanceMismatch, "Source recovery lost its original point authority.");
     }
-    for (const auto error : source_point->absolute_error)
+    for (const auto error : source_point.absolute_error())
         if (error != 0)
         {
             ++statistics.rejections;
@@ -195,21 +196,21 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         // the retained parent or edge. Check the proposed original point before
         // assigning any recovered coordinates, identity or support authority.
         Vertex candidate;
-        candidate.source_identity = unique;
+        candidate.source_identity = points.import(unique);
         for (std::size_t axis = 0; axis < 3; ++axis)
-            candidate.coordinates[axis] = StorageScalar(source_point->value[axis]);
+            candidate.coordinates[axis] = StorageScalar(source_point.value()[axis]);
         for (const auto& surface : parent->surfaces)
         {
             active_work->pair();
-            if (sign<kernel_mode>(
-                    distance<kernel_mode>(candidate, Frame{}, surface.plane) * Scalar(surface.orientation)) > 0)
+            if (sign<kernel_mode>(distance<kernel_mode>(candidate, Frame{}, surface.plane, points.context()) *
+                                  Scalar(surface.orientation)) > 0)
             {
                 ++statistics.rejections;
                 throw GeometryError(GeometryErrorCode::InvalidTopology,
                     "Recovered source point lies outside an inherited parent halfspace.");
             }
         }
-        const ordinary_predicates::FramedPoint proposed{source_point->value, {}, 0};
+        const ordinary_predicates::FramedPoint proposed{source_point.value(), {}, 0};
         const auto endpoint = [&](const Vertex& v)
         {
             return ordinary_predicates::FramedPoint{
@@ -243,15 +244,15 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 if (!support->normal_error || *support->normal_error != 0 || support->offset.value != 0 ||
                     support->source_vertices.empty())
                     return false;
-                const auto owner = support->source_vertices.front().lock();
+                const auto owner = resolve_point(support->point_context, support->source_vertices.front());
                 const auto& token = DynamicGeometryAccess::borrowed_original_source(owner);
-                if (!token || token->constructed || token->arithmetic_mode != ArithmeticMode::Ordinary ||
-                    token->absolute_error != std::array<long double, 3>{})
+                if (!token || token.constructed() || token.arithmetic_mode() != ArithmeticMode::Ordinary ||
+                    token.absolute_error() != std::array<long double, 3>{})
                     return false;
                 const ordinary_predicates::FramedPoint anchor{
                     {support->anchor[0].value, support->anchor[1].value, support->anchor[2].value},
                     support->frame.origin, support->frame.exponent};
-                const ordinary_predicates::FramedPoint original_anchor{token->value, {}, 0};
+                const ordinary_predicates::FramedPoint original_anchor{token.value(), {}, 0};
                 for (std::size_t axis = 0; axis < 3; ++axis)
                 {
                     ordinary_predicates::Point unit{};
@@ -264,8 +265,9 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
             };
             const auto common_support = [&](const PlanePtr& support)
             {
-                return incident<kernel_mode>(*edge_first, support) && incident<kernel_mode>(*edge_second, support) &&
-                       incident<kernel_mode>(candidate, support);
+                return incident<kernel_mode>(*edge_first, support, edge_context) &&
+                       incident<kernel_mode>(*edge_second, support, edge_context) &&
+                       incident<kernel_mode>(candidate, support, points.context());
             };
             struct EndpointBounds
             {
@@ -279,12 +281,12 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 for (const auto& bound : endpoint.incident)
                 {
                     active_work->pair();
-                    if (incident<kernel_mode>(other, bound))
+                    if (incident<kernel_mode>(other, bound, edge_context))
                         continue;
                     const int derivative = source_normal_orientation(*first_support, *second_support, *bound);
                     if (!derivative)
                         continue;
-                    if (incident<kernel_mode>(candidate, bound))
+                    if (incident<kernel_mode>(candidate, bound, points.context()))
                     {
                         result.coincident = true;
                         continue;
@@ -293,7 +295,8 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                     // expression, including its anchor, not just a rank bound.
                     if (!exact_anchor(bound))
                         continue;
-                    const int candidate_side = sign<kernel_mode>(distance<kernel_mode>(candidate, Frame{}, bound));
+                    const int candidate_side =
+                        sign<kernel_mode>(distance<kernel_mode>(candidate, Frame{}, bound, points.context()));
                     if (!candidate_side)
                     {
                         result.coincident = true;
@@ -304,7 +307,8 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                         active_work->pair();
                         if (surface.plane != bound)
                             continue;
-                        const int other_side = sign<kernel_mode>(distance<kernel_mode>(other, parent->frame, bound));
+                        const int other_side =
+                            sign<kernel_mode>(distance<kernel_mode>(other, parent->frame, bound, edge_context));
                         if (other_side * surface.orientation >= 0)
                             continue;
                         if (candidate_side * surface.orientation > 0)
@@ -367,7 +371,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
     }
     // Three independent original supports identify this source point uniquely.
     // No rounded residual or coordinate proximity participates in the proof.
-    const ordinary_predicates::FramedPoint original{source_point->value, {}, 0};
+    const ordinary_predicates::FramedPoint original{source_point.value(), {}, 0};
     const ordinary_predicates::FramedPoint destination{{}, frame.origin, frame.exponent};
     Point coordinates;
     for (std::size_t axis = 0; axis < 3; ++axis)
@@ -383,10 +387,10 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         }
         coordinates[axis] = StorageScalar(placed.value);
     }
-    for (const auto& key : unique->supports())
+    for (const auto& key : unique.supports())
     {
         bool retained = false;
-        for (const auto& current : vertex.authorities)
+        for (const auto& current : resolve_authorities(points.context(), vertex.authorities))
         {
             active_work->pair();
             if (key == current)
@@ -399,11 +403,11 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         {
             active_work->charge(1, sizeof(PlaneAuthority));
             active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
-            vertex.authorities.append(key);
+            append_admitted_authority(vertex.authorities, key, points);
         }
     }
     vertex.coordinates = coordinates;
-    vertex.source_identity = std::move(unique);
+    vertex.source_identity = points.import(unique);
     return true;
 }
 
@@ -531,7 +535,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     bool negative = false, positive = false;
     for (const auto& vertex : impl_->vertices)
     {
-        auto d = distance<Mode>(vertex, impl_->frame, plane) * Scalar(support.orientation);
+        auto d = distance<Mode>(vertex, impl_->frame, plane, impl_->point_context.get()) * Scalar(support.orientation);
 
         const auto s = sign<Mode>(d);
         distances.push_back(d);
@@ -678,7 +682,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         DynamicClipResult result;
         result.section.area = bounded<Mode>(Scalar{});
         result.section.centroid = bounded<Mode>(Point{});
+        PointSnapshotBuilder<Mode> points;
         std::vector<Vertex> vertices = impl_->vertices;
+        import_vertex_provenance(vertices, impl_->point_context.get(), points);
+        points.retain_context(plane->point_context);
         for (std::size_t i = 0; i < reframed.size(); ++i)
             vertices[i].coordinates = reframed[i];
         // Authenticate every zero-distance input incidence on the new shared plane.
@@ -691,10 +698,11 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), plane) ==
                     vertices[i].incident.end())
                     vertices[i].incident.push_back(plane);
-                for (const auto& key : plane->authorities)
-                    if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
-                        vertices[i].authorities.end())
-                        vertices[i].authorities.append(key);
+                for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+                    if (std::find(resolve_authorities(points.context(), vertices[i].authorities).begin(),
+                            resolve_authorities(points.context(), vertices[i].authorities).end(),
+                            key) == resolve_authorities(points.context(), vertices[i].authorities).end())
+                        append_admitted_authority(vertices[i].authorities, key, points);
             }
         std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
         const auto crossing = [&](std::size_t a, std::size_t b)
@@ -723,21 +731,24 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                     denominator;
             }
             for (const auto& p : vertices[a].incident)
-                if (incident<Mode>(vertices[b], p))
+                if (incident<Mode>(vertices[b], p, points.context()))
                     vertex.incident.push_back(p);
             if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
                 vertex.incident.push_back(plane);
-            for (const auto& key : vertices[a].authorities)
-                if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
-                    vertices[b].authorities.end())
-                    vertex.authorities.append(key);
-            for (const auto& key : plane->authorities)
-                if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
-                    vertex.authorities.append(key);
-            const bool recovered_source =
-                recover_source_identity(vertex, frame, impl_.get(), &impl_->vertices[a], &impl_->vertices[b]);
+            for (const auto& key : resolve_authorities(points.context(), vertices[a].authorities))
+                if (std::find(resolve_authorities(points.context(), vertices[b].authorities).begin(),
+                        resolve_authorities(points.context(), vertices[b].authorities).end(),
+                        key) != resolve_authorities(points.context(), vertices[b].authorities).end())
+                    append_admitted_authority(vertex.authorities, key, points);
+            for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
+                if (std::find(resolve_authorities(points.context(), vertex.authorities).begin(),
+                        resolve_authorities(points.context(), vertex.authorities).end(),
+                        key) == resolve_authorities(points.context(), vertex.authorities).end())
+                    append_admitted_authority(vertex.authorities, key, points);
+            const bool recovered_source = recover_source_identity(vertex, frame, impl_.get(), &impl_->vertices[a],
+                &impl_->vertices[b], points, impl_->point_context.get());
             preserve_crossing_incidence<Mode>(
-                vertex, vertices[a], vertices[b], frame, impl_->numerical_only || source->numerical_only);
+                vertex, vertices[a], vertices[b], frame, impl_->numerical_only || source->numerical_only, points);
             // Distinct source edges can recover the same original point. Reuse
             // that authenticated identity in every incident face and both children;
             // equal rounded coordinates alone never authorize this replacement.
@@ -746,17 +757,19 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 {
                     active_work->pair();
                     if (!DynamicGeometryAccess::same_represented_source(
-                            vertex.source_identity, vertices[i].source_identity) ||
-                        !incident<Mode>(vertices[i], plane))
+                            resolve_point(points.context(), vertex.source_identity),
+                            resolve_point(points.context(), vertices[i].source_identity)) ||
+                        !incident<Mode>(vertices[i], plane, points.context()))
                         continue;
                     for (const auto& support : vertex.incident)
                         if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), support) ==
                             vertices[i].incident.end())
                             vertices[i].incident.push_back(support);
-                    for (const auto& authority : vertex.authorities)
-                        if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), authority) ==
-                            vertices[i].authorities.end())
-                            vertices[i].authorities.append(authority);
+                    for (const auto& authority : resolve_authorities(points.context(), vertex.authorities))
+                        if (std::find(resolve_authorities(points.context(), vertices[i].authorities).begin(),
+                                resolve_authorities(points.context(), vertices[i].authorities).end(),
+                                authority) == resolve_authorities(points.context(), vertices[i].authorities).end())
+                            append_admitted_authority(vertices[i].authorities, authority, points);
                     crossings.emplace(key, i);
                     return i;
                 }
@@ -794,8 +807,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                 loop.erase(std::unique(loop.begin(), loop.end()), loop.end());
                 if (loop.size() > 1 && loop.front() == loop.back())
                     loop.pop_back();
-                if (loop.size() >= 3 &&
-                    !std::all_of(loop.begin(), loop.end(), [&](auto i) { return incident<Mode>(vertices[i], plane); }))
+                if (loop.size() >= 3 && !std::all_of(loop.begin(), loop.end(), [&](auto i)
+                                            { return incident<Mode>(vertices[i], plane, points.context()); }))
                 {
                     // A source face can meet the cut in an edge containing three
                     // or more propagated collinear vertices. It is not a positive
@@ -807,7 +820,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
                         for (std::size_t i = 0; i < loop.size(); ++i)
                         {
                             const auto a = loop[i], b = loop[(i + 1) % loop.size()];
-                            if (a != b && incident<Mode>(vertices[a], plane) && incident<Mode>(vertices[b], plane))
+                            if (a != b && incident<Mode>(vertices[a], plane, points.context()) &&
+                                incident<Mode>(vertices[b], plane, points.context()))
                             {
                                 active_work->pair();
                                 const std::pair key{std::min(a, b), std::max(a, b)};
@@ -908,10 +922,17 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         construction->measure_section = measure_section;
         construction->construct_outside = construct_outside;
         construction->partition_proof = partition_proof;
-        active_work->charge(plane->source_vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-        for (const auto& weak : plane->source_vertices)
-            if (const auto point = weak.lock())
-                construction->retained_points.push_back(point);
+        active_work->charge(plane->source_vertices.size(), sizeof(DynamicStoredPointRef));
+        construction->retained_points.reserve(plane->source_vertices.size());
+        if (construction->retained_points.capacity() > plane->source_vertices.size())
+            active_work->charge(construction->retained_points.capacity() - plane->source_vertices.size(),
+                sizeof(DynamicStoredPointRef));
+        for (const auto& ref : plane->source_vertices)
+            if (resolve_point(plane->point_context, ref))
+                construction->retained_points.push_back(erase_point_ref(ref));
+        if (plane->point_context)
+            construction->point_context = plane->point_context->shared_from_this();
+        const auto point_context = points.freeze();
         const auto resize_scratch = [](auto& buffer, std::size_t count)
         {
             using Value = typename std::remove_reference_t<decltype(buffer)>::value_type;
@@ -943,6 +964,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             {
                 active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
                 auto poly = std::make_shared<Impl>();
+                poly->point_context = point_context;
                 poly->frame = frame;
                 poly->reference_origin = impl_->reference_origin;
                 poly->limits = impl_->limits;
@@ -1279,12 +1301,15 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::intersect(const DynamicConvexGeom
                 normal_orientation = matching_input<Mode>(*a.plane->input, *b.plane->input);
             if (!normal_orientation)
             {
-                const bool common_authority = std::any_of(a.plane->authorities.begin(), a.plane->authorities.end(),
-                    [&](const auto& key)
-                    {
-                        return std::find(b.plane->authorities.begin(), b.plane->authorities.end(), key) !=
-                               b.plane->authorities.end();
-                    });
+                const bool common_authority =
+                    std::any_of(resolve_authorities(a.plane->point_context, a.plane->authorities).begin(),
+                        resolve_authorities(a.plane->point_context, a.plane->authorities).end(),
+                        [&](const auto& key)
+                        {
+                            return std::find(resolve_authorities(b.plane->point_context, b.plane->authorities).begin(),
+                                       resolve_authorities(b.plane->point_context, b.plane->authorities).end(),
+                                       key) != resolve_authorities(b.plane->point_context, b.plane->authorities).end();
+                        });
                 if (common_authority)
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
@@ -1343,7 +1368,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
                 if (shifted->native_support.has_value())
                     shifted->native_support = details::ordinary_native::translate_support(
                         *shifted->native_support, details::ordinary_native::wide(displacement));
-                shifted->authorities.clear();
+                shifted->authorities = {};
+                shifted->point_context = nullptr;
                 shifted->source_vertices.clear();
                 planes.emplace(plane, shifted);
             }
@@ -1354,15 +1380,17 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
     for (auto& vertex : result->vertices)
     {
         vertex.coordinates = vertex.coordinates + scaled<Mode>(point<Mode>(displacement), -result->frame.exponent);
-        vertex.authorities.clear();
-        vertex.source_identity.reset();
+        vertex.authorities = {};
+        vertex.source_identity = {};
     }
+    result->point_context.reset();
     finish<Mode>(*result, false, true);
     return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
 }
 
 template int matching_input<kernel_mode>(const GeometryHalfspace& a, const GeometryHalfspace& b);
-template bool incident<kernel_mode>(const Vertex& v, const PlanePtr& plane);
+template bool incident<kernel_mode>(
+    const Vertex& v, const PlanePtr& plane, const PointSnapshotContext<kernel_mode>* context);
 template DynamicGeometrySection section<kernel_mode>(
     const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
 template DynamicClipResult GeometryKernel<kernel_mode>::clip(

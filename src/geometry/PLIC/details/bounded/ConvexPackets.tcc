@@ -52,7 +52,13 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
                 writer.real(x);
             writer.real(plane->input->offset);
         }
-        auto keys = plane->authorities;
+        const auto row = resolve_authorities(plane->point_context, plane->authorities);
+        active_work->charge(row.size(), sizeof(PlaneAuthority));
+        std::vector<PlaneAuthority> keys;
+        keys.reserve(row.size());
+        if (keys.capacity() > row.size())
+            active_work->charge(keys.capacity() - row.size(), sizeof(PlaneAuthority));
+        keys.insert(keys.end(), row.begin(), row.end());
         std::sort(keys.begin(), keys.end());
         writer.authorities(keys);
     }
@@ -63,7 +69,13 @@ std::vector<char> GeometryKernel<Mode>::encode(const GeometryPacketContext& cont
         writer.word(vertex.incident.size());
         for (const auto& plane : vertex.incident)
             writer.word(plane_ids.at(plane));
-        std::vector<PlaneAuthority> keys = vertex.authorities.values();
+        const auto row = resolve_authorities(impl_->point_context, vertex.authorities);
+        active_work->charge(row.size(), sizeof(PlaneAuthority));
+        std::vector<PlaneAuthority> keys;
+        keys.reserve(row.size());
+        if (keys.capacity() > row.size())
+            active_work->charge(keys.capacity() - row.size(), sizeof(PlaneAuthority));
+        keys.insert(keys.end(), row.begin(), row.end());
         std::sort(keys.begin(), keys.end());
         writer.authorities(keys);
     }
@@ -99,7 +111,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         require_mode(limits.arithmetic_mode, source->arithmetic_mode());
         for (const auto& vertex : checked_geometry_storage<Mode>(source->impl_)->vertices)
             for (const auto& plane : vertex.incident)
-                for (const auto& key : plane->authorities)
+                for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
                 {
                     if (registry.insert(key).second)
                     {
@@ -118,6 +130,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     for (const auto pin : expected.publication)
         if (reader.word() != pin)
             reject("stale or foreign numerical geometry publication/trial pins.");
+    PointSnapshotBuilder<Mode> points;
     auto result = std::make_shared<Impl>();
     result->numerical_only = true;
     result->frame = reader.frame();
@@ -131,6 +144,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     for (std::size_t i = 0; i < plane_count; ++i)
     {
         auto plane = std::make_shared<Plane>();
+        plane->point_context = points.context();
         plane->frame = reader.frame();
         plane->normal = reader.coordinates();
         plane->anchor = reader.coordinates();
@@ -170,10 +184,11 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                 reject("plane expression disagrees with its original input provenance.");
             plane->input = h;
         }
-        plane->authorities = reader.authorities(registry, limits);
+        const auto plane_keys = reader.authorities(registry, limits);
+        plane->authorities = points.authority_range(DynamicGeometryAccess::admit_incidence<Mode>(plane_keys));
         // Known opaque identity is only an index. Its supplied numerical
         // expression must remain compatible with the pinned original support.
-        for (const auto& key : plane->authorities)
+        for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
         {
             const auto& original = registry_planes.at(key);
             const auto reference_anchor = transform<Mode>(original->anchor, original->frame, plane->frame);
@@ -204,14 +219,17 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                 reject("invalid or repeated numerical vertex/plane incidence.");
             vertex.incident.push_back(planes[index]);
         }
-        vertex.authorities = reader.authorities(registry, limits);
+        const auto point_keys = reader.authorities(registry, limits);
+        // This is a private numerical-shell catalog. It creates no native
+        // point record or public point-membership proof.
+        vertex.authorities = points.authority_range(DynamicGeometryAccess::admit_incidence<Mode>(point_keys));
         for (const auto& plane : vertex.incident)
         {
             const auto raw = raw_distance<Mode>(vertex, result->frame, plane);
             if (raw.lo() > 0 || raw.hi() < 0)
                 reject("numerical vertex misses its claimed original construction support.");
         }
-        for (const auto& key : vertex.authorities)
+        for (const auto& key : resolve_authorities(points.context(), vertex.authorities))
         {
             const auto& original = registry_planes.at(key);
             const auto raw = raw_distance<Mode>(vertex, result->frame, original);
@@ -245,7 +263,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         result->surfaces.push_back({planes[plane], outward ? 1 : -1});
         for (std::size_t j = 0; j < face.size(); ++j)
         {
-            if (!incident<Mode>(result->vertices[face[j]], planes[plane]))
+            if (!incident<Mode>(result->vertices[face[j]], planes[plane], points.context()))
                 reject("numerical face lacks original vertex/support incidence.");
             const auto a = face[j], b = face[(j + 1) % face.size()];
             auto& edge = edges[std::minmax(a, b)];
@@ -264,7 +282,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     {
         const auto& surface = result->surfaces[f];
         for (const auto& vertex : result->vertices)
-            if (sign<Mode>(distance<Mode>(vertex, result->frame, surface.plane) * Interval(surface.orientation)) > 0)
+            if (sign<Mode>(distance<Mode>(vertex, result->frame, surface.plane, points.context()) *
+                           Interval(surface.orientation)) > 0)
                 reject("numerical packet violates convex containment.");
         const auto& face = result->faces[f];
         Point normal;
@@ -282,6 +301,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                     reject("numerical packet contains a nonconvex face loop.");
         }
     }
+    result->point_context = points.freeze();
     finish<Mode>(*result);
     return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(result)));
 }

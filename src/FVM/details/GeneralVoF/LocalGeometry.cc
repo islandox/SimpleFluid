@@ -208,7 +208,9 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 // Sealed centers own provenance beyond inline point arrays.
                 // Keep their conservative charge even when classification lets
                 // us destroy a scalar face's recipe before plane import.
-                work.charge(PLIC::point_storage_bytes(recipe.center) + PLIC::point_storage_bytes(recipe.backcenter));
+                work.charge(2 * sizeof(PLIC::DynamicPoint));
+                work.allocations.retain_point_provenance(recipe.center, work.bytes, work.limits.byte_budget);
+                work.allocations.retain_point_provenance(recipe.backcenter, work.bytes, work.limits.byte_budget);
                 Box bounds;
                 for (const auto& p : recipe.current)
                     bounds.add(p.value);

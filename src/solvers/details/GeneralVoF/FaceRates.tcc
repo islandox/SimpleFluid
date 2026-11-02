@@ -121,10 +121,10 @@ template<class Topology> Topology projection_topology(const MeshHandle<>& mesh, 
                     continue;
                 const auto& tile = *tiles.at(mesh.face_global_id(face));
                 std::vector<char> identity;
-                for (const auto* bytes : {&tile.domain, &tile.surface, &tile.identity})
+                for (const auto bytes : {tile.domain.span(), tile.surface.span(), std::span<const char>(tile.identity)})
                 {
-                    append_word(identity, bytes->size());
-                    identity.insert(identity.end(), bytes->begin(), bytes->end());
+                    append_word(identity, bytes.size());
+                    identity.insert(identity.end(), bytes.begin(), bytes.end());
                 }
                 result.faces.push_back({mesh.face_global_id(face), mesh.cell_global_id(mesh.owner_cell(face)),
                     mesh.cell_global_id(mesh.neighbor_cell(face)), std::move(identity), {}, {}});

@@ -6,6 +6,7 @@
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode> struct PointSnapshotContext;
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
  * admission poisons the ledger; create a new ledger for a new transaction.
@@ -24,9 +25,28 @@ public:
     void retain(const ConvexGeometryPtr<Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     template<ArithmeticMode Mode>
     void retain(const DynamicConvexGeometryPtr&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+    void retain_snapshot(
+        const std::shared_ptr<const PointSnapshotContextBase>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+    void retain_snapshot(
+        const std::shared_ptr<const PointSnapshotContext<Mode>>& context, std::size_t& used, std::size_t limit)
+    {
+        retain_snapshot<Mode>(std::static_pointer_cast<const PointSnapshotContextBase>(context), used, limit);
+    }
+    /** Admit only physically held provenance owners; the caller owns/counts
+     * the point object or buffer. Mutation invalidates authority, not storage. */
+    void retain_point_provenance(const DynamicPoint&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+    void retain_point_provenance(const Point<Mode>& point, std::size_t& used, std::size_t limit)
+    {
+        retain_point_provenance(point.dynamic(), used, limit);
+    }
     void retain(const DynamicPointExport&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     template<ArithmeticMode Mode>
     void retain(const PointExport<Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+    void retain(const PointSnapshot<Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Admit a shared opaque authority payload or the complete typed support
      * ancestry. Content equality does not merge independently owned handles. */
     void retain(const PlaneAuthority&, std::size_t& cumulative_bytes, std::size_t byte_limit);

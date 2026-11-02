@@ -283,6 +283,27 @@ remainders, metric witnesses and temporary aggregate results have a face-local
 scope. The default 64 MiB admission condition covers the retained preparation
 allowance plus the current face's conservative scratch allowance.
 
+Retained canonical tiles share immutable domain and support byte sequences by
+complete value within one topology construction. Equal first/second physical
+node loops share only when their ordered node IDs agree exactly. Tile IDs,
+ordering, full identity bytes and wire encoding remain unchanged. These metadata
+fields provide const element/iterator/span access; a detached caller edits an
+independent vector builder and replaces the complete immutable handle. Creating
+a handle snapshots the builder even for rvalues, so escaped builder pointers
+cannot modify published authority. Copies retain the shared owner. The local
+intern pool expires before publication; no global pool pins past topologies.
+The local census flattens unique values into one byte backing and one node-ID
+backing, then rebinds each metadata handle to a checked immutable slice. Values
+at different offsets share the backing owner while retaining their own spans.
+Slice offsets and lengths are checked before narrowing to 32-bit indices;
+logical slice length is separate from backing size and allocated capacity.
+Storage admission counts each surviving owner, shared control allowance and
+actual vector capacity once, plus the traversal's pinned owner ledger and local
+intern tracking while live. The 64 MiB default remains the same.
+Tile decoding can consume an enclosing caller arena through public scalar
+usage/limit counters; admitted usage survives both success and rejection without
+exposing private admission types across shared-library boundaries.
+
 Sparse plane import also uses a scoped reservation on that preparation allowance.
 Authority-count storage and the complete requested result map, including adaptive
 key storage, are reserved before import. Live request/receive packet capacities,

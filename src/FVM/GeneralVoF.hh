@@ -577,6 +577,9 @@ public:
      * histories or transport declarations. Incomplete support requests resolution. */
     [[nodiscard]] GeneralVoFSurfaceCatalog capillary_surface(GeneralVoFSurfaceOptions = {}) const;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveNode>& nodes() const noexcept;
+    /** Canonical ordered tile authorities. Domain/surface bytes and ordered node
+     * loops are shared immutable snapshots; edit detached tiles through vector
+     * builders and replace complete metadata handles, never borrowed elements. */
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveTile>& tiles() const noexcept;
     /** Retained tile ordinals incident to a canonical node, in tiles() order.
      * The immutable incidence storage is shared by accepted transport states. */

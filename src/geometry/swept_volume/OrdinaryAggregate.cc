@@ -134,6 +134,20 @@ struct AggregateWork
         }
         charge(admitted - bytes);
     }
+    void retain_point(const Point<ArithmeticMode::Ordinary>& point)
+    {
+        auto admitted = bytes;
+        try
+        {
+            allocations.retain_point_provenance(point, admitted, std::min(sweep.byte_budget, geometry.byte_budget));
+        }
+        catch (...)
+        {
+            charge(admitted - bytes);
+            throw;
+        }
+        charge(admitted - bytes);
+    }
     void sync() const
     {
         if (context)
@@ -945,13 +959,17 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         c.exponent = plane.frame.exponent;
         c.offset = plane.offset.value;
         c.orientation = surface.orientation;
-        c.authorities = plane.authorities;
+        const auto authorities = ::SimpleFluid::PLIC::resolve_authorities(plane.point_context, plane.authorities);
         c.native_support = plane.native_support;
-        if (c.authorities.empty() && c.native_support.has_value())
+        const auto count = authorities.empty() && c.native_support.has_value() ? 1 : authorities.size();
+        work.charge(count * sizeof(PlaneAuthority));
+        c.authorities.reserve(count);
+        work.charge((c.authorities.capacity() - count) * sizeof(PlaneAuthority));
+        c.authorities.assign(authorities.begin(), authorities.end());
+        if (authorities.empty() && c.native_support.has_value())
             c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(*c.native_support));
         if (c.native_support)
             work.retain_identity(*c.native_support);
-        work.charge(c.authorities.capacity() * sizeof(PlaneAuthority));
         for (const auto& authority : c.authorities)
             work.retain_identity(authority);
         result.push_back(std::move(c));
@@ -1153,8 +1171,8 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
     prepare(impl->orientations);
     prepare(impl->partners);
     // The table retains every slot, including unused ones. Charge its actual
-    // object capacity above and provenance payload once per slot here. Shared
-    // provenance between distinct slots is conservatively charged per slot;
+    // object capacity above and each immutable provenance snapshot once here.
+    // Slot identity remains distinct even when several points pin one snapshot;
     // the transient DynamicPoint adapter itself is not retained.
     for (std::size_t point_index = 0; point_index < batch.points.size(); ++point_index)
     {
@@ -1174,7 +1192,7 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(OrdinaryAggregateSourceBatch&& 
                     }
                 fail(GeometryErrorCode::InvalidInput, "Nonfinite Ordinary aggregate source point.");
             }
-        work.charge(point_storage_bytes(point) - sizeof(DynamicPoint));
+        work.retain_point(point);
     }
     struct Record
     {

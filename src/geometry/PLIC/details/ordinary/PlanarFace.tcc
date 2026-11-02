@@ -200,8 +200,17 @@ DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoin
         for (std::size_t i = 0; i < points.size(); ++i)
         {
             const unsigned a = (dropped + 1) % 3, b = (dropped + 2) % 3;
-            PlanarVertex vertex{{points[i][a], points[i][b]}, points[i], originals[i].supports(), ++token};
-            planar_charge<Mode>(vertex);
+            const auto admitted = originals[i].supports();
+            active_work->charge(admitted.size(), sizeof(PlaneAuthority));
+            std::vector<PlaneAuthority> supports;
+            supports.reserve(admitted.size());
+            if (supports.capacity() > admitted.size())
+                active_work->charge(supports.capacity() - admitted.size(), sizeof(PlaneAuthority));
+            supports.insert(supports.end(), admitted.begin(), admitted.end());
+            PlanarVertex vertex{{points[i][a], points[i][b]}, points[i], std::move(supports), ++token};
+            active_work->charge(1, sizeof(PlanarVertex));
+            for (const auto& key : vertex.supports)
+                active_work->allocations.retain(key, active_work->bytes, active_work->limits.byte_budget);
             polygon.push_back(std::move(vertex));
         }
         return polygon;
@@ -276,15 +285,31 @@ DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoin
         overlap = -overlap;
     result.overlap_projected_area = bounded<Mode>(scaled<Mode>(overlap, 2 * exponent));
     const Point anchor{Scalar(origin[0]), Scalar(origin[1]), Scalar(origin[2])};
-    result.overlap_vertices.reserve(first_polygon.size());
+    PointSnapshotBuilder<Mode> points;
     active_work->charge(first_polygon.size(), sizeof(DynamicPoint));
-    for (const auto& vertex : first_polygon)
+    result.overlap_vertices.reserve(first_polygon.size());
+    if (result.overlap_vertices.capacity() > first_polygon.size())
+        active_work->charge(result.overlap_vertices.capacity() - first_polygon.size(), sizeof(DynamicPoint));
+    active_work->charge(first_polygon.size(), sizeof(StoredPointRef<Mode>));
+    std::vector<StoredPointRef<Mode>> refs;
+    refs.reserve(first_polygon.size());
+    if (refs.capacity() > first_polygon.size())
+        active_work->charge(refs.capacity() - first_polygon.size(), sizeof(StoredPointRef<Mode>));
+    for (auto& vertex : first_polygon)
     {
         auto exported = bounded<Mode>(scaled<Mode>(vertex.physical, exponent) + anchor);
-        DynamicGeometryAccess::seal(exported, vertex.supports);
-        active_work->charge(1, DynamicGeometryAccess::storage_bytes(exported));
+        std::sort(vertex.supports.begin(), vertex.supports.end());
+        vertex.supports.erase(std::unique(vertex.supports.begin(), vertex.supports.end()), vertex.supports.end());
+        const auto point = points.sealed(
+            exported.value, exported.absolute_error, DynamicGeometryAccess::admit_incidence<Mode>(vertex.supports));
+        refs.push_back(points.import(point));
         result.overlap_vertices.push_back(std::move(exported));
     }
+    const auto snapshot = points.freeze();
+    active_work->allocations.template retain_snapshot<Mode>(
+        snapshot, active_work->bytes, active_work->limits.byte_budget);
+    for (std::size_t i = 0; i < refs.size(); ++i)
+        DynamicGeometryAccess::attach_identity(result.overlap_vertices[i], bind_point(snapshot, refs[i]));
     const auto over_first = overlap / first_area, over_second = overlap / second_area;
     if (over_first.value > 1 || over_second.value > 1)
         reject("planar overlap area exceeds an input polygon.");

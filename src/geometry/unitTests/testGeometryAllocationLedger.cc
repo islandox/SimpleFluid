@@ -1,12 +1,14 @@
 /** @file testGeometryAllocationLedger.cc
  * @brief Unique immutable-payload admission, strong pins and cumulative cap checks.
  */
+#include "geometry/PLIC/ConstructionRegistry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
-#include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
+#include <cmath>
 #include <gtest/gtest.h>
 #include <optional>
 
@@ -44,6 +46,115 @@ TEST(GeometryAllocationLedgerTest, RepeatedAndAliasedInputsChargeOnlyNewOwners)
     reuse_contract<ArithmeticMode::Ordinary>();
     if (P::certification_environment())
         reuse_contract<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(GeometryAllocationLedgerTest, ImportedOrdinaryRootsPreserveExactNativeBoxRepresentation)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    using Box = std::array<P::GeometryPoint, 2>;
+    const std::array<Box, 3> boxes{Box{P::GeometryPoint{0, 0, 0}, P::GeometryPoint{1, 1, 1}},
+        Box{P::GeometryPoint{-.125, 2.25, -8}, P::GeometryPoint{.375, 2.375, 8}},
+        Box{P::GeometryPoint{.3, -.7, .01}, P::GeometryPoint{.315625, -.66875, .0725}}};
+    for (const auto& bounds : boxes)
+    {
+        const auto native = Ordinary::box(bounds[0], bounds[1]);
+        const auto imported = Ordinary::from_geometry(*native);
+        EXPECT_NE(native->storage_identity(), imported->storage_identity());
+        EXPECT_TRUE(native->same_native_representation(*imported));
+        EXPECT_TRUE(imported->same_native_representation(*native));
+        EXPECT_EQ(native->encode_certificate(), imported->encode_certificate());
+        EXPECT_EQ(native->volume().value, imported->volume().value);
+        EXPECT_EQ(native->centroid(), imported->centroid());
+        const auto before = native->moments(), after = imported->moments();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(before.first_moment[axis].value, after.first_moment[axis].value);
+        for (std::size_t face = 0; face < native->num_faces(); ++face)
+            EXPECT_EQ(P::planar_support<ArithmeticMode::Ordinary>(*native->face_geometry(face)),
+                P::planar_support<ArithmeticMode::Ordinary>(*imported->face_geometry(face)));
+    }
+}
+
+TEST(GeometryAllocationLedgerTest, PromotedImportedRootReleasesNativeOwnerAndRetainsReplayAuthority)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    auto native = Ordinary::box({2, -4, .125}, {2.5, -3.875, 1.125});
+    const std::weak_ptr<const Ordinary> discarded = native;
+    const std::weak_ptr<const P::DynamicConvexGeometry> discarded_dynamic = native->dynamic_geometry();
+    const std::weak_ptr<const P::DynamicConvexGeometry::Impl> discarded_payload =
+        P::DynamicGeometryAccess::implementation(*native->dynamic_geometry());
+    const auto imported = Ordinary::from_geometry(*native);
+    ASSERT_TRUE(native->same_native_representation(*imported));
+    P::GeometryAllocationLedger publications;
+    std::size_t publication_bytes = 0;
+    const auto native_points = native->export_points(publications, publication_bytes, byte_limit);
+    const auto imported_points = imported->export_points(publications, publication_bytes, byte_limit);
+    for (std::size_t vertex = 0; vertex < native_points.points().size(); ++vertex)
+    {
+        EXPECT_TRUE(native_points.points()[vertex].supports().empty());
+        EXPECT_EQ(imported_points.points()[vertex].supports().size(), 3u);
+    }
+    native.reset();
+    EXPECT_TRUE(discarded.expired());
+    EXPECT_TRUE(discarded_dynamic.expired());
+    EXPECT_TRUE(discarded_payload.expired());
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(imported, used, byte_limit);
+    const auto before = used, payload = ledger.payload_bytes(), owners = ledger.owner_count();
+    ledger.retain<ArithmeticMode::Ordinary>(imported->dynamic_geometry(), used, byte_limit);
+    EXPECT_EQ(used, before);
+    EXPECT_EQ(ledger.owner_count(), owners);
+    const auto alias = Ordinary::from_dynamic(imported->dynamic_geometry());
+    ledger.retain(alias, used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes(), payload + sizeof(Ordinary));
+    EXPECT_EQ(ledger.owner_count(), owners + 1);
+
+    const P::GeometryPacketContext context{{2, 3, 5, 7}};
+    P::ConstructionRegistry<ArithmeticMode::Ordinary> registry(context);
+    registry.register_native(11, 0, imported);
+    const P::GeometryHalfspace cut{{1, 0, 0}, {2, -4, .125}, .25};
+    registry.register_plane(13, cut);
+    const auto piece = imported->clip(cut, false).inside;
+    ASSERT_TRUE(piece);
+    const auto replay = Ordinary::decode(piece->encode(registry), registry);
+    EXPECT_EQ(piece->volume().value, replay->volume().value);
+    EXPECT_EQ(piece->encode_certificate(), replay->encode_certificate());
+    const auto before_moments = piece->moments(), after_moments = replay->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(before_moments.first_moment[axis].value, after_moments.first_moment[axis].value);
+}
+
+TEST(GeometryAllocationLedgerTest, NativeRepresentationProofRejectsChangedOrConstructedSources)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    const auto native = Ordinary::box({0, 0, 0}, {1, 1, 1});
+    const auto imported = Ordinary::from_geometry(*native);
+    const auto changed = Ordinary::box({0, 0, 0}, {1, 1, 1.125});
+    EXPECT_FALSE(native->same_native_representation(*changed));
+    const auto last_bit = Ordinary::box({0, 0, 0}, {1, 1, std::nextafter(1., 2.)});
+    EXPECT_FALSE(native->same_native_representation(*last_bit));
+    const auto signed_zero = Ordinary::box({-0., 0, 0}, {1, 1, 1});
+    EXPECT_FALSE(native->same_native_representation(*signed_zero));
+    std::vector<P::PlaneSupportIdentity<ArithmeticMode::Ordinary>> altered_supports;
+    for (std::size_t face = 0; face < native->num_faces(); ++face)
+        altered_supports.push_back(P::planar_support<ArithmeticMode::Ordinary>(*native->face_geometry(face)));
+    altered_supports[0] = altered_supports[1];
+    const auto wrong_support = P::details::NativeSupportAccess::cell_supports(*native, altered_supports);
+    EXPECT_EQ(native->volume().value, wrong_support->volume().value);
+    EXPECT_EQ(native->local_points()[0].value, wrong_support->local_points()[0].value);
+    EXPECT_FALSE(native->same_native_representation(*wrong_support));
+    const auto shifted = native->translated({1, 0, 0});
+    EXPECT_FALSE(shifted->same_native_representation(*shifted));
+    const auto piece = imported->clip({{1, 0, 0}, {}, .5}, false).inside;
+    ASSERT_TRUE(piece);
+    EXPECT_FALSE(piece->same_native_representation(*piece));
+    const auto restored = Ordinary::decode_certificate(native->encode_certificate());
+    EXPECT_EQ(native->encode_certificate(), restored->encode_certificate());
+    EXPECT_FALSE(native->same_native_representation(*restored));
+    // An explicit source import can enrich that decoded shell, but it cannot
+    // authorize replacement of its weaker decoded point definitions.
+    const auto restored_source = Ordinary::from_geometry(*restored);
+    EXPECT_FALSE(restored->same_native_representation(*restored_source));
 }
 
 template<ArithmeticMode Mode> void sibling_contract()
@@ -251,62 +362,51 @@ template<ArithmeticMode Mode> void shared_support_payload_contract()
                     P::details::original_support_authority(support)});
     P::DynamicPoint exported(source.value, source.absolute_error, Mode);
     const auto root = Access::identity(source);
-    Access::seal_export(exported, root, source.supports());
+    const auto keys = source.supports();
+    Access::seal_export(exported, root, {keys.begin(), keys.end()});
     const auto copy = Access::identity(exported);
     ASSERT_NE(root, copy);
-    ASSERT_EQ(root->support_payload, copy->support_payload);
-
-    auto provenance_bytes = 2 * sizeof(P::DynamicPointProvenance) + sizeof(P::DynamicPointSupportPayload) +
-                            root->supports().capacity() * sizeof(P::PlaneAuthority);
-    EXPECT_EQ(Access::identity_bytes(copy, false), provenance_bytes);
-    EXPECT_EQ(Access::identity_bytes(copy), provenance_bytes + opaque_bytes + support.payload_bytes());
-
-    enum class VertexSupports
+    EXPECT_EQ(root.view().supports(), copy.view().supports());
+    EXPECT_EQ(copy.view().source_origin(), root.view());
+    EXPECT_EQ(
+        Access::identity_bytes(copy) - Access::identity_bytes(copy, false), opaque_bytes + support.payload_bytes());
+    // Three backing key owners remain shared even though source and export
+    // snapshots have independently issued CSR rows.
+    for (const bool vertex_incidence : {false, true})
     {
-        Empty,
-        Owned,
-        Shared
-    };
-    for (const auto vertex_supports : {VertexSupports::Empty, VertexSupports::Owned, VertexSupports::Shared})
-    {
-        SCOPED_TRACE(static_cast<unsigned>(vertex_supports));
-        // Independently enumerate two wrappers, storage, one vertex slot,
-        // two provenance records, one shared support payload and its typed
-        // support attachment. Empty vertex authorities make the attachment
-        // reachable only through the vertex source-provenance chain. The owned vertex case
-        // additionally charges its private outer buffer; the two immutable
-        // opaque payload owners remain shared across every authority copy.
+        P::PointSnapshotBuilder<Mode> builder;
+        const auto point_ref = builder.import(copy);
+        const auto range =
+            vertex_incidence ? builder.import_authority_range(source.supports()) : P::LocalAuthorityRange<Mode>{};
+        const auto context = builder.freeze();
         auto storage = std::make_shared<P::details::GeometryStorage<Mode>>();
         storage->ancestry.reset();
         storage->moment_cache.reset();
+        storage->point_context = context;
         storage->vertices.resize(1);
-        auto& vertex = storage->vertices[0];
-        vertex.source_identity = copy;
-        if (vertex_supports != VertexSupports::Empty)
-            vertex.authorities = source.supports();
-        if (vertex_supports == VertexSupports::Shared)
-            vertex.authorities.share_if_equal(root->support_payload);
+        storage->vertices[0].source_identity = point_ref;
+        storage->vertices[0].authorities = range;
         const auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
-        auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
-                        storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + provenance_bytes +
-                        opaque_bytes + support.payload_bytes();
-        if (vertex_supports == VertexSupports::Owned)
-        {
-            const auto& keys = vertex.authorities.values();
-            expected += keys.capacity() * sizeof(P::PlaneAuthority);
-        }
+        const auto added_context =
+            sizeof(*context) + 2 * sizeof(void*) +
+            context->dependencies.capacity() * sizeof(std::shared_ptr<const P::PointSnapshotContextBase>) +
+            context->authority_table.capacity() * sizeof(P::PlaneAuthority) +
+            context->incidence.capacity() * sizeof(P::PrivateAuthorityRef<Mode>);
+        const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
+                              storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + added_context +
+                              Access::identity_bytes(copy);
         P::GeometryAllocationLedger ledger;
         std::size_t used = 0;
         ledger.retain(geometry, used, byte_limit);
+        // Three wrappers/storage, three snapshots, and three key payloads.
         EXPECT_EQ(ledger.owner_count(), 9u);
         EXPECT_EQ(ledger.payload_bytes(), expected);
         EXPECT_EQ(used, expected + ledger.bookkeeping_bytes());
-        const auto first_used = used;
+        const auto admitted = used;
         ledger.retain(geometry, used, byte_limit);
-        EXPECT_EQ(used, first_used);
+        EXPECT_EQ(used, admitted);
     }
 }
-
 TEST(GeometryAllocationLedgerTest, SharedPointSupportsAreChargedAsOneSeparateImmutableOwner)
 {
     shared_support_payload_contract<ArithmeticMode::Ordinary>();
@@ -317,143 +417,123 @@ TEST(GeometryAllocationLedgerTest, SharedPointSupportsAreChargedAsOneSeparateImm
 template<ArithmeticMode Mode> void provenance_dag_contract()
 {
     using Access = P::DynamicGeometryAccess;
-    using Record = P::DynamicPointProvenance;
-    using Owner = std::shared_ptr<const Record>;
-    using Payload = P::DynamicPointSupportPayload;
+    using Context = P::PointSnapshotContext<Mode>;
     const std::array<P::GeometryPoint, 3> points{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
     const auto support =
         P::planar_support<ArithmeticMode::Ordinary>(*P::PlanarFace<ArithmeticMode::Ordinary>::make(points));
     std::vector<std::uint64_t> first_words{2, 7}, second_words{13, 17, 19};
     first_words.reserve(7);
     second_words.reserve(11);
-    const auto opaque_bytes = 2 * sizeof(first_words) +
-                              (first_words.capacity() + second_words.capacity()) * sizeof(std::uint64_t);
+    const auto opaque_bytes =
+        2 * sizeof(first_words) + (first_words.capacity() + second_words.capacity()) * sizeof(std::uint64_t);
     const auto first = P::PlaneAuthority::opaque(std::move(first_words));
     const auto second = P::PlaneAuthority::opaque(std::move(second_words));
     const auto typed = P::details::original_support_authority(support);
-    std::vector<P::PlaneAuthority> first_supports{first, typed}, second_supports{second, first};
-    first_supports.reserve(5);
-    second_supports.reserve(9);
-    std::shared_ptr<const Payload> first_payload = std::make_shared<Payload>(std::move(first_supports));
-    std::shared_ptr<const Payload> second_payload = std::make_shared<Payload>(std::move(second_supports));
-    const auto make_record = [&](const std::shared_ptr<const Payload>& payload)
+    const std::array first_keys{first, typed}, second_keys{second, first};
+    struct Fixture
     {
-        auto record = std::make_shared<Record>();
-        record->value = {1, 2, 4};
-        record->absolute_error = {};
-        record->arithmetic_mode = Mode;
-        record->support_payload = payload;
-        return record;
+        P::PointProvenanceRef root;
+        P::StoredPointRef<Mode> root_slot;
+        std::array<std::weak_ptr<const P::PointSnapshotContextBase>, 4> contexts;
+        std::weak_ptr<const P::NativePointFactBlock<Mode>> facts;
     };
-    auto leaf = make_record(first_payload), chain = make_record(first_payload), root = make_record(first_payload);
-    auto other = make_record(second_payload), branch = make_record(second_payload);
-    chain->source_origin = leaf;
-    root->source_origin = chain;
-    root->source_edges.reserve(7);
-    root->source_edges = {{branch, leaf}, {nullptr, branch}};
-    branch->source_edges.reserve(11);
-    branch->source_edges = {{other, leaf}, {other, nullptr}};
-
-    // Verify actual borrowed slots, including duplicate and null endpoints.
-    // The temporary visitor can only be invoked as a named lvalue.
-    struct Visitor
+    auto fixture = [&]
     {
-        std::vector<const Owner*>& slots;
-        void operator()(const Owner& owner) & { slots.push_back(&owner); }
-        void operator()(const Owner&) && = delete;
-    };
-    std::vector<const Owner*> slots;
-    P::details::visit_provenance_children(*root, Visitor{slots});
-    EXPECT_EQ(slots, (std::vector<const Owner*>{&root->source_origin, &root->source_edges[0][0],
-                         &root->source_edges[0][1], &root->source_edges[1][0], &root->source_edges[1][1]}));
-    slots.clear();
-    P::details::visit_provenance_children(*branch, Visitor{slots});
-    EXPECT_EQ(slots, (std::vector<const Owner*>{&branch->source_edges[0][0], &branch->source_edges[0][1],
-                         &branch->source_edges[1][0], &branch->source_edges[1][1]}));
-    slots.clear();
-    P::details::visit_provenance_children(*leaf, Visitor{slots});
-    EXPECT_TRUE(slots.empty());
-
-    // Fixed graph: root -> chain -> leaf; root edges reach branch and leaf;
-    // branch edges reach other and leaf. Five records, two shared support
-    // payloads, two opaque word owners and one typed support owner.
-    const auto provenance_bytes = 5 * sizeof(Record) +
-                                  (root->source_edges.capacity() + branch->source_edges.capacity()) *
-                                      sizeof(root->source_edges.front()) +
-                                  2 * sizeof(Payload) +
-                                  (first_payload->authorities.capacity() + second_payload->authorities.capacity()) *
-                                      sizeof(P::PlaneAuthority);
+        P::PointSnapshotBuilder<Mode> native;
+        const auto leaf = native.native_source({0, 0, 0}, {}, Access::admit_incidence<Mode>(first_keys));
+        const auto other = native.native_source({2, 0, 0}, {}, Access::admit_incidence<Mode>(second_keys));
+        const auto native_context = native.freeze();
+        P::PointSnapshotBuilder<Mode> generated;
+        const std::array branch_edges{std::array{other, leaf}, std::array{other, P::PointProvenanceView{}}};
+        const auto branch =
+            generated.generated({1, 0, 0}, {}, branch_edges, Access::admit_incidence<Mode>(second_keys));
+        const std::array root_edges{std::array{branch, leaf}, std::array{P::PointProvenanceView{}, branch}};
+        const auto root_value =
+            generated.generated({.5L, 0, 0}, {}, root_edges, Access::admit_incidence<Mode>(first_keys));
+        const auto generated_context = generated.freeze();
+        std::vector<P::PointProvenanceView> children;
+        P::details::visit_provenance_children(root_value, [&](auto child) { children.push_back(child); });
+        EXPECT_EQ(children, (std::vector<P::PointProvenanceView>{branch, leaf, {}, branch}));
+        children.clear();
+        P::details::visit_provenance_children(branch, [&](auto child) { children.push_back(child); });
+        EXPECT_EQ(children, (std::vector<P::PointProvenanceView>{other, leaf, other, {}}));
+        P::PointSnapshotBuilder<Mode> chain;
+        const auto alias =
+            chain.export_alias(root_value.value(), {}, root_value, Access::admit_incidence<Mode>(first_keys));
+        const auto chain_context = chain.freeze();
+        P::PointSnapshotBuilder<Mode> head;
+        const auto root = head.export_alias(alias.value(), {}, alias, Access::admit_incidence<Mode>(first_keys));
+        const auto root_slot = head.import(root);
+        const auto head_context = head.freeze();
+        children.clear();
+        P::details::visit_provenance_children(root, [&](auto child) { children.push_back(child); });
+        EXPECT_EQ(children, (std::vector<P::PointProvenanceView>{alias}));
+        children.clear();
+        P::details::visit_provenance_children(alias, [&](auto child) { children.push_back(child); });
+        EXPECT_EQ(children, (std::vector<P::PointProvenanceView>{root_value}));
+        children.clear();
+        P::details::visit_provenance_children(leaf, [&](auto child) { children.push_back(child); });
+        EXPECT_TRUE(children.empty());
+        EXPECT_EQ(Access::borrowed_original_source(root), root_value);
+        return Fixture{root.owning(), root_slot, {native_context, generated_context, chain_context, head_context},
+            native_context->native_fact_blocks.front()};
+    }();
     const auto attachment_bytes = opaque_bytes + support.payload_bytes();
-    EXPECT_EQ(Access::identity_bytes(root, false), provenance_bytes);
-    EXPECT_EQ(Access::identity_bytes(root), provenance_bytes + attachment_bytes);
-    P::GeometryAllocationLedger manual, attachments;
-    std::size_t manual_used = 0, attachment_used = 0;
+    EXPECT_EQ(Access::identity_bytes(fixture.root) - Access::identity_bytes(fixture.root, false), attachment_bytes);
+    P::GeometryAllocationLedger attachments, manual;
+    std::size_t attachment_used = 0, manual_used = 0;
+    Access::retain_supports(fixture.root, attachments, attachment_used, byte_limit);
     manual.retain(first, manual_used, byte_limit);
     manual.retain(typed, manual_used, byte_limit);
     manual.retain(second, manual_used, byte_limit);
-    Access::retain_supports(root, attachments, attachment_used, byte_limit);
     EXPECT_EQ(attachments.owner_count(), 3u);
-    EXPECT_EQ(attachments.owner_count(), manual.owner_count());
     EXPECT_EQ(attachments.payload_bytes(), attachment_bytes);
     EXPECT_EQ(attachments.payload_bytes(), manual.payload_bytes());
     EXPECT_EQ(attachment_used, manual_used);
-    Access::retain_supports(root, attachments, attachment_used, byte_limit);
+    Access::retain_supports(fixture.root, attachments, attachment_used, byte_limit);
     EXPECT_EQ(attachment_used, manual_used);
-
     auto storage = std::make_shared<P::details::GeometryStorage<Mode>>();
     storage->ancestry.reset();
     storage->moment_cache.reset();
     storage->vertices.resize(1);
-    storage->vertices[0].source_identity = root;
+    storage->point_context = std::static_pointer_cast<const Context>(fixture.root.context_pin());
+    storage->vertices[0].source_identity = fixture.root_slot;
     auto geometry = Geometry<Mode>::from_dynamic(Access::geometry(storage));
     const auto expected = sizeof(Geometry<Mode>) + sizeof(P::DynamicConvexGeometry) + sizeof(*storage) +
-                          storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) + provenance_bytes +
-                          attachment_bytes;
-    const std::array<std::weak_ptr<const Record>, 5> weak_records{root, chain, leaf, branch, other};
-    const std::array<std::weak_ptr<const Payload>, 2> weak_payloads{first_payload, second_payload};
+                          storage->vertices.capacity() * sizeof(P::details::StoredVertex<Mode>) +
+                          Access::identity_bytes(fixture.root);
     {
         P::GeometryAllocationLedger ledger;
         std::size_t used = 0;
         ledger.retain(geometry, used, byte_limit);
-        EXPECT_EQ(ledger.owner_count(), 13u);
+        // Three geometry owners, four contexts, one native block, three keys.
+        EXPECT_EQ(ledger.owner_count(), 11u);
         EXPECT_EQ(ledger.payload_bytes(), expected);
         EXPECT_EQ(used, expected + ledger.bookkeeping_bytes());
         const auto required = used;
         ledger.retain(geometry, used, byte_limit);
         EXPECT_EQ(used, required);
-        {
-            P::GeometryAllocationLedger exact;
-            std::size_t exact_used = 0;
-            EXPECT_NO_THROW(exact.retain(geometry, exact_used, required));
-            EXPECT_EQ(exact_used, required);
-            P::GeometryAllocationLedger limited;
-            std::size_t limited_used = 0;
-            EXPECT_THROW(limited.retain(geometry, limited_used, required - 1), P::GeometryError);
-            EXPECT_LE(limited_used, required - 1);
-            const auto rejected = limited_used;
-            EXPECT_THROW(limited.retain(geometry, limited_used, byte_limit), P::GeometryError);
-            EXPECT_EQ(limited_used, rejected);
-        }
+        P::GeometryAllocationLedger exact;
+        std::size_t exact_used = 0;
+        EXPECT_NO_THROW(exact.retain(geometry, exact_used, required));
+        EXPECT_EQ(exact_used, required);
+        P::GeometryAllocationLedger limited;
+        std::size_t limited_used = 0;
+        EXPECT_THROW(limited.retain(geometry, limited_used, required - 1), P::GeometryError);
+        const auto rejected = limited_used;
+        EXPECT_THROW(limited.retain(geometry, limited_used, byte_limit), P::GeometryError);
+        EXPECT_EQ(limited_used, rejected);
         geometry.reset();
         storage.reset();
-        root.reset();
-        chain.reset();
-        leaf.reset();
-        branch.reset();
-        other.reset();
-        first_payload.reset();
-        second_payload.reset();
-        for (const auto& weak : weak_records)
+        fixture.root.reset();
+        for (const auto& weak : fixture.contexts)
             EXPECT_FALSE(weak.expired());
-        for (const auto& weak : weak_payloads)
-            EXPECT_FALSE(weak.expired());
+        EXPECT_FALSE(fixture.facts.expired());
     }
-    for (const auto& weak : weak_records)
+    for (const auto& weak : fixture.contexts)
         EXPECT_TRUE(weak.expired());
-    for (const auto& weak : weak_payloads)
-        EXPECT_TRUE(weak.expired());
+    EXPECT_TRUE(fixture.facts.expired());
 }
-
 TEST(GeometryAllocationLedgerTest, ProvenanceDagPreservesUniqueOwnersCapsAndDescendantLifetimes)
 {
     provenance_dag_contract<ArithmeticMode::Ordinary>();
@@ -489,8 +569,7 @@ template<ArithmeticMode Mode> void construction_payload_contract()
         for (std::size_t side = 0; side < pair.size(); ++side)
         {
             auto storage = empty_storage();
-            storage->construction = D::construction_rebase(
-                D::construction_node(Node::Clip{clip, side != 0}), second);
+            storage->construction = D::construction_rebase(D::construction_node(Node::Clip{clip, side != 0}), second);
             pair[side] = Geometry<Mode>::from_dynamic(P::DynamicGeometryAccess::geometry(storage));
         }
         return pair;

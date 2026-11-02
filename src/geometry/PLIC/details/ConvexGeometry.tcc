@@ -62,7 +62,7 @@ void preflight_shell(std::size_t vertices, std::size_t faces)
 bool has_numerical_only_provenance(const DynamicPoint& point)
 {
     const auto identity = DynamicGeometryAccess::identity(point);
-    return identity && identity->numerical_only;
+    return identity && identity.view().numerical_only();
 }
 void require_constructive_points(std::span<const DynamicPoint> points)
 {
@@ -77,24 +77,24 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
     for (const auto& input : inputs)
         if (const auto identity = DynamicGeometryAccess::identity(input))
         {
-            if (identity->numerical_only)
+            if (identity.view().numerical_only())
             {
                 DynamicGeometryAccess::seal_numerical(result);
                 return result;
             }
-            constructed |= identity->constructed;
+            constructed |= identity.view().constructed();
         }
     if (constructed)
     {
         const auto existing = DynamicGeometryAccess::identity(result);
-        if (!existing || !existing->constructed)
+        if (!existing || !existing.view().constructed())
         {
-            std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> edges;
+            std::vector<std::array<PointProvenanceView, 2>> edges;
             if (affine && !inputs.empty())
             {
                 const auto first_owner = DynamicGeometryAccess::identity(inputs[0]);
                 if (const auto& first = DynamicGeometryAccess::borrowed_original_source(first_owner))
-                    for (const auto& edge : first->source_edges)
+                    for (const auto& edge : first.source_edges())
                     {
                         bool common = true;
                         for (const auto& input : inputs)
@@ -105,7 +105,7 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
                             bool incident = DynamicGeometryAccess::same_represented_source(source, edge[0]) ||
                                             DynamicGeometryAccess::same_represented_source(source, edge[1]);
                             if (source)
-                                for (const auto& other : source->source_edges)
+                                for (const auto& other : source.source_edges())
                                 {
                                     details::active_work->pair();
                                     incident |= (DynamicGeometryAccess::same_represented_source(other[0], edge[0]) &&
@@ -130,7 +130,8 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
                         }
                     }
             }
-            DynamicGeometryAccess::seal_generated(result, std::move(edges), result.supports());
+            DynamicGeometryAccess::seal_generated(
+                result, std::move(edges), details::normalized_point_authorities(result.supports()));
         }
     }
     return result;
@@ -189,7 +190,7 @@ template<ArithmeticMode Mode> DynamicPoint Point<Mode>::dynamic() const
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
         error = this->absolute_error;
     else if (provenance_)
-        error = provenance_->absolute_error; // Original source evidence, not an ordinary numerical bound.
+        error = provenance_.view().absolute_error(); // Original source evidence, not an ordinary numerical bound.
     DynamicPoint result(this->value, error, Mode);
     result.provenance_ = provenance_;
     return result;

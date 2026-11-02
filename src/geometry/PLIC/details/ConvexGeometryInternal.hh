@@ -13,6 +13,7 @@
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
+#include "geometry/PLIC/details/PointSnapshot.hh"
 #include <algorithm>
 #include <bit>
 #include <cfenv>
@@ -37,72 +38,88 @@
 namespace SimpleFluid::PLIC
 {
 using namespace details;
-struct SIMPLEFLUID_LOCAL DynamicPointSupportPayload
-{
-    const std::vector<PlaneAuthority> authorities;
-    explicit DynamicPointSupportPayload(std::vector<PlaneAuthority> values) : authorities(std::move(values)) {}
-};
-
-struct SIMPLEFLUID_LOCAL DynamicPointProvenance
-{
-    std::array<long double, 3> value, absolute_error;
-    std::shared_ptr<const DynamicPointSupportPayload> support_payload;
-    ArithmeticMode arithmetic_mode;
-    /** Explicit represented global-input identity in the selected finite mode.
-     * This is not native support, ownership or trial authority. Rounded or
-     * uncertain construction outputs do not acquire it implicitly. */
-    bool represented_native_source = false;
-    bool constructed = false;
-    bool numerical_only = false;
-    std::shared_ptr<const DynamicPointProvenance> source_origin;
-    std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> source_edges;
-
-    [[nodiscard]] const std::vector<PlaneAuthority>& supports() const
-    {
-        static const std::vector<PlaneAuthority> empty;
-        return support_payload ? support_payload->authorities : empty;
-    }
-};
-
 namespace details
 {
-/** Borrow direct child owner slots in origin, then edge-endpoint order.
- * The record must remain alive and unchanged throughout the visit. */
-template<class Visitor> SIMPLEFLUID_LOCAL void visit_provenance_children(const DynamicPointProvenance&, Visitor&&);
+template<class Visitor> void visit_provenance_children(PointProvenanceView point, Visitor&& visitor)
+{
+    if (const auto origin = point.source_origin())
+        visitor(origin);
+    for (const auto edge : point.source_edges())
+    {
+        visitor(edge[0]);
+        visitor(edge[1]);
+    }
+}
 } // namespace details
 
 class SIMPLEFLUID_LOCAL DynamicGeometryAccess
 {
 public:
-    static std::shared_ptr<const DynamicPointProvenance> identity(const DynamicPoint& p);
-    static std::size_t identity_bytes(
-        const std::shared_ptr<const DynamicPointProvenance>& p, bool include_support_payloads = true);
+    static PointProvenanceRef identity(const DynamicPoint&);
+    static std::size_t identity_bytes(const PointProvenanceRef&, bool include_support_payloads = true);
+    static std::size_t identity_bytes(PointProvenanceView, bool include_support_payloads = true);
+    static void retain_supports(PointProvenanceView, GeometryAllocationLedger&, std::size_t&, std::size_t);
     static void retain_supports(
-        const std::shared_ptr<const DynamicPointProvenance>&, GeometryAllocationLedger&, std::size_t&, std::size_t);
-    static std::size_t storage_bytes(const DynamicPoint& p, bool include_support_payloads = true);
-    static bool same_source(const DynamicPoint& a, const DynamicPoint& b);
-    static void seal(DynamicPoint& point, std::vector<PlaneAuthority> supports);
-    static void seal_represented_source(DynamicPoint& point);
+        const PointProvenanceRef& point, GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+    {
+        retain_supports(point.view(), ledger, used, limit);
+    }
+    static std::size_t storage_bytes(const DynamicPoint&, bool include_support_payloads = true);
+    static bool same_source(const DynamicPoint&, const DynamicPoint&);
+    static void seal(DynamicPoint&, std::vector<PlaneAuthority>);
+    static void seal_represented_source(DynamicPoint&);
     static void seal_represented_source(DynamicPoint&, std::vector<PlaneAuthority>);
-    static bool same_represented_source(
-        const std::shared_ptr<const DynamicPointProvenance>&, const std::shared_ptr<const DynamicPointProvenance>&);
-    /** Borrow an immutable ancestor owner slot. The named input owner must
-     * remain alive and unchanged while the reference is used. Rvalues cannot
-     * pin that lifetime. Use original_source when retaining ownership. */
-    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
-        const std::shared_ptr<const DynamicPointProvenance>&);
-    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
-        std::shared_ptr<const DynamicPointProvenance>&&) = delete;
-    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
-        const std::shared_ptr<const DynamicPointProvenance>&&) = delete;
-    static std::shared_ptr<const DynamicPointProvenance> original_source(
-        const std::shared_ptr<const DynamicPointProvenance>&);
-    static void seal_export(DynamicPoint&, const std::shared_ptr<const DynamicPointProvenance>&,
-        std::vector<PlaneAuthority>, bool numerical_only = false);
-    static void seal_generated(DynamicPoint&, std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>>,
-        std::vector<PlaneAuthority> = {}, bool numerical_only = false);
+    static bool same_represented_source(PointProvenanceView, PointProvenanceView);
+    static bool same_represented_source(const PointProvenanceRef& a, const PointProvenanceRef& b)
+    {
+        return same_represented_source(a.view(), b.view());
+    }
+    static PointProvenanceView borrowed_original_source(PointProvenanceView);
+    static PointProvenanceView borrowed_original_source(const PointProvenanceRef& point)
+    {
+        return borrowed_original_source(point.view());
+    }
+    static PointProvenanceView borrowed_original_source(PointProvenanceRef&&) = delete;
+    static PointProvenanceView borrowed_original_source(const PointProvenanceRef&&) = delete;
+    static PointProvenanceRef original_source(const PointProvenanceRef& point)
+    {
+        return borrowed_original_source(point).owning();
+    }
+    static PointProvenanceRef original_source(PointProvenanceView point)
+    {
+        return borrowed_original_source(point).owning();
+    }
+    static void seal_export(DynamicPoint&, PointProvenanceView, std::vector<PlaneAuthority>, bool numerical = false);
+    static void seal_export(DynamicPoint& point, const PointProvenanceRef& source, std::vector<PlaneAuthority> supports,
+        bool numerical = false)
+    {
+        seal_export(point, source.view(), std::move(supports), numerical);
+    }
+    static void seal_generated(DynamicPoint&, std::vector<std::array<PointProvenanceView, 2>>,
+        std::vector<PlaneAuthority> = {}, bool numerical = false);
     static void seal_numerical(DynamicPoint&);
-    static void attach_identity(DynamicPoint&, std::shared_ptr<const DynamicPointProvenance>);
+    static void attach_identity(DynamicPoint&, PointProvenanceRef);
+    template<ArithmeticMode Mode>
+    static PointSnapshot<Mode> capture_snapshot(
+        std::span<const Point<Mode>>, GeometryAllocationLedger&, std::size_t&, std::size_t);
+    template<ArithmeticMode Mode>
+    static const std::shared_ptr<const PointSnapshotPayload<Mode>>& snapshot_payload(const PointSnapshot<Mode>& points)
+    {
+        return points.payload_;
+    }
+    static PointAuthorityRange boundary_keys(std::span<const PlaneAuthority> keys)
+    {
+        return PointAuthorityRange(keys.data(), 0, keys.size(), nullptr);
+    }
+    template<ArithmeticMode Mode>
+    static AdmittedPointIncidence<Mode> admit_incidence(std::span<const PlaneAuthority> keys)
+    {
+        return AdmittedPointIncidence<Mode>(PointAuthorityRange(keys.data(), 0, keys.size(), nullptr));
+    }
+    template<ArithmeticMode Mode> static AdmittedPointIncidence<Mode> admit_incidence(PointAuthorityRange keys)
+    {
+        return AdmittedPointIncidence<Mode>(keys);
+    }
     template<ArithmeticMode Mode>
     static PointExport<Mode> export_typed(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
         GeometryAllocationLedger&, std::size_t&, std::size_t);
@@ -115,6 +132,9 @@ public:
 
     static const std::shared_ptr<const DynamicConvexGeometry::Impl>& implementation(const DynamicConvexGeometry&);
     static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
+    template<ArithmeticMode Mode>
+    static void retain_geometry_storage(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
+        GeometryAllocationLedger&, std::size_t&, std::size_t);
 };
 
 namespace SIMPLEFLUID_LOCAL details
@@ -149,6 +169,8 @@ extern constinit thread_local Work* active_work;
 struct GeometrySourceSnapshot
 {
     NumericalConvexShell<ArithmeticMode::Ordinary> shell;
+    std::shared_ptr<const PointSnapshotContext<ArithmeticMode::Ordinary>> point_context;
+    std::vector<StoredPointRef<ArithmeticMode::Ordinary>> original_points;
     std::size_t preparation_bytes = 0, preparation_operations = 0, preparation_pairs = 0;
     const Work* charged_work = nullptr;
 };
@@ -203,14 +225,20 @@ struct GeometryClipConstruction
 {
     std::shared_ptr<const GeometryConstruction> parent;
     std::shared_ptr<const void> plane;
-    std::vector<std::shared_ptr<const DynamicPointProvenance>> retained_points;
+    std::shared_ptr<const PointSnapshotContextBase> point_context;
+    std::vector<DynamicStoredPointRef> retained_points;
     ArithmeticMode mode = ArithmeticMode::Ordinary;
     int orientation = 1;
     bool measure_section = false, construct_outside = true, partition_proof = false;
 };
 struct GeometryConstruction
 {
-    enum class Kind { Source, Clip, Rebase };
+    enum class Kind
+    {
+        Source,
+        Clip,
+        Rebase
+    };
     struct Source
     {
         std::shared_ptr<const DynamicConvexGeometry::Impl> source;
@@ -263,62 +291,21 @@ template<ArithmeticMode Mode> struct StoredPlane : PlaneNormalWitness<Mode>
     StoredPoint<Mode> normal, anchor;
     StoredValue<Mode> offset;
     std::optional<GeometryHalfspace> input;
-    std::vector<PlaneAuthority> authorities;
-    std::vector<std::weak_ptr<const DynamicPointProvenance>> source_vertices;
+    LocalAuthorityRange<Mode> authorities;
+    const PointSnapshotContext<Mode>* point_context = nullptr;
+    std::vector<StoredPointRef<Mode>> source_vertices;
 };
 
 template<ArithmeticMode Mode> using StoredPlanePtr = std::shared_ptr<const StoredPlane<Mode>>;
 
 /** Mutable draft support storage, frozen only against an exact source sequence.
  * Reads never detach. Shared storage is immutable; append stages a deep copy. */
-class SIMPLEFLUID_LOCAL StoredVertexAuthorities
-{
-public:
-    StoredVertexAuthorities() = default;
-    StoredVertexAuthorities(std::vector<PlaneAuthority> values) : storage_(std::move(values)) {}
-    StoredVertexAuthorities& operator=(std::vector<PlaneAuthority> values)
-    {
-        storage_ = std::move(values);
-        return *this;
-    }
-    [[nodiscard]] const std::vector<PlaneAuthority>& values() const
-    {
-        if (const auto* owned = owned_values())
-            return *owned;
-        static const std::vector<PlaneAuthority> empty;
-        const auto& shared = shared_payload();
-        return shared ? shared->authorities : empty;
-    }
-    [[nodiscard]] const std::vector<PlaneAuthority>* owned_values() const
-    {
-        return std::get_if<std::vector<PlaneAuthority>>(&storage_);
-    }
-    [[nodiscard]] const std::shared_ptr<const DynamicPointSupportPayload>& shared_payload() const
-    {
-        static const std::shared_ptr<const DynamicPointSupportPayload> empty;
-        const auto* shared = std::get_if<std::shared_ptr<const DynamicPointSupportPayload>>(&storage_);
-        return shared ? *shared : empty;
-    }
-    [[nodiscard]] auto begin() const { return values().begin(); }
-    [[nodiscard]] auto end() const { return values().end(); }
-    [[nodiscard]] std::size_t size() const { return values().size(); }
-    [[nodiscard]] bool empty() const { return values().empty(); }
-    [[nodiscard]] bool operator==(const StoredVertexAuthorities& other) const { return values() == other.values(); }
-    void share_if_equal(const std::shared_ptr<const DynamicPointSupportPayload>&);
-    void detach();
-    void append(const PlaneAuthority&);
-    void clear();
-
-private:
-    std::variant<std::vector<PlaneAuthority>, std::shared_ptr<const DynamicPointSupportPayload>> storage_;
-};
-
 template<ArithmeticMode Mode> struct StoredVertex
 {
     StoredPoint<Mode> coordinates;
     std::vector<StoredPlanePtr<Mode>> incident;
-    StoredVertexAuthorities authorities;
-    std::shared_ptr<const DynamicPointProvenance> source_identity;
+    LocalAuthorityRange<Mode> authorities;
+    StoredPointRef<Mode> source_identity;
     bool numerical_only = false;
 };
 
@@ -362,17 +349,23 @@ template<ArithmeticMode Mode> struct StoredMomentCache
     std::once_flag prepared;
     std::optional<StoredIntegrals<Mode>> integrals;
 };
-} // namespace details
+} // namespace SIMPLEFLUID_LOCAL details
 
 struct SIMPLEFLUID_LOCAL DynamicPointExportPayload
 {
     ArithmeticMode mode = ArithmeticMode::Ordinary;
     std::vector<DynamicPoint> points;
+    std::shared_ptr<const PointSnapshotContextBase> point_context;
 };
 template<ArithmeticMode Mode> struct PointExportPayload
 {
     std::vector<Point<Mode>> points;
     std::shared_ptr<const DynamicPointExportPayload> dynamic;
+};
+template<ArithmeticMode Mode> struct PointSnapshotPayload
+{
+    std::shared_ptr<const PointSnapshotContext<Mode>> context;
+    std::vector<StoredPointRef<Mode>> refs;
 };
 struct SIMPLEFLUID_LOCAL PointExportCache
 {
@@ -382,7 +375,8 @@ struct SIMPLEFLUID_LOCAL PointExportCache
     std::weak_ptr<const DynamicPointExportPayload> dynamic_root;
     std::weak_ptr<const PointExportPayload<ArithmeticMode::Ordinary>> ordinary_root;
     std::weak_ptr<const PointExportPayload<ArithmeticMode::BoundedCertification>> bounded_root;
-    std::vector<std::weak_ptr<const DynamicPointProvenance>> vertex_provenance;
+    std::weak_ptr<const PointSnapshotContextBase> provenance_root;
+    std::vector<DynamicStoredPointRef> vertex_provenance;
 };
 
 struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
@@ -407,6 +401,7 @@ namespace details
 template<ArithmeticMode Mode> struct GeometryStorage : DynamicConvexGeometry::Impl
 {
     GeometryStorage() { limits.arithmetic_mode = Mode; }
+    std::shared_ptr<const PointSnapshotContext<Mode>> point_context;
     std::vector<StoredVertex<Mode>> vertices;
     std::vector<StoredSurface<Mode>> surfaces;
     StoredValue<Mode> volume;
@@ -430,10 +425,12 @@ std::shared_ptr<const GeometryConstruction> construction_rebase(
 std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConstruction>&);
 template<ArithmeticMode Mode>
 std::size_t geometry_allocation_footprint(const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
-template<ArithmeticMode Mode> bool construction_edge_incident(const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&);
 template<ArithmeticMode Mode>
-void preserve_crossing_incidence(
-    StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&, const Frame&, bool numerical_only);
+bool construction_edge_incident(
+    const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&, const PointSnapshotContext<Mode>*);
+template<ArithmeticMode Mode>
+void preserve_crossing_incidence(StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&,
+    const Frame&, bool numerical_only, PointSnapshotBuilder<Mode>&);
 } // namespace details
 
 namespace SIMPLEFLUID_LOCAL details
@@ -453,7 +450,5 @@ template<ArithmeticMode Mode> struct StoredPlanarLine
     StoredPlanarVertex<Mode> first, second;
     std::vector<PlaneAuthority> supports;
 };
-} // namespace details
+} // namespace SIMPLEFLUID_LOCAL details
 } // namespace SimpleFluid::PLIC
-
-#include "geometry/PLIC/details/ProvenanceChildren.ipp"

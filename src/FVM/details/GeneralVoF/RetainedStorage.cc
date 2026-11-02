@@ -126,9 +126,15 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
     category("cells_and_geometry_roots");
     for (const auto& node : data.topology->nodes)
         budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.payload_bytes());
-    for (const auto& [id, point] : data.topology->finite_nodes)
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        native_allocations.retain(std::get<PLIC::PointSnapshot<Mode>>(data.topology->finite_nodes.snapshot),
+            budget.used, budget.limit);
+    else if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        finite_allocations.retain(std::get<PLIC::PointSnapshot<Mode>>(data.topology->finite_nodes.snapshot),
+            budget.used, budget.limit);
+    for (const auto& [id, slot] : data.topology->finite_nodes.slots)
     {
-        budget.add(sizeof(id) + PLIC::dynamic_point_storage_bytes(point));
+        budget.add(sizeof(id) + sizeof(slot));
         links(4);
     }
     for (const auto& [id, identity] : data.topology->construction_nodes)
@@ -142,8 +148,9 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         links(4);
     }
     category("nodes_and_authorities");
-    // Each actual tile owner pays for all allocated element slots and every
-    // copied metadata vector. The surface catalog itself owns only references.
+    // Tile arrays pay every allocated element slot. Immutable metadata pays
+    // actual owner/control/capacity once, including the traversal's owner ledger.
+    AMR::adaptive_detail::ImmutableSequenceLedger tile_metadata;
     const auto tiles = [&](const auto& entries)
     {
         const auto allocation = entries.capacity() * sizeof(AMR::AdaptiveTile);
@@ -153,17 +160,28 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         tile_owned_vector_size_bytes += entries.size() * sizeof(AMR::AdaptiveTile);
         for (const auto& tile : entries)
         {
-            const auto vectors =
-                (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
-                tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
-                tile.second_image_identity.payload_bytes();
-            const auto metadata = vectors + tile.boundary.capacity();
-            budget.add(metadata);
-            tile_metadata_bytes += metadata;
+            std::size_t shared_owners = 0;
+            const auto shared_sequence = [&](const auto& values)
+            {
+                const auto owner = tile_metadata.retain(values, budget);
+                if (owner)
+                {
+                    using T = typename std::decay_t<decltype(values)>::value_type;
+                    shared_owners += owner;
+                    tile_owned_vector_capacity_bytes += values.storage_capacity() * sizeof(T);
+                    tile_owned_vector_size_bytes += values.storage_size() * sizeof(T);
+                }
+            };
+            shared_sequence(tile.domain);
+            shared_sequence(tile.surface);
+            shared_sequence(tile.node_gids);
+            shared_sequence(tile.second_node_gids);
+            const auto vectors = tile.identity.capacity() + tile.second_image_identity.payload_bytes();
+            budget.add(vectors + tile.boundary.capacity());
+            tile_metadata_bytes += shared_owners + vectors + tile.boundary.capacity();
             tile_owned_vector_capacity_bytes += vectors;
             tile_owned_vector_size_bytes +=
-                (tile.node_gids.size() + tile.second_node_gids.size()) * sizeof(std::uint64_t) + tile.domain.size() +
-                tile.surface.size() + tile.identity.size() + tile.second_image_identity.payload_bytes();
+                tile.identity.size() + tile.second_image_identity.payload_bytes();
             const auto tile_key = [&](const Key& key)
             {
                 const auto capacity = key_vector_bytes(key, true);

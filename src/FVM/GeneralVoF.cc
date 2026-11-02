@@ -6,6 +6,115 @@
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 namespace SimpleFluid::VoF
 {
+namespace
+{
+template<ArithmeticMode Mode>
+void retain_cell_geometry(Cell& cell, const AMR::AdaptiveLeaf& leaf, const GeneralVoFOptions& options)
+{
+    if constexpr (Mode != ArithmeticMode::Exact)
+    {
+        const auto imported = PLIC::ConvexCellGeometry<Mode>::from_geometry(
+            *cell.phase.geometry, geometry_limits(Mode, options.byte_budget));
+        cell.finite_geometry = imported->dynamic_geometry();
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            // Procedural Cartesian leaves own recipes rather than the native
+            // shell. Keep the fully authenticated imported root for both uses
+            // only when every native represented query is exactly preserved.
+            // Explicit shells and certified imports retain their separate roots.
+            if (!leaf.geometry && std::holds_alternative<AMR::CartesianCellAncestry>(leaf.key.ancestry) &&
+                cell.phase.geometry->same_native_representation(*imported))
+                cell.phase.geometry = imported;
+        }
+    }
+}
+template<ArithmeticMode Mode>
+void retain_canonical_points(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topology,
+    const std::map<std::uint64_t, KeySet>& node_sources, wire::Budget& budget)
+{
+    static_assert(Mode != ArithmeticMode::Exact);
+    topology.finite_nodes.snapshot = PLIC::PointSnapshot<Mode>{};
+    if (topology.draft.nodes.empty())
+        return;
+    const auto reserve = [&](auto& values, std::size_t count)
+    {
+        using Value = typename std::decay_t<decltype(values)>::value_type;
+        if (count > values.max_size() || count > (budget.limit - budget.used) / sizeof(Value))
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "Finite VoF native point-batch storage exceeds its byte budget.");
+        budget.add(count * sizeof(Value));
+        values.reserve(count);
+        if (values.capacity() > count)
+            budget.add((values.capacity() - count) * sizeof(Value));
+    };
+    std::vector<const Key*> keys;
+    std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources;
+    reserve(keys, data.cells.size());
+    reserve(sources, data.cells.size());
+    for (const auto& [key, cell] : data.cells)
+    {
+        keys.push_back(&key);
+        sources.push_back(cell.phase.geometry);
+    }
+    const auto fan = [&](std::uint64_t node) -> const KeySet&
+    {
+        if (const auto found = topology.node_fans.find(node);
+            found != topology.node_fans.end() && !found->second.empty())
+            return found->second;
+        const auto found = node_sources.find(node);
+        if (found == node_sources.end() || found->second.empty())
+            throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
+        return found->second;
+    };
+    std::size_t references = 0;
+    for (const auto& node : topology.draft.nodes)
+    {
+        const auto count = fan(node.gid).size();
+        if (count > std::numeric_limits<std::size_t>::max() - references)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Native source-fan size overflows.");
+        references += count;
+    }
+    std::vector<std::size_t> source_indices;
+    std::vector<PLIC::NativeSourcePointRequest> requests;
+    reserve(source_indices, references);
+    reserve(requests, topology.draft.nodes.size());
+    for (const auto& node : topology.draft.nodes)
+    {
+        const auto& incident = fan(node.gid);
+        requests.push_back({node.coordinate_identity, source_indices.size(), incident.size()});
+        for (const auto& key : incident)
+        {
+            const auto found = std::lower_bound(keys.begin(), keys.end(), key,
+                [](const Key* stored, const Key& sought) { return *stored < sought; });
+            if (found == keys.end() || **found != key)
+                throw std::invalid_argument("Finite VoF native point source is outside its retained shell table.");
+            source_indices.push_back(static_cast<std::size_t>(found - keys.begin()));
+        }
+    }
+    if (requests.size() > (budget.limit - budget.used) / sizeof(PLIC::Point<Mode>))
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Native point output reservation exhausted.");
+    const auto batch_allowance = budget.limit - budget.used;
+    budget.add(requests.size() * sizeof(PLIC::Point<Mode>));
+    // The caller reservation covers the returned vector while map entries are
+    // built. The geometry operation separately admits its construction scratch.
+    auto points = PLIC::source_points<Mode>(sources, source_indices, requests,
+        geometry_limits(Mode, batch_allowance));
+    if (points.capacity() > requests.size())
+        budget.add((points.capacity() - requests.size()) * sizeof(PLIC::Point<Mode>));
+    PLIC::GeometryAllocationLedger owners;
+    topology.finite_nodes.snapshot = PLIC::snapshot_points<Mode>(points, owners, budget.used, budget.limit);
+    for (std::size_t index = 0; index < points.size(); ++index)
+    {
+        const auto& node = topology.draft.nodes[index];
+        budget.add(sizeof(typename decltype(topology.finite_nodes.slots)::value_type) + 4 * sizeof(void*));
+        if (!topology.finite_nodes.slots.emplace(node.gid, index).second)
+            throw std::invalid_argument("Finite VoF canonical node identity is duplicated.");
+        budget.add(sizeof(std::uint64_t) + sizeof(AMR::AdaptiveBytes) + 4 * sizeof(void*) + node.identity.size());
+        if (!topology.construction_nodes.emplace(node.gid, node.identity).second)
+            throw std::invalid_argument("Finite VoF construction node identity is duplicated.");
+    }
+}
+} // namespace
 GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<Key> order, std::vector<double> gas,
     std::vector<double> carrier, GeneralVoFOptions options, std::vector<GeneralVoFPhaseGeometry> declarations)
     : GeneralVoF(std::move(hierarchy), std::move(order), std::move(gas), std::move(carrier), options,
@@ -78,10 +187,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 cell.revision = leaf.revision;
                 cell.phase = {hierarchy->geometry(leaf), gas[i], carrier[i]};
                 cell.native_volume = hierarchy->metrics(leaf).volume;
-                if constexpr (Mode != ArithmeticMode::Exact)
-                    cell.finite_geometry = PLIC::ConvexCellGeometry<Mode>::from_geometry(
-                        *cell.phase.geometry, geometry_limits(Mode, options.byte_budget))
-                                               ->dynamic_geometry();
+                retain_cell_geometry<Mode>(cell, leaf, options);
                 if (capsules)
                 {
                     cell.inherited = true;
@@ -257,10 +363,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         cell.owner = binding.owner;
                         cell.revision = leaf.revision;
                         cell.phase.geometry = retained_geometry;
-                        if constexpr (Mode != ArithmeticMode::Exact)
-                            cell.finite_geometry = PLIC::ConvexCellGeometry<Mode>::from_geometry(
-                                *retained_geometry, geometry_limits(Mode, options.byte_budget))
-                                                       ->dynamic_geometry();
+                        retain_cell_geometry<Mode>(cell, leaf, options);
                         budget.add(cell.phase.geometry->storage_bytes());
                         found = data->cells.emplace(binding.key, std::move(cell)).first;
                     }
@@ -322,6 +425,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 }
                 return entries[key];
             };
+            AMR::adaptive_detail::ImmutableSequencePool<char> retained_bytes;
+            AMR::adaptive_detail::ImmutableSequencePool<std::uint64_t> retained_loops;
             for (const auto& tile : topology->draft.tiles)
             {
                 if (!tile.second_image_identity.is_zero())
@@ -342,10 +447,14 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     continue;
                 auto& owner = owned_incident ? topology->tiles : topology->extra_surface_tiles;
                 owner.push_back(tile);
+                auto& metadata = owner.back();
+                retained_bytes.intern(metadata.domain, budget);
+                retained_bytes.intern(metadata.surface, budget);
+                retained_loops.intern(metadata.node_gids, budget);
+                retained_loops.intern(metadata.second_node_gids, budget);
                 const auto& retained = owner.back();
                 budget.add(
-                    (retained.node_gids.capacity() + retained.second_node_gids.capacity()) * sizeof(std::uint64_t) +
-                    retained.domain.capacity() + retained.surface.capacity() + retained.identity.capacity() +
+                    retained.identity.capacity() +
                     retained.boundary.capacity() + retained.second_image_identity.payload_bytes() +
                     AMR::encode_adaptive_key(retained.first).size() +
                     (retained.second ? AMR::encode_adaptive_key(*retained.second).size() : 0));
@@ -366,6 +475,16 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         throw std::invalid_argument("General VoF construction face identity is duplicated.");
                 }
             }
+            retained_bytes.finalize(budget);
+            retained_loops.finalize(budget);
+            for (auto* entries : {&topology->tiles, &topology->extra_surface_tiles})
+                for (auto& tile : *entries)
+                {
+                    retained_bytes.rebind(tile.domain);
+                    retained_bytes.rebind(tile.surface);
+                    retained_loops.rebind(tile.node_gids);
+                    retained_loops.rebind(tile.second_node_gids);
+                }
             // Preserve canonical tile order in every incidence row. Transport
             // sums and node-wall packets use this same order after publication.
             const auto append_index = [&](auto& entries, const auto& key, std::size_t index)
@@ -431,26 +550,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         wall_tiles.try_emplace(tile.identity, &tile);
                 }
             if constexpr (Mode != ArithmeticMode::Exact)
-                for (const auto& node : topology->draft.nodes)
-                {
-                    const auto fan = topology->node_fans.find(node.gid);
-                    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
-                        incident_sources;
-                    if (fan != topology->node_fans.end() && !fan->second.empty())
-                        for (const auto& key : fan->second)
-                            incident_sources.push_back(data->cells.at(key).phase.geometry);
-                    else if (const auto sources = node_source_cells.find(node.gid); sources != node_source_cells.end())
-                        for (const auto& key : sources->second)
-                            incident_sources.push_back(data->cells.at(key).phase.geometry);
-                    if (incident_sources.empty())
-                        throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
-                    auto p = PLIC::source_point<Mode>(incident_sources, node.coordinate_identity).dynamic();
-                    topology->finite_nodes.emplace(node.gid, std::move(p));
-                    budget.add(
-                        sizeof(std::uint64_t) + sizeof(AMR::AdaptiveBytes) + 4 * sizeof(void*) + node.identity.size());
-                    if (!topology->construction_nodes.emplace(node.gid, node.identity).second)
-                        throw std::invalid_argument("Finite VoF construction node identity is duplicated.");
-                }
+                retain_canonical_points<Mode>(*data, *topology, node_source_cells, budget);
             const auto node_sources = [&](std::uint64_t node) -> const KeySet&
             {
                 if (const auto complete = topology->node_fans.find(node); complete != topology->node_fans.end())

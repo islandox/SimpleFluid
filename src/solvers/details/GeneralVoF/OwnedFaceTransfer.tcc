@@ -39,10 +39,10 @@ FaceTransferResult transfer_owned_faces(
     const auto identity = [](const Meshes::AMR::AdaptiveTile& tile)
     {
         std::vector<char> result;
-        for (const auto* key : {&tile.domain, &tile.surface, &tile.identity})
+        for (const auto key : {tile.domain.span(), tile.surface.span(), std::span<const char>(tile.identity)})
         {
-            append_face_word(result, key->size());
-            result.insert(result.end(), key->begin(), key->end());
+            append_face_word(result, key.size());
+            result.insert(result.end(), key.begin(), key.end());
         }
         return result;
     };

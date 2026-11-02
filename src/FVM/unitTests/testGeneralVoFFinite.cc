@@ -454,6 +454,40 @@ TEST(GeneralVoFFinite, OrdinaryDefaultAndBoundedOptInKeepSeparateAcceptancePolic
     EXPECT_EQ(certified.carrier_volumes(), input.carrier);
 }
 
+TEST(GeneralVoFFinite, ProceduralOrdinaryCellsShareAuthenticatedGeometryAndBoundedCellsStaySeparate)
+{
+    const auto input = fixture();
+    GeneralVoF ordinary(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoFOptions options;
+    options.arithmetic_mode = ArithmeticMode::BoundedCertification;
+    GeneralVoF certified(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto native = ordinary.owned_geometry();
+    const auto finite = ordinary.owned_finite_geometry<ArithmeticMode::Ordinary>();
+    const auto bounded_native = certified.owned_geometry();
+    const auto bounded = certified.owned_finite_geometry<ArithmeticMode::BoundedCertification>();
+    ASSERT_EQ(native.size(), ordinary.owned_order().size());
+    ASSERT_EQ(finite.size(), native.size());
+    ASSERT_EQ(bounded.size(), native.size());
+    for (std::size_t i = 0; i < native.size(); ++i)
+    {
+        EXPECT_EQ(native[i]->storage_identity(), finite[i]->storage_identity());
+        EXPECT_NE(bounded_native[i]->storage_identity(), bounded[i]->storage_identity());
+        const auto& leaf = input.hierarchy->owned().at(ordinary.owned_order()[i]);
+        ASSERT_FALSE(leaf.geometry);
+        const auto oracle = input.hierarchy->geometry(leaf);
+        EXPECT_EQ(native[i]->encode_certificate(), oracle->encode_certificate());
+        EXPECT_EQ(native[i]->volume().value, 1.L);
+        EXPECT_EQ(native[i]->centroid(), oracle->centroid());
+        EXPECT_TRUE(native[i]->same_native_representation(*oracle));
+    }
+    const auto successor = ordinary.apply(ordinary.plan_transport(stationary(ordinary), circulation(ordinary, true), 1));
+    EXPECT_EQ(successor->gas_volumes(), ordinary.gas_volumes());
+    EXPECT_EQ(successor->carrier_volumes(), ordinary.carrier_volumes());
+    const auto successor_native = successor->owned_geometry();
+    for (std::size_t i = 0; i < native.size(); ++i)
+        EXPECT_EQ(successor_native[i]->storage_identity(), native[i]->storage_identity());
+}
+
 TEST(GeneralVoFFinite, OrdinaryModeRejectsInvalidPhysicalDataAndImplicitExactViews)
 {
     const auto input = fixture();

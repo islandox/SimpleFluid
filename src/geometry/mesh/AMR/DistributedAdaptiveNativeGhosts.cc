@@ -177,7 +177,7 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
                 {
                     auto bytes = r.bytes();
                     budget.add(bytes.size());
-                    auto tile = decode_adaptive_tile(bytes, limit);
+                    auto tile = adaptive_detail::decode_adaptive_tile(bytes, limit, budget);
                     if (tile.first != key && (!tile.second || *tile.second != key))
                         throw std::invalid_argument("Nonincident tile in native ghost package.");
                     auto found = tiles.find(tile.face_gid);

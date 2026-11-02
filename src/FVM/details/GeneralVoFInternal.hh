@@ -327,7 +327,20 @@ struct GeneralVoF::Data
         // Full-shell boundary evidence survives moving draft into the native publication.
         [[nodiscard]] SurfaceTiles frontier_tiles() const { return SurfaceTiles(*this, frontier_tile_references); }
         std::vector<AMR::AdaptiveNode> nodes;
-        std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
+        struct FiniteNodes
+        {
+            std::variant<PLIC::PointSnapshot<ArithmeticMode::Ordinary>,
+                PLIC::PointSnapshot<ArithmeticMode::BoundedCertification>> snapshot;
+            std::map<std::uint64_t, std::size_t> slots;
+            [[nodiscard]] bool contains(std::uint64_t node) const { return slots.contains(node); }
+            [[nodiscard]] bool empty() const noexcept { return slots.empty(); }
+            [[nodiscard]] std::size_t size() const noexcept { return slots.size(); }
+            [[nodiscard]] PLIC::DynamicPoint at(std::uint64_t node) const
+            {
+                const auto slot = slots.at(node);
+                return std::visit([&](const auto& points) { return points.point(slot).dynamic(); }, snapshot);
+            }
+        } finite_nodes;
         std::map<std::uint64_t, SurfaceTileReference> construction_faces;
         std::map<std::uint64_t, AMR::AdaptiveBytes> construction_nodes;
         std::map<std::uint64_t, Key> by_gid;

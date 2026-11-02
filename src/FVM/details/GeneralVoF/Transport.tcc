@@ -7,6 +7,7 @@
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoF/PhasePublication.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -42,6 +43,7 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         face_volume.size() != data.topology->tiles.size())
         throw std::invalid_argument("Finite VoF controls do not cover retained nodes/faces.");
     wire::Budget budget{limit};
+    PLIC::GeometryAllocationLedger point_owners;
     std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint> velocity;
     for (const auto& node : node_velocity)
     {
@@ -56,8 +58,9 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         const PLIC::Point<Mode> source(data.topology->finite_nodes.at(node.gid));
         const auto departure = auth::departure<Mode>(data, node.gid, velocity.at(node.gid), timestep);
         budget.add(sizeof(typename std::remove_reference_t<decltype(traces)>::value_type) + 4 * sizeof(void*) +
-                   PLIC::dynamic_point_storage_bytes(source.dynamic()) +
-                   PLIC::dynamic_point_storage_bytes(departure.dynamic()));
+                   2 * sizeof(PLIC::DynamicPoint));
+        point_owners.retain_point_provenance(source, budget.used, budget.limit);
+        point_owners.retain_point_provenance(departure, budget.used, budget.limit);
         traces.emplace(node.gid, std::pair{source, departure});
         auto bytes =
             auth::node_record<Mode>(data, node.gid, source, departure, velocity.at(node.gid), timestep, packet_context);
@@ -579,13 +582,15 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             {
                 wire::Budget budget{limit};
                 budget.add(retained_protocol_bytes);
+                PLIC::GeometryAllocationLedger imported_point_owners;
                 for (const auto& [node, bytes] : node_records)
                 {
                     budget.add(sizeof(decltype(node_records)::value_type) + 4 * sizeof(void*) + bytes.capacity());
                     auto trace = auth::accept_node_record<Mode>(data, node, bytes, timestep, packet_context);
                     budget.add(sizeof(typename decltype(traces)::value_type) + 4 * sizeof(void*) +
-                               PLIC::dynamic_point_storage_bytes(trace.first.dynamic()) +
-                               PLIC::dynamic_point_storage_bytes(trace.second.dynamic()));
+                               2 * sizeof(PLIC::DynamicPoint));
+                    imported_point_owners.retain_point_provenance(trace.first, budget.used, budget.limit);
+                    imported_point_owners.retain_point_provenance(trace.second, budget.used, budget.limit);
                     if (!traces.emplace(node, std::move(trace)).second)
                         throw std::invalid_argument("Finite VoF source-node trace was independently registered twice.");
                 }

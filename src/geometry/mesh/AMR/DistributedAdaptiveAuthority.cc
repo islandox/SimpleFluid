@@ -164,7 +164,7 @@ AdaptiveBytes encode_tile(const AdaptiveTile& tile, std::size_t byte_budget, Bud
     write(w);
     return std::move(w.data);
 }
-AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget)
+AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget, Budget& allocation)
 {
     if (bytes.size() > byte_budget)
         throw std::invalid_argument("Adaptive tile packet exceeds byte budget.");
@@ -172,8 +172,17 @@ AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget)
     AdaptiveTile tile;
     tile.face_gid = r.word();
     read_geometry_record_header(r, GeometryRecordKind::Tile);
-    tile.surface = r.bytes();
-    tile.domain = r.bytes();
+    const auto read_metadata = [&]
+    {
+        const auto size = r.word();
+        if (size > r.data.size() - r.offset)
+            throw std::invalid_argument("Truncated adaptive tile metadata.");
+        const auto input = r.data.subspan(r.offset, size);
+        r.offset += size;
+        return ImmutableSequence<char>::snapshot(input, allocation);
+    };
+    tile.surface = read_metadata();
+    tile.domain = read_metadata();
     tile.identity = r.bytes();
     tile.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), byte_budget);
     tile.second_image_identity =
@@ -197,8 +206,14 @@ AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget)
         auto count = r.word();
         if (count > (r.data.size() - r.offset) / 8)
             throw std::invalid_argument("Truncated adaptive face incidence.");
+        allocation.add(count * sizeof(std::uint64_t));
+        std::vector<std::uint64_t> nodes;
+        nodes.reserve(count);
+        if (nodes.capacity() != count)
+            throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
         for (std::uint64_t i = 0; i < count; ++i)
-            incidence->push_back(r.word());
+            nodes.push_back(r.word());
+        *incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(nodes), allocation);
     }
     r.done();
     return tile;
@@ -210,7 +225,31 @@ AdaptiveBytes encode_adaptive_tile(const AdaptiveTile& tile, std::size_t byte_bu
 }
 AdaptiveTile decode_adaptive_tile(std::span<const char> bytes, std::size_t byte_budget)
 {
-    return decode_tile(bytes, byte_budget);
+    Budget allocation{byte_budget};
+    return decode_tile(bytes, byte_budget, allocation);
+}
+AdaptiveTile decode_adaptive_tile(
+    std::span<const char> bytes, std::size_t byte_budget, std::size_t& used, std::size_t arena_limit)
+{
+    if (used > arena_limit)
+        throw std::invalid_argument("Adaptive tile caller admission exceeds its arena.");
+    Budget allocation{arena_limit, used};
+    try
+    {
+        auto result = decode_tile(bytes, byte_budget, allocation);
+        used = allocation.used;
+        return result;
+    }
+    catch (...)
+    {
+        used = allocation.used;
+        throw;
+    }
+}
+AdaptiveTile adaptive_detail::decode_adaptive_tile(
+    std::span<const char> bytes, std::size_t byte_budget, Budget& allocation)
+{
+    return decode_tile(bytes, byte_budget, allocation);
 }
 std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> owned,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t tile_budget,
@@ -433,9 +472,14 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                             throw std::invalid_argument("Authority tile budget exhausted.");
                         ++tiles;
                         AdaptiveTile tile;
+                        lease(adaptive_detail::ImmutableSequence<char>::allocation_bytes(support.size()));
+                        lease(adaptive_detail::ImmutableSequence<char>::allocation_bytes(entries[i].domain.size()));
                         tile.face_gid = authority_faces;
                         tile.surface = support;
                         tile.domain = entries[i].domain;
+                        if (tile.surface.storage_capacity() != support.size() ||
+                            tile.domain.storage_capacity() != entries[i].domain.size())
+                            throw std::invalid_argument("Adaptive metadata capacity differs from admission.");
                         tile.geometry = std::move(face);
                         auto first_shift = entries[i].image,
                              second_shift = j ? entries[*j].image : DisplacementIdentity{};
@@ -578,7 +622,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 allocation.add(sizeof(AdaptiveTile));
                 if (result.size() >= tile_budget)
                     throw std::invalid_argument("Resident tile budget exhausted.");
-                auto tile = decode_tile(packet.bytes, budget);
+                auto tile = decode_tile(packet.bytes, budget, allocation);
                 if (tile.face_gid >= global_faces || packet.peer != authority(tile.surface, comm->getSize()) ||
                     (tile.first_owner != comm->getRank() && tile.second_owner != comm->getRank()))
                     throw std::invalid_argument("Foreign authority tile.");
@@ -617,7 +661,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         throw std::invalid_argument("Authority tile has foreign incidence.");
                     allocation.add(sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>) + sizeof(AdaptiveCellKey) +
                                    tile.surface.size());
-                    coverage[{cell, tile.surface}].push_back(std::move(face));
+                    coverage[{cell, AdaptiveBytes(tile.surface.begin(), tile.surface.end())}].push_back(std::move(face));
                 };
                 if (tile.first_owner == comm->getRank())
                     register_incident(tile.first, tile.geometry);
@@ -1037,11 +1081,15 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             for (auto& tile : result)
             {
                 auto assign =
-                    [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry, std::vector<std::uint64_t>& gids)
+                    [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry,
+                        adaptive_detail::ImmutableSequence<std::uint64_t>& incidence)
                 {
                     auto points = geometry->vertex_identities();
                     allocation.add(points.size() * sizeof(std::uint64_t));
-                    gids.clear();
+                    std::vector<std::uint64_t> gids;
+                    gids.reserve(points.size());
+                    if (gids.capacity() != points.size())
+                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
                     for (const auto& point : points)
                     {
                         Writer key_writer;
@@ -1067,6 +1115,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         }
                         gids.push_back(found->second);
                     }
+                    incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
                 };
                 assign(tile.geometry, tile.node_gids);
                 if (tile.second)
@@ -1178,12 +1227,19 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             }
             for (auto& tile : result)
                 for (auto* incidence : {&tile.node_gids, &tile.second_node_gids})
-                    for (auto& node : *incidence)
+                {
+                    allocation.add(incidence->size() * sizeof(std::uint64_t));
+                    std::vector<std::uint64_t> gids(incidence->begin(), incidence->end());
+                    if (gids.capacity() != incidence->size())
+                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
+                    for (auto& node : gids)
                     {
                         if (node >= catalog.size())
                             throw std::invalid_argument("Invalid canonical face incidence node.");
                         node = catalog[node].gid;
                     }
+                    *incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
+                }
             if (node_catalog)
                 *node_catalog = std::move(catalog);
         });

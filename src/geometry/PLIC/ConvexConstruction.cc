@@ -219,6 +219,18 @@ GeometrySourceSnapshot prepare_source_geometry(
     const auto bytes = active_work->bytes, operations = active_work->operations, pairs = active_work->pairs;
     GeometrySourceSnapshot snapshot;
     snapshot.shell = source.numerical_shell();
+    const auto stored = checked_geometry_storage<ArithmeticMode::Ordinary>(
+        DynamicGeometryAccess::implementation(*source.dynamic_geometry()));
+    if (stored->vertices.size() != snapshot.shell.relative_vertices.size())
+        reject("source provenance differs from its native vertex table.");
+    snapshot.point_context = stored->point_context;
+    active_work->charge(stored->vertices.size(), sizeof(StoredPointRef<ArithmeticMode::Ordinary>));
+    snapshot.original_points.resize(stored->vertices.size());
+    if (snapshot.original_points.capacity() > stored->vertices.size())
+        active_work->charge(snapshot.original_points.capacity() - stored->vertices.size(),
+            sizeof(StoredPointRef<ArithmeticMode::Ordinary>));
+    for (std::size_t vertex = 0; vertex < stored->vertices.size(); ++vertex)
+        snapshot.original_points[vertex] = stored->vertices[vertex].source_identity;
     active_work->charge(snapshot.shell.relative_vertices.capacity(), sizeof(snapshot.shell.relative_vertices.front()));
     active_work->charge(snapshot.shell.outward_faces.capacity(), sizeof(std::vector<std::size_t>));
     active_work->charge(
@@ -253,6 +265,139 @@ void charge_source_preparation(const GeometrySourceSnapshot& source)
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode Mode>
+std::vector<Point<Mode>> source_points(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
+    std::span<const std::size_t> source_indices, std::span<const NativeSourcePointRequest> requests,
+    GeometryLimits limits)
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    if (requests.empty())
+        return {};
+    if (details::active_work)
+        throw GeometryError(GeometryErrorCode::InvalidInput,
+            "Native source-point batch publication requires an outer allocation scope.");
+    struct Admission
+    {
+        std::size_t used = 0, limit;
+        details::Work* metadata_work = nullptr;
+        static void charge(void* state, std::size_t count, std::size_t width)
+        {
+            auto& self = *static_cast<Admission*>(state);
+            if (self.metadata_work)
+            {
+                self.metadata_work->charge(count, width);
+                self.used = self.metadata_work->bytes;
+                return;
+            }
+            if (self.used > self.limit || (width && count > (self.limit - self.used) / width))
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Native source-point batch storage exhausted.");
+            self.used += count * width;
+        }
+        void add(std::size_t count, std::size_t width) { charge(this, count, width); }
+    } admission{0, limits.byte_budget};
+    struct MetadataScope
+    {
+        Admission& admission;
+        details::Work work;
+        details::Work* previous;
+        MetadataScope(Admission& owner, GeometryLimits requested)
+            : admission(owner), work(typed_limits<Mode>(requested)), previous(details::active_work)
+        {
+            work.bytes = admission.used;
+            admission.metadata_work = &work;
+            details::active_work = &work;
+        }
+        ~MetadataScope()
+        {
+            admission.used = work.bytes;
+            admission.metadata_work = nullptr;
+            details::active_work = previous;
+        }
+    };
+    std::size_t largest_fan = 0;
+    for (const auto& request : requests)
+    {
+        if (request.first_source > source_indices.size() ||
+            request.source_count > source_indices.size() - request.first_source || !request.source_count)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Native source-point batch has an invalid fan range.");
+        if (request.source_count > limits.maximum_faces)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Native source-point batch fan exceeds its cap.");
+        largest_fan = std::max(largest_fan, request.source_count);
+    }
+    const auto reserve = [&](auto& values, std::size_t count)
+    {
+        using Value = typename std::decay_t<decltype(values)>::value_type;
+        if (count > values.max_size())
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Native source-point batch exceeds vector limits.");
+        admission.add(count, sizeof(Value));
+        values.reserve(count);
+        if (values.capacity() > count)
+            admission.add(values.capacity() - count, sizeof(Value));
+    };
+    std::vector<const ConvexCellGeometry<ArithmeticMode::Ordinary>*> fan;
+    std::vector<PointProvenanceView> records;
+    std::vector<Point<Mode>> result;
+    reserve(fan, largest_fan);
+    reserve(records, requests.size());
+    reserve(result, requests.size());
+    PointSnapshotBuilder<Mode> builder({&admission, Admission::charge});
+    GeometryAllocationLedger authority_owners;
+    for (const auto& request : requests)
+    {
+        fan.clear();
+        for (const auto slot : source_indices.subspan(request.first_source, request.source_count))
+        {
+            if (slot >= sources.size() || !sources[slot])
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Native source-point batch has a foreign source.");
+            fan.push_back(sources[slot].get());
+        }
+        if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        {
+            auto native_limits = typed_limits<ArithmeticMode::Ordinary>(limits);
+            native_limits.byte_budget = admission.limit - admission.used;
+            details::Operation native_query(native_limits);
+            validate_native_point_membership(fan, request.identity);
+        }
+        const auto definition = [&]
+        {
+            // Each original source fan keeps its numerical-operation scope.
+            // Its scratch overlaps the already admitted batch, but one fan's
+            // retired query allocations do not become another fan's budget.
+            auto query_limits = typed_limits<Mode>(limits);
+            query_limits.byte_budget = admission.limit - admission.used;
+            details::Operation query(query_limits);
+            if constexpr (Mode == ArithmeticMode::Ordinary)
+                return details::ordinary_kernel::source_point_definition<Mode>(fan, request.identity, Mode);
+            else
+                return details::certification_kernel::source_point_definition<Mode>(fan, request.identity, Mode);
+        }();
+        // This returned buffer survives the query while the snapshot grows.
+        // Its charge remains cumulative after the buffer is destroyed.
+        // Canonical authority comparisons share this same counter; they must
+        // not allocate unaccounted cursor scratch outside the numerical query.
+        MetadataScope metadata(admission, limits);
+        admission.add(definition.supports.capacity(), sizeof(PlaneAuthority));
+        for (const auto& authority : definition.supports)
+            authority_owners.retain(authority, metadata.work.bytes, admission.limit);
+        records.push_back(builder.native_source(definition.value, definition.absolute_error,
+            DynamicGeometryAccess::admit_incidence<Mode>(definition.supports)));
+    }
+    const auto snapshot = builder.freeze();
+    for (const auto record : records)
+    {
+        DynamicPoint point{record.value(), record.absolute_error(), Mode};
+        DynamicGeometryAccess::attach_identity(point, record.owning());
+        result.emplace_back(point);
+    }
+    return result;
+}
+template std::vector<Point<ArithmeticMode::Ordinary>> source_points<ArithmeticMode::Ordinary>(
+    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+    std::span<const NativeSourcePointRequest>, GeometryLimits);
+template std::vector<Point<ArithmeticMode::BoundedCertification>> source_points<ArithmeticMode::BoundedCertification>(
+    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+    std::span<const NativeSourcePointRequest>, GeometryLimits);
+
 template class Point<ArithmeticMode::Ordinary>;
 template class Point<ArithmeticMode::BoundedCertification>;
 template class ConvexCellGeometry<ArithmeticMode::Ordinary>;

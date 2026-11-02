@@ -712,6 +712,13 @@ differences in these and the earlier [recorded results](docs/verification/vof_so
       and oracles. Preserve strict failures and distinguish full-horizon accuracy
       from admission of a local approximation. Optimizer/arithmetic failures
       and incomplete spatial/time studies remain open qualification gates.
+      The practical Q2 candidate combines `ConservativeApproximation` with the
+      existing budgeted cleanup policy (`1e-14` cutoff, cumulative caps of
+      `1e-13` times each original phase inventory). Keep zero-cleanup failures
+      as separate strict raw-inventory results, with their reconstruction policy
+      identified. Trace phases removed by declared cleanup are not prerequisites
+      for practical qualification; all original physical and convergence gates
+      still apply to the enabled candidate.
 - [ ] **4. Q3 GeometricFace coupled motion — after the applicable blockers above.**
       Complete the required eight-second horizon and original displacement,
       redistribution, limiting and physical gates at the declared timestep

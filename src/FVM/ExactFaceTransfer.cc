@@ -38,6 +38,7 @@ struct Budget
     ExactFaceTransferOptions options;
     W::Budget memory;
     PLIC::GeometryAllocationLedger identity_allocations;
+    A::adaptive_detail::ImmutableSequenceLedger tile_metadata;
     std::size_t tests = 0, patches = 0, scalar_limit;
     // Retain both the finite source and its explicit exact import. Ownership
     // identity prevents a recycled temporary face address from aliasing a cache entry.
@@ -102,11 +103,12 @@ struct Budget
         key(value.first);
         if (value.second)
             key(*value.second);
-        blob(value.domain);
-        blob(value.surface);
+        tile_metadata.retain(value.domain, memory);
+        tile_metadata.retain(value.surface, memory);
         blob(value.identity);
         records(1, value.second_image_identity.payload_bytes());
-        records(value.node_gids.capacity() + value.second_node_gids.capacity(), sizeof(std::uint64_t));
+        tile_metadata.retain(value.node_gids, memory);
+        tile_metadata.retain(value.second_node_gids, memory);
     }
     void test()
     {
@@ -324,7 +326,8 @@ std::map<Key, std::vector<Tile>> target_tiles(
                 {
                     const auto encoded = r.bytes();
                     budget.records(4, encoded.size());
-                    auto tile = A::decode_adaptive_tile(encoded, communication.codec);
+                    auto tile = A::decode_adaptive_tile(
+                        encoded, communication.codec, budget.memory.used, budget.memory.limit);
                     if (tile.first != key && (!tile.second || *tile.second != key))
                         throw std::invalid_argument("Target native package has foreign incidence.");
                     const auto tile_identity = identity(tile);

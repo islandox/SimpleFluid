@@ -506,8 +506,8 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
             }
     }
     std::map<std::uint64_t, Wide> coordinates;
-    for (const auto& [node, coordinate] : data.topology->finite_nodes)
-        tracked_row(coordinates, node, budget) = coordinate.value;
+    for (const auto& [node, slot] : data.topology->finite_nodes.slots)
+        tracked_row(coordinates, node, budget) = data.topology->finite_nodes.at(node).value;
     std::vector<int> support_label;
     reserve_exact(support_label, cells.size(), budget);
     support_label.resize(cells.size(), -1);

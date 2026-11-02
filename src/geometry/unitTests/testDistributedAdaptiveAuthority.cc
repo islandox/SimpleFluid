@@ -513,7 +513,7 @@ TEST(DistributedAdaptiveAuthority, ExactReservedTileEncodingMatchesIndependentWi
     {
         AMR::AdaptiveTile tile;
         tile.face_gid = 37;
-        tile.surface.assign(72, 's');
+        tile.surface = std::vector<char>(72, 's');
         tile.domain = {'d'};
         tile.identity.assign(608, 'i');
         auto face = rectangle(0, 0, 1, 1);
@@ -589,6 +589,23 @@ TEST(DistributedAdaptiveAuthority, ExactReservedTileEncodingMatchesIndependentWi
         EXPECT_EQ(encoded.capacity(), encoded.size());
         EXPECT_LT(encoded.capacity(), reference.capacity());
         const auto restored = AMR::decode_adaptive_tile(encoded);
+        AMR::adaptive_detail::Budget no_snapshot_owner{
+            AMR::adaptive_detail::ImmutableSequence<char>::allocation_bytes(tile.surface.size()) - 1};
+        EXPECT_THROW(AMR::adaptive_detail::decode_adaptive_tile(encoded, encoded.size(), no_snapshot_owner),
+            std::invalid_argument);
+        EXPECT_EQ(no_snapshot_owner.used, 0u);
+        const auto surface_owner = AMR::adaptive_detail::ImmutableSequence<char>::allocation_bytes(tile.surface.size());
+        std::size_t caller_used = 17;
+        EXPECT_THROW(AMR::decode_adaptive_tile(encoded, encoded.size(), caller_used, caller_used + surface_owner),
+            std::invalid_argument);
+        EXPECT_EQ(caller_used, 17u + surface_owner);
+        std::size_t admitted = 17;
+        const auto caller_decoded = AMR::decode_adaptive_tile(encoded, encoded.size(), admitted, 4096);
+        EXPECT_GT(admitted, 17u + surface_owner);
+        EXPECT_EQ(AMR::encode_adaptive_tile(caller_decoded), encoded);
+        auto invalid_used = std::numeric_limits<std::size_t>::max();
+        EXPECT_THROW(AMR::decode_adaptive_tile(encoded, encoded.size(), invalid_used, 4096), std::invalid_argument);
+        EXPECT_EQ(invalid_used, std::numeric_limits<std::size_t>::max());
         EXPECT_EQ(restored.geometry->vertex_identities(), tile.geometry->vertex_identities());
         EXPECT_EQ(restored.node_gids, tile.node_gids);
         EXPECT_EQ(restored.second_node_gids, tile.second_node_gids);

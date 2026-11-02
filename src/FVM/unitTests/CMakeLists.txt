@@ -21,6 +21,7 @@ set(FVM_ONLY_TESTS
     testExactFaceTransfer
     testExactPhaseTransfer
     testPolyhedralReconstruction
+    testPolyhedralGradientSelection
     testPolyhedralReconstructionResult
     testGeneralVoF
     testFvmLibrary
@@ -396,6 +397,10 @@ foreach(PROCS IN ITEMS 2 4)
     LABELS "vof;geometry;resolution;finite;collective"
     TIMEOUT 180)
   simplefluid_add_mpi_test(
+    NAME PolyhedralGradientSelection_${PROCS}procs
+    TARGET testPolyhedralGradientSelection PROCS ${PROCS}
+    LABELS "vof;geometry;reconstruction;method_selection" TIMEOUT 180)
+  simplefluid_add_mpi_test(
     NAME GeneralVoFSingleInterfaceMotion_${PROCS}procs
     TARGET testGeneralVoFMotionAccuracy PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFMotionAccuracy.SingleInterfaceClosedShearSweptPartition:GeneralVoFMotionAccuracy.SingleInterfaceClosedShearGeometricFace"
@@ -484,6 +489,10 @@ foreach(PROCS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFApproximationMotionN32_${PROCS}procs
     TARGET testGeneralVoFMotionAccuracy PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFMotionAccuracy.ConservativeApproximationRequiredPlanarPatchN32Endpoint"
+    LABELS "vof;reconstruction;approximation;qualification" TIMEOUT 1800)
+  simplefluid_add_mpi_test(NAME GeneralVoFApproximationMotionN64_${PROCS}procs
+    TARGET testGeneralVoFMotionAccuracy PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFMotionAccuracy.ConservativeApproximationRequiredPlanarPatchN64Endpoint"
     LABELS "vof;reconstruction;approximation;qualification" TIMEOUT 1800)
 endforeach()
 

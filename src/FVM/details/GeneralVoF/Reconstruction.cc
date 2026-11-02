@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/Reconstruction.hh"
 #include <chrono>
+#include <optional>
 namespace SimpleFluid::VoF::general_vof_detail
 {
 SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_labels(const Cell& cell)
@@ -95,6 +96,17 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
             (void) PLIC::PolyhedralReconstruction<Mode>::assess_stencil_geometry(
                 target, result, data.options.reconstruction);
         else
+        {
+            std::optional<std::size_t> gradient_cells;
+            auto support_options = data.options.reconstruction;
+            const bool practical = Mode == ArithmeticMode::Ordinary &&
+                                   support_options.model_policy == PLIC::PlicModelPolicy::ConservativeApproximation;
+            // Search all configured complete rings for the existing angular
+            // method before selecting a practical gradient. Raw support must
+            // retain angular-only failures during this geometry-only search.
+            if (practical)
+                support_options.model_policy = PLIC::PlicModelPolicy::RequireModelAgreement;
+            bool selected_ring = false;
             for (const auto count : ring_ends)
             {
                 const std::span<const PLIC::PolyhedralPhaseSample<Mode>> prefix(result.data(), count);
@@ -103,7 +115,7 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
                 if (!geometry.admitted())
                     continue;
                 const auto support = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
-                    target, result, count, data.options.reconstruction);
+                    target, result, count, support_options);
                 using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
                 if (support.reason != Reason::RankDeficientAngularSupport &&
                     support.reason != Reason::IllConditionedAngularSupport)
@@ -111,9 +123,15 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
                     // NoDirectionalSignal deliberately keeps this first local
                     // ring and its rejection. A larger ring cannot mask it.
                     selected = count;
+                    selected_ring = true;
                     break;
                 }
+                if (practical && !gradient_cells)
+                    gradient_cells = count;
             }
+            if (!selected_ring && gradient_cells)
+                selected = *gradient_cells;
+        }
     }
     if (fitting_cells)
         *fitting_cells = selected;

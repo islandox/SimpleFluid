@@ -5,6 +5,7 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/ImmutableSequence.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
 #include <limits>
 #include <optional>
@@ -95,10 +96,13 @@ struct AdaptiveTileIncident
 };
 struct AdaptiveTile
 {
-    AdaptiveBytes domain, surface, identity;
+    // Immutable values share exact metadata owners within accepted catalogs.
+    // Use independent vector builders and replace the complete handle to edit.
+    adaptive_detail::ImmutableSequence<char> domain, surface;
+    AdaptiveBytes identity;
     std::uint64_t face_gid = std::numeric_limits<std::uint64_t>::max();
-    std::vector<std::uint64_t> node_gids;
-    std::vector<std::uint64_t> second_node_gids; ///< Same loop order, in the second cell physical image.
+    adaptive_detail::ImmutableSequence<std::uint64_t> node_gids;
+    adaptive_detail::ImmutableSequence<std::uint64_t> second_node_gids; ///< Same loop order, second physical image.
     PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>
         second_image_identity;                   ///< Finite neighbor-physical to first-physical displacement.
     PLIC::GeometryPoint second_image{};          ///< Checked display of second_image_identity for FVM geometry.

@@ -390,10 +390,10 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 face.boundary = tile.exterior && !tile.boundary.empty() ? boundary_ids.at(tile.boundary)
                                                                         : MultiRegionMesh::invalid_boundary_id;
                 face.override_geometry = tile.geometry;
-                face.override_nodes = tile.node_gids;
+                face.override_nodes.assign(tile.node_gids.begin(), tile.node_gids.end());
                 face.second_image = tile.second_image;
                 face.second_image_identity = tile.second_image_identity;
-                face.second_node_gids = tile.second_node_gids;
+                face.second_node_gids.assign(tile.second_node_gids.begin(), tile.second_node_gids.end());
                 face.native_is_second = !first_full;
                 input.faces.push_back(std::move(face));
             }

@@ -226,6 +226,103 @@ NumericalConvexShell<Mode> ConvexCellGeometry<Mode>::numerical_shell() const
     return shell;
 }
 template<ArithmeticMode Mode>
+bool ConvexCellGeometry<Mode>::same_native_representation(const ConvexCellGeometry& other) const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    const auto left = details::checked_geometry_storage<Mode>(geometry_->impl_);
+    const auto right = details::checked_geometry_storage<Mode>(other.geometry_->impl_);
+    const auto source_root = [](const auto& geometry)
+    {
+        return !geometry.numerical_only && !geometry.partition_proof_only && !geometry.construction &&
+               !geometry.partition_certificate && !geometry.export_source && !geometry.export_seal &&
+               geometry.ancestry && !geometry.ancestry->parent && !geometry.ancestry->split &&
+               !geometry.ancestry->outside && geometry.ancestry->depth == 0;
+    };
+    // Signed zero is observable in exported numerical values. Comparing scalar
+    // fields avoids padding bytes in wider-FP storage and allocates no packets.
+    const auto number_equal = [](auto a, auto b) { return a == b && (a != 0 || std::signbit(a) == std::signbit(b)); };
+    const auto point_equal = [&](const auto& a, const auto& b)
+    {
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            if (!number_equal(a[axis], b[axis]))
+                return false;
+        return true;
+    };
+    const auto stored_point_equal = [&](const auto& a, const auto& b)
+    {
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            if (!number_equal(a[axis].value, b[axis].value))
+                return false;
+        return true;
+    };
+    const auto frame_equal = [&](const auto& a, const auto& b)
+    { return a.exponent == b.exponent && point_equal(a.origin, b.origin); };
+    if (!source_root(*left) || !source_root(*right) || !frame_equal(left->frame, right->frame) ||
+        !point_equal(left->reference_origin, right->reference_origin) ||
+        !number_equal(left->volume.value, right->volume.value) || left->faces != right->faces ||
+        left->vertices.size() != right->vertices.size() || left->surfaces.size() != right->surfaces.size())
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (!number_equal(left->bounds[axis].lo, right->bounds[axis].lo) ||
+            !number_equal(left->bounds[axis].hi, right->bounds[axis].hi))
+            return false;
+    for (std::size_t index = 0; index < left->vertices.size(); ++index)
+    {
+        const auto& a = left->vertices[index];
+        const auto& b = right->vertices[index];
+        const auto original = [](const auto& p)
+        {
+            return p && p.arithmetic_mode() == ArithmeticMode::Ordinary && p.represented_native_source() &&
+                   !p.constructed() && !p.numerical_only() && !p.source_origin() && p.source_edges().empty();
+        };
+        const auto a_source = resolve_point(left->point_context, a.source_identity);
+        const auto b_source = resolve_point(right->point_context, b.source_identity);
+        if (a.numerical_only || b.numerical_only || !stored_point_equal(a.coordinates, b.coordinates) ||
+            !original(a_source) || !original(b_source) || !point_equal(a_source.value(), b_source.value()) ||
+            !point_equal(a_source.absolute_error(), b_source.absolute_error()) ||
+            a.incident.size() != b.incident.size())
+            return false;
+        // Incidence order contributes to subsequent native queries. Match its
+        // face indices, never pointer addresses or merely equal coordinates.
+        for (std::size_t incident = 0; incident < a.incident.size(); ++incident)
+        {
+            std::size_t face = 0;
+            while (face < left->surfaces.size() && left->surfaces[face].plane != a.incident[incident])
+                ++face;
+            if (face == left->surfaces.size() || right->surfaces[face].plane != b.incident[incident])
+                return false;
+        }
+    }
+    for (std::size_t face = 0; face < left->surfaces.size(); ++face)
+    {
+        const auto& a = *left->surfaces[face].plane;
+        const auto& b = *right->surfaces[face].plane;
+        if (left->surfaces[face].orientation != right->surfaces[face].orientation || !frame_equal(a.frame, b.frame) ||
+            !stored_point_equal(a.normal, b.normal) || !stored_point_equal(a.anchor, b.anchor) ||
+            !number_equal(a.offset.value, b.offset.value) || a.input || b.input || !a.native_support ||
+            !b.native_support || *a.native_support != *b.native_support ||
+            a.normal_error.has_value() != b.normal_error.has_value() ||
+            (a.normal_error && !number_equal(*a.normal_error, *b.normal_error)))
+            return false;
+    }
+    // Each publication retains its construction-time FP environment. Equal
+    // framed scalars alone do not establish equal exported world coordinates.
+    const details::OrdinaryExportCoordinates left_export(*this), right_export(other);
+    for (std::size_t vertex = 0; vertex < left->vertices.size(); ++vertex)
+        if (!point_equal(left_export.at(vertex), right_export.at(vertex)))
+            return false;
+    // A previously prepared moment cache may have been evaluated under a
+    // different caller environment. Compare its public numerical result too;
+    // the existing inline cache storage requires no additional allocation.
+    const auto left_moments = moments(), right_moments = other.moments();
+    if (!number_equal(left_moments.volume.value, right_moments.volume.value))
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (!number_equal(left_moments.first_moment[axis].value, right_moments.first_moment[axis].value))
+            return false;
+    return true;
+}
+template<ArithmeticMode Mode>
 PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) const
     requires(Mode == ArithmeticMode::Ordinary)
 {
@@ -316,10 +413,14 @@ std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
     // box initializer-list inner vectors, outer-vector copies, import copies.
     add(3 * 6 * 4, sizeof(std::size_t));
     add(2 * 6, sizeof(Face));
-    // make's input conversion/identity histories and represented-source owners.
+    // make's input conversion and one native-fact snapshot batch. Complete
+    // table growth histories include overlap with the previous buffer.
     add(15, sizeof(DynamicPoint));
-    add(15, sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    add(8, sizeof(DynamicPointProvenance));
+    add(15, sizeof(PointProvenanceView));
+    add(1, sizeof(PointSnapshotContext<Mode>) + 2 * sizeof(void*));
+    add(1, sizeof(NativePointFactBlock<Mode>) + 2 * sizeof(void*));
+    add(1, sizeof(std::shared_ptr<const NativePointFactBlock<Mode>>));
+    add(15, sizeof(PointCoordinates<Mode>) + sizeof(NativePointRefRow<Mode>));
     // import's framed input, immutable graph, and per-face scratch histories.
     add(15, sizeof(StoredPoint<Mode>));
     add(1, sizeof(GeometryStorage<Mode>) + sizeof(Ancestry) + sizeof(StoredMomentCache<Mode>));
@@ -327,7 +428,7 @@ std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
     add(15, sizeof(Surface));
     add(8 * 7, sizeof(PlanePtr));
     add(6, sizeof(Plane));
-    add(6 * 4, sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    add(6 * 4, sizeof(StoredPointRef<Mode>));
     add(6 * 7, sizeof(DynamicPoint));
     add(6 * 7, sizeof(on::WidePoint));
     add(6, on::source_support_allocation_bound(4));
@@ -338,14 +439,15 @@ std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
     add(6, sizeof(std::vector<std::size_t>));
     add(6 * 7 + 15, sizeof(std::size_t));
     add(24, sizeof(std::pair<const std::pair<std::size_t, std::size_t>, std::size_t>) + 4 * sizeof(void*));
-    // prepare_finish's cache, plane set, and two one-owner source walks per
-    // vertex (retain_supports and identity_bytes). All source supports are empty.
+    // prepare_finish cache and plane set; original source supports are empty.
+    // Snapshot/fact ownership is admitted once for the batch.
     add(1, sizeof(PointExportCache));
-    add(8, sizeof(std::weak_ptr<const DynamicPointProvenance>));
+    add(8, sizeof(StoredPointRef<Mode>));
     add(24, sizeof(PlanePtr) + 4 * sizeof(void*));
-    add(2 * 8, sizeof(const DynamicPointProvenance*) + 4 * sizeof(void*) +
-                   sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    add(1, identity_ledger_bookkeeping_bound(6));
+    add(1, identity_ledger_bookkeeping_bound(8));
+    // Snapshot owner traversal uses a small explicit pending stack as well as
+    // the identity ledger's ordered owner nodes.
+    add(15, 2 * sizeof(void*) + sizeof(std::shared_ptr<const void>));
     add(1, sizeof(DynamicConvexGeometry) + sizeof(ConvexCellGeometry));
     return bytes;
 }
@@ -464,7 +566,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode_certificate(
     const auto n = r.count(4096);
     if (n > (r.bytes.size() - r.cursor) / 48)
         on::reject("cell point count exceeds the remaining encoded coordinates.");
-    charge(n, sizeof(Point<Mode>) + sizeof(DynamicPointProvenance));
+    charge(n, sizeof(Point<Mode>));
     std::vector<Point<Mode>> p;
     p.reserve(n);
     if (p.capacity() > n)

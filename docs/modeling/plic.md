@@ -87,20 +87,29 @@ fitting is eligible, adequate observed local tangent support. Expand by complete
 rings when geometric coverage, conditioning, or local angular support requires
 it, up to the unchanged configured ring and
 resource limits. The selection performs no clipping and evaluates no plane-model
-residual. A deficient final ring rejects with a typed support reason; it never
-switches an angular-eligible case to a gradient fallback. Standalone weak-majority
-and subthreshold-target gradient-only policies remain unchanged. A geometry-selected
+residual. Strict transport rejects a deficient final ring with a typed support
+reason. Under Ordinary `ConservativeApproximation`, exhausting angular-support
+rings instead selects the first complete ring with an admitted weighted-gradient
+direction. Successful expanded-ring angular fits remain preferred. This method
+choice precedes clipping, model RMS and optimization; it is not recovery from a
+failed angular solve. Weak-majority and subthreshold-target gradient-only policies
+remain unchanged. A geometry-selected
 ring with ambiguous phase direction also rejects. The complete halo remains available to curvature,
 contact and other non-reconstruction consumers, including remote owners and all
 canonical coarse/fine covering faces; this does not reduce `support_rings`.
 
 `assess_transport_support()` implements this stronger complete-ring caller
-contract. The standalone explicit-stencil `reconstruct()` kernel retains its
+contract. The strict standalone explicit-stencil `reconstruct()` kernel retains its
 separate clipping/optimizer/model-defect contract, including stencils deliberately
 used to demonstrate a one-plane contradiction. Observed tangent support is a
 preflight requirement, not a certificate of subsequent clipped-volume optimizer
 convergence; the existing angular arithmetic, conditioning and convergence gates
-still apply.
+still apply when that method is selected. The practical explicit-stencil kernel
+also applies the support-based method choice. Gradient results report
+`Gradient`, `fit_converged=false`, zero angular iterations and their measured
+neighborhood RMS. Their original direction/conditioning and target-volume gates
+remain required. Angular witness count and condition remain diagnostics;
+infinity denotes a rank-deficient angular Gram matrix, not a failed gradient.
 
 The finite four-argument overloads take `(target, full_context, fitting_cells,
 options)`. The first `fitting_cells` entries of the same context span form the
@@ -156,7 +165,7 @@ flowchart TD
     F["Fit target offset for current normal<br/>Clip stencil cells and form residuals"]
     G["Perturb normal in two tangent directions<br/>Refit offset at every evaluation"]
     H["Build angular Gauss-Newton system<br/>Check conditioning and observability"]
-    I{"Small residual OR<br/>small angular step?"}
+    I{"Small residual OR<br/>resolved small angular step?"}
     J["Backtracking line search<br/>Require a smaller squared residual"]
     K{"Measured model RMS<br/>within reference threshold?"}
     Q{"Explicit Ordinary<br/>ConservativeApproximation?"}
@@ -284,9 +293,10 @@ vector, including a fresh offset solve at every perturbed direction. A
 two-variable Gauss-Newton system gives the proposed angular step. Singular,
 ill-conditioned, or unobservable orientation systems reject.
 
-After those checks, angular convergence requires either the stencil RMS
-residual to meet `fit_tolerance` or the proposed step norm to meet
-`orientation_tolerance`. Otherwise, a line search tries scales from `1` down to
+After those checks, finite angular convergence requires either the stencil RMS
+residual to meet `fit_tolerance` or a resolved proposed step, including its
+probe-consistency estimate below, to meet `orientation_tolerance`. Otherwise,
+a line search tries scales from `1` down to
 `1/128` by successive halving, renormalizes the candidate normal, and accepts
 only a strict decrease in the comparison merit. When the qualified Gauss-Newton step exceeds one,
 those eight values instead bound a dogleg trial between the Cauchy and
@@ -294,16 +304,41 @@ Gauss-Newton steps. Each smaller radius recomputes the direction from the same
 qualified normal equations. This prevents a poorly directed, oversized step
 from exhausting the search without testing useful local directions.
 
-Qualification uses the existing finer probe scales `5e-5` and `2.5e-5` when
-the search stalls or a nonconverged step is smaller than its probe scale.
+Required qualification retains the arithmetic retry scales `1e-4`, `5e-5`
+and `2.5e-5`. A valid required qualification can request further single-scale
+quartets when the search stalls, the correction is smaller than the probe,
+or a nonzero-residual angular convergence claim needs verification. At most
+ten halvings of `1e-4` are available, all charged to the existing clip budget.
+The actual probe scale controls the unchanged signal and conditioning gates.
+This refinement handles both smooth derivative bias and probes that cross a
+nearby clipping breakpoint; it does not select a scale from the measured RMS.
+
+For successive correction vectors $s_k$, define
+$d_k=\lVert s_k-s_{k-1}\rVert$ and $e_k=\max(d_k,d_{k-1})$.
+Nonzero-residual angular convergence requires at least three successful scales,
+$e_k\leq\frac14\max(\texttt{orientation\_tolerance},\lVert s_k\rVert)$,
+and $\lVert s_k\rVert+e_k\leq\texttt{orientation\_tolerance}$.
+Agreement is absolute at the requested resolution: differencing noise need
+not decrease monotonically with probe size. This is a numerical consistency
+estimate, not a certified bound on the exact derivative. Small residuals still
+require the original observable-current-normal check. A failed finer arithmetic
+probe cannot certify stationarity from the coarse estimate. It may retain a
+strictly decreasing, observable trial; unresolved refinement without such a
+trial rejects as arithmetic failure. Fatal rank, conditioning and resource
+failures propagate. A stalled line search alone never establishes convergence.
+
 If the qualified Gauss-Newton linear model can already fit the residual vector
 within `fit_tolerance`, its direction remains authoritative for that iteration.
 This protects consistent, nearly zero-residual solves from slower curvature
-steps. Otherwise, a nonconverged qualified normal may try one residual-curvature
-Newton correction at its current probe scale. Four diagonal probes supplement the
+steps. Otherwise, a nonconverged qualified normal may compute a residual-curvature
+Newton direction at its current probe scale. Four diagonal probes supplement the
 existing axial probes to estimate $J_r^T J_r+\sum_i r_i\nabla^2 r_i$.
 The optional Hessian must be positive definite, satisfy the existing condition
-bound, and give a descent step no larger than one in tangent coordinates. Only strict objective
+bound, and give a descent step no larger than one in tangent coordinates. The
+same dyadic radii from `1` to `1/128` backtrack that direction before Gauss-Newton
+fallback: a positive local Hessian does not ensure full-step descent across
+clipping events. Every candidate still refits the strict target volume, requires
+observable angular support and charges the shared clip allowance. Only strict objective
 decrease accepts that trial; recoverable arithmetic or nondecrease leaves the
 ordinary search available. An improving trial must also satisfy the unchanged
 observability and conditioning gates before becoming the current iterate; a
@@ -351,6 +386,9 @@ where `long double` equals `double`.
 finite-difference scale, condition, iterations and clip counts. Nonstationarity
 does not establish plane-model incompatibility. Collective diagnostics label it
 as an optimizer failure and preserve the typed local cause on failing ranks.
+On iteration exhaustion, the retained normal/RMS can include the last accepted
+trial while the step and probe scale describe its preceding qualification.
+Compare derivatives at the same frozen normal when diagnosing that failure.
 The best entry follows search merit, with raw measured RMS at that plane rather
 than the minimum raw RMS of all trials. If a restart scan fails, best diagnostics
 may identify a qualified lower-merit seed; that seed remains unqualified for
@@ -375,7 +413,8 @@ meaningful direction, conditioning/observability, strict target-cell minority
 volume accuracy, and every work/resource limit. An eligible angular solve must
 actually converge. Nonstationarity, exhaustion, unobservability and arithmetic
 failures still reject; no failed solve becomes a gradient or donor fallback.
-The existing supported-gradient branch retains `fit_converged=false` because
+The supported-gradient branch, including the explicit angular-support method
+choice above, retains `fit_converged=false` because
 only its target offset is solved. Its already-admitted orientation and volume
 requirements still apply. The small-phase exclusion remains unmeasured and does
 not acquire a fabricated zero-error quality claim.
