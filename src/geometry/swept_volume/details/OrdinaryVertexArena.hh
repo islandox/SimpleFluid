@@ -41,6 +41,7 @@ public:
         {
         }
     };
+    class SlotBuffer;
     class Handle
     {
     public:
@@ -74,9 +75,145 @@ public:
 
     private:
         friend class OrdinaryVertexArena;
+        friend class SlotBuffer;
         Handle(OrdinaryVertexArena& arena, SlotId id) : arena_(&arena), slot_(id) {}
         OrdinaryVertexArena* arena_ = nullptr;
         SlotId slot_;
+    };
+
+    /** A Poly owns one arena binding. Individual local positions own only their
+     * stable slot identity; borrowing a position does not retain its record. */
+    class SlotBuffer
+    {
+    public:
+        using value_type = SlotId;
+        class Borrowed
+        {
+        public:
+            const Record& get() const { return *arena_->slot(id_).record; }
+            SlotId slot_id() const { return id_; }
+            Handle retain() const
+            {
+                ++arena_->slot(id_).references;
+                ++arena_->work_.stats.vertex_handle_copies;
+                return Handle(*arena_, id_);
+            }
+
+        private:
+            friend class SlotBuffer;
+            Borrowed(OrdinaryVertexArena& arena, SlotId id) : arena_(&arena), id_(id) {}
+            OrdinaryVertexArena* arena_;
+            SlotId id_;
+        };
+        struct Iterator
+        {
+            OrdinaryVertexArena* arena;
+            const SlotId* id;
+            Borrowed operator*() const { return Borrowed(*arena, *id); }
+            Iterator& operator++()
+            {
+                ++id;
+                return *this;
+            }
+            bool operator!=(const Iterator& other) const { return id != other.id; }
+        };
+        SlotBuffer() = default;
+        explicit SlotBuffer(OrdinaryVertexArena& arena) : arena_(&arena) {}
+        SlotBuffer(const SlotBuffer& other) : arena_(other.arena_)
+        {
+            if (!arena_)
+                return;
+            try
+            {
+                reserve(other.size());
+                for (auto position : other)
+                    push_back(position.retain());
+            }
+            catch (...)
+            {
+                clear();
+                unobserve();
+                throw;
+            }
+        }
+        SlotBuffer(SlotBuffer&& other) noexcept { swap(other); }
+        SlotBuffer& operator=(SlotBuffer other) noexcept
+        {
+            swap(other);
+            return *this;
+        }
+        ~SlotBuffer()
+        {
+            clear();
+            unobserve();
+        }
+        void bind(OrdinaryVertexArena& arena)
+        {
+            assert(empty() && (!arena_ || arena_ == &arena));
+            arena_ = &arena;
+        }
+        OrdinaryVertexArena* arena() const { return arena_; }
+        std::size_t size() const { return slots_.size(); }
+        std::size_t capacity() const { return slots_.capacity(); }
+        bool empty() const { return slots_.empty(); }
+        Borrowed operator[](std::size_t local) const { return Borrowed(*arena_, slots_[local]); }
+        Iterator begin() const { return {arena_, slots_.data()}; }
+        Iterator end() const { return {arena_, slots_.empty() ? slots_.data() : slots_.data() + slots_.size()}; }
+        void swap(SlotBuffer& other) noexcept
+        {
+            std::swap(arena_, other.arena_);
+            slots_.swap(other.slots_);
+        }
+        void reserve(std::size_t requested)
+        {
+            assert(arena_);
+            if (requested <= capacity())
+                return;
+            if (requested > slots_.max_size() || requested > std::numeric_limits<std::size_t>::max() / sizeof(SlotId))
+                counter_limit();
+            auto& work = arena_->work_;
+            const auto old_bytes = capacity() * sizeof(SlotId), requested_bytes = requested * sizeof(SlotId);
+            work.charge(requested_bytes);
+            work.observe_geometry(requested_bytes);
+            slots_.reserve(requested);
+            const auto actual_bytes = capacity() * sizeof(SlotId);
+            // Observe replacement overlap before transferring the new capacity
+            // to the buffer's persistent ownership, including exceptional exits.
+            work.observe_geometry(actual_bytes);
+            work.live_vertex_index_bytes += actual_bytes - old_bytes;
+            work.observe_geometry();
+            work.charge(actual_bytes - requested_bytes);
+        }
+        void push_back(Handle handle)
+        {
+            assert(arena_ && handle.arena_ == arena_ && size() < capacity());
+            slots_.push_back(handle.slot_);
+            handle.arena_ = nullptr;
+        }
+        void pop_back() noexcept
+        {
+            const auto id = slots_.back();
+            slots_.pop_back();
+            arena_->release(id);
+        }
+        void clear() noexcept
+        {
+            while (!empty())
+                pop_back();
+        }
+
+    private:
+        friend class OrdinaryVertexArena;
+        OrdinaryVertexArena* arena_ = nullptr;
+        std::vector<SlotId> slots_;
+        void unobserve() noexcept
+        {
+            if (arena_)
+            {
+                arena_->work_.live_vertex_index_bytes -= capacity() * sizeof(SlotId);
+                arena_->work_.observe_geometry();
+            }
+        }
     };
 
     explicit OrdinaryVertexArena(Work& work) : work_(work)
@@ -112,57 +249,19 @@ public:
     }
     Handle extend(const Handle& original, const Support* support)
     {
-        // Copy numerical/source evidence before any allocation or compaction.
-        const auto weights = original.get().weights, errors = original.get().errors;
-        const auto source = original.get().source, chart = original.get().chart;
-        const auto construction = original.get().construction;
-        const auto& old = original.get().supports;
-        work_.charge((old.size() + 1) * sizeof(const Support*));
-        std::vector<const Support*> incidence;
-        incidence.reserve(old.size() + 1);
-        work_.charge((incidence.capacity() - old.size() - 1) * sizeof(const Support*));
-        incidence.insert(incidence.end(), old.begin(), old.end());
-        incidence.push_back(support);
-        IncidenceScratch scratch(work_, incidence.capacity() * sizeof(const Support*));
-        return make(weights, errors, incidence, source, chart, construction, true);
+        assert(original.arena_ == this);
+        return extend_slot(original.slot_, support);
     }
-    /** Consume the target's old evidence version. Shared versions stay immutable;
-     * an exclusively owned record can replace its complete incidence in place.
-     * Success invalidates borrowed Record/support views of target. Failure
-     * preserves target, its version, and every surviving handle. */
+    /** Failure preserves target identity and every sibling evidence version. */
     void replace_with_extended_evidence(Handle& target, const Support* support)
     {
         assert(target.arena_ == this);
-        auto& metadata = slot(target.slot_);
-        if (metadata.references > 1)
-        {
-            target = extend(target, support);
-            return;
-        }
-        admit_version(true);
-        auto& record = *metadata.record;
-        const auto required = record.supports.size() + 1;
-        work_.charge(sizeof(Record) + required * sizeof(const Support*));
-        std::vector<const Support*> incidence;
-        incidence.reserve(required);
-        IncidenceScratch scratch(work_, incidence.capacity() * sizeof(const Support*));
-        work_.charge((incidence.capacity() - required) * sizeof(const Support*));
-        incidence.insert(incidence.end(), record.supports.begin(), record.supports.end());
-        incidence.push_back(support);
-        const auto old_bytes = record.supports.capacity() * sizeof(const Support*);
-        const auto new_bytes = incidence.capacity() * sizeof(const Support*);
-        // Every admission/allocation has succeeded. Preserve the numerical,
-        // source/chart, construction and owning-slot identities at commit.
-        record.supports.swap(incidence);
-        record.evidence_version = next_evidence_version_++;
-        incidence_ = incidence_ - old_bytes + new_bytes;
-        // The scratch now owns the old buffer. Transfer the observations
-        // together before observing, retaining the real old+new overlap.
-        work_.live_incidence_bytes = work_.live_incidence_bytes - scratch.bytes + old_bytes;
-        scratch.bytes = old_bytes;
-        ++work_.stats.vertex_record_constructions;
-        ++work_.stats.vertex_evidence_extensions;
-        observe();
+        replace_slot(target.slot_, support);
+    }
+    void replace_with_extended_evidence(SlotBuffer& target, std::size_t local, const Support* support)
+    {
+        assert(target.arena_ == this);
+        replace_slot(target.slots_[local], support);
     }
     std::size_t live_records() const { return live_; }
     std::size_t record_capacity() const { return pages_.size() * 2; }
@@ -190,6 +289,59 @@ private:
     {
         throw ::SimpleFluid::PLIC::GeometryError(::SimpleFluid::PLIC::GeometryErrorCode::ResourceLimit,
             "Ordinary vertex evidence/construction counter exhausted.");
+    }
+    Handle extend_slot(SlotId original, const Support* support)
+    {
+        // Copy numerical/source evidence before any allocation or compaction.
+        const auto weights = (*slot(original).record).weights, errors = (*slot(original).record).errors;
+        const auto source = (*slot(original).record).source, chart = (*slot(original).record).chart;
+        const auto construction = (*slot(original).record).construction;
+        const auto& old = (*slot(original).record).supports;
+        work_.charge((old.size() + 1) * sizeof(const Support*));
+        std::vector<const Support*> incidence;
+        incidence.reserve(old.size() + 1);
+        work_.charge((incidence.capacity() - old.size() - 1) * sizeof(const Support*));
+        incidence.insert(incidence.end(), old.begin(), old.end());
+        incidence.push_back(support);
+        IncidenceScratch scratch(work_, incidence.capacity() * sizeof(const Support*));
+        return make(weights, errors, incidence, source, chart, construction, true);
+    }
+    void replace_slot(SlotId& target, const Support* support)
+    {
+        auto& metadata = slot(target);
+        if (metadata.references > 1)
+        {
+            auto replacement = extend_slot(target, support);
+            const auto previous = target;
+            target = replacement.slot_;
+            replacement.arena_ = nullptr;
+            release(previous);
+            return;
+        }
+        admit_version(true);
+        auto& record = *metadata.record;
+        const auto required = record.supports.size() + 1;
+        work_.charge(sizeof(Record) + required * sizeof(const Support*));
+        std::vector<const Support*> incidence;
+        incidence.reserve(required);
+        IncidenceScratch scratch(work_, incidence.capacity() * sizeof(const Support*));
+        work_.charge((incidence.capacity() - required) * sizeof(const Support*));
+        incidence.insert(incidence.end(), record.supports.begin(), record.supports.end());
+        incidence.push_back(support);
+        const auto old_bytes = record.supports.capacity() * sizeof(const Support*);
+        const auto new_bytes = incidence.capacity() * sizeof(const Support*);
+        // Every admission/allocation has succeeded. Preserve the numerical,
+        // source/chart, construction and owning-slot identities at commit.
+        record.supports.swap(incidence);
+        record.evidence_version = next_evidence_version_++;
+        incidence_ = incidence_ - old_bytes + new_bytes;
+        // The scratch now owns the old buffer. Transfer the observations
+        // together before observing, retaining the real old+new overlap.
+        work_.live_incidence_bytes = work_.live_incidence_bytes - scratch.bytes + old_bytes;
+        scratch.bytes = old_bytes;
+        ++work_.stats.vertex_record_constructions;
+        ++work_.stats.vertex_evidence_extensions;
+        observe();
     }
     void admit_version(bool extension) const
     {

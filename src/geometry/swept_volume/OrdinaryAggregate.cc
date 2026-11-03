@@ -1,9 +1,11 @@
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
-#include "geometry/swept_volume/details/OrdinaryVertexArena.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
+#include "geometry/swept_volume/details/OrdinaryAggregateRetention.hh"
+#include "geometry/swept_volume/details/OrdinaryMetricRecords.hh"
+#include "geometry/swept_volume/details/OrdinaryVertexArena.hh"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -17,6 +19,47 @@
 namespace SimpleFluid::geometry::swept_volume
 {
 using namespace ::SimpleFluid::PLIC;
+namespace details
+{
+namespace
+{
+thread_local OrdinaryAggregateRetentionCallback retention_callback = nullptr;
+thread_local void* retention_state = nullptr;
+} // namespace
+ScopedOrdinaryAggregateRetentionObserver::ScopedOrdinaryAggregateRetentionObserver(
+    OrdinaryAggregateRetentionCallback callback, void* state) noexcept
+    : previous_callback_(retention_callback), previous_state_(retention_state)
+{
+    retention_callback = callback;
+    retention_state = state;
+}
+ScopedOrdinaryAggregateRetentionObserver::~ScopedOrdinaryAggregateRetentionObserver()
+{
+    retention_callback = previous_callback_;
+    retention_state = previous_state_;
+}
+// Diagnostics cannot make failure, work admission, or floating environment
+// changes observable to the aggregate calculation.
+SIMPLEFLUID_LOCAL void observe_retention(const OrdinaryAggregateRetentionObservation& observation) noexcept
+{
+    if (!retention_callback)
+        return;
+    std::fenv_t environment;
+    if (std::fegetenv(&environment) != 0)
+        return;
+    const auto active = ::SimpleFluid::PLIC::details::active_work;
+    ::SimpleFluid::PLIC::details::active_work = nullptr;
+    try
+    {
+        retention_callback(observation, retention_state);
+    }
+    catch (...)
+    {
+    }
+    ::SimpleFluid::PLIC::details::active_work = active;
+    std::fesetenv(&environment);
+}
+} // namespace details
 namespace
 {
 namespace predicates = ::SimpleFluid::PLIC::details::ordinary_predicates;
@@ -121,18 +164,25 @@ struct AggregateWork
     OrdinaryAggregateStage stage = OrdinaryAggregateStage::Source;
     std::size_t live_witnesses = 0, live_witness_bytes = 0;
     std::size_t live_arena_bytes = 0, live_slot_bytes = 0, live_incidence_bytes = 0;
-    std::size_t live_face_scratch_bytes = 0;
+    std::size_t live_face_scratch_bytes = 0, live_vertex_index_bytes = 0;
+    std::size_t live_compact_metric_bytes = 0, live_freeze_scratch_bytes = 0;
     void observe_geometry(std::size_t transient_bytes = 0) noexcept
     {
         stats.live_arena_bytes = live_arena_bytes;
         stats.live_slot_bytes = live_slot_bytes;
         stats.live_incidence_bytes = live_incidence_bytes;
-        stats.live_connectivity_bytes = live_witness_bytes + live_face_scratch_bytes;
+        stats.live_connectivity_bytes = live_witness_bytes + live_face_scratch_bytes + live_vertex_index_bytes;
         stats.peak_arena_bytes = std::max(stats.peak_arena_bytes, live_arena_bytes);
         stats.peak_slot_bytes = std::max(stats.peak_slot_bytes, live_slot_bytes);
         stats.peak_incidence_bytes = std::max(stats.peak_incidence_bytes, live_incidence_bytes);
         stats.peak_connectivity_bytes = std::max(stats.peak_connectivity_bytes, stats.live_connectivity_bytes);
-        const auto combined = stats.live_connectivity_bytes + live_arena_bytes + live_slot_bytes + live_incidence_bytes + transient_bytes;
+        stats.live_compact_metric_bytes = live_compact_metric_bytes;
+        stats.live_freeze_scratch_bytes = live_freeze_scratch_bytes;
+        stats.peak_compact_metric_bytes = std::max(stats.peak_compact_metric_bytes, live_compact_metric_bytes);
+        stats.peak_freeze_scratch_bytes = std::max(stats.peak_freeze_scratch_bytes, live_freeze_scratch_bytes);
+        const auto combined = stats.live_connectivity_bytes + live_arena_bytes + live_slot_bytes +
+                              live_incidence_bytes + live_compact_metric_bytes + live_freeze_scratch_bytes +
+                              transient_bytes;
         stats.peak_combined_geometry_bytes = std::max(stats.peak_combined_geometry_bytes, combined);
         stats.peak_live_witness_bytes = stats.peak_combined_geometry_bytes;
         sync();
@@ -384,9 +434,8 @@ struct SourceTetra
 using VertexArena = details::OrdinaryVertexArena<Support, AggregateWork>;
 struct Poly
 {
-    std::vector<VertexArena::Handle> vertices;
+    VertexArena::SlotBuffer vertices;
     SourceTetra source;
-    VertexArena* arena = nullptr;
     DefiningCache* defining_cache = nullptr;
     // Local numbering and face/support ordering remain independent of arena slots.
     std::vector<Face> faces;
@@ -394,17 +443,19 @@ struct Poly
     std::size_t tracked_bytes = 0;
 
     Poly() = default;
-    Poly(const Poly& p) : source(p.source), arena(p.arena), defining_cache(p.defining_cache)
+    Poly(const Poly& p) : source(p.source), defining_cache(p.defining_cache)
     {
         if (!p.tracking)
             return;
+        vertices.bind(*p.vertices.arena());
         watch(*p.tracking);
         try
         {
             reserve(vertices, p.vertices.size());
-            vertices.insert(vertices.end(), p.vertices.begin(), p.vertices.end());
+            for (auto position : p.vertices)
+                vertices.push_back(position.retain());
             tracking->stats.vertices_copied += vertices.size();
-            tracking->stats.copied_vertex_bytes += vertices.size() * sizeof(VertexArena::Handle);
+            tracking->stats.copied_vertex_bytes += vertices.size() * sizeof(VertexArena::SlotId);
             reserve(faces, p.faces.size());
             for (const auto& face : p.faces)
             {
@@ -452,7 +503,6 @@ struct Poly
         vertices.swap(p.vertices);
         faces.swap(p.faces);
         std::swap(source, p.source);
-        std::swap(arena, p.arena);
         std::swap(defining_cache, p.defining_cache);
         std::swap(tracking, p.tracking);
         std::swap(tracked_bytes, p.tracked_bytes);
@@ -472,6 +522,11 @@ struct Poly
         tracking->observe_geometry(n * sizeof(T));
         values.reserve(n);
         tracking->charge((values.capacity() - n) * sizeof(T));
+        observe();
+    }
+    void reserve(VertexArena::SlotBuffer& values, std::size_t n)
+    {
+        values.reserve(n);
         observe();
     }
     void append(VertexArena::Handle handle)
@@ -495,7 +550,7 @@ struct Poly
     {
         if (!tracking)
             return;
-        auto bytes = sizeof(Poly) + vertices.capacity() * sizeof(VertexArena::Handle) + faces.capacity() * sizeof(Face);
+        auto bytes = sizeof(Poly) + faces.capacity() * sizeof(Face);
         for (const auto& face : faces)
             bytes += face.vertices.capacity() * sizeof(std::size_t);
         tracking->live_witness_bytes -= tracked_bytes;
@@ -527,7 +582,7 @@ Poly tetra(SourceTetra source, const std::array<Support, 4>& supports, DefiningC
     Poly p;
     p.watch(work);
     p.source = source;
-    p.arena = &arena;
+    p.vertices.bind(arena);
     p.defining_cache = &cache;
     p.reserve(p.vertices, 4);
     p.reserve(p.faces, 4);
@@ -792,7 +847,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
         if (active[i] && distances[i].value == 0 &&
             std::find(p.supports(i).begin(), p.supports(i).end(), d.support) == p.supports(i).end())
         {
-            p.arena->replace_with_extended_evidence(p.vertices[i], d.support);
+            p.vertices.arena()->replace_with_extended_evidence(p.vertices, i, d.support);
             p.observe();
         }
     if (!inside || !outside)
@@ -809,7 +864,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
     {
         child.watch(work);
         child.source = p.source;
-        child.arena = p.arena;
+        child.vertices.bind(*p.vertices.arena());
         child.defining_cache = p.defining_cache;
     };
     initialize(negative);
@@ -865,7 +920,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
         if (copied)
         {
             ++work.stats.vertices_copied;
-            work.stats.copied_vertex_bytes += sizeof(VertexArena::Handle);
+            work.stats.copied_vertex_bytes += sizeof(VertexArena::SlotId);
         }
         const auto index = child.vertices.size();
         child.append(std::move(handle));
@@ -882,7 +937,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
         {
             if (indices[id] == absent)
             {
-                indices[id] = append_point(child, p.vertices[id], true);
+                indices[id] = append_point(child, p.vertices[id].retain(), true);
             }
             id = indices[id];
         }
@@ -950,7 +1005,7 @@ Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
                         if (std::find(p.supports(j).begin(), p.supports(j).end(), id) != p.supports(j).end() &&
                             id != d.support)
                             supports.push_back(id);
-                    auto crossing = p.arena->create(b, error, supports, p.source.batch, p.source.recipe);
+                    auto crossing = p.vertices.arena()->create(b, error, supports, p.source.batch, p.source.recipe);
                     negative_indices.push_back(append_point(negative, crossing, false));
                     if (complementary)
                         positive_indices.push_back(append_point(positive, crossing, true));
@@ -1129,8 +1184,9 @@ std::array<predicates::Result, 4> integration_coefficients(
     }
     return result;
 }
-void integrate(const Poly& p, const std::array<predicates::Result, 4>& coefficients, const predicates::Result& jacobian,
-    const std::array<bool, 4>& cancelled, Sum& sum, AggregateWork& work)
+using MetricRecords = details::OrdinaryMetricRecords<AggregateWork, predicates::Result>;
+void integrate(const MetricRecords::MetricView& p, const std::array<predicates::Result, 4>& coefficients,
+    const predicates::Result& jacobian, const std::array<bool, 4>& cancelled, Sum& sum, AggregateWork& work)
 {
     const auto orientation = jacobian.value > 0 ? 1.L : -1.L;
     for (const auto& f : p.faces)
@@ -1184,8 +1240,8 @@ void integrate(const Poly& p, const std::array<predicates::Result, 4>& coefficie
  * differ from its neighbor's. Domain additivity is equivalent to integration
  * of their identity-cancelled exterior boundary. No witness scalar is admitted
  * or published: every signed cone enters the final physical authority's Sum. */
-void integrate_source_reference(
-    const Poly& p, const predicates::Result& jacobian, long double scale, Sum& sum, AggregateWork& work)
+void integrate_source_reference(const MetricRecords::MetricView& p, const predicates::Result& jacobian,
+    long double scale, Sum& sum, AggregateWork& work)
 {
     if (p.faces.empty())
         return;
@@ -1477,6 +1533,13 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     work.context = &context;
     work.stage = context.stage;
     work.sync();
+    const auto observe_retention = [&](std::string_view stage) noexcept
+    { details::observe_retention({stage, impl_->batch.points, donors, work.allocations, work.stats}); };
+    struct RetentionExit
+    {
+        const decltype(observe_retention)& observe;
+        ~RetentionExit() { observe("work-scope-exit"); }
+    } retention_exit{observe_retention};
     const auto source_tetra = [&](std::size_t i) { return SourceTetra{&impl_->batch, &impl_->batch.tetrahedra[i]}; };
     OrdinaryAggregateResult result;
     if (donors.size() > result.groups.max_size() / 2)
@@ -1783,6 +1846,8 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             {
                 context.source = context.cut = OrdinaryAggregateContext::absent;
                 context.retry = retry;
+                work.stats.metric_construction_operations = 0;
+                work.sync();
                 if (retry)
                     ++work.stats.retries;
                 try
@@ -1833,92 +1898,101 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     int exponent = 0;
                     std::frexp(scale, &exponent);
                     scale = represented(std::ldexp(1.L, exponent));
-                    struct Witness
+                    MetricRecords metrics(work);
                     {
-                        std::size_t tetra;
-                        Poly bulk, gas, carrier;
-                        std::array<predicates::Result, 4> coefficients;
-                    };
-                    VertexArena arena(work);
-                    std::vector<Witness> witnesses;
-                    ReverseDrain drain_witnesses(witnesses);
-                    work.charge(impl_->batch.tetrahedra.size() * sizeof(Witness));
-                    for (std::size_t ti = 0; ti < impl_->batch.tetrahedra.size(); ++ti)
-                    {
-                        context.source = ti;
-                        const auto& t = impl_->batch.tetrahedra[ti];
-                        if (t.sign != sign)
-                            continue;
-                        auto bulk = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
-                        // Replay immutable supports in reverse order on the single
-                        // reconstruction retry; rounded child coordinates are not inputs.
-                        for (std::size_t k = 0; k < cuts[di].size() && !bulk.faces.empty(); ++k)
+                        VertexArena arena(work);
+                        const auto source_count =
+                            static_cast<std::size_t>(std::count_if(impl_->batch.tetrahedra.begin(),
+                                impl_->batch.tetrahedra.end(), [&](const auto& t) { return t.sign == sign; }));
+                        metrics.reserve_records(source_count, !retry);
+                        for (std::size_t ti = 0; ti < impl_->batch.tetrahedra.size(); ++ti)
                         {
-                            const auto j = retry ? cuts[di].size() - 1 - k : k;
-                            context.cut = j;
-                            bulk = clipped(std::move(bulk), source_values(ti, di, j), work);
-                            work.pair();
-                        }
-                        if (bulk.faces.empty())
-                            continue;
-                        Witness witness;
-                        witness.tetra = ti;
-                        if (!retry)
-                            witness.coefficients = integration_coefficients(source_tetra(ti), pivot, scale, work);
-                        if (!donor.pure_gas && !donor.pure_carrier)
-                        {
-                            context.cut = cuts[di].size(); // The phase support follows donor supports.
-                            const auto d = source_values(ti, di, cuts[di].size());
-                            // Rebuild phase witnesses from immutable source
-                            // supports on the existing retry. Applying the phase
-                            // first retains its small endpoint weights before
-                            // donor intersections introduce dependent crossings.
-                            Poly phase_source;
-                            if (retry)
-                                phase_source = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
-                            else
+                            context.source = ti;
+                            const auto& t = impl_->batch.tetrahedra[ti];
+                            if (t.sign != sign)
+                                continue;
+                            auto bulk = tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
+                            // Replay immutable supports in reverse order on the single
+                            // reconstruction retry; rounded child coordinates are not inputs.
+                            for (std::size_t k = 0; k < cuts[di].size() && !bulk.faces.empty(); ++k)
                             {
-                                // Bulk remains immutable for its own channel.
-                                // The consuming split shares all phase work.
-                                phase_source = bulk;
+                                const auto j = retry ? cuts[di].size() - 1 - k : k;
+                                context.cut = j;
+                                bulk = clipped(std::move(bulk), source_values(ti, di, j), work);
+                                work.pair();
                             }
-                            auto phases = split(std::move(phase_source), d, work, true);
-                            witness.gas = std::move(phases.inside);
-                            witness.carrier = std::move(phases.outside);
-                            if (retry)
-                                for (std::size_t k = 0; k < cuts[di].size(); ++k)
+                            if (bulk.faces.empty())
+                                continue;
+                            std::array<predicates::Result, 4> coefficients;
+                            Poly gas, carrier;
+                            if (!retry)
+                                coefficients = integration_coefficients(source_tetra(ti), pivot, scale, work);
+                            if (!donor.pure_gas && !donor.pure_carrier)
+                            {
+                                context.cut = cuts[di].size(); // The phase support follows donor supports.
+                                const auto d = source_values(ti, di, cuts[di].size());
+                                // Rebuild phase witnesses from immutable source
+                                // supports on the existing retry. Applying the phase
+                                // first retains its small endpoint weights before
+                                // donor intersections introduce dependent crossings.
+                                Poly phase_source;
+                                if (retry)
+                                    phase_source =
+                                        tetra(source_tetra(ti), source_faces[ti], defining_caches[ti], arena, work);
+                                else
                                 {
-                                    const auto j = cuts[di].size() - 1 - k;
-                                    context.cut = j;
-                                    const auto cut = source_values(ti, di, j);
-                                    if (!witness.gas.faces.empty())
-                                        witness.gas = clipped(std::move(witness.gas), cut, work);
-                                    if (!witness.carrier.faces.empty())
-                                        witness.carrier = clipped(std::move(witness.carrier), cut, work);
-                                    work.pair();
+                                    // Bulk remains immutable for its own channel.
+                                    // The consuming split shares all phase work.
+                                    phase_source = bulk;
                                 }
+                                auto phases = split(std::move(phase_source), d, work, true);
+                                gas = std::move(phases.inside);
+                                carrier = std::move(phases.outside);
+                                if (retry)
+                                    for (std::size_t k = 0; k < cuts[di].size(); ++k)
+                                    {
+                                        const auto j = cuts[di].size() - 1 - k;
+                                        context.cut = j;
+                                        const auto cut = source_values(ti, di, j);
+                                        if (!gas.faces.empty())
+                                            gas = clipped(std::move(gas), cut, work);
+                                        if (!carrier.faces.empty())
+                                            carrier = clipped(std::move(carrier), cut, work);
+                                        work.pair();
+                                    }
+                            }
+                            // Freeze every channel together while arena identities are live.
+                            // Pure phases reuse the bulk view; the opposite phase stays absent.
+                            const std::array<const Poly*, 3> channels{&bulk,
+                                donor.pure_gas       ? &bulk
+                                : donor.pure_carrier ? nullptr
+                                                     : &gas,
+                                donor.pure_carrier ? &bulk
+                                : donor.pure_gas   ? nullptr
+                                                   : &carrier};
+                            observe_retention("metric-before-freeze");
+                            metrics.freeze(ti, channels, retry ? nullptr : &coefficients);
+                            observe_retention("metric-after-freeze");
                         }
-                        witness.bulk = std::move(bulk);
-                        witnesses.push_back(std::move(witness));
                     }
+                    work.stats.metric_construction_operations = work.stats.operations;
+                    work.sync();
+                    observe_retention("metric-before-integration");
+                    // All source construction finishes before the unchanged channel-major
+                    // integration order. Frozen rows cannot serve as replay provenance.
                     for (unsigned channel = 0; channel < 3; ++channel)
                     {
-                        const auto poly = [&](const Witness& w) -> const Poly&
-                        {
-                            if (channel == 0 || (channel == 1 && donor.pure_gas) ||
-                                (channel == 2 && donor.pure_carrier))
-                                return w.bulk;
-                            return channel == 1 ? w.gas : w.carrier;
-                        };
+                        work.charge(impl_->batch.tetrahedra.size() * sizeof(std::array<bool, 4>));
                         std::vector<std::array<bool, 4>> present(impl_->batch.tetrahedra.size());
-                        work.charge(present.size() * sizeof(std::array<bool, 4>));
-                        for (const auto& w : witnesses)
-                            for (const auto& f : poly(w).faces)
+                        work.charge((present.capacity() - present.size()) * sizeof(std::array<bool, 4>));
+                        for (const auto& w : metrics.records())
+                            for (const auto& f : MetricRecords::view(w, channel).faces)
                                 if (f.source >= 0)
                                     present[w.tetra][f.source] = true;
-                        for (const auto& w : witnesses)
+                        for (std::size_t wi = 0; wi < metrics.records().size(); ++wi)
                         {
-                            const auto& p = poly(w);
+                            const auto& w = metrics.records()[wi];
+                            const auto p = MetricRecords::view(w, channel);
                             if (p.faces.empty())
                                 continue;
                             positive[channel] = true;
@@ -1934,8 +2008,8 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             if (retry)
                                 integrate_source_reference(p, impl_->orientations[w.tetra], scale, sums[channel], work);
                             else
-                                integrate(
-                                    p, w.coefficients, impl_->orientations[w.tetra], cancelled, sums[channel], work);
+                                integrate(p, metrics.coefficients(wi), impl_->orientations[w.tetra], cancelled,
+                                    sums[channel], work);
                         }
                     }
                     context.source = context.cut = OrdinaryAggregateContext::absent;

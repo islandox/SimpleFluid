@@ -1,4 +1,5 @@
 #include "general_vof_finite_test_helpers.hh"
+#include "general_vof_retention_probe.hh"
 #include <algorithm>
 #include <array>
 #include <string>
@@ -266,9 +267,20 @@ TEST(GeneralVoFInterfaceTransport, ThreePlanarCyclesUseAggregateWitnessesAndPres
         SCOPED_TRACE(::testing::Message() << "step=" << step);
         const auto identity = source->accepted_identity();
         const auto gas = source->gas_volumes(), carrier = source->carrier_volumes();
+        const auto census_name = "three_planar_cycles_step_" + std::to_string(step);
+        namespace probe = SimpleFluid::VoF::test::retention_probe;
+        probe::checkpoint(census_name.c_str(), "accepted_before_plan", [&](auto& roots) { roots.state(*source); });
         const auto trial = source->plan_transport(stationary(*source), loops(*source, 1. / 64), 1);
+        probe::checkpoint(census_name.c_str(), "postplan_retained_candidate", [&](auto& roots) { roots.trial(trial); });
         const auto prepared = trial.prepare_transport({1, 1000}, 29 + step);
+        probe::checkpoint(census_name.c_str(), "prepared", [&](auto& roots)
+        { roots.trial(trial); roots.prepared(*prepared); });
         const auto next = source->apply(trial);
+        probe::checkpoint(census_name.c_str(), "accepted_with_live_trial", [&](auto& roots)
+        {
+            roots.trial(trial); roots.prepared(*prepared);
+            roots.state(*next, SimpleFluid::VoF::general_vof_detail::RetentionGroup::Candidate);
+        });
         EXPECT_EQ(prepared->family, Family::InterfaceLocalSwept);
         EXPECT_EQ(prepared->backend, GeneralVoFTransportBackend::SweptPartition);
         EXPECT_TRUE(prepared->positive_transfers.empty());
@@ -307,6 +319,8 @@ TEST(GeneralVoFInterfaceTransport, ThreePlanarCyclesUseAggregateWitnessesAndPres
         EXPECT_EQ(source->carrier_volumes(), carrier);
         source = next;
     }
+    SimpleFluid::VoF::test::retention_probe::checkpoint("three_planar_cycles", "all_trial_scopes_exited",
+        [&](auto& roots) { roots.state(*source); });
 }
 TEST(GeneralVoFInterfaceTransport, FaceAlignedInterfaceWithoutMixedCellsUsesGeometry)
 {

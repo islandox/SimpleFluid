@@ -8,6 +8,7 @@ set_source_files_properties(
     PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 set(FVM_ONLY_TESTS
+    testGeneralVoFRetentionCensus
     testGeneralVoFBalance
     testGeneralVoFPhaseCleanup
     testGeneralVoFFaceWorkspace
@@ -106,7 +107,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction")
+  if(TEST_NAME STREQUAL "testGeneralVoFRetentionCensus")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;geometry\\;resource\\;retention_census" TIMEOUT 180)
+  elseif(TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;exact\\;geometry\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"

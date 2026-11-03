@@ -78,15 +78,15 @@ struct OrdinaryAggregateStatistics
     /** Requested bytes of the charge rejected by the cumulative allowance. */
     std::size_t failed_charge_bytes = 0;
     std::size_t vertices_classified = 0, vertices_copied = 0;
-    /** Logical bytes of retained vertex handles copied into compact children. */
+    /** Logical bytes of retained vertex slot indices copied into compact children. */
     std::size_t copied_vertex_bytes = 0;
     /** Vertex counts summed over clipping observations, including repeated visits. */
     std::size_t active_vertices_seen = 0, stored_vertices_seen = 0;
     std::size_t peak_active_vertices = 0, peak_stored_vertices = 0, peak_remainders = 0;
     /** Simultaneous Poly handles/connectivity (including faces being built)
-     * plus shared arena records, slot
+     * plus frozen numeric metric records and freeze slot-index scratch, shared arena records, slot
      * metadata, directories and incidence capacity, observed at mutations.
-     * Excludes allocator metadata, maps, source/support caches, predicate scratch,
+     * Excludes allocator metadata, source/support caches, predicate scratch,
      * and total RSS; this is not a whole-memory measurement. */
     std::size_t peak_live_witnesses = 0, peak_live_witness_bytes = 0;
     std::size_t vertex_record_constructions = 0, vertex_handle_copies = 0, vertex_evidence_extensions = 0;
@@ -95,6 +95,13 @@ struct OrdinaryAggregateStatistics
     std::size_t peak_vertex_record_capacity = 0, peak_vertex_slot_capacity = 0;
     std::size_t live_arena_bytes = 0, live_slot_bytes = 0, live_incidence_bytes = 0, live_connectivity_bytes = 0;
     std::size_t peak_arena_bytes = 0, peak_slot_bytes = 0, peak_incidence_bytes = 0, peak_connectivity_bytes = 0;
+    /** Frozen numeric rows/connectivity and temporary freeze slot-index maps.
+     * Both are included in the simultaneous combined geometry peak. */
+    std::size_t live_compact_metric_bytes = 0, peak_compact_metric_bytes = 0;
+    std::size_t live_freeze_scratch_bytes = 0, peak_freeze_scratch_bytes = 0;
+    /** Operation snapshot after all tetrahedra are frozen, before channel-major
+     * integration in the latest donor/sign/attempt. Freezing adds no math. */
+    std::size_t metric_construction_operations = 0;
     std::size_t peak_combined_geometry_bytes = 0;
 };
 struct OrdinaryAggregateResult

@@ -23,6 +23,17 @@ These buffers retain the existing preparation accounting boundary; measured live
 capacity is distinct from cumulative geometry admission, whose charges are never
 refunded.
 
+Ordinary swept-volume metric integration retains a separate numerical record for
+each completed source tetrahedron. All four barycentric weights and errors remain
+available; channel-local vertex numbering, face winding, source-face tags and
+ordered integration remain unchanged. Pure channels alias bulk. First-attempt
+exterior-face cancellation and retry integration of the complete closed boundary
+retain their distinct rules, including reference selection and zero-cone tests.
+Compaction performs no determinants, error arithmetic or partial integration, and
+compact records cannot supply construction or replay provenance. Original supports
+remain the inputs to retry reconstruction. Storage observations distinguish the
+simultaneous construction/frozen peak from cumulative admission and process RSS.
+
 
 PLIC represents the gas/liquid interface inside a cell by a plane. This guide
 describes the finite `PLIC::PolyhedralReconstruction<Mode>` used by `GeneralVoF` on

@@ -61,6 +61,7 @@ public:
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::RetentionAccess;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;

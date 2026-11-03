@@ -7,6 +7,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -33,6 +34,15 @@ struct OrdinaryFace::Impl
     std::optional<OrdinarySupport> support;
     bool retained_support = false;
 };
+std::size_t details::RetentionAccess::planar_metadata_bytes() noexcept
+{
+    return sizeof(OrdinaryFace::Impl);
+}
+const PlaneSupportIdentity<ArithmeticMode::Ordinary>* details::RetentionAccess::planar_support_borrowed(
+    const OrdinaryFace& face) noexcept
+{
+    return face.impl_->support ? &*face.impl_->support : nullptr;
+}
 struct EdgePointIndex<ArithmeticMode::Ordinary>::Impl
 {
     std::map<on::WidePoint, OrdinaryPoint> points;

@@ -31,6 +31,7 @@ namespace details
 {
 class NativeSupportAccess;
 class OriginalSupportAuthorityAccess;
+class RetentionAccess;
 namespace ordinary_kernel
 {
 template<ArithmeticMode> class GeometryKernel;
@@ -104,6 +105,7 @@ public:
 
 private:
     friend class details::OriginalSupportAuthorityAccess;
+    friend class details::RetentionAccess;
     using Native = PlaneSupportIdentity<ArithmeticMode::Ordinary>;
     using Opaque = std::shared_ptr<const std::vector<std::uint64_t>>;
     explicit PlaneAuthority(Native support) : storage_(std::move(support)) {}
@@ -125,6 +127,7 @@ struct DynamicPoint
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::RetentionAccess;
     friend class GeometryAllocationLedger;
     template<ArithmeticMode> friend class Point;
     PointProvenanceRef provenance_;
@@ -198,6 +201,7 @@ public:
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::RetentionAccess;
     friend class GeometryAllocationLedger;
     explicit DynamicPointExport(std::shared_ptr<const DynamicPointExportPayload> payload) : payload_(std::move(payload))
     {
@@ -286,6 +290,7 @@ public:
     [[nodiscard]] PointAuthorityRange supports() const { return dynamic().supports(); }
 
 private:
+    friend class details::RetentionAccess;
     TypedPointProvenanceRef<Mode> provenance_;
 };
 
@@ -304,6 +309,7 @@ public:
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::RetentionAccess;
     friend class GeometryAllocationLedger;
     explicit PointSnapshot(std::shared_ptr<const PointSnapshotPayload<Mode>> payload) : payload_(std::move(payload)) {}
     std::shared_ptr<const PointSnapshotPayload<Mode>> payload_;
@@ -327,6 +333,7 @@ public:
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::RetentionAccess;
     friend class GeometryAllocationLedger;
     explicit PointExport(std::shared_ptr<const PointExportPayload<Mode>> payload) : payload_(std::move(payload)) {}
     std::shared_ptr<const PointExportPayload<Mode>> payload_;

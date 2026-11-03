@@ -35,6 +35,7 @@ struct GeneralVoF;
 namespace general_vof_detail
 {
 struct LocalTransportControls;
+struct RetentionAccess;
 }
 enum class GeneralVoFPhaseGeometry : uint8_t
 {
@@ -399,6 +400,7 @@ public:
     void retain_provenance(PLIC::GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit) const;
 private:
     friend class GeneralVoF;
+    friend struct general_vof_detail::RetentionAccess;
     explicit GeneralVoFFiniteTrajectories(std::shared_ptr<const Snapshot> snapshot) : storage_(std::move(snapshot)) {}
     explicit GeneralVoFFiniteTrajectories(std::vector<value_type> records) : storage_(std::move(records)) {}
     std::variant<std::shared_ptr<const Snapshot>, std::vector<value_type>> storage_;
@@ -481,6 +483,7 @@ struct GeneralVoFPreparedTransport
 
 private:
     friend class GeneralVoF;
+    friend struct general_vof_detail::RetentionAccess;
     // The actual family is factory-authenticated, independently of public
     // backend configuration and of whether this rank retains any streams.
     std::shared_ptr<const void> authenticated_source_, authenticated_candidate_;
@@ -742,6 +745,7 @@ public:
     private:
         friend GeneralVoF;
         friend struct Exact::GeneralVoF;
+        friend struct general_vof_detail::RetentionAccess;
         SIMPLEFLUID_FVM_LOCAL void validate_retained_algebraic_payload() const;
         void validate_prepared_transport_mode(ArithmeticMode,
             const std::shared_ptr<const GeneralVoFPreparedTransport>* retained = nullptr) const;
@@ -868,6 +872,7 @@ private:
         std::vector<double>, GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*,
         GeneralVoFPhaseCleanupState = {});
     explicit GeneralVoF(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
+    friend struct general_vof_detail::RetentionAccess;
     std::shared_ptr<const Data> data_;
 };
 } // namespace SimpleFluid::VoF

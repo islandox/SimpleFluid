@@ -2,6 +2,7 @@
  * @brief Native finite support payloads and bounded canonical-body import.
  */
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/GeometryIdentityRetention.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include <algorithm>
 #include <limits>
@@ -544,6 +545,53 @@ namespace SimpleFluid::PLIC::details
 {
 using namespace ordinary_identity_detail;
 using NativePoint = OrdinaryIdentityPoint;
+IdentityRetentionBytes ordinary_identity_retention_bytes(const GeometryIdentityNativePayload& payload) noexcept
+{
+    IdentityRetentionBytes result;
+    if (payload.native_kind() != GeometryIdentityNativeKind::OrdinarySupport)
+    {
+        result.complete = false;
+        return result;
+    }
+    const auto& support = static_cast<const NativeSupport&>(payload);
+    switch (support.kind())
+    {
+        case OrdinarySupportKind::Axis:
+            result.metadata = sizeof(Axis);
+            break;
+        case OrdinarySupportKind::Input:
+            result.metadata = sizeof(Input);
+            break;
+        case OrdinarySupportKind::Plane:
+            result.metadata = sizeof(Plane);
+            break;
+        case OrdinarySupportKind::Translation:
+            result.metadata = sizeof(Translation);
+            break;
+        case OrdinarySupportKind::RetainedExact:
+            result.metadata = sizeof(RetainedExact);
+            break;
+        case OrdinarySupportKind::Source: {
+            const auto& source = static_cast<const Source&>(support);
+            result.metadata = sizeof(source);
+            result.buffer(source.points.size(), source.points.capacity(), sizeof(NativePoint));
+            break;
+        }
+        case OrdinarySupportKind::ExtrusionDag: {
+            const auto& dag = static_cast<const Dag&>(support);
+            result.metadata = sizeof(dag);
+            result.buffer(dag.records.size(), dag.records.capacity(), sizeof(OrdinarySupportRecipe));
+            for (const auto& recipe : dag.records)
+                result.buffer(recipe.parents.size(), recipe.parents.capacity(), sizeof(std::size_t));
+            break;
+        }
+        default:
+            result.complete = false;
+            break;
+    }
+    return result;
+}
+
 std::size_t ordinary_native::source_support_allocation_bound(std::size_t points)
 {
     // make_source_support either issues an Axis or copies the polygon into

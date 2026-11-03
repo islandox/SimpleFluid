@@ -8,6 +8,7 @@ namespace SimpleFluid::PLIC
 namespace details
 {
 class NativeSupportAccess;
+class RetentionAccess;
 }
 template<>
 [[nodiscard]] PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(
@@ -162,6 +163,7 @@ public:
 private:
     friend std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend class details::NativeSupportAccess;
+    friend class details::RetentionAccess;
     friend PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend int planar_orientation<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend std::vector<PlanarFacePtr<ArithmeticMode::Ordinary>> subtract_planar_faces<ArithmeticMode::Ordinary>(

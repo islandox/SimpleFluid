@@ -77,6 +77,8 @@ struct AggregateFaceTrace
             "\"peak_live_vertex_records\":%zu,\"peak_vertex_record_capacity\":%zu,\"peak_vertex_slot_capacity\":%zu,"
             "\"peak_arena_bytes\":%zu,\"peak_slot_bytes\":%zu,\"peak_incidence_bytes\":%zu,"
             "\"peak_connectivity_bytes\":%zu,\"peak_combined_geometry_bytes\":%zu,"
+            "\"peak_compact_metric_bytes\":%zu,\"peak_freeze_scratch_bytes\":%zu,"
+            "\"metric_construction_operations\":%zu,"
             "\"active_vertices_seen\":%zu,\"stored_vertices_seen\":%zu,\"peak_active_vertices\":%zu,"
             "\"peak_stored_vertices\":%zu,\"peak_remainders\":%zu,\"witness_admissions\":%zu,"
             "\"peak_live_witnesses\":%zu,\"peak_live_witness_capacity_bytes\":%zu,"
@@ -91,7 +93,8 @@ struct AggregateFaceTrace
             stats.vertex_handle_copies, stats.vertex_evidence_extensions, stats.vertex_relocation_bytes,
             stats.peak_live_vertex_records, stats.peak_vertex_record_capacity, stats.peak_vertex_slot_capacity,
             stats.peak_arena_bytes, stats.peak_slot_bytes, stats.peak_incidence_bytes, stats.peak_connectivity_bytes,
-            stats.peak_combined_geometry_bytes, stats.active_vertices_seen, stats.stored_vertices_seen,
+            stats.peak_combined_geometry_bytes, stats.peak_compact_metric_bytes, stats.peak_freeze_scratch_bytes,
+            stats.metric_construction_operations, stats.active_vertices_seen, stats.stored_vertices_seen,
             stats.peak_active_vertices, stats.peak_stored_vertices, stats.peak_remainders, stats.witnesses,
             stats.peak_live_witnesses, stats.peak_live_witness_bytes, stats.source_pieces, stats.pair_tests,
             stats.operations);

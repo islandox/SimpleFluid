@@ -367,3 +367,52 @@ directly from the recipe's current/departure points and private backcenter. The
 canonical triangle sequence, node-ID diagonal rule and construction ordinals are
 unchanged. The traversal owns no triangle array and retains existing determinant,
 pair-work and geometric construction charges.
+
+Ordinary aggregate construction keeps one arena binding per fragment and stores
+owning slot indices in local vertex order. Copies retain those slots; evidence
+extensions preserve independent sibling evidence. Arena compaction changes only
+the slot-to-record mapping, never local vertex numbering or numerical traversal.
+
+Metric construction freezes all completed channels for one source tetrahedron
+before advancing to the next source. Each compact record owns all four weights
+and errors, channel-local numerical-row mappings, and ordered flat face rings with
+source-face tags. Sharing uses live arena identity within that tetrahedron only.
+Pure channels alias bulk; the opposite channel is empty. Records retain no arena,
+support, chart or construction-cache pointers. First-attempt coefficient pairs
+remain a separate attempt-owned array, absent on retry. The construction arena is
+destroyed before channel-major integration. The two integrators consume borrowed
+views without changing arithmetic or reference-selection order; compact records
+are never replay provenance. Support catalogs and defining-expression caches keep
+their measure lifetime.
+
+Storage admission precedes each compact buffer and freeze lookup allocation and
+covers capacity replacement and construction/frozen overlap. Descriptor capacity
+uses the actual sign-matching source count. The combined geometry observation
+includes arena records, slots, incidence, connectivity, compact records and freeze
+scratch simultaneously. Failed freezes discard the attempt's compact collector
+and release live observations while preserving spent admission and reusable source
+inputs. Earlier destruction can reduce live storage while increasing cumulative
+construction admission; those quantities must be reported separately.
+
+The private retention census borrows quiescent application roots and allocation
+ledgers, including pending pins left by failed walks. It distinguishes physical
+strong-owner closure from required point/replay-record closure, keyed by owner,
+mode, role and slot. It does not copy pins, lock weak caches, publish exports,
+serialize identities, invoke numerical operations or alter production accounting.
+Caller-bounded diagnostic scratch owns detached scalar reports; exhaustion makes
+the report unavailable without poisoning a production ledger. Live payload is
+recomputed from owners and capacities, separately from current ledger tracking,
+cumulative admission and external RSS. Inclusive root-group totals overlap and
+must not be summed. Required-record bytes are an optimization lower bound, not
+reclaimable memory.
+
+The FVM adapter covers explicitly supplied accepted, candidate, prepared, copied
+point/trajectory and work roots. Unknown opaque prepared pins make its coverage
+incomplete. Application-boundary checkpoints do not observe transient planning
+peaks. Mesh/partition fields, native recipes, non-PLIC application buffers,
+trajectory container storage, allocator control blocks, MPI storage and unprovided
+external roots are outside that report. A private same-image aggregate callback
+can inspect borrowed work roots during metric freezing; it permits no numerical
+work or reentry. Neither probe establishes global retention without a complete
+root manifest. Snapshot paging and ledger-pin ownership changes remain separate
+decisions.

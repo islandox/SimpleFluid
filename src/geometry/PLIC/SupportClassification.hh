@@ -44,6 +44,7 @@ public:
     }
 
 private:
+    friend class details::RetentionAccess;
     FaceConstraint<ArithmeticMode::Ordinary> boundary_;
     PlaneAuthority native_authority_;
 };

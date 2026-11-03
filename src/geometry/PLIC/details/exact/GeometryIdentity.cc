@@ -3,6 +3,7 @@
  */
 #include "geometry/PLIC/details/exact/GeometryIdentity.hh"
 #include "geometry/PLIC/details/GeometryIdentityBacking.hh"
+#include "geometry/PLIC/details/GeometryIdentityRetention.hh"
 #include <cstdint>
 #include <memory>
 
@@ -215,6 +216,31 @@ template<std::size_t Count> struct NativeTuple final : details::GeometryIdentity
 };
 namespace
 {
+
+template<class Integer>
+void retained_integer_buffers(const Integer& integer, details::IdentityRetentionBytes& result) noexcept
+{
+    // Match storage_bytes(): cpp_int's inline limb union is part of sizeof.
+    // The const backend accessors read size/capacity only and perform no arithmetic.
+    const auto limbs = reinterpret_cast<std::uintptr_t>(integer.limbs());
+    const auto object = reinterpret_cast<std::uintptr_t>(std::addressof(integer));
+    if (limbs >= object && limbs - object < sizeof(integer))
+        return;
+    result.buffer(integer.size(), integer.capacity(), sizeof(boost::multiprecision::limb_type));
+}
+template<std::size_t Count>
+details::IdentityRetentionBytes retained_tuple_buffers(const details::GeometryIdentityNativePayload& payload) noexcept
+{
+    const auto& tuple = static_cast<const NativeTuple<Count>&>(payload);
+    details::IdentityRetentionBytes result;
+    result.metadata = sizeof(tuple);
+    for (const auto& rational : tuple.values)
+    {
+        retained_integer_buffers(rational.backend().num(), result);
+        retained_integer_buffers(rational.backend().denom(), result);
+    }
+    return result;
+}
 template<std::size_t Count> std::array<Q, Count> read_tuple(std::span<const char> key, GeometryTag tag)
 {
     WireReader reader{key, 0, true};
@@ -360,6 +386,24 @@ std::size_t point_identity_storage_bound(const P& value) noexcept
 
 namespace SimpleFluid::PLIC::details
 {
+IdentityRetentionBytes exact_identity_retention_bytes(const GeometryIdentityNativePayload& payload) noexcept
+{
+    using namespace exact_geometry_detail;
+    switch (payload.native_kind())
+    {
+        case GeometryIdentityNativeKind::ExactTuple3:
+            return retained_tuple_buffers<3>(payload);
+        case GeometryIdentityNativeKind::ExactTuple4:
+            return retained_tuple_buffers<4>(payload);
+        case GeometryIdentityNativeKind::ExactTuple6:
+            return retained_tuple_buffers<6>(payload);
+        default: {
+            IdentityRetentionBytes result;
+            result.complete = false;
+            return result;
+        }
+    }
+}
 std::strong_ordering compare_exact_identity_native(
     GeometryIdentityKind kind, const GeometryIdentityBackingPtr& first, const GeometryIdentityBackingPtr& second)
 {

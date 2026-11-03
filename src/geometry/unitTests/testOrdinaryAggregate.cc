@@ -1,14 +1,22 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/GeometryRetentionCensus.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
+#include "geometry/swept_volume/details/OrdinaryAggregateRetention.hh"
+#include "geometry/swept_volume/details/OrdinaryMetricRecords.hh"
 #include "geometry/swept_volume/details/OrdinaryVertexArena.hh"
 #include <algorithm>
 #include <cfenv>
+#include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <memory>
 #include <numeric>
+#include <optional>
+#include <string>
 #include <type_traits>
 
 namespace
@@ -1385,6 +1393,8 @@ struct ArenaTestWork
 {
     SimpleFluid::geometry::swept_volume::OrdinaryAggregateStatistics stats;
     std::size_t live_arena_bytes = 0, live_slot_bytes = 0, live_incidence_bytes = 0;
+    std::size_t live_compact_metric_bytes = 0, live_freeze_scratch_bytes = 0, live_vertex_index_bytes = 0;
+    std::size_t external_connectivity_bytes = 0;
     std::size_t charges = 0, charged_bytes = 0, fail_at = std::numeric_limits<std::size_t>::max();
     std::size_t byte_budget = std::numeric_limits<std::size_t>::max();
     void charge(std::size_t bytes)
@@ -1398,7 +1408,12 @@ struct ArenaTestWork
         stats.live_incidence_bytes = live_incidence_bytes;
         stats.peak_incidence_bytes = std::max(stats.peak_incidence_bytes, live_incidence_bytes);
         stats.peak_combined_geometry_bytes = std::max(stats.peak_combined_geometry_bytes,
-            live_arena_bytes + live_slot_bytes + live_incidence_bytes + transient_bytes);
+            live_arena_bytes + live_slot_bytes + live_incidence_bytes + live_compact_metric_bytes +
+                live_freeze_scratch_bytes + live_vertex_index_bytes + external_connectivity_bytes + transient_bytes);
+        stats.live_compact_metric_bytes = live_compact_metric_bytes;
+        stats.live_freeze_scratch_bytes = live_freeze_scratch_bytes;
+        stats.peak_compact_metric_bytes = std::max(stats.peak_compact_metric_bytes, live_compact_metric_bytes);
+        stats.peak_freeze_scratch_bytes = std::max(stats.peak_freeze_scratch_bytes, live_freeze_scratch_bytes);
     }
 };
 using TestArena = SimpleFluid::geometry::swept_volume::details::OrdinaryVertexArena<int, ArenaTestWork>;
@@ -1718,4 +1733,628 @@ TEST(OrdinaryAggregateArena, SecondChargeFailureReleasesScratchAndRetainsSpentPr
     EXPECT_EQ(work.live_incidence_bytes, 2 * sizeof(const int*));
     EXPECT_EQ(work.stats.vertex_record_constructions, 5u);
     EXPECT_EQ(work.stats.vertex_evidence_extensions, 1u);
+}
+
+namespace
+{
+struct MetricTestPoly
+{
+    struct Face
+    {
+        std::vector<std::size_t> vertices;
+        int source = -1;
+    };
+    std::vector<TestArena::Handle> vertices;
+    std::vector<Face> faces;
+    const TestArena::Weights& weights(std::size_t local) const { return vertices[local].get().weights; }
+    const TestArena::Weights& errors(std::size_t local) const { return vertices[local].get().errors; }
+};
+using TestMetrics = SimpleFluid::geometry::swept_volume::details::OrdinaryMetricRecords<ArenaTestWork, long double>;
+
+MetricTestPoly metric_triangle(TestArena& arena)
+{
+    MetricTestPoly poly;
+    poly.vertices.push_back(arena.create({1, 0, 0, 0}, {0, 0x1p-40L, 0x1p-41L, 0x1p-42L}, {}, nullptr, nullptr));
+    poly.vertices.push_back(arena.create({0, 1, 0, 0}, {0x1p-43L, 0, 0x1p-44L, 0x1p-45L}, {}, nullptr, nullptr));
+    // Equal numerical rows with independently issued identity must remain distinct.
+    poly.vertices.push_back(arena.create({1, 0, 0, 0}, {0, 0x1p-40L, 0x1p-41L, 0x1p-42L}, {}, nullptr, nullptr));
+    poly.faces.push_back({{2, 0, 1}, 3});
+    return poly;
+}
+} // namespace
+
+TEST(OrdinaryAggregateMetric, FrozenRowsOutliveArenaAndPreserveEveryWeightErrorAndLocalIdentity)
+{
+    ArenaTestWork work;
+    TestMetrics metrics(work);
+    metrics.reserve_records(1, false);
+    {
+        TestArena arena(work);
+        const auto bulk = metric_triangle(arena);
+        MetricTestPoly gas;
+        gas.vertices = {bulk.vertices[1], bulk.vertices[0]};
+        gas.faces.push_back({{1, 0, 1}, -1});
+        const std::array<const MetricTestPoly*, 3> channels{&bulk, &gas, nullptr};
+        metrics.freeze(29, channels, nullptr);
+        ASSERT_EQ(metrics.records().size(), 1u);
+        const auto& frozen = metrics.records().front();
+        ASSERT_EQ(frozen.rows.size(), 3u);
+        ASSERT_EQ(frozen.local_to_numeric.size(), 5u);
+        EXPECT_EQ(frozen.local_to_numeric[0], frozen.local_to_numeric[4]);
+        EXPECT_EQ(frozen.local_to_numeric[1], frozen.local_to_numeric[3]);
+        EXPECT_NE(frozen.local_to_numeric[0], frozen.local_to_numeric[2]);
+    }
+    EXPECT_EQ(work.stats.live_vertex_records, 0u);
+    const auto& record = metrics.records().front();
+    EXPECT_EQ(record.tetra, 29u);
+    EXPECT_EQ(metrics.coefficient_count(), 0u);
+    const auto bulk = TestMetrics::view(record, 0), gas = TestMetrics::view(record, 1);
+    const std::array<TestArena::Weights, 3> expected_weights{{{1, 0, 0, 0}, {0, 1, 0, 0}, {1, 0, 0, 0}}};
+    const std::array<TestArena::Weights, 3> expected_errors{
+        {{0, 0x1p-40L, 0x1p-41L, 0x1p-42L}, {0x1p-43L, 0, 0x1p-44L, 0x1p-45L}, {0, 0x1p-40L, 0x1p-41L, 0x1p-42L}}};
+    for (unsigned local = 0; local < 3; ++local)
+    {
+        EXPECT_EQ(bulk.weights(local), expected_weights[local]);
+        EXPECT_EQ(bulk.errors(local), expected_errors[local]);
+    }
+    EXPECT_EQ(gas.weights(0), expected_weights[1]);
+    EXPECT_EQ(gas.errors(1), expected_errors[0]);
+    EXPECT_EQ(bulk.faces.front().source, 3);
+    EXPECT_EQ(gas.faces.front().source, -1);
+    const std::vector<std::size_t> bulk_ring{2, 0, 1}, gas_ring{1, 0, 1};
+    EXPECT_TRUE(std::equal(
+        bulk.faces.front().vertices.begin(), bulk.faces.front().vertices.end(), bulk_ring.begin(), bulk_ring.end()));
+    EXPECT_TRUE(std::equal(
+        gas.faces.front().vertices.begin(), gas.faces.front().vertices.end(), gas_ring.begin(), gas_ring.end()));
+    // Source-domain retry must still see its original local zero, even when
+    // that point uses another channel's numeric row one.
+    EXPECT_EQ(record.local_to_numeric[record.channels[1].local_first], record.local_to_numeric[1]);
+    EXPECT_TRUE(TestMetrics::view(record, 2).faces.empty());
+    EXPECT_EQ(work.stats.live_freeze_scratch_bytes, 0u);
+    EXPECT_GT(work.stats.peak_freeze_scratch_bytes, 0u);
+    EXPECT_GT(work.stats.live_compact_metric_bytes, 0u);
+}
+
+TEST(OrdinaryAggregateMetric, PureChannelsAliasBulkAndOnlyFirstAttemptStoresCoefficients)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    const auto bulk = metric_triangle(arena);
+    TestMetrics metrics(work);
+    metrics.reserve_records(2, true);
+    const std::array<long double, 4> coefficients{2, 3, 5, 7};
+    metrics.freeze(0, std::array<const MetricTestPoly*, 3>{&bulk, &bulk, nullptr}, &coefficients);
+    metrics.freeze(1, std::array<const MetricTestPoly*, 3>{&bulk, nullptr, &bulk}, &coefficients);
+    ASSERT_EQ(metrics.records().size(), 2u);
+    EXPECT_EQ(metrics.coefficient_count(), 2u);
+    EXPECT_NE(metrics.records()[0].rows.data(), metrics.records()[1].rows.data());
+    for (unsigned index = 0; index < 2; ++index)
+    {
+        const auto& record = metrics.records()[index];
+        EXPECT_EQ(record.rows.size(), 3u);
+        EXPECT_EQ(record.local_to_numeric.size(), 3u);
+        EXPECT_EQ(record.faces.size(), 1u);
+        const auto alias = index == 0 ? 1 : 2;
+        EXPECT_EQ(TestMetrics::view(record, 0).faces.descriptors.data(),
+            TestMetrics::view(record, alias).faces.descriptors.data());
+        EXPECT_EQ(record.channels[0].local_first, record.channels[alias].local_first);
+        EXPECT_TRUE(TestMetrics::view(record, index == 0 ? 2 : 1).faces.empty());
+        EXPECT_EQ(metrics.coefficients(index), coefficients);
+    }
+}
+
+TEST(OrdinaryAggregateMetric, FreezeAdmissionExactCapOneByteShortAndSpentPrefixAreMonotone)
+{
+    std::size_t exact_cap = 0, allocations = 0;
+    {
+        ArenaTestWork work;
+        TestArena arena(work);
+        const auto bulk = metric_triangle(arena);
+        const auto charges_before = work.charges;
+        TestMetrics metrics(work);
+        metrics.reserve_records(1, false);
+        metrics.freeze(0, std::array<const MetricTestPoly*, 3>{&bulk, &bulk, nullptr}, nullptr);
+        exact_cap = work.charged_bytes;
+        allocations = work.charges - charges_before;
+    }
+    for (bool short_by_one : {false, true})
+    {
+        ArenaTestWork work;
+        work.byte_budget = exact_cap - short_by_one;
+        TestArena arena(work);
+        const auto bulk = metric_triangle(arena);
+        const auto vertex = bulk.vertices.front().slot_id();
+        const auto bytes_before = work.charged_bytes;
+        {
+            TestMetrics metrics(work);
+            metrics.reserve_records(1, false);
+            const auto freeze = [&]
+            { metrics.freeze(0, std::array<const MetricTestPoly*, 3>{&bulk, &bulk, nullptr}, nullptr); };
+            if (short_by_one)
+                EXPECT_THROW(freeze(), std::bad_alloc);
+            else
+                EXPECT_NO_THROW(freeze());
+        }
+        EXPECT_EQ(work.stats.live_compact_metric_bytes, 0u);
+        EXPECT_EQ(work.stats.live_freeze_scratch_bytes, 0u);
+        EXPECT_GT(work.charged_bytes, bytes_before);
+        EXPECT_EQ(bulk.vertices.front().slot_id(), vertex);
+        EXPECT_EQ(bulk.weights(0), (TestArena::Weights{1, 0, 0, 0}));
+        work.byte_budget = std::numeric_limits<std::size_t>::max();
+        TestMetrics retry(work);
+        retry.reserve_records(1, false);
+        EXPECT_NO_THROW(retry.freeze(0, std::array<const MetricTestPoly*, 3>{&bulk, &bulk, nullptr}, nullptr));
+        EXPECT_GT(work.charged_bytes, bytes_before);
+    }
+    // Every admitted allocation prefix is retained, while partial freeze
+    // storage and scratch are released after each exceptional exit.
+    for (std::size_t fail = 0; fail < allocations; ++fail)
+    {
+        ArenaTestWork work;
+        TestArena arena(work);
+        const auto bulk = metric_triangle(arena);
+        const auto original = work.charged_bytes;
+        work.fail_at = work.charges + fail;
+        try
+        {
+            TestMetrics metrics(work);
+            metrics.reserve_records(1, false);
+            metrics.freeze(0, std::array<const MetricTestPoly*, 3>{&bulk, &bulk, nullptr}, nullptr);
+        }
+        catch (const std::bad_alloc&)
+        {
+            EXPECT_GE(work.charged_bytes, original);
+        }
+        EXPECT_EQ(work.stats.live_compact_metric_bytes, 0u);
+        EXPECT_EQ(work.stats.live_freeze_scratch_bytes, 0u);
+        EXPECT_EQ(arena.live_records(), 3u);
+    }
+}
+
+TEST(OrdinaryAggregateMetric, OperationLimitAtIntegrationBoundaryRetainsCompletedConstructionAndSourceReuse)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    OrdinaryAggregateDonor donor;
+    donor.id = 82;
+    donor.geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
+    donor.pure_gas = true;
+    donor.bulk_budget = donor.gas_budget = relative_allowance;
+    const std::array donors{donor};
+    const OrdinaryAggregateSource baseline(indexed_cube(), {}, ordinary_limits());
+    const auto expected = baseline.measure(donors);
+    ASSERT_EQ(expected.statistics.retries, 0u);
+    const auto boundary = expected.statistics.metric_construction_operations;
+    ASSERT_GT(boundary, 0u);
+    ASSERT_LT(boundary, expected.statistics.operations);
+    auto limits = ordinary_limits();
+    limits.maximum_operations = boundary;
+    const OrdinaryAggregateSource limited(indexed_cube(), {}, limits);
+    for (unsigned attempt = 0; attempt < 2; ++attempt)
+    {
+        OrdinaryAggregateContext context;
+        expect_error([&] { (void) limited.measure(donors, &context); }, GeometryErrorCode::ResourceLimit);
+        EXPECT_EQ(context.stage, OrdinaryAggregateStage::Metric);
+        EXPECT_EQ(context.retry, 0u);
+        EXPECT_EQ(context.source, 0u);
+        EXPECT_EQ(context.cut, OrdinaryAggregateContext::absent);
+        EXPECT_EQ(context.operations, boundary);
+        EXPECT_EQ(context.statistics.metric_construction_operations, boundary);
+        EXPECT_EQ(context.statistics.vertex_record_constructions, expected.statistics.vertex_record_constructions);
+        EXPECT_EQ(context.statistics.vertices_classified, expected.statistics.vertices_classified);
+        EXPECT_EQ(context.statistics.witnesses, expected.statistics.witnesses);
+        EXPECT_EQ(context.statistics.live_vertex_records, 0u);
+        EXPECT_EQ(context.statistics.live_compact_metric_bytes, 0u);
+        EXPECT_EQ(context.statistics.live_freeze_scratch_bytes, 0u);
+        EXPECT_GT(context.statistics.peak_compact_metric_bytes, 0u);
+        ASSERT_EQ(limited.points().size(), 8u);
+        EXPECT_EQ(limited.points()[0].value, (std::array<long double, 3>{0, 0, 0}));
+    }
+    expect_amount(expected.groups.front().nominal.bulk, 1);
+    expect_amount(expected.groups.front().nominal.gas, 1);
+    EXPECT_EQ(expected.groups.front().nominal.carrier, 0);
+    expect_identical_results(expected, baseline.measure(donors));
+}
+
+TEST(OrdinaryAggregateSlotBuffer, OwnsOneBindingAndPreservesBorrowedCopyMoveAndReverseLocalOrder)
+{
+    static_assert(sizeof(TestArena::Handle) == 2 * sizeof(std::size_t));
+    static_assert(sizeof(TestArena::SlotBuffer::value_type) == sizeof(std::size_t));
+    static_assert(sizeof(TestArena::SlotBuffer) == sizeof(void*) + sizeof(std::vector<TestArena::SlotId>));
+    ArenaTestWork work;
+    TestArena arena(work);
+    {
+        TestArena::SlotBuffer original(arena);
+        original.reserve(3);
+        for (unsigned local = 0; local < 3; ++local)
+            original.push_back(arena.create({local + 1.L, 0, 0, 0}, {}, {}, nullptr, nullptr));
+        const auto copies_before_borrow = work.stats.vertex_handle_copies;
+        std::vector<TestArena::SlotId> order;
+        for (auto borrowed : original)
+            order.push_back(borrowed.slot_id());
+        EXPECT_EQ(work.stats.vertex_handle_copies, copies_before_borrow);
+        EXPECT_EQ(original[1].get().weights[0], 2);
+        {
+            TestArena::SlotBuffer copy(original);
+            EXPECT_EQ(arena.live_records(), 3u);
+            EXPECT_EQ(work.stats.vertex_handle_copies, copies_before_borrow + 3);
+            const auto copies_before_move = work.stats.vertex_handle_copies;
+            TestArena::SlotBuffer moved(std::move(copy));
+            EXPECT_TRUE(copy.empty());
+            EXPECT_EQ(copy.arena(), nullptr);
+            EXPECT_EQ(work.stats.vertex_handle_copies, copies_before_move);
+            for (unsigned local = 0; local < 3; ++local)
+            {
+                EXPECT_EQ(moved[local].slot_id(), order[local]);
+                EXPECT_EQ(moved[local].get().weights[0], local + 1.L);
+            }
+        }
+        EXPECT_EQ(arena.live_records(), 3u);
+        EXPECT_EQ(work.live_vertex_index_bytes, original.capacity() * sizeof(std::size_t));
+    }
+    EXPECT_EQ(arena.live_records(), 0u);
+    EXPECT_EQ(work.live_vertex_index_bytes, 0u);
+    EXPECT_EQ(work.stats.vertex_relocation_bytes, 0u);
+}
+
+TEST(OrdinaryAggregateSlotBuffer, CopyAllocationFailuresPreserveSourceTargetAndSpentPrefix)
+{
+    for (std::size_t rejected_charge : {0u, 1u})
+    {
+        ArenaTestWork work;
+        TestArena arena(work);
+        TestArena::SlotBuffer source(arena), target(arena);
+        source.reserve(2);
+        target.reserve(1);
+        source.push_back(arena.create({1, 0, 0, 0}, {}, {}, nullptr, nullptr));
+        source.push_back(arena.create({0, 1, 0, 0}, {}, {}, nullptr, nullptr));
+        target.push_back(arena.create({0, 0, 1, 0}, {}, {}, nullptr, nullptr));
+        const auto source_first = source[0].slot_id(), target_first = target[0].slot_id();
+        const auto admitted = work.charged_bytes, live_bytes = work.live_vertex_index_bytes;
+        const auto copies = work.stats.vertex_handle_copies;
+        work.fail_at = work.charges + rejected_charge;
+        EXPECT_THROW(target = source, std::bad_alloc);
+        EXPECT_EQ(source.size(), 2u);
+        EXPECT_EQ(target.size(), 1u);
+        EXPECT_EQ(source[0].slot_id(), source_first);
+        EXPECT_EQ(target[0].slot_id(), target_first);
+        EXPECT_EQ(arena.live_records(), 3u);
+        EXPECT_EQ(work.live_vertex_index_bytes, live_bytes);
+        EXPECT_EQ(work.stats.vertex_handle_copies, copies);
+        EXPECT_EQ(work.charged_bytes, admitted + rejected_charge * 2 * sizeof(std::size_t));
+        work.fail_at = std::numeric_limits<std::size_t>::max();
+        target = source;
+        ASSERT_EQ(target.size(), 2u);
+        EXPECT_EQ(target[0].slot_id(), source_first);
+        EXPECT_EQ(target[1].get().weights, (TestArena::Weights{0, 1, 0, 0}));
+        EXPECT_EQ(arena.live_records(), 2u);
+    }
+}
+
+TEST(OrdinaryAggregateSlotBuffer, EvidenceReplacementPreservesSharedVersionsAndFailureLocalIndices)
+{
+    for (bool shared : {false, true})
+    {
+        ArenaTestWork work;
+        TestArena arena(work);
+        int first = 1, second = 2;
+        TestArena::SlotBuffer target(arena);
+        target.reserve(4);
+        target.push_back(arena.create({1, 2, 3, 4}, {4, 3, 2, 1}, {&first}, &first, &second));
+        for (unsigned local = 1; local < 4; ++local)
+            target.push_back(arena.create({}, {}, {}, nullptr, nullptr));
+        std::optional<TestArena::SlotBuffer> sibling;
+        if (shared)
+            sibling.emplace(target);
+        const auto old_slot = target[0].slot_id(), following = target[1].slot_id();
+        const auto construction = target[0].get().construction, version = target[0].get().evidence_version;
+        const auto incidence_bytes = work.live_incidence_bytes, slot_bytes = work.live_vertex_index_bytes;
+        const auto copies = work.stats.vertex_handle_copies, admitted = work.charged_bytes;
+        work.fail_at = work.charges + 1;
+        EXPECT_THROW(arena.replace_with_extended_evidence(target, 0, &second), std::bad_alloc);
+        EXPECT_EQ(target[0].slot_id(), old_slot);
+        EXPECT_EQ(target[0].get().evidence_version, version);
+        EXPECT_EQ(target[0].get().supports, (std::vector<const int*>{&first}));
+        EXPECT_EQ(target[1].slot_id(), following);
+        EXPECT_EQ(work.live_incidence_bytes, incidence_bytes);
+        EXPECT_EQ(work.live_vertex_index_bytes, slot_bytes);
+        EXPECT_EQ(arena.live_records(), 4u);
+        EXPECT_GT(work.charged_bytes, admitted);
+        work.fail_at = std::numeric_limits<std::size_t>::max();
+        arena.replace_with_extended_evidence(target, 0, &second);
+        EXPECT_EQ(target[0].get().weights, (TestArena::Weights{1, 2, 3, 4}));
+        EXPECT_EQ(target[0].get().errors, (TestArena::Weights{4, 3, 2, 1}));
+        EXPECT_EQ(target[0].get().construction, construction);
+        EXPECT_GT(target[0].get().evidence_version, version);
+        EXPECT_EQ(target[0].get().supports, (std::vector<const int*>{&first, &second}));
+        EXPECT_EQ(target[1].slot_id(), following);
+        EXPECT_EQ(work.stats.vertex_handle_copies, copies);
+        if (shared)
+        {
+            EXPECT_NE(target[0].slot_id(), old_slot);
+            EXPECT_EQ((*sibling)[0].slot_id(), old_slot);
+            EXPECT_EQ((*sibling)[0].get().evidence_version, version);
+            EXPECT_EQ((*sibling)[0].get().supports, (std::vector<const int*>{&first}));
+            EXPECT_EQ(arena.live_records(), 5u);
+        }
+        else
+        {
+            EXPECT_EQ(target[0].slot_id(), old_slot);
+            EXPECT_EQ(arena.live_records(), 4u);
+        }
+    }
+}
+
+TEST(OrdinaryAggregateMetric, CombinedPeakIncludesOldGeometryPreviousRecordNewBuffersAndFreezeScratch)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    const auto bulk = metric_triangle(arena);
+    // This test owns and counts the physical synthetic Poly, including its
+    // inline vector descriptors, retained Handle buffer, and original face ring.
+    const auto old_poly = sizeof(MetricTestPoly) + bulk.vertices.capacity() * sizeof(TestArena::Handle) +
+                          bulk.faces.capacity() * sizeof(MetricTestPoly::Face) +
+                          bulk.faces.front().vertices.capacity() * sizeof(std::size_t);
+    work.external_connectivity_bytes = old_poly;
+    work.observe_geometry();
+    // Three issued records require two two-record pages, a two-pointer page
+    // directory, and one four-slot block with its one-pointer directory.
+    using Page = std::array<std::optional<TestArena::Record>, 2>;
+    struct SlotLayout
+    {
+        TestArena::Record* record;
+        std::size_t references, next_free;
+    };
+    using SlotBlock = std::array<SlotLayout, 4>;
+    const auto old_arena = sizeof(TestArena) + 2 * sizeof(std::unique_ptr<Page>) + 2 * sizeof(Page);
+    const auto old_slots = sizeof(std::unique_ptr<SlotBlock>) + sizeof(SlotBlock);
+    ASSERT_EQ(arena.record_capacity(), 4u);
+    ASSERT_EQ(arena.slot_capacity(), 4u);
+    ASSERT_EQ(work.live_arena_bytes, old_arena);
+    ASSERT_EQ(work.live_slot_bytes, old_slots);
+    ASSERT_EQ(work.live_incidence_bytes, 0u);
+    TestMetrics metrics(work);
+    metrics.reserve_records(2, false);
+    ASSERT_EQ(metrics.records().capacity(), 2u);
+    const auto descriptors = sizeof(TestMetrics) + 2 * sizeof(TestMetrics::Record);
+    const auto payload =
+        3 * sizeof(TestMetrics::Row) + 3 * sizeof(std::size_t) + sizeof(TestMetrics::Face) + 3 * sizeof(std::size_t);
+    const auto freeze_map = 3 * sizeof(std::size_t);
+    const std::array<const MetricTestPoly*, 3> channels{&bulk, &bulk, nullptr};
+    metrics.freeze(0, channels, nullptr);
+    EXPECT_EQ(
+        work.stats.peak_combined_geometry_bytes, old_poly + old_arena + old_slots + descriptors + payload + freeze_map);
+    const auto first_peak = work.stats.peak_combined_geometry_bytes;
+    metrics.freeze(1, channels, nullptr);
+    for (const auto& record : metrics.records())
+    {
+        ASSERT_EQ(record.rows.capacity(), 3u);
+        ASSERT_EQ(record.local_to_numeric.capacity(), 3u);
+        ASSERT_EQ(record.faces.capacity(), 1u);
+        ASSERT_EQ(record.rings.capacity(), 3u);
+    }
+    // The first tetra's completed payload remains live while the next complete
+    // payload and its slot map coexist with every old construction allocation.
+    const auto expected_peak = old_poly + old_arena + old_slots + descriptors + payload + payload + freeze_map;
+    EXPECT_EQ(work.stats.peak_combined_geometry_bytes, expected_peak);
+    EXPECT_GT(expected_peak, first_peak);
+    EXPECT_EQ(work.stats.peak_compact_metric_bytes, descriptors + 2 * payload);
+    EXPECT_EQ(work.stats.peak_freeze_scratch_bytes, freeze_map);
+    EXPECT_EQ(work.stats.live_freeze_scratch_bytes, 0u);
+    EXPECT_EQ(arena.live_records(), 3u);
+}
+
+TEST(OrdinaryAggregateSlotBuffer, MixedStandaloneHandleAndBufferPreserveAllSharedEvidenceVersions)
+{
+    ArenaTestWork work;
+    TestArena arena(work);
+    int source = 0, chart = 0, first = 1, second = 2, third = 3;
+    const TestArena::Weights weights{.125L, .25L, .5L, .125L}, errors{0x1p-43L, 0x1p-44L, 0x1p-45L, 0x1p-46L};
+    auto original = arena.create(weights, errors, {&first}, &source, &chart);
+    const auto original_slot = original.slot_id();
+    const auto original_version = original.get().evidence_version;
+    const auto construction = original.get().construction;
+    TestArena::SlotBuffer buffer(arena);
+    buffer.reserve(1);
+    buffer.push_back(original);
+    const auto copies_before_replacement = work.stats.vertex_handle_copies;
+    arena.replace_with_extended_evidence(buffer, 0, &second);
+    EXPECT_EQ(work.stats.vertex_handle_copies, copies_before_replacement);
+    EXPECT_EQ(original.slot_id(), original_slot);
+    EXPECT_EQ(original.get().evidence_version, original_version);
+    EXPECT_EQ(original.get().supports, (std::vector<const int*>{&first}));
+    EXPECT_NE(buffer[0].slot_id(), original_slot);
+    EXPECT_EQ(buffer[0].get().supports, (std::vector<const int*>{&first, &second}));
+    const auto buffer_slot = buffer[0].slot_id();
+    const auto buffer_version = buffer[0].get().evidence_version;
+    auto standalone = buffer[0].retain();
+    const auto copies_before_second_replacement = work.stats.vertex_handle_copies;
+    arena.replace_with_extended_evidence(standalone, &third);
+    EXPECT_EQ(work.stats.vertex_handle_copies, copies_before_second_replacement);
+    EXPECT_EQ(buffer[0].slot_id(), buffer_slot);
+    EXPECT_EQ(buffer[0].get().evidence_version, buffer_version);
+    EXPECT_EQ(buffer[0].get().supports, (std::vector<const int*>{&first, &second}));
+    EXPECT_NE(standalone.slot_id(), buffer_slot);
+    EXPECT_EQ(standalone.get().supports, (std::vector<const int*>{&first, &second, &third}));
+    for (const auto* record : {&original.get(), &buffer[0].get(), &standalone.get()})
+    {
+        EXPECT_EQ(record->weights, weights);
+        EXPECT_EQ(record->errors, errors);
+        EXPECT_EQ(record->construction, construction);
+        EXPECT_EQ(record->source, &source);
+        EXPECT_EQ(record->chart, &chart);
+    }
+    EXPECT_GT(buffer_version, original_version);
+    EXPECT_GT(standalone.get().evidence_version, buffer_version);
+    EXPECT_EQ(arena.live_records(), 3u);
+}
+
+namespace
+{
+auto geometry_counter_values()
+{
+    constexpr std::array members{&GeometryStatistics::source_imports, &GeometryStatistics::constructions,
+        &GeometryStatistics::intersections, &GeometryStatistics::support_distances,
+        &GeometryStatistics::volume_evaluations, &GeometryStatistics::moment_evaluations,
+        &GeometryStatistics::partition_checks, &GeometryStatistics::structural_partition_reuses,
+        &GeometryStatistics::floating_operations, &GeometryStatistics::interval_operations,
+        &GeometryStatistics::ledger_operations, &GeometryStatistics::wider_routes, &GeometryStatistics::rejections,
+        &GeometryStatistics::runtime_dispatches, &GeometryStatistics::exact_predicates,
+        &GeometryStatistics::rational_constructions, &GeometryStatistics::rational_measures,
+        &GeometryStatistics::rational_ledgers};
+    const auto statistics = geometry_statistics();
+    std::array<std::uint64_t, members.size()> values{};
+    for (std::size_t i = 0; i < members.size(); ++i)
+        values[i] = statistics.*members[i];
+    return values;
+}
+} // namespace
+
+TEST(OrdinaryAggregateMetric, BorrowedRetentionObserverPreservesEnvironmentCountersBudgetsAndFailure)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    namespace Retention = SimpleFluid::PLIC::details::retention;
+    namespace AggregateDiagnostics = SimpleFluid::geometry::swept_volume::details;
+    struct Environment
+    {
+        std::fenv_t saved{};
+        Environment() { std::fegetenv(&saved); }
+        ~Environment() { std::fesetenv(&saved); }
+    } environment;
+    OrdinaryAggregateDonor donor;
+    donor.id = 132;
+    donor.geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
+    donor.pure_carrier = true;
+    donor.bulk_budget = donor.carrier_budget = relative_allowance;
+    const std::array donors{donor};
+    const OrdinaryAggregateSource source(indexed_cube(), {}, ordinary_limits());
+    const auto warm = source.measure(donors);
+    auto limits = ordinary_limits();
+    limits.maximum_operations = warm.statistics.metric_construction_operations;
+    const OrdinaryAggregateSource limited(indexed_cube(), {}, limits);
+    std::vector<std::byte> scratch_bytes(2 * 1024 * 1024);
+    Retention::ProbeScratch scratch(scratch_bytes);
+    struct ObserverState
+    {
+        Retention::ProbeScratch& scratch;
+        std::size_t calls = 0, exits = 0, owners = 0;
+        bool complete = true, neutral = true;
+    } observer{scratch};
+    const auto callback =
+        +[](const AggregateDiagnostics::OrdinaryAggregateRetentionObservation& observation, void* context)
+    {
+        auto& state = *static_cast<ObserverState*>(context);
+        const auto before = geometry_counter_values();
+        const auto round = std::fegetround(), flags = std::fetestexcept(FE_ALL_EXCEPT);
+        std::array<Retention::BorrowedRoot, 9> roots;
+        std::size_t count = 0;
+        for (const auto& point : observation.source_points)
+            roots[count++] = Retention::root(point, 7);
+        for (const auto& declared : observation.donors)
+            roots[count++] = Retention::root(*declared.geometry, 7);
+        state.scratch.reset();
+        const std::array ledgers{&observation.ledger};
+        {
+            const auto report = Retention::inspect_retention(std::span(roots).first(count), ledgers, state.scratch);
+            state.complete &= report.complete() && report.root_count == 9 && report.ledger_count == 1;
+            state.owners = std::max(state.owners, report.owner_union.owners);
+        }
+        state.neutral &= geometry_counter_values() == before && std::fegetround() == round &&
+                         std::fetestexcept(FE_ALL_EXCEPT) == flags;
+        ++state.calls;
+        state.exits += observation.stage == "work-scope-exit";
+    };
+    struct Outcome
+    {
+        std::optional<OrdinaryAggregateResult> result;
+        std::optional<GeometryErrorCode> error;
+        std::string message;
+        OrdinaryAggregateContext context;
+        decltype(geometry_counter_values()) counters{};
+        std::size_t caller_bytes = 0, caller_operations = 0, caller_pairs = 0;
+        bool caller_restored = false;
+        int rounding = 0, flags = 0;
+    };
+    const auto run = [&](const OrdinaryAggregateSource& input, bool observe)
+    {
+        Outcome outcome;
+        std::fesetround(FE_UPWARD);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        std::feraiseexcept(FE_DIVBYZERO | FE_INEXACT);
+        SimpleFluid::PLIC::details::Operation caller(ordinary_limits());
+        caller.work.bytes = 101;
+        caller.work.operations = 17;
+        caller.work.pairs = 7;
+        const auto before = geometry_counter_values();
+        const auto measure = [&]
+        {
+            try
+            {
+                outcome.result = input.measure(donors, &outcome.context);
+            }
+            catch (const GeometryError& error)
+            {
+                outcome.error = error.code();
+                outcome.message = error.what();
+            }
+        };
+        if (observe)
+        {
+            AggregateDiagnostics::ScopedOrdinaryAggregateRetentionObserver scope(callback, &observer);
+            measure();
+        }
+        else
+            measure();
+        outcome.caller_restored = SimpleFluid::PLIC::details::active_work == &caller.work;
+        outcome.caller_bytes = caller.work.bytes;
+        outcome.caller_operations = caller.work.operations;
+        outcome.caller_pairs = caller.work.pairs;
+        outcome.rounding = std::fegetround();
+        outcome.flags = std::fetestexcept(FE_ALL_EXCEPT);
+        const auto after = geometry_counter_values();
+        for (std::size_t i = 0; i < before.size(); ++i)
+            outcome.counters[i] = after[i] - before[i];
+        return outcome;
+    };
+    for (const auto* input : {&source, &limited})
+    {
+        const auto plain = run(*input, false), observed = run(*input, true);
+        EXPECT_EQ(observed.rounding, FE_UPWARD);
+        EXPECT_EQ(observed.flags, FE_DIVBYZERO | FE_INEXACT);
+        EXPECT_EQ(observed.rounding, plain.rounding);
+        EXPECT_EQ(observed.flags, plain.flags);
+        EXPECT_EQ(observed.counters, plain.counters);
+        EXPECT_TRUE(plain.caller_restored);
+        EXPECT_TRUE(observed.caller_restored);
+        EXPECT_EQ(observed.caller_bytes, plain.caller_bytes);
+        EXPECT_EQ(observed.caller_operations, plain.caller_operations);
+        EXPECT_EQ(observed.caller_pairs, plain.caller_pairs);
+        EXPECT_EQ(observed.error, plain.error);
+        EXPECT_EQ(observed.message, plain.message);
+        EXPECT_EQ(observed.context.bytes, plain.context.bytes);
+        EXPECT_EQ(observed.context.pairs, plain.context.pairs);
+        EXPECT_EQ(observed.context.operations, plain.context.operations);
+        EXPECT_EQ(observed.context.stage, plain.context.stage);
+        EXPECT_EQ(observed.context.donor, plain.context.donor);
+        EXPECT_EQ(observed.context.source, plain.context.source);
+        EXPECT_EQ(observed.context.cut, plain.context.cut);
+        EXPECT_EQ(observed.context.retry, plain.context.retry);
+        if (plain.result)
+        {
+            ASSERT_TRUE(observed.result);
+            expect_identical_results(*plain.result, *observed.result);
+            expect_amount(observed.result->groups.front().nominal.bulk, 1);
+            expect_amount(observed.result->groups.front().nominal.carrier, 1);
+        }
+        else
+        {
+            EXPECT_FALSE(observed.result);
+            EXPECT_EQ(observed.error, GeometryErrorCode::ResourceLimit);
+            EXPECT_EQ(observed.context.operations, limits.maximum_operations);
+        }
+    }
+    EXPECT_TRUE(observer.complete);
+    EXPECT_TRUE(observer.neutral);
+    EXPECT_GT(observer.calls, 2u);
+    EXPECT_EQ(observer.exits, 2u);
+    EXPECT_GT(observer.owners, 0u);
 }
