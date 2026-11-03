@@ -4,6 +4,7 @@
 #include "geometry/PLIC/ScalarPacket.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
@@ -172,14 +173,16 @@ struct ObservedClosure
     std::uint64_t point_observations = 0, global_physical_nodes = 0, planned_reply_records = 0, retired_groups = 0;
 };
 ObservedClosure observe_closure(std::span<const ::SimpleFluid::Meshes::AMR::AdaptiveLeaf> source,
-    const ::SimpleFluid::Meshes::AMR::AdaptiveProviderKernel& kernel)
+    const ::SimpleFluid::Meshes::AMR::AdaptiveProviderKernel& kernel, bool compare_spatial = true)
 {
     namespace AMR = ::SimpleFluid::Meshes::AMR;
     ObservedClosure result;
     ClosureDiagnosticCapture capture;
     AMR::AdaptiveClosureOptions options;
     options.statistics = &result.statistics;
-    result.marks = AMR::required_adaptive_refinements(source, kernel, Tpetra::getDefaultComm(), options);
+    // Historical packet/count diagnostics remain an explicit legacy oracle.
+    result.marks = AMR::adaptive_detail::legacy_required_adaptive_refinements(
+        source, kernel, Tpetra::getDefaultComm(), options);
     const auto log = capture.finish();
     result.point_observations = closure_diagnostic(log, "point_observations");
     result.global_physical_nodes = closure_diagnostic(log, "global_physical_nodes");
@@ -188,6 +191,16 @@ ObservedClosure observe_closure(std::span<const ::SimpleFluid::Meshes::AMR::Adap
     const auto request_peak = closure_diagnostic(log, "request_state_peak_bytes");
     EXPECT_LE(request_peak, options.byte_budget);
     EXPECT_GE(closure_diagnostic(log, "tile_and_request_peak_bytes"), request_peak);
+    if (compare_spatial)
+    {
+        const auto spatial = AMR::required_adaptive_refinements(source, kernel, Tpetra::getDefaultComm());
+        EXPECT_EQ(spatial.size(), result.marks.size());
+        for (std::size_t i = 0; i < std::min(spatial.size(), result.marks.size()); ++i)
+        {
+            EXPECT_EQ(spatial[i].key, result.marks[i].key);
+            EXPECT_EQ(spatial[i].split, result.marks[i].split);
+        }
+    }
     return result;
 }
 void require_contact_counts(const ObservedClosure& observed, std::uint64_t contacts, std::uint64_t observations,
@@ -265,7 +278,7 @@ TEST(DistributedAdaptiveClosure, ContactShellsRetireBetweenRecordsAndAfterCollec
     ShellLifetimeKernel kernel(detached.kernel);
     const auto check = [&]
     {
-        const auto result = observe_closure(detached.owned, kernel);
+        const auto result = observe_closure(detached.owned, kernel, false);
         EXPECT_TRUE(result.marks.empty());
         // A 2x2x2 box has 27 distinct vertices and 8 vertices/24 face-vertex
         // occurrences per cell. At its contacts there are 12*C(2,2) +
@@ -281,6 +294,10 @@ TEST(DistributedAdaptiveClosure, ContactShellsRetireBetweenRecordsAndAfterCollec
             EXPECT_FALSE(value.geometry);
             EXPECT_TRUE(value.surfaces.empty());
         }
+        kernel.reset_observation();
+        EXPECT_TRUE(AMR::required_adaptive_refinements(detached.owned, kernel, comm).empty());
+        EXPECT_EQ(kernel.shells.size(), ids.size());
+        EXPECT_EQ(kernel.maximum_live_shells, ids.empty() ? 0u : 1u);
         kernel.reset_observation();
     };
     check();
@@ -369,7 +386,7 @@ TEST(DistributedAdaptiveClosure, GeometryAndTracesAreInternedAcrossClosedPointIn
     if (comm->getSize() < 8 && !source.empty())
         EXPECT_LT(statistics.transmitted_geometry_records, statistics.contacts);
     if (comm->getSize() == 1)
-        EXPECT_EQ(statistics.replicated_record_bytes, statistics.unique_record_bytes);
+        EXPECT_EQ(statistics.replicated_record_bytes, 0u); // Local records need no self-wire copy.
     // The same contact/trace work cap remains cumulative across all points.
     options.contact_budget = 1;
     EXPECT_THROW(AMR::required_adaptive_refinements(source, ContactKernel{true}, comm, options), std::invalid_argument);
@@ -422,15 +439,15 @@ TEST(DistributedAdaptiveClosure, PointIndependentTraceWorkIsCachedAndCumulative)
     require_coarse(source, ContactKernel{true}, options);
     if (comm->getSize() == 1)
     {
-        // Exactly two shared edge endpoints produce two original cell-pair
-        // admissions, and the one immutable trace pair is evaluated once.
-        EXPECT_EQ(statistics.work, 3);
-        options.contact_budget = 2;
+        // Both edge endpoints share one cell pair: one span evaluation and
+        // one point-independent trace evaluation spend two work admissions.
+        EXPECT_EQ(statistics.work, 2);
+        options.contact_budget = 1;
         EXPECT_THROW(
             AMR::required_adaptive_refinements(source, ContactKernel{true}, comm, options), std::invalid_argument);
-        options.contact_budget = 3;
+        options.contact_budget = 2;
         require_coarse(source, ContactKernel{true}, options);
-        EXPECT_EQ(statistics.work, 3);
+        EXPECT_EQ(statistics.work, 2);
     }
     options.contact_budget = 1;
     EXPECT_THROW(AMR::required_adaptive_refinements(source, ContactKernel{true}, comm, options), std::invalid_argument);
@@ -451,11 +468,12 @@ TEST(DistributedAdaptiveClosure, FaceRestrictedTracesRemainSpecificToEachContact
     require_coarse(source, ContactKernel{true, true, true}, options);
     if (comm->getSize() == 1)
     {
-        EXPECT_EQ(statistics.work, 4);
-        options.contact_budget = 3;
+        // One shared span pair, plus a physical-point trace test at each endpoint.
+        EXPECT_EQ(statistics.work, 3);
+        options.contact_budget = 2;
         EXPECT_THROW(AMR::required_adaptive_refinements(source, ContactKernel{true, true, true}, comm, options),
             std::invalid_argument);
-        options.contact_budget = 4;
+        options.contact_budget = 3;
         require_coarse(source, ContactKernel{true, true, true}, options);
     }
 }

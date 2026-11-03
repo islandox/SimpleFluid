@@ -28,11 +28,16 @@ struct SIMPLEFLUID_LOCAL ClosureRequirements
     std::optional<AdaptiveSplit> first, second;
 };
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t key_capacity(const AdaptiveCellKey&);
+[[nodiscard]] SIMPLEFLUID_LOCAL std::size_t key_wire_size(const AdaptiveCellKey&);
+[[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveCellKey decode_bounded_key(std::span<const char>, Budget&);
 /** Legacy record codec: its payload, field order and admission order are fixed. */
 [[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveBytes encode_contact(const AdaptiveLeaf&, const AdaptiveProviderKernel&,
     Budget&, std::size_t& trace_records, std::size_t& transient_geometry_peak);
 [[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveBytes encode_contact(const ContactRecord&, Budget&);
 [[nodiscard]] SIMPLEFLUID_LOCAL ContactRecord decode_contact(std::span<const char>, std::size_t limit);
+/** Owning decode with preallocation admission against the caller's simultaneous
+ * live state. Encoded input remains charged by the caller until return. */
+[[nodiscard]] SIMPLEFLUID_LOCAL ContactRecord decode_contact(std::span<const char>, Budget&, IdentityBudget&);
 /** Construct an owning record without contact serialization. The caller keeps
  * retained_identities alive as long as the record and retains the returned
  * budget charges until retirement. Includes sizeof(ContactRecord), key/domain,

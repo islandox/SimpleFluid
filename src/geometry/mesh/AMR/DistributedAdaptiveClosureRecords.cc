@@ -28,16 +28,72 @@ std::size_t key_capacity(const AdaptiveCellKey& key)
         },
         key.ancestry);
 }
+std::size_t key_wire_size(const AdaptiveCellKey& key)
+{
+    const auto path_bytes = std::visit([](const auto& value) -> std::size_t {
+        if constexpr (requires { value.path; }) return value.path.size();
+        else if constexpr (requires { value.base; value.axial; }) return value.base.path.size() + value.axial.path.size();
+        else return 0;
+    }, key.ancestry);
+    if (path_bytes > (std::numeric_limits<std::size_t>::max() - 80) / 8)
+        throw std::invalid_argument("Adaptive key size overflows.");
+    const std::size_t fixed[] = {72, 56, 80, 56};
+    return fixed[key.ancestry.index()] + 8 * path_bytes;
+}
+AdaptiveCellKey decode_bounded_key(std::span<const char> bytes, Budget& budget)
+{
+    // Path arrays reserve their validated lengths. Keep a conservative envelope
+    // for the decoded ancestry value and its variant-copy temporaries; the
+    // returned owner's actual capacity is retained after those temporaries die.
+    if (bytes.size() > (budget.limit - budget.used) / 3)
+        throw std::invalid_argument("Adaptive key decode exceeds live byte budget.");
+    const auto admitted = 3 * bytes.size();
+    budget.add(admitted);
+    auto result = decode_adaptive_key(bytes);
+    const auto retained = key_capacity(result);
+    if (retained > admitted)
+        throw std::invalid_argument("Adaptive key decode capacity exceeds admission.");
+    budget.used -= admitted - retained;
+    return result;
+}
 namespace
 {
 template<class Factor, class Admit>
 AdaptiveBytes write_contact(const AdaptiveCellKey& key, std::span<const char> domain,
     std::span<const AdaptiveTraceFace> traces, const std::array<long double, 3>& spans, Factor&& factor, Budget& budget,
-    Admit&& add_transient)
+    Admit&& add_transient, bool bounded = false)
 {
     Writer w;
+    std::size_t reservation = 0;
+    if (bounded)
+    {
+        auto add = [&](std::size_t n) {
+            if (n > std::numeric_limits<std::size_t>::max() - reservation)
+                throw std::invalid_argument("Closure record size overflows.");
+            reservation += n;
+        };
+        add(geometry_record_header_bytes + 8 + key_wire_size(key) + 8 + domain.size());
+        add(16 + 3 * PLIC::ScalarPacketWords{}.size() * 8 + 24 + 8);
+        for (const auto& face : traces)
+        {
+            add(8); add(face.stem.size()); add(32);
+            if (face.face) { add(8); add(face.face->encoded_incidence_size()); }
+        }
+        budget.add(reservation);
+        w.data.reserve(reservation);
+        if (w.data.capacity() != reservation)
+            throw std::invalid_argument("Closure record capacity differs from admission.");
+    }
     write_geometry_record_header(w, GeometryRecordKind::ClosureSpanContact);
-    w.bytes(encode_adaptive_key(key));
+    if (bounded)
+    {
+        const auto size = key_wire_size(key);
+        if (size > (budget.limit - budget.used) / 3) throw std::invalid_argument("Closure key encoding exceeds budget.");
+        budget.add(3 * size);
+        { auto encoded = encode_adaptive_key(key); w.bytes(encoded); }
+        budget.used -= 3 * size;
+    }
+    else w.bytes(encode_adaptive_key(key));
     w.bytes(domain);
     w.word(std::numeric_limits<long double>::digits);
     w.word(std::numeric_limits<long double>::max_exponent);
@@ -58,11 +114,27 @@ AdaptiveBytes write_contact(const AdaptiveCellKey& key, std::span<const char> do
         w.word(bool(face.face));
         if (face.face)
         {
-            add_transient(face.face->encode_incidence(budget.limit).size());
-            w.bytes(face.face->encode_incidence(budget.limit));
+            if (bounded)
+            {
+                const auto size = face.face->encoded_incidence_size();
+                const auto scratch = face.face->encoding_scratch_bytes();
+                if (scratch > budget.limit - budget.used || size > (budget.limit - budget.used - scratch) / 6)
+                    throw std::invalid_argument("Closure face encoding exceeds live byte budget.");
+                const auto admitted = scratch + 6 * size;
+                budget.add(admitted);
+                { auto encoded = face.face->encode_incidence(admitted); w.bytes(encoded); }
+                budget.used -= admitted;
+            }
+            else
+            {
+                add_transient(face.face->encode_incidence(budget.limit).size());
+                w.bytes(face.face->encode_incidence(budget.limit));
+            }
         }
     }
-    budget.add(w.data.capacity());
+    if (bounded && w.data.size() != reservation)
+        throw std::invalid_argument("Closure record size differs from admission.");
+    if (!bounded) budget.add(w.data.capacity());
     return std::move(w.data);
 }
 /** Keep the full source shell, trace owners and certificate scratch in one
@@ -157,19 +229,42 @@ AdaptiveBytes encode_contact(const ContactRecord& contact, Budget& budget)
     const auto before = budget.used;
     auto result = write_contact(
         contact.key, contact.domain, contact.traces, contact.spans,
-        [&](std::size_t axis) { return contact.factors[axis]; }, budget, [&](std::size_t bytes) { budget.add(bytes); });
+        [&](std::size_t axis) { return contact.factors[axis]; }, budget, [&](std::size_t bytes) { budget.add(bytes); }, true);
     budget.used -= budget.used - before - result.capacity();
     return result;
 }
-ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
+namespace
+{
+ContactRecord read_contact(std::span<const char> bytes, std::size_t limit, Budget* budget, IdentityBudget* identities)
 {
     if (bytes.size() > limit)
         throw std::invalid_argument("Closure contact exceeds byte budget.");
     Reader r{bytes};
     read_geometry_record_header(r, GeometryRecordKind::ClosureSpanContact);
+    if (budget)
+        budget->add(sizeof(ContactRecord));
     ContactRecord contact;
-    contact.key = decode_adaptive_key(r.bytes());
-    contact.domain = r.bytes();
+    if (budget)
+    {
+        const auto key = r.bytes_view();
+        // Canonical ancestry paths contain one encoded word per retained word;
+        // the complete key is a conservative preallocation bound.
+        contact.key = decode_bounded_key(key, *budget);
+    }
+    else
+        contact.key = decode_adaptive_key(r.bytes());
+    auto read_bytes = [&]()
+    {
+        if (!budget)
+            return r.bytes();
+        const auto field = r.bytes_view();
+        budget->add(field.size());
+        AdaptiveBytes result(field.begin(), field.end());
+        if (result.capacity() > field.size())
+            budget->add(result.capacity() - field.size());
+        return result;
+    };
+    contact.domain = read_bytes();
     if (contact.domain.empty())
         throw std::invalid_argument("Closure contact requires connected-domain provenance.");
     if (r.word() != std::numeric_limits<long double>::digits ||
@@ -193,10 +288,19 @@ ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
     auto n = r.word();
     if (n > bytes.size() / 32)
         throw std::invalid_argument("Invalid comparable trace count.");
+    if (budget)
+    {
+        if (n > (budget->limit - budget->used) / sizeof(AdaptiveTraceFace))
+            throw std::invalid_argument("Closure decoded trace capacity exceeds live byte budget.");
+        budget->add(n * sizeof(AdaptiveTraceFace));
+        contact.traces.reserve(n);
+        if (contact.traces.capacity() > n)
+            budget->add((contact.traces.capacity() - n) * sizeof(AdaptiveTraceFace));
+    }
     for (std::uint64_t i = 0; i < n; ++i)
     {
         AdaptiveTraceFace face;
-        face.stem = r.bytes();
+        face.stem = read_bytes();
         auto depth = r.word(), split = r.word(), terminal = r.word(), geometry = r.word();
         if (face.stem.empty() || depth > 64 || split > 2 || terminal > 1 || geometry > 1)
             throw std::invalid_argument("Invalid comparable trace.");
@@ -205,13 +309,33 @@ ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
         face.terminal = terminal;
         if (geometry)
         {
-            face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
+            if (budget)
+            {
+                const auto encoded = r.bytes_view();
+                // The face decoder admits its native polygon/support before
+                // allocation. Its cap is the remaining enclosing live credit.
+                face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(
+                    encoded, budget->limit - budget->used);
+                budget->add(sizeof(*face.face));
+                identities->face(*budget, *face.face);
+            }
+            else
+                face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), limit);
             contact.traces_point_independent = false;
         }
         contact.traces.push_back(std::move(face));
     }
     r.done();
     return contact;
+}
+} // namespace
+ContactRecord decode_contact(std::span<const char> bytes, std::size_t limit)
+{
+    return read_contact(bytes, limit, nullptr, nullptr);
+}
+ContactRecord decode_contact(std::span<const char> bytes, Budget& budget, IdentityBudget& identities)
+{
+    return read_contact(bytes, budget.limit - budget.used, &budget, &identities);
 }
 ContactRecord prepare_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
     IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak)

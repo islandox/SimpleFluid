@@ -42,7 +42,32 @@ codec retains field order and scalar bytes. Local preparation admits owned field
 before allocation and shares the existing nested geometry-admission boundary;
 outer live-byte observations are not substitutes for those construction caps.
 
-At the discovery-foundation stage, the existing closure route remains active. The
-spatial exchange and incremental frontier are separate integration stages. Their
-publication must preserve source/candidate isolation, owner/revision checks,
-complete neighborhoods, existing grading limits and collective rejection.
+The production closure route bootstraps complete physical contact incidence once
+through the existing canonical support/edge machinery, then evaluates a spatial
+halo. The index used for exclusion is built from the actual normalized incidence
+points, not merely the provider hull. This retains legacy edge-index admissions
+while the provider hull interface remains a broad-phase building block.
+
+A distributed binary rank-cover tree stores bounds only. It returns overlapping
+owner fragments; complete normalized point keys then go directly to those owners.
+Exact matches return all associated cell/revision/physical-point incidences, or an
+explicit empty completion. Cell records are fetched once per matched owner, key,
+revision and session. Bounded application pages, authenticated context/query/page
+identifiers and terminal counts prevent missing messages from becoming empty
+neighborhoods. Pages and decoded records share one live budget with the retained
+index, fans, pair table and cached records.
+
+The evaluator builds unique cell pairs before numerical comparison. Owned/owned
+pairs contribute both local requirements; owned/remote pairs contribute only the
+owned requirement. Point-independent span/trace work is reused across shared
+contacts; physical-point-dependent trace membership is still checked at each
+required incidence. Actual performed comparisons consume the contact work cap,
+while logical point-incidence pairs are reported separately. Communication and
+work placement intentionally differ from the previous hash-authority algorithm;
+transport paging never resets admission counters.
+
+The old closure implementation is an explicit private test oracle, never a
+production fallback. The standalone production call currently creates a complete
+bootstrap for that invocation. Persistent canonical-incidence deltas and hierarchy
+frontier updates are the subsequent integration stage; no incremental traversal
+claim follows from spatial packet routing alone.

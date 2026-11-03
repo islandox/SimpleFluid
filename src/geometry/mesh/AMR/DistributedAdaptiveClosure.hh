@@ -7,15 +7,16 @@
 #include <Teuchos_RCP.hpp>
 namespace SimpleFluid::Meshes::AMR
 {
-/** Rank-local construction diagnostics, including a rejected prefix. The
- * geometry_records counters retain their names for compact records containing
- * lossless decoded-shell axis spans and comparable traces, including optional
- * point-membership faces. Records are encoded once per owned leaf and sent at
- * most once to each actual point authority. Bytes are application estimates,
- * distinct from RSS; cumulative allocation and work counters never reset.
- * Request construction admits its node catalogue and GID-incidence storage;
- * borrowed authority tiles retain their separate input-accounting scope. The
- * printed diagnostics report their conservative simultaneous baseline. */
+/** Rank-local construction diagnostics, including a rejected prefix. The spatial
+ * route prepares owning span/trace records locally and fetches each matched remote
+ * record once per owner/key/revision and session. It does not send full records
+ * to point-hash authorities. geometry_records/trace_records count local preparation;
+ * transmitted/decoded counters describe actual remote record traffic.
+ * unique_record_bytes is local record header/key/domain admission; trace and
+ * identity owners also enter live_peak_bytes. replicated_record_bytes counts
+ * serialized remote records. Bytes are application estimates, not RSS.
+ * Work counts performed unique span-pair and trace comparisons, rather than
+ * repeated logical point incidences; paging never resets that counter. */
 struct AdaptiveClosureStats
 {
     std::size_t cells = 0, faces = 0, contacts = 0, geometry_records = 0, trace_records = 0;
@@ -37,10 +38,12 @@ struct AdaptiveClosureOptions
     unsigned maximum_trace_jump = 1;
     AdaptiveClosureStats* statistics = nullptr; ///< Optional local output; not collective option semantics.
 };
-/** Return only requirements for cells owned by this rank. Complete canonical
- * faces and propagated edge points establish closed face/edge/vertex contacts;
- * coincident independent domains remain separate. The operation is collective
- * and leaves every source record unchanged on rejection. */
+/** Return requirements for owned cells using exact point matches with spatial
+ * neighbors. One canonical support/edge bootstrap establishes complete incidence;
+ * closed spatial covers discover candidates and complete owner replies establish
+ * the halo. Physical point identities remain distinct from normalized keys.
+ * Coincident independent domains remain separate. The operation is collective,
+ * including empty owners, and leaves every source record unchanged on rejection. */
 [[nodiscard]] std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const AdaptiveLeaf> owned,
     const AdaptiveProviderKernel&, Teuchos::RCP<const Teuchos::Comm<int>>, AdaptiveClosureOptions = {});
 } // namespace SimpleFluid::Meshes::AMR

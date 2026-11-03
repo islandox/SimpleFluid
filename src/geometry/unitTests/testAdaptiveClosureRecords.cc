@@ -1,5 +1,6 @@
 /** Independent grading decisions and owning-record compatibility checks. */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/ScalarPacket.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include "utils/testing_environment.hh"
@@ -180,6 +181,97 @@ TEST(AdaptiveClosureRecords, OwningPreparationMatchesLegacyRecordAndOutlivesSour
     EXPECT_EQ(direct.key, (AMR::AdaptiveCellKey{7, AMR::ConvexCellAncestry{19, {1, 3}}}));
     EXPECT_EQ(direct.spans, (std::array<long double, 3>{4, 2, 1}));
     EXPECT_TRUE(direct.traces[0].face->contains_point(point(7, 1, 1)));
+}
+
+TEST(AdaptiveClosureRecords, LongAncestryCodecAndRecordEncodingRespectSharedLiveAdmission)
+{
+    const auto path = [](std::size_t count, std::uint64_t first)
+    {
+        std::vector<std::uint64_t> result(count);
+        for (std::size_t i = 0; i < count; ++i)
+            result[i] = first + 3 * i;
+        return result;
+    };
+    const std::array<AMR::AdaptiveCellKey, 2> keys{{
+        {7, AMR::ConvexCellAncestry{19, path(65, 1)}},
+        {11, AMR::ProductCellAncestry{{23, 29, path(65, 2)}, {31, path(67, 4)}}}}};
+    // Independent canonical layout: Convex has seven fixed words; Product has
+    // ten. Path lengths immediately beyond 64 expose geometric vector growth.
+    constexpr std::array<std::size_t, 2> key_bytes{56 + 8 * 65, 80 + 8 * (65 + 67)};
+    constexpr std::array<std::size_t, 2> path_bytes{8 * 65, 8 * (65 + 67)};
+    for (std::size_t fixture = 0; fixture < keys.size(); ++fixture)
+    {
+        SCOPED_TRACE(fixture);
+        const auto encoded_key = AMR::encode_adaptive_key(keys[fixture]);
+        const auto key_before = encoded_key;
+        ASSERT_EQ(encoded_key.size(), key_bytes[fixture]);
+        EXPECT_EQ(D::key_wire_size(keys[fixture]), key_bytes[fixture]);
+        EXPECT_EQ(AMR::decode_adaptive_key(encoded_key), keys[fixture]);
+
+        // The encoded input stays live while the decoder owns its output.
+        const auto key_resident = 4093 + encoded_key.capacity();
+        D::Budget key_budget{ample};
+        key_budget.add(key_resident);
+        const auto decoded_key = D::decode_bounded_key(encoded_key, key_budget);
+        EXPECT_EQ(decoded_key, keys[fixture]);
+        EXPECT_EQ(D::key_capacity(decoded_key), path_bytes[fixture]);
+        EXPECT_EQ(key_budget.used, key_resident + path_bytes[fixture]);
+        D::Budget exact_key_budget{key_budget.peak};
+        exact_key_budget.add(key_resident);
+        EXPECT_EQ(D::decode_bounded_key(encoded_key, exact_key_budget), keys[fixture]);
+        D::Budget short_key_budget{key_budget.peak - 1};
+        short_key_budget.add(key_resident);
+        EXPECT_THROW((void) D::decode_bounded_key(encoded_key, short_key_budget), std::invalid_argument);
+        EXPECT_EQ(encoded_key, key_before);
+
+        auto leaf = source_leaf();
+        leaf.key = keys[fixture];
+        leaf.domain = AMR::AdaptiveBytes(257, 'd');
+        RecordKernel kernel;
+        kernel.trace_faces = {{{'s'}, 3, AMR::AdaptiveSplit::Base, {}, true},
+            {AMR::AdaptiveBytes(513, 't'), 1, AMR::AdaptiveSplit::Axial, {}, false}};
+        // This codec fixture intentionally supplies no full native surface
+        // representation; compare its actual source fields independently.
+        const auto source_before = leaf.geometry->encode_certificate();
+        const auto domain_before = leaf.domain;
+        D::ContactRecord record;
+        record.key = leaf.key;
+        record.identity = 91;
+        record.domain = leaf.domain;
+        record.spans = {4, 2, 1};
+        record.factors = {1, 1, 2};
+        record.traces = kernel.trace_faces;
+        D::Budget legacy_budget{ample};
+        std::size_t trace_count = 0, geometry_peak = 0;
+        const auto legacy = D::encode_contact(leaf, kernel, legacy_budget, trace_count, geometry_peak);
+        const auto expected_bytes = D::geometry_record_header_bytes + 8 + key_bytes[fixture] + 8 + 257 +
+            16 + 3 * P::ScalarPacketWords{}.size() * 8 + 24 + 8 + (8 + 1 + 32) + (8 + 513 + 32);
+        ASSERT_EQ(legacy.size(), expected_bytes);
+
+        // No geometric trace faces enter this encoder, so its observed shared
+        // peak completely determines admission without a nested geometry cap.
+        constexpr std::size_t record_resident = 8191;
+        D::Budget observed{ample};
+        observed.add(record_resident);
+        const auto encoded_record = D::encode_contact(record, observed);
+        EXPECT_EQ(encoded_record, legacy);
+        EXPECT_EQ(observed.used, record_resident + encoded_record.capacity());
+        EXPECT_GT(observed.peak, observed.used);
+        D::Budget exact{observed.peak};
+        exact.add(record_resident);
+        EXPECT_EQ(D::encode_contact(record, exact), legacy);
+        EXPECT_EQ(exact.peak, observed.peak);
+        D::Budget short_budget{observed.peak - 1};
+        short_budget.add(record_resident);
+        EXPECT_THROW((void) D::encode_contact(record, short_budget), std::invalid_argument);
+        D::Budget after_rejection{ample};
+        EXPECT_EQ(D::encode_contact(record, after_rejection), legacy);
+        EXPECT_EQ(record.identity, 91u);
+        EXPECT_TRUE(record.traces_point_independent);
+        EXPECT_EQ(leaf.geometry->encode_certificate(), source_before);
+        EXPECT_EQ(AMR::encode_adaptive_key(leaf.key), key_before);
+        EXPECT_EQ(leaf.domain, domain_before);
+    }
 }
 
 TEST(AdaptiveClosureRecords, ExactAdmissionAndOneByteShortRejectionLeaveSourceUnchanged)

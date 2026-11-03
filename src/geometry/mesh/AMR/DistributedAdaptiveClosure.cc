@@ -2,6 +2,7 @@
  * @brief Point-authority closed-neighbor proofs without global leaf catalogs.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
@@ -114,7 +115,200 @@ void require(Contact& contact, std::uint64_t split)
     join_closure_requirement(*contact.record, contact.required, split);
 }
 } // namespace
+std::vector<ContactIncidenceRow> adaptive_detail::bootstrap_adaptive_contact_rows(std::span<const AdaptiveLeaf> owned,
+    const AdaptiveProviderKernel& kernel, Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options)
+{
+    if (comm.is_null())
+        throw std::invalid_argument("Adaptive closure needs a communicator.");
+    ClosureDiagnostics diagnostics{comm->getRank(), options.statistics};
+    diagnostics.cells = owned.size();
+    std::array<std::uint64_t, 5> semantics{options.byte_budget, options.contact_budget, options.tile_budget,
+        std::bit_cast<std::uint64_t>(options.maximum_span_ratio), options.maximum_trace_jump};
+    auto root = semantics;
+    Teuchos::broadcast(*comm, 0, int(root.size()), root.data());
+    collective(*comm, [&]
+        {
+            if (root != semantics || !options.byte_budget || !options.contact_budget || !options.tile_budget ||
+                !std::isfinite(options.maximum_span_ratio) || options.maximum_span_ratio < 1 ||
+                options.maximum_trace_jump != 1)
+                throw std::invalid_argument("Invalid or inconsistent closure bootstrap options.");
+        });
+    std::vector<AdaptiveLeaf> transient;
+    collective(*comm, [&]
+        {
+            Budget budget{options.byte_budget};
+            BudgetObservation observation{budget, diagnostics};
+            IdentityBudget identities;
+            for (const auto& source : owned)
+            {
+                budget.add(sizeof(AdaptiveLeaf) + key_capacity(source.key) + source.domain.size() +
+                    source.parent_family.size());
+                auto leaf = source;
+                leaf.geometry.reset();
+                leaf.surfaces = kernel.surfaces(source);
+                diagnostics.faces += leaf.surfaces.size();
+                budget.add(leaf.surfaces.capacity() * sizeof(AdaptiveSurface));
+                for (const auto& surface : leaf.surfaces)
+                {
+                    budget.add(surface.key.capacity() + surface.boundary.capacity() + surface.authority_image.payload_bytes());
+                    if (!surface.geometry)
+                        throw std::invalid_argument("Closure support has no physical geometry.");
+                    budget.add(sizeof(*surface.geometry));
+                    identities.face(budget, *surface.geometry);
+                }
+                budget.append_capacity(transient);
+                transient.push_back(std::move(leaf));
+            }
+            diagnostics.input_retained_bytes = budget.used;
+        });
+    diagnostics.stage = "spatial_canonical_bootstrap";
+    std::vector<AdaptiveNode> nodes;
+    auto tiles = decide_adaptive_tiles(transient, comm, options.byte_budget, options.tile_budget, nullptr, &nodes);
+    std::vector<AdaptiveLeaf>().swap(transient);
+    std::vector<ContactIncidenceRow> result;
+    collective(*comm, [&]
+        {
+            Budget budget{options.byte_budget};
+            BudgetObservation observation{budget, diagnostics};
+            budget.add(nodes.capacity() * sizeof(AdaptiveNode));
+            for (const auto& node : nodes)
+                budget.add(node.identity.capacity() + node.coordinate_identity.payload_bytes());
+            std::sort(nodes.begin(), nodes.end(), [](const auto& a, const auto& b) { return a.gid < b.gid; });
+            for (std::size_t i = 0; i < nodes.size(); ++i)
+            {
+                (void) node_identity(nodes[i]);
+                if (i && nodes[i - 1].gid == nodes[i].gid)
+                    throw std::invalid_argument("Duplicate closure bootstrap node GID.");
+            }
+            auto node_for = [&](std::uint64_t gid) -> const AdaptiveNode&
+            {
+                const auto position = std::lower_bound(nodes.begin(), nodes.end(), gid,
+                    [](const auto& node, auto value) { return node.gid < value; });
+                if (position == nodes.end() || position->gid != gid)
+                    throw std::invalid_argument("Missing closure bootstrap physical node.");
+                return *position;
+            };
+            std::map<AdaptiveCellKey, std::size_t> cells;
+            for (std::size_t i = 0; i < owned.size(); ++i)
+            {
+                budget.add(sizeof(decltype(cells)::value_type) + 4 * sizeof(void*) + key_capacity(owned[i].key));
+                if (!cells.emplace(owned[i].key, i).second)
+                    throw std::invalid_argument("Duplicate closure bootstrap source cell.");
+            }
+            budget.add(owned.size() * sizeof(std::vector<std::uint64_t>));
+            std::vector<std::vector<std::uint64_t>> incidence(owned.size());
+            // Retain only compact GID incidence while canonical tile owners are
+            // alive. In particular, no normalized/physical identity pairs or
+            // ContactRecords overlap this tile phase.
+            std::size_t tile_charge = 0;
+            {
+                const auto before = budget.used;
+                budget.add(tiles.capacity() * sizeof(AdaptiveTile));
+                ImmutableSequenceLedger metadata;
+                IdentityBudget tile_identities;
+                std::set<const void*> faces;
+                for (const auto& tile : tiles)
+                {
+                    budget.add(tile.identity.capacity() + key_capacity(tile.first) +
+                        (tile.second ? key_capacity(*tile.second) : 0) + tile.boundary.capacity() +
+                        tile.second_image_identity.payload_bytes());
+                    metadata.retain(tile.domain, budget);
+                    metadata.retain(tile.surface, budget);
+                    metadata.retain(tile.node_gids, budget);
+                    metadata.retain(tile.second_node_gids, budget);
+                    if (!tile.geometry)
+                        throw std::invalid_argument("Closure bootstrap tile has no physical geometry.");
+                    if (!faces.contains(tile.geometry.get()))
+                    {
+                        budget.add(sizeof(const void*) + 4 * sizeof(void*) + sizeof(*tile.geometry));
+                        faces.insert(tile.geometry.get());
+                        tile_identities.face(budget, *tile.geometry);
+                    }
+                }
+                tile_charge = budget.used - before;
+                auto record_points = [&](const AdaptiveCellKey& key, std::span<const std::uint64_t> gids,
+                                         std::span<const char> domain)
+                {
+                    const auto cell = cells.find(key);
+                    if (cell == cells.end())
+                        throw std::invalid_argument("Foreign closure bootstrap cell owner.");
+                    auto& values = incidence[cell->second];
+                    for (const auto gid : gids)
+                    {
+                        const auto& node = node_for(gid);
+                        if (!std::ranges::equal(node_identity(node).domain, domain))
+                            throw std::invalid_argument("Foreign closure bootstrap node domain.");
+                        if (std::find(values.begin(), values.end(), gid) == values.end())
+                        {
+                            budget.append_capacity(values);
+                            values.push_back(gid);
+                        }
+                    }
+                };
+                for (const auto& tile : tiles)
+                {
+                    const auto n = tile.geometry->points().size();
+                    if (tile.node_gids.size() != n || (tile.second && tile.second_node_gids.size() != n) ||
+                        (!tile.second && !tile.second_node_gids.empty()))
+                        throw std::invalid_argument("Incomplete closure bootstrap tile incidence.");
+                    if (tile.first_owner == comm->getRank())
+                        record_points(tile.first, tile.node_gids, tile.domain);
+                    if (tile.second_owner == comm->getRank())
+                    {
+                        if (!tile.second)
+                            throw std::invalid_argument("Closure bootstrap second owner has no cell.");
+                        record_points(*tile.second, tile.second_node_gids, tile.domain);
+                    }
+                }
+                std::vector<AdaptiveTile>().swap(tiles);
+            }
+            // Ledger pins and tile objects are both gone before the heavy rows
+            // are allocated. Retire the compact cell lookup as well.
+            budget.used -= tile_charge;
+            std::size_t cell_bytes = cells.size() * (sizeof(decltype(cells)::value_type) + 4 * sizeof(void*));
+            for (const auto& [key, index] : cells)
+                cell_bytes += key_capacity(key);
+            cells.clear();
+            budget.used -= cell_bytes;
+            for (std::size_t i = 0; i < owned.size(); ++i)
+            {
+                const auto& source = owned[i];
+                auto& gids = incidence[i];
+                if (gids.empty())
+                    throw std::invalid_argument("Closure bootstrap has no complete owned cell incidence.");
+                std::sort(gids.begin(), gids.end(), [&](auto a, auto b)
+                    { return node_for(a).coordinate_identity < node_for(b).coordinate_identity; });
+                budget.add(key_capacity(source.key) + source.domain.size());
+                ContactIncidenceRow row{source.key, source.revision, source.domain, {}};
+                budget.add(gids.size() * sizeof(ContactPointIncidence));
+                row.points.reserve(gids.size());
+                for (const auto gid : gids)
+                {
+                    const auto& node = node_for(gid);
+                    if (!std::ranges::equal(node_identity(node).domain, source.domain))
+                        throw std::invalid_argument("Foreign closure bootstrap cell domain.");
+                    row.points.push_back({kernel.contact_point(source, node.coordinate_identity), node.coordinate_identity});
+                }
+                budget.append_capacity(result);
+                result.push_back(std::move(row));
+                const auto bytes = gids.capacity() * sizeof(std::uint64_t);
+                std::vector<std::uint64_t>().swap(gids);
+                budget.used -= bytes;
+            }
+        });
+    return result;
+}
+
 std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const AdaptiveLeaf> owned,
+    const AdaptiveProviderKernel& kernel, Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options)
+{
+    auto rows = adaptive_detail::bootstrap_adaptive_contact_rows(owned, kernel, comm, options);
+    adaptive_detail::DistributedAdaptiveContactHalo halo{kernel, std::move(comm), options};
+    halo.bootstrap(owned, std::move(rows));
+    return halo.required_refinements();
+}
+
+std::vector<AdaptiveMark> adaptive_detail::legacy_required_adaptive_refinements(std::span<const AdaptiveLeaf> owned,
     const AdaptiveProviderKernel& kernel, Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options)
 {
     using namespace adaptive_detail;

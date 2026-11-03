@@ -36,6 +36,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testGeometryRetentionCensus"
       OR TEST_NAME STREQUAL "testClosedContactIndex"
       OR TEST_NAME STREQUAL "testAdaptiveClosureRecords"
+      OR TEST_NAME STREQUAL "testSpatialAdaptiveClosure"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -260,3 +261,19 @@ endforeach()
 
 simplefluid_add_mpi_test(NAME NativeUnstructuredMapping_2procs
     TARGET testUnstructuredMeshMapping PROCS 2 LABELS "mpi;geometry;unstructured;mapping" TIMEOUT 120)
+
+# Closed-contact spatial exchange, including idle owners and protocol rejection.
+foreach(_spatial_closure_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME SpatialAdaptiveClosure_${_spatial_closure_ranks}procs
+    TARGET testSpatialAdaptiveClosure PROCS ${_spatial_closure_ranks}
+    ARGS "--gtest_filter=SpatialAdaptiveClosure.*-SpatialAdaptiveClosure.CubicN32FourSlabHaloUnder64MiB"
+    LABELS "mpi;amr;closure;spatial;empty_rank" TIMEOUT 240)
+endforeach()
+simplefluid_add_mpi_test(NAME SpatialAdaptiveClosureN32_4procs
+  TARGET testSpatialAdaptiveClosure PROCS 4
+  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN32FourSlabHaloUnder64MiB"
+  LABELS "mpi;amr;closure;spatial;resource" TIMEOUT 600)
+if(TEST SpatialAdaptiveClosureN32_4procs)
+  set_tests_properties(SpatialAdaptiveClosureN32_4procs PROPERTIES
+    ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
+endif()

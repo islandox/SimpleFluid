@@ -99,6 +99,7 @@ struct Reader
         if (n > (data.size() - position) / 8)
             throw std::invalid_argument("Invalid adaptive ancestry depth.");
         std::vector<std::uint64_t> result;
+        result.reserve(static_cast<std::size_t>(n));
         for (std::uint64_t i = 0; i < n; ++i)
             result.push_back(word());
         return result;

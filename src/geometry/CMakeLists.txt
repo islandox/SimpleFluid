@@ -10,6 +10,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveClosure.cc
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
+    mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/ClosedContactIndex.cc
     mesh/AMR/DistributedAdaptiveBalance.cc
     mesh/AMR/DistributedCartesianKernel.cc
@@ -119,6 +120,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Closure retains the strict arithmetic policy for transported long-double spans.
     set_source_files_properties(mesh/AMR/DistributedAdaptiveClosure.cc
         mesh/AMR/DistributedAdaptiveClosureRecords.cc
+        mesh/AMR/DistributedAdaptiveContactHalo.cc
         mesh/AMR/ClosedContactIndex.cc
         PLIC/GeometryIdentity.cc
         PLIC/details/ordinary/GeometryIdentity.cc
@@ -172,6 +174,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveClosure.cc
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
+    mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/ClosedContactIndex.cc
     mesh/AMR/DistributedAdaptiveBalance.cc
     mesh/AMR/DistributedCartesianKernel.cc
