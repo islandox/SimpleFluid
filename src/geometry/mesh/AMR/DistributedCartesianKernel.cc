@@ -167,6 +167,73 @@ public:
         const auto& cell = ancestry(grid_, leaf.key);
         return {leaf.key, {{descriptor(), cell.level, AdaptiveSplit::Isotropic, {}}}};
     }
+    AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf& leaf) const override
+    {
+        (void) ancestry(grid_, leaf.key);
+        const bool periodic = grid_.periodic[0] || grid_.periodic[1] || grid_.periodic[2];
+        return {periodic ? AdaptiveContactNormalization::PeriodicCartesian
+                         : AdaptiveContactNormalization::PhysicalIdentity,
+            false, false};
+    }
+    std::vector<AdaptiveContactImage> closed_contact_images(const AdaptiveLeaf& leaf) const override
+    {
+        const auto& cell = ancestry(grid_, leaf.key);
+        const auto [root_lower, root_upper] = root_bounds(grid_);
+        AdaptiveContactImage initial;
+        initial.logical.emplace();
+        initial.logical->frame = descriptor();
+        initial.logical->exact_embedding = true;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            initial.bounds.lower[axis] = coordinate(grid_, axis, cell.index[axis], cell.level);
+            initial.bounds.upper[axis] = coordinate(grid_, axis, cell.index[axis] + 1, cell.level);
+            initial.logical->lower[axis] = mul(cell.index[axis], scale(grid_.max_level - cell.level));
+            initial.logical->upper[axis] = mul(cell.index[axis] + 1, scale(grid_.max_level - cell.level));
+            initial.logical->period[axis] =
+                mul(mul(grid_.root_blocks[axis], grid_.block_cells[axis]), scale(grid_.max_level));
+            int exponent = 0;
+            const auto total = initial.logical->period[axis];
+            // This sufficient condition proves that every coordinate operation
+            // is an exact binary scaling of a representable integer. Other
+            // admitted grids retain their exact ancestry metadata, but use the
+            // physical closed enclosure for separation.
+            initial.logical->exact_embedding = initial.logical->exact_embedding && grid_.origin[axis] == 0 &&
+                                               std::frexp(grid_.extent[axis], &exponent) == 0.5 &&
+                                               std::has_single_bit(total) && total <= (ID(1) << 52) &&
+                                               std::isnormal(grid_.extent[axis] / double(total));
+        }
+        if (!initial.logical->exact_embedding)
+        {
+            const auto bounds = geometry(leaf)->closed_contact_bounds();
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                initial.bounds.lower[axis] = bounds[axis][0];
+                initial.bounds.upper[axis] = bounds[axis][1];
+            }
+        }
+        std::vector<AdaptiveContactImage> result{std::move(initial)};
+        // contact_point maps the upper seam to the lower seam. Retain the full
+        // physical box (safe overinclusion), plus every seam/corner singleton
+        // image. In particular, no seam endpoint is lost by a half-open box.
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            if (grid_.periodic[axis] && result.front().logical->upper[axis] == result.front().logical->period[axis])
+            {
+                const auto count = result.size();
+                for (std::size_t i = 0; i < count; ++i)
+                {
+                    auto image = result[i];
+                    image.bounds.lower[axis] = image.bounds.upper[axis] = root_lower[axis];
+                    image.logical->lower[axis] = image.logical->upper[axis] = 0;
+                    auto physical = root_lower, canonical = root_lower;
+                    for (std::size_t a = 0; a < 3; ++a)
+                        if (image.logical->lower[a] == 0 && image.logical->upper[a] == 0 && grid_.periodic[a])
+                            physical[a] = root_upper[a];
+                    image.physical_to_contact = PLIC::displacement<ArithmeticMode::Ordinary>(physical, canonical);
+                    result.push_back(std::move(image));
+                }
+            }
+        return result;
+    }
     PLIC::PointIdentity<ArithmeticMode::Ordinary> contact_point(
         const AdaptiveLeaf& leaf, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& point) const override
     {

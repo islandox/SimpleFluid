@@ -3,6 +3,8 @@
  */
 #pragma once
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include <array>
+#include <optional>
 namespace SimpleFluid::Meshes::AMR
 {
 struct AdaptiveSplitResult
@@ -40,6 +42,39 @@ struct AdaptiveCellMetrics
     double volume = 0;
     PLIC::GeometryPoint centroid{};
 };
+/** Closed broad-phase ranges in canonical world coordinates. Equality at an
+ * endpoint is contact; these ranges must never use an interior-overlap test. */
+struct AdaptiveContactBounds
+{
+    std::array<long double, 3> lower{}, upper{};
+};
+enum class AdaptiveContactNormalization
+{
+    Unsupported,
+    PhysicalIdentity,
+    PeriodicCartesian
+};
+/** Explicit provider promise, independent of the legacy contact-point API.
+ * Union preservation permits retaining ancestor ownership covers after local
+ * splits/coarsens; it does not authorize skipping the exact contact predicate. */
+struct AdaptiveContactCapabilities
+{
+    AdaptiveContactNormalization normalization = AdaptiveContactNormalization::Unsupported;
+    bool split_union_preserving = false, coarsen_union_preserving = false;
+};
+struct AdaptiveContactLogicalBox
+{
+    AdaptiveBytes frame; ///< Complete grid semantics, never a display-coordinate identity.
+    std::array<std::uint64_t, 3> lower{}, upper{}, period{};
+    bool exact_embedding = false; ///< Integer separation proves physical separation only under this promise.
+};
+struct AdaptiveContactImage
+{
+    AdaptiveContactBounds bounds;
+    /** Physical-to-contact mapping for this image, including periodic corners. */
+    PLIC::DisplacementIdentity<ArithmeticMode::Ordinary> physical_to_contact;
+    std::optional<AdaptiveContactLogicalBox> logical;
+};
 class AdaptiveProviderKernel
 {
 public:
@@ -60,6 +95,12 @@ public:
     [[nodiscard]] virtual AdaptiveLeaf compact_native_materialize(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual PLIC::PointIdentity<ArithmeticMode::Ordinary> contact_point(
         const AdaptiveLeaf&, const PLIC::PointIdentity<ArithmeticMode::Ordinary>&) const;
+    /** Opt-in spatial-search contract. The default remains unsupported, so an
+     * existing custom contact_point override cannot silently use wrong bounds. */
+    [[nodiscard]] virtual AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const { return {}; }
+    /** Complete conservative closed images in contact_point coordinates.
+     * Supported identity providers use the canonical actual convex hull. */
+    [[nodiscard]] virtual std::vector<AdaptiveContactImage> closed_contact_images(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual std::vector<AdaptiveCellKey> matching_partners(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual AdaptiveTrace traces(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual AdaptiveSplit closure_split(const AdaptiveLeaf&, std::size_t axis) const;

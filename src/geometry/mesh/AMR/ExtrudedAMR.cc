@@ -2311,6 +2311,10 @@ void merge_pool(Pool& target, const Pool& source)
 class Kernel final : public AdaptiveProviderKernel
 {
 public:
+    AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
+    {
+        return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
+    }
     AdaptiveBytes descriptor() const override { return AdaptiveBytes{'P', 'R', 'O', 'D', '6'}; }
     AdaptiveSplit closure_split(const AdaptiveLeaf&, std::size_t axis) const override
     {

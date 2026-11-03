@@ -453,6 +453,11 @@ public:
     [[nodiscard]] FaceRange faces() const& { return geometry_->faces(); }
     FaceRange faces() const&& = delete;
     [[nodiscard]] std::array<GeometryValue<Mode>, 3> axis_spans() const;
+    /** Closed canonical world-coordinate hull bounds, preserving the original
+     * export source across numerical rebases and its floating-point environment.
+     * No point owners or provenance exports are constructed. */
+    [[nodiscard]] std::array<std::array<long double, 2>, 3> closed_contact_bounds() const
+        requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] Support<Mode> support(GeometryPoint normal, GeometryPoint anchor) const;
     [[nodiscard]] ClipResult<Mode> clip(const GeometryHalfspace&, bool measure_section = true) const;
     [[nodiscard]] ClipResult<Mode> clip_by_face(

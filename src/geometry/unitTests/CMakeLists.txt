@@ -34,6 +34,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   if((TEST_NAME STREQUAL "testOrdinaryPredicateAccounting" OR TEST_NAME STREQUAL "testGeometryProvenanceBorrow"
       OR TEST_NAME STREQUAL "testPointSnapshot"
       OR TEST_NAME STREQUAL "testGeometryRetentionCensus"
+      OR TEST_NAME STREQUAL "testClosedContactIndex"
+      OR TEST_NAME STREQUAL "testAdaptiveClosureRecords"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

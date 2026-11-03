@@ -51,6 +51,19 @@ PLIC::PointIdentity<ArithmeticMode::Ordinary> AdaptiveProviderKernel::contact_po
 {
     return point;
 }
+std::vector<AdaptiveContactImage> AdaptiveProviderKernel::closed_contact_images(const AdaptiveLeaf& leaf) const
+{
+    if (contact_capabilities(leaf).normalization != AdaptiveContactNormalization::PhysicalIdentity)
+        throw std::invalid_argument("Provider has no qualified closed-contact spatial images.");
+    const auto bounds = geometry(leaf)->closed_contact_bounds();
+    AdaptiveContactImage image;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        image.bounds.lower[axis] = bounds[axis][0];
+        image.bounds.upper[axis] = bounds[axis][1];
+    }
+    return {std::move(image)};
+}
 std::vector<AdaptiveCellKey> AdaptiveProviderKernel::matching_partners(const AdaptiveLeaf&) const
 {
     return {};
@@ -112,6 +125,10 @@ public:
     {
         if (!depth || depth > 64 || !std::isfinite(quality) || quality < 0)
             throw std::invalid_argument("Invalid convex kernel limits.");
+    }
+    AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
+    {
+        return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
     }
     AdaptiveBytes descriptor() const override
     {

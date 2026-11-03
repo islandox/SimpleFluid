@@ -273,6 +273,10 @@ class StaticKernel final : public AdaptiveProviderKernel
     std::uint64_t root_, region_, material_;
 
 public:
+    AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
+    {
+        return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
+    }
     StaticKernel(std::uint64_t root, std::uint64_t region, std::uint64_t material)
         : root_(root), region_(region), material_(material)
     {
@@ -569,6 +573,17 @@ public:
     AdaptiveCellMetrics metrics(const AdaptiveLeaf& leaf) const override
     {
         return route(leaf).kernel->metrics(original(leaf));
+    }
+    AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf& leaf) const override
+    {
+        return route(leaf).kernel->contact_capabilities(original(leaf));
+    }
+    std::vector<AdaptiveContactImage> closed_contact_images(const AdaptiveLeaf& leaf) const override
+    {
+        // Mixed construction already rejects periodic routes. Each pure route
+        // retains its complete logical frame; canonical physical coordinates
+        // allow contact between distinct routes in the joined domain.
+        return route(leaf).kernel->closed_contact_images(original(leaf));
     }
     std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override { return mapped(leaf); }
     AdaptiveTrace traces(const AdaptiveLeaf& leaf) const override

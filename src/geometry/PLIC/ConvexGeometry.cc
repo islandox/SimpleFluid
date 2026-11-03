@@ -10,6 +10,31 @@
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode Mode>
+std::array<std::array<long double, 2>, 3> ConvexCellGeometry<Mode>::closed_contact_bounds() const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    const details::OrdinaryExportCoordinates coordinates(*this);
+    if (coordinates.size() == 0)
+        throw GeometryError(GeometryErrorCode::InvalidTopology, "Closed bounds need a nonempty actual cell.");
+    std::array<std::array<long double, 2>, 3> bounds{};
+    const auto first = coordinates.at(0);
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        bounds[axis] = {first[axis], first[axis]};
+    for (std::size_t vertex = 1; vertex < coordinates.size(); ++vertex)
+    {
+        const auto point = coordinates.at(vertex);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            bounds[axis][0] = std::min(bounds[axis][0], point[axis]);
+            bounds[axis][1] = std::max(bounds[axis][1], point[axis]);
+        }
+    }
+    return bounds;
+}
+template std::array<std::array<long double, 2>, 3>
+ConvexCellGeometry<ArithmeticMode::Ordinary>::closed_contact_bounds() const;
+
 const PlaneAuthority& PointAuthorityRange::Iterator::operator*() const
 {
     return lookup ? lookup(source, position) : static_cast<const PlaneAuthority*>(source)[position];
