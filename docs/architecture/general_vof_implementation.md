@@ -416,3 +416,38 @@ can inspect borrowed work roots during metric freezing; it permits no numerical
 work or reentry. Neither probe establishes global retention without a complete
 root manifest. Snapshot paging and ledger-pin ownership changes remain separate
 decisions.
+
+Owner exchange bounds transport staging independently of the total serialized
+stream. Large exchanges use synchronized cyclic peer rounds, including ranks with
+no local work, and keep received bytes in exact blocks. The original Distributor
+sender order and each sender's packet order define the result; arrival order does
+not. Small or tighter previously admitted exchanges can retain the contiguous path.
+Both paths preserve the existing packet framing and total MPI count limits.
+
+Every received stream is audited collectively before allocating decoded payloads.
+Segmented decoding then creates the existing independently owned packet vectors
+and destroys exhausted receive blocks. Admission includes the whole next packet,
+partially consumed blocks, descriptor capacities and replacement overlap; a record
+may cross either a length-word or payload boundary. Keeping independent output
+packets preserves canonical-authority processing's ability to release a complete
+support group's encoded inputs while constructing its geometric replies.
+
+Borrowed input remains intact throughout exchange. The consuming adapter releases
+its input only after collective success, so a rejected attempt can retry the same
+source. Caller phase/plane imports destroy request, incoming and outgoing owners
+at their last authenticated use. Short-lived framed fields can borrow a checked
+reader span; data retained beyond the message lifetime is explicitly copied.
+Temporary admission is released only after the corresponding owners disappear.
+Canonical edge authorities reserve reply slots from the authenticated subscription
+count. They retire each completed line in the existing key order after its index,
+query buffers and endpoint borrows die. Replies own their encoded bytes; retiring
+line storage reduces live admission without refunding cumulative construction.
+Retirement diagnostics accumulate over propagation; the optional edge-decode
+peak/cumulative fields describe the latest propagation iteration.
+
+Exchange statistics separate planning, transfer and decode peaks from caller-owned
+input and MPI/allocator memory. A lower phase peak does not imply lower cumulative
+allocation traffic or RSS. Bounded rounds change the communication schedule but
+not numerical traversal, publication or rollback. No exchange improvement alone
+qualifies a complete cubic-grid motion run or resolves a separate closure-storage
+limit.

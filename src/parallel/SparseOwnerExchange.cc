@@ -14,6 +14,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <memory>
 #include <stdexcept>
 namespace SimpleFluid
 {
@@ -74,7 +75,191 @@ template<class T> auto write_view(std::vector<T>& v)
 {
     return Kokkos::View<T*, Kokkos::HostSpace>(v.data(), v.size());
 }
+using StreamBlocks = owner_exchange_detail::OwnerStreamBlocks;
+// A cursor borrows block owners during audit and retires their real allocations
+// during decode. A crossing record is allocated whole before any payload copy;
+// its admission therefore includes the partially consumed source block.
+class BlockCursor
+{
+public:
+    BlockCursor(const StreamBlocks& stream, StreamBlocks* destructive)
+        : blocks_(stream.blocks), destructive_(destructive)
+    {
+        for (const auto& block : blocks_)
+            remaining_ = plus(remaining_, block.size());
+    }
+    std::size_t remaining() const { return remaining_; }
+    std::size_t released() const { return released_; }
+    void finish()
+    {
+        if (remaining_)
+            throw std::invalid_argument("Trailing segmented owner stream bytes.");
+        // Explicit seam callers may retain capacity in empty trailing owners.
+        // They are real live allocations until the completed stream retires.
+        while (block_ < blocks_.size())
+            retire();
+    }
+    void read(char* destination, std::size_t count)
+    {
+        if (count > remaining_)
+            throw std::invalid_argument("Truncated segmented owner stream.");
+        while (count)
+        {
+            while (block_ < blocks_.size() && offset_ == blocks_[block_].size())
+                retire();
+            const auto n = std::min(count, blocks_[block_].size() - offset_);
+            if (destination)
+            {
+                std::memcpy(destination, blocks_[block_].data() + offset_, n);
+                destination += n;
+            }
+            offset_ += n;
+            count -= n;
+            remaining_ -= n;
+            if (offset_ == blocks_[block_].size())
+                retire();
+        }
+    }
+
+private:
+    void retire()
+    {
+        released_ = plus(released_, blocks_[block_].capacity());
+        if (destructive_)
+            std::vector<char>().swap(destructive_->blocks[block_]);
+        ++block_;
+        offset_ = 0;
+    }
+    const std::vector<std::vector<char>>& blocks_;
+    StreamBlocks* destructive_;
+    std::size_t block_ = 0, offset_ = 0, remaining_ = 0, released_ = 0;
+};
+template<class Visitor>
+owner_exchange_detail::StreamAudit walk_blocks(std::span<const StreamBlocks> streams,
+    std::span<const std::size_t> sizes, std::span<const Word> headers, Visitor&& visit,
+    std::span<StreamBlocks> destructive = {})
+{
+    if (streams.size() != sizes.size() || headers.size() != times(sizes.size(), 2) ||
+        (!destructive.empty() && destructive.size() != streams.size()))
+        throw std::invalid_argument("Owner block/header count differs from stream count.");
+    owner_exchange_detail::StreamAudit audit;
+    std::size_t retired = 0;
+    for (std::size_t stream = 0; stream < streams.size(); ++stream)
+    {
+        BlockCursor cursor(streams[stream], destructive.empty() ? nullptr : &destructive[stream]);
+        const auto count = headers[2 * stream], bytes = headers[2 * stream + 1];
+        if (!count || bytes < sizeof(Word) || count > bytes / sizeof(Word) || bytes != sizes[stream] ||
+            cursor.remaining() != sizes[stream])
+            throw std::invalid_argument("Invalid segmented owner stream declaration.");
+        for (Word record = 0; record < count; ++record)
+        {
+            Word length = 0;
+            cursor.read(reinterpret_cast<char*>(&length), sizeof(length));
+            if (length > cursor.remaining())
+                throw std::invalid_argument("Truncated segmented owner packet payload.");
+            const auto size = static_cast<std::size_t>(length);
+            audit.records = plus(audit.records, 1);
+            audit.payload_bytes = plus(audit.payload_bytes, size);
+            audit.largest_payload = std::max(audit.largest_payload, size);
+            const auto before = cursor.remaining();
+            visit(stream, size, cursor, retired);
+            if (cursor.remaining() != before - size)
+                throw std::invalid_argument("Segmented owner visitor consumed a different payload size.");
+        }
+        if (cursor.remaining())
+            throw std::invalid_argument("Trailing segmented owner stream bytes.");
+        cursor.finish();
+        retired = plus(retired, cursor.released());
+    }
+    return audit;
+}
 } // namespace
+owner_exchange_detail::StreamAudit owner_exchange_detail::walk_owner_block_streams(
+    std::span<const OwnerStreamBlocks> streams, std::span<const std::size_t> sizes, std::span<const Word> headers)
+{
+    return walk_blocks(streams, sizes, headers,
+        [](std::size_t, std::size_t size, BlockCursor& cursor, std::size_t) { cursor.read(nullptr, size); });
+}
+OwnerExchange owner_exchange_detail::decode_owner_block_streams(std::span<OwnerStreamBlocks> streams,
+    std::span<const std::size_t> sizes, std::span<const Word> headers, std::span<const int> senders,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t retained_metadata,
+    void* observer_context, void (*before_payload_allocation)(void*, std::size_t))
+{
+    if (comm.is_null())
+        throw std::invalid_argument("Owner block decode needs a communicator.");
+    OwnerExchange output;
+    StreamAudit validated;
+    std::size_t raw_capacity = 0;
+    collectively(*comm,
+        [&]
+        {
+            if (senders.size() != streams.size())
+                throw std::invalid_argument("Owner block sender count differs from stream count.");
+            // Audit every frame before considering allocation or resource
+            // admission. Invalid tails retain priority over remote cap errors.
+            validated = walk_owner_block_streams(streams, sizes, headers);
+            for (const auto& stream : streams)
+                for (const auto& block : stream.blocks)
+                    raw_capacity = plus(raw_capacity, block.capacity());
+        });
+    std::size_t metadata = 0, planned_peak = 0, payload_capacity = 0;
+    collectively(*comm,
+        [&]
+        {
+            metadata = plus(retained_metadata, times(validated.records, sizeof(OwnerPacket)));
+            planned_peak = plus(metadata, raw_capacity);
+            (void) walk_blocks(streams, sizes, headers,
+                [&](std::size_t, std::size_t size, BlockCursor& cursor, std::size_t retired)
+                {
+                    const auto remaining_raw = raw_capacity - retired - cursor.released();
+                    planned_peak =
+                        std::max(planned_peak, plus(metadata, plus(remaining_raw, plus(payload_capacity, size))));
+                    payload_capacity = plus(payload_capacity, size);
+                    cursor.read(nullptr, size);
+                });
+            if (planned_peak > budget)
+                throw std::length_error("Owner packet destructive decode exceeds byte budget.");
+        });
+    std::size_t decode_peak = 0;
+    payload_capacity = 0;
+    collectively(*comm,
+        [&]
+        {
+            output.packets.reserve(validated.records);
+            const auto actual_metadata = plus(retained_metadata, times(output.packets.capacity(), sizeof(OwnerPacket)));
+            if (plus(planned_peak - metadata, actual_metadata) > budget)
+                throw std::length_error("Owner packet output capacities exceed byte budget.");
+            decode_peak = plus(actual_metadata, raw_capacity);
+            const auto decoded = walk_blocks(
+                streams, sizes, headers,
+                [&](std::size_t stream, std::size_t size, BlockCursor& cursor, std::size_t retired)
+                {
+                    const auto remaining_raw = raw_capacity - retired - cursor.released();
+                    if (plus(actual_metadata, plus(remaining_raw, plus(payload_capacity, size))) > budget)
+                        throw std::length_error("Owner packet next payload exceeds byte budget.");
+                    if (size && before_payload_allocation)
+                        before_payload_allocation(observer_context, size);
+                    output.packets.push_back({senders[stream], std::vector<char>(size)});
+                    auto& packet = output.packets.back();
+                    payload_capacity = plus(payload_capacity, packet.bytes.capacity());
+                    const auto live = plus(actual_metadata, plus(remaining_raw, payload_capacity));
+                    if (live > budget)
+                        throw std::length_error("Owner packet decoded capacities exceed byte budget.");
+                    decode_peak = std::max(decode_peak, live);
+                    cursor.read(packet.bytes.data(), size);
+                    output.stats.received_bytes = plus(output.stats.received_bytes, size);
+                },
+                streams);
+            if (decoded.records != validated.records || decoded.payload_bytes != validated.payload_bytes)
+                throw std::invalid_argument("Owner block decode differs from complete audit.");
+        });
+    output.stats.received_packets = validated.records;
+    output.stats.decode_peak_bytes = decode_peak;
+    output.stats.peak_scratch_bytes = decode_peak;
+    output.stats.largest_received_record = validated.largest_payload;
+    output.stats.receive_block_capacity = raw_capacity;
+    return output;
+}
 owner_exchange_detail::StreamAudit owner_exchange_detail::walk_owner_streams(std::span<const char> packed,
     std::span<const std::size_t> stream_sizes, std::span<const std::uint64_t> headers, void* context,
     void (*visitor)(void*, std::size_t, std::span<const char>))
@@ -103,6 +288,7 @@ owner_exchange_detail::StreamAudit owner_exchange_detail::walk_owner_streams(std
                 throw std::invalid_argument("Truncated owner packet payload.");
             audit.records = plus(audit.records, 1);
             audit.payload_bytes = plus(audit.payload_bytes, static_cast<std::size_t>(size));
+            audit.largest_payload = std::max(audit.largest_payload, static_cast<std::size_t>(size));
             if (visitor)
                 visitor(context, stream, packed.subspan(offset, static_cast<std::size_t>(size)));
             offset += static_cast<std::size_t>(size);
@@ -114,33 +300,41 @@ owner_exchange_detail::StreamAudit owner_exchange_detail::walk_owner_streams(std
         throw std::invalid_argument("Owner streams do not cover receive buffer.");
     return audit;
 }
-OwnerExchange exchange_owner_packets(
-    std::span<const OwnerPacket> input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
+OwnerExchange owner_exchange_detail::exchange_owner_packets_with_round_limit(std::span<const OwnerPacket> input,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t round_limit)
 {
     if (comm.is_null())
         throw std::invalid_argument("Owner exchange needs a communicator.");
+    Word local_limit = round_limit, minimum_limit = 0, maximum_limit = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_limit, &minimum_limit);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_limit, &maximum_limit);
+    if (!minimum_limit || minimum_limit != maximum_limit)
+        throw std::invalid_argument("Owner exchange round limits must be nonzero and identical on every rank.");
     OwnerExchange output;
-    std::size_t sent_wire = 0, group_storage = 0;
+    std::size_t sent_wire = 0, group_storage = 0, planning_peak = 0;
+    Word largest_input_payload = 0, global_payload_bound = 0;
     collectively(*comm,
         [&]
         {
             if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
                 throw std::length_error("Owner exchange packet count exceeds MPI/Teuchos range.");
+            for (const auto& p : input)
+                if (p.peer < 0 || p.peer >= comm->getSize())
+                    throw std::invalid_argument("Owner packet peer is out of range.");
             if (input.size() > budget / sizeof(std::size_t))
                 throw std::length_error("Owner packet metadata exceeds byte budget.");
             for (const auto& p : input)
             {
-                if (p.peer < 0 || p.peer >= comm->getSize())
-                    throw std::invalid_argument("Owner packet peer is out of range.");
                 sent_wire = plus(sent_wire, plus(sizeof(Word), p.bytes.size()));
                 output.stats.sent_bytes = plus(output.stats.sent_bytes, p.bytes.size());
+                largest_input_payload = std::max(largest_input_payload, static_cast<Word>(p.bytes.size()));
             }
             if (sent_wire > static_cast<std::size_t>(std::numeric_limits<int>::max()))
                 throw std::length_error("Owner exchange packed exports exceed supported MPI count range.");
             constexpr auto record_metadata = 2 * sizeof(std::size_t) +
                                              sizeof(std::pair<const int, std::vector<std::size_t>>) +
                                              4 * sizeof(void*) + sizeof(int) + sizeof(std::size_t) + 2 * sizeof(Word);
-            if (plus(sent_wire, times(input.size(), record_metadata)) > budget)
+            if (times(input.size(), record_metadata) > budget)
                 throw std::length_error("Owner packet exports/framing exceed byte budget.");
         });
     // One Distributor item per actual peer bounds planning by peer count, not by
@@ -152,8 +346,27 @@ OwnerExchange exchange_owner_packets(
     collectively(*comm,
         [&]
         {
+            std::size_t current_group_storage = 0;
             for (std::size_t i = 0; i < input.size(); ++i)
-                groups[input[i].peer].push_back(i);
+            {
+                auto [group, inserted] = groups.try_emplace(input[i].peer);
+                if (inserted)
+                    current_group_storage =
+                        plus(current_group_storage, sizeof(decltype(groups)::value_type) + 4 * sizeof(void*));
+                auto& indices = group->second;
+                const auto old_capacity = indices.capacity();
+                indices.push_back(i);
+                if (indices.capacity() != old_capacity)
+                {
+                    // At reallocation both old and new index owners coexist.
+                    // current_group_storage still includes the old owner here.
+                    planning_peak = std::max(
+                        planning_peak, plus(current_group_storage, times(indices.capacity(), sizeof(std::size_t))));
+                    current_group_storage =
+                        plus(current_group_storage, times(indices.capacity() - old_capacity, sizeof(std::size_t)));
+                }
+                planning_peak = std::max(planning_peak, current_group_storage);
+            }
             peers.reserve(groups.size());
             send_sizes.reserve(groups.size());
             send_header.reserve(times(2, groups.size()));
@@ -172,10 +385,15 @@ OwnerExchange exchange_owner_packets(
             const auto metadata = plus(group_storage,
                 plus(times(peers.capacity(), sizeof(int)), plus(times(send_sizes.capacity(), sizeof(std::size_t)),
                                                                times(send_header.capacity(), sizeof(Word)))));
-            if (plus(sent_wire, metadata) > budget)
+            planning_peak = std::max(planning_peak, metadata);
+            if (metadata > budget)
                 throw std::length_error("Owner packet export framing exceeds byte budget.");
+            if (planning_peak > budget)
+                throw std::length_error("Owner packet planning capacities exceed byte budget.");
         });
-    Tpetra::Distributor distributor(comm);
+    std::unique_ptr<Tpetra::Distributor> distributor_owner;
+    collectively(*comm, [&] { distributor_owner = std::make_unique<Tpetra::Distributor>(comm); });
+    auto& distributor = *distributor_owner;
     const auto imports = distributor.createFromSends(Teuchos::arrayViewFromVector(peers));
     std::vector<Word> recv_header;
     std::vector<int> senders;
@@ -208,6 +426,7 @@ OwnerExchange exchange_owner_packets(
     std::size_t received_wire = 0, records = 0, metadata = 0;
     std::size_t retired_send_metadata = 0, planned_decode_metadata = 0, framed_record_bytes = 0;
     std::size_t planned_decoded_payload = 0;
+    std::size_t transfer_bound = 0, decode_bound = 0;
     collectively(*comm,
         [&]
         {
@@ -230,6 +449,7 @@ OwnerExchange exchange_owner_packets(
             metadata = plus(metadata, times(send_sizes.capacity() + recv_sizes.capacity(), sizeof(std::size_t)));
             metadata = plus(metadata, times(send_header.capacity() + recv_header.capacity(), sizeof(Word)));
             metadata = plus(metadata, times(records, sizeof(OwnerPacket)));
+            planning_peak = std::max(planning_peak, metadata - times(records, sizeof(OwnerPacket)));
             retired_send_metadata = plus(group_storage,
                 plus(times(peers.capacity(), sizeof(int)), plus(times(send_sizes.capacity(), sizeof(std::size_t)),
                                                                times(send_header.capacity(), sizeof(Word)))));
@@ -239,8 +459,8 @@ OwnerExchange exchange_owner_packets(
             // Transfer and decode have distinct lifetimes: packed sends are
             // destroyed after the completed exchange, before output allocation.
             // Keep output record metadata charged in both phases conservatively.
-            const auto transfer_bound = plus(metadata, plus(sent_wire, received_wire));
-            const auto decode_bound = plus(planned_decode_metadata, plus(received_wire, planned_decoded_payload));
+            transfer_bound = plus(metadata, plus(sent_wire, received_wire));
+            decode_bound = plus(planned_decode_metadata, plus(received_wire, planned_decoded_payload));
             if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
             {
                 std::size_t input_size = times(input.size(), sizeof(OwnerPacket)), input_capacity = input_size;
@@ -262,6 +482,218 @@ OwnerExchange exchange_owner_packets(
                     plus(metadata, plus(sent_wire, times(received_wire, 2))), std::max(transfer_bound, decode_bound),
                     budget);
             }
+        });
+    // This scalar conservatively bounds every incoming payload without
+    // changing either the two-word peer headers or the framed packet bytes.
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &largest_input_payload, &global_payload_bound);
+    int old_admitted = std::max(transfer_bound, decode_bound) <= budget, all_old_admitted = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &old_admitted, &all_old_admitted);
+    const int force_blocks = round_limit != 16 * 1024 * 1024;
+    int want_blocks = force_blocks || !all_old_admitted || std::max(sent_wire, received_wire) > 1024 * 1024;
+    int any_want_blocks = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &want_blocks, &any_want_blocks);
+    std::size_t quantum = round_limit, block_metadata = 0, block_transfer_base = 0, max_stream_send = 0;
+    std::size_t block_decode_base = 0;
+    std::size_t planned_block_transfer = 0, planned_block_decode = 0, decode_payload_headroom = 0;
+    for (const auto size : send_sizes)
+        max_stream_send = std::max(max_stream_send, size);
+    bool use_blocks = false;
+    if (any_want_blocks)
+    {
+        // A smaller quantum lowers staging but increases block descriptors.
+        // Check both costs on every rank at every candidate, including empty
+        // owners and owners with distinct budgets. No candidate allocates.
+        while (quantum)
+        {
+            int fits = 0, all_fit = 0, compatible = 0, all_compatible = 0;
+            try
+            {
+                block_metadata = times(imports, sizeof(StreamBlocks) + sizeof(std::size_t));
+                for (const auto size : recv_sizes)
+                    block_metadata =
+                        plus(block_metadata, times(size / quantum + (size % quantum != 0), sizeof(std::vector<char>)));
+                block_transfer_base = plus(metadata - times(records, sizeof(OwnerPacket)), block_metadata);
+                block_decode_base = plus(planned_decode_metadata, block_metadata - times(imports, sizeof(std::size_t)));
+                planned_block_transfer =
+                    plus(block_transfer_base, plus(received_wire, std::min(quantum, max_stream_send)));
+                // Completed source blocks are retired in stream order. Prior
+                // decoded payload plus remaining raw bytes exceed the original
+                // receive size by at most one partially consumed block. The
+                // next packet is allocated whole before copying, even when it
+                // crosses several blocks. Frame bytes only reduce this bound.
+                // The contiguous R+D bound remains a useful smaller bound for
+                // oversized records and owners with little decoded payload.
+                decode_payload_headroom = std::min(planned_decoded_payload,
+                    plus(std::min(quantum, received_wire),
+                        std::min(planned_decoded_payload, static_cast<std::size_t>(global_payload_bound))));
+                planned_block_decode = plus(block_decode_base, plus(received_wire, decode_payload_headroom));
+                const auto candidate_peak = std::max(planned_block_transfer, planned_block_decode);
+                fits = candidate_peak <= budget;
+                compatible = candidate_peak <= budget && candidate_peak <= std::max(transfer_bound, decode_bound);
+            }
+            catch (const std::length_error&)
+            {
+                // This candidate's descriptor bound overflows; it cannot fit.
+            }
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &fits, &all_fit);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &compatible, &all_compatible);
+            if (all_fit)
+            {
+                // Preserve previously admitted tight contiguous budgets. A
+                // forced private test seam deliberately bypasses that choice.
+                use_blocks = force_blocks || !all_old_admitted || all_compatible;
+                break;
+            }
+            quantum /= 2;
+        }
+    }
+    if (use_blocks)
+    {
+        std::vector<StreamBlocks> streams;
+        std::vector<std::size_t> round_receive_sizes;
+        std::size_t raw_capacity = 0, transfer_peak = 0, actual_block_metadata = 0;
+        collectively(*comm,
+            [&]
+            {
+                streams.resize(imports);
+                round_receive_sizes.resize(imports);
+                for (std::size_t i = 0; i < imports; ++i)
+                    streams[i].blocks.reserve(recv_sizes[i] / quantum + (recv_sizes[i] % quantum != 0));
+                actual_block_metadata = plus(times(streams.capacity(), sizeof(StreamBlocks)),
+                    times(round_receive_sizes.capacity(), sizeof(std::size_t)));
+                for (const auto& stream : streams)
+                    actual_block_metadata =
+                        plus(actual_block_metadata, times(stream.blocks.capacity(), sizeof(std::vector<char>)));
+                block_transfer_base = plus(metadata - times(records, sizeof(OwnerPacket)), actual_block_metadata);
+                block_decode_base = plus(planned_decode_metadata,
+                    actual_block_metadata - times(round_receive_sizes.capacity(), sizeof(std::size_t)));
+                planned_block_transfer =
+                    plus(block_transfer_base, plus(received_wire, std::min(quantum, max_stream_send)));
+                planned_block_decode = plus(block_decode_base, plus(received_wire, decode_payload_headroom));
+                if (std::max(planned_block_transfer, planned_block_decode) > budget)
+                    throw std::length_error("Owner packet block capacities exceed byte budget.");
+            });
+        if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+            std::fprintf(stderr,
+                "ADAPTIVE_EXCHANGE_BLOCK_PLAN rank=%d round_limit=%zu global_payload_bound=%llu "
+                "block_metadata_capacity=%zu planned_block_transfer=%zu planned_block_decode=%zu limit=%zu\n",
+                comm->getRank(), quantum, static_cast<unsigned long long>(global_payload_bound), actual_block_metadata,
+                planned_block_transfer, planned_block_decode, budget);
+        // Each shift is a permutation: there is at most one outgoing and one
+        // incoming block per rank. Counts for all other original plan slots are
+        // zero. The global extent keeps empty ranks in precisely the same rounds.
+        for (int shift = 0; shift < comm->getSize(); ++shift)
+        {
+            const int destination = (comm->getRank() + shift) % comm->getSize();
+            const int source = (comm->getRank() - shift + comm->getSize()) % comm->getSize();
+            const auto send_it = std::find(peers.begin(), peers.end(), destination);
+            const auto receive_it = std::find(senders.begin(), senders.end(), source);
+            const auto si = static_cast<std::size_t>(send_it - peers.begin());
+            const auto ri = static_cast<std::size_t>(receive_it - senders.begin());
+            const std::size_t local_send = si == peers.size() ? 0 : send_header[2 * si + 1];
+            const std::size_t local_receive = ri == senders.size() ? 0 : recv_sizes[ri];
+            Word extent = local_send, global_extent = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &extent, &global_extent);
+            const auto group = groups.find(destination);
+            std::size_t record = 0, framed_offset = 0;
+            for (std::size_t offset = 0; offset < global_extent; offset = plus(offset, quantum))
+            {
+                const auto send_count = offset < local_send ? std::min(quantum, local_send - offset) : 0;
+                const auto receive_count = offset < local_receive ? std::min(quantum, local_receive - offset) : 0;
+                std::vector<char> send, empty_receive;
+                std::vector<char>* receive = &empty_receive;
+                collectively(*comm,
+                    [&]
+                    {
+                        std::fill(send_sizes.begin(), send_sizes.end(), 0);
+                        std::fill(round_receive_sizes.begin(), round_receive_sizes.end(), 0);
+                        // Admission precedes both allocations; no old/new staging
+                        // owners overlap between rounds.
+                        if (plus(block_transfer_base, plus(raw_capacity, plus(send_count, receive_count))) > budget)
+                            throw std::length_error("Owner packet round staging exceeds byte budget.");
+                        send.resize(send_count);
+                        if (send_count)
+                            send_sizes[si] = send_count;
+                        if (receive_count)
+                        {
+                            streams[ri].blocks.emplace_back(receive_count);
+                            receive = &streams[ri].blocks.back();
+                            raw_capacity = plus(raw_capacity, receive->capacity());
+                            round_receive_sizes[ri] = receive_count;
+                        }
+                        const auto live = plus(block_transfer_base, plus(raw_capacity, send.capacity()));
+                        if (live > budget)
+                            throw std::length_error("Owner packet round capacities exceed byte budget.");
+                        transfer_peak = std::max(transfer_peak, live);
+                        std::size_t filled = 0;
+                        while (filled < send_count)
+                        {
+                            const auto& packet = input[group->second[record]];
+                            const Word length = packet.bytes.size();
+                            const auto* part = framed_offset < sizeof(Word)
+                                                   ? reinterpret_cast<const char*>(&length) + framed_offset
+                                                   : packet.bytes.data() + (framed_offset - sizeof(Word));
+                            const auto available = framed_offset < sizeof(Word)
+                                                       ? sizeof(Word) - framed_offset
+                                                       : packet.bytes.size() - (framed_offset - sizeof(Word));
+                            const auto count = std::min(available, send_count - filled);
+                            std::memcpy(send.data() + filled, part, count);
+                            filled += count;
+                            framed_offset += count;
+                            if (framed_offset == sizeof(Word) + packet.bytes.size())
+                            {
+                                ++record;
+                                framed_offset = 0;
+                            }
+                        }
+                    });
+                distributor.doPostsAndWaits(read_view(send), Teuchos::arrayViewFromVector(send_sizes),
+                    write_view(*receive), Teuchos::arrayViewFromVector(round_receive_sizes));
+                ++output.stats.transport_rounds;
+            }
+        }
+        decltype(groups)().swap(groups);
+        std::vector<int>().swap(peers);
+        std::vector<std::size_t>().swap(send_sizes);
+        std::vector<Word>().swap(send_header);
+        const auto retired_round_metadata = times(round_receive_sizes.capacity(), sizeof(std::size_t));
+        std::vector<std::size_t>().swap(round_receive_sizes);
+        actual_block_metadata -= retired_round_metadata;
+        const auto retained_decode_metadata =
+            plus(planned_decode_metadata - times(records, sizeof(OwnerPacket)), actual_block_metadata);
+        auto decoded_output = owner_exchange_detail::decode_owner_block_streams(
+            streams, recv_sizes, recv_header, senders, comm, budget, retained_decode_metadata);
+        decoded_output.stats.sent_bytes = output.stats.sent_bytes;
+        decoded_output.stats.transport_rounds = output.stats.transport_rounds;
+        output = std::move(decoded_output);
+        const auto decode_peak = output.stats.decode_peak_bytes;
+        std::size_t payload_capacity = 0;
+        for (const auto& packet : output.packets)
+            payload_capacity = plus(payload_capacity, packet.bytes.capacity());
+        output.stats.sent_packets = input.size();
+        output.stats.received_packets = records;
+        output.stats.transfer_peak_bytes = transfer_peak;
+        output.stats.decode_peak_bytes = decode_peak;
+        output.stats.planning_peak_bytes = planning_peak;
+        output.stats.peak_scratch_bytes = std::max(planning_peak, std::max(transfer_peak, decode_peak));
+        output.stats.round_byte_limit = quantum;
+        output.stats.receive_block_capacity = raw_capacity;
+        output.stats.block_metadata_capacity = actual_block_metadata;
+        output.stats.segmented_receive = true;
+        if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+            std::fprintf(stderr,
+                "ADAPTIVE_EXCHANGE_DONE rank=%d segmented_receive=1 rounds=%zu round_limit=%zu "
+                "receive_capacity=%zu block_metadata_capacity=%zu largest_record=%zu "
+                "decoded_payload_capacity=%zu planning_capacity=%zu transfer_capacity=%zu decode_capacity=%zu "
+                "send_capacity_at_decode=0 scratch_capacity=%zu limit=%zu scratch_excludes_input=1\n",
+                comm->getRank(), output.stats.transport_rounds, quantum, raw_capacity, actual_block_metadata,
+                output.stats.largest_received_record, payload_capacity, planning_peak, transfer_peak, decode_peak,
+                output.stats.peak_scratch_bytes, budget);
+        return output;
+    }
+    collectively(*comm,
+        [&]
+        {
             if (std::max(transfer_bound, decode_bound) > budget)
                 throw std::length_error("Owner packet receive buffers exceed byte budget.");
         });
@@ -344,7 +776,12 @@ OwnerExchange exchange_owner_packets(
         });
     output.stats.sent_packets = input.size();
     output.stats.received_packets = records;
-    output.stats.peak_scratch_bytes = std::max(transfer_capacity, decode_capacity);
+    output.stats.planning_peak_bytes = planning_peak;
+    output.stats.peak_scratch_bytes = std::max(planning_peak, std::max(transfer_capacity, decode_capacity));
+    output.stats.transfer_peak_bytes = transfer_capacity;
+    output.stats.decode_peak_bytes = decode_capacity;
+    output.stats.transport_rounds = sent_wire || received_wire ? 1 : 0;
+    output.stats.largest_received_record = validated.largest_payload;
     if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
     {
         std::size_t decoded_capacity = times(output.packets.capacity(), sizeof(OwnerPacket));
@@ -355,13 +792,19 @@ OwnerExchange exchange_owner_packets(
             "receive_capacity=%zu decoded_size=%zu decoded_capacity=%zu metadata_capacity=%zu "
             "decode_metadata_capacity=%zu retired_send_metadata_capacity=%zu validated_payload_bytes=%zu "
             "decoded_payload_capacity=%zu "
-            "transfer_capacity=%zu decode_capacity=%zu send_capacity_at_decode=0 scratch_capacity=%zu limit=%zu\n",
+            "planning_capacity=%zu transfer_capacity=%zu decode_capacity=%zu send_capacity_at_decode=0 "
+            "scratch_capacity=%zu limit=%zu\n",
             comm->getRank(), sent_wire, send_capacity, received.size(), received.capacity(),
             plus(times(output.packets.size(), sizeof(OwnerPacket)), output.stats.received_bytes), decoded_capacity,
             metadata, actual_decode_metadata, retired_send_metadata, validated.payload_bytes, decoded_payload_capacity,
-            transfer_capacity, decode_capacity, output.stats.peak_scratch_bytes, budget);
+            planning_peak, transfer_capacity, decode_capacity, output.stats.peak_scratch_bytes, budget);
     }
     return output;
+}
+OwnerExchange exchange_owner_packets(
+    std::span<const OwnerPacket> input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
+{
+    return owner_exchange_detail::exchange_owner_packets_with_round_limit(input, comm, budget, 16 * 1024 * 1024);
 }
 OwnerExchange consume_owner_packets(
     std::vector<OwnerPacket>&& input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
@@ -410,6 +853,9 @@ OwnerExchange consume_owner_packets(
     result.stats.sent_packets = result.stats.received_packets = input.size();
     result.stats.sent_bytes = result.stats.received_bytes = bytes;
     result.stats.peak_scratch_bytes = capacity;
+    result.stats.decode_peak_bytes = capacity;
+    for (const auto& packet : input)
+        result.stats.largest_received_record = std::max(result.stats.largest_received_record, packet.bytes.size());
     if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
         std::fprintf(stderr,
             "ADAPTIVE_EXCHANGE rank=%d local_delivery=1 packets=%zu input_size=%zu "

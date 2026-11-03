@@ -315,7 +315,7 @@ TEST(SparseNativePeriodic, InconsistentDisplayImageRejectsCollectively)
     if (comm->getRank() == 0)
     {
         auto found = std::find_if(fixture.input.faces.begin(), fixture.input.faces.end(),
-            [](const auto& face) { return !face.second_image_identity.empty(); });
+            [](const auto& face) { return !face.second_image_identity.is_zero(); });
         ASSERT_NE(found, fixture.input.faces.end());
         found->second_image[0] += .125;
     }
@@ -337,7 +337,7 @@ TEST(SparseNativePeriodic, WrongSecondPhysicalNodeRejectsCollectively)
     if (comm->getRank() == 0)
     {
         auto found = std::find_if(fixture.input.faces.begin(), fixture.input.faces.end(),
-            [](const auto& face) { return !face.second_image_identity.empty(); });
+            [](const auto& face) { return !face.second_image_identity.is_zero(); });
         ASSERT_NE(found, fixture.input.faces.end());
         found->second_node_gids = found->override_nodes;
     }

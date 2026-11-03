@@ -26,6 +26,7 @@ struct AuthorityDiagnostics
     std::size_t cells = 0, faces = 0, face_bytes = 0, requests = 0;
     std::size_t edge_subscriptions = 0, endpoint_events = 0, unique_endpoints = 0, endpoint_bytes = 0, edge_work = 0;
     std::size_t edge_query_calls = 0, edge_query_scanned = 0, edge_query_growths = 0, edge_query_peak_bytes = 0;
+    std::size_t retired_lines = 0, retired_line_bytes = 0, edge_decode_peak_bytes = 0, edge_decode_cumulative_bytes = 0;
     ~AuthorityDiagnostics()
     {
         if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
@@ -33,10 +34,13 @@ struct AuthorityDiagnostics
                 "ADAPTIVE_AUTHORITY rank=%d stage=%s cells=%zu face_occurrences=%zu "
                 "geometry_record_bytes=%zu requests=%zu edge_subscriptions=%zu "
                 "endpoint_events=%zu unique_line_endpoints=%zu unique_endpoint_bytes=%zu edge_work=%zu "
-                "edge_query_calls=%zu edge_query_scanned=%zu edge_query_growths=%zu edge_query_peak_bytes=%zu\n",
+                "edge_query_calls=%zu edge_query_scanned=%zu edge_query_growths=%zu edge_query_peak_bytes=%zu "
+                "retired_lines=%zu retired_line_bytes=%zu edge_decode_peak_bytes=%zu "
+                "edge_decode_cumulative_bytes=%zu\n",
                 rank, stage, cells, faces, face_bytes, requests, edge_subscriptions, endpoint_events, unique_endpoints,
                 endpoint_bytes, edge_work, edge_query_calls, edge_query_scanned, edge_query_growths,
-                edge_query_peak_bytes);
+                edge_query_peak_bytes, retired_lines, retired_line_bytes, edge_decode_peak_bytes,
+                edge_decode_cumulative_bytes);
     }
 };
 std::pair<std::uint64_t, std::uint64_t> entity_range(std::uint64_t local, const Teuchos::Comm<int>& comm)
@@ -184,22 +188,22 @@ AdaptiveTile decode_tile(std::span<const char> bytes, std::size_t byte_budget, B
     tile.surface = read_metadata();
     tile.domain = read_metadata();
     tile.identity = r.bytes();
-    tile.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), byte_budget);
+    tile.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes_view(), byte_budget);
     tile.second_image_identity =
-        PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes(), byte_budget);
+        PLIC::decode_identity<PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>>(r.bytes_view(), byte_budget);
     tile.second_image = PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
-    tile.first = decode_adaptive_key(r.bytes());
+    tile.first = decode_adaptive_key(r.bytes_view());
     auto second = r.word();
     if (second > 1)
         throw std::invalid_argument("Invalid authority incidence.");
     if (second)
-        tile.second = decode_adaptive_key(r.bytes());
+        tile.second = decode_adaptive_key(r.bytes_view());
     tile.first_owner = r.word();
     tile.second_owner = int(r.word()) - 1;
     tile.first_native_face = r.word();
     tile.second_native_face = r.word();
     tile.exterior = r.word();
-    auto name = r.bytes();
+    const auto name = r.bytes_view();
     tile.boundary.assign(name.begin(), name.end());
     for (auto* incidence : {&tile.node_gids, &tile.second_node_gids})
     {
@@ -397,14 +401,14 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         r.offset += 8 + support.size();
                         Occurrence entry;
                         entry.domain = r.bytes();
-                        entry.cell = decode_adaptive_key(r.bytes());
+                        entry.cell = decode_adaptive_key(r.bytes_view());
                         entry.native_face = r.word();
-                        entry.image = PLIC::decode_identity<DisplacementIdentity>(r.bytes(), budget);
+                        entry.image = PLIC::decode_identity<DisplacementIdentity>(r.bytes_view(), budget);
                         auto nesting = r.word();
                         if (nesting > 2)
                             throw std::invalid_argument("Invalid native face nesting policy.");
                         entry.native_whole = nesting;
-                        auto whole = r.bytes();
+                        const auto whole = r.bytes_view();
                         if (nesting == 2 && !whole.empty())
                             throw std::invalid_argument("Shared native whole-face proof has a duplicate payload.");
                         if (!whole.empty())
@@ -417,10 +421,10 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                             throw std::invalid_argument("Invalid authority support routing.");
                         entry.orientation = orientation ? 1 : -1;
                         entry.exterior = exterior;
-                        auto name = r.bytes();
+                        const auto name = r.bytes_view();
                         entry.boundary.assign(name.begin(), name.end());
-                        entry.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes(), budget)->translated(
-                            entry.image);
+                        entry.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes_view(), budget)
+                                         ->translated(entry.image);
                         if (nesting == 2)
                             entry.whole_geometry = entry.face;
                         if (entry.native_whole && !entry.whole_geometry)
@@ -821,6 +825,17 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 };
                 std::map<AdaptiveBytes, Line> lines;
                 Budget allocation{budget};
+                struct DecodeObservation
+                {
+                    const Budget& allocation;
+                    AuthorityDiagnostics& diagnostics;
+                    ~DecodeObservation()
+                    {
+                        diagnostics.edge_decode_peak_bytes = allocation.peak;
+                        diagnostics.edge_decode_cumulative_bytes = allocation.cumulative;
+                    }
+                } observation{allocation, diagnostics};
+                allocation.add(replies.capacity() * sizeof(OwnerPacket));
                 allocation.add(incoming.packets.capacity() * sizeof(OwnerPacket));
                 for (const auto& packet : incoming.packets)
                     allocation.add(packet.bytes.capacity());
@@ -836,8 +851,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     if (authority(key, comm->getSize()) != comm->getRank() ||
                         !unique.emplace(packet.peer, ordinal).second)
                         throw std::invalid_argument("Invalid edge authority request.");
-                    auto first = PLIC::decode_identity<PointIdentity>(r.bytes(), budget),
-                         last = PLIC::decode_identity<PointIdentity>(r.bytes(), budget);
+                    auto first = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget),
+                         last = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget);
                     r.done();
                     auto [position, inserted] = lines.try_emplace(std::move(key));
                     if (inserted)
@@ -871,87 +886,121 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 // Every request has passed routing, ordinal uniqueness and
                 // complete framing checks. Endpoints now belong to line nodes;
                 // neither the empty records nor the completed audit are used below.
+                const auto reply_count = incoming.packets.size();
                 const auto input_records = incoming.packets.capacity() * sizeof(OwnerPacket);
                 std::vector<OwnerPacket>().swap(incoming.packets);
                 allocation.used -= input_records;
                 const auto audit_nodes = unique.size() * (sizeof(decltype(unique)::value_type) + 4 * sizeof(void*));
                 decltype(unique)().swap(unique);
                 allocation.used -= audit_nodes;
-                for (const auto& [key, line] : lines)
+                // Each authenticated subscription emits one reply. Admit only
+                // that actual slot count, including any old/new allocation overlap.
+                if (reply_count > replies.capacity())
                 {
-                    BudgetLease index_scratch{&allocation};
-                    // The immutable endpoint index contains each actual point
-                    // once. Subscriber references above retain no endpoint copy.
-                    index_scratch.add(line.points.size() * sizeof(PointIdentity));
-                    for (const auto& point : line.points)
+                    if (reply_count > budget / sizeof(OwnerPacket))
+                        throw std::invalid_argument("Distributed adaptive vector capacity budget exhausted.");
+                    const auto previous_capacity = replies.capacity();
+                    allocation.add(reply_count * sizeof(OwnerPacket));
+                    replies.reserve(reply_count);
+                    allocation.add((replies.capacity() - reply_count) * sizeof(OwnerPacket));
+                    allocation.used -= previous_capacity * sizeof(OwnerPacket);
+                }
+                while (!lines.empty())
+                {
+                    const auto entry = lines.begin();
                     {
-                        TileEncodedSize bound;
-                        bound.add(point.payload_bytes());
-                        for (unsigned copy = 0; copy < 4; ++copy)
-                            bound.add(PLIC::encoded_identity_size(point));
-                        bound.add(256);
-                        index_scratch.add(bound.total);
-                    }
-                    // Preserve first-arrival identity selection if the geometry
-                    // index recognizes equivalent encodings of the same point.
-                    std::vector<PointIdentity> indexed_points;
-                    indexed_points.reserve(line.point_order.size());
-                    for (const auto* point : line.point_order)
-                        indexed_points.push_back(*point);
-                    PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(indexed_points);
-                    TileEncodedSize actual_index;
-                    actual_index.add(indexed_points.capacity() * sizeof(PointIdentity));
-                    for (const auto& point : indexed_points)
-                        actual_index.add(point.payload_bytes());
-                    actual_index.add(index.storage_bytes());
-                    if (actual_index.total > index_scratch.bytes)
-                        index_scratch.add(actual_index.total - index_scratch.bytes);
-                    // One bounded hit buffer serves the complete line. Charge
-                    // retained capacity once, even when a query clears its hits.
-                    // This lease outlives the scratch, whose pin must disappear
-                    // before the immutable index storage lease is released.
-                    BudgetLease query_storage{&allocation};
-                    PLIC::OrdinaryEdgeQueryScratch points;
-                    const auto query_peak = points.reserve_required_peak(line.points.size());
-                    query_storage.add(query_peak);
-                    points.reserve(line.points.size(), query_peak);
-                    diagnostics.edge_query_growths += points.growths();
-                    diagnostics.edge_query_peak_bytes =
-                        std::max(diagnostics.edge_query_peak_bytes, points.storage_bytes());
-                    for (const auto& subscriber : line.subscribers)
+                        const auto& [key, line] = *entry;
+                        BudgetLease index_scratch{&allocation};
+                        // The immutable endpoint index contains each actual point
+                        // once. Subscriber references above retain no endpoint copy.
+                        index_scratch.add(line.points.size() * sizeof(PointIdentity));
+                        for (const auto& point : line.points)
+                        {
+                            TileEncodedSize bound;
+                            bound.add(point.payload_bytes());
+                            for (unsigned copy = 0; copy < 4; ++copy)
+                                bound.add(PLIC::encoded_identity_size(point));
+                            bound.add(256);
+                            index_scratch.add(bound.total);
+                        }
+                        // Preserve first-arrival identity selection if the geometry
+                        // index recognizes equivalent encodings of the same point.
+                        std::vector<PointIdentity> indexed_points;
+                        indexed_points.reserve(line.point_order.size());
+                        for (const auto* point : line.point_order)
+                            indexed_points.push_back(*point);
+                        PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(indexed_points);
+                        TileEncodedSize actual_index;
+                        actual_index.add(indexed_points.capacity() * sizeof(PointIdentity));
+                        for (const auto& point : indexed_points)
+                            actual_index.add(point.payload_bytes());
+                        actual_index.add(index.storage_bytes());
+                        if (actual_index.total > index_scratch.bytes)
+                            index_scratch.add(actual_index.total - index_scratch.bytes);
+                        // One bounded hit buffer serves the complete line. Charge
+                        // retained capacity once, even when a query clears its hits.
+                        // This lease outlives the scratch, whose pin must disappear
+                        // before the immutable index storage lease is released.
+                        BudgetLease query_storage{&allocation};
+                        PLIC::OrdinaryEdgeQueryScratch points;
+                        const auto query_peak = points.reserve_required_peak(line.points.size());
+                        query_storage.add(query_peak);
+                        points.reserve(line.points.size(), query_peak);
+                        diagnostics.edge_query_growths += points.growths();
+                        diagnostics.edge_query_peak_bytes =
+                            std::max(diagnostics.edge_query_peak_bytes, points.storage_bytes());
+                        for (const auto& subscriber : line.subscribers)
+                        {
+                            diagnostics.edge_work += line.points.size();
+                            BudgetLease query_scratch{&allocation};
+                            ++diagnostics.edge_query_calls;
+                            const auto scanned_before = points.scanned_points();
+                            index.closed_segment(*subscriber.first, *subscriber.last, points);
+                            diagnostics.edge_query_scanned += points.scanned_points() - scanned_before;
+                            TileEncodedSize size;
+                            write_geometry_record_header(size, GeometryRecordKind::EdgeReply);
+                            size.bytes(key);
+                            size.word(subscriber.ordinal);
+                            size.word(points.size());
+                            for (std::size_t p = 0; p < points.size(); ++p)
+                                size.add(8 + PLIC::encoded_identity_size(points.point(p)));
+                            // Keep the conservative temporary OwnerPacket object
+                            // admission distinct from the retained vector slots.
+                            query_scratch.add(sizeof(OwnerPacket));
+                            allocation.add(size.total);
+                            Writer w;
+                            w.data.reserve(size.total);
+                            allocation.add(w.data.capacity() - size.total);
+                            write_geometry_record_header(w, GeometryRecordKind::EdgeReply);
+                            w.bytes(key);
+                            w.word(subscriber.ordinal);
+                            w.word(points.size());
+                            for (std::size_t p = 0; p < points.size(); ++p)
+                                w.bytes(PLIC::encode_identity(points.point(p)));
+                            allocation.append_capacity(replies);
+                            replies.push_back({subscriber.rank, std::move(w.data)});
+                            // Published replies now own every byte they reference.
+                            points.clear();
+                        }
+                        points.release();
+                    } // Destroy the index, endpoint copies, query pins and their leases before retiring the line.
+                    TileEncodedSize retired;
                     {
-                        diagnostics.edge_work += line.points.size();
-                        BudgetLease query_scratch{&allocation};
-                        ++diagnostics.edge_query_calls;
-                        const auto scanned_before = points.scanned_points();
-                        index.closed_segment(*subscriber.first, *subscriber.last, points);
-                        diagnostics.edge_query_scanned += points.scanned_points() - scanned_before;
-                        TileEncodedSize size;
-                        write_geometry_record_header(size, GeometryRecordKind::EdgeReply);
-                        size.bytes(key);
-                        size.word(subscriber.ordinal);
-                        size.word(points.size());
-                        for (std::size_t p = 0; p < points.size(); ++p)
-                            size.add(8 + PLIC::encoded_identity_size(points.point(p)));
-                        // Keep the conservative temporary OwnerPacket object
-                        // admission distinct from the retained vector slots.
-                        query_scratch.add(sizeof(OwnerPacket));
-                        allocation.add(size.total);
-                        Writer w;
-                        w.data.reserve(size.total);
-                        allocation.add(w.data.capacity() - size.total);
-                        write_geometry_record_header(w, GeometryRecordKind::EdgeReply);
-                        w.bytes(key);
-                        w.word(subscriber.ordinal);
-                        w.word(points.size());
-                        for (std::size_t p = 0; p < points.size(); ++p)
-                            w.bytes(PLIC::encode_identity(points.point(p)));
-                        allocation.append_capacity(replies);
-                        replies.push_back({subscriber.rank, std::move(w.data)});
-                        // Published replies now own every byte they reference.
-                        points.clear();
+                        const auto& [key, line] = *entry;
+                        retired.add(sizeof(decltype(lines)::value_type) + 4 * sizeof(void*));
+                        retired.add(key.capacity());
+                        retired.add(line.point_order.capacity() * sizeof(decltype(line.point_order)::value_type));
+                        retired.add(line.subscribers.capacity() * sizeof(Subscriber));
+                        for (const auto& point : line.points)
+                        {
+                            retired.add(sizeof(PointIdentity) + 4 * sizeof(void*));
+                            retired.add(point.payload_bytes());
+                        }
                     }
-                    points.release();
+                    lines.erase(entry);
+                    allocation.used -= retired.total;
+                    ++diagnostics.retired_lines;
+                    diagnostics.retired_line_bytes += retired.total;
                 }
             });
         std::vector<OwnerPacket>().swap(incoming.packets);
@@ -1006,7 +1055,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         {
                             BudgetLease point_scratch{&allocation};
                             point_scratch.add(sizeof(PointIdentity));
-                            auto point = PLIC::decode_identity<PointIdentity>(r.bytes(), budget);
+                            auto point = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget);
                             auto& row = points[edge.tile];
                             if (edge.image.is_zero())
                             {
@@ -1145,7 +1194,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 read_geometry_record_header(r, GeometryRecordKind::NodeRequest);
                 auto ordinal = r.word();
                 auto key = r.bytes();
-                auto point = PLIC::decode_identity<PointIdentity>(r.bytes(), budget);
+                auto point = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget);
                 r.done();
                 Reader identity{key};
                 auto domain = identity.bytes(), certified_point = identity.bytes();

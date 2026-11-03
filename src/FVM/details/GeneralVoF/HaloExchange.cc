@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/ProtocolTags.hh"
+#include <algorithm>
 namespace SimpleFluid::VoF::general_vof_detail
 {
 // Every incident owner registers its actual cell once. The node authority
@@ -54,6 +55,7 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
             }
         });
     auto received = exchange_owner_packets(requests, comm, limit);
+    std::vector<OwnerPacket>().swap(requests);
     struct Registration
     {
         std::uint64_t node, revision;
@@ -72,20 +74,20 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
             {
                 wire::Reader r{packet.bytes};
                 const auto node = r.word();
-                auto identity = r.bytes();
-                budget.add(identity.size() + sizeof(identity) + 8 * sizeof(void*));
+                const auto identity = r.bytes_view();
+                budget.add(identity.size() + sizeof(AMR::AdaptiveBytes) + 8 * sizeof(void*));
                 if (node % std::uint64_t(comm->getSize()) != std::uint64_t(comm->getRank()) ||
                     !subscribers[node].insert(packet.peer).second)
                     throw std::invalid_argument("General VoF duplicate or misrouted node fan registration.");
-                const auto [it, fresh] = identities.emplace(node, identity);
-                if (!fresh && it->second != identity)
+                const auto [it, fresh] = identities.try_emplace(node, identity.begin(), identity.end());
+                if (!fresh && !std::equal(it->second.begin(), it->second.end(), identity.begin(), identity.end()))
                     throw std::invalid_argument("General VoF node fan identity differs.");
                 const auto count = r.word();
                 if (!count || count > data.options.maximum_stencil_cells)
                     throw std::invalid_argument("General VoF node fan budget exhausted.");
                 for (std::uint64_t i = 0; i < count; ++i)
                 {
-                    auto bytes = r.bytes();
+                    const auto bytes = r.bytes_view();
                     budget.add(bytes.size() + sizeof(Registration) + sizeof(Key));
                     auto key = AMR::decode_adaptive_key(bytes);
                     const auto revision = r.word();
@@ -95,7 +97,9 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                 r.done();
             }
         });
-    const auto owners = data.hierarchy->lookup_cells(keys);
+    std::vector<OwnerPacket>().swap(received.packets);
+    auto owners = data.hierarchy->lookup_cells(keys);
+    std::vector<Key>().swap(keys);
     std::vector<OwnerPacket> replies;
     wire::collective(*comm,
         [&]
@@ -111,6 +115,8 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                 if (fans[entry.node].size() > data.options.maximum_stencil_cells)
                     throw std::invalid_argument("General VoF complete node fan budget exhausted.");
             }
+            std::vector<Registration>().swap(registrations);
+            decltype(owners)().swap(owners);
             for (const auto& [node, fan] : fans)
                 for (auto peer : subscribers.at(node))
                 {
@@ -127,8 +133,11 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                     }
                     replies.push_back({peer, std::move(w.data)});
                 }
+            subscribers.clear();
+            identities.clear();
         });
     auto returned = exchange_owner_packets(replies, comm, limit);
+    std::vector<OwnerPacket>().swap(replies);
     wire::collective(*comm,
         [&]
         {
@@ -141,19 +150,21 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
             {
                 wire::Reader r{packet.bytes};
                 const auto node = r.word();
-                const auto identity = r.bytes();
+                const auto identity = r.bytes_view();
                 if (!topology.node_fans.contains(node) || !seen.insert(node).second ||
                     packet.peer != int(node % std::uint64_t(comm->getSize())))
                     throw std::invalid_argument("General VoF unexpected node fan reply.");
                 const auto native = native_nodes.find(node);
-                if (native == native_nodes.end() || native->second->identity != identity)
+                if (native == native_nodes.end() ||
+                    !std::equal(native->second->identity.begin(), native->second->identity.end(), identity.begin(),
+                        identity.end()))
                     throw std::invalid_argument("General VoF node fan reply identity differs.");
                 const auto count = r.word();
                 if (!count || count > data.options.maximum_stencil_cells)
                     throw std::invalid_argument("General VoF node fan reply budget exhausted.");
                 for (std::uint64_t i = 0; i < count; ++i)
                 {
-                    const auto bytes = r.bytes();
+                    const auto bytes = r.bytes_view();
                     budget.add(bytes.size() + sizeof(Key) + 8 * sizeof(void*));
                     if (!topology.node_fans.at(node)
                             .insert(AMR::decode_adaptive_key(bytes), topology.graph_keys, &budget)
@@ -186,7 +197,9 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                     requests.push_back({cell.owner, std::move(w.data)});
                 }
         });
+    const auto request_count = requests.size();
     auto incoming = exchange_owner_packets(requests, comm, limit);
+    std::vector<OwnerPacket>().swap(requests);
     std::vector<OwnerPacket> replies;
     wire::collective(*comm,
         [&]
@@ -195,7 +208,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto bytes = r.bytes();
+                const auto bytes = r.bytes_view();
                 auto key = AMR::decode_adaptive_key(bytes);
                 auto revision = r.word();
                 r.done();
@@ -240,7 +253,9 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
+    std::vector<OwnerPacket>().swap(incoming.packets);
     auto received = exchange_owner_packets(replies, comm, limit);
+    std::vector<OwnerPacket>().swap(replies);
     wire::collective(*comm,
         [&]
         {
@@ -248,7 +263,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto key = AMR::decode_adaptive_key(r.bytes());
+                auto key = AMR::decode_adaptive_key(r.bytes_view());
                 auto revision = r.word();
                 auto& cell = data.cells.at(key);
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
@@ -285,13 +300,13 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                         &cell.occupancy.transferred_bound, &cell.occupancy.fit_allocation_bound})
                     *value = real(r);
                 if (data.options.arithmetic_mode == ArithmeticMode::Exact)
-                    cell.experimental_exact = detail::decode_experimental(r.bytes(), limit);
+                    cell.experimental_exact = detail::decode_experimental(r.bytes_view(), limit);
                 else
                     cell.experimental_exact.reset();
                 r.done();
                 validate_cell<Mode>(cell, data.options, retained_interface(data, cell));
             }
-            if (seen.size() != requests.size())
+            if (seen.size() != request_count)
                 throw std::invalid_argument("General VoF incomplete phase replies.");
         });
 }

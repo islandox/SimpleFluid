@@ -35,7 +35,9 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                     requests.push_back({cell.owner, std::move(w.data)});
                 }
         });
+    const auto request_count = requests.size();
     auto incoming = exchange_owner_packets(requests, comm, limit);
+    std::vector<OwnerPacket>().swap(requests);
     std::vector<OwnerPacket> replies;
     wire::collective(*comm,
         [&]
@@ -44,7 +46,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto bytes = r.bytes();
+                const auto bytes = r.bytes_view();
                 auto key = AMR::decode_adaptive_key(bytes);
                 auto revision = r.word();
                 r.done();
@@ -59,7 +61,9 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
+    std::vector<OwnerPacket>().swap(incoming.packets);
     auto received = exchange_owner_packets(replies, comm, limit);
+    std::vector<OwnerPacket>().swap(replies);
     wire::collective(*comm,
         [&]
         {
@@ -67,7 +71,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto key = AMR::decode_adaptive_key(r.bytes());
+                auto key = AMR::decode_adaptive_key(r.bytes_view());
                 auto revision = r.word();
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
@@ -108,7 +112,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                 result.emplace(key, std::move(imported));
                 r.done();
             }
-            if (seen.size() != requests.size())
+            if (seen.size() != request_count)
                 throw std::invalid_argument("General VoF incomplete plane replies.");
         });
     return result;
@@ -134,18 +138,21 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
             row->request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
             // Same codec as a real reply; this calibration is outside reconstruction timing.
             storage.charge(ordinary_plane_wire_bytes);
+            std::size_t extra_capacity = 0;
             {
                 wire::Writer writer;
                 writer.data.reserve(ordinary_plane_wire_bytes);
                 if (writer.data.capacity() > ordinary_plane_wire_bytes)
-                    storage.charge(writer.data.capacity() - ordinary_plane_wire_bytes);
+                {
+                    extra_capacity = writer.data.capacity() - ordinary_plane_wire_bytes;
+                    storage.charge(extra_capacity);
+                }
                 plane(writer, result);
                 if (writer.data.size() > ordinary_plane_wire_bytes)
                     throw std::invalid_argument("General VoF plane exceeds its capture envelope.");
                 row->reply_payload_bytes = row->request_payload_bytes + writer.data.size();
-                if (writer.data.capacity() > ordinary_plane_wire_bytes)
-                    storage.release(writer.data.capacity() - ordinary_plane_wire_bytes);
             }
+            storage.release(extra_capacity);
             storage.release(ordinary_plane_wire_bytes);
         }
         return result;
@@ -251,8 +258,10 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
         [&]
         {
             storage.observe_exchange_peak(received.stats.peak_scratch_bytes);
-            // The peer-only map is already gone. Keep replies charged until
-            // exchange and their destruction; account the received owners too.
+            const auto reply_bytes =
+                owner_plane_packet_storage_bytes(replies) + (replies.capacity() - replies.size()) * sizeof(OwnerPacket);
+            std::vector<OwnerPacket>().swap(replies);
+            storage.release(reply_bytes);
             storage.charge(owner_plane_packet_storage_bytes(received.packets) +
                            (received.packets.capacity() - received.packets.size()) * sizeof(OwnerPacket));
             std::size_t key_scratch = 0;
@@ -321,6 +330,10 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
             storage.release(key_scratch);
             if (seen.size() != remote_requests)
                 throw std::invalid_argument("General VoF incomplete plane replies.");
+            const auto received_bytes = owner_plane_packet_storage_bytes(received.packets) +
+                                        (received.packets.capacity() - received.packets.size()) * sizeof(OwnerPacket);
+            std::vector<OwnerPacket>().swap(received.packets);
+            storage.release(received_bytes);
         });
     if (balance_work)
         balance_work->fully_deduplicated = diagnostics.cache_admission_denials == 0;

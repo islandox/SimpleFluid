@@ -33,6 +33,54 @@ using Diagnostics = GeneralVoFOwnerPlaneRequestDiagnostics;
 using Work = SimpleFluid::geometry::swept_volume::Work;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
+TEST(GeneralVoFOwnerPlaneRequests, FramedFieldViewsAliasInputAndOwningFieldsSurviveItsDestruction)
+{
+    AMR::AdaptiveBytes retained;
+    {
+        // Independent little-endian fixture: empty field, "abc", sentinel word.
+        AMR::AdaptiveBytes packet = {
+            0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 'a', 'b', 'c', 1, 2, 3, 4, 5, 6, 7, 8};
+        wire::Reader borrowed{packet}, owning{packet};
+        const auto empty = borrowed.bytes_view();
+        EXPECT_TRUE(empty.empty());
+        EXPECT_EQ(empty.data(), packet.data() + 8);
+        EXPECT_TRUE(owning.bytes().empty());
+        EXPECT_EQ(borrowed.offset, owning.offset);
+        EXPECT_EQ(borrowed.offset, 8u);
+
+        const auto field = borrowed.bytes_view();
+        retained = owning.bytes();
+        ASSERT_EQ(field.size(), 3u);
+        EXPECT_EQ(field.data(), packet.data() + 16);
+        EXPECT_TRUE(std::equal(field.begin(), field.end(), retained.begin(), retained.end()));
+        EXPECT_EQ(borrowed.offset, owning.offset);
+        EXPECT_EQ(borrowed.offset, 19u);
+        EXPECT_THROW(borrowed.done(), std::invalid_argument);
+        EXPECT_THROW(owning.done(), std::invalid_argument);
+        EXPECT_EQ(borrowed.word(), 0x0807060504030201ULL);
+        EXPECT_EQ(owning.word(), 0x0807060504030201ULL);
+        EXPECT_EQ(borrowed.offset, owning.offset);
+        EXPECT_NO_THROW(borrowed.done());
+        EXPECT_NO_THROW(owning.done());
+    }
+    EXPECT_EQ(retained, (AMR::AdaptiveBytes{'a', 'b', 'c'}));
+}
+
+TEST(GeneralVoFOwnerPlaneRequests, FramedFieldViewsRejectMalformedLengthsLikeOwningFields)
+{
+    const auto reject = [](const AMR::AdaptiveBytes& packet, std::size_t expected_offset)
+    {
+        wire::Reader borrowed{packet}, owning{packet};
+        EXPECT_THROW(borrowed.bytes_view(), std::invalid_argument);
+        EXPECT_THROW(owning.bytes(), std::invalid_argument);
+        EXPECT_EQ(borrowed.offset, owning.offset);
+        EXPECT_EQ(borrowed.offset, expected_offset);
+    };
+    reject({}, 0);
+    reject({1, 2, 3, 4, 5, 6, 7}, 0);
+    reject({2, 0, 0, 0, 0, 0, 0, 0, 'a'}, 8);
+}
+
 AMR::AdaptiveCellKey key(unsigned region = 3)
 {
     AMR::AdaptiveCellKey result;

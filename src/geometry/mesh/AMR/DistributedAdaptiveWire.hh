@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -85,6 +86,16 @@ struct Reader
         for (unsigned i = 0; i < 8; ++i)
             n |= std::uint64_t(static_cast<unsigned char>(data[offset++])) << (8 * i);
         return n;
+    }
+    /** Borrow a framed field while the message storage remains alive and unchanged. */
+    std::span<const char> bytes_view()
+    {
+        auto n = word();
+        if (n > data.size() - offset)
+            throw std::invalid_argument("Invalid distributed adaptive message length.");
+        const auto b = data.subspan(offset, static_cast<std::size_t>(n));
+        offset += n;
+        return b;
     }
     AdaptiveBytes bytes()
     {
