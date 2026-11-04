@@ -5,6 +5,13 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+/** Value-only scalar projection used by immutable tile-body readers. */
+struct TileBodyScalars
+{
+    std::size_t support, domain, plane, normal_slot, image_slot;
+    std::size_t first_cell, second_cell;
+    std::uint64_t emission;
+};
 /** Compact owner-side tile state. Slot order is never used as canonical order.
  * The intrinsic layer is the only seed on a deletion replay. Cell slots retain
  * only this resident's owned incidences; authenticated source memberships stay
@@ -18,4 +25,9 @@ struct PooledTile
     std::uint64_t emission = 0;
     std::vector<Slot> intrinsic_loop;
 };
+[[nodiscard]] inline TileBodyScalars pooled_tile_scalars(const PooledTile& tile) noexcept
+{
+    return {tile.support, tile.domain, tile.plane, tile.normal_slot, tile.image_slot, tile.first_cell, tile.second_cell,
+        tile.emission};
+}
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

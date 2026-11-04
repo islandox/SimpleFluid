@@ -3,8 +3,8 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-void visit_tile_physical_points(const PooledTile& tile, std::span<const std::size_t> loop, int rank,
-    IncidencePools& pools, const std::function<void(std::size_t, std::size_t)>& visit)
+void visit_tile_physical_points(const TileBodyScalars& tile, TileBodyLoopView loop, int rank, IncidencePools& pools,
+    const std::function<void(std::size_t, std::size_t)>& visit)
 {
     if (rank < 0)
         throw std::invalid_argument("Invalid physical tile incidence.");

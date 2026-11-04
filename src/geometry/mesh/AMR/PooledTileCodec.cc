@@ -28,7 +28,7 @@ PooledTile freeze_tile(const ReceivedTileRecipe& recipe, int resident_rank, Inci
         result.intrinsic_loop.push_back(pools.points.intern(point));
     return result;
 }
-SupportFace restore_tile(const PooledTile& tile, std::span<const std::size_t> loop, const IncidencePools& pools)
+SupportFace restore_tile(const TileBodyScalars& tile, TileBodyLoopView loop, const IncidencePools& pools)
 {
     std::vector<IncidencePools::Point> points;
     points.reserve(loop.size());

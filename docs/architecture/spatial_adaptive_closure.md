@@ -144,6 +144,29 @@ larger groups. Empty groups retain generation tombstones. The owner-local revers
 support index likewise stores up to two cell slots inline and shares immutable
 larger spills. Full member fields and canonical member ordering are preserved.
 
+Persistent tile bodies occupy immutable pages of sixteen records with ordered
+flat rings. Actual slots and terminal offsets select checked 32-bit storage or
+the 64-bit alternative; cell presence is separate from its index, and emission
+ordinals retain their full width. The construction draft is temporary. A complete
+pending page batch is sealed before replay can read its bodies.
+Candidate-private ordered map entries hold a page reference, initialization state
+and optional layer history. Layerless tiles allocate no history owner. Forks
+share immutable body pages, independently admit their arena credits, and rebind
+entry references. Histories detach only on mutation; changed-entry snapshots
+retain the old bodies and histories until contribution removal completes.
+Vector-backed replay inputs explicitly pin their layer owner through replacement
+or pruning; page-backed inputs retain their page reference.
+
+Retirement releases a private page when no tile/view needs it. If an accepted
+source still retains the immutable body, its candidate body credit moves to a
+weak-owner table until physical expiry. Re-adoption transfers that existing
+credit back without charging the body twice. Failed metadata admission leaves
+the original page owner intact. Fork overlap counts distinct source credit
+objects and directory metadata; shared history bodies are admitted once by the
+candidate rather than added again as source-only metadata. Diagnostics separate
+occupied/live records, page/ring capacities, history storage, credit objects and
+deferred body storage.
+
 Line replay streams edge edits and batches tile delivery in bounded pages.
 Stored subscribers use checked 32-bit fields for support and endpoint slots,
 emission and edge when representable, with a full-width spill otherwise; the

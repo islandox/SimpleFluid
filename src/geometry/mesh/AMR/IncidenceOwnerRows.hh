@@ -5,6 +5,7 @@
 #include "DistributedAdaptiveIncidence.hh"
 #include "PooledCellPoints.hh"
 #include "PooledTile.hh"
+#include "TileBodyPages.hh"
 #include <map>
 #include <memory>
 #include <set>
@@ -35,8 +36,16 @@ public:
     void insert(Slot cell, std::uint64_t generation = 0);
     void erase(Slot cell);
     void begin_delta();
-    void add(const PooledTile&, std::span<const Slot> loop);
-    void remove(const PooledTile&, std::span<const Slot> loop);
+    void add(const TileBodyScalars&, TileBodyLoopView loop);
+    void remove(const TileBodyScalars&, TileBodyLoopView loop);
+    void add(const PooledTile& tile, std::span<const Slot> loop)
+    {
+        add(pooled_tile_scalars(tile), TileBodyLoopView(loop));
+    }
+    void remove(const PooledTile& tile, std::span<const Slot> loop)
+    {
+        remove(pooled_tile_scalars(tile), TileBodyLoopView(loop));
+    }
     /** Returned vector capacity is charged to the caller; release that charge
      * after destroying its allocation. Row handles release their own charge. */
     [[nodiscard]] std::vector<Patch> finish(const OwnedLeafLookup&);

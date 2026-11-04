@@ -91,7 +91,7 @@ void IncidenceOwnerRows::touch(Slot cell)
     dirty_.insert(cell);
     entry.points->begin_delta();
 }
-void IncidenceOwnerRows::add(const PooledTile& tile, std::span<const Slot> loop)
+void IncidenceOwnerRows::add(const TileBodyScalars& tile, TileBodyLoopView loop)
 {
     visit_tile_physical_points(tile, loop, rank_, *pools_,
         [&](Slot cell, Slot point)
@@ -100,7 +100,7 @@ void IncidenceOwnerRows::add(const PooledTile& tile, std::span<const Slot> loop)
             cells_.at(cell).points->add(point);
         });
 }
-void IncidenceOwnerRows::remove(const PooledTile& tile, std::span<const Slot> loop)
+void IncidenceOwnerRows::remove(const TileBodyScalars& tile, TileBodyLoopView loop)
 {
     visit_tile_physical_points(tile, loop, rank_, *pools_,
         [&](Slot cell, Slot point)

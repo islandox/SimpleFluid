@@ -30,6 +30,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/IncidenceTileDelivery.cc
     mesh/AMR/ResidentSupportCertification.cc
     mesh/AMR/TilePointContributions.cc
+    mesh/AMR/TileBodyPages.cc
     mesh/AMR/PooledCellPoints.cc
     mesh/AMR/IncidenceOwnerRows.cc
     mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
@@ -163,6 +164,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/IncidenceTileDelivery.cc
         mesh/AMR/ResidentSupportCertification.cc
         mesh/AMR/TilePointContributions.cc
+        mesh/AMR/TileBodyPages.cc
         mesh/AMR/PooledCellPoints.cc
         mesh/AMR/IncidenceOwnerRows.cc
         mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
@@ -240,6 +242,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/IncidenceTileDelivery.cc
     mesh/AMR/ResidentSupportCertification.cc
     mesh/AMR/TilePointContributions.cc
+    mesh/AMR/TileBodyPages.cc
     mesh/AMR/PooledCellPoints.cc
     mesh/AMR/IncidenceOwnerRows.cc
     mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
