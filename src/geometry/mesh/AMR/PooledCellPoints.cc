@@ -121,16 +121,59 @@ bool PooledCellPoints::changed() const
 }
 ContactIncidenceRow PooledCellPoints::row(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel)
 {
+    return make_row(leaf, kernel, nullptr);
+}
+ContactIncidenceRow PooledCellPoints::row(
+    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch& batch)
+{
+    return make_row(leaf, kernel, &batch);
+}
+ContactIncidenceRow PooledCellPoints::make_row(
+    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch* batch)
+{
     if (leaf.domain.empty() || counts_.empty())
         throw std::invalid_argument("Incomplete spatial contact incidence row.");
-    // The caller owns these charges after this function returns.
-    budget_->add(key_capacity(leaf.key));
-    budget_->add(leaf.domain.size());
-    if (counts_.size() > budget_->limit / sizeof(ContactPointIncidence))
+    // Transfer only row-exclusive bytes to its owner. Pool pages and the
+    // shared batch directory retain their independent admission credits.
+    struct RowAdmission
+    {
+        Budget& budget;
+        std::size_t bytes = 0;
+        bool transferred = false;
+        ~RowAdmission()
+        {
+            if (!transferred)
+                budget.used -= bytes;
+        }
+        void add(std::size_t n)
+        {
+            budget.add(n);
+            bytes += n;
+        }
+    } admission{*budget_};
+    admission.add(key_capacity(leaf.key));
+    admission.add(leaf.domain.size());
+    auto base_admission = admission.bytes;
+    const auto row_element_bound = batch ? 2 * sizeof(std::uint64_t) : sizeof(ContactPointIncidence);
+    if (counts_.size() > budget_->limit / row_element_bound)
         throw std::invalid_argument("Contact incidence row exceeds budget.");
-    budget_->add(counts_.size() * sizeof(ContactPointIncidence));
+    if (!batch)
+        admission.add(counts_.size() * sizeof(ContactPointIncidence));
     ContactIncidenceRow result{leaf.key, leaf.revision, leaf.domain, {}};
-    result.points.reserve(counts_.size());
+    const auto copied_base = key_capacity(result.key) + result.domain.capacity();
+    if (copied_base > base_admission)
+        throw std::invalid_argument("Contact row key capacity exceeds its construction admission.");
+    // Copies can discard unused ancestry capacity. Transfer only the buffers
+    // actually owned by the row; the caller's source keeps its own allowance.
+    budget_->used -= base_admission - copied_base;
+    admission.bytes -= base_admission - copied_base;
+    base_admission = copied_base;
+    if (batch)
+        result.points = ContactPointArray::pooled(*batch, counts_.size(), *budget_);
+    else
+        result.points.reserve(counts_.size());
+    if (batch)
+        admission.bytes = base_admission + result.points.storage_bytes();
     if (result.points.capacity() != counts_.size())
         throw std::invalid_argument("Contact incidence row capacity differs from admission.");
     // Scoped transient storage is admitted before allocation and retired after
@@ -141,6 +184,7 @@ ContactIncidenceRow PooledCellPoints::row(const AdaptiveLeaf& leaf, const Adapti
         throw std::invalid_argument("Contact row temporary budget exhausted.");
     const auto scratch = count * (sizeof(Slot) + node_bytes);
     admit(scratch);
+    try
     {
         std::vector<Slot> order;
         order.reserve(count);
@@ -155,14 +199,37 @@ ContactIncidenceRow PooledCellPoints::row(const AdaptiveLeaf& leaf, const Adapti
             auto contact = kernel.contact_point(leaf, point);
             if (!normalized.insert(contact).second)
                 throw std::invalid_argument("Duplicate cell incidence at a normalized closure point.");
-            result.points.push_back({std::move(contact), point});
+            if (batch)
+            {
+                // Preserve physical sorting and contact_point call order. Pool
+                // lookup work restores the caller's floating-point environment.
+                const auto contact_slot = pools_->points.intern(std::move(contact));
+                const auto physical = batch->capture(slot);
+                const auto normalized = batch->capture(contact_slot);
+                result.points.push_reference(physical, normalized, *budget_);
+            }
+            else
+                result.points.push_back({std::move(contact), point});
         }
     }
+    catch (...)
+    {
+        release(scratch);
+        if (batch)
+            admission.bytes = base_admission + result.points.storage_bytes();
+        throw;
+    }
     release(scratch);
+    if (batch)
+    {
+        admission.transferred = true;
+        return result;
+    }
     const auto point_reservation = counts_.size() * sizeof(ContactPointIncidence);
     if (result.points.storage_bytes() > point_reservation)
         throw std::invalid_argument("Contact point arrays exceed their construction admission.");
     budget_->used -= point_reservation - result.points.storage_bytes();
+    admission.transferred = true;
     return result;
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

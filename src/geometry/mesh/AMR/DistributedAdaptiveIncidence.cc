@@ -235,18 +235,19 @@ struct DistributedAdaptiveIncidenceSession::Impl
     Impl(const AdaptiveProviderKernel& k, Teuchos::RCP<const Teuchos::Comm<int>> c, AdaptiveClosureOptions o,
         ContactHaloContext ctx, Budget& b, IdentityBudget& i, std::shared_ptr<Budget> arena)
         : lease(b), borrowed(b), kernel(&k), comm(std::move(c)), options(o), context(ctx), budget(&b), identities(&i),
-          keeper(std::move(arena)), pools(b, i), owned(b, pools), supports(b, pools.supports, pools.cells),
+          keeper(std::move(arena)), pools(b, i, keeper), owned(b, pools), supports(b, pools.supports, pools.cells),
           lines(b, pools), owner_rows(b, i, pools, k, comm->getRank(), keeper)
     {
         lease.add(sizeof(Impl));
     }
     Impl(const Impl& source, Budget& b, IdentityBudget& i, std::shared_ptr<Budget> arena)
         : lease(b), borrowed(b), kernel(source.kernel), comm(source.comm), options(source.options),
-          context(source.context), budget(&b), identities(&i), keeper(std::move(arena)), pools(source.pools, b, i),
-          owned(source.owned, b, pools), supports(source.supports, b, pools.supports, pools.cells),
-          lines(source.lines, b, pools), owner_rows(source.owner_rows, b, i, pools, keeper),
-          statistics(source.statistics), last_layer(source.last_layer), periodic_tiles(source.periodic_tiles),
-          authority_tiles(source.authority_tiles), ready(source.ready)
+          context(source.context), budget(&b), identities(&i), keeper(std::move(arena)),
+          pools(source.pools, b, i, keeper), owned(source.owned, b, pools),
+          supports(source.supports, b, pools.supports, pools.cells), lines(source.lines, b, pools),
+          owner_rows(source.owner_rows, b, i, pools, keeper), statistics(source.statistics),
+          last_layer(source.last_layer), periodic_tiles(source.periodic_tiles), authority_tiles(source.authority_tiles),
+          ready(source.ready)
     {
         lease.add(sizeof(Impl));
         Lease scratch(b);
@@ -1441,9 +1442,14 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
 {
     const auto& state = *impl_;
     impl_->reap_deferred();
-    return sizeof(Impl) + state.pools.metadata_bytes() + state.owned.metadata_bytes() +
-           state.supports.metadata_bytes() + state.lines.metadata_bytes() + state.owner_rows.metadata_bytes() +
-           state.tiles.size() * tile_map_node + state.authority_tile_counts.size() * slot_count_node +
+    return sizeof(Impl) + state.pools.metadata_bytes() + state.pools.page_credit_overhead_bytes() +
+           state.owned.metadata_bytes() + state.supports.metadata_bytes() + state.lines.metadata_bytes() +
+           state.owner_rows.metadata_bytes() + state.tiles.size() * tile_map_node +
+           state.authority_tile_counts.size() * slot_count_node +
            state.resident_generations.size() * slot_generation_node + state.borrowed.metadata_bytes();
+}
+bool DistributedAdaptiveIncidenceSession::owns_point_page_credit(const void* identity) const noexcept
+{
+    return impl_->pools.points.owns_page_credit(identity);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

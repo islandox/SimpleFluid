@@ -2182,11 +2182,54 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
             copy_vector(state.rows, source.rows);
             state.budget.add(source.rows.size() * sizeof(std::size_t));
             state.borrowed_rows.resize(source.rows.size());
+            const auto borrow_owner = [&](const auto& owner, std::size_t bytes, bool from_source_overlap = false)
+            {
+                if (state.deferred_owners.contains(owner))
+                    return;
+                if (from_source_overlap)
+                {
+                    if (bytes > state.fork_overlap_bytes)
+                        throw std::invalid_argument("Point-page credit exceeds source overlap admission.");
+                }
+                else
+                    state.budget.add(bytes);
+                try
+                {
+                    if (!state.deferred_owners.adopt(owner, bytes))
+                        throw std::invalid_argument("Duplicate borrowed point-page admission.");
+                }
+                catch (...)
+                {
+                    if (!from_source_overlap)
+                        state.budget.used -= bytes;
+                    throw;
+                }
+                if (from_source_overlap)
+                    state.fork_overlap_bytes -= bytes;
+            };
             for (std::size_t i = 0; i < source.rows.size(); ++i)
                 if (source.rows[i])
                 {
                     state.borrowed_rows[i] = row_storage(*source.rows[i]);
                     state.budget.add(state.borrowed_rows[i]);
+                    if (const auto view = source.rows[i]->points.page_view();
+                        view && !state.deferred_owners.contains(view))
+                    {
+                        // The forked incidence pool independently admits page
+                        // bodies. This credit covers the shared immutable
+                        // directory once, independently of per-row buffers.
+                        borrow_owner(view, view->metadata_bytes());
+                        view->visit_credit_owners(
+                            [&](const auto& owner, std::size_t bytes)
+                            {
+                                // Transfer current-source credit objects out
+                                // of source-only overlap. Ancestor credits are
+                                // distinct owners even when they pin one page.
+                                const bool current_source = view->origin_arena() == &source.budget &&
+                                                            source.incidence->owns_point_page_credit(owner.get());
+                                borrow_owner(owner, bytes, current_source);
+                            });
+                    }
                 }
             copy_vector(state.free_rows, source.free_rows);
             copy_vector(state.free_records, source.free_records);

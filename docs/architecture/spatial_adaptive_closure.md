@@ -103,18 +103,37 @@ the same collective phases. A failed plan discards the candidate and its overlay
 leaving the accepted hierarchy, cache and source observations intact.
 
 The incidence identity pools store full values in pages of sixteen records. Byte,
-cell and point keys use flat hash-slot lookup with full-value collision checks;
-plane, normal and image keys retain tree lookup. Point hashing isolates and
+cell and point keys use templated hashing policies and flat hash-slot lookup with
+full-value collision checks; plane, normal and image keys retain tree lookup. Point hashing isolates and
 restores the caller's floating-point environment while emitting canonical words. Hash buckets and stable pool slots are private
 references, not numerical or canonical ordering. Forks share existing page owners
 and copy lookup metadata, then append to a private page instead of changing a
 shared page.
+Hashing and dynamic-payload accounting are template policies; forks preserve
+their configuration. Shared plane payload remains in the separate identity ledger.
+Fork overlap includes every current-source pool credit object. A credit required
+by an inherited row is transferred from source-only overlap to persistent
+borrowed admission, rather than charged twice. Credits originating in an earlier
+ancestor remain distinct allocations even when they pin the same immutable page.
 These pool pages are independent of PLIC point-snapshot paging. Per-cell point
 membership uses sorted pool-slot reference counts, so removal of one contributing
-incidence does not remove a point still supplied by another. A contact row shares
-its physical point array for normalized points while every pair is equal. If a
-pair differs, it retains a separate array of complete normalized identities;
-physical identities remain complete in both cases.
+incidence does not remove a point still supplied by another. Canonical contact
+rows retain checked 32-bit references, or a 64-bit alternative, into a frozen
+directory shared by each changed-row batch. The directory pins only referenced
+point pages and their arena credits, independently of the mutable pool lookup.
+Logical insertion slots and captured references are separate: a fork may seal a
+partially filled page, so insertion slots cannot be decoded by division by the
+page size. Rows preserve full physical-identity ordering and the existing
+normalization and duplicate checks. Normalized references share the physical
+array while every pair is equal; a separate reference array is retained only
+when normalization differs. Standalone/manual rows retain their owning adapter.
+
+Each arena independently admits shared point pages once. Published directories
+retain the originating arena until their last row/view is destroyed. Forked
+sessions separately admit borrowed directory and originating credit-object
+metadata, without charging their page payload twice. Failed row publication
+destroys partial buffers before returning live admission; cumulative spending
+remains unchanged. An unchanged delta constructs no frozen directory.
 
 Resident `PooledTile` records keep only the cell roles local to that resident,
 while complete authenticated membership remains in the authority registries.

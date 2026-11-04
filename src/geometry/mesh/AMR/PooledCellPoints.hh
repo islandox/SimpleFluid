@@ -25,8 +25,10 @@ public:
     /** The returned row is charged to the arena and charge ownership transfers
      * to the caller. Temporary normalization/audit storage is scoped here. */
     [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&);
+    [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch&);
 
 private:
+    [[nodiscard]] ContactIncidenceRow make_row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch*);
     void admit(std::size_t);
     void release(std::size_t);
     Budget* budget_;

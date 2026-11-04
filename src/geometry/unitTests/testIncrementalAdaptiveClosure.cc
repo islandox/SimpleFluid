@@ -347,6 +347,47 @@ TEST(IncrementalAdaptiveClosure, EdgeInsertionDeletionPreserveRevisionRecordsAnd
     EXPECT_EQ(candidate->statistics().full_owned_scans_after_bootstrap, 0u);
 }
 
+TEST(IncrementalAdaptiveClosure, BorrowedPageCreditsSurviveAncestorForkAndExactAdmission)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    FixtureKernel kernel;
+    const auto original = local({{0, box(1, {0, 0, 0}, {4, 4, 4})}, {0, box(2, {8, 8, 8}, {12, 12, 12})}});
+    auto source =
+        std::make_unique<D::DistributedAdaptiveContactHalo>(kernel, comm, AMR::AdaptiveClosureOptions{}, context());
+    source->bootstrap_canonical(original, lookup(original));
+    EXPECT_TRUE(source->required_refinements().empty());
+    const auto expected = rows(*source);
+    auto child = source->fork_candidate(context(701));
+    auto descendant = child->fork_candidate(context(702));
+    EXPECT_EQ(rows(*child), expected);
+    EXPECT_EQ(rows(*descendant), expected);
+    source.reset();
+    child.reset();
+    EXPECT_EQ(rows(*descendant), expected);
+    EXPECT_TRUE(descendant->required_refinements().empty());
+
+    const auto before = descendant->allocation().used;
+    const auto cap = descendant->allocation().limit;
+    std::size_t required = 0;
+    {
+        auto probe = descendant->fork_candidate(context(703));
+        required = probe->allocation().used;
+        EXPECT_EQ(rows(*probe), expected);
+    }
+    ASSERT_LT(required, cap);
+    const auto caller_live = cap - required;
+    {
+        auto exact = descendant->fork_candidate(context(704), caller_live);
+        EXPECT_EQ(exact->allocation().used, cap);
+        EXPECT_EQ(rows(*exact), expected);
+    }
+    EXPECT_EQ(descendant->allocation().used, before);
+    rejects_collectively([&] { (void) descendant->fork_candidate(context(705), caller_live + 1); }, "budget");
+    EXPECT_EQ(descendant->allocation().used, before);
+    EXPECT_EQ(rows(*descendant), expected);
+    EXPECT_TRUE(descendant->required_refinements().empty());
+}
+
 TEST(IncrementalAdaptiveClosure, RankLocalEarlyAndLateRejectionLeaveAcceptedStateReusable)
 {
     const auto comm = Tpetra::getDefaultComm();

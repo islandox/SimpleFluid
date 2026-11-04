@@ -50,6 +50,7 @@ public:
         std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup&);
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
+    [[nodiscard]] bool owns_point_page_credit(const void*) const noexcept;
 
 private:
     struct Impl;

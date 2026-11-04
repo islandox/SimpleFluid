@@ -7,12 +7,21 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace
 {
 namespace D = SimpleFluid::Meshes::AMR::adaptive_detail;
 namespace P = SimpleFluid::PLIC;
+static_assert(D::IdentityPool<D::ContactPointIdentity>::uses_hashing);
+static_assert(D::IdentityPool<SimpleFluid::Meshes::AMR::AdaptiveBytes>::uses_hashing);
+static_assert(D::IdentityPool<SimpleFluid::Meshes::AMR::AdaptiveCellKey>::uses_hashing);
+static_assert(!D::IdentityPool<D::IncidencePools::Plane>::uses_hashing);
+static_assert(!D::IdentityPool<D::IncidencePools::Normal>::uses_hashing);
+static_assert(!D::IdentityPool<D::IncidencePools::Image>::uses_hashing);
+static_assert(std::is_same_v<decltype(D::IncidencePools::points), D::IdentityPool<D::ContactPointIdentity>>);
+static_assert(std::is_empty_v<D::IdentityPool<D::ContactPointIdentity>::HashPolicy>);
 D::ContactPointIdentity point(long double x, long double y = 0, long double z = 0)
 {
     return P::details::GeometryIdentityAccess::point({x, y, z});

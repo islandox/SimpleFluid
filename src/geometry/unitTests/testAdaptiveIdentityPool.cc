@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -97,10 +98,6 @@ struct Identity
     bool operator==(const Identity& other) const { return words == other.words; }
 };
 using Pool = D::IdentityPool<Identity>;
-std::size_t payload(const Identity&)
-{
-    return 0;
-} // All three words reside in the record itself.
 std::vector<Identity> inputs(std::size_t count)
 {
     std::vector<Identity> result;
@@ -109,12 +106,14 @@ std::vector<Identity> inputs(std::size_t count)
         result.emplace_back(Words{1000 - i, i % 3, 7 * i});
     return result;
 }
-void fill(Pool& pool, const std::vector<Identity>& values)
+template<class Hash> void fill(D::IdentityPool<Identity, Hash>& pool, const std::vector<Identity>& values)
 {
     for (const auto& value : values)
         (void) pool.intern(value);
 }
-void expect_prefix(const Pool& pool, const std::vector<Identity>& values, const std::vector<const Identity*>& addresses)
+template<class Hash>
+void expect_prefix(const D::IdentityPool<Identity, Hash>& pool, const std::vector<Identity>& values,
+    const std::vector<const Identity*>& addresses)
 {
     EXPECT_GE(pool.size(), values.size());
     for (std::size_t i = 0; i < values.size(); ++i)
@@ -124,7 +123,7 @@ void expect_prefix(const Pool& pool, const std::vector<Identity>& values, const 
         EXPECT_EQ(&pool.get(i), addresses[i]);
     }
 }
-std::vector<const Identity*> addresses(const Pool& pool)
+template<class Hash> std::vector<const Identity*> addresses(const D::IdentityPool<Identity, Hash>& pool)
 {
     std::vector<const Identity*> result;
     for (std::size_t i = 0; i < pool.size(); ++i)
@@ -152,7 +151,7 @@ TEST_F(AdaptiveIdentityPool, FullValuesKeepInsertionSlotsAndStableAddressesAcros
     constexpr std::size_t caller_live = 113;
     budget.add(caller_live);
     {
-        Pool pool(budget, payload);
+        Pool pool(budget);
         const std::array<Words, 5> literal{
             {{9, 4, 7}, {2, 4, 7}, {9, 4, 8}, {9, 3, 7}, {0, std::numeric_limits<std::uint64_t>::max(), 0}}};
         std::array<const Identity*, 5> original{};
@@ -189,7 +188,7 @@ TEST_F(AdaptiveIdentityPool, DuplicateInternAndQueriesMakeNoCopiesOrAllocations)
 {
     const auto values = inputs(33);
     D::Budget budget{ample};
-    Pool pool(budget, payload);
+    Pool pool(budget);
     fill(pool, values);
     const auto before_used = budget.used, before_cumulative = budget.cumulative;
     const auto before_copies = Identity::copies, before_moves = Identity::moves;
@@ -226,7 +225,7 @@ TEST_F(AdaptiveIdentityPool, ForksAppendPrivatelyAndSurviveSourceAndSourceBudget
     D::Budget candidate_budget{ample}, sibling_budget{ample};
     candidate_budget.add(211);
     sibling_budget.add(307);
-    auto source = std::make_unique<Pool>(*source_budget, payload);
+    auto source = std::make_unique<Pool>(*source_budget);
     fill(*source, values);
     const auto prefix = addresses(*source);
     const auto copies_before_fork = Identity::copies, moves_before_fork = Identity::moves;
@@ -273,7 +272,7 @@ TEST_F(AdaptiveIdentityPool, ExactObservedPeakAdmitsAndOneByteLessRejects)
     probe.add(caller_live);
     std::size_t retained = 0;
     {
-        Pool pool(probe, payload);
+        Pool pool(probe);
         fill(pool, values);
         retained = pool.retained_bytes();
         EXPECT_EQ(pool.size(), values.size());
@@ -283,7 +282,7 @@ TEST_F(AdaptiveIdentityPool, ExactObservedPeakAdmitsAndOneByteLessRejects)
     D::Budget exact{required_peak};
     exact.add(caller_live);
     {
-        Pool pool(exact, payload);
+        Pool pool(exact);
         EXPECT_NO_THROW(fill(pool, values));
         EXPECT_EQ(pool.size(), values.size());
         EXPECT_EQ(pool.retained_bytes(), retained);
@@ -294,7 +293,7 @@ TEST_F(AdaptiveIdentityPool, ExactObservedPeakAdmitsAndOneByteLessRejects)
     short_budget.add(caller_live);
     std::size_t spent_after_rejection = 0;
     {
-        Pool pool(short_budget, payload);
+        Pool pool(short_budget);
         EXPECT_THROW(fill(pool, values), std::invalid_argument);
         EXPECT_LT(pool.size(), values.size());
         EXPECT_GT(short_budget.cumulative, caller_live);
@@ -312,7 +311,7 @@ TEST_F(AdaptiveIdentityPool, FailedForkAndPartialAppendReturnOnlyTheirOwnAdmissi
     const Identity inserted({4003, 7, 1});
     D::Budget source_budget{ample};
     source_budget.add(79);
-    Pool source(source_budget, payload);
+    Pool source(source_budget);
     fill(source, values);
     const auto prefix = addresses(source);
     const auto source_used = source_budget.used, source_spent = source_budget.cumulative;
@@ -392,7 +391,7 @@ TEST_F(AdaptiveIdentityPool, MeasuredPageAllocationsReplacePerRecordOwnersWithou
     constexpr std::size_t count = 96;
     const auto values = inputs(count);
     D::Budget budget{ample};
-    Pool pool(budget, payload);
+    Pool pool(budget);
     PerRecordOwnerReference reference;
     HeapActivity pooled_heap, reference_heap;
     const auto copies_before_pool = Identity::copies, moves_before_pool = Identity::moves;
@@ -438,7 +437,7 @@ TEST_F(AdaptiveIdentityPool, SmallPoolsReportTheirUnusedPageCapacity)
         SCOPED_TRACE(count);
         const auto values = inputs(count);
         D::Budget budget{ample};
-        Pool pool(budget, payload);
+        Pool pool(budget);
         fill(pool, values);
         // Sixteen records per immutable owner page is the documented storage
         // contract; unused records are admitted capacity, not live payloads.
@@ -458,25 +457,126 @@ TEST_F(AdaptiveIdentityPool, SmallPoolsReportTheirUnusedPageCapacity)
     }
 }
 
-std::uint64_t collide(const Identity&)
+struct DynamicIdentity
 {
-    return 0;
-}
-std::uint64_t identity_hash(const Identity& value)
+    std::uint64_t key;
+    std::vector<std::uint64_t> words;
+    bool operator<(const DynamicIdentity& other) const { return key < other.key; }
+};
+TEST_F(AdaptiveIdentityPool, StatefulPayloadPolicyForkAdmitsDynamicCapacityAndCopiesCapturedState)
 {
-    std::uint64_t hash = 14695981039346656037ULL;
-    for (const auto word : value.words)
+    std::size_t observed_bytes = 0;
+    const auto payload = [&observed_bytes](const DynamicIdentity& value)
     {
-        hash ^= word;
-        hash *= 1099511628211ULL;
+        observed_bytes = value.words.capacity() * sizeof(std::uint64_t);
+        return observed_bytes;
+    };
+    using DynamicPool = D::IdentityPool<DynamicIdentity, D::NoIdentityPoolHash, decltype(payload)>;
+    static_assert(!std::is_pointer_v<DynamicPool::PayloadPolicy>);
+    D::Budget baseline_budget{ample}, source_budget{ample}, candidate_budget{ample};
+    std::size_t baseline_retained = 0;
+    {
+        DynamicPool baseline(baseline_budget, {}, {}, payload);
+        EXPECT_EQ(baseline.intern(DynamicIdentity{1, {}}), 0u);
+        baseline_retained = baseline.retained_bytes();
     }
-    return hash;
+    EXPECT_EQ(baseline_budget.used, 0u);
+    DynamicIdentity first{1, {4, 5, 6}};
+    first.words.reserve(23);
+    const auto first_bytes = first.words.capacity() * sizeof(std::uint64_t);
+    DynamicPool source(source_budget, {}, {}, payload);
+    EXPECT_EQ(source.intern(std::move(first)), 0u);
+    EXPECT_EQ(observed_bytes, first_bytes);
+    EXPECT_EQ(source.retained_bytes(), baseline_retained + first_bytes);
+    EXPECT_EQ(source_budget.used, source.retained_bytes());
+    const auto* retained = &source.get(0);
+    std::size_t append_peak = 0;
+    {
+        DynamicPool candidate(source, candidate_budget);
+        EXPECT_EQ(&candidate.get(0), retained);
+        EXPECT_EQ(candidate.retained_bytes(), source.retained_bytes());
+        DynamicIdentity tail{2, {7, 8}};
+        tail.words.reserve(43);
+        const auto tail_bytes = tail.words.capacity() * sizeof(std::uint64_t);
+        observed_bytes = 0;
+        EXPECT_EQ(candidate.intern(std::move(tail)), 1u);
+        EXPECT_EQ(observed_bytes, tail_bytes); // The fork retained the capturing policy.
+        EXPECT_EQ(candidate.get(1).words, (std::vector<std::uint64_t>{7, 8}));
+        EXPECT_EQ(source.size(), 1u);
+        append_peak = candidate_budget.peak;
+    }
+    EXPECT_EQ(candidate_budget.used, 0u);
+    for (const bool admit : {true, false})
+    {
+        D::Budget replay_budget{append_peak - (admit ? 0 : 1)};
+        {
+            DynamicPool candidate(source, replay_budget);
+            DynamicIdentity tail{2, {7, 8}};
+            tail.words.reserve(43);
+            if (admit)
+            {
+                EXPECT_EQ(candidate.intern(std::move(tail)), 1u);
+                EXPECT_EQ(replay_budget.peak, append_peak);
+            }
+            else
+                EXPECT_THROW((void) candidate.intern(std::move(tail)), std::invalid_argument);
+        }
+        EXPECT_EQ(replay_budget.used, 0u);
+        EXPECT_EQ(&source.get(0), retained);
+        EXPECT_EQ(source.get(0).words, (std::vector<std::uint64_t>{4, 5, 6}));
+    }
+}
+
+struct ConstantHash
+{
+    static constexpr bool enabled = true;
+    std::uint64_t operator()(const Identity&) const noexcept { return 0; }
+};
+struct WordHash
+{
+    static constexpr bool enabled = true;
+    std::uint64_t operator()(const Identity& value) const noexcept
+    {
+        std::uint64_t hash = 14695981039346656037ULL;
+        for (const auto word : value.words)
+        {
+            hash ^= word;
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+};
+using FlatPool = D::IdentityPool<Identity, WordHash>;
+static_assert(!Pool::uses_hashing);
+static_assert(FlatPool::uses_hashing);
+static_assert(std::is_empty_v<FlatPool::HashPolicy>);
+static_assert(!std::is_pointer_v<FlatPool::HashPolicy>);
+struct SeededWordHash
+{
+    static constexpr bool enabled = true;
+    std::uint64_t seed = 0;
+    std::uint64_t operator()(const Identity& value) const noexcept { return WordHash{}(value) ^ seed; }
+};
+TEST_F(AdaptiveIdentityPool, StatefulHashPolicyForkPreservesExistingLookupConfiguration)
+{
+    using StatefulPool = D::IdentityPool<Identity, SeededWordHash>;
+    const auto values = inputs(17);
+    D::Budget source_budget{ample}, candidate_budget{ample};
+    StatefulPool source(source_budget, {}, SeededWordHash{137});
+    fill(source, values);
+    const auto retained = addresses(source);
+    StatefulPool candidate(source, candidate_budget);
+    expect_prefix(candidate, values, retained);
+    const Identity appended(Words{9000, 3, 4});
+    EXPECT_EQ(candidate.intern(appended), 17u);
+    EXPECT_EQ(candidate.find(appended), 17u);
+    EXPECT_EQ(source.find(appended), std::nullopt);
 }
 TEST_F(AdaptiveIdentityPool, FlatLookupChecksEveryFullKeyEvenWhenAllHashesCollide)
 {
     const auto values = inputs(257);
     D::Budget budget{ample};
-    Pool pool(budget, payload, collide);
+    D::IdentityPool<Identity, ConstantHash> pool(budget);
     fill(pool, values);
     const auto retained = addresses(pool);
     expect_prefix(pool, values, retained);
@@ -495,10 +595,10 @@ TEST_F(AdaptiveIdentityPool, FlatLookupForksKeepSlotsAndPagesAfterEitherBranchGr
 {
     const auto values = inputs(17);
     D::Budget source_budget{ample}, candidate_budget{ample};
-    auto source = std::make_unique<Pool>(source_budget, payload, identity_hash);
+    auto source = std::make_unique<FlatPool>(source_budget);
     fill(*source, values);
     const auto retained = addresses(*source);
-    Pool candidate(*source, candidate_budget);
+    FlatPool candidate(*source, candidate_budget);
     const Identity source_only(Words{5000, 1, 2}), candidate_only(Words{6000, 2, 3});
     EXPECT_EQ(source->intern(source_only), 17u);
     EXPECT_EQ(candidate.intern(candidate_only), 17u);
@@ -513,7 +613,7 @@ TEST_F(AdaptiveIdentityPool, FlatLookupGrowthAdmitsOldAndNewTablesBeforeReplacin
 {
     const auto values = inputs(8);
     D::Budget budget{ample};
-    Pool pool(budget, payload, identity_hash);
+    FlatPool pool(budget);
     for (std::size_t i = 0; i < 7; ++i)
         EXPECT_EQ(pool.intern(values[i]), i);
     ASSERT_EQ(pool.lookup_bucket_capacity(), 8u);
@@ -539,7 +639,8 @@ TEST_F(AdaptiveIdentityPool, FlatLookupMeasuresFewerAllocationsThanTreeMetadata)
 {
     const auto values = inputs(96);
     D::Budget tree_budget{ample}, flat_budget{ample};
-    Pool tree(tree_budget, payload), flat(flat_budget, payload, identity_hash);
+    Pool tree(tree_budget);
+    FlatPool flat(flat_budget);
     HeapActivity tree_heap, flat_heap;
     {
         HeapProbe probe(tree_heap);
