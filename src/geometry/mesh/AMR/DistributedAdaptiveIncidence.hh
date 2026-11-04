@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
+#include "geometry/mesh/AMR/ContactPointPageView.hh"
 #include <functional>
 #include <memory>
 #include <span>
@@ -51,6 +52,7 @@ public:
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     [[nodiscard]] bool owns_point_page_credit(const void*) const noexcept;
+    [[nodiscard]] const IdentityPool<ContactPointIdentity>& point_pool() const noexcept;
 
 private:
     struct Impl;

@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "ContactPointPageView.hh"
 #include <algorithm>
 #include <cstddef>
@@ -7,6 +8,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -37,6 +39,11 @@ class ContactPointArray
     };
 
 public:
+    struct Locator
+    {
+        const ContactPointPageView* view;
+        CapturedPointReference reference;
+    };
     struct Reference
     {
         const ContactPointIdentity& normalized;
@@ -211,6 +218,37 @@ public:
     [[nodiscard]] const_iterator begin() const noexcept { return {this, 0}; }
     [[nodiscard]] const_iterator end() const noexcept { return {this, size()}; }
     [[nodiscard]] bool pooled() const noexcept { return !std::holds_alternative<Owning>(storage_); }
+    /** Construction directories are borrowed only during this call. A consumer
+     * that escapes must selectively import the returned physical page. */
+    [[nodiscard]] std::optional<Locator> normalized_locator(std::size_t i) const { return locator(i, true); }
+    [[nodiscard]] std::optional<Locator> physical_locator(std::size_t i) const { return locator(i, false); }
+    [[nodiscard]] const ContactPointPageView* borrowed_page_view() const noexcept
+    {
+        return std::visit([](const auto& values) -> const ContactPointPageView*
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>) return nullptr;
+                else return values.view.get();
+            }, storage_);
+    }
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::PointArrayObject, sizeof(*this));
+        std::visit([&](const auto& values)
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
+                {
+                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysical, values.physical);
+                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayNormalized, values.normalized);
+                }
+                else
+                {
+                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysicalRefs, values.physical);
+                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayNormalizedRefs, values.normalized);
+                    if (values.view) values.view->visit_borrowed_payload(visitor);
+                }
+            }, storage_);
+    }
     [[nodiscard]] std::shared_ptr<const ContactPointPageView> page_view() const noexcept
     {
         return std::visit(
@@ -225,6 +263,20 @@ public:
     }
 
 private:
+    [[nodiscard]] std::optional<Locator> locator(std::size_t i, bool normalized) const
+    {
+        if (i >= size())
+            throw std::out_of_range("Contact point locator index is out of range.");
+        return std::visit(
+            [&](const auto& values) -> std::optional<Locator>
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
+                    return {};
+                else
+                    return Locator{values.view.get(), CapturedPointReference{
+                        normalized && !values.normalized.empty() ? values.normalized[i] : values.physical[i]}};
+            }, storage_);
+    }
     template<class Value> static std::size_t buffer_bytes(const std::vector<Value>& array)
     {
         if (array.capacity() > std::numeric_limits<std::size_t>::max() / sizeof(Value))

@@ -47,6 +47,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testContactPointArray"
       OR TEST_NAME STREQUAL "testPooledContactRows"
       OR TEST_NAME STREQUAL "testTileBodyPages"
+      OR TEST_NAME STREQUAL "testCompactTileIndex"
+      OR TEST_NAME STREQUAL "testContactPointGroups"
       OR TEST_NAME STREQUAL "testContactPairSet"
       OR TEST_NAME STREQUAL "testContactRecordStorage"
       OR TEST_NAME STREQUAL "testDeferredOwnerCharges"

@@ -1,6 +1,7 @@
 /** @file DistributedAdaptiveIncidence.cc
  * @brief Incremental complete-support and layered exact-line incidence. */
 #include "DistributedAdaptiveIncidence.hh"
+#include "CompactTileIndex.hh"
 #include "DeferredOwnerCharges.hh"
 #include "IncidenceOwnerRows.hh"
 #include "IncidencePools.hh"
@@ -111,11 +112,10 @@ struct LayerWork
     std::shared_ptr<Layer> body;
     bool require_all = false;
 };
-using TileMap = std::map<TileId, TileEntry>;
+using TileMap = CompactTileIndex<TileEntry>;
 using ChangedTileMap = std::map<TileId, std::optional<TileEntry>>;
 using LayerMap = std::map<TileId, LayerWork>;
 using ExpectedSupportMap = std::map<Slot, std::vector<RegistryMember>>;
-constexpr std::size_t tile_map_node = sizeof(TileMap::value_type) + 4 * sizeof(void*);
 constexpr std::size_t changed_map_node = sizeof(ChangedTileMap::value_type) + 4 * sizeof(void*);
 constexpr std::size_t layer_map_node = sizeof(LayerMap::value_type) + 4 * sizeof(void*);
 constexpr std::size_t expected_support_node = sizeof(ExpectedSupportMap::value_type) + 4 * sizeof(void*);
@@ -257,7 +257,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
         ContactHaloContext ctx, Budget& b, IdentityBudget& i, std::shared_ptr<Budget> arena)
         : lease(b), borrowed(b), kernel(&k), comm(std::move(c)), options(o), context(ctx), budget(&b), identities(&i),
           keeper(std::move(arena)), pools(b, i, keeper), tile_bodies(b, keeper), owned(b, pools),
-          supports(b, pools.supports, pools.cells), lines(b, pools), owner_rows(b, i, pools, k, comm->getRank(), keeper)
+          supports(b, pools.supports, pools.cells), lines(b, pools),
+          owner_rows(b, i, pools, k, comm->getRank(), keeper), tiles(b, keeper)
     {
         lease.add(sizeof(Impl));
     }
@@ -266,7 +267,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
           context(source.context), budget(&b), identities(&i), keeper(std::move(arena)),
           pools(source.pools, b, i, keeper), tile_bodies(source.tile_bodies, b, keeper), owned(source.owned, b, pools),
           supports(source.supports, b, pools.supports, pools.cells), lines(source.lines, b, pools),
-          owner_rows(source.owner_rows, b, i, pools, keeper), statistics(source.statistics),
+          owner_rows(source.owner_rows, b, i, pools, keeper), tiles(b, keeper), statistics(source.statistics),
           last_layer(source.last_layer), periodic_tiles(source.periodic_tiles), authority_tiles(source.authority_tiles),
           ready(source.ready)
     {
@@ -274,25 +275,24 @@ struct DistributedAdaptiveIncidenceSession::Impl
         Lease scratch(b);
         std::set<const Layer*> layers;
         std::set<const LayerHistory*> histories;
-        for (const auto& [id, tile] : source.tiles)
-        {
-            lease.add(tile_map_node);
-            if (tile.history && !histories.contains(tile.history.get()))
+        tiles.clone_from(source.tiles,
+            [&](const TileEntry& tile)
             {
-                scratch.add(pointer_set_node);
-                histories.insert(tile.history.get());
-                lease.add(history_bytes(*tile.history));
-            }
-            for (const auto& [layer, body] : tile.layers())
-                if (body && !layers.contains(body.get()))
+                if (tile.history && !histories.contains(tile.history.get()))
                 {
                     scratch.add(pointer_set_node);
-                    layers.insert(body.get());
-                    lease.add(layer_bytes(*body));
+                    histories.insert(tile.history.get());
+                    lease.add(history_bytes(*tile.history));
                 }
-            TileEntry entry{tile_bodies.adopt(tile.body), tile.history, tile.initialized};
-            tiles.emplace(id, std::move(entry));
-        }
+                for (const auto& [layer, body] : tile.layers())
+                    if (body && !layers.contains(body.get()))
+                    {
+                        scratch.add(pointer_set_node);
+                        layers.insert(body.get());
+                        lease.add(layer_bytes(*body));
+                    }
+                return TileEntry{tile_bodies.adopt(tile.body), tile.history, tile.initialized};
+            });
         lease.add(source.authority_tile_counts.size() * slot_count_node +
                   source.resident_generations.size() * slot_generation_node);
         authority_tile_counts = source.authority_tile_counts;
@@ -309,8 +309,9 @@ struct DistributedAdaptiveIncidenceSession::Impl
         if (!std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
             return;
         std::size_t tile_owners = tile_bodies.retained_bytes(), layer_owners = 0, layers = 0, edge_replies = 0;
-        for (const auto& [id, tile] : tiles)
+        for (std::size_t tile_index = 0; tile_index < tiles.size(); ++tile_index)
         {
+            const auto& tile = tiles.value_at(tile_index);
             tile_owners += tile.history ? history_bytes(*tile.history) : 0;
             for (const auto& [layer, value] : tile.layers())
                 if (value)
@@ -337,7 +338,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             pools.supports.retained_bytes(), pools.lines.retained_bytes(), pools.points.retained_bytes(),
             pools.planes.retained_bytes(), pools.normals.retained_bytes(), pools.images.retained_bytes(),
             owned.retained_bytes(), supports.retained_bytes(), lines.retained_bytes(), owner_rows.metadata_bytes(),
-            lease.bytes + borrowed.retained_bytes() + tile_bodies.retained_bytes());
+            lease.bytes + borrowed.retained_bytes() + tile_bodies.retained_bytes() + tiles.metadata_bytes());
         const auto bodies = tile_bodies.statistics();
         std::fprintf(stderr,
             "ADAPTIVE_INCIDENCE_TILE_BODIES rank=%d phase=%s pages=%zu wide_pages=%zu occupied_records=%zu "
@@ -791,19 +792,19 @@ struct DistributedAdaptiveIncidenceSession::Impl
             return;
         scratch.add(changed_map_node);
         const auto found = tiles.find(id);
-        before.emplace(id, found == tiles.end() ? std::optional<TileEntry>{} : std::optional<TileEntry>(found->second));
+        before.emplace(id, found ? std::optional<TileEntry>(*found) : std::optional<TileEntry>{});
     }
-    void replace_group(Slot support, std::span<const ReceivedTileRecipe> recipes, ChangedTiles& before, Lease& scratch)
+    void replace_group(Slot support, std::span<const ReceivedTileRecipe> recipes, ChangedTiles& before, Lease& scratch,
+        TileMap::Batch& batch)
     {
-        auto it = tiles.lower_bound({support, 0});
-        while (it != tiles.end() && it->first.first == support)
+        batch.replace_support(support);
+        for (auto i = tiles.lower_bound({support, 0}); i < tiles.size() && tiles.key_at(i).first == support; ++i)
         {
-            remember(before, it->first, scratch);
-            defer_history(it->second.history);
-            periodic_tiles -= !tile_image(it->second.tile()).is_zero();
-            it = tiles.erase(it);
-            lease.bytes -= tile_map_node;
-            budget->used -= tile_map_node;
+            const auto id = tiles.key_at(i);
+            const auto& tile = tiles.value_at(i);
+            remember(before, id, scratch);
+            defer_history(tile.history);
+            periodic_tiles -= !tile_image(tile.tile()).is_zero();
         }
         for (const auto& recipe : recipes)
         {
@@ -811,14 +812,11 @@ struct DistributedAdaptiveIncidenceSession::Impl
             periodic_tiles += !recipe.second_image.is_zero();
             const TileId id{support, recipe.emission};
             remember(before, id, scratch);
-            if (tiles.size() >= options.tile_budget)
-                throw std::invalid_argument("Resident tile budget exhausted.");
-            lease.add(tile_map_node);
-            if (!tiles.emplace(id, std::move(state)).second)
-                throw std::invalid_argument("Duplicate resident tile ordinal.");
+            batch.insert(id, std::move(state));
         }
     }
-    void fetch_supports(const OwnedLeafLookup& lookup, ChangedTiles& changed, Lease& scratch)
+    void fetch_supports(
+        const OwnedLeafLookup& lookup, ChangedTiles& changed, Lease& scratch, TileMap::Batch& tile_batch)
     {
         struct Source
         {
@@ -948,7 +946,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         if (!resident_generations.contains(*support))
                             lease.add(slot_generation_node);
                         resident_generations[*support] = generation;
-                        replace_group(*support, recipes, changed, scratch);
+                        replace_group(*support, recipes, changed, scratch, tile_batch);
                     });
                 collective(*comm,
                     [&]
@@ -961,6 +959,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         page_identities = std::make_unique<IdentityBudget>();
                     });
             });
+        collective(*comm, [&] { tile_batch.publish(options.tile_budget); });
         supports.clear_dirty();
     }
 
@@ -1032,13 +1031,13 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         const auto original = changed.find(id);
                         const TileEntry* old_state = nullptr;
                         if (bootstrap)
-                            old_state = layer && current != tiles.end() ? &current->second : nullptr;
+                            old_state = layer && current != nullptr ? current : nullptr;
                         else if (replacements.contains(id))
                             old_state = original == changed.end() ? nullptr
                                         : original->second        ? &*original->second
                                                                   : nullptr;
-                        else if (current != tiles.end())
-                            old_state = &current->second;
+                        else if (current != nullptr)
+                            old_state = current;
                         const auto* old_layer = old_state ? at_layer(*old_state, layer) : nullptr;
                         if (old_layer || (old_state && old_state->initialized))
                             visit_edges(old_state->tile(),
@@ -1050,18 +1049,18 @@ struct DistributedAdaptiveIncidenceSession::Impl
                                 });
                         continue;
                     }
-                    if (current == tiles.end())
+                    if (current == nullptr)
                         continue;
                     remember(changed, id, scratch);
-                    auto previous_owner = layer ? at_layer_owner(current->second, layer - 1) : std::shared_ptr<Layer>{};
+                    auto previous_owner = layer ? at_layer_owner(*current, layer - 1) : std::shared_ptr<Layer>{};
                     const auto* previous_layer = previous_owner.get();
-                    const auto input = previous_layer ? TileBodyLoopView(previous_layer->output)
-                                                      : current->second.body.intrinsic_loop();
-                    auto next = make_work(current->second.tile(), input, true, iteration, std::move(previous_owner));
-                    visit_edges(current->second.tile(), input,
+                    const auto input =
+                        previous_layer ? TileBodyLoopView(previous_layer->output) : current->body.intrinsic_loop();
+                    auto next = make_work(current->tile(), input, true, iteration, std::move(previous_owner));
+                    visit_edges(current->tile(), input,
                         [&](Slot line, const auto& sub)
                         {
-                            register_edge(current->second.tile(), next, line, sub);
+                            register_edge(current->tile(), next, line, sub);
                             iteration.append(buffered);
                             buffered.push_back({line, sub, false});
                         });
@@ -1077,22 +1076,21 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     ++statistics.dirty_subscriptions;
                     const TileId id{sub.support, sub.emission};
                     const auto current = tiles.find(id);
-                    if (current == tiles.end() || tile_authority(current->second.tile()) != sub.support_authority)
+                    if (current == nullptr || tile_authority(current->tile()) != sub.support_authority)
                         throw std::invalid_argument("Foreign incremental edge reply.");
                     auto work = working.find(id);
                     if (work == working.end())
                     {
-                        auto previous_owner = at_layer_owner(current->second, layer);
+                        auto previous_owner = at_layer_owner(*current, layer);
                         const auto* previous = previous_owner.get();
-                        if (!previous && !current->second.initialized)
+                        if (!previous && !current->initialized)
                             throw std::invalid_argument("Missing cached edge subscription.");
                         const auto input =
-                            previous ? TileBodyLoopView(previous->input) : current->second.body.intrinsic_loop();
-                        auto next =
-                            make_work(current->second.tile(), input, false, iteration, std::move(previous_owner));
-                        const auto count = edge_count(current->second.tile(), input.size());
-                        visit_edges(current->second.tile(), input, [&](Slot expected, const auto& edge)
-                            { register_edge(current->second.tile(), next, expected, edge); });
+                            previous ? TileBodyLoopView(previous->input) : current->body.intrinsic_loop();
+                        auto next = make_work(current->tile(), input, false, iteration, std::move(previous_owner));
+                        const auto count = edge_count(current->tile(), input.size());
+                        visit_edges(current->tile(), input, [&](Slot expected, const auto& edge)
+                            { register_edge(current->tile(), next, expected, edge); });
                         if (previous && !previous->edges.empty())
                         {
                             if (previous->edges.size() != count)
@@ -1106,12 +1104,12 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         work = working.emplace(id, std::move(next)).first;
                     }
                     auto& value = work->second;
-                    receive_edge(current->second.tile(), value, line, sub);
+                    receive_edge(current->tile(), value, line, sub);
                     const auto edge = sub.image * value.input.size() + sub.edge;
-                    if (!value.body && endpoint_reply(current->second.tile(), value, edge, sub.result))
+                    if (!value.body && endpoint_reply(current->tile(), value, edge, sub.result))
                         return;
                     if (!value.body)
-                        materialize_endpoints(current->second.tile(), value);
+                        materialize_endpoints(current->tile(), value);
                     auto& result = value.body->edges[edge].result;
                     reserve_owned(result, sub.result.size(), value.body->charge);
                     result.assign(sub.result.begin(), sub.result.end());
@@ -1181,9 +1179,9 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         for (const auto& [id, old] : changed)
                         {
                             const auto found = tiles.find(id);
-                            if (found == tiles.end())
+                            if (found == nullptr)
                                 continue;
-                            auto& entry = found->second;
+                            auto& entry = (*found);
                             if (!entry.history)
                                 continue;
                             const auto& previous = entry.layers();
@@ -1245,8 +1243,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     owner_rows.insert(*pools.cells.find(key), generation);
                 }
                 for (const auto& [id, old] : changed)
-                    if (const auto current = tiles.find(id); current != tiles.end())
-                        owner_rows.add(current->second.tile(), final_loop(current->second, last_layer));
+                    if (const auto current = tiles.find(id); current != nullptr)
+                        owner_rows.add(current->tile(), final_loop(*current, last_layer));
             });
         collective(*comm,
             [&]
@@ -1338,6 +1336,7 @@ std::vector<IncidenceRowHandle> DistributedAdaptiveIncidenceSession::bootstrap(
     } reaper{state};
     Lease scratch(*state.budget);
     Impl::ChangedTiles changed;
+    TileMap::Batch tile_batch(state.tiles);
     state.phase("owned_membership");
     collective(*state.comm,
         [&]
@@ -1375,7 +1374,7 @@ std::vector<IncidenceRowHandle> DistributedAdaptiveIncidenceSession::bootstrap(
     exchange_support_registry_stream(state.supports, next, state.context, state.comm, page, *state.budget);
     materialized.clear();
     state.phase("support_fetch");
-    state.fetch_supports(lookup, changed, scratch);
+    state.fetch_supports(lookup, changed, scratch, tile_batch);
     materialized.clear();
     state.phase("line_replay");
     state.replay(changed, scratch, true);
@@ -1405,6 +1404,7 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
     } reaper{state};
     Lease scratch(*state.budget);
     Impl::ChangedTiles changed;
+    TileMap::Batch tile_batch(state.tiles);
     std::set<Slot> retired_supports;
     collective(*state.comm,
         [&]
@@ -1458,7 +1458,7 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
             }
             for (const auto support : retired_supports)
                 if (!state.owned.support_cells(support))
-                    state.replace_group(support, {}, changed, scratch);
+                    state.replace_group(support, {}, changed, scratch, tile_batch);
         });
     materialized.clear();
     cell = surface = 0;
@@ -1479,7 +1479,7 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
     };
     page = state.page_bytes();
     exchange_support_registry_stream(state.supports, insert_next, state.context, state.comm, page, *state.budget);
-    state.fetch_supports(lookup, changed, scratch);
+    state.fetch_supports(lookup, changed, scratch, tile_batch);
     materialized.clear();
     state.replay(changed, scratch, false);
     IncidenceDelta result;
@@ -1511,7 +1511,7 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
     const auto source_page_credits = state.tile_bodies.statistics().page_credit_overhead_bytes;
     return sizeof(Impl) + state.pools.metadata_bytes() + state.pools.page_credit_overhead_bytes() +
            state.owned.metadata_bytes() + state.supports.metadata_bytes() + state.lines.metadata_bytes() +
-           state.owner_rows.metadata_bytes() + state.tiles.size() * tile_map_node +
+           state.owner_rows.metadata_bytes() + state.tiles.metadata_bytes() +
            state.authority_tile_counts.size() * slot_count_node +
            state.resident_generations.size() * slot_generation_node + state.borrowed.metadata_bytes() +
            state.tile_bodies.metadata_bytes() + source_page_credits;
@@ -1519,5 +1519,9 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
 bool DistributedAdaptiveIncidenceSession::owns_point_page_credit(const void* identity) const noexcept
 {
     return impl_->pools.points.owns_page_credit(identity);
+}
+const IdentityPool<ContactPointIdentity>& DistributedAdaptiveIncidenceSession::point_pool() const noexcept
+{
+    return impl_->pools.points;
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

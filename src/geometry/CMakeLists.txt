@@ -32,6 +32,10 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/TilePointContributions.cc
     mesh/AMR/TileBodyPages.cc
     mesh/AMR/PooledCellPoints.cc
+    mesh/AMR/ContactPointWire.cc
+    mesh/AMR/ContactPointFacts.cc
+    mesh/AMR/ContactPointFans.cc
+    mesh/AMR/ContactPointGroups.cc
     mesh/AMR/IncidenceOwnerRows.cc
     mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
     mesh/AMR/ContactCoverIndex.cc
@@ -166,6 +170,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/TilePointContributions.cc
         mesh/AMR/TileBodyPages.cc
         mesh/AMR/PooledCellPoints.cc
+        mesh/AMR/ContactPointWire.cc
+        mesh/AMR/ContactPointFacts.cc
+        mesh/AMR/ContactPointFans.cc
+        mesh/AMR/ContactPointGroups.cc
         mesh/AMR/IncidenceOwnerRows.cc
         mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
         mesh/AMR/ContactCoverIndex.cc
@@ -244,6 +252,10 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/TilePointContributions.cc
     mesh/AMR/TileBodyPages.cc
     mesh/AMR/PooledCellPoints.cc
+    mesh/AMR/ContactPointWire.cc
+    mesh/AMR/ContactPointFacts.cc
+    mesh/AMR/ContactPointFans.cc
+    mesh/AMR/ContactPointGroups.cc
     mesh/AMR/IncidenceOwnerRows.cc
     mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
     mesh/AMR/ContactCoverIndex.cc

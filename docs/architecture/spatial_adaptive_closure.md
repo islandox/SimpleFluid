@@ -149,7 +149,7 @@ flat rings. Actual slots and terminal offsets select checked 32-bit storage or
 the 64-bit alternative; cell presence is separate from its index, and emission
 ordinals retain their full width. The construction draft is temporary. A complete
 pending page batch is sealed before replay can read its bodies.
-Candidate-private ordered map entries hold a page reference, initialization state
+Candidate-private indexed entries hold a page reference, initialization state
 and optional layer history. Layerless tiles allocate no history owner. Forks
 share immutable body pages, independently admit their arena credits, and rebind
 entry references. Histories detach only on mutation; changed-entry snapshots
@@ -166,6 +166,16 @@ objects and directory metadata; shared history bodies are admitted once by the
 candidate rather than added again as source-only metadata. Diagnostics separate
 occupied/live records, page/ring capacities, history storage, credit objects and
 deferred body storage.
+
+The persistent tile lookup uses compact ordered support/emission/entry-slot
+descriptors and stable sixteen-slot metadata pages. Full emission ordinals are
+retained; actual support and entry slots select the compact or wide descriptor
+form. A fetch stages all support replacements before one sorted publication.
+Old ordered keys remain readable until the merge succeeds, retired slots are
+not reused during that publication, and moving page-directory owners does not
+move the entries themselves. Actual array storage is allocated and constructed
+explicitly so admission includes its exact requested extent without an implicit
+array cookie. Index work changes metadata only; it does not replay geometry.
 
 Line replay streams edge edits and batches tile delivery in bounded pages.
 Stored subscribers use checked 32-bit fields for support and endpoint slots,
@@ -184,6 +194,40 @@ are unchanged. Owner routing and dirty support/line state follow the new partiti
 A native partition binding may rebind an equivalent cache only after the existing
 per-cell native geometry check and with the canonical leaf, provider and support
 identities unchanged.
+
+One stable typed point-group catalog owns local and remote fan slices. Domains
+and complete normalized identities refer to immutable pooled facts; periodic
+remote physical identities remain separate where required. Canonical rows import
+only their referenced point pages, while owning inputs use packed fallback pages.
+The cover index borrows coordinates from those stable identity owners rather
+than retaining another coordinate array. No resident serialized point-key mirror
+is retained.
+
+Lookup hashes never decide identity. Communication and evaluation scheduling
+retain the complete legacy framed-key order: encoded domain length and bytes,
+then encoded point-key length and bytes, including the platform's existing
+`char` comparison. Inline canonical emission uses bounded stack storage and
+restores the caller's floating-point environment. Arbitrary bounded incoming
+key bytes remain unmatched probes rather than acquiring a new decoding failure.
+
+Immutable fan blocks contain compact local binding/point slots and remote
+record/physical-point slots, with a checked wide alternative. Bindings pin the
+exact row and incidence generation, so reusing a row slot cannot redirect an
+old occurrence. A candidate stages only touched fan edits, preserving survivors
+then append order and remote response order. Slice ownership releases obsolete
+bindings independently while other slices retain their shared block. Old pair
+obligations are collected before edits. Dirty/query leases and owning fan views
+delay group, binding and point reuse until their readers have retired.
+
+Forks establish the candidate incidence pool before importing group facts, then
+rebind every cover to candidate-owned facts. Body and ledger identities govern
+shared admission; containing objects and embedded ledgers do not share a dedupe
+identity merely because their addresses coincide. The borrowed group/fact/fan
+payload inventory reports actual object and buffer extents independently from
+admission allowances and explicitly excludes unmeasured allocator, control-block
+and tree-node overhead. It does not by itself inventory every native or legacy
+Halo owner. Allocating ordered-query leases and empty group-constructor owners
+participate in collective admission before communication begins.
 
 A distributed binary rank-cover tree stores bounds only. It returns overlapping
 owner fragments; complete normalized point keys then go directly to those owners.

@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/ContactPointArray.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "parallel/SparseOwnerExchange.hh"
@@ -77,6 +78,44 @@ struct ContactHaloStatistics
     std::size_t bootstrap_owned_visits = 0, delta_owned_visits = 0, full_owned_scans_after_bootstrap = 0;
     std::size_t dirty_supports = 0, dirty_support_members = 0, dirty_lines = 0, dirty_subscriptions = 0;
     std::size_t recomputed_tiles = 0;
+    std::size_t point_groups = 0, group_private_metadata_bytes = 0, group_shared_body_bytes = 0;
+    std::size_t reused_point_credit_metadata_bytes = 0, reused_point_body_bytes = 0;
+};
+struct ContactFanView;
+struct ContactHaloBorrowedGroup
+{
+    const void* record;
+    std::size_t slot;
+    std::uint64_t generation;
+    const AdaptiveBytes* domain;
+    const ContactPointIdentity* normalized;
+    std::size_t normalized_slot;
+    std::uint64_t normalized_generation;
+    const ContactFanView* fan;
+    std::size_t cover;
+    bool live, retired;
+};
+struct ContactHaloBorrowedFact
+{
+    const void* record;
+    std::size_t slot;
+    std::uint64_t generation;
+    std::size_t pins;
+    bool retired;
+    const void* physical_page;
+    std::uint64_t captured;
+    const ContactPointIdentity* value;
+};
+struct ContactHaloBorrowedBinding
+{
+    const void* record;
+    std::size_t slot;
+    std::uint64_t generation;
+    std::size_t pins;
+    bool retired;
+    const ContactIncidenceRow* row;
+    std::uint64_t incidence_generation;
+    std::size_t record_id;
 };
 /** A session owns complete incidence and only exact-match remote records. Its
  * deterministic rank-cover tree contains bounds, never a global leaf catalogue.
@@ -106,6 +145,12 @@ public:
     [[nodiscard]] std::vector<AdaptiveMark> required_refinements();
     [[nodiscard]] ContactMarkLease lease_required_refinements();
     void for_each_incidence_row(const std::function<void(const ContactIncidenceRow&)>&) const;
+    /** Synchronous borrowed census. The caller keeps this controller alive and
+     * prevents mutation; callbacks must not retain references or copy owners. */
+    void for_each_borrowed_contact_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
+    void for_each_borrowed_contact_group(const std::function<void(const ContactHaloBorrowedGroup&)>&) const;
+    void for_each_borrowed_contact_fact(const std::function<void(const ContactHaloBorrowedFact&)>&) const;
+    void for_each_borrowed_contact_binding(const std::function<void(const ContactHaloBorrowedBinding&)>&) const;
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
 
 private:
