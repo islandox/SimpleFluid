@@ -187,7 +187,7 @@ std::vector<SweepDonor> donor_support(
     for (const auto& key : seen)
     {
         const auto& cell = data.cells.at(key);
-        result.push_back({cell.gid, cell.phase.geometry});
+        result.push_back({cell.gid, existing_native_geometry(data, cell)});
     }
     return result;
 }
@@ -198,14 +198,14 @@ std::vector<SweepDonor> face_donor_support(
     auto insert = [&](const Key& key)
     {
         const auto cell = data.cells.find(key);
-        if (cell == data.cells.end() || !cell->second.phase.geometry)
+        if (cell == data.cells.end() || !existing_native_geometry(data, cell->second))
             throw std::invalid_argument("General VoF face donor fan requires an authenticated full native shell.");
         if (!selected.contains(key))
         {
             if (selected.size() >= data.options.maximum_stencil_cells)
                 throw std::invalid_argument("General VoF complete face donor fan budget exhausted.");
             budget.add(sizeof(Key) + sizeof(SweepDonor) + AMR::encode_adaptive_key(key).size() + 8 * sizeof(void*));
-            selected.emplace(key, SweepDonor{cell->second.gid, cell->second.phase.geometry});
+            selected.emplace(key, SweepDonor{cell->second.gid, existing_native_geometry(data, cell->second)});
         }
     };
     for (const auto& donor : donor_support(data, face.first, face.second))
@@ -336,11 +336,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 {
                     budget.add(sizeof(GeneralVoFTransfer) + sizeof(GeneralVoFDonorBudget));
                     const auto& cell = data.cells.at(key);
-                    trial.transfers_.push_back({cell.gid, cell.gid, cell.owner, cell.owner, phase_measures(cell),
-                        diagnostic(phase_measures(cell))});
+                    trial.transfers_.push_back({cell.gid, cell.gid, cell.owner, cell.owner, phase_measures(data, cell),
+                        diagnostic(phase_measures(data, cell))});
                     ExactPhases zero;
-                    trial.budgets_.push_back({cell.gid, phase_measures(cell), zero, phase_measures(cell),
-                        diagnostic(phase_measures(cell)), diagnostic(zero), diagnostic(phase_measures(cell))});
+                    trial.budgets_.push_back({cell.gid, phase_measures(data, cell), zero, phase_measures(data, cell),
+                        diagnostic(phase_measures(data, cell)), diagnostic(zero),
+                        diagnostic(phase_measures(data, cell))});
                 }
             });
         return trial;
@@ -353,10 +354,10 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             wire::Budget budget{limit};
             for (const auto& [key, cell] : data.cells)
             {
-                const auto raw = phases(
-                    *Fragment::from_geometry(*cell.phase.geometry), PLIC::reconstruction_geometry(planes.at(key)));
-                const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
-                const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
+                const auto raw = phases(*Fragment::from_geometry(*existing_native_geometry(data, cell)),
+                    PLIC::reconstruction_geometry(planes.at(key)));
+                const bool gas = phase_measures(data, cell).gas.compare(phase_measures(data, cell).carrier) <= 0;
+                const auto target = gas ? phase_measures(data, cell).gas : phase_measures(data, cell).carrier;
                 const auto view = Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
                 const auto conversion = target - view;
                 const auto absolute_conversion = conversion.sign() < 0 ? conversion.scaled(-1) : conversion;
@@ -428,7 +429,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             for (const auto& key : data.topology->order)
             {
                 const auto& cell = data.cells.at(key);
-                SweepRecipient recipient{cell.gid, cell.phase.geometry, {}};
+                SweepRecipient recipient{cell.gid, existing_native_geometry(data, cell), {}};
                 Measure divergence;
                 for (const auto index : data.topology->cell_tiles.at(key))
                 {
@@ -517,8 +518,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                                      PLIC::reconstruction_geometry(planes.at(data.topology->by_gid.at(piece.donor)))),
                                 sign * piece.sign);
                 }
-                const auto original = phases(
-                    *Fragment::from_geometry(*cell.phase.geometry), PLIC::reconstruction_geometry(planes.at(key)));
+                const auto original = phases(*Fragment::from_geometry(*existing_native_geometry(data, cell)),
+                    PLIC::reconstruction_geometry(planes.at(key)));
                 row_for(cell.gid).add(original, -1);
                 for (const auto& [donor, amount] : row)
                 {
@@ -822,7 +823,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             {
                 const auto& donor = data.cells.at(key);
                 TransportPartition::certify_donor_cover(
-                    {donor.gid, donor.phase.geometry}, donor_atoms[key], data.options.sweep);
+                    {donor.gid, existing_native_geometry(data, donor)}, donor_atoms[key], data.options.sweep);
                 const auto discrepancy = labels.at(key).discrepancy();
                 auto absolute_discrepancy = discrepancy.sign() < 0 ? live.scaled(discrepancy, -1) : discrepancy;
                 detail::ExactLiveStorage::Scope discrepancy_scope(live, {&absolute_discrepancy});
@@ -840,31 +841,31 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         live.add(exported.gas, amount.gas);
                         live.add(exported.carrier, amount.carrier);
                     }
-                auto retained_gas = live.difference(phase_measures(donor).gas, exported.gas);
+                auto retained_gas = live.difference(phase_measures(data, donor).gas, exported.gas);
                 detail::ExactLiveStorage::Scope retained_gas_scope(live, {&retained_gas});
-                auto retained_carrier = live.difference(phase_measures(donor).carrier, exported.carrier);
+                auto retained_carrier = live.difference(phase_measures(data, donor).carrier, exported.carrier);
                 detail::ExactLiveStorage::Scope retained_carrier_scope(live, {&retained_carrier});
                 if (retained_gas.sign() < 0 || retained_carrier.sign() < 0)
                     throw std::invalid_argument(
                         "General VoF donor phase capacity exceeded after bounded canonical correction.");
                 ExactPhases exported_exact{exported.bulk, exported.gas, exported.carrier};
                 ExactPhases retained_exact{
-                    live.difference(phase_measures(donor).bulk, exported.bulk), retained_gas, retained_carrier};
+                    live.difference(phase_measures(data, donor).bulk, exported.bulk), retained_gas, retained_carrier};
                 detail::ExactLiveStorage::Scope retained_exact_scope(
                     live, {&retained_exact.bulk, &retained_exact.gas, &retained_exact.carrier});
                 if (!retained_exact.bulk.sign() && (retained_gas.sign() || retained_carrier.sign()))
                     throw std::invalid_argument(
                         "General VoF full donor export cannot retain a numerical occupancy defect.");
                 transport_charge(budget, 3 * sizeof(GeneralVoFDonorBudget), "donor phase proof records");
-                trial.budgets_.push_back({donor.gid, phase_measures(donor), exported_exact, retained_exact,
-                    diagnostic(phase_measures(donor)), diagnostic(exported_exact), diagnostic(retained_exact)});
+                trial.budgets_.push_back({donor.gid, phase_measures(data, donor), exported_exact, retained_exact,
+                    diagnostic(phase_measures(data, donor)), diagnostic(exported_exact), diagnostic(retained_exact)});
                 auto& proof = trial.budgets_.back();
                 proof.signed_repair_absolute = donor_signed_repair[key].first;
                 proof.signed_repair_bound = donor_signed_repair[key].second;
                 proof.route_repair_absolute = route_repair[key];
                 proof.route_repair_bound = labels.at(key).bound();
                 proof.full_cell_fit_discrepancy = discrepancy;
-                live.retain(phase_measures(donor));
+                live.retain(phase_measures(data, donor));
                 live.retain(exported_exact);
                 live.retain(retained_exact);
                 live.retain(proof.signed_repair_absolute);
@@ -889,8 +890,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     if (recipient != key && live.sum(amount.gas, amount.carrier).compare(amount.bulk))
                         throw std::invalid_argument("General VoF routed phase complement differs from bulk.");
                 }
-                if (column.gas.compare(phase_measures(donor).gas) ||
-                    column.carrier.compare(phase_measures(donor).carrier))
+                if (column.gas.compare(phase_measures(data, donor).gas) ||
+                    column.carrier.compare(phase_measures(data, donor).carrier))
                     throw std::invalid_argument("General VoF independent donor phase column does not close.");
                 for (const auto& [recipient, amount] : amounts[key])
                 {
@@ -1098,16 +1099,17 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
             {
                 auto& cell = candidate->cells.at(key);
                 const auto& total = totals.at(key);
-                if (total.bulk.compare(Measure::volume(*cell.phase.geometry)))
+                if (total.bulk.compare(Measure::volume(*existing_native_geometry(data, cell))))
                     throw std::invalid_argument("General VoF positive transfers do not fill actual target.");
-                const auto before = phase_measures(data.cells.at(key));
+                const auto before = phase_measures(data, data.cells.at(key));
                 if (((total.gas + total.carrier) - total.bulk).compare((before.gas + before.carrier) - before.bulk))
                     throw std::invalid_argument(
                         "General VoF transport changed the independent source occupancy defect.");
                 if (inventory_policy_for(data.options.arithmetic_mode) == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     cell.experimental_exact = detail::experimental_advance(*data.cells.at(key).experimental_exact,
-                        {total.bulk, total.gas, total.carrier}, *cell.phase.geometry, cell.native_volume, limit);
+                        {total.bulk, total.gas, total.carrier}, *existing_native_geometry(data, cell),
+                        cell.native_volume, limit);
                     const auto view = detail::experimental_view(*cell.experimental_exact, cell.native_volume);
                     cell.phase.gas_volume = view.phases.gas;
                     cell.phase.carrier_volume = view.phases.carrier;
@@ -1128,7 +1130,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         detail::phase_upper_bound(finite_bound(cell.occupancy.admitted_bound) + rounding);
                     cell.occupancy.phase_input_bound =
                         detail::phase_upper_bound(finite_bound(cell.occupancy.phase_input_bound) + rounding);
-                    const auto published = phase_measures(cell);
+                    const auto published = phase_measures(data, cell);
                     const auto diagnostic =
                         detail::round_phase_residual(published.gas + published.carrier - published.bulk);
                     cell.occupancy.difference = diagnostic.value;
@@ -1142,7 +1144,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 candidate->occupancy.push_back(cell.occupancy);
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
                 {
-                    const auto metric = cell.phase.geometry->moments().volume;
+                    const auto metric = existing_native_geometry(data, cell)->moments().volume;
                     const double minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas
                                                 ? cell.phase.carrier_volume
                                                 : cell.phase.gas_volume;
@@ -1150,7 +1152,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         metric.binary64_absolute_error() + 8 * std::numeric_limits<double>::epsilon() * metric.value)
                         cell.declaration = GeneralVoFPhaseGeometry::Infer;
                 }
-                validate_cell<ArithmeticMode::Exact>(cell, data.options);
+                validate_cell<ArithmeticMode::Exact>(data, cell, data.options);
                 candidate->gas.push_back(cell.phase.gas_volume);
                 candidate->carrier.push_back(cell.phase.carrier_volume);
             }

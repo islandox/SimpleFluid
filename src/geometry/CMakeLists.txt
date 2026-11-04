@@ -69,6 +69,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
     PLIC/ConvexConstruction.cc
+    PLIC/CellGeometryView.cc
+    PLIC/CellGeometryConstraints.cc
     PLIC/ConvexClipping.cc
     PLIC/ConvexPartitions.cc
     PLIC/ConvexTrajectories.cc
@@ -193,6 +195,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         PLIC/details/ordinary/ExtrudedConstruction.cc
         PLIC/details/ordinary/ExtrudedGeometry.cc
         PLIC/ConvexConstruction.cc
+        PLIC/CellGeometryView.cc
+        PLIC/CellGeometryConstraints.cc
         PLIC/ConvexClipping.cc
         PLIC/ConvexPartitions.cc
         PLIC/ConvexTrajectories.cc
@@ -212,6 +216,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Compensated predicates isolate their rounding mode and restore the
     # caller's environment; prohibit motion across those fenv boundaries.
     set_property(SOURCE PLIC/details/ordinary/Predicates.cc swept_volume/OrdinaryAggregate.cc
+        PLIC/CellGeometryView.cc
         APPEND PROPERTY COMPILE_OPTIONS -frounding-math)
 endif()
 
@@ -290,6 +295,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
     PLIC/ConvexConstruction.cc
+    PLIC/CellGeometryView.cc
+    PLIC/CellGeometryConstraints.cc
     PLIC/ConvexClipping.cc
     PLIC/ConvexPartitions.cc
     PLIC/ConvexTrajectories.cc

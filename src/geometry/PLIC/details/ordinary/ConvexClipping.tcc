@@ -1264,14 +1264,20 @@ bool construction_disjoint(std::shared_ptr<const Ancestry> a, std::shared_ptr<co
 }
 
 template<ArithmeticMode Mode>
-bool separated_bounds(const DynamicConvexGeometry::Impl& a, const DynamicConvexGeometry::Impl& b)
+bool separated_framed_bounds(
+    const CoordinateBox& first, const Frame& first_frame, const CoordinateBox& second, const Frame& second_frame)
 {
     static_assert(Mode == kernel_mode);
-    const auto other = transform<Mode>(b.bounds, b.frame, a.frame);
+    const auto other = transform<Mode>(second, second_frame, first_frame);
     for (std::size_t axis = 0; axis < 3; ++axis)
-        if (a.bounds[axis].hi <= other[axis].lo || other[axis].hi <= a.bounds[axis].lo)
+        if (first[axis].hi <= other[axis].lo || other[axis].hi <= first[axis].lo)
             return true; // At most a zero-volume contact, including equality.
     return false;
+}
+template<ArithmeticMode Mode>
+bool separated_bounds(const DynamicConvexGeometry::Impl& a, const DynamicConvexGeometry::Impl& b)
+{
+    return separated_framed_bounds<Mode>(a.bounds, a.frame, b.bounds, b.frame);
 }
 
 template<ArithmeticMode Mode>
@@ -1294,6 +1300,13 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::intersect(const DynamicConvexGeom
     ++statistics.intersections;
     if (separated_bounds<Mode>(*impl_, *other.impl_))
         return {};
+    return intersect_after_bound_screen(other);
+}
+
+template<ArithmeticMode Mode>
+DynamicConvexGeometryPtr GeometryKernel<Mode>::intersect_after_bound_screen(const DynamicConvexGeometry& other) const
+{
+    static_assert(Mode == kernel_mode);
     if (construction_disjoint<Mode>(impl_->ancestry, other.impl_->ancestry))
         return {};
     // An authenticated common support with opposing interior halfspaces
@@ -1422,9 +1435,13 @@ template DynamicPhaseMeasures GeometryKernel<kernel_mode>::phases(const Geometry
 template bool construction_contains<kernel_mode>(
     const std::shared_ptr<const Ancestry>& parent, std::shared_ptr<const Ancestry> child);
 template bool construction_disjoint<kernel_mode>(std::shared_ptr<const Ancestry> a, std::shared_ptr<const Ancestry> b);
+template bool separated_framed_bounds<kernel_mode>(
+    const CoordinateBox&, const Frame&, const CoordinateBox&, const Frame&);
 template bool separated_bounds<kernel_mode>(const DynamicConvexGeometry::Impl& a, const DynamicConvexGeometry::Impl& b);
 template bool GeometryKernel<kernel_mode>::bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::intersect(const DynamicConvexGeometry& other) const;
+template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::intersect_after_bound_screen(
+    const DynamicConvexGeometry& other) const;
 template DynamicConvexGeometryPtr GeometryKernel<kernel_mode>::translated(GeometryPoint displacement) const;
 } // namespace ordinary_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -97,8 +97,24 @@ std::optional<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind> relati
     }
     return {};
 }
-std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> catalog(
-    const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& hierarchy, const std::vector<Key>& probes,
+inline const Key& binding_key(const Meshes::AMR::AdaptiveCellBinding& binding)
+{
+    return binding.key;
+}
+inline const Key& binding_key(const AdaptiveOverlapCellMetadata& binding)
+{
+    return binding.leaf.key;
+}
+inline std::uint64_t binding_material(const Meshes::AMR::AdaptiveCellBinding& binding)
+{
+    return binding.material;
+}
+inline std::uint64_t binding_material(const AdaptiveOverlapCellMetadata& binding)
+{
+    return binding.leaf.material;
+}
+template<bool Metadata>
+auto catalog(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& hierarchy, const std::vector<Key>& probes,
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes>& family_probes, std::size_t limit,
     std::size_t leaf_fetch_budget)
 {
@@ -166,9 +182,10 @@ std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> catalog(
     std::vector<Key>().swap(child_queries);
     decltype(children)().swap(children);
     const auto locations = hierarchy.lookup_cells(keys, true, service_limit);
-    const auto leaves = hierarchy.fetch_leaves(
+    auto leaves = hierarchy.fetch_leaves(
         keys, std::min(leaf_fetch_budget ? leaf_fetch_budget : service_limit, hierarchy.options().byte_budget));
-    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> result;
+    using Binding = std::conditional_t<Metadata, AdaptiveOverlapCellMetadata, Meshes::AMR::AdaptiveCellBinding>;
+    std::vector<Binding> result;
     ::SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
         [&]
         {
@@ -177,21 +194,34 @@ std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> catalog(
             {
                 if (leaves[i].key != keys[i] || leaves[i].revision != locations[i].revision)
                     throw std::invalid_argument("Overlap family owner/revision authentication failed.");
-                auto geometry = hierarchy.geometry(leaves[i]);
-                if (!geometry)
-                    throw std::invalid_argument(
-                        "Every topology-remap participant requires certified planar convex geometry.");
-                budget.add(sizeof(::SimpleFluid::Meshes::AMR::AdaptiveCellBinding) +
-                           ::SimpleFluid::Meshes::AMR::encode_adaptive_key(keys[i]).size() + geometry->storage_bytes());
-                result.push_back({keys[i], locations[i].address, leaves[i].material, std::move(geometry)});
+                if constexpr (Metadata)
+                {
+                    // Construction is deferred until an authenticated relation
+                    // actually needs clipping/coverage. Keep existing explicit
+                    // certificates and validated compact procedural recipes.
+                    if (!leaves[i].geometry && !leaves[i].native_recipe)
+                        throw std::invalid_argument("Topology-remap participant has no native recipe or certificate.");
+                    budget.add(sizeof(Binding) + Meshes::AMR::encode_adaptive_key(keys[i]).size());
+                    result.push_back({std::move(leaves[i]), locations[i].address, locations[i].owner});
+                }
+                else
+                {
+                    auto geometry = hierarchy.geometry(leaves[i]);
+                    if (!geometry)
+                        throw std::invalid_argument(
+                            "Every topology-remap participant requires certified planar convex geometry.");
+                    budget.add(
+                        sizeof(Binding) + Meshes::AMR::encode_adaptive_key(keys[i]).size() + geometry->storage_bytes());
+                    result.push_back({keys[i], locations[i].address, leaves[i].material, std::move(geometry)});
+                }
             }
         });
     return result;
 }
 } // namespace
-AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
-    const Meshes::AMR::DistributedAdaptiveHierarchy& source, const Meshes::AMR::DistributedAdaptiveHierarchy& target,
-    std::size_t limit, std::size_t leaf_fetch_budget)
+template<class Catalog, bool Metadata>
+Catalog build_overlap_catalog(const Meshes::AMR::DistributedAdaptiveHierarchy& source,
+    const Meshes::AMR::DistributedAdaptiveHierarchy& target, std::size_t limit, std::size_t leaf_fetch_budget)
 {
     const auto comm = source.communicator();
     std::vector<Key> probes;
@@ -232,8 +262,8 @@ AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
                 }
             family_probes.assign(families.begin(), families.end());
         });
-    auto from = catalog(source, probes, family_probes, limit, leaf_fetch_budget),
-         to = catalog(target, probes, family_probes, limit, leaf_fetch_budget);
+    auto from = catalog<Metadata>(source, probes, family_probes, limit, leaf_fetch_budget),
+         to = catalog<Metadata>(target, probes, family_probes, limit, leaf_fetch_budget);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations;
     ::SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
         [&]
@@ -242,8 +272,8 @@ AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
             std::map<Key, std::vector<std::size_t>> target_index;
             for (std::size_t i = 0; i < to.size(); ++i)
             {
-                auto ancestors = parents(to[i].key);
-                ancestors.push_back(to[i].key);
+                auto ancestors = parents(binding_key(to[i]));
+                ancestors.push_back(binding_key(to[i]));
                 for (const auto& ancestor : ancestors)
                 {
                     budget.add(sizeof(Key) + ::SimpleFluid::Meshes::AMR::encode_adaptive_key(ancestor).size() +
@@ -254,15 +284,15 @@ AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
             for (const auto& cell : from)
             {
                 std::set<std::size_t> candidates;
-                auto ancestors = parents(cell.key);
-                ancestors.push_back(cell.key);
+                auto ancestors = parents(binding_key(cell));
+                ancestors.push_back(binding_key(cell));
                 for (const auto& ancestor : ancestors)
                     if (auto found = target_index.find(ancestor); found != target_index.end())
                         candidates.insert(found->second.begin(), found->second.end());
                 for (auto i : candidates)
-                    if (auto kind = relation(cell.key, to[i].key))
+                    if (auto kind = relation(binding_key(cell), binding_key(to[i])))
                     {
-                        if (cell.material != to[i].material)
+                        if (binding_material(cell) != binding_material(to[i]))
                             throw std::invalid_argument("Topology transfer changes physical material membership.");
                         budget.add(sizeof(::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation));
                         relations.push_back({*kind, cell.gid, to[i].gid});
@@ -270,6 +300,18 @@ AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
             }
         });
     return {source.observation(), target.observation(), std::move(from), std::move(to), std::move(relations)};
+}
+
+AdaptiveOverlapCatalog build_adaptive_overlap_catalog(const Meshes::AMR::DistributedAdaptiveHierarchy& source,
+    const Meshes::AMR::DistributedAdaptiveHierarchy& target, std::size_t limit, std::size_t leaf_fetch_budget)
+{
+    return build_overlap_catalog<AdaptiveOverlapCatalog, false>(source, target, limit, leaf_fetch_budget);
+}
+AdaptiveOverlapMetadataCatalog build_adaptive_overlap_metadata_catalog(
+    const Meshes::AMR::DistributedAdaptiveHierarchy& source, const Meshes::AMR::DistributedAdaptiveHierarchy& target,
+    std::size_t limit, std::size_t leaf_fetch_budget)
+{
+    return build_overlap_catalog<AdaptiveOverlapMetadataCatalog, true>(source, target, limit, leaf_fetch_budget);
 }
 
 std::shared_ptr<const Meshes::AMR::AdaptiveOverlapPlan> build_adaptive_overlap(

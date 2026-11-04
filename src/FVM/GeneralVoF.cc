@@ -1,33 +1,15 @@
 /** @file GeneralVoF.cc
  * @brief Accepted phase state construction, queries and reconstruction.
  */
+#include "FVM/details/GeneralVoF/CellCatalog.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 namespace SimpleFluid::VoF
 {
 namespace
 {
-template<ArithmeticMode Mode>
-void retain_cell_geometry(Cell& cell, const AMR::AdaptiveLeaf& leaf, const GeneralVoFOptions& options)
-{
-    if constexpr (Mode != ArithmeticMode::Exact)
-    {
-        const auto imported = PLIC::ConvexCellGeometry<Mode>::from_geometry(
-            *cell.phase.geometry, geometry_limits(Mode, options.byte_budget));
-        cell.finite_geometry = imported->dynamic_geometry();
-        if constexpr (Mode == ArithmeticMode::Ordinary)
-        {
-            // Procedural Cartesian leaves own recipes rather than the native
-            // shell. Keep the fully authenticated imported root for both uses
-            // only when every native represented query is exactly preserved.
-            // Explicit shells and certified imports retain their separate roots.
-            if (!leaf.geometry && std::holds_alternative<AMR::CartesianCellAncestry>(leaf.key.ancestry) &&
-                cell.phase.geometry->same_native_representation(*imported))
-                cell.phase.geometry = imported;
-        }
-    }
-}
 template<ArithmeticMode Mode>
 void retain_canonical_points(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topology,
     const std::map<std::uint64_t, KeySet>& node_sources, wire::Budget& budget)
@@ -47,15 +29,7 @@ void retain_canonical_points(GeneralVoF::Data& data, GeneralVoF::Data::Topology&
         if (values.capacity() > count)
             budget.add((values.capacity() - count) * sizeof(Value));
     };
-    std::vector<const Key*> keys;
-    std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources;
-    reserve(keys, data.cells.size());
-    reserve(sources, data.cells.size());
-    for (const auto& [key, cell] : data.cells)
-    {
-        keys.push_back(&key);
-        sources.push_back(cell.phase.geometry);
-    }
+    const PLIC::CellGeometryRange<ArithmeticMode::Ordinary> sources(topology.cell_geometry);
     const auto fan = [&](std::uint64_t node) -> const KeySet&
     {
         if (const auto found = topology.node_fans.find(node);
@@ -84,11 +58,10 @@ void retain_canonical_points(GeneralVoF::Data& data, GeneralVoF::Data::Topology&
         requests.push_back({node.coordinate_identity, source_indices.size(), incident.size()});
         for (const auto& key : incident)
         {
-            const auto found = std::lower_bound(keys.begin(), keys.end(), key,
-                [](const Key* stored, const Key& sought) { return *stored < sought; });
-            if (found == keys.end() || **found != key)
-                throw std::invalid_argument("Finite VoF native point source is outside its retained shell table.");
-            source_indices.push_back(static_cast<std::size_t>(found - keys.begin()));
+            const auto found = data.cells.find(key);
+            if (found == data.cells.end())
+                throw std::invalid_argument("Finite VoF native point source is outside its retained catalog.");
+            source_indices.push_back(found->second.geometry_slot);
         }
     }
     if (requests.size() > (budget.limit - budget.used) / sizeof(PLIC::Point<Mode>))
@@ -97,8 +70,8 @@ void retain_canonical_points(GeneralVoF::Data& data, GeneralVoF::Data::Topology&
     budget.add(requests.size() * sizeof(PLIC::Point<Mode>));
     // The caller reservation covers the returned vector while map entries are
     // built. The geometry operation separately admits its construction scratch.
-    auto points = PLIC::source_points<Mode>(sources, source_indices, requests,
-        geometry_limits(Mode, batch_allowance));
+    PLIC::CellGeometryOperationWorkspace workspace(geometry_limits(Mode, batch_allowance));
+    auto points = PLIC::source_points<Mode>(sources, source_indices, requests, workspace);
     if (points.capacity() > requests.size())
         budget.add((points.capacity() - requests.size()) * sizeof(PLIC::Point<Mode>));
     PLIC::GeometryAllocationLedger owners;
@@ -150,10 +123,14 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
     std::vector<GeneralVoFPhaseGeometry> declarations, const ExactPhaseTransferResult* transfer,
     GeneralVoFPhaseCleanupState cleanup_state)
 {
+    options.reconstruction.geometry_limits.byte_budget =
+        std::min(options.reconstruction.geometry_limits.byte_budget, options.byte_budget);
     const auto* capsules = transfer ? &transfer->owned() : nullptr;
     auto comm = hierarchy ? hierarchy->communicator() : Tpetra::getDefaultComm();
     std::shared_ptr<Data> data;
     std::shared_ptr<Data::Topology> topology;
+    const unsigned catalog_operation = 0;
+    cell_catalog_detail::CatalogReuseAuthority initial_catalog_authority;
     wire::collective(*comm,
         [&]
         {
@@ -180,7 +157,23 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     data->retained_interfaces.reserve(std::count_if(capsules->begin(), capsules->end(),
                                                           [](const auto& capsule) { return capsule.geometry_ready; }),
                         budget);
+            std::vector<const AMR::AdaptiveLeaf*> owned_leaves;
+            cell_catalog_detail::reserve_leaf_references(owned_leaves, order.size(), budget);
             std::set<Key> seen;
+            for (const auto& key : order)
+            {
+                if (!hierarchy->owned().contains(key) || !seen.insert(key).second)
+                    throw std::invalid_argument("General VoF input ownership differs.");
+                owned_leaves.push_back(&hierarchy->owned().at(key));
+            }
+            const auto initial_catalog = cell_catalog_detail::build<Mode>(*hierarchy, owned_leaves, budget, nullptr,
+                cell_catalog_detail::CatalogPurpose::State, nullptr, nullptr, &catalog_operation);
+            initial_catalog_authority = initial_catalog.reuse_authority;
+            topology->cell_geometry = initial_catalog.ordinary;
+            topology->ordinary_cell_geometry = initial_catalog.finite_ordinary;
+            topology->bounded_cell_geometry = initial_catalog.bounded;
+            topology->owned_geometry_count = order.size();
+            seen.clear();
             for (std::size_t i = 0; i < order.size(); ++i)
             {
                 if (!hierarchy->owned().contains(order[i]) || !seen.insert(order[i]).second)
@@ -191,9 +184,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 cell.key = order[i];
                 cell.owner = comm->getRank();
                 cell.revision = leaf.revision;
-                cell.phase = {hierarchy->geometry(leaf), gas[i], carrier[i]};
-                cell.native_volume = hierarchy->metrics(leaf).volume;
-                retain_cell_geometry<Mode>(cell, leaf, options);
+                cell.phase = {gas[i], carrier[i]};
+                cell.geometry_slot = i;
+                cell.native_volume = initial_catalog.native_metrics[i].volume;
+                cell.centroid = initial_catalog.native_metrics[i].centroid;
                 if (capsules)
                 {
                     cell.inherited = true;
@@ -215,7 +209,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     }
                 }
                 else
-                    occupancy<Mode>(cell);
+                    occupancy<Mode>(*data, cell);
                 if constexpr (Mode == ArithmeticMode::Exact)
                 {
                     if (capsules)
@@ -227,8 +221,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         cell.experimental_exact = capsule.experimental_exact;
                     }
                     else
-                        cell.experimental_exact = detail::experimental_initial(*cell.phase.geometry, cell.native_volume,
-                            cell.phase.gas_volume, cell.phase.carrier_volume, options.byte_budget);
+                        cell.experimental_exact = detail::experimental_initial(*existing_native_geometry(*data, cell),
+                            cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume, options.byte_budget);
                 }
                 else if (capsules &&
                          (capsules->at(i).policy != PhaseInventoryPolicy::Finite || capsules->at(i).experimental_exact))
@@ -247,8 +241,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         cell.declaration = GeneralVoFPhaseGeometry::PureCarrier;
                 }
                 // Validates independent occupancy without changing represented phases.
-                validate_cell<Mode>(cell, options, retained);
-                budget.add(cell.phase.geometry->storage_bytes());
+                validate_cell<Mode>(*data, cell, options, retained);
                 data->cells.emplace(order[i], std::move(cell));
             }
             data->retained_interfaces.finish();
@@ -355,34 +348,73 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 leaves.emplace(leaf.key, &leaf);
             for (const auto& leaf : topology->draft.ghosts)
                 leaves.emplace(leaf.key, &leaf);
+            std::vector<const AMR::AdaptiveLeaf*> catalog_leaves;
+            std::map<Key, std::size_t> catalog_slots;
+            cell_catalog_detail::charge_items(
+                budget, leaves.size(), sizeof(typename decltype(catalog_slots)::value_type) + 4 * sizeof(void*));
+            cell_catalog_detail::reserve_leaf_references(catalog_leaves, leaves.size(), budget);
+            const auto append_leaf = [&](const Key& key)
+            {
+                if (catalog_slots.emplace(key, catalog_leaves.size()).second)
+                    catalog_leaves.push_back(leaves.at(key));
+            };
+            // Input order is maintained until actual native map order is known.
+            for (const auto& key : order)
+                append_leaf(key);
+            for (const auto& binding : topology->draft.cell_bindings)
+                if (binding.full)
+                    append_leaf(binding.key);
+            auto catalog = cell_catalog_detail::build<Mode>(*hierarchy, catalog_leaves, budget, data.get(),
+                cell_catalog_detail::CatalogPurpose::State, nullptr, &initial_catalog_authority, &catalog_operation);
             for (const auto& binding : topology->draft.cell_bindings)
                 if (binding.full)
                 {
                     auto found = data->cells.find(binding.key);
                     const auto& retained_leaf = *leaves.at(binding.key);
-                    const auto retained_geometry =
-                        retained_leaf.geometry ? retained_leaf.geometry : hierarchy->geometry(retained_leaf);
-                    if (found != data->cells.end() && (!found->second.phase.geometry->equivalent(*retained_geometry) ||
-                                                          found->second.native_volume != binding.volume))
-                        throw std::invalid_argument("General VoF retained native geometry/metric differs from source.");
+                    const auto slot = catalog_slots.at(binding.key);
+                    const auto& metrics = catalog.native_metrics.at(slot);
+                    if (retained_leaf.key != binding.key || retained_leaf.provider != binding.provider ||
+                        retained_leaf.material != binding.material ||
+                        retained_leaf.native_cell != binding.native_cell ||
+                        retained_leaf.native_recipe != binding.native_recipe || metrics.volume != binding.volume ||
+                        metrics.centroid != binding.centroid ||
+                        (found != data->cells.end() &&
+                            (found->second.revision != retained_leaf.revision || found->second.owner != binding.owner ||
+                                found->second.native_volume != binding.volume)))
+                        throw std::invalid_argument("General VoF full native recipe/metric/owner binding differs.");
+                    if (found != data->cells.end())
+                    {
+                        const auto previous = native_cell_geometry(*data, found->second);
+                        const PLIC::CellGeometryView<ArithmeticMode::Ordinary> next(catalog.ordinary, slot);
+                        const bool equivalent =
+                            previous.is_procedural() && next.is_procedural()
+                                ? cell_catalog_detail::same_native_representation(previous, next)
+                                : !previous.is_procedural() && !next.is_procedural() &&
+                                      PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(previous)
+                                          ->equivalent(
+                                              *PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(next));
+                        if (!equivalent)
+                            throw std::invalid_argument(
+                                "General VoF retained source representation differs from its native binding.");
+                    }
                     if (found == data->cells.end())
                     {
-                        const auto& leaf = retained_leaf;
                         Cell cell;
                         cell.key = binding.key;
                         cell.owner = binding.owner;
-                        cell.revision = leaf.revision;
-                        cell.phase.geometry = retained_geometry;
-                        retain_cell_geometry<Mode>(cell, leaf, options);
-                        budget.add(cell.phase.geometry->storage_bytes());
+                        cell.revision = retained_leaf.revision;
                         found = data->cells.emplace(binding.key, std::move(cell)).first;
                     }
+                    found->second.geometry_slot = slot;
                     found->second.gid = binding.gid;
                     found->second.centroid = binding.centroid;
                     found->second.native_volume = binding.volume;
                     if (!topology->by_gid.emplace(binding.gid, binding.key).second)
                         throw std::invalid_argument("General VoF duplicate native cell GID.");
                 }
+            topology->cell_geometry = std::move(catalog.ordinary);
+            topology->ordinary_cell_geometry = std::move(catalog.finite_ordinary);
+            topology->bounded_cell_geometry = std::move(catalog.bounded);
             // One retained tile owns each native authority. Surface, frontier,
             // construction and wall catalogs reference these stable owner indices.
             const auto retain_extra = [&](const auto& tile)
@@ -533,8 +565,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     throw std::invalid_argument("General VoF owned cell has no canonical boundary tiles.");
                 if constexpr (Mode == ArithmeticMode::Ordinary)
                 {
-                    const auto volume = std::min(static_cast<long double>(cell.native_volume),
-                        PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume().value);
+                    const auto volume = std::min(
+                        static_cast<long double>(cell.native_volume), cell_geometry<Mode>(*data, cell).volume().value);
                     cell.ordinary_quota_scale =
                         std::nextafter(volume / static_cast<long double>(cell.canonical_face_count), 0.L);
                     if (!(cell.ordinary_quota_scale > 0) || !std::isfinite(cell.ordinary_quota_scale))
@@ -615,7 +647,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 {
                     PLIC::DynamicPoint normal;
                     normal.arithmetic_mode = options.arithmetic_mode;
-                    PLIC::DynamicFaceConstraint constraint;
+                    std::size_t geometry_slot = 0, constraint_face = 0;
                     if constexpr (Mode != ArithmeticMode::Exact)
                     {
                         const auto found_face = wall_tiles.find(identity);
@@ -623,12 +655,13 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                             throw std::invalid_argument("Finite VoF wall lacks its authenticated native loop.");
                         const auto* face = found_face->second;
                         const auto& source_cell = data->cells.at(face->first);
-                        constraint.geometry = source_cell.finite_geometry;
+                        geometry_slot = source_cell.geometry_slot;
+                        const auto source_geometry = native_cell_geometry(*data, source_cell);
                         bool matched = false;
-                        for (std::size_t index = 0; index < source_cell.phase.geometry->num_faces(); ++index)
-                            if (source_cell.phase.geometry->face_geometry(index)->contains(*face->geometry))
+                        for (std::size_t index = 0; index < source_geometry.num_faces(); ++index)
+                            if (source_geometry.face_contains(index, *face->geometry))
                             {
-                                constraint.face = index;
+                                constraint_face = index;
                                 matched = true;
                                 break;
                             }
@@ -642,9 +675,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                                             Math::subtract(topology->finite_nodes.at(face->node_gids[i + 1]), a)));
                     }
                     if constexpr (Mode == ArithmeticMode::Exact)
-                        retained.push_back({identity, wall_tile->geometry, normal, constraint});
+                        retained.push_back({identity, wall_tile->geometry, normal, geometry_slot, constraint_face});
                     else
-                        retained.push_back({wall_tile->face_gid, wall_tile->geometry, normal, constraint});
+                        retained.push_back(
+                            {wall_tile->face_gid, wall_tile->geometry, normal, geometry_slot, constraint_face});
                 }
             }
             for (const auto& [key, leaf] : hierarchy->owned())
@@ -689,6 +723,53 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 data->phase_history.push_back(data->cells.at(key).finite_history);
                 data->occupancy.push_back(data->cells.at(key).occupancy);
             }
+            std::vector<std::size_t> permutation;
+            wire::Budget reorder_budget{options.byte_budget};
+            PLIC::GeometryAllocationLedger reorder_native, reorder_bounded;
+            reorder_native.retain(topology->cell_geometry, reorder_budget.used, reorder_budget.limit);
+            if (topology->ordinary_cell_geometry)
+                reorder_native.retain(topology->ordinary_cell_geometry, reorder_budget.used, reorder_budget.limit);
+            if constexpr (Mode == ArithmeticMode::BoundedCertification)
+                reorder_bounded.retain(topology->bounded_cell_geometry, reorder_budget.used, reorder_budget.limit);
+            cell_catalog_detail::reserve_indices(permutation, data->cells.size(), reorder_budget);
+            for (const auto& key : topology->order)
+                permutation.push_back(data->cells.at(key).geometry_slot);
+            for (const auto& [key, cell] : data->cells)
+                if (cell.owner != comm->getRank())
+                    permutation.push_back(cell.geometry_slot);
+            topology->cell_geometry =
+                PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>::reordered(topology->cell_geometry, permutation,
+                    geometry_limits(ArithmeticMode::Ordinary, reorder_budget.limit - reorder_budget.used));
+            reorder_native.retain(topology->cell_geometry, reorder_budget.used, reorder_budget.limit);
+            if (topology->ordinary_cell_geometry)
+            {
+                topology->ordinary_cell_geometry = PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>::reordered(
+                    topology->ordinary_cell_geometry, permutation,
+                    geometry_limits(ArithmeticMode::Ordinary, reorder_budget.limit - reorder_budget.used));
+                reorder_native.retain(topology->ordinary_cell_geometry, reorder_budget.used, reorder_budget.limit);
+            }
+            if constexpr (Mode == ArithmeticMode::BoundedCertification)
+            {
+                topology->bounded_cell_geometry =
+                    PLIC::CellGeometryCatalog<Mode>::reordered(topology->bounded_cell_geometry, permutation,
+                        geometry_limits(Mode, reorder_budget.limit - reorder_budget.used));
+                reorder_bounded.retain(topology->bounded_cell_geometry, reorder_budget.used, reorder_budget.limit);
+            }
+            std::size_t slot = 0;
+            for (const auto& key : topology->order)
+                data->cells.at(key).geometry_slot = slot++;
+            for (auto& [key, cell] : data->cells)
+                if (cell.owner != comm->getRank())
+                    cell.geometry_slot = slot++;
+            std::vector<std::size_t> inverse;
+            cell_catalog_detail::reserve_indices(inverse, permutation.size(), reorder_budget);
+            inverse.resize(permutation.size());
+            for (std::size_t index = 0; index < permutation.size(); ++index)
+                inverse.at(permutation[index]) = index;
+            for (auto& [node, walls] : topology->node_walls)
+                for (auto& wall : walls)
+                    wall.geometry_slot = inverse.at(wall.geometry_slot);
+            topology->owned_geometry_count = topology->order.size();
             refresh_experimental_catalog(*data);
         });
     wire::collective(*comm,
@@ -791,8 +872,8 @@ std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>
             for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
-                validate_cell<ArithmeticMode::Exact>(cell, data_->options, retained_interface(*data_, cell));
-                auto labels = geometric_labels(cell);
+                validate_cell<ArithmeticMode::Exact>(*data_, cell, data_->options, retained_interface(*data_, cell));
+                auto labels = geometric_labels(*data_, cell);
                 budget.add(sizeof(labels) + labels.bulk.storage_bytes() + labels.gas.storage_bytes() +
                            labels.carrier.storage_bytes());
                 result.push_back(std::move(labels));
@@ -816,8 +897,8 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
                     for (const auto& key : data_->topology->order)
                     {
                         const auto& cell = data_->cells.at(key);
-                        validate_cell<Mode>(cell, data_->options, retained_interface(*data_, cell));
-                        const auto bulk = PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume();
+                        validate_cell<Mode>(*data_, cell, data_->options, retained_interface(*data_, cell));
+                        const auto bulk = cell_geometry<Mode>(*data_, cell).volume();
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         const auto minority = gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
                         const auto fraction = static_cast<long double>(minority) / bulk.value;
@@ -837,8 +918,8 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
             for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
-                validate_cell<ArithmeticMode::Exact>(cell, data_->options, retained_interface(*data_, cell));
-                const auto labels = geometric_labels(cell);
+                validate_cell<ArithmeticMode::Exact>(*data_, cell, data_->options, retained_interface(*data_, cell));
+                const auto labels = geometric_labels(*data_, cell);
                 if (labels.bulk.sign() <= 0)
                     throw std::invalid_argument("General VoF geometric fraction has nonpositive actual volume.");
                 const auto fraction = labels.gas.divided_by(labels.bulk, data_->options.byte_budget);
@@ -881,8 +962,8 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
                     std::size_t fitting_cells = 0;
                     const auto stencil = reconstruction_stencil<Mode>(*data_, key, false, &fitting_cells);
                     auto assessment = PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(
-                        reconstruction_sample<Mode>(cell, retained_interface(*data_, cell)), stencil, fitting_cells,
-                        data_->options.reconstruction);
+                        reconstruction_sample<Mode>(*data_, cell, retained_interface(*data_, cell)), stencil,
+                        fitting_cells, data_->options.reconstruction);
                     if (!assessment.admitted())
                         result.push_back({cell.gid, key, assessment});
                 }
@@ -916,7 +997,8 @@ std::vector<GeneralVoFReconstructionPatch> GeneralVoF::reconstruction_patches() 
         [&]
         {
             for (const auto& [key, cell] : data_->cells)
-                result.push_back({cell.gid, cell.owner, cell.phase.geometry, planes.at(key), cell.finite_geometry});
+                result.push_back({cell.gid, cell.owner, native_cell_geometry(*data_, cell), planes.at(key),
+                    dynamic_cell_geometry(*data_, cell)});
         });
     return result;
 }
@@ -932,23 +1014,20 @@ const std::vector<std::size_t>& GeneralVoF::node_tiles(std::uint64_t node) const
 {
     return data_->topology->node_tiles.at(node);
 }
-std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
-GeneralVoF::owned_geometry() const
+PLIC::CellGeometryRange<ArithmeticMode::Ordinary> GeneralVoF::owned_geometry() const
 {
-    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> result;
-    for (const auto& key : data_->topology->order)
-        result.push_back(data_->cells.at(key).phase.geometry);
-    return result;
+    return {data_->topology->cell_geometry, 0, data_->topology->owned_geometry_count};
 }
-template<ArithmeticMode Mode> std::vector<PLIC::ConvexGeometryPtr<Mode>> GeneralVoF::owned_finite_geometry() const
+template<ArithmeticMode Mode> PLIC::CellGeometryRange<Mode> GeneralVoF::owned_finite_geometry() const
 {
     if (arithmetic_mode() != Mode)
         throw std::invalid_argument("General VoF geometry mode differs from its selected operation.");
-    std::vector<PLIC::ConvexGeometryPtr<Mode>> result;
-    result.reserve(data_->topology->order.size());
-    for (const auto& key : data_->topology->order)
-        result.push_back(PLIC::ConvexCellGeometry<Mode>::from_dynamic(data_->cells.at(key).finite_geometry));
-    return result;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return {data_->topology->ordinary_cell_geometry ? data_->topology->ordinary_cell_geometry
+                                                        : data_->topology->cell_geometry,
+            0, data_->topology->owned_geometry_count};
+    else
+        return {data_->topology->bounded_cell_geometry, 0, data_->topology->owned_geometry_count};
 }
 template<ArithmeticMode Mode> std::vector<PLIC::Point<Mode>> GeneralVoF::finite_face_points(std::uint64_t face) const
 {
@@ -964,11 +1043,11 @@ template<ArithmeticMode Mode> std::vector<PLIC::Point<Mode>> GeneralVoF::finite_
         points.emplace_back(data_->topology->finite_nodes.at(node));
     return points;
 }
-template std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>>
+template PLIC::CellGeometryRange<ArithmeticMode::Ordinary>
 GeneralVoF::owned_finite_geometry<ArithmeticMode::Ordinary>() const;
 template std::vector<PLIC::Point<ArithmeticMode::Ordinary>> GeneralVoF::finite_face_points<ArithmeticMode::Ordinary>(
     std::uint64_t) const;
-template std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::BoundedCertification>>
+template PLIC::CellGeometryRange<ArithmeticMode::BoundedCertification>
 GeneralVoF::owned_finite_geometry<ArithmeticMode::BoundedCertification>() const;
 template std::vector<PLIC::Point<ArithmeticMode::BoundedCertification>>
 GeneralVoF::finite_face_points<ArithmeticMode::BoundedCertification>(std::uint64_t) const;
@@ -1099,8 +1178,8 @@ std::vector<GeneralVoFSupportCell> GeneralVoF::support_cells() const
 {
     std::vector<GeneralVoFSupportCell> result;
     for (const auto& [key, cell] : data_->cells)
-        result.push_back(
-            {cell.gid, cell.revision, cell.owner, cell.phase.geometry, cell.centroid, key, cell.finite_geometry});
+        result.push_back({cell.gid, cell.revision, cell.owner, native_cell_geometry(*data_, cell), cell.centroid, key,
+            dynamic_cell_geometry(*data_, cell)});
     return result;
 }
 const std::vector<GeneralVoFDonorBudget>& GeneralVoF::Trial::donor_budgets() const noexcept

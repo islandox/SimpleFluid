@@ -4,6 +4,7 @@
 
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/NativeFaceConstraintAccess.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 namespace SimpleFluid::PLIC::details
 {
@@ -157,10 +158,28 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
     for (const auto& wall : walls)
     {
         active_work->pair();
-        if (!wall.geometry || wall.face >= checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces.size())
-            reject("invalid wall support constraint.");
-        require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
-        const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
+        Plane native_plane;
+        const Plane* plane = nullptr;
+        if (wall.original)
+        {
+            const auto& facts = NativeFaceConstraintAccess::facts(*wall.original);
+            native_plane.frame = {facts.frame_origin, facts.frame_exponent};
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                native_plane.normal[axis] = Scalar(facts.normal[axis]);
+                native_plane.anchor[axis] = Scalar(facts.anchor[axis]);
+            }
+            native_plane.offset = Scalar(facts.offset);
+            native_plane.native_support = facts.support;
+            plane = &native_plane;
+        }
+        else
+        {
+            if (!wall.geometry || wall.face >= checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces.size())
+                reject("invalid wall support constraint.");
+            require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
+            plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane.get();
+        }
         PlaneAuthority native_authority;
         auto authorities = resolve_authorities(plane->point_context, plane->authorities);
         if (authorities.empty() && plane->native_support.has_value())

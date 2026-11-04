@@ -1,8 +1,11 @@
+#include "geometry/PLIC/CellGeometryConstraints.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/LocalCoordinates.hh"
+#include "geometry/PLIC/details/NativeFaceConstraintAccess.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 
@@ -431,4 +434,9 @@ template class ConvexPartition<ArithmeticMode::BoundedCertification>;
 SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::Ordinary)
 SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::BoundedCertification)
 #undef SIMPLEFLUID_INSTANTIATE_TYPED_POINTS
+template Point<ArithmeticMode::Ordinary> backtrace_constrained(const Point<ArithmeticMode::Ordinary>&, GeometryPoint,
+    double, std::span<const CellGeometryFaceConstraint<ArithmeticMode::Ordinary>>, GeometryLimits);
+template Point<ArithmeticMode::BoundedCertification> backtrace_constrained(
+    const Point<ArithmeticMode::BoundedCertification>&, GeometryPoint, double,
+    std::span<const CellGeometryFaceConstraint<ArithmeticMode::BoundedCertification>>, GeometryLimits);
 } // namespace SimpleFluid::PLIC

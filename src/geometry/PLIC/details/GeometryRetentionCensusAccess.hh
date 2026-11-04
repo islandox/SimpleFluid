@@ -1,5 +1,6 @@
 #pragma once
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
 #include "geometry/PLIC/details/PointSnapshot.hh"
 namespace SimpleFluid::PLIC::details
@@ -8,6 +9,14 @@ namespace SimpleFluid::PLIC::details
 class RetentionAccess
 {
 public:
+    template<ArithmeticMode M> static const auto& catalog_sources(const CellGeometryCatalog<M>& catalog)
+    { return catalog.sources_; }
+    template<ArithmeticMode M> static const auto& catalog_entries(const CellGeometryCatalog<M>& catalog)
+    { return catalog.entries_; }
+    static std::array<std::size_t,3> cartesian_bytes(const CartesianCellSource& source)
+    { return source.retention_bytes(); }
+    static std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> cartesian_supports(const CartesianCellSource& source)
+    { return source.retained_supports(); }
     static const GeometryAllocationLedger::Impl* ledger(const GeometryAllocationLedger& p) noexcept
     {
         return p.impl_.get();

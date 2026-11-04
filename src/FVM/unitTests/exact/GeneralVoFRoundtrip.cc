@@ -1,6 +1,7 @@
 /** @file GeneralVoFRoundtrip.cc
  * @brief Explicit exact geometry inspection stays separate from finite migration history.
  */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "../general_vof_finite_test_helpers.hh"
 #include <array>
 namespace
@@ -39,7 +40,7 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     const auto native_geometry = moved->owned_geometry();
     for (std::size_t i = 0; i < moved->owned_order().size(); ++i)
     {
-        const auto cell = address(native_geometry[i]->centroid());
+        const auto cell = address(native_geometry[i].centroid());
         EXPECT_LT(cell, local_owners.size());
         if (cell >= local_owners.size())
             continue;
@@ -76,8 +77,8 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     using ExactMeasure = PLIC::GeometryMeasure<ArithmeticMode::Exact>;
     for (const auto& native : native_geometry)
     {
-        const auto exact = ExactGeometry::from_geometry(*native);
-        const auto split = exact->clip({{1, 0, 0}, native->centroid(), 0});
+        const auto exact = ExactGeometry::from_geometry(*PLIC::test::shell(native));
+        const auto split = exact->clip({{1, 0, 0}, native.centroid(), 0});
         EXPECT_TRUE(split.inside);
         EXPECT_TRUE(split.outside);
         if (!split.inside || !split.outside)
@@ -115,7 +116,7 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     const auto migrated_geometry = adopted->owned_geometry();
     for (std::size_t i = 0; i < adopted->owned_order().size(); ++i)
     {
-        const auto cell = address(migrated_geometry[i]->centroid());
+        const auto cell = address(migrated_geometry[i].centroid());
         EXPECT_LT(cell, original_owners.size());
         if (cell >= original_owners.size())
             continue;

@@ -51,7 +51,8 @@ void validate_sample(
         !std::isfinite(options.minimum_optimized_phase_length_ratio) ||
         !(options.minimum_optimized_phase_length_ratio >= 0 && options.minimum_optimized_phase_length_ratio <= 1))
         throw std::invalid_argument("Invalid polyhedral PLIC sample/options.");
-    const auto metric = PLIC::GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry).certified();
+    const auto metric =
+        PLIC::GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry.existing_geometry()).certified();
     const long double discrepancy = static_cast<long double>(sample.gas_volume) + sample.carrier_volume - metric.value;
     const long double bound =
         metric.binary64_absolute_error() + 8 * std::numeric_limits<double>::epsilon() * metric.value;
@@ -118,20 +119,21 @@ ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMo
     // The selected exact source publishes the centroid and LS normalization.
     // These may round differently from an Ordinary source's cached moments;
     // the exact clipped-volume residual and acceptance gates below are unchanged.
-    result.center = sample.geometry->centroid();
+    result.center = sample.geometry.existing_geometry()->centroid();
     if (metric_volume)
-        result.volume = sample.geometry->moments().volume.as_double();
+        result.volume = sample.geometry.existing_geometry()->moments().volume.as_double();
     if (vertices && fragment)
-        result.exact_volume = GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry);
+        result.exact_volume = GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry.existing_geometry());
     if (vertices)
-        for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
+        for (std::size_t f = 0; f < sample.geometry.existing_geometry()->num_faces(); ++f)
         {
-            auto points = sample.geometry->face_geometry(f)->vertex_identities();
+            auto points = sample.geometry.existing_geometry()->face_geometry(f)->vertex_identities();
             for (auto& point : points)
                 result.vertices.push_back(std::move(point));
         }
     if (fragment)
-        result.fragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*sample.geometry);
+        result.fragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(
+            *sample.geometry.existing_geometry());
     return result;
 }
 PolyhedralReconstructionResult<ArithmeticMode::Exact> offset_fit(
@@ -331,8 +333,8 @@ PolyhedralReconstructionResult<ArithmeticMode::Exact> PolyhedralReconstruction<A
         return result;
     }
     for (std::size_t i = 0; i < stencil.size(); ++i)
-        stencil_geometry[i].fragment =
-            geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*stencil[i].geometry);
+        stencil_geometry[i].fragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(
+            *stencil[i].geometry.existing_geometry());
     struct Evaluation
     {
         PolyhedralReconstructionResult<ArithmeticMode::Exact> plane;

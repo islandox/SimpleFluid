@@ -3,14 +3,16 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactLiveStorage.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "FVM/details/VoFFailure.hh"
+#include "geometry/PLIC/CellGeometryConstraints.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/swept_volume/FiniteVoFTransport.hh"
@@ -248,8 +250,12 @@ struct Cell
     double native_volume = 0;
     std::size_t canonical_face_count = 0;
     long double ordinary_quota_scale = 0;
-    PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> phase;
-    PLIC::DynamicConvexGeometryPtr finite_geometry;
+    struct PhaseAmounts
+    {
+        double gas_volume = 0, carrier_volume = 0;
+    } phase;
+    // One flat immutable topology catalog owns all geometry contexts and fallbacks.
+    std::size_t geometry_slot = 0;
     PhaseError occupancy;
     PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
@@ -271,7 +277,7 @@ struct GeneralVoF::Data
         std::variant<std::uint64_t, AMR::AdaptiveBytes> authority;
         SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
         PLIC::DynamicPoint finite_normal;
-        PLIC::DynamicFaceConstraint finite_constraint;
+        std::size_t geometry_slot = 0, face = 0;
     };
     struct Topology
     {
@@ -285,6 +291,10 @@ struct GeneralVoF::Data
             SurfaceTileOwner owner;
             std::size_t index;
         };
+        std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> cell_geometry;
+        std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> ordinary_cell_geometry;
+        std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::BoundedCertification>> bounded_cell_geometry;
+        std::size_t owned_geometry_count = 0;
         AMR::AdaptiveNativePublication native;
         AMR::AdaptiveNativeDraft draft;
         std::vector<AMR::AdaptiveTile> tiles, extra_surface_tiles;
@@ -421,6 +431,40 @@ struct GeneralVoF::Data
 };
 namespace general_vof_detail
 {
+/** Geometry access always names the publication that owns the slot. Cells have
+ * no owning view and cannot accidentally preserve or rebind a prior topology. */
+template<ArithmeticMode Mode>
+[[nodiscard]] inline PLIC::CellGeometryView<Mode> cell_geometry(const GeneralVoF::Data& data, const Cell& cell)
+    requires(Mode != ArithmeticMode::Exact)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return {data.topology->ordinary_cell_geometry ? data.topology->ordinary_cell_geometry
+                                                      : data.topology->cell_geometry,
+            cell.geometry_slot};
+    else
+        return {data.topology->bounded_cell_geometry, cell.geometry_slot};
+}
+[[nodiscard]] inline PLIC::CellGeometryView<ArithmeticMode::Ordinary> native_cell_geometry(
+    const GeneralVoF::Data& data, const Cell& cell)
+{
+    return {data.topology->cell_geometry, cell.geometry_slot};
+}
+[[nodiscard]] inline PLIC::DynamicCellGeometryView dynamic_cell_geometry(const GeneralVoF::Data& data, const Cell& cell)
+{
+    if (data.options.arithmetic_mode == ArithmeticMode::Ordinary)
+        return PLIC::DynamicCellGeometryView(cell_geometry<ArithmeticMode::Ordinary>(data, cell));
+    if (data.options.arithmetic_mode == ArithmeticMode::BoundedCertification)
+        return PLIC::DynamicCellGeometryView(cell_geometry<ArithmeticMode::BoundedCertification>(data, cell));
+    return {};
+}
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL PLIC::ConvexGeometryPtr<Mode> existing_cell_geometry(const GeneralVoF::Data&, const Cell&)
+    requires(Mode != ArithmeticMode::Exact);
+/** Forward an existing Ordinary owner only on the old explicit Exact path.
+ * This function must never construct a shell or admit it through finite Work. */
+SIMPLEFLUID_FVM_LOCAL PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> existing_native_geometry(
+    const GeneralVoF::Data&, const Cell&);
+
 /** Borrowed only while this immutable publication's sparse table is unchanged. */
 inline const PLIC::DynamicPolyhedralReconstructionResult* retained_interface(
     const GeneralVoF::Data& data, const Cell& cell)
@@ -434,12 +478,12 @@ SIMPLEFLUID_FVM_LOCAL PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, 
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL long double phase_allowance(PLIC::DynamicGeometryValue source, double relative);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(
-    const Cell& cell);
+    const GeneralVoF::Data& data, const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
-template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
+template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void occupancy(const GeneralVoF::Data&, Cell& cell);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options,
-    const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr);
+SIMPLEFLUID_FVM_LOCAL void validate_cell(const GeneralVoF::Data& data, const Cell& cell,
+    const GeneralVoFOptions& options, const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
     const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
     const PLIC::PolyhedralInterface& p);
@@ -447,7 +491,7 @@ SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(
     const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& measures);
 SIMPLEFLUID_FVM_LOCAL double output(const Measure& measure);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_labels(
-    const Cell& cell);
+    const GeneralVoF::Data& data, const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
@@ -464,7 +508,7 @@ SIMPLEFLUID_FVM_LOCAL void agree_transaction(Teuchos::RCP<const Teuchos::Comm<in
 SIMPLEFLUID_FVM_LOCAL void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos::Comm<int>> comm);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void import_phases(GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(
+SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const GeneralVoF::Data& data,
     const Cell& cell, const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(

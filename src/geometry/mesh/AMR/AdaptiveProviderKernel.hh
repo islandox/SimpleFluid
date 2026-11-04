@@ -37,6 +37,12 @@ struct AdaptiveTrace
     AdaptiveCellKey key;
     std::vector<AdaptiveTraceFace> faces;
 };
+/** Actual Cartesian provider factory input under the current caller controls.
+ * These are raw coordinate expressions, before any PLIC frame/normalization. */
+struct AdaptiveCartesianGeometryBounds
+{
+    PLIC::GeometryPoint lower{}, upper{};
+};
 struct AdaptiveCellMetrics
 {
     double volume = 0;
@@ -113,10 +119,26 @@ public:
     [[nodiscard]] virtual std::vector<AdaptiveCellKey> refinement_group(const AdaptiveCellKey&, AdaptiveSplit) const;
     [[nodiscard]] virtual std::vector<AdaptiveBytes> coarsening_group(const AdaptiveFamily&) const;
     [[nodiscard]] virtual AdaptiveSplitResult split(const AdaptiveLeaf&, AdaptiveSplit) const = 0;
+    /** Explicit opt-in box/recipe contract. The default is unsupported, even
+     * for a provider labelled Cartesian. A supporting kernel guarantees its
+     * raw bounds match geometry() under current controls and its native metrics
+     * retain the Cartesian recipe's binary64 expressions. The capability query
+     * performs no allocation or coordinate arithmetic. */
+    [[nodiscard]] virtual bool has_native_cartesian_geometry() const noexcept { return false; }
+    [[nodiscard]] virtual std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
+        const AdaptiveLeaf&) const { return {}; }
     /** Complete immediate source membership is verified by distributed family
      * authority before this exact local inverse is evaluated. */
     [[nodiscard]] AdaptiveLeaf coarsen(const AdaptiveFamily&, std::span<const AdaptiveLeaf>) const;
 };
+/** Allocation-free explicit provider capability. A provider label or custom
+ * wrapper does not grant this opt-in contract. Virtual dispatch preserves the
+ * actual provider's promise across statically embedded library images. */
+[[nodiscard]] bool has_native_cartesian_geometry(const AdaptiveProviderKernel&) noexcept;
+/** Same ancestry checks, coordinate expression and order as geometry().
+ * Returns empty for unsupported kernels; performs no allocation. */
+[[nodiscard]] std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
+    const AdaptiveProviderKernel&, const AdaptiveLeaf&);
 [[nodiscard]] std::shared_ptr<const AdaptiveProviderKernel> convex_adaptive_kernel(
     unsigned maximum_depth, double minimum_scaled_volume);
 /** Exact full family identity includes typed parent and factor split. */

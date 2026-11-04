@@ -28,7 +28,7 @@ TEST(GeneralVoF, CanonicalNodeFanUsesAllIncidentOwnersBeforeFixedPhysicalSupport
         std::vector<std::uint64_t> expected;
         for (const auto& cell : support)
         {
-            const auto center = cell.geometry->centroid();
+            const auto center = cell.geometry.centroid();
             unsigned distance = 0;
             for (unsigned axis = 0; axis < 3; ++axis)
             {
@@ -335,8 +335,8 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
         const auto recipient = std::find_if(
             support.begin(), support.end(), [&](const auto& cell) { return cell.cell == transfer.recipient; });
         if (donor != support.end() && recipient != support.end() &&
-            donor->geometry->centroid() == SimpleFluid::PLIC::GeometryPoint{.5, .5, .5} &&
-            recipient->geometry->centroid() == SimpleFluid::PLIC::GeometryPoint{1.5, 1.5, 1.5})
+            donor->geometry.centroid() == SimpleFluid::PLIC::GeometryPoint{.5, .5, .5} &&
+            recipient->geometry.centroid() == SimpleFluid::PLIC::GeometryPoint{1.5, 1.5, 1.5})
         {
             EXPECT_GT(transfer.amount.bulk.value, transfer.amount.bulk.absolute_error);
             EXPECT_NEAR(transfer.amount.gas.value, transfer.amount.bulk.value,
@@ -411,7 +411,7 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
             support.begin(), support.end(), [&](const auto& cell) { return cell.cell == transfer.recipient; });
         if (donor == support.end() || recipient == support.end())
             continue;
-        const auto a = donor->geometry->centroid(), b = recipient->geometry->centroid();
+        const auto a = donor->geometry.centroid(), b = recipient->geometry.centroid();
         // Opposite sectors touch only at the shared vertical native edge;
         // their angular face-graph distance is at least three, independently
         // of the number of radial/Z halo rings one might assume for boxes.

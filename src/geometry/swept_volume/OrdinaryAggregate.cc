@@ -2,6 +2,9 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/OrdinaryIntersection.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/swept_volume/details/OrdinaryAggregateRetention.hh"
 #include "geometry/swept_volume/details/OrdinaryMetricRecords.hh"
@@ -245,6 +248,12 @@ struct AggregateWork
         stats.stage_charged_bytes[static_cast<unsigned>(stage)] += n;
         stats.storage_bytes = bytes;
         sync();
+    }
+    void charge_items(std::size_t count, std::size_t width)
+    {
+        if (width && count > std::numeric_limits<std::size_t>::max() / width)
+            fail(GeometryErrorCode::ResourceLimit, "Aggregate descriptor storage count overflows.");
+        charge(count * width);
     }
     void op(std::size_t n = 1)
     {
@@ -1128,10 +1137,123 @@ Cut phase_cut(const GeometryHalfspace& h)
         fail(GeometryErrorCode::InvalidInput, "Invalid Ordinary aggregate phase plane.");
     return c;
 }
-std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work)
+using DonorFrameBounds = ::SimpleFluid::PLIC::details::OrdinaryIntersectionOperand;
+struct NativeDonorFacts
 {
-    const auto storage = ::SimpleFluid::PLIC::details::checked_geometry_storage<ArithmeticMode::Ordinary>(
-        DynamicGeometryAccess::implementation(*d.geometry->dynamic_geometry()));
+    DonorFrameBounds operand;
+    std::array<::SimpleFluid::PLIC::details::NativeOriginalFace, 6> faces;
+};
+NativeDonorFacts native_donor_facts(const CellGeometryView<ArithmeticMode::Ordinary>& view, AggregateWork& work)
+{
+    namespace pd = ::SimpleFluid::PLIC::details;
+    const auto remaining = work.remaining_geometry();
+    const auto caller = pd::active_work;
+    pd::Operation preparation(remaining);
+    const auto active = &preparation.work;
+    pd::active_work = active;
+    const auto before = work.stats;
+    const auto before_bytes = work.bytes;
+    const auto account = [&]
+    {
+        pd::active_work = caller;
+        try
+        {
+            if (caller)
+            {
+                caller->charge(active->bytes, 1);
+                caller->operations += active->operations;
+                caller->pairs += active->pairs;
+            }
+            work.charge(active->bytes);
+            work.op(active->operations);
+            work.stats.native_fact_preparation_operations += active->operations;
+            work.pairs(active->pairs);
+        }
+        catch (...)
+        {
+            // Keep the actually consumed provider prefix in diagnostics even
+            // when the cumulative handoff rejects before its normal sync.
+            if (work.context)
+            {
+                work.context->bytes = before_bytes + active->bytes;
+                work.context->operations = before.operations + active->operations;
+                work.context->pairs = before.pair_tests + active->pairs;
+                work.context->statistics = before;
+                auto& stats = work.context->statistics;
+                stats.storage_bytes = work.context->bytes;
+                stats.operations = work.context->operations;
+                stats.native_fact_preparation_operations += active->operations;
+                stats.pair_tests = work.context->pairs;
+                stats.stage_charged_bytes[static_cast<unsigned>(work.stage)] += active->bytes;
+            }
+            throw;
+        }
+    };
+    NativeDonorFacts result;
+    try
+    {
+        result.operand = DonorFrameBounds::native(view);
+        for (std::size_t face = 0; face < result.faces.size(); ++face)
+            result.faces[face] = pd::NativeCellGeometrySourceAccess::original_face(view, face);
+    }
+    catch (...)
+    {
+        account();
+        throw;
+    }
+    account();
+    return result;
+}
+ConvexGeometryPtr<ArithmeticMode::Ordinary> donor_existing_geometry(const OrdinaryAggregateDonor& donor)
+{
+    if (donor.geometry)
+        return donor.geometry;
+    if (!donor.geometry_view || donor.geometry_view.is_procedural())
+        return {};
+    return ::SimpleFluid::PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(donor.geometry_view);
+}
+std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work, DonorFrameBounds* framed)
+{
+    if (!d.geometry && d.geometry_view && d.geometry_view.is_procedural())
+    {
+        const auto facts = native_donor_facts(d.geometry_view, work);
+        if (framed)
+            *framed = facts.operand;
+        std::vector<Cut> result;
+        work.charge(facts.faces.size() * sizeof(Cut));
+        result.reserve(facts.faces.size());
+        work.charge((result.capacity() - facts.faces.size()) * sizeof(Cut));
+        for (std::size_t face = 0; face < facts.faces.size(); ++face)
+        {
+            const auto& original = facts.faces[face];
+            Cut c;
+            c.normal = original.normal;
+            c.anchor = original.anchor;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                c.origin[axis] = original.frame_origin[axis];
+            c.exponent = original.frame_exponent;
+            c.orientation = original.orientation;
+            c.offset = original.offset;
+            c.native_support = d.geometry_view.source_support(face);
+            work.charge(sizeof(PlaneAuthority));
+            c.authorities.reserve(1);
+            work.charge((c.authorities.capacity() - 1) * sizeof(PlaneAuthority));
+            c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(*c.native_support));
+            work.retain_identity(*c.native_support);
+            work.retain_identity(c.authorities.front());
+            result.push_back(std::move(c));
+            // Stable actual cut-owner address, then canonicalized only through
+            // the same issued native/support identities as existing donors.
+            result.back().identity = &result.back();
+        }
+        return result;
+    }
+    const auto geometry = donor_existing_geometry(d);
+    const auto implementation = DynamicGeometryAccess::implementation(*geometry->dynamic_geometry());
+    const auto storage =
+        ::SimpleFluid::PLIC::details::checked_geometry_storage<ArithmeticMode::Ordinary>(implementation);
+    if (framed)
+        *framed = DonorFrameBounds::existing(geometry);
     std::vector<Cut> result;
     work.charge(storage->surfaces.size() * sizeof(Cut));
     result.reserve(storage->surfaces.size());
@@ -1166,6 +1288,114 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         result.push_back(std::move(c));
     }
     return result;
+}
+ConvexGeometryPtr<ArithmeticMode::Ordinary> materialize_donor_for_overlap(DonorFrameBounds& operand)
+{
+    namespace pd = ::SimpleFluid::PLIC::details;
+    const auto active = pd::active_work;
+    auto limits = active->limits;
+    if (active->bytes >= limits.byte_budget || active->pairs >= limits.maximum_pair_tests ||
+        active->operations >= active->operation_limit)
+        fail(GeometryErrorCode::ResourceLimit, "Aggregate donor overlap workspace is exhausted.");
+    limits.byte_budget -= active->bytes;
+    limits.maximum_pair_tests -= active->pairs;
+    limits.maximum_operations = active->operation_limit - active->operations;
+    CellGeometryOperationWorkspace temporary(limits);
+    // Explicit native materialization is an outer operation. Its complete
+    // consumed prefix rejoins this validation guard before the original clip.
+    pd::active_work = nullptr;
+    ConvexGeometryPtr<ArithmeticMode::Ordinary> result;
+    const auto account = [&]
+    {
+        pd::active_work = active;
+        active->charge(temporary.bytes_used(), 1);
+        active->operations += temporary.operations_used();
+        active->pairs += temporary.pair_tests_used();
+    };
+    try
+    {
+        operand.prepare(temporary);
+        result = operand.geometry();
+    }
+    catch (...)
+    {
+        account();
+        throw;
+    }
+    account();
+    return result;
+}
+void validate_view_donors(std::span<const OrdinaryAggregateDonor> donors, std::span<DonorFrameBounds> frames,
+    std::vector<ConvexGeometryPtr<ArithmeticMode::Ordinary>>& prepared)
+{
+    namespace pd = ::SimpleFluid::PLIC::details;
+    namespace kernel = pd::ordinary_kernel;
+    struct Candidate
+    {
+        std::size_t index;
+        pd::CoordinateRange x;
+    };
+    auto& active = *pd::active_work;
+    active.charge(donors.size(), sizeof(Candidate));
+    std::vector<Candidate> ordered;
+    ordered.reserve(donors.size());
+    if (ordered.capacity() > donors.size())
+        active.charge(ordered.capacity() - donors.size(), sizeof(Candidate));
+    for (std::size_t i = 0; i < donors.size(); ++i)
+    {
+        if (prepared[i] &&
+            DynamicGeometryAccess::implementation(*prepared[i]->dynamic_geometry())->partition_proof_only)
+            kernel::reject("donor partition requires measured immutable geometry.");
+        const auto bounds =
+            kernel::transform<ArithmeticMode::Ordinary>(frames[i].bounds(), frames[i].frame(), frames[0].frame());
+        ordered.push_back({i, bounds[0]});
+    }
+    std::sort(ordered.begin(), ordered.end(),
+        [&](const auto& a, const auto& b)
+        {
+            active.pair();
+            return a.x.lo < b.x.lo;
+        });
+    // Retain the original x-order/pair traversal and full framed bound screen.
+    // Only an actual unresolved geometric overlap needs general donor shells.
+    for (std::size_t i = 0; i < ordered.size(); ++i)
+        for (std::size_t j = i + 1; j < ordered.size(); ++j)
+        {
+            active.pair();
+            if (ordered[j].x.lo >= ordered[i].x.hi)
+                break;
+            const auto a = ordered[i].index, b = ordered[j].index;
+            // Already materialized pairs use precisely the original kernel
+            // prefix. Native pairs issue one operand-bound screen receipt;
+            // exact preparation can continue its unchanged intersection tail.
+            if (prepared[a] && prepared[b])
+            {
+                if (prepared[a]->intersect(*prepared[b]))
+                    kernel::reject("donor partition has overlapping interiors.");
+                continue;
+            }
+            auto receipt = pd::OrdinaryIntersectionAccess::screen(frames[a], frames[b]);
+            if (receipt.separated())
+                continue;
+            if (!prepared[a])
+                prepared[a] = materialize_donor_for_overlap(frames[a]);
+            if (!prepared[b])
+                prepared[b] = materialize_donor_for_overlap(frames[b]);
+            if (!frames[a].prepared_frame_matches() || !frames[b].prepared_frame_matches())
+            {
+                // A failed representation proof also invalidates the earlier
+                // x-order screen. Execute the complete original validation on
+                // actual owners; all already executed work remains charged.
+                for (std::size_t donor = 0; donor < prepared.size(); ++donor)
+                    if (!prepared[donor])
+                        prepared[donor] = materialize_donor_for_overlap(frames[donor]);
+                const ConvexPartition<ArithmeticMode::Ordinary> disjoint(prepared, active.limits);
+                active.charge(1, sizeof(disjoint));
+                return;
+            }
+            if (receipt.finish())
+                kernel::reject("donor partition has overlapping interiors.");
+        }
 }
 /** Multilinear integration leaves tiny barycentric weights intact. Every
  * surviving exterior face uses the SAME physical pivot and power-of-two scale. */
@@ -1550,6 +1780,18 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     // reserve may grant more than requested. Charge actual owned capacity so
     // the returned allocation remains covered while the caller copies groups.
     work.charge((result.groups.capacity() - reserved_groups) * sizeof(OrdinaryAggregateGroup));
+    const bool native_donors = std::any_of(donors.begin(), donors.end(), [](const auto& donor)
+        { return !donor.geometry && donor.geometry_view && donor.geometry_view.is_procedural(); });
+    std::vector<DonorFrameBounds> donor_bounds;
+    if (native_donors)
+    {
+        if (donors.size() > donor_bounds.max_size())
+            fail(GeometryErrorCode::ResourceLimit, "Aggregate donor bound count exceeds its representation.");
+        work.charge_items(donors.size(), sizeof(DonorFrameBounds));
+        donor_bounds.reserve(donors.size());
+        work.charge_items(donor_bounds.capacity() - donors.size(), sizeof(DonorFrameBounds));
+        donor_bounds.resize(donors.size());
+    }
     std::vector<ConvexGeometryPtr<ArithmeticMode::Ordinary>> geometries;
     std::vector<std::vector<Cut>> cuts;
     std::set<std::uint64_t> ids;
@@ -1561,7 +1803,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (const auto& d : donors)
     {
         context.donor = d.id;
-        if (!d.geometry)
+        if (!d.geometry && !d.geometry_view)
             fail(GeometryErrorCode::InvalidInput, "Invalid Ordinary aggregate donor declaration.");
         const auto fresh = ids.insert(d.id).second;
         if (fresh)
@@ -1571,8 +1813,8 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         for (auto b : {d.bulk_budget, d.gas_budget, d.carrier_budget})
             if (!std::isfinite(b) || b < 0)
                 fail(GeometryErrorCode::InvalidInput, "Invalid aggregate accounting budget.");
-        geometries.push_back(d.geometry);
-        cuts.push_back(donor_cuts(d, work));
+        geometries.push_back(donor_existing_geometry(d));
+        cuts.push_back(donor_cuts(d, work, native_donors ? &donor_bounds[cuts.size()] : nullptr));
     }
     // Distinct native cells can pin different StoredPlane owners for one
     // authenticated support. Unify ONLY issued support identities, never
@@ -1733,8 +1975,15 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         bool provider_charged = false;
         try
         {
-            const ConvexPartition<ArithmeticMode::Ordinary> disjoint(geometries, remaining);
-            work.charge(active->bytes + sizeof(disjoint));
+            std::size_t provider_descriptor_bytes = 0;
+            if (native_donors)
+                validate_view_donors(donors, donor_bounds, geometries);
+            else
+            {
+                const ConvexPartition<ArithmeticMode::Ordinary> disjoint(geometries, remaining);
+                provider_descriptor_bytes = sizeof(disjoint);
+            }
+            work.charge(active->bytes + provider_descriptor_bytes);
             provider_charged = true;
             work.op(active->operations);
             work.pairs(active->pairs);
@@ -1760,6 +2009,14 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             throw;
         }
         account_caller();
+    }
+    if (native_donors)
+    {
+        // General owners prepared for actual overlap checks are validation
+        // scratch. Cuts retain the original input provenance, so retire these
+        // derived owners before coverage and retention observations.
+        geometries.clear();
+        donor_bounds.clear();
     }
     // Subtract every donor through retained complementary cuts. Every outside
     // child remains a witness until a later donor consumes it. No volume closure

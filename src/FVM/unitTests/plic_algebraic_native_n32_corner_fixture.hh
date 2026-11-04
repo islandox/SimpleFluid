@@ -5,6 +5,7 @@
  * An independent exact-box argument bounds every plane RMS above .24220143877513919.
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
 #include <string_view>
@@ -191,7 +192,7 @@ inline Sample sample(const Row& row)
     bytes.reserve(row.certificate.size() / 2);
     for (std::size_t i = 0; i < row.certificate.size(); i += 2)
         bytes.push_back(char((digit(row.certificate[i]) << 4) | digit(row.certificate[i + 1])));
-    return {PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(bytes),
+    return {SimpleFluid::PLIC::test::view(PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(bytes)),
         row.gas, row.carrier, row.id, row.mixed};
 }
 } // namespace captured_native_n32_corner

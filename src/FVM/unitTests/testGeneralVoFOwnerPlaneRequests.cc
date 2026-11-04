@@ -1,6 +1,7 @@
 /** @file testGeneralVoFOwnerPlaneRequests.cc
  * @brief Actual Ordinary fits, authenticated cache reuse and bounded owner replies.
  */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
@@ -130,7 +131,7 @@ struct PlanarFixture
     double fraction = .25;
     Sample target;
     std::vector<Sample> stencil;
-    explicit PlanarFixture(double gas = .25) : fraction(gas), target{Geometry::box({0, 0, 0}, {1, 1, 1}), gas, 1 - gas}
+    explicit PlanarFixture(double gas = .25) : fraction(gas), target{SimpleFluid::PLIC::test::view(Geometry::box({0, 0, 0}, {1, 1, 1})), gas, 1 - gas}
     {
         for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0},
                  {0, 0, -1}, {0, 0, 1}, {-1, -1, -1}, {1, 1, 1}, {-1, 1, 1}, {1, -1, -1}})
@@ -138,7 +139,7 @@ struct PlanarFixture
             const PLIC::GeometryPoint lower{double(index[0]), double(index[1]), double(index[2])};
             const PLIC::GeometryPoint upper{double(index[0] + 1), double(index[1] + 1), double(index[2] + 1)};
             const double amount = index[0] < 0 ? 1 : index[0] > 0 ? 0 : gas;
-            stencil.push_back({Geometry::box(lower, upper), amount, 1 - amount});
+            stencil.push_back({SimpleFluid::PLIC::test::view(Geometry::box(lower, upper)), amount, 1 - amount});
         }
     }
     void change_phase(double gas)
@@ -168,7 +169,7 @@ struct PlanarFixture
         EXPECT_NEAR(fitted.geometry.gas.normal[2], 0, 1e-8);
         // The scalar offset is relative to the represented anchor.
         EXPECT_NEAR(fitted.geometry.gas.offset + fitted.geometry.gas.anchor[0], fraction, 1e-8);
-        const auto measured = target.geometry->phases(fitted.geometry.gas);
+        const auto measured = SimpleFluid::PLIC::test::shell(target.geometry)->phases(fitted.geometry.gas);
         EXPECT_LE(std::abs(measured.gas.value - fraction),
             fraction * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
         EXPECT_LE(std::abs(measured.carrier.value - (1 - fraction)),
@@ -196,7 +197,7 @@ struct PlanarFixture
 struct ApproximateGradientFixture
 {
     double low_fraction = .05, high_fraction = .25;
-    Sample target{Geometry::box({0, 0, 0}, {1, 1, 1}), low_fraction, 1 - low_fraction};
+    Sample target{SimpleFluid::PLIC::test::view(Geometry::box({0, 0, 0}, {1, 1, 1})), low_fraction, 1 - low_fraction};
     std::vector<Sample> stencil;
     explicit ApproximateGradientFixture(double low = .05, double high = .25) : low_fraction(low), high_fraction(high)
     {
@@ -208,8 +209,8 @@ struct ApproximateGradientFixture
                     if (x || y || z)
                     {
                         const double gas = x ? high : low;
-                        stencil.push_back({Geometry::box({double(x), double(y), double(z)},
-                                               {double(x + 1), double(y + 1), double(z + 1)}),
+                        stencil.push_back({SimpleFluid::PLIC::test::view(Geometry::box({double(x), double(y), double(z)},
+                                               {double(x + 1), double(y + 1), double(z + 1)})),
                             gas, 1 - gas});
                     }
     }
@@ -227,7 +228,7 @@ struct ApproximateGradientFixture
         EXPECT_NEAR(fitted.geometry.gas.normal[0], -1, 1e-12);
         EXPECT_NEAR(fitted.geometry.gas.normal[1], 0, 1e-12);
         EXPECT_NEAR(fitted.geometry.gas.normal[2], 0, 1e-12);
-        const auto measured = target.geometry->phases(fitted.geometry.gas);
+        const auto measured = SimpleFluid::PLIC::test::shell(target.geometry)->phases(fitted.geometry.gas);
         EXPECT_LE(std::abs(measured.gas.value - low_fraction),
             low_fraction * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
         EXPECT_EQ(target.gas_volume, low_fraction);
@@ -441,7 +442,7 @@ TEST(GeneralVoFOwnerPlaneRequests, ExistingCacheNeverBypassesRevisionContextOrPa
 TEST(GeneralVoFOwnerPlaneRequests, NextInvocationRefitsChangedPhaseOnIdenticalGeometryKeyAndRevision)
 {
     PlanarFixture fixture;
-    const auto geometry_identity = fixture.target.geometry.get();
+    const auto geometry_identity = fixture.target.geometry;
     auto retained = work();
     std::vector<char> previous;
     Diagnostics diagnostics;
@@ -449,7 +450,7 @@ TEST(GeneralVoFOwnerPlaneRequests, NextInvocationRefitsChangedPhaseOnIdenticalGe
     for (const double fraction : {.25, .75})
     {
         fixture.change_phase(fraction);
-        EXPECT_EQ(fixture.target.geometry.get(), geometry_identity);
+        EXPECT_EQ(fixture.target.geometry, geometry_identity);
         {
             local::PlaneImportStorage storage(retained, diagnostics);
             const auto outgoing = replies(fixture, {}, incoming, storage, diagnostics);

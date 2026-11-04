@@ -1,6 +1,7 @@
 /** Private, quiescent, observational retention probe. No owner pins escape. */
 #pragma once
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/SupportClassification.hh"
@@ -26,7 +27,9 @@ enum class RootKind : std::uint8_t
     OrdinaryPlanarFace,
     IdentityBacking,
     Authority,
-    OrdinaryBoundary
+    OrdinaryBoundary,
+    CartesianSource,
+    CellCatalog
 };
 struct BorrowedRoot
 {
@@ -35,6 +38,10 @@ struct BorrowedRoot
     ArithmeticMode mode = ArithmeticMode::Ordinary;
     std::uint32_t group = 0;
 };
+template<ArithmeticMode M> BorrowedRoot root(const CellGeometryCatalog<M>& catalog, std::uint32_t group = 0)
+{ return {RootKind::CellCatalog, &catalog, M, group}; }
+inline BorrowedRoot root(const CartesianCellSource& source, std::uint32_t group = 0)
+{ return {RootKind::CartesianSource, &source, ArithmeticMode::Ordinary, group}; }
 template<ArithmeticMode M> BorrowedRoot root(const ConvexCellGeometry<M>& p, std::uint32_t g = 0)
 {
     return {RootKind::TypedGeometry, &p, M, g};

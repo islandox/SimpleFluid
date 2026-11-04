@@ -2,6 +2,7 @@
  * @brief Owner-authenticated, independently volume-admitted capillary plane witnesses.
  */
 #include "FVM/details/GeneralVoF/CapillaryPlanes.hh"
+#include "FVM/details/GeneralVoF/CellWorkspace.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -96,14 +97,16 @@ void evaluation(const GeneralVoF::Data& data, std::size_t& evaluations)
         throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
             "Capillary plane witness exceeds the reconstruction evaluation budget.");
 }
-bool pure_side(const Geometry& geometry, const PLIC::GeometryHalfspace& gas, int phase)
+bool pure_side(const PLIC::CellGeometryView<mode>& geometry, const PLIC::GeometryHalfspace& gas, int phase,
+    CellWorkspace& workspace)
 {
     try
     {
         // Structural classification uses the public Ordinary clip's compensated
         // predicates and original support incidence. No rounded support scalar
         // or volume allowance can erase a positive geometric sliver.
-        const auto split = geometry.clip(gas, false);
+        const auto materialized = workspace.materialize(geometry);
+        const auto split = materialized->clip(gas, false);
         return phase > 0 ? bool(split.inside) && !split.outside : !split.inside && bool(split.outside);
     }
     catch (const PLIC::GeometryError& error)
@@ -114,8 +117,8 @@ bool pure_side(const Geometry& geometry, const PLIC::GeometryHalfspace& gas, int
         throw;            // Resource exhaustion and metadata/provenance failures retain their evidence.
     }
 }
-std::optional<Candidate> native_candidate(
-    const GeneralVoF::Data& data, const Planes& original, const AMR::AdaptiveTile& tile, std::size_t& evaluations)
+std::optional<Candidate> native_candidate(const GeneralVoF::Data& data, const Planes& original,
+    const AMR::AdaptiveTile& tile, std::size_t& evaluations, wire::Budget& budget)
 {
     if (tile.exterior || !tile.second || !tile.second_image_identity.is_zero() || !data.cells.contains(tile.first) ||
         !data.cells.contains(*tile.second))
@@ -163,11 +166,12 @@ std::optional<Candidate> native_candidate(
             return {};
     // The witness's two original endpoints must themselves lie on their
     // declared sides, even when only one endpoint belongs to the target stencil.
+    CellWorkspace active_geometry(mode, budget, data.options.maximum_face_geometry_operations);
     for (const auto* cell : {&first, &second})
     {
         evaluation(data, evaluations);
-        if (!pure_side(*Geometry::from_dynamic(cell->finite_geometry), candidate.gas,
-                geometric_phase(data, *cell, PLIC::reconstruction_geometry(original.at(cell->key)))))
+        if (!pure_side(cell_geometry<mode>(data, *cell), candidate.gas,
+                geometric_phase(data, *cell, PLIC::reconstruction_geometry(original.at(cell->key))), active_geometry))
             return {};
     }
     candidate.support = PLIC::planar_support<mode>(*tile.geometry);
@@ -181,11 +185,15 @@ std::optional<MinorityEvidence> admit_cell(const GeneralVoF::Data& data, const P
     const PLIC::GeometryHalfspace& gas, std::size_t& evaluations, wire::Budget& budget)
 {
     const auto& cell = data.cells.at(key);
-    const auto geometry = Geometry::from_dynamic(cell.finite_geometry);
+    const auto geometry = cell_geometry<mode>(data, cell);
     const int phase = geometric_phase(data, cell, PLIC::reconstruction_geometry(original.at(key)));
     evaluation(data, evaluations);
+    wire::Budget query{budget.limit};
+    query.add(budget.used);
+    CellWorkspace active_geometry(mode, query, data.options.maximum_face_geometry_operations);
     if (phase)
-        return pure_side(*geometry, gas, phase) ? std::optional<MinorityEvidence>{MinorityEvidence{}} : std::nullopt;
+        return pure_side(geometry, gas, phase, active_geometry) ? std::optional<MinorityEvidence>{MinorityEvidence{}}
+                                                                : std::nullopt;
     const bool minority_is_gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
     const long double target = minority_is_gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
     if (!(target > 0) || !std::isfinite(target))
@@ -200,13 +208,11 @@ std::optional<MinorityEvidence> admit_cell(const GeneralVoF::Data& data, const P
         minority.offset = -minority.offset;
     }
     // Account for the temporary boundary query separately from retained maps.
-    wire::Budget query{budget.limit};
-    query.add(budget.used);
-    query.add(geometry->storage_bytes());
+    const auto materialized = active_geometry.materialize(geometry);
     PLIC::PlaneVolumeMeasure measured;
     try
     {
-        measured = PLIC::OrdinaryPlaneMeasure(*geometry).below(minority);
+        measured = PLIC::OrdinaryPlaneMeasure(*materialized).below(minority);
     }
     catch (const PLIC::GeometryError& error)
     {
@@ -259,7 +265,7 @@ std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_pla
         budget.add(2 * (stencil.size() - 1) * sizeof(PLIC::PolyhedralPhaseSample<mode>));
         const auto support = reconstruction_stencil<mode>(data, target, true);
         initial = PLIC::PolyhedralReconstruction<mode>::reconstruct(
-            reconstruction_sample<mode>(target_cell, retained_interface(data, target_cell)), support,
+            reconstruction_sample<mode>(data, target_cell, retained_interface(data, target_cell)), support,
             data.options.reconstruction);
     }
     std::vector<const AMR::AdaptiveTile*> faces;
@@ -276,7 +282,7 @@ std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_pla
     std::size_t evaluations = 0;
     for (const auto* face : faces)
     {
-        const auto candidate = native_candidate(data, original, *face, evaluations);
+        const auto candidate = native_candidate(data, original, *face, evaluations, budget);
         if (!candidate)
             continue;
         wire::Budget candidate_budget{budget.limit};
@@ -298,7 +304,7 @@ std::pair<std::uint64_t, PLIC::DynamicPolyhedralReconstructionResult> choose_pla
                 evidence = *admitted;
             else
             {
-                const auto bulk = Geometry::from_dynamic(data.cells.at(key).finite_geometry)->volume().value;
+                const auto bulk = cell_geometry<mode>(data, data.cells.at(key)).volume().value;
                 const auto normalized = admitted->difference / bulk;
                 squared_residual += normalized * normalized;
             }

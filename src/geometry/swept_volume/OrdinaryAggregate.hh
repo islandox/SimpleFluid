@@ -2,6 +2,7 @@
  * @brief Ordinary signed-chain measures without measured computational children.
  */
 #pragma once
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/swept_volume/SweptVolumeDeclarations.hh"
 #include <compare>
@@ -40,6 +41,9 @@ struct OrdinaryAggregateDonor
     bool pure_gas = false, pure_carrier = false;
     /** Independent physical scales, supplied by the accounting owner. */
     long double bulk_budget = 0, gas_budget = 0, carrier_budget = 0;
+    /** Explicit original source view. Existing owning input takes precedence;
+     * native views provide cuts/bounds without constructing a general shell. */
+    PLIC::CellGeometryView<ArithmeticMode::Ordinary> geometry_view;
 };
 struct OrdinaryAggregateAmounts
 {
@@ -74,6 +78,10 @@ struct OrdinaryAggregateStatistics
     /** Cumulative construction charges, including destroyed temporary geometry;
      * these counters do not describe simultaneous live memory or RSS. */
     std::size_t storage_bytes = 0, pair_tests = 0, operations = 0;
+    /** Observational subset of operations spent recovering original native cut
+     * and normalized frame facts only. Already included in operations and its
+     * unchanged guard; excludes donor pair validation and intersection work. */
+    std::size_t native_fact_preparation_operations = 0;
     std::array<std::size_t, 4> stage_charged_bytes{};
     /** Requested bytes of the charge rejected by the cumulative allowance. */
     std::size_t failed_charge_bytes = 0;

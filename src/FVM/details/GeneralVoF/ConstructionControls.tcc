@@ -94,10 +94,17 @@ template<ArithmeticMode Mode>
 PLIC::Point<Mode> departure(
     const GeneralVoF::Data& data, std::uint64_t node, const PLIC::GeometryPoint& velocity, double timestep)
 {
-    std::vector<PLIC::FaceConstraint<Mode>> walls;
+    std::vector<PLIC::CellGeometryFaceConstraint<Mode>> walls;
     for (const auto& wall : data.topology->node_walls.at(node))
-        walls.push_back({PLIC::ConvexCellGeometry<Mode>::from_dynamic(wall.finite_constraint.geometry),
-            wall.finite_constraint.face});
+    {
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            walls.push_back({{data.topology->ordinary_cell_geometry ? data.topology->ordinary_cell_geometry
+                                                                    : data.topology->cell_geometry,
+                                 wall.geometry_slot},
+                wall.face});
+        else
+            walls.push_back({{data.topology->bounded_cell_geometry, wall.geometry_slot}, wall.face});
+    }
     if (walls.size() > SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_constraints)
         throw std::invalid_argument("Finite VoF construction wall catalog exceeds its constraint cap.");
     PLIC::GeometryLimits limits;

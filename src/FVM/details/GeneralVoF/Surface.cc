@@ -3,10 +3,11 @@
  */
 #include "FVM/details/GeneralVoF/CapillaryNodeFans.hh"
 #include "FVM/details/GeneralVoF/CapillaryPlanes.hh"
+#include "FVM/details/GeneralVoF/CellWorkspace.hh"
 #include "FVM/details/GeneralVoF/FilteredSurface.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
-#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -61,25 +62,21 @@ int geometric_phase(const GeneralVoF::Data& data, const Cell& cell)
         return -1;
     return 0;
 }
-void physical_scale(GeneralVoFSurfacePatch& patch, const Cell& cell, PLIC::GeometryAllocationLedger& point_exports,
-    wire::Budget& budget, std::size_t& point_export_bytes)
+void physical_scale(const GeneralVoF::Data& data, GeneralVoFSurfacePatch& patch, const Cell& cell,
+    PLIC::GeometryAllocationLedger& point_exports, wire::Budget& budget, std::size_t& point_export_bytes)
 {
-    const auto geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
-    const auto spans = geometry->axis_spans();
+    const auto geometry = cell_geometry<ArithmeticMode::Ordinary>(data, cell);
+    const auto spans = geometry.axis_spans();
     patch.physical_spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
     patch.cell_scale = std::min({patch.physical_spans[0], patch.physical_spans[1], patch.physical_spans[2]});
     long double surface = 0;
-    const auto before_export = budget.used;
-    const auto exported = geometry->export_points(point_exports, budget.used, budget.limit);
-    point_export_bytes += budget.used - before_export;
-    const auto points = exported.points();
-    for (const auto& face : geometry->faces())
+    for (const auto& face : geometry.faces())
     {
         WidePoint area{};
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
         {
-            const auto triangle = cross(difference(points[face[i]].value, points[face[0]].value),
-                difference(points[face[i + 1]].value, points[face[0]].value));
+            const auto triangle = cross(difference(geometry.corner(face[i]), geometry.corner(face[0])),
+                difference(geometry.corner(face[i + 1]), geometry.corner(face[0])));
             for (unsigned a = 0; a < 3; ++a)
                 area[a] += triangle[a] / 2;
         }
@@ -87,7 +84,7 @@ void physical_scale(GeneralVoFSurfacePatch& patch, const Cell& cell, PLIC::Geome
     }
     if (!(surface > 0) || !std::isfinite(surface))
         unresolved("Capillary support has no positive physical cell surface.");
-    patch.cell_scale = std::min(patch.cell_scale, static_cast<double>(2 * geometry->volume().value / surface));
+    patch.cell_scale = std::min(patch.cell_scale, static_cast<double>(2 * geometry.volume().value / surface));
     if (!(patch.cell_scale > 0) || !std::isfinite(patch.cell_scale))
         unresolved("Capillary support has no positive physical cell scale.");
 }
@@ -295,18 +292,17 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                               << " method=" << int(plane.orientation_method) << " iterations=" << plane.fit_iterations
                               << " converged=" << plane.fit_converged << " residual=" << plane.target_volume_residual
                               << " numerical_error=" << plane.target_volume_numerical_error_estimate << '\n';
-                    const auto geometry =
-                        PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
+                    const auto geometry = cell_geometry<ArithmeticMode::Ordinary>(*data_, cell);
                     std::cerr << "CAP_GEOMETRY control=" << data_->control << " rank=" << comm->getRank()
                               << " id=" << cell.gid << " centroid=" << cell.centroid[0] << ',' << cell.centroid[1]
-                              << ',' << cell.centroid[2] << " volume=" << geometry->volume().value << " points=";
-                    const auto before_export = budget.used;
-                    const auto exported = geometry->export_points(point_exports, budget.used, budget.limit);
-                    point_export_bytes += budget.used - before_export;
-                    for (const auto& point : exported.points())
-                        std::cerr << point.value[0] << ',' << point.value[1] << ',' << point.value[2] << ';';
+                              << ',' << cell.centroid[2] << " volume=" << geometry.volume().value << " points=";
+                    for (std::size_t vertex = 0; vertex < geometry.vertex_count(); ++vertex)
+                    {
+                        const auto point = geometry.corner(vertex);
+                        std::cerr << point[0] << ',' << point[1] << ',' << point[2] << ';';
+                    }
                     std::cerr << " faces=";
-                    for (const auto& face : geometry->faces())
+                    for (const auto& face : geometry.faces())
                     {
                         for (auto vertex : face)
                             std::cerr << vertex << ',';
@@ -316,8 +312,10 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 }
                 if (plane.geometry.pure_gas || plane.geometry.pure_carrier)
                     continue;
+                CellWorkspace active_geometry(
+                    ArithmeticMode::Ordinary, budget, data_->options.maximum_face_geometry_operations);
                 const auto geometry =
-                    PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
+                    active_geometry.materialize(cell_geometry<ArithmeticMode::Ordinary>(*data_, cell));
                 // Surface measurements require an actual closed-shell clip;
                 // phase-volume shortcuts cannot provide curvature geometry.
                 const auto section = geometry->clip(plane.geometry.gas, true).section;
@@ -336,7 +334,7 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 for (auto& v : n)
                     v /= magnitude;
                 patch.normal = display(n);
-                physical_scale(patch, cell, point_exports, budget, point_export_bytes);
+                physical_scale(*data_, patch, cell, point_exports, budget, point_export_bytes);
                 auto& polygon = polygons[key];
                 budget.add(section.vertices.size() * sizeof(WidePoint) + sizeof(Key) + sizeof(std::vector<WidePoint>) +
                            4 * sizeof(void*));
@@ -384,9 +382,9 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                     patch.centroid = face.centroid;
                     patch.normal = face.normal;
                     patch.area = face.area;
-                    physical_scale(patch, first, point_exports, budget, point_export_bytes);
+                    physical_scale(*data_, patch, first, point_exports, budget, point_export_bytes);
                     GeneralVoFSurfacePatch other;
-                    physical_scale(other, second, point_exports, budget, point_export_bytes);
+                    physical_scale(*data_, other, second, point_exports, budget, point_export_bytes);
                     patch.cell_scale = std::min(patch.cell_scale, other.cell_scale);
                     for (unsigned axis = 0; axis < 3; ++axis)
                         patch.physical_spans[axis] = std::max(patch.physical_spans[axis], other.physical_spans[axis]);

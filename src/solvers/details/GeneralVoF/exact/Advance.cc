@@ -6,6 +6,7 @@
 #include "solvers/details/GeneralVoF/Curvature.hh"
 #include "solvers/details/GeneralVoF/Diagnostics.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "solvers/details/GeneralVoF/FaceRates.hh"
 #include "solvers/details/GeneralVoF/NodeVelocity.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
@@ -86,7 +87,7 @@ double Advance<ArithmeticMode::Exact>::stable_timestep(
                 if (sums[c].sign())
                 {
                     const auto exact =
-                        M::volume(*geometry[c]).scaled(options.flow.max_courant).divided_by(sums[c], scalar_budget);
+                        M::volume(*PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(geometry[c])).scaled(options.flow.max_courant).divided_by(sums[c], scalar_budget);
                     if (exact.compare(M::from_value(std::numeric_limits<double>::max())) > 0)
                         continue;
                     double value = exact.certified().as_double();
@@ -221,7 +222,7 @@ std::shared_ptr<State> Advance<ArithmeticMode::Exact>::prepare(Resources& resour
                                       old_inventory[c].carrier.scaled(material.liquid_viscosity);
                 const auto coefficient =
                     weighted.divided_by(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(
-                                            *physical_geometry[c]),
+                                            *PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(physical_geometry[c])),
                         options.byte_budget);
                 viscosity[c] = coefficient.sign() ? coefficient.certified().as_double() : 0;
             }

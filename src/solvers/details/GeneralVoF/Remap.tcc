@@ -95,7 +95,7 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     item.amounts.push_back(A::multiply(A::make_value(old.finite_mass[c], old.finite_mass_error[c]),
                         A::make_value(old.velocity[c][a], 0)));
                 item.amounts.push_back(
-                    A::multiply(SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()),
+                    A::multiply(SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c].volume()),
                         A::make_value(old.pressure[c], 0)));
                 channels.push_back(std::move(item));
             }
@@ -134,7 +134,7 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     state->velocity[c][a] = A::as_double(
                         A::divide(item.amounts[a], A::make_value(state->finite_mass[c], state->finite_mass_error[c])));
                 state->pressure[c] = A::as_double(A::divide(
-                    item.amounts[3], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume())));
+                    item.amounts[3], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c].volume())));
             }
         });
     state->curvature = Curvature<Mode>::assemble(*(*candidate).mesh, (*candidate).flow, *state->phases,

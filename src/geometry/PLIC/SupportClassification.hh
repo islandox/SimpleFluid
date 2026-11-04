@@ -6,6 +6,7 @@
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode> struct CellGeometryFaceConstraint;
 /** Membership consults the sealed coordinate snapshot; arbitrary coordinate
  * mutation invalidates it. Keys identify geometric supports only. The caller
  * authenticates geometry revision, ownership and transaction independently. */
@@ -34,6 +35,7 @@ class OrdinaryBoundary
 {
 public:
     explicit OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary>);
+    explicit OrdinaryBoundary(CellGeometryFaceConstraint<ArithmeticMode::Ordinary>);
     [[nodiscard]] PointAuthorityRange authorities() const;
     [[nodiscard]] OrdinaryBoundaryClass classify(const Point<ArithmeticMode::Ordinary>&) const;
     /** Wrapper and opaque fallback payload only; retained immutable cell storage
@@ -47,5 +49,6 @@ private:
     friend class details::RetentionAccess;
     FaceConstraint<ArithmeticMode::Ordinary> boundary_;
     PlaneAuthority native_authority_;
+    std::optional<DynamicOriginalFaceConstraint> original_;
 };
 } // namespace SimpleFluid::PLIC

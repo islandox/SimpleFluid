@@ -3,6 +3,7 @@
  */
 #include "solvers/details/GeneralVoF/Resources.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -36,7 +37,7 @@ std::vector<Vector> finite_spans_mode(const std::shared_ptr<const VoF::GeneralVo
     std::vector<Vector> result;
     for (const auto& geometry : phases->owned_finite_geometry<Mode>())
     {
-        const auto spans = geometry->axis_spans();
+        const auto spans = geometry.axis_spans();
         result.push_back({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
     }
     return result;
@@ -107,7 +108,7 @@ void initialize_geometry(
     const auto geometry = phases->owned_geometry();
     const auto bounded_geometry = arithmetic_mode_ != ArithmeticMode::Exact
                                       ? phases->owned_finite_geometry<Mode>()
-                                      : std::vector<PLIC::ConvexGeometryPtr<Mode>>{};
+                                      : PLIC::CellGeometryRange<Mode>{};
     volume.resize(mesh->num_owned_cells());
     thickness.resize(volume.size());
     execution.collective(
@@ -121,31 +122,51 @@ void initialize_geometry(
             {
                 if (!bounded_geometry.empty())
                 {
-                    const auto exported =
-                        bounded_geometry[c]->export_points(point_exports, point_export_bytes, o.byte_budget);
-                    const auto p = exported.points();
                     long double area = 0;
-                    for (const auto& face : bounded_geometry[c]->faces())
+                    if constexpr (Mode == ArithmeticMode::Ordinary)
                     {
-                        auto normal = A::point({});
-                        for (std::size_t i = 1; i + 1 < face.size(); ++i)
-                            normal = A::add(normal, A::cross(A::subtract(p[face[i]].dynamic(), p[face[0]].dynamic()),
-                                                        A::subtract(p[face[i + 1]].dynamic(), p[face[0]].dynamic())));
-                        const auto square = A::dot(normal, normal);
-                        area += std::sqrt(square.value) / 2;
+                        // Preserve the original fan-triangle arithmetic on the
+                        // same canonical world coordinates, without provenance
+                        // export or an owning shell for a regular cell.
+                        const auto point = [&](std::size_t vertex)
+                        { return PLIC::DynamicPoint{bounded_geometry[c].corner(vertex), {}, Mode}; };
+                        for (const auto& face : bounded_geometry[c].faces())
+                        {
+                            auto normal = A::point({});
+                            for (std::size_t i = 1; i + 1 < face.size(); ++i)
+                                normal = A::add(normal, A::cross(A::subtract(point(face[i]), point(face[0])),
+                                                            A::subtract(point(face[i + 1]), point(face[0]))));
+                            const auto square = A::dot(normal, normal);
+                            area += std::sqrt(square.value) / 2;
+                        }
                     }
-                    const auto v = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(bounded_geometry[c]->volume());
+                    else
+                    {
+                        const auto owner = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(bounded_geometry[c]);
+                        const auto exported = owner->export_points(point_exports, point_export_bytes, o.byte_budget);
+                        const auto p = exported.points();
+                        for (const auto& face : owner->faces())
+                        {
+                            auto normal = A::point({});
+                            for (std::size_t i = 1; i + 1 < face.size(); ++i)
+                                normal = A::add(normal, A::cross(A::subtract(p[face[i]].dynamic(), p[face[0]].dynamic()),
+                                                            A::subtract(p[face[i + 1]].dynamic(), p[face[0]].dynamic())));
+                            const auto square = A::dot(normal, normal);
+                            area += std::sqrt(square.value) / 2;
+                        }
+                    }
+                    const auto v = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(bounded_geometry[c].volume());
                     volume[c] = A::as_double(v);
                     thickness[c] = static_cast<double>(2 * v.value / area);
                     if (!std::isfinite(thickness[c]) || !(thickness[c] > 0))
                         throw std::runtime_error("Finite VoF cell has no physical thickness.");
                     continue;
                 }
-                volume[c] = geometry[c]->moments().volume.as_double();
+                volume[c] = geometry[c].moments().volume.as_double();
                 long double area = 0;
-                for (std::size_t face = 0; face < geometry[c]->num_faces(); ++face)
-                    area += geometry[c]->face_geometry(face)->area().value;
-                thickness[c] = static_cast<double>(2 * geometry[c]->moments().volume.value / area);
+                for (std::size_t face = 0; face < geometry[c].num_faces(); ++face)
+                    area += geometry[c].ordered_face(face).area().value;
+                thickness[c] = static_cast<double>(2 * geometry[c].moments().volume.value / area);
                 if (!std::isfinite(thickness[c]) || thickness[c] <= 0)
                     throw std::runtime_error("General VoF cell has no positive physical thickness.");
             }

@@ -1,3 +1,4 @@
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "general_vof_finite_test_helpers.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "plic_cleanup_capture.hh"
@@ -36,7 +37,7 @@ TEST(GeneralVoFPhaseCleanup, CapturedTailChargesActualChangeAndBypassesMixedFit)
     const PLIC::GeometryPoint normal{0x1.f7ee8d4364952p-1, 0x1.a119432b4a1dcp-4, -0x1.2810933c9e17ap-3};
     // The untouched raw fixed-normal problem must retain its strict rejection.
     EXPECT_THROW(
-        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({geometry, tail, 0x1p-7}, normal),
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({SimpleFluid::PLIC::test::view(geometry), tail, 0x1p-7}, normal),
         PLIC::GeometryError);
     auto input = fixture();
     std::fill(input.gas.begin(), input.gas.end(), tail);
@@ -65,7 +66,7 @@ TEST(GeneralVoFPhaseCleanup, CapturedTailChargesActualChangeAndBypassesMixedFit)
     EXPECT_EQ(trial.candidate()->phase_cleanup_state().cleaned_cells, 8u);
     EXPECT_TRUE(trial.candidate()->latest_phase_cleanup().empty());
     const auto pure =
-        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({geometry, 0, 0x1p-7}, normal);
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({SimpleFluid::PLIC::test::view(geometry), 0, 0x1p-7}, normal);
     EXPECT_TRUE(pure.geometry.pure_carrier);
 }
 TEST(GeneralVoFPhaseCleanup, SymmetricChargesUsePublishedEndpoints)
@@ -105,7 +106,7 @@ TEST(GeneralVoFPhaseCleanup, DisabledAndAboveCutoffPreserveInventory)
         for (std::size_t i = 0; i < geometry.size(); ++i)
         {
             const auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(
-                {geometry[i], small, 1 - small}, {1, 0, 0});
+                {SimpleFluid::PLIC::test::view(geometry[i]), small, 1 - small}, {1, 0, 0});
             EXPECT_FALSE(plane.geometry.pure_carrier);
             EXPECT_FALSE(plane.geometry.pure_gas);
             EXPECT_LE(std::abs(plane.target_volume_residual), 8e-15 * small);

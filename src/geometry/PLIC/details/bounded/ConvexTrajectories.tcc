@@ -142,7 +142,8 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
     for (const auto& wall : walls)
     {
         active_work->pair();
-        if (!wall.geometry || wall.face >= checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces.size())
+        if (wall.original || !wall.geometry ||
+            wall.face >= checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces.size())
             reject("invalid wall support constraint.");
         require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
         const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;

@@ -1,6 +1,7 @@
 /** @file PlaneExchange.cc
  * @brief Full and sparse authenticated owner interface-plane imports.
  */
+#include "FVM/details/GeneralVoF/CellWorkspace.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoF/Reconstruction.hh"
 #include "FVM/details/GeneralVoF/WorkCapture.hh"
@@ -86,9 +87,12 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                 {
                     if (!fitted.geometry.pure_gas && !fitted.geometry.pure_carrier)
                     {
+                        wire::Budget measurement_budget{limit};
+                        CellWorkspace active_geometry(
+                            Mode, measurement_budget, data.options.maximum_face_geometry_operations);
+                        const auto geometry = active_geometry.materialize(cell_geometry<Mode>(data, cell));
                         const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
-                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)
-                                ->phases(fitted.geometry.gas));
+                            geometry->phases(fitted.geometry.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         const auto difference = fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
                             {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
@@ -102,7 +106,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_planes(const G
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                     const auto measures = SimpleFluid::geometry::swept_volume::ConvexFragment<
-                        SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell.phase.geometry)
+                        SimpleFluid::ArithmeticMode::Exact>::from_geometry(*existing_native_geometry(data, cell))
                                               ->phases(fitted.geometry.gas);
                     const auto residual = (gas ? measures.gas : measures.carrier) -
                                           Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
@@ -129,7 +133,7 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
     const auto reconstruct = [&](const Key& key)
     {
         auto* row = balance_cell(balance_work, key);
-        auto result = reconstruct_observed_ordinary_cell(data, key, &diagnostics, row);
+        auto result = reconstruct_observed_ordinary_cell(data, key, &diagnostics, row, storage.remaining_bytes());
         const auto& fitted = std::get<PLIC::PolyhedralReconstructionResult<Mode>>(result);
         if (row)
         {
@@ -314,9 +318,10 @@ std::map<Key, PLIC::DynamicPolyhedralReconstructionResult> import_requested_plan
                     if (!fitted.geometry.pure_gas && !fitted.geometry.pure_carrier)
                     {
                         WorkObservation receiver_observation(receiver ? &receiver->remeasurement : nullptr);
+                        CellWorkspace active_geometry(Mode, work, data.options.maximum_face_geometry_operations);
+                        const auto geometry = active_geometry.materialize(cell_geometry<Mode>(data, cell));
                         const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
-                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)
-                                ->phases(fitted.geometry.gas));
+                            geometry->phases(fitted.geometry.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         const auto difference = fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
                             {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});

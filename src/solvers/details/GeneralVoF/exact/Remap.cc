@@ -9,6 +9,7 @@
 #include "solvers/details/GeneralVoF/Curvature.hh"
 #include "solvers/details/GeneralVoF/Diagnostics.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
 #include "solvers/details/GeneralVoF/exact/Reduction.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -58,7 +59,7 @@ PreparedRemap Remap<ArithmeticMode::Exact>::prepare(const Resources& resources, 
                 const auto mass = item.phase_mass->gas + item.phase_mass->carrier;
                 for (unsigned a = 0; a < 3; ++a)
                     item.amounts.push_back(mass.scaled(old.velocity[c][a]));
-                item.amounts.push_back(M::volume(*source_geometry[c]).scaled(old.pressure[c]));
+                item.amounts.push_back(M::volume(*PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(source_geometry[c])).scaled(old.pressure[c]));
                 channels.push_back(std::move(item));
             }
         });
@@ -137,7 +138,7 @@ PreparedRemap Remap<ArithmeticMode::Exact>::prepare(const Resources& resources, 
                     const auto value = item.amounts[a].divided_by(mass, options.byte_budget);
                     state->velocity[c][a] = value.sign() ? value.certified().as_double() : 0;
                 }
-                const auto pressure = item.amounts[3].divided_by(M::volume(*target_geometry[c]), options.byte_budget);
+                const auto pressure = item.amounts[3].divided_by(M::volume(*PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(target_geometry[c])), options.byte_budget);
                 mapped_pressure[c] = pressure.sign() ? pressure.certified().as_double() : 0;
             }
         });

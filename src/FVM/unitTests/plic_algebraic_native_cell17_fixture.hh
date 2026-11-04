@@ -10,6 +10,7 @@
  * queries use the represented shell, not those historical allocations.
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
@@ -258,7 +259,7 @@ inline std::vector<char> certificate(const Row& row)
 }
 inline Sample sample(const Row& row)
 {
-    return {Cell::decode_certificate(certificate(row)), row.gas, row.carrier, row.id, true};
+    return {SimpleFluid::PLIC::test::view(Cell::decode_certificate(certificate(row))), row.gas, row.carrier, row.id, true};
 }
 inline PLIC::PolyhedralReconstructionOptions options()
 {

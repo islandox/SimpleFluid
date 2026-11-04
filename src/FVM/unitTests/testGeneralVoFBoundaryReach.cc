@@ -1,6 +1,7 @@
 /** @file testGeneralVoFBoundaryReach.cc
  * @brief Construction replay and rejection counterexamples for retained reach.
  */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
@@ -45,9 +46,11 @@ VoF::GeneralVoF::Data retained_data(
     cell.key.region = 3;
     cell.gid = 11;
     cell.owner = 0;
-    cell.finite_geometry = geometry->dynamic_geometry();
+    cell.geometry_slot = 0;
     data.cells.emplace(cell.key, cell);
     auto topology = std::make_shared<VoF::GeneralVoF::Data::Topology>();
+    topology->cell_geometry = PLIC::CellGeometryCatalog<mode>::single_existing(geometry);
+    topology->ordinary_cell_geometry = topology->cell_geometry;
     Meshes::AMR::AdaptiveTile tile;
     tile.face_gid = 23;
     tile.identity = {'r', 'e', 'p', 'l', 'a', 'y'};
@@ -160,6 +163,8 @@ TEST(GeneralVoFBoundaryReach, Face17ReplaysOriginalWallConstructionBeforeDonorCl
     }
     auto data = retained_data(finite[0], 5);
     auto topology = std::make_shared<VoF::GeneralVoF::Data::Topology>();
+    topology->cell_geometry = data.topology->cell_geometry;
+    topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
     topology->tiles = data.topology->tiles;
     topology->frontier_tile_references = data.topology->frontier_tile_references;
     topology->tiles[0].face_gid = 73;
@@ -233,7 +238,12 @@ TEST(GeneralVoFBoundaryReach, OriginalSupportCannotAuthorizeAStaleEpochOrOwner)
     // Equal geometric keys do not authenticate a replacement immutable owner.
     EXPECT_EQ(PLIC::original_support_authority(*source->face_geometry(0)),
         PLIC::original_support_authority(*rebuilt->face_geometry(0)));
-    stale.cells.begin()->second.finite_geometry = rebuilt->dynamic_geometry();
+    auto replaced_topology = std::make_shared<VoF::GeneralVoF::Data::Topology>();
+    replaced_topology->tiles = stale.topology->tiles;
+    replaced_topology->frontier_tile_references = stale.topology->frontier_tile_references;
+    replaced_topology->cell_geometry = PLIC::CellGeometryCatalog<mode>::single_existing(rebuilt);
+    replaced_topology->ordinary_cell_geometry = replaced_topology->cell_geometry;
+    stale.topology = std::move(replaced_topology);
     EXPECT_FALSE(rejection(trial, stale, recipe).empty());
 }
 

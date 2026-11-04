@@ -7,6 +7,8 @@
 namespace SimpleFluid::PLIC
 {
 template<ArithmeticMode> struct PointSnapshotContext;
+class CartesianCellSource;
+template<ArithmeticMode> class CellGeometryCatalog;
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
  * admission poisons the ledger; create a new ledger for a new transaction.
@@ -55,6 +57,10 @@ public:
     template<GeometryIdentityKind Kind, ArithmeticMode Mode>
         requires(GeometryIdentity<Kind, Mode>::shared_storage)
     void retain(const GeometryIdentity<Kind, Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode> requires(Mode != ArithmeticMode::Exact)
+    void retain(const std::shared_ptr<const CellGeometryCatalog<Mode>>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    /** Admit one immutable procedural context and its shared original supports. */
+    void retain(const std::shared_ptr<const CartesianCellSource>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     [[nodiscard]] std::size_t owner_count() const noexcept;
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t bookkeeping_bytes() const noexcept;

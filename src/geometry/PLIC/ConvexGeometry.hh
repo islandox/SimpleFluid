@@ -30,6 +30,7 @@ template<ArithmeticMode> struct PointSnapshotPayload;
 namespace details
 {
 class NativeSupportAccess;
+class NativeFaceConstraintAccess;
 class OriginalSupportAuthorityAccess;
 class RetentionAccess;
 namespace ordinary_kernel
@@ -211,10 +212,34 @@ private:
 
 class DynamicConvexGeometry;
 using DynamicConvexGeometryPtr = std::shared_ptr<const DynamicConvexGeometry>;
+/** Trusted original native coefficients, copied without any general cell body.
+ * Only the private view adapter can issue this authority-bearing value. */
+class DynamicOriginalFaceConstraint
+{
+public:
+    struct Facts
+    {
+        std::array<long double, 3> normal{}, anchor{};
+        GeometryPoint frame_origin{};
+        int frame_exponent = 0, orientation = 1;
+        long double offset = 0;
+        PlaneSupportIdentity<ArithmeticMode::Ordinary> support;
+    };
+    DynamicOriginalFaceConstraint(const DynamicOriginalFaceConstraint&) = default;
+    DynamicOriginalFaceConstraint(DynamicOriginalFaceConstraint&&) noexcept = default;
+    DynamicOriginalFaceConstraint& operator=(const DynamicOriginalFaceConstraint&) = default;
+    DynamicOriginalFaceConstraint& operator=(DynamicOriginalFaceConstraint&&) noexcept = default;
+
+private:
+    friend class details::NativeFaceConstraintAccess;
+    explicit DynamicOriginalFaceConstraint(Facts facts) : facts_(std::move(facts)) {}
+    Facts facts_;
+};
 struct DynamicFaceConstraint
 {
     DynamicConvexGeometryPtr geometry;
     std::size_t face = 0;
+    std::shared_ptr<const DynamicOriginalFaceConstraint> original;
 };
 struct DynamicClipResult
 {

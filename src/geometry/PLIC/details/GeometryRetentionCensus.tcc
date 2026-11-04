@@ -95,7 +95,7 @@ const char* owner_label(unsigned kind)
 {
     static constexpr const char* labels[] = {"typed_wrapper", "dynamic_wrapper", "geometry", "topology", "export_cache",
         "dynamic_export", "typed_export", "compact_batch", "plane", "point_context", "native_facts", "moment",
-        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority"};
+        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog"};
     if (kind < std::size(labels))
         return labels[kind];
     return kind == planar_wrapper ? "planar_wrapper" : "planar_payload";
@@ -579,6 +579,27 @@ public:
                     push(K::IdentityPayload, identity.parent.get(), w);
                     break;
                 }
+                case K::CellCatalog: {
+                    const auto& catalog = *static_cast<const CellGeometryCatalog<M>*>(p);
+                    metadata = sizeof(catalog);
+                    table(RetentionAccess::catalog_entries(catalog), populated, unused);
+                    table(RetentionAccess::catalog_sources(catalog), populated, unused);
+                    if constexpr (M == ArithmeticMode::Ordinary)
+                        for (const auto& source : RetentionAccess::catalog_sources(catalog))
+                            push(K::CartesianSource, source.get(), w);
+                    for (const auto& entry : RetentionAccess::catalog_entries(catalog))
+                        if (const auto* geometry = std::get_if<ConvexGeometryPtr<M>>(&entry))
+                            push(K::TypedWrapper, geometry->get(), w);
+                    break;
+                }
+                case K::CartesianSource: {
+                    const auto& source = *static_cast<const CartesianCellSource*>(p);
+                    const auto bytes = RetentionAccess::cartesian_bytes(source);
+                    metadata = bytes[0]; populated = bytes[1]; unused = bytes[2];
+                    for (const auto& support : RetentionAccess::cartesian_supports(source))
+                        push(K::IdentityPayload, GeometryIdentityAccess::backing(support).get(), w);
+                    break;
+                }
                 case K::AuthorityPayload: {
                     const auto& a = *static_cast<const std::vector<std::uint64_t>*>(p);
                     metadata = sizeof(a);
@@ -833,6 +854,12 @@ public:
                 break;
             case RootKind::Authority:
                 authority(*static_cast<const PlaneAuthority*>(r.object), w);
+                break;
+            case RootKind::CellCatalog:
+                push(K::CellCatalog, r.object, w);
+                break;
+            case RootKind::CartesianSource:
+                push(K::CartesianSource, r.object, w);
                 break;
             case RootKind::OrdinaryBoundary: {
                 const auto& b = *static_cast<const OrdinaryBoundary*>(r.object);

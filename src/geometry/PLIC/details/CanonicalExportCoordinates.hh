@@ -2,7 +2,7 @@
  * @brief Private allocation-free numerical access to canonical global coordinates.
  */
 #pragma once
-#include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/ordinary/FixedBoxGeometry.hh"
 
 namespace SimpleFluid::PLIC::details
 {
@@ -50,11 +50,7 @@ public:
     {
         FrozenExportEnvironment environment(*geometry_->point_export_cache);
         namespace kernel = ordinary_kernel;
-        constexpr auto mode = ArithmeticMode::Ordinary;
-        return kernel::bounded<mode>(kernel::operator+(kernel::scaled<mode>(geometry_->vertices.at(index).coordinates,
-                                                           geometry_->frame.exponent),
-                                         kernel::point<mode>(geometry_->frame.origin)))
-            .value;
+        return kernel::represented_world_corner(geometry_->frame, geometry_->vertices.at(index).coordinates);
     }
 
 private:

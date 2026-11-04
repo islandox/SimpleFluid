@@ -1,3 +1,4 @@
+#include "geometry/PLIC/details/CellGeometryCoordinates.hh"
 /** @file PolyhedralReconstruction.tcc
  * @brief Resolution admission and mode-selected finite PLIC reconstruction.
  */
@@ -150,7 +151,7 @@ void validate_sample(const PolyhedralPhaseSample<Mode>& sample, const Polyhedral
         !std::isfinite(options.minimum_optimized_phase_length_ratio) ||
         !(options.minimum_optimized_phase_length_ratio >= 0 && options.minimum_optimized_phase_length_ratio <= 1))
         throw std::invalid_argument("Invalid finite polyhedral PLIC sample/options.");
-    const auto volume = sample.geometry->volume();
+    const auto volume = sample.geometry.volume();
     if (!(lower<Mode>(volume) > 0))
         throw std::invalid_argument("Finite PLIC cell volume is not established positive.");
     const auto total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
@@ -263,7 +264,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
     DirectionAnalysis analysis;
     auto& result = analysis.resolution;
     result.stencil_cells = stencil.size();
-    for (const auto& span : target.geometry->axis_spans())
+    for (const auto& span : target.geometry.axis_spans())
         result.local_cell_span = std::max(result.local_cell_span, outward(upper<Mode>(span), true));
     result.requested_cell_span = result.local_cell_span * .5;
     const auto examine = [&](const PolyhedralPhaseSample<Mode>& sample)
@@ -309,7 +310,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         return static_cast<long double>(gas ? sample.gas_volume : sample.carrier_volume) / total;
     };
     const auto alpha = geometry_only ? 0 : fraction(target);
-    const auto center = target.geometry->centroid();
+    const auto center = target.geometry.centroid();
     using LongVector = std::array<long double, 3>;
     std::array<LongVector, 3> assembled{}, matrix_magnitude{}, matrix_error{};
     LongVector assembled_rhs{}, rhs_magnitude{}, rhs_error{};
@@ -318,7 +319,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
     const auto fraction_roundoff = roundoff_factor(3);
     for (const auto& sample : stencil)
     {
-        const auto sample_center = sample.geometry->centroid();
+        const auto sample_center = sample.geometry.centroid();
         LongVector d{};
         long double d2 = 0;
         for (unsigned i = 0; i < 3; ++i)
@@ -328,7 +329,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         }
         if (d2 == 0 || !std::isfinite(d2))
             throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
-        analysis.volumes.push_back(sample.geometry->volume().as_double());
+        analysis.volumes.push_back(sample.geometry.volume().as_double());
         const auto sample_fraction = geometry_only ? 0 : fraction(sample);
         const auto delta = sample_fraction - alpha;
         // Relative input/ratio roundoff scales with the chosen phase itself,
@@ -448,17 +449,30 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
 }
 template<ArithmeticMode Mode> struct ReconstructionPreparation
 {
+    CellGeometryOperationWorkspace workspace;
+    ConvexGeometryPtr<Mode> active_geometry;
     std::vector<PointCoordinates<Mode>> original_coordinates;
     std::optional<OrdinaryPlaneMeasure> ordinary_measure;
     OrdinaryPlaneMeasure::Scratch scratch;
 
     ReconstructionPreparation(const PolyhedralPhaseSample<Mode>& sample, const PolyhedralReconstructionOptions& options)
+        : workspace(
+              [&]
+              {
+                  auto limits = options.geometry_limits;
+                  limits.arithmetic_mode = Mode;
+                  return limits;
+              }())
     {
-        original_coordinates = details::materialize_local_coordinates(*sample.geometry);
+        original_coordinates = details::materialize_local_coordinates(sample.geometry, workspace);
+        // Pure offsets need only represented support and original coordinates.
+        // Mixed targets materialize for the unchanged clipping/measure model.
+        if (sample.gas_volume != 0 && sample.carrier_volume != 0)
+            active_geometry = sample.geometry.materialize(workspace);
         if constexpr (Mode == ArithmeticMode::Ordinary)
-            if (options.measure_only)
+            if (options.measure_only && active_geometry)
             {
-                ordinary_measure.emplace(*sample.geometry);
+                ordinary_measure.emplace(*active_geometry);
                 scratch.reserve(ordinary_measure->maximum_face_degree());
             }
     }
@@ -478,7 +492,7 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
     result.geometry.pure_carrier = sample.gas_volume == 0;
     result.geometry.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
-    const auto reference = sample.geometry->origin();
+    const auto reference = sample.geometry.origin();
     const auto& points = preparation.original_coordinates;
     long double extremum = gas ? infinity : -infinity;
     bool have_anchor = false;
@@ -505,7 +519,7 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
     // This vertex choice only conditions the scalar representation. The full
     // enclosed support query below still proves a signed bracket, including
     // nonbinary support behind the displayed anchor. Never assume a zero bound.
-    const auto support = sample.geometry->support(result.geometry.gas.normal, result.geometry.gas.anchor);
+    const auto support = sample.geometry.support(result.geometry.gas.normal, result.geometry.gas.anchor);
     double lo = outward(lower<Mode>(support.lower), false);
     double hi = outward(upper<Mode>(support.upper), true);
     if (result.geometry.pure_gas || result.geometry.pure_carrier)
@@ -519,7 +533,7 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
         throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Finite PLIC support bracket is unresolved.");
     const long double requested = gas ? sample.gas_volume : sample.carrier_volume;
     const long double allowed = fit_allowance<Mode>(requested, options.volume_tolerance);
-    const auto bulk = sample.geometry->volume();
+    const auto bulk = sample.geometry.volume();
     const double fraction = static_cast<double>(requested / bulk.value);
     double offset = gas ? lo + (hi - lo) * std::cbrt(fraction) : hi - (hi - lo) * std::cbrt(fraction);
     if (!(offset > lo && offset < hi))
@@ -553,12 +567,12 @@ PolyhedralReconstructionResult<Mode> offset_fit(const PolyhedralPhaseSample<Mode
                     numerical_error = volume.numerical_error_estimate;
                     return {volume.volume};
                 }
-                const auto phases = sample.geometry->phases(plane);
+                const auto phases = preparation.active_geometry->phases(plane);
                 return gas ? phases.gas : phases.carrier;
             }
             else
             {
-                const auto phases = sample.geometry->phases(plane);
+                const auto phases = preparation.active_geometry->phases(plane);
                 return gas ? phases.gas : phases.carrier;
             }
         }();
@@ -711,7 +725,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
         return result;
     const auto phase_length_ratio =
         std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
-        std::cbrt(target.geometry->volume().value);
+        std::cbrt(target.geometry.volume().value);
     if (phase_length_ratio < options.minimum_optimized_phase_length_ratio)
         return result; // Preserve the existing target-only small-phase gradient policy.
     const auto& normal = direction.normal;
@@ -723,7 +737,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
     tangent = unit(tangent);
     const Vector second{normal[1] * tangent[2] - normal[2] * tangent[1],
         normal[2] * tangent[0] - normal[0] * tangent[2], normal[0] * tangent[1] - normal[1] * tangent[0]};
-    const auto center = target.geometry->centroid();
+    const auto center = target.geometry.centroid();
     double aa = 0, ab = 0, bb = 0;
     for (const auto& sample : stencil)
     {
@@ -736,10 +750,10 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_
         // collapse a complete expanded ring to an unobservable first ring.
         const auto sample_phase_length_ratio =
             std::cbrt(static_cast<long double>(std::min(sample.gas_volume, sample.carrier_volume))) /
-            std::cbrt(sample.geometry->volume().value);
+            std::cbrt(sample.geometry.volume().value);
         if (sample_phase_length_ratio < options.minimum_optimized_phase_length_ratio)
             continue;
-        auto displacement = sample.geometry->centroid();
+        auto displacement = sample.geometry.centroid();
         for (unsigned a = 0; a < 3; ++a)
             displacement[a] -= center[a];
         displacement = unit(displacement);
@@ -824,7 +838,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
     ReconstructionPreparation<Mode> preparation(target, options);
     const auto phase_length_ratio =
         std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
-        std::cbrt(target.geometry->volume().value);
+        std::cbrt(target.geometry.volume().value);
     if (phase_length_ratio < options.minimum_optimized_phase_length_ratio)
     {
         // The stencil establishes the gradient and its support; tiny target
@@ -836,14 +850,31 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
         result.resolution = resolution;
         return result;
     }
+    std::vector<ConvexGeometryPtr<Mode>> active_stencil;
+    if (stencil.size() > active_stencil.max_size())
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC active stencil descriptor count overflows.");
+    preparation.workspace.charge_temporary_storage(stencil.size(), sizeof(ConvexGeometryPtr<Mode>));
+    active_stencil.reserve(stencil.size());
+    if (active_stencil.capacity() > stencil.size())
+        preparation.workspace.charge_temporary_storage(
+            active_stencil.capacity() - stencil.size(), sizeof(ConvexGeometryPtr<Mode>));
+    for (const auto& sample : stencil)
+        active_stencil.push_back(sample.geometry.materialize(preparation.workspace));
     std::vector<OrdinaryPlaneMeasure> ordinary_stencil;
     if constexpr (Mode == ArithmeticMode::Ordinary)
         if (options.measure_only)
         {
+            if (stencil.size() > ordinary_stencil.max_size())
+                throw GeometryError(
+                    GeometryErrorCode::ResourceLimit, "Finite PLIC plane-measure descriptor count overflows.");
+            preparation.workspace.charge_temporary_storage(stencil.size(), sizeof(OrdinaryPlaneMeasure));
             ordinary_stencil.reserve(stencil.size());
+            if (ordinary_stencil.capacity() > stencil.size())
+                preparation.workspace.charge_temporary_storage(
+                    ordinary_stencil.capacity() - stencil.size(), sizeof(OrdinaryPlaneMeasure));
             for (const auto& sample : stencil)
             {
-                ordinary_stencil.emplace_back(*sample.geometry);
+                ordinary_stencil.emplace_back(*active_stencil.at(ordinary_stencil.size()));
                 preparation.scratch.reserve(ordinary_stencil.back().maximum_face_degree());
             }
         }
@@ -905,12 +936,12 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
                         sample_section_area = measure.section_area;
                         return {measure.volume};
                     }
-                    const auto phases = sample.geometry->phases(value.plane.geometry.gas);
+                    const auto phases = active_stencil.at(i)->phases(value.plane.geometry.gas);
                     return gas ? phases.gas : phases.carrier;
                 }
                 else
                 {
-                    const auto phases = sample.geometry->phases(value.plane.geometry.gas);
+                    const auto phases = active_stencil.at(i)->phases(value.plane.geometry.gas);
                     return gas ? phases.gas : phases.carrier;
                 }
             }();
@@ -1022,7 +1053,7 @@ PolyhedralReconstructionResult<Mode> reconstruct_finite(const PolyhedralPhaseSam
                 const auto& points = preparation.original_coordinates;
                 const int minority_sign = target.gas_volume <= target.carrier_volume ? 1 : -1;
                 const unsigned orientations = target.gas_volume == target.carrier_volume ? 2 : 1;
-                for (const auto& face : target.geometry->faces())
+                for (const auto& face : target.geometry.faces())
                 {
                     try
                     {

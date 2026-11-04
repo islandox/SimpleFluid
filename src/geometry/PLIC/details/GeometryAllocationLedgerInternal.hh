@@ -40,7 +40,9 @@ enum class Kind
     Recipe,
     Clip,
     IdentityPayload,
-    AuthorityPayload
+    AuthorityPayload,
+    CartesianSource,
+    CellCatalog
 };
 struct Item
 {
@@ -365,10 +367,12 @@ struct GeometryAllocationLedger::Impl
                     }
                     break;
                 }
+                case Kind::CellCatalog:
+                case Kind::CartesianSource:
                 case Kind::IdentityPayload:
                 case Kind::AuthorityPayload:
                     throw GeometryError(GeometryErrorCode::InvalidTopology,
-                        "Identity allocations must enter through their owner visitor.");
+                        "Specialized immutable allocations must enter through their owner visitor.");
                 case Kind::Clip: {
                     const auto clip = std::static_pointer_cast<const GeometryClipConstruction>(item.owner);
                     require_mode(clip->mode, Mode);

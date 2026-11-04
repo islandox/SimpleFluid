@@ -106,23 +106,18 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
         budget.add(sizeof(*data.experimental_catalog) +
                    data.experimental_catalog->capacity() *
                        sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>));
+    const auto before_catalogs = budget.used;
+    native_allocations.retain(data.topology->cell_geometry, budget.used, budget.limit);
+    if (data.topology->ordinary_cell_geometry)
+        native_allocations.retain(data.topology->ordinary_cell_geometry, budget.used, budget.limit);
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        finite_allocations.retain(data.topology->bounded_cell_geometry, budget.used, budget.limit);
+    geometry_root_bytes += budget.used - before_catalogs;
     for (const auto& [key, cell] : data.cells)
     {
         budget.add(sizeof(Cell) + sizeof(Key));
         links(8);
         key_allowance(key);
-        const auto before_geometry = budget.used;
-        if (geometry.insert(cell.phase.geometry.get()).second)
-            native_allocations.retain(cell.phase.geometry, budget.used, budget.limit);
-        if constexpr (Mode != ArithmeticMode::Exact)
-            if (cell.finite_geometry && geometry.insert(cell.finite_geometry.get()).second)
-            {
-                if constexpr (Mode == ArithmeticMode::Ordinary)
-                    native_allocations.retain<Mode>(cell.finite_geometry, budget.used, budget.limit);
-                else
-                    finite_allocations.retain<Mode>(cell.finite_geometry, budget.used, budget.limit);
-            }
-        geometry_root_bytes += budget.used - before_geometry;
         if (cell.experimental_exact)
         {
             budget.add(sizeof(ExperimentalPhaseInventory));

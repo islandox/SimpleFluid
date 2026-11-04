@@ -1,4 +1,5 @@
 /** @file testGeneralVoFFinite.cc */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/unitTests/point_export_test_helpers.hh"
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
@@ -87,13 +88,13 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
         EXPECT_EQ(cell.canonical_face_count, count);
         EXPECT_GT(cell.quota_scale, 0);
         EXPECT_LE(cell.quota_scale * count,
-            std::min(static_cast<long double>(state.phase_volumes()[c].bulk), geometry[c]->volume().value));
+            std::min(static_cast<long double>(state.phase_volumes()[c].bulk), geometry[c].volume().value));
         EXPECT_LE(budgets.value().value, cell.allowed_closure);
         EXPECT_EQ(cell.absolute_geometry_difference, actual.value().value);
         EXPECT_EQ(cell.combined_residual.value,
             cell.canonical_residual.value + cell.signed_geometry_difference.value + cell.signed_phase_cut_closure);
         EXPECT_EQ(cell.allowed_closure,
-            state.options().reconstruction.volume_tolerance * geometry[c]->volume().value);
+            state.options().reconstruction.volume_tolerance * geometry[c].volume().value);
         EXPECT_LE(std::abs(cell.combined_residual.value), cell.allowed_closure);
     }
     // Compare actual replica quantities, not just their configured allowances.
@@ -470,22 +471,22 @@ TEST(GeneralVoFFinite, ProceduralOrdinaryCellsShareAuthenticatedGeometryAndBound
     ASSERT_EQ(bounded.size(), native.size());
     for (std::size_t i = 0; i < native.size(); ++i)
     {
-        EXPECT_EQ(native[i]->storage_identity(), finite[i]->storage_identity());
-        EXPECT_NE(bounded_native[i]->storage_identity(), bounded[i]->storage_identity());
+        EXPECT_EQ(SimpleFluid::PLIC::test::identity(native[i]), SimpleFluid::PLIC::test::identity(finite[i]));
+        EXPECT_NE(SimpleFluid::PLIC::test::identity(bounded_native[i]), SimpleFluid::PLIC::test::identity(bounded[i]));
         const auto& leaf = input.hierarchy->owned().at(ordinary.owned_order()[i]);
         ASSERT_FALSE(leaf.geometry);
         const auto oracle = input.hierarchy->geometry(leaf);
-        EXPECT_EQ(native[i]->encode_certificate(), oracle->encode_certificate());
-        EXPECT_EQ(native[i]->volume().value, 1.L);
-        EXPECT_EQ(native[i]->centroid(), oracle->centroid());
-        EXPECT_TRUE(native[i]->same_native_representation(*oracle));
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(native[i])->encode_certificate(), oracle->encode_certificate());
+        EXPECT_EQ(native[i].volume().value, 1.L);
+        EXPECT_EQ(native[i].centroid(), oracle->centroid());
+        EXPECT_TRUE(SimpleFluid::PLIC::test::shell(native[i])->same_native_representation(*oracle));
     }
     const auto successor = ordinary.apply(ordinary.plan_transport(stationary(ordinary), circulation(ordinary, true), 1));
     EXPECT_EQ(successor->gas_volumes(), ordinary.gas_volumes());
     EXPECT_EQ(successor->carrier_volumes(), ordinary.carrier_volumes());
     const auto successor_native = successor->owned_geometry();
     for (std::size_t i = 0; i < native.size(); ++i)
-        EXPECT_EQ(successor_native[i]->storage_identity(), native[i]->storage_identity());
+        EXPECT_EQ(SimpleFluid::PLIC::test::identity(successor_native[i]), SimpleFluid::PLIC::test::identity(native[i]));
 }
 
 TEST(GeneralVoFFinite, OrdinaryModeRejectsInvalidPhysicalDataAndImplicitExactViews)
@@ -557,7 +558,7 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivatio
     {
         zero += atom.coefficient == 0;
         one += atom.coefficient == 1;
-        const auto volume = atom.geometry->volume();
+        const auto volume = SimpleFluid::PLIC::test::shell(atom.geometry)->volume();
         EXPECT_LE(volume.lower(), .5L);
         EXPECT_GE(volume.upper(), .5L);
     }
@@ -629,7 +630,7 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier);
     EXPECT_EQ(state.arithmetic_mode(), ArithmeticMode::Ordinary);
     for (const auto& geometry : state.owned_finite_geometry<ArithmeticMode::Ordinary>())
-        EXPECT_EQ(geometry->arithmetic_mode(), ArithmeticMode::Ordinary);
+        EXPECT_EQ(geometry.arithmetic_mode(), ArithmeticMode::Ordinary);
     const auto velocities = stationary(state);
     const auto controls = circulation(state);
     const auto prepared = GeneralVoF::geometry_statistics();

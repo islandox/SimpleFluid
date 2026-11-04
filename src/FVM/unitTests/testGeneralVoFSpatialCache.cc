@@ -1,6 +1,7 @@
 /** @file testGeneralVoFSpatialCache.cc
  * @brief Independent retained-domain cache lifetime and admission checks.
  */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "general_vof_finite_test_helpers.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
@@ -10,6 +11,7 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 namespace local = SimpleFluid::VoF::general_vof_detail;
 using Cache = local::LocalSpatialCache;
 using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+constexpr auto mode = ArithmeticMode::Ordinary;
 struct CacheTrial
 {
     SimpleFluid::geometry::swept_volume::Work work{};
@@ -20,7 +22,9 @@ struct CacheTrial
 GeneralVoF::Data catalog()
 {
     GeneralVoF::Data data;
-    data.topology = std::make_shared<GeneralVoF::Data::Topology>();
+    auto geometry_topology = std::make_shared<GeneralVoF::Data::Topology>();
+    std::vector<PLIC::ConvexGeometryPtr<mode>> geometry;
+    data.topology = geometry_topology;
     data.observation.identity = std::make_shared<const int>(1);
     data.supplied_observation = data.observation;
     for (unsigned i = 0; i < 8; ++i)
@@ -31,9 +35,12 @@ GeneralVoF::Data catalog()
         cell.key = key;
         cell.gid = 10 + i;
         cell.owner = Tpetra::getDefaultComm()->getRank();
-        cell.finite_geometry = Geometry::box({2. * i, 0, 0}, {2. * i + 1, 1, 1})->dynamic_geometry();
+        cell.geometry_slot = geometry.size();
+        geometry.push_back(Geometry::box({2. * i, 0, 0}, {2. * i + 1, 1, 1}));
         data.cells.emplace(key, std::move(cell));
     }
+    geometry_topology->cell_geometry = PLIC::CellGeometryCatalog<mode>::materialized(std::move(geometry));
+    geometry_topology->ordinary_cell_geometry = geometry_topology->cell_geometry;
     return data;
 }
 std::vector<std::size_t> query(const Cache& cache, long double x, SimpleFluid::geometry::swept_volume::Work& work,
@@ -66,11 +73,11 @@ TEST(GeneralVoFSpatialCache, ImmutableCatalogReusesStorageAndCountsOnlyExecutedP
     EXPECT_EQ(second.diagnostics.spatial_index_builds, 0u);
     EXPECT_EQ(second.diagnostics.spatial_index_reuses, 1u);
     EXPECT_EQ(second.diagnostics.spatial_index_bytes, first.diagnostics.spatial_index_bytes);
-    // Building the bounds consumes temporary point exports. A warm index
-    // retains its geometry and bounds, without charging those exports again.
+    // Bounds use numerical view queries directly. Neither cold construction
+    // nor a warm lookup publishes point exports or pins temporary geometry.
     EXPECT_EQ(second.work.bytes, first.cache->bytes);
-    EXPECT_GT(first.work.bytes, second.work.bytes);
-    EXPECT_GT(first.work.allocations.owner_count(), 0u);
+    EXPECT_EQ(first.work.bytes, second.work.bytes);
+    EXPECT_EQ(first.work.allocations.owner_count(), 0u);
     EXPECT_EQ(second.work.allocations.owner_count(), 0u);
     EXPECT_LT(second.work.pair_tests, first.work.pair_tests);
     EXPECT_EQ(query(*second.cache, 4.5L, second.work, second.diagnostics), std::vector<std::size_t>{2});
@@ -83,7 +90,14 @@ TEST(GeneralVoFSpatialCache, ChangedRetainedGeometryRebuildsWithoutMutatingPrevi
     auto data = catalog();
     CacheTrial first(data);
     auto changed = data;
-    changed.cells.begin()->second.finite_geometry = Geometry::box({20, 0, 0}, {21, 1, 1})->dynamic_geometry();
+    auto replacement_topology = std::make_shared<GeneralVoF::Data::Topology>();
+    std::vector<PLIC::ConvexGeometryPtr<mode>> replacement_geometry;
+    for (const auto& [key, cell] : changed.cells)
+        replacement_geometry.push_back(key == changed.cells.begin()->first ? Geometry::box({20, 0, 0}, {21, 1, 1})
+            : PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(local::cell_geometry<mode>(changed, cell)));
+    replacement_topology->cell_geometry = PLIC::CellGeometryCatalog<mode>::materialized(std::move(replacement_geometry));
+    replacement_topology->ordinary_cell_geometry = replacement_topology->cell_geometry;
+    changed.topology = replacement_topology;
     CacheTrial replacement(changed);
     EXPECT_NE(replacement.cache, first.cache);
     EXPECT_EQ(replacement.diagnostics.spatial_index_builds, 1u);
@@ -143,7 +157,10 @@ TEST(GeneralVoFSpatialCache, GeometryTopologyAndPartitionObservationsInvalidate)
         EXPECT_EQ(after.diagnostics.spatial_index_builds, 1u);
         EXPECT_EQ(after.diagnostics.spatial_index_reuses, 0u);
         // A new topology cannot inherit a cache by matching shape or GIDs.
-        data.topology = std::make_shared<GeneralVoF::Data::Topology>();
+        auto new_topology = std::make_shared<GeneralVoF::Data::Topology>();
+        new_topology->cell_geometry = data.topology->cell_geometry;
+        new_topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
+        data.topology = std::move(new_topology);
         const CacheTrial rebuilt(data);
         EXPECT_EQ(rebuilt.diagnostics.spatial_index_builds, 1u);
     }
@@ -159,10 +176,12 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     tile.identity = {'w', 'a', 'l', 'l'};
     tile.exterior = true;
     tile.boundary = "wall";
-    const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
+    const auto retained = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(local::cell_geometry<mode>(data, data.cells.begin()->second));
     tile.geometry = retained->face_geometry(0);
     topology->tiles.push_back(tile);
     topology->frontier_tile_references.push_back({decltype(topology)::element_type::SurfaceTileOwner::OwnedTiles, 0});
+    topology->cell_geometry = data.topology->cell_geometry;
+    topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
     data.topology = topology;
     const CacheTrial first(data);
     CacheTrial next(data);
@@ -178,7 +197,7 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     EXPECT_EQ(frontier.retained_key, data.cells.begin()->first);
     EXPECT_EQ(frontier.retained_gid, data.cells.begin()->second.gid);
     EXPECT_EQ(frontier.retained_owner, tile.first_owner);
-    EXPECT_EQ(frontier.retained_geometry->dynamic_geometry(), data.cells.begin()->second.finite_geometry);
+    EXPECT_EQ(frontier.retained_geometry, local::cell_geometry<mode>(data, data.cells.begin()->second));
     ASSERT_TRUE(frontier.support_identity);
     EXPECT_EQ(*frontier.support_identity, PLIC::planar_support<ArithmeticMode::Ordinary>(*retained->face_geometry(0)));
     ASSERT_TRUE(frontier.original_boundary);
@@ -202,10 +221,12 @@ TEST(GeneralVoFSpatialCache, HaloFrontierBindsRetainedSecondCellAndOutsideAuthor
     tile.second_owner = data.cells.begin()->second.owner;
     tile.face_gid = 91;
     tile.identity = {'h', 'a', 'l', 'o'};
-    const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
+    const auto retained = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(local::cell_geometry<mode>(data, data.cells.begin()->second));
     tile.geometry = retained->face_geometry(1);
     topology->tiles.push_back(tile);
     topology->frontier_tile_references.push_back({decltype(topology)::element_type::SurfaceTileOwner::OwnedTiles, 0});
+    topology->cell_geometry = data.topology->cell_geometry;
+    topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
     data.topology = topology;
     const CacheTrial trial(data);
     ASSERT_EQ(trial.cache->frontiers.size(), 1u);
@@ -240,7 +261,10 @@ TEST(GeneralVoFSpatialCache, WarmAndColdCachesHonorEachConsumersLimits)
     limited.limits.maximum_pair_tests = 0;
     EXPECT_THROW((void) local::retained_spatial_cache(data, limited, diagnostics), PLIC::GeometryError);
     auto cold = data;
-    cold.topology = std::make_shared<GeneralVoF::Data::Topology>();
+    auto cold_topology = std::make_shared<GeneralVoF::Data::Topology>();
+    cold_topology->cell_geometry = data.topology->cell_geometry;
+    cold_topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
+    cold.topology = std::move(cold_topology);
     limited = {};
     limited.limits.byte_budget = 1;
     EXPECT_THROW((void) local::retained_spatial_cache(cold, limited, diagnostics), PLIC::GeometryError);
@@ -254,7 +278,10 @@ TEST(GeneralVoFSpatialCache, CombinedRetainedAdmissionFailureLeavesTheSourceRetr
     auto data = catalog();
     const CacheTrial size_probe(data);
     auto cold = data;
-    cold.topology = std::make_shared<GeneralVoF::Data::Topology>();
+    auto cold_topology = std::make_shared<GeneralVoF::Data::Topology>();
+    cold_topology->cell_geometry = data.topology->cell_geometry;
+    cold_topology->ordinary_cell_geometry = data.topology->ordinary_cell_geometry;
+    cold.topology = std::move(cold_topology);
     // Independent admission oracle: the source header and cache each fit, but
     // their combined storage exceeds this budget by exactly one byte.
     cold.options.byte_budget = sizeof(cold) + size_probe.cache->bytes - 1;

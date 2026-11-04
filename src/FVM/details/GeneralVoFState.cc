@@ -9,26 +9,20 @@ PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode)
 {
     return mode == ArithmeticMode::Exact ? PhaseInventoryPolicy::ExperimentalExact : PhaseInventoryPolicy::Finite;
 }
-PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes)
-{
-    PLIC::GeometryLimits limits;
-    limits.arithmetic_mode = mode;
-    limits.byte_budget = bytes;
-    return limits;
-}
 template<ArithmeticMode Mode> long double phase_allowance(PLIC::DynamicGeometryValue source, double relative)
 {
     using Math = fp::Arithmetic<Mode>;
     return Math::lower(Math::multiply(Math::make_value(Math::lower(source)), Math::make_value(relative)));
 }
-SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(const Cell& cell)
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(
+    const GeneralVoF::Data& data, const Cell& cell)
 {
-    if (cell.finite_geometry)
+    if (data.options.arithmetic_mode != ArithmeticMode::Exact)
         throw std::logic_error("Exact phase measures require an explicitly selected exact cell state.");
     if (cell.experimental_exact)
         return cell.experimental_exact->phases;
     // The selected exact route lifts finite accepted inventories for this trial.
-    return {Measure::volume(*cell.phase.geometry), Measure::from_value(cell.phase.gas_volume),
+    return {Measure::volume(*existing_native_geometry(data, cell)), Measure::from_value(cell.phase.gas_volume),
         Measure::from_value(cell.phase.carrier_volume)};
 }
 Measure finite_bound(double value)
@@ -48,13 +42,13 @@ PLIC::DynamicGeometryValue finite_cell_defect(const Cell& cell, PLIC::DynamicGeo
     return defect_sum.value();
 }
 } // namespace
-template<ArithmeticMode Mode> void occupancy(Cell& cell)
+template<ArithmeticMode Mode> void occupancy(const GeneralVoF::Data& data, Cell& cell)
 {
     if constexpr (Mode != ArithmeticMode::Exact)
     {
         using namespace finite_detail;
-        const auto actual = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(
-            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto actual =
+            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(cell_geometry<Mode>(data, cell).volume());
         const auto conversion =
             fp::Arithmetic<Mode>::subtract(fp::Arithmetic<Mode>::make_value(cell.native_volume), actual);
         const auto defect = finite_cell_defect<Mode>(cell, actual);
@@ -72,7 +66,7 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
     }
     if (!std::isfinite(cell.native_volume) || !(cell.native_volume > 0))
         throw std::invalid_argument("General VoF native metric is invalid.");
-    const auto lifted = phase_measures(cell);
+    const auto lifted = phase_measures(data, cell);
     const auto native = Measure::from_value(cell.native_volume);
     const auto defect = lifted.gas + lifted.carrier - lifted.bulk;
     const auto conversion = native - lifted.bulk;
@@ -90,8 +84,8 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
     cell.occupancy.admitted_bound = detail::phase_upper_bound(absolute(conversion) + input + diagnostic_error);
 }
 template<ArithmeticMode Mode>
-void validate_cell(
-    const Cell& cell, const GeneralVoFOptions& options, const PLIC::DynamicPolyhedralReconstructionResult* retained)
+void validate_cell(const GeneralVoF::Data& data, const Cell& cell, const GeneralVoFOptions& options,
+    const PLIC::DynamicPolyhedralReconstructionResult* retained)
 {
     constexpr bool experimental = Mode == ArithmeticMode::Exact;
     if (retained)
@@ -103,7 +97,7 @@ void validate_cell(
     if (experimental)
     {
         detail::validate_experimental(
-            *cell.experimental_exact, *cell.phase.geometry, cell.native_volume, options.byte_budget);
+            *cell.experimental_exact, *existing_native_geometry(data, cell), cell.native_volume, options.byte_budget);
         const auto view = detail::experimental_view(*cell.experimental_exact, cell.native_volume);
         if (view.phases.gas != cell.phase.gas_volume || view.phases.carrier != cell.phase.carrier_volume)
             throw std::invalid_argument("Experimental exact diagnostic phase view differs.");
@@ -111,10 +105,11 @@ void validate_cell(
     if constexpr (!experimental)
     {
         using namespace finite_detail;
-        if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != options.arithmetic_mode)
+        if (!cell_geometry<Mode>(data, cell) ||
+            cell_geometry<Mode>(data, cell).arithmetic_mode() != options.arithmetic_mode)
             throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
-        const auto actual = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(
-            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto actual =
+            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(cell_geometry<Mode>(data, cell).volume());
         const auto defect = finite_cell_defect<Mode>(cell, actual);
         const auto& e = cell.occupancy;
         bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
@@ -128,7 +123,7 @@ void validate_cell(
         if (!valid || std::uint64_t(cell.declaration) > 2)
             throw std::invalid_argument("General VoF finite occupancy provenance is invalid.");
         PLIC::PolyhedralReconstruction<Mode>::validate(
-            reconstruction_sample<Mode>(cell, retained), options.reconstruction);
+            reconstruction_sample<Mode>(data, cell, retained), options.reconstruction);
         if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
         {
             const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ? cell.phase.carrier_volume
@@ -143,7 +138,7 @@ void validate_cell(
     }
     // Explicit exact-policy diagnostic views retain their exact provenance.
     const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> lifted{
-        Measure::volume(*cell.phase.geometry), Measure::from_value(cell.phase.gas_volume),
+        Measure::volume(*existing_native_geometry(data, cell)), Measure::from_value(cell.phase.gas_volume),
         Measure::from_value(cell.phase.carrier_volume)};
     const auto defect = lifted.gas + lifted.carrier - lifted.bulk;
     const auto absolute = defect.sign() < 0 ? defect.scaled(-1) : defect;
@@ -161,14 +156,14 @@ void validate_cell(
     // always uses complementary labels, not a fresh input tolerance on an
     // accepted inventory carrying explicit publication uncertainty.
     PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::validate(
-        reconstruction_sample<ArithmeticMode::Exact>(cell, retained), options.reconstruction);
+        reconstruction_sample<ArithmeticMode::Exact>(data, cell, retained), options.reconstruction);
     if (std::uint64_t(cell.declaration) > 2)
         throw std::invalid_argument("General VoF invalid phase geometry declaration.");
     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
     {
         const double minority =
             cell.declaration == GeneralVoFPhaseGeometry::PureGas ? cell.phase.carrier_volume : cell.phase.gas_volume;
-        const auto metric = cell.phase.geometry->moments().volume;
+        const auto metric = native_cell_geometry(data, cell).moments().volume;
         const double inherited_bound = std::max(e.admitted_bound, e.fit_bound);
         if (experimental)
         {
@@ -239,15 +234,15 @@ void current(const GeneralVoF::Data& data)
         data.supplied_hierarchy->observation() != data.supplied_observation)
         throw std::invalid_argument("General VoF source geometry/control is stale.");
 }
-template void occupancy<ArithmeticMode::Ordinary>(Cell&);
+template void occupancy<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, Cell&);
 template void validate_cell<ArithmeticMode::Ordinary>(
-    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
-template void occupancy<ArithmeticMode::BoundedCertification>(Cell&);
+    const GeneralVoF::Data&, const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
+template void occupancy<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, Cell&);
 template void validate_cell<ArithmeticMode::BoundedCertification>(
-    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
-template void occupancy<ArithmeticMode::Exact>(Cell&);
+    const GeneralVoF::Data&, const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
+template void occupancy<ArithmeticMode::Exact>(const GeneralVoF::Data&, Cell&);
 template void validate_cell<ArithmeticMode::Exact>(
-    const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
+    const GeneralVoF::Data&, const Cell&, const GeneralVoFOptions&, const PLIC::DynamicPolyhedralReconstructionResult*);
 template long double phase_allowance<ArithmeticMode::Ordinary>(PLIC::DynamicGeometryValue, double);
 template long double phase_allowance<ArithmeticMode::BoundedCertification>(PLIC::DynamicGeometryValue, double);
 } // namespace SimpleFluid::VoF::general_vof_detail

@@ -9,6 +9,7 @@
  * are not reproduced. Ordinary measure-only queries use this numerical shell.
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
@@ -223,7 +224,7 @@ inline std::vector<char> certificate(const Row& row)
 }
 inline Sample sample(const Row& row)
 {
-    return {Cell::decode_certificate(certificate(row)), row.gas, row.carrier, row.id, row.observed_mixed};
+    return {SimpleFluid::PLIC::test::view(Cell::decode_certificate(certificate(row))), row.gas, row.carrier, row.id, row.observed_mixed};
 }
 inline PLIC::PolyhedralReconstructionOptions options()
 {

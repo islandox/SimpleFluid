@@ -5,106 +5,12 @@
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <sstream>
+#include "geometry/PLIC/details/ordinary/FixedBoxGeometry.hh"
 
 namespace SimpleFluid::PLIC::details
 {
 namespace SIMPLEFLUID_LOCAL ordinary_kernel
 {
-namespace
-{
-ordinary_predicates::Point predicate_point(const Point& point)
-{
-    return {point[0].value, point[1].value, point[2].value};
-}
-Scalar measured_volume(const ordinary_predicates::Result& determinant, int exponent)
-{
-    (void) ordinary_predicates::require_sign(determinant);
-    const auto result = scaled<kernel_mode>(Scalar(determinant.value) / Scalar(6), exponent);
-    if (result.value == 0 && determinant.value != 0)
-    {
-        ++statistics.rejections;
-        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
-            "Ordinary volume scaling would lose a nonzero measure.");
-    }
-    return result;
-}
-} // namespace
-
-template<ArithmeticMode Mode, class Geometry> Integrals integrate_ordinary(const Geometry& poly, bool moments)
-{
-    static_assert(Mode == kernel_mode);
-    if (poly.vertices.size() == 4 && poly.faces.size() == 4 &&
-        std::all_of(poly.faces.begin(), poly.faces.end(), [](const auto& face) { return face.size() == 3; }))
-    {
-        Integrals result;
-        if (!moments)
-        {
-            const auto& anchor = poly.vertices.front().coordinates;
-            for (const auto& face : poly.faces)
-                if (std::find(face.begin(), face.end(), 0) == face.end())
-                {
-                    const auto determinant = ordinary_predicates::orientation({predicate_point(anchor),
-                        predicate_point(poly.vertices[face[0]].coordinates),
-                        predicate_point(poly.vertices[face[1]].coordinates),
-                        predicate_point(poly.vertices[face[2]].coordinates)});
-                    result.volume = measured_volume(determinant, 3 * poly.frame.exponent);
-                    break;
-                }
-        }
-        else
-        {
-            Point center;
-            for (const auto& vertex : poly.vertices)
-                center = center + vertex.coordinates;
-            result.volume = poly.volume;
-            result.first = scaled<Mode>(center * Scalar(.25L), poly.frame.exponent) * poly.volume;
-        }
-        return result;
-    }
-    Point pivot;
-    for (const auto& vertex : poly.vertices)
-        pivot = pivot + vertex.coordinates;
-    pivot = pivot * (Scalar(1) / Scalar(static_cast<long double>(poly.vertices.size())));
-    ordinary_predicates::ResultAccumulator volume;
-    std::array<Accumulator<Mode>, 3> first;
-    for (const auto& face : poly.faces)
-        for (std::size_t i = 1; i + 1 < face.size(); ++i)
-        {
-            const auto& a = poly.vertices[face[0]].coordinates;
-            const auto& b = poly.vertices[face[i]].coordinates;
-            const auto& c = poly.vertices[face[i + 1]].coordinates;
-            const auto determinant = ordinary_predicates::orientation(
-                {predicate_point(pivot), predicate_point(a), predicate_point(b), predicate_point(c)});
-            volume.add(determinant);
-            if (moments)
-            {
-                const auto weighted = (pivot + a + b + c) * Scalar(determinant.value);
-                for (std::size_t axis = 0; axis < 3; ++axis)
-                    first[axis].add(weighted[axis]);
-            }
-        }
-    Integrals result;
-    if (moments)
-        result.volume = poly.volume;
-    else
-    {
-        // Individual signed cones can be unresolved near a contact. Retain
-        // every contribution and its evaluation bound; qualify the total.
-        const auto determinant = volume.result();
-        result.volume = measured_volume(determinant, 3 * poly.frame.exponent);
-    }
-    if (moments)
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            result.first[axis] = scaled<Mode>(first[axis].result() / Scalar(24), 4 * poly.frame.exponent);
-    return result;
-}
-
-template<ArithmeticMode Mode, class Geometry> Integrals integrate(const Geometry& poly, bool moments)
-{
-    static_assert(Mode == kernel_mode);
-    return integrate_ordinary<Mode>(poly, moments);
-}
-
 template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool partition_proof)
 {
     static_assert(Mode == kernel_mode);
@@ -200,13 +106,7 @@ template<ArithmeticMode Mode> void finish(DraftGeometry& poly, bool partition_pr
     {
         ++statistics.volume_evaluations;
         poly.volume = integrate<Mode>(poly, false).volume;
-        if (!(poly.volume.value > 0))
-        {
-            std::ostringstream reason;
-            reason.precision(std::numeric_limits<long double>::max_digits10);
-            reason << "computed signed volume is not positive (volume=" << poly.volume.value << ").";
-            reject(reason.str());
-        }
+        represented_positive_volume(poly.volume);
     }
     ++statistics.constructions;
 }
@@ -266,20 +166,12 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
     auto& points = point_builder ? *point_builder : *local_points;
     active_work->charge(1, sizeof(DraftGeometry) + sizeof(Ancestry));
     auto result = std::make_shared<DraftGeometry>();
-    result->frame.origin = origin;
     result->reference_origin = origin;
     result->limits = limits;
-    long double extent = 0;
     std::vector<Point> input;
     for (const auto& vertex : vertices)
-    {
         input.push_back(point<Mode>(vertex));
-        for (const auto x : input.back())
-            extent = std::max(extent, std::abs(x.value));
-    }
-    if (!(extent > 0))
-        reject("degenerate shell extent.");
-    std::frexp(extent, &result->frame.exponent);
+    result->frame = represented_source_frame(origin, std::span<const Point>(input));
     for (std::size_t i = 0; i < input.size(); ++i)
     {
         const auto authority = !identities.empty() && identities[i] ? identities[i].supports() : vertices[i].supports();
@@ -307,19 +199,10 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         plane->point_context = points.context();
         plane->frame = result->frame;
         plane->anchor = result->vertices[face[0]].coordinates;
-        std::size_t second = 1, third = 2;
-        for (; third < face.size(); ++third)
-        {
-            plane->normal = cross<Mode>(result->vertices[face[second]].coordinates - plane->anchor,
-                result->vertices[face[third]].coordinates - plane->anchor);
-            if (nonzero<Mode>(plane->normal))
-                break;
-        }
-        if (third == face.size())
-            reject("face normal unresolved or degenerate.");
-        // A normal witness is issued only from original source coordinates.
-        // Nominal public/decoded shells cannot manufacture this rank evidence.
-        const std::array<std::size_t, 3> defining{face[0], face[second], face[third]};
+        const auto face_normal = represented_source_face_normal(*result, face);
+        plane->normal = face_normal.normal;
+        // The witness still comes only from original source coordinates.
+        const auto& defining = face_normal.defining;
         std::array<Point, 3> original_points;
         std::array<std::array<long double, 3>, 3> original_errors;
         bool known_normal = true;
@@ -402,21 +285,7 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         for (const auto& vertex : result->vertices)
             if (sign<Mode>(distance<Mode>(vertex, result->frame, plane, points.context())) > 0)
                 reject("shell is not convex/outward.");
-        // Each edge bounds a convex face, including a collinear prefix.
-        for (std::size_t i = 0; i < face.size(); ++i)
-        {
-            const auto& a = result->vertices[face[i]].coordinates;
-            const auto& b = result->vertices[face[(i + 1) % face.size()]].coordinates;
-            for (const auto index : face)
-            {
-                if (index == face[i] || index == face[(i + 1) % face.size()])
-                    continue;
-                const auto orientation =
-                    dot<Mode>(cross<Mode>(b - a, result->vertices[index].coordinates - a), plane->normal);
-                if (orientation.value < 0)
-                    reject("nonconvex face loop.");
-            }
-        }
+        represented_source_face_winding(*result, face, plane->normal);
     }
     result->point_context = points.freeze();
     finish<Mode>(*result);
@@ -537,7 +406,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::make(
     {
         DynamicPoint original{{vertex[0], vertex[1], vertex[2]}, {}, ArithmeticMode::Ordinary};
         identities.push_back(points.native_source(original.value, original.absolute_error, {}));
-        relative.push_back(bounded<Mode>(point<Mode>(vertex) - point<Mode>(vertices.front())));
+        relative.push_back(represented_source_relative(vertex, vertices.front()));
     }
     return DynamicConvexGeometryPtr(
         new DynamicConvexGeometry(import<Mode>(vertices.front(), relative, faces, limits, false, identities, &points)));
@@ -690,14 +559,8 @@ template<ArithmeticMode Mode>
 DynamicConvexGeometryPtr GeometryKernel<Mode>::box(GeometryPoint lower, GeometryPoint upper, GeometryLimits limits)
 {
     static_assert(Mode == kernel_mode);
-    std::array<GeometryPoint, 8> vertices;
-    for (std::size_t axis = 0; axis < 3; ++axis)
-        if (!(upper[axis] > lower[axis]))
-            reject("box requires positive represented spans.");
-    for (std::size_t i = 0; i < 8; ++i)
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            vertices[i][axis] = (i >> axis) & 1 ? upper[axis] : lower[axis];
-    return make(vertices, {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}}, limits);
+    const auto vertices = fixed_box_corners(lower, upper);
+    return make(vertices, fixed_box_face_rows(), limits);
 }
 
 template<ArithmeticMode Mode>
@@ -747,32 +610,14 @@ template<ArithmeticMode Mode> DynamicGeometryMoments GeometryKernel<Mode>::momen
             ++statistics.moment_evaluations;
             impl_->moment_cache->integrals = integrate<Mode>(*impl_, true);
         });
-    auto result = *impl_->moment_cache->integrals;
-    const auto shift = point<Mode>(impl_->frame.origin) - point<Mode>(origin);
-    result.first = result.first + shift * result.volume;
-    DynamicGeometryMoments output;
-    output.origin = origin;
-    output.volume = bounded<Mode>(result.volume);
-    for (std::size_t axis = 0; axis < 3; ++axis)
-        output.first_moment[axis] = bounded<Mode>(result.first[axis]);
-    return output;
+    return represented_moments(*impl_->moment_cache->integrals, impl_->frame, origin);
 }
 
 template<ArithmeticMode Mode> GeometryPoint GeometryKernel<Mode>::centroid() const
 {
     static_assert(Mode == kernel_mode);
     Operation scope(impl_->limits);
-    const auto m = moments();
-    GeometryPoint result;
-    for (std::size_t axis = 0; axis < 3; ++axis)
-    {
-        const auto coordinate =
-            scalar_value<Mode>(m.first_moment[axis]) / impl_->volume + Scalar(impl_->reference_origin[axis]);
-        result[axis] = static_cast<double>(bounded<Mode>(coordinate).value);
-        if (!std::isfinite(result[axis]))
-            reject("centroid outside publication range.");
-    }
-    return result;
+    return represented_centroid(moments(), impl_->volume, impl_->reference_origin);
 }
 
 template<ArithmeticMode Mode> std::vector<DynamicPoint> GeometryKernel<Mode>::local_points() const
@@ -818,19 +663,7 @@ template<ArithmeticMode Mode> std::array<DynamicGeometryValue, 3> GeometryKernel
 {
     static_assert(Mode == kernel_mode);
     Operation scope(impl_->limits);
-    std::array<DynamicGeometryValue, 3> result;
-    for (std::size_t axis = 0; axis < 3; ++axis)
-    {
-        Scalar minimum = impl_->vertices.front().coordinates[axis], maximum = minimum;
-        for (const auto& vertex : impl_->vertices)
-        {
-            const auto x = vertex.coordinates[axis];
-            minimum = Scalar(std::min(minimum.value, x.value));
-            maximum = Scalar(std::max(maximum.value, x.value));
-        }
-        result[axis] = bounded<Mode>(scaled<Mode>(maximum - minimum, impl_->frame.exponent));
-    }
-    return result;
+    return represented_axis_spans(*impl_);
 }
 
 template<ArithmeticMode Mode>
@@ -838,18 +671,7 @@ DynamicSupport GeometryKernel<Mode>::support(GeometryPoint normal, GeometryPoint
 {
     static_assert(Mode == kernel_mode);
     Operation scope(impl_->limits);
-    if (!nonzero<Mode>(point<Mode>(normal)))
-        reject("support requires a nonzero normal.");
-    const auto offset = point<Mode>(impl_->frame.origin) - point<Mode>(anchor);
-    std::optional<Scalar> minimum, maximum;
-    for (const auto& vertex : impl_->vertices)
-    {
-        const auto projection =
-            dot<Mode>(point<Mode>(normal), scaled<Mode>(vertex.coordinates, impl_->frame.exponent) + offset);
-        minimum = minimum ? Scalar(std::min(minimum->value, projection.value)) : projection;
-        maximum = maximum ? Scalar(std::max(maximum->value, projection.value)) : projection;
-    }
-    return {bounded<Mode>(*minimum), bounded<Mode>(*maximum)};
+    return represented_support(*impl_, normal, anchor);
 }
 
 template Integrals integrate_ordinary<kernel_mode>(const StoredGeometry& poly, bool moments);

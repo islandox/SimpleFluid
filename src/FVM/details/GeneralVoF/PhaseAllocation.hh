@@ -35,6 +35,11 @@ template<ArithmeticMode Mode> struct SIMPLEFLUID_FVM_LOCAL PhaseLabel
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PhaseLabel<Mode> phase_label(
     const Cell&, const PLIC::ConvexCellGeometry<Mode>&, const PLIC::PolyhedralInterface&, double tolerance);
+/** Pure interface labels require the unchanged bulk query and independent
+ * phase/history scalars, without a closed computational cell shell. */
+SIMPLEFLUID_FVM_LOCAL PhaseValues phase_inventory(const Cell&, const PLIC::CellGeometryView<ArithmeticMode::Ordinary>&);
+SIMPLEFLUID_FVM_LOCAL PhaseLabel<ArithmeticMode::Ordinary> pure_phase_label(
+    const Cell&, const PLIC::CellGeometryView<ArithmeticMode::Ordinary>&, const PLIC::PolyhedralInterface&);
 struct AllocationProvenance
 {
     long double admitted_bound = 0, fit_allocation_bound = 0, current_allocation_bound = 0;

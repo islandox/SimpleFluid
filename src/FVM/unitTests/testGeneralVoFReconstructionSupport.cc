@@ -158,7 +158,7 @@ TEST(GeneralVoFReconstructionSupport, PublicCallerUsesAvailableMajorityAndRetain
             EXPECT_FALSE(fit.geometry.pure_gas);
             EXPECT_FALSE(fit.geometry.pure_carrier);
             EXPECT_TRUE(fit.resolution.admitted());
-            EXPECT_EQ(geometry[i]->centroid(), target_center);
+            EXPECT_EQ(geometry[i].centroid(), target_center);
             EXPECT_LE(std::abs(fit.target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
                 static_cast<long double>(std::min(expected[0], expected[1])) * options.reconstruction.volume_tolerance);
             if (oblique)

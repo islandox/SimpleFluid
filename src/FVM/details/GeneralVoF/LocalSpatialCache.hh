@@ -59,7 +59,7 @@ struct Frontier
     bool first = true;
     std::optional<Key> outside_key;
     int outside_owner = -1;
-    PLIC::ConvexGeometryPtr<mode> retained_geometry;
+    PLIC::CellGeometryView<mode> retained_geometry;
     std::size_t retained_face = 0;
     std::optional<PLIC::OrdinaryBoundary> original_boundary;
 };
@@ -72,10 +72,11 @@ struct SIMPLEFLUID_FVM_LOCAL LocalSpatialCache
         Key key;
         std::uint64_t gid;
         int owner;
-        PLIC::DynamicConvexGeometryPtr geometry;
+        std::size_t geometry_slot = 0;
     };
     AMR::HierarchyObservation observation, supplied_observation;
     const void* topology_identity = nullptr;
+    std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> geometry_catalog;
     std::vector<CellIdentity> cells;
     std::vector<local_spatial_detail::Box> cell_boxes, frontier_boxes;
     std::vector<local_spatial_detail::Frontier> frontiers;

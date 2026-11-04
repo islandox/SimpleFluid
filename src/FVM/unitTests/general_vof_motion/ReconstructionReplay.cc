@@ -1,4 +1,5 @@
 /** Captured accepted-source reconstruction replay; no physical qualification claim. */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "FVM/GeneralVoF.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
@@ -270,7 +271,7 @@ Sample fit_sample(const CapturedCell& c)
     if (volume < minority)
         throw std::runtime_error("Captured minority exceeds original native geometry");
     const auto dominant = double(volume - minority);
-    return {geometry, gas_minor ? minority : dominant, gas_minor ? dominant : minority};
+    return {SimpleFluid::PLIC::test::view(geometry), gas_minor ? minority : dominant, gas_minor ? dominant : minority};
 }
 std::set<std::uint64_t> expected_stencil(const Capture& capture, std::uint64_t target)
 {
@@ -316,8 +317,8 @@ std::vector<std::uint64_t> production_order(const Capture& capture, std::uint64_
 }
 void report_sample(std::ostream& out, std::uint64_t gid, const CapturedCell& c, const Sample& sample)
 {
-    const auto center = sample.geometry->centroid();
-    const auto volume = sample.geometry->volume().value;
+    const auto center = SimpleFluid::PLIC::test::shell(sample.geometry)->centroid();
+    const auto volume = SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
     out << "sample gid=" << gid << " owner=" << c.owner << " center=" << center[0] << ',' << center[1] << ','
         << center[2] << " native_volume=" << volume << " physical_G=" << c.gas << " physical_L=" << c.liquid
         << " fit_G=" << sample.gas_volume << " fit_L=" << sample.carrier_volume
@@ -351,11 +352,11 @@ PLIC::GeometryPoint diagnostic_gradient(const Sample& target, const std::vector<
     const bool gas = target.gas_volume <= target.carrier_volume;
     const auto fraction = [&](const Sample& s)
     { return (gas ? s.gas_volume : s.carrier_volume) / (static_cast<long double>(s.gas_volume) + s.carrier_volume); };
-    const auto center = target.geometry->centroid();
+    const auto center = SimpleFluid::PLIC::test::shell(target.geometry)->centroid();
     std::array<std::array<long double, 4>, 3> matrix{};
     for (const auto& sample : stencil)
     {
-        const auto neighbor = sample.geometry->centroid();
+        const auto neighbor = SimpleFluid::PLIC::test::shell(sample.geometry)->centroid();
         std::array<long double, 3> d;
         long double radius2 = 0;
         for (unsigned i = 0; i < 3; ++i)
@@ -418,9 +419,9 @@ void diagnostic_offset(std::ostream& out, const Sample& target, const std::vecto
     long double squared = 0;
     for (const auto& sample : stencil)
     {
-        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(measured_plane);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(measured_plane);
         const auto reference = gas ? sample.gas_volume : sample.carrier_volume;
-        const auto residual = (measured.volume - reference) / sample.geometry->volume().value;
+        const auto residual = (measured.volume - reference) / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
         squared += residual * residual;
         out << "diagnostic_neighbor residual_fraction=" << residual << " measure_status=" << int(measured.status)
             << " numerical_error=" << measured.numerical_error_estimate << '\n';

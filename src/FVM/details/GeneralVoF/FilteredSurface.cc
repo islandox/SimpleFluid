@@ -233,8 +233,8 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
     for (const auto& [key, c] : data.cells)
     {
         budget.add(sizeof(PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>) + 64);
-        const auto geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(c.finite_geometry);
-        const auto vol = geometry->volume().value;
+        const auto geometry = cell_geometry<ArithmeticMode::Ordinary>(data, c);
+        const auto vol = geometry.volume().value;
         if (!(vol > 0) || !std::isfinite(vol))
             reject(Reason::VolumeConstraint, "Filtered cell volume is unresolved.");
         tracked_row(index, key, budget) = cells.size();
@@ -242,21 +242,17 @@ GeneralVoFSurfaceCatalog filtered_binary_surface(const GeneralVoF::Data& data, c
         row.source = &c;
         row.volume = vol;
         row.h = std::cbrt(vol);
-        const auto spans = geometry->axis_spans();
+        const auto spans = geometry.axis_spans();
         row.spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
         row.fit_scale = std::min({row.spans[0], row.spans[1], row.spans[2]});
         long double surface_area = 0;
-        const auto before_export = budget.used;
-        const auto exported = c.finite_geometry->export_points(point_exports, budget.used, budget.limit);
-        point_export_bytes += budget.used - before_export;
-        const auto points = exported.points();
-        for (const auto& face : geometry->faces())
+        for (const auto& face : geometry.faces())
         {
             Wide area_vector{};
             for (std::size_t j = 1; j + 1 < face.size(); ++j)
             {
-                const auto triangle = cross(sub(points[face[j]].value, points[face[0]].value),
-                    sub(points[face[j + 1]].value, points[face[0]].value));
+                const auto triangle = cross(sub(geometry.corner(face[j]), geometry.corner(face[0])),
+                    sub(geometry.corner(face[j + 1]), geometry.corner(face[0])));
                 for (unsigned k = 0; k < 3; ++k)
                     area_vector[k] += triangle[k] / 2;
             }

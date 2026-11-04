@@ -28,17 +28,18 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
     current(data);
-    if (cell_geometry.empty())
-    {
-        wire::Budget geometry_budget{limit};
-        for (const auto& [key, cell] : data.cells)
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        if (cell_geometry.empty())
         {
-            geometry_budget.add(sizeof(typename std::remove_reference_t<decltype(cell_geometry)>::value_type) +
-                                4 * sizeof(void*) + sizeof(PLIC::ConvexCellGeometry<Mode>) +
-                                AMR::encode_adaptive_key(key).size());
-            cell_geometry.emplace(key, PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry));
+            wire::Budget geometry_budget{limit};
+            for (const auto& [key, cell] : data.cells)
+            {
+                geometry_budget.add(sizeof(typename std::remove_reference_t<decltype(cell_geometry)>::value_type) +
+                                    4 * sizeof(void*) + sizeof(PLIC::ConvexCellGeometry<Mode>) +
+                                    AMR::encode_adaptive_key(key).size());
+                cell_geometry.emplace(key, existing_cell_geometry<Mode>(data, cell));
+            }
         }
-    }
     if (!std::isfinite(timestep) || timestep < 0 || node_velocity.size() != data.topology->nodes.size() ||
         face_volume.size() != data.topology->tiles.size())
         throw std::invalid_argument("Finite VoF controls do not cover retained nodes/faces.");
@@ -186,7 +187,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                         sum.add(sign > 0 ? flux.at(tile.face_gid) : Math::negate(flux.at(tile.face_gid)));
                     }
                     const auto residual = sum.value();
-                    const auto bulk = runtime_value<Mode>(cell_geometry.at(key)->volume());
+                    const auto bulk =
+                        runtime_value<Mode>(general_vof_detail::cell_geometry<Mode>(data, data.cells.at(key)).volume());
                     const auto bound = phase_allowance<Mode>(bulk, data.options.reconstruction.volume_tolerance);
                     if (!Math::closure_within(residual, bound))
                         throw std::invalid_argument("Finite VoF canonical controls violate source-free occupancy.");
@@ -249,7 +251,10 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 for (const auto& key : data.topology->order)
                 {
                     const auto& cell = data.cells.at(key);
-                    const auto old = phase_inventory<Mode>(cell, *cell_geometry.at(cell.key));
+                    const auto old =
+                        PhaseValues{runtime_value<Mode>(general_vof_detail::cell_geometry<Mode>(data, cell).volume()),
+                            Math::make_value(Mode, cell.phase.gas_volume),
+                            Math::make_value(Mode, cell.phase.carrier_volume)};
                     trial.finite_transfers_.push_back(
                         {cell.gid, cell.gid, cell.owner, cell.owner, old, cell.finite_history});
                     budget.add(AMR::encode_adaptive_key(key).size());
@@ -934,7 +939,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                             ? 0
                             : (cell.declaration == GeneralVoFPhaseGeometry::PureGas ? carrier.first : gas.first);
                     cell.inherited = true;
-                    validate_cell<Mode>(cell, data.options);
+                    validate_cell<Mode>(data, cell, data.options);
                     append_finite_phase_publication(*candidate, cell);
                 }
                 trial.roundoff_ = candidate->roundoff;

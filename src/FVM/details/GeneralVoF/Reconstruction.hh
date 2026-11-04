@@ -37,5 +37,5 @@ inline void record_transport_plane_quality(GeneralVoFReconstructionQualityDiagno
 }
 SIMPLEFLUID_FVM_LOCAL PLIC::DynamicPolyhedralReconstructionResult reconstruct_observed_ordinary_cell(
     const GeneralVoF::Data& data, const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics,
-    GeneralVoFWorkCell* row);
+    GeneralVoFWorkCell* row, std::optional<std::size_t> remaining_bytes = {});
 } // namespace SimpleFluid::VoF::general_vof_detail

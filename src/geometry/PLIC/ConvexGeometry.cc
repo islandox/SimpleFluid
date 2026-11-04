@@ -1,7 +1,10 @@
+#include "geometry/PLIC/CellGeometryConstraints.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/NativeFaceConstraintAccess.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <cassert>
 
@@ -15,22 +18,7 @@ std::array<std::array<long double, 2>, 3> ConvexCellGeometry<Mode>::closed_conta
     requires(Mode == ArithmeticMode::Ordinary)
 {
     const details::OrdinaryExportCoordinates coordinates(*this);
-    if (coordinates.size() == 0)
-        throw GeometryError(GeometryErrorCode::InvalidTopology, "Closed bounds need a nonempty actual cell.");
-    std::array<std::array<long double, 2>, 3> bounds{};
-    const auto first = coordinates.at(0);
-    for (std::size_t axis = 0; axis < 3; ++axis)
-        bounds[axis] = {first[axis], first[axis]};
-    for (std::size_t vertex = 1; vertex < coordinates.size(); ++vertex)
-    {
-        const auto point = coordinates.at(vertex);
-        for (std::size_t axis = 0; axis < 3; ++axis)
-        {
-            bounds[axis][0] = std::min(bounds[axis][0], point[axis]);
-            bounds[axis][1] = std::max(bounds[axis][1], point[axis]);
-        }
-    }
-    return bounds;
+    return details::ordinary_kernel::represented_closed_bounds(coordinates);
 }
 template std::array<std::array<long double, 2>, 3>
 ConvexCellGeometry<ArithmeticMode::Ordinary>::closed_contact_bounds() const;
@@ -299,8 +287,25 @@ OrdinaryBoundary::OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary> boun
         native_authority_ = details::original_support_authority(*plane.native_support);
 }
 
+OrdinaryBoundary::OrdinaryBoundary(CellGeometryFaceConstraint<ArithmeticMode::Ordinary> boundary)
+{
+    if (!boundary.geometry || boundary.face >= boundary.geometry.num_faces())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Ordinary view original boundary constraint.");
+    if (!boundary.geometry.is_procedural())
+    {
+        *this = OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary>{
+            details::NativeCellGeometrySourceAccess::existing_geometry(boundary.geometry), boundary.face});
+        return;
+    }
+    original_.emplace(details::NativeFaceConstraintAccess::make(boundary.geometry, boundary.face));
+    native_authority_ =
+        details::original_support_authority(details::NativeFaceConstraintAccess::facts(*original_).support);
+}
+
 PointAuthorityRange OrdinaryBoundary::authorities() const
 {
+    if (original_)
+        return DynamicGeometryAccess::boundary_keys({&native_authority_, 1});
     const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
         DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
     const auto& plane = *storage->surfaces.at(boundary_.face).plane;
@@ -313,6 +318,31 @@ PointAuthorityRange OrdinaryBoundary::authorities() const
 OrdinaryBoundaryClass OrdinaryBoundary::classify(const Point<ArithmeticMode::Ordinary>& point) const
 {
     namespace predicates = details::ordinary_predicates;
+    if (original_)
+    {
+        if (has_any_support(point.dynamic(), authorities()))
+            return OrdinaryBoundaryClass::ConstructionContact;
+        const auto& facts = details::NativeFaceConstraintAccess::facts(*original_);
+        predicates::Result distance;
+        try
+        {
+            distance = predicates::plane_distance(predicates::FramedPoint{point.value, {}, 0},
+                predicates::FramedPoint{facts.anchor, facts.frame_origin, facts.frame_exponent}, facts.normal,
+                facts.offset);
+        }
+        catch (const GeometryError& error)
+        {
+            if (error.code() == GeometryErrorCode::UnresolvedArithmetic)
+                return OrdinaryBoundaryClass::Unresolved;
+            throw;
+        }
+        if (distance.sign == predicates::Sign::Unresolved)
+            return OrdinaryBoundaryClass::Unresolved;
+        if (distance.sign == predicates::Sign::Zero)
+            return OrdinaryBoundaryClass::CoordinateContact;
+        return static_cast<int>(distance.sign) * facts.orientation < 0 ? OrdinaryBoundaryClass::Inside
+                                                                       : OrdinaryBoundaryClass::Outside;
+    }
     const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
         DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
     const auto& surface = storage->surfaces.at(boundary_.face);

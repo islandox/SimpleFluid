@@ -91,6 +91,40 @@ PhaseValues phase_inventory(const Cell& cell, const PLIC::ConvexCellGeometry<Mod
         Math::make_value(mode, cell.phase.carrier_volume)};
 }
 
+namespace
+{
+template<ArithmeticMode Mode> PhaseLabel<Mode> pure_label_from_inventory(const Cell& cell, const PhaseValues& inventory)
+{
+    using Math = fp::Arithmetic<Mode>;
+    PhaseLabel<Mode> result;
+    result.raw_source.bulk = inventory.bulk;
+    result.gas_bulk = result.carrier_bulk = true;
+    result.gas_factor = Math::divide(inventory.gas, inventory.bulk);
+    result.carrier_factor = Math::divide(inventory.carrier, inventory.bulk);
+    result.gas_history_factor =
+        Math::divide(Math::make_value(inventory.bulk.arithmetic_mode, cell.finite_history.gas), inventory.bulk);
+    result.carrier_history_factor =
+        Math::divide(Math::make_value(inventory.bulk.arithmetic_mode, cell.finite_history.carrier), inventory.bulk);
+    result.raw_source.gas = result.raw_source.carrier = Math::make_value(inventory.bulk.arithmetic_mode, 0);
+    result.gas_deviation = result.carrier_deviation = Math::make_value(inventory.bulk.arithmetic_mode, 0);
+    return result;
+}
+} // namespace
+PhaseValues phase_inventory(const Cell& cell, const PLIC::CellGeometryView<ArithmeticMode::Ordinary>& geometry)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    using Math = fp::Arithmetic<mode>;
+    return {runtime_value<mode>(geometry.volume()), Math::make_value(mode, cell.phase.gas_volume),
+        Math::make_value(mode, cell.phase.carrier_volume)};
+}
+PhaseLabel<ArithmeticMode::Ordinary> pure_phase_label(const Cell& cell,
+    const PLIC::CellGeometryView<ArithmeticMode::Ordinary>& geometry, const PLIC::PolyhedralInterface& plane)
+{
+    if (!plane.pure_gas && !plane.pure_carrier)
+        throw std::invalid_argument("Pure view label requires its declared pure interface.");
+    return pure_label_from_inventory<ArithmeticMode::Ordinary>(cell, phase_inventory(cell, geometry));
+}
+
 template<ArithmeticMode Mode>
 PhaseLabel<Mode> phase_label(const Cell& cell, const PLIC::ConvexCellGeometry<Mode>& geometry,
     const PLIC::PolyhedralInterface& plane, double tolerance)
@@ -100,18 +134,7 @@ PhaseLabel<Mode> phase_label(const Cell& cell, const PLIC::ConvexCellGeometry<Mo
     PhaseLabel<Mode> result;
     result.raw_source.bulk = inventory.bulk;
     if (plane.pure_gas || plane.pure_carrier)
-    {
-        result.gas_bulk = result.carrier_bulk = true;
-        result.gas_factor = Math::divide(inventory.gas, inventory.bulk);
-        result.carrier_factor = Math::divide(inventory.carrier, inventory.bulk);
-        result.gas_history_factor =
-            Math::divide(Math::make_value(inventory.bulk.arithmetic_mode, cell.finite_history.gas), inventory.bulk);
-        result.carrier_history_factor =
-            Math::divide(Math::make_value(inventory.bulk.arithmetic_mode, cell.finite_history.carrier), inventory.bulk);
-        result.raw_source.gas = result.raw_source.carrier = Math::make_value(inventory.bulk.arithmetic_mode, 0);
-        result.gas_deviation = result.carrier_deviation = Math::make_value(inventory.bulk.arithmetic_mode, 0);
-        return result;
-    }
+        return pure_label_from_inventory<Mode>(cell, inventory);
     const auto raw = runtime_phases<Mode>(geometry.phases(plane.gas));
     result.raw_source = raw;
     result.gas_deviation = Math::subtract(inventory.gas, raw.gas);

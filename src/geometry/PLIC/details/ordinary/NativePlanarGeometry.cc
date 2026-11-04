@@ -1,3 +1,6 @@
+/** @file NativePlanarGeometry.cc
+ * @brief Ordinary planar ownership, checked native support and shared span queries.
+ */
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
@@ -10,6 +13,7 @@
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
+#include "geometry/PLIC/details/ordinary/NativePlanarQueries.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
 #include <limits>
@@ -64,60 +68,14 @@ namespace
 using Polygon = std::vector<on::WidePoint>;
 namespace predicates = details::ordinary_predicates;
 constexpr std::size_t vertex_cap = 4096;
-long double norm(const on::WidePoint& p)
-{
-    const auto v = std::hypot(p[0], p[1], p[2]);
-    on::finite(v);
-    return v;
-}
-std::size_t axis_of(const on::WidePoint& n)
-{
-    std::size_t axis = 0;
-    for (std::size_t i = 1; i < 3; ++i)
-        if (std::abs(n[i]) > std::abs(n[axis]))
-            axis = i;
-    return axis;
-}
-struct DefiningPlane
-{
-    std::array<std::size_t, 3> vertices;
-    unsigned projection;
-    int winding;
-};
-DefiningPlane defining_plane(const Polygon& p)
-{
-    bool unresolved = false;
-    for (std::size_t i = 1; i + 1 < p.size(); ++i)
-    {
-        unsigned projection = 0;
-        predicates::Result best;
-        for (unsigned a = 0; a < 3; ++a)
-        {
-            const auto area = predicates::projected_orientation(p[0], p[i], p[i + 1], a);
-            unresolved = unresolved || area.sign == predicates::Sign::Unresolved;
-            if ((area.sign == predicates::Sign::Positive || area.sign == predicates::Sign::Negative) &&
-                std::abs(area.value) > std::abs(best.value))
-            {
-                projection = a;
-                best = area;
-            }
-        }
-        if (best.sign == predicates::Sign::Positive || best.sign == predicates::Sign::Negative)
-            return {{0, i, i + 1}, projection, predicates::require_sign(best)};
-    }
-    throw GeometryError(unresolved ? GeometryErrorCode::UnresolvedArithmetic : GeometryErrorCode::InvalidTopology,
-        "Ordinary native face has no resolved noncollinear defining triangle.");
-}
-bool on_plane(const Polygon& p, const DefiningPlane& plane, const on::WidePoint& v)
-{
-    // Incidence of the defining triangle is structural, independent of the
-    // rounding in a separately computed normal. No proximity test is used.
-    for (const auto index : plane.vertices)
-        if (v == p[index])
-            return true;
-    const auto& t = plane.vertices;
-    return predicates::require_sign(predicates::orientation({p[t[0]], p[t[1]], p[t[2]], v})) == 0;
-}
+namespace planar_queries = details::ordinary_planar_queries;
+using planar_queries::norm;
+using planar_queries::axis_of;
+using planar_queries::DefiningPlane;
+using planar_queries::defining_plane;
+using planar_queries::on_plane;
+using planar_queries::point_inside;
+using planar_queries::center;
 void validate(const Polygon& p)
 {
     if (p.size() > vertex_cap)
@@ -151,23 +109,6 @@ bool coplanar(const Polygon& a, const Polygon& b)
 {
     const auto plane = defining_plane(a);
     return std::all_of(b.begin(), b.end(), [&](const auto& p) { return on_plane(a, plane, p); });
-}
-bool point_inside(const Polygon& poly, const on::WidePoint& p, bool check_plane = true)
-{
-    // A represented boundary vertex has structural incidence, including for
-    // retained native supports. Keep this query shortcut out of on_plane:
-    // polygon validation must still establish planarity of every input vertex.
-    if (std::find(poly.begin(), poly.end(), p) != poly.end())
-        return true;
-    const auto plane = defining_plane(poly);
-    if (check_plane && !on_plane(poly, plane, p))
-        return false;
-    for (std::size_t i = 0; i < poly.size(); ++i)
-        if (plane.winding * predicates::require_sign(predicates::projected_orientation(
-                                poly[i], poly[(i + 1) % poly.size()], p, plane.projection)) <
-            0)
-            return false;
-    return true;
 }
 Polygon clip_loop(
     const Polygon& source, const on::WidePoint& a, const on::WidePoint& b, const on::WidePoint& n, bool inside)
@@ -222,22 +163,6 @@ Polygon intersect_loop(Polygon a, const Polygon& b, bool retained_support = fals
         a = clip_loop(a, b[i], b[(i + 1) % b.size()], n, true);
     return a;
 }
-on::WidePoint center(const Polygon& p)
-{
-    const auto n = on::polygon_vector(p);
-    const auto axis = axis_of(n);
-    on::WidePoint weighted{};
-    long double total = 0;
-    for (std::size_t i = 1; i + 1 < p.size(); ++i)
-    {
-        const auto v = on::cross(on::sub(p[i], p[0]), on::sub(p[i + 1], p[0]));
-        total += v[axis];
-        weighted = on::add(weighted, on::mul(on::add(on::add(p[0], p[i]), p[i + 1]), v[axis] / 3));
-    }
-    if (total == 0)
-        on::reject("native polygon centroid has zero area.");
-    return on::mul(weighted, 1 / total);
-}
 ::SimpleFluid::MeshUtils::Vec3 vector(const on::WidePoint& p)
 {
     const auto d = on::display(p);
@@ -278,32 +203,12 @@ OrdinaryFacePtr OrdinaryFace::make_wide(std::span<const WidePoint> vertices)
 OrdinaryFacePtr OrdinaryFace::from_retained_support(
     std::span<const WidePoint> vertices, WidePoint normal, OrdinarySupport support)
 {
-    if (vertices.size() < 3 || vertices.size() > vertex_cap || !(norm(normal) > 0))
-        on::reject("invalid retained native face support.");
+    planar_queries::validate_retained_loop(vertices, normal);
     auto impl = std::make_shared<Impl>();
     impl->polygon.assign(vertices.begin(), vertices.end());
     impl->normal = normal;
     impl->support = std::move(support);
     impl->retained_support = true;
-    std::set<WidePoint> unique;
-    for (const auto& p : impl->polygon)
-    {
-        for (auto value : p)
-            on::finite(value);
-        if (!unique.insert(p).second)
-            on::reject("repeated retained native face vertex.");
-    }
-    const auto projected = on::polygon_vector(impl->polygon);
-    const auto axis = axis_of(normal);
-    if (projected[axis] == 0)
-        on::reject("retained native face has zero projected area.");
-    const auto orientation = projected[axis] < 0 ? -1.L : 1.L;
-    for (std::size_t edge = 0; edge < impl->polygon.size(); ++edge)
-        for (const auto& p : impl->polygon)
-            if (orientation * on::cross(on::sub(impl->polygon[(edge + 1) % impl->polygon.size()], impl->polygon[edge]),
-                                  on::sub(p, impl->polygon[edge]))[axis] <
-                0)
-                on::reject("nonconvex retained native face loop.");
     return OrdinaryFacePtr(new OrdinaryFace(std::move(impl)));
 }
 OrdinaryIncidenceFrame capture_incidence_frame(const OrdinaryFace& face)
@@ -359,15 +264,17 @@ const std::vector<OrdinaryFace::WidePoint>& OrdinaryFace::points() const
 }
 GeometryValue<ArithmeticMode::Ordinary> OrdinaryFace::area() const
 {
-    return {norm(on::polygon_vector(impl_->polygon))};
+    return planar_queries::area(impl_->polygon);
 }
 ::SimpleFluid::MeshUtils::Vec3 OrdinaryFace::centroid() const
 {
-    return vector(center(impl_->polygon));
+    const auto result = planar_queries::centroid(impl_->polygon);
+    return {result[0], result[1], result[2]};
 }
 ::SimpleFluid::MeshUtils::Vec3 OrdinaryFace::area_vector() const
 {
-    return vector(on::polygon_vector(impl_->polygon));
+    const auto result = planar_queries::area_vector(impl_->polygon);
+    return {result[0], result[1], result[2]};
 }
 GeometryMeasure<ArithmeticMode::Ordinary> OrdinaryFace::coplanar_area_ratio(
     const OrdinaryFace& denominator, std::size_t budget) const
@@ -474,8 +381,7 @@ bool OrdinaryFace::contains_point(const OrdinaryPoint& packet) const
 }
 bool OrdinaryFace::contains(const OrdinaryFace& other) const
 {
-    return std::all_of(other.impl_->polygon.begin(), other.impl_->polygon.end(),
-        [&](const auto& p) { return point_inside(impl_->polygon, p, *impl_->support != *other.impl_->support); });
+    return planar_queries::contains(impl_->polygon, other.impl_->polygon, *impl_->support == *other.impl_->support);
 }
 bool OrdinaryFace::oppositely_oriented(const OrdinaryFace& other) const
 {
@@ -862,8 +768,7 @@ template<> OrdinarySupport planar_support<ArithmeticMode::Ordinary>(const Ordina
 }
 template<> int planar_orientation<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
-    const auto n = on::polygon_vector(face.points());
-    return n[axis_of(n)] < 0 ? -1 : 1;
+    return planar_queries::orientation(face.points());
 }
 template<>
 std::vector<OrdinaryFacePtr> subtract_planar_faces<ArithmeticMode::Ordinary>(

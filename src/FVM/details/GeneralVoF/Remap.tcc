@@ -1,10 +1,13 @@
 /** @file Remap.tcc
  * @brief Conservative AMR remap; source and target evidence remain pinned.
  */
+#include "FVM/details/GeneralVoF/CellCatalog.hh"
+#include "FVM/details/GeneralVoF/CellWorkspace.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
-#include "FVM/details/GeneralVoF/Wire.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoF/PhasePublication.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -52,24 +55,13 @@ PhaseError finite_remap_error(wire::Reader& r)
 template<ArithmeticMode Mode>
 void prepare_remap_schema(const GeneralVoF::Data& data, const GeneralVoF::Hierarchy::Plan& plan,
     const std::shared_ptr<const GeneralVoF::Hierarchy>& target, std::span<const GeneralVoFFiniteOwnedChannels> channels,
-    const GeneralVoFFiniteRemapOptions& options, std::map<Key, PLIC::ConvexGeometryPtr<Mode>>& cell_geometry,
-    std::map<Key, std::vector<PhaseValue>>& source_channels, std::vector<char>& manifest)
+    const GeneralVoFFiniteRemapOptions& options, std::map<Key, std::vector<PhaseValue>>& source_channels,
+    std::vector<char>& manifest)
 {
     using Math = fp::Arithmetic<Mode>;
     const auto comm = data.hierarchy->communicator();
     const auto limit = std::min(data.options.byte_budget, options.byte_budget);
     current(data);
-    if (cell_geometry.empty())
-    {
-        wire::Budget geometry_budget{limit};
-        for (const auto& [key, cell] : data.cells)
-        {
-            geometry_budget.add(sizeof(typename std::remove_reference_t<decltype(cell_geometry)>::value_type) +
-                                4 * sizeof(void*) + sizeof(PLIC::ConvexCellGeometry<Mode>) +
-                                AMR::encode_adaptive_key(key).size());
-            cell_geometry.emplace(key, PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry));
-        }
-    }
     if (data.options.arithmetic_mode == ArithmeticMode::Exact || !target ||
         target->communicator().getRawPtr() != comm.getRawPtr() || !target->native_partition() || !limit ||
         !plan.collective_identity() || !std::isfinite(options.maximum_relative_target_defect) ||
@@ -146,11 +138,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     const auto limit = std::min(data.options.byte_budget, options.byte_budget);
     std::map<Key, std::vector<PhaseValue>> source_channels;
     std::vector<char> manifest;
-    wire::collective(*comm,
-        [&]
-        {
-            prepare_remap_schema<Mode>(data, plan, target, channels, options, cell_geometry, source_channels, manifest);
-        });
+    wire::collective(
+        *comm, [&] { prepare_remap_schema<Mode>(data, plan, target, channels, options, source_channels, manifest); });
     std::uint64_t manifest_size = manifest.size();
     Teuchos::broadcast(*comm, 0, 1, &manifest_size);
     std::vector<char> agreed;
@@ -171,8 +160,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     target = data.hierarchy->apply(plan, std::move(target));
     const auto target_observation = target->observation();
     const bool ownership = target->topology_generation() == data.hierarchy->topology_generation();
-    const auto catalog = detail::build_adaptive_overlap_catalog(*data.hierarchy, *target, limit);
-    std::map<std::uint64_t, const AMR::AdaptiveCellBinding*> from, to;
+    const auto catalog = detail::build_adaptive_overlap_metadata_catalog(*data.hierarchy, *target, limit);
+    std::map<std::uint64_t, const detail::AdaptiveOverlapCellMetadata*> from, to;
     wire::collective(*comm,
         [&]
         {
@@ -208,12 +197,12 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             {
                 const auto& source_cell = *from.at(relation.source_gid);
                 const auto& target_cell = *to.at(relation.target_gid);
-                if (!target->owned().contains(target_cell.key))
+                if (!target->owned().contains(target_cell.leaf.key))
                     continue;
                 budget.add(sizeof(Relation) + 2 * sizeof(Key));
-                source_keys.push_back(source_cell.key);
-                requests.push_back({source_cell.key, target_cell.key, source_cell.gid, 0, target_cell.gid,
-                    target->owned().at(target_cell.key).revision, relation.kind, comm->getRank(), {}});
+                source_keys.push_back(source_cell.leaf.key);
+                requests.push_back({source_cell.leaf.key, target_cell.leaf.key, source_cell.gid, 0, target_cell.gid,
+                    target->owned().at(target_cell.leaf.key).revision, relation.kind, comm->getRank(), {}});
             }
         });
     const auto locations = data.hierarchy->lookup_cells(source_keys);
@@ -251,7 +240,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             std::map<std::pair<Key, Key>, AMR::AdaptiveAncestryRelation::Kind> admitted_relations;
             for (const auto& relation : catalog.relations)
                 admitted_relations.emplace(
-                    std::pair{from.at(relation.source_gid)->key, to.at(relation.target_gid)->key}, relation.kind);
+                    std::pair{from.at(relation.source_gid)->leaf.key, to.at(relation.target_gid)->leaf.key},
+                    relation.kind);
             for (const auto& packet : incoming.packets)
             {
                 wire::Reader r{packet.bytes};
@@ -284,12 +274,49 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         });
     const auto target_locations = target->lookup_cells(target_keys);
     const auto target_leaves = target->fetch_leaves(target_keys, limit);
+    PLIC::GeometryAllocationLedger active_overlap_outputs;
+    std::size_t overlap_retained_bytes = 0;
+    const auto retain_overlap = [&](const auto& geometry, wire::Budget& budget)
+    {
+        const auto before = overlap_retained_bytes;
+        // The surviving overlap graph is one monotone admission across local
+        // phases. Each phase pays its live roots before new scratch/output.
+        // Never reuse one ledger with a reset cumulative counter.
+        const auto available = budget.limit - budget.used;
+        active_overlap_outputs.retain(geometry, overlap_retained_bytes, before + available);
+        budget.add(overlap_retained_bytes - before);
+    };
     std::map<Key, PLIC::ConvexGeometryPtr<Mode>> imported_targets;
     std::map<Key, std::vector<std::size_t>> by_source;
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
+            std::vector<const AMR::AdaptiveLeaf*> target_catalog_leaves;
+            std::map<Key, std::size_t> target_catalog_slots;
+            cell_catalog_detail::reserve_leaf_references(target_catalog_leaves, columns.size(), budget);
+            for (std::size_t i = 0; i < columns.size(); ++i)
+            {
+                const auto& column = columns[i];
+                const auto& leaf = target_leaves[i];
+                const auto& location = target_locations[i];
+                const auto& source_leaf = data.hierarchy->owned().at(column.source);
+                if (location.owner != column.target_owner || location.address != column.target_gid ||
+                    location.revision != column.target_revision || leaf.key != column.target ||
+                    leaf.revision != column.target_revision || leaf.material != source_leaf.material ||
+                    leaf.key.region != source_leaf.key.region)
+                    throw std::invalid_argument("Finite remap target owner/material/revision differs.");
+                if (!target_catalog_slots.contains(leaf.key))
+                {
+                    budget.add(sizeof(typename decltype(target_catalog_slots)::value_type) + 4 * sizeof(void*) +
+                               topology_key_wire_bytes(leaf.key));
+                    target_catalog_slots.emplace(leaf.key, target_catalog_leaves.size());
+                    target_catalog_leaves.push_back(&leaf);
+                }
+            }
+            const auto target_catalog = cell_catalog_detail::build<Mode>(*target, target_catalog_leaves, budget);
+            CellWorkspace active_geometry(Mode, budget, data.options.maximum_face_geometry_operations);
             for (std::size_t i = 0; i < columns.size(); ++i)
             {
                 auto& column = columns[i];
@@ -301,14 +328,39 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     leaf.revision != column.target_revision || leaf.material != source_leaf.material ||
                     leaf.key.region != source_leaf.key.region)
                     throw std::invalid_argument("Finite remap target owner/material/revision differs.");
+                if (ownership && Mode == ArithmeticMode::Ordinary &&
+                    column.kind == AMR::AdaptiveAncestryRelation::Kind::Unchanged &&
+                    cell_catalog_detail::same_native_recipe(source_leaf, leaf) &&
+                    cell_catalog_detail::same_native_representation(
+                        native_cell_geometry(data, data.cells.at(column.source)),
+                        {target_catalog.ordinary, target_catalog_slots.at(column.target)}))
+                {
+                    const auto& source = data.cells.at(column.source);
+                    const auto metric = target_catalog.native_metrics.at(target_catalog_slots.at(column.target));
+                    if (column.kind != AMR::AdaptiveAncestryRelation::Kind::Unchanged ||
+                        column.source != column.target || column.source_revision != column.target_revision ||
+                        metric.volume != source.native_volume || metric.centroid != source.centroid)
+                        throw std::invalid_argument("Finite identity remap native recipe/metric evidence differs.");
+                    // Exact recipe/ordinal, represented corners, original support
+                    // and captured frame coefficients establish the same original
+                    // cell that the owning singleton partition would certify.
+                    budget.add(sizeof(std::size_t));
+                    by_source[column.source].push_back(i);
+                    continue;
+                }
                 if (!imported_targets.contains(column.target))
                 {
-                    PLIC::GeometryLimits limits;
-                    limits.arithmetic_mode = data.options.arithmetic_mode;
-                    limits.byte_budget = limit;
-                    auto geometry = PLIC::ConvexCellGeometry<Mode>::from_geometry(*target->geometry(leaf), limits);
-                    budget.add(geometry->storage_bytes());
+                    auto geometry = active_geometry.materialize(
+                        target_catalog.template view<Mode>(target_catalog_slots.at(column.target)));
+                    retain_overlap(geometry, budget);
                     imported_targets.emplace(column.target, std::move(geometry));
+                }
+                if (!cell_geometry.contains(column.source))
+                {
+                    auto geometry = active_geometry.materialize(
+                        general_vof_detail::cell_geometry<Mode>(data, data.cells.at(column.source)));
+                    retain_overlap(geometry, budget);
+                    cell_geometry.emplace(column.source, std::move(geometry));
                 }
                 const auto& source_geometry = cell_geometry.at(column.source);
                 const auto& target_geometry = imported_targets.at(column.target);
@@ -324,7 +376,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     column.overlap = source_geometry->intersect(*target_geometry);
                 if (!column.overlap)
                     throw std::invalid_argument("Finite remap ancestry overlap is geometrically empty.");
-                budget.add(sizeof(std::size_t) + column.overlap->storage_bytes());
+                retain_overlap(column.overlap, budget);
+                budget.add(sizeof(std::size_t));
                 by_source[column.source].push_back(i);
             }
         });
@@ -346,6 +399,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
             for (const auto& key : data.topology->order)
             {
                 const auto& source = data.cells.at(key);
@@ -356,7 +410,10 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 std::vector<PLIC::ConvexGeometryPtr<Mode>> cover;
                 for (auto i : indices)
                     cover.push_back(columns[i].overlap);
-                cell_geometry.at(source.key)->certify_fragment_partition(cover, options.maximum_relative_target_defect);
+                const bool structural_identity = ownership && indices.size() == 1 && !columns[indices[0]].overlap;
+                if (!structural_identity)
+                    cell_geometry.at(source.key)
+                        ->certify_fragment_partition(cover, options.maximum_relative_target_defect);
                 const bool whole = indices.size() == 1 &&
                                    (columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Unchanged ||
                                        columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Coarsening);
@@ -368,7 +425,10 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     labels = phase_label<Mode>(source, *cell_geometry.at(key), PLIC::reconstruction_geometry(fitted),
                         data.options.reconstruction.volume_tolerance);
                 }
-                const auto old = phase_inventory<Mode>(source, *cell_geometry.at(source.key));
+                const PhaseValues old{
+                    runtime_value<Mode>(general_vof_detail::cell_geometry<Mode>(data, source).volume()),
+                    Math::make_value(Mode, source.phase.gas_volume),
+                    Math::make_value(Mode, source.phase.carrier_volume)};
                 // Carrier existence is a source contract even on ownership-only
                 // copies; the whole-cell fast path cannot legitimize an unsupported
                 // nonzero channel merely because it needs no geometric weighting.
@@ -481,6 +541,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
             for (const auto& output : outgoing)
             {
                 const auto& column = output.relation;
@@ -539,17 +600,80 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
+            using CommonCatalog = PLIC::CellGeometryCatalog<Mode>;
+            using CommonEntry = typename CommonCatalog::Entry;
+            std::vector<CommonEntry> common_entries;
+            if (columns.size() > common_entries.max_size())
+                throw PLIC::GeometryError(
+                    PLIC::GeometryErrorCode::ResourceLimit, "Finite common-cell descriptor count overflows.");
+            cell_catalog_detail::charge_items(budget, columns.size(), sizeof(CommonEntry));
+            common_entries.reserve(columns.size());
+            if (common_entries.capacity() > columns.size())
+                cell_catalog_detail::charge_items(
+                    budget, common_entries.capacity() - columns.size(), sizeof(CommonEntry));
+            using SourceRecord = std::pair<std::size_t, std::shared_ptr<const PLIC::CartesianCellSource>>;
+            std::map<const PLIC::CartesianCellSource*, SourceRecord> source_records;
             for (const auto& column : columns)
             {
-                budget.add(sizeof(GeneralVoFFiniteCommonCell) + column.overlap->storage_bytes());
-                result.common_cells_.push_back({column.source, column.target, column.source_gid, column.target_gid,
-                    column.target_owner, column.overlap->dynamic_geometry()});
+                if (column.overlap)
+                {
+                    retain_overlap(column.overlap, budget);
+                    common_entries.emplace_back(column.overlap);
+                }
+                else
+                {
+                    if constexpr (Mode == ArithmeticMode::Ordinary)
+                    {
+                        const auto ref = PLIC::details::NativeCellGeometrySourceAccess::source_cell(
+                            general_vof_detail::cell_geometry<Mode>(data, data.cells.at(column.source)));
+                        auto found = source_records.find(ref.source.get());
+                        if (found == source_records.end())
+                        {
+                            cell_catalog_detail::charge_items(
+                                budget, 1, sizeof(typename decltype(source_records)::value_type) + 4 * sizeof(void*));
+                            found = source_records
+                                        .emplace(ref.source.get(), SourceRecord{source_records.size(), ref.source})
+                                        .first;
+                        }
+                        common_entries.emplace_back(PLIC::NativeCellGeometrySlot{found->second.first, ref.cell_slot});
+                    }
+                    else
+                        throw std::logic_error("Non-Ordinary common cell lacks its explicit overlap owner.");
+                }
+            }
+            typename CommonCatalog::SourceTable common_sources;
+            cell_catalog_detail::charge_items(budget, source_records.size(), sizeof(typename CommonCatalog::SourcePtr));
+            common_sources.reserve(source_records.size());
+            if (common_sources.capacity() > source_records.size())
+                cell_catalog_detail::charge_items(budget, common_sources.capacity() - source_records.size(),
+                    sizeof(typename CommonCatalog::SourcePtr));
+            common_sources.resize(source_records.size());
+            for (const auto& [pointer, record] : source_records)
+                common_sources.at(record.first) = record.second;
+            const auto common_catalog = CommonCatalog::make(std::move(common_sources), std::move(common_entries),
+                geometry_limits(Mode, budget.limit - budget.used));
+            retain_overlap(common_catalog, budget);
+            cell_catalog_detail::charge_items(budget, columns.size(), sizeof(GeneralVoFFiniteCommonCell));
+            result.common_cells_.reserve(columns.size());
+            if (result.common_cells_.capacity() > columns.size())
+                cell_catalog_detail::charge_items(
+                    budget, result.common_cells_.capacity() - columns.size(), sizeof(GeneralVoFFiniteCommonCell));
+            for (std::size_t index = 0; index < columns.size(); ++index)
+            {
+                const auto& column = columns[index];
+                budget.add(topology_key_wire_bytes(column.source));
+                budget.add(topology_key_wire_bytes(column.target));
+                result.common_cells_.push_back(
+                    {column.source, column.target, column.source_gid, column.target_gid, column.target_owner,
+                        PLIC::DynamicCellGeometryView(PLIC::CellGeometryView<Mode>{common_catalog, index})});
             }
         });
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
             std::map<std::pair<Key, Key>, std::size_t> expected;
             for (std::size_t i = 0; i < requests.size(); ++i)
                 if (!expected.emplace(std::pair{requests[i].source, requests[i].target}, i).second)
@@ -641,24 +765,83 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
+            std::set<Key> structural_targets;
+            std::vector<const AMR::AdaptiveLeaf*> source_catalog_leaves, target_catalog_leaves;
+            std::map<Key, std::size_t> source_catalog_slots, target_catalog_slots;
+            cell_catalog_detail::reserve_leaf_references(source_catalog_leaves, requests.size(), budget);
+            cell_catalog_detail::reserve_leaf_references(target_catalog_leaves, requests.size(), budget);
+            const auto add_leaf = [&](const AMR::AdaptiveLeaf& leaf, auto& slots, auto& leaves)
+            {
+                if (!slots.contains(leaf.key))
+                {
+                    budget.add(sizeof(typename std::remove_reference_t<decltype(slots)>::value_type) +
+                               4 * sizeof(void*) + topology_key_wire_bytes(leaf.key));
+                    slots.emplace(leaf.key, leaves.size());
+                    leaves.push_back(&leaf);
+                }
+            };
             for (const auto& request : requests)
             {
+                add_leaf(from.at(request.source_gid)->leaf, source_catalog_slots, source_catalog_leaves);
+                add_leaf(to.at(request.target_gid)->leaf, target_catalog_slots, target_catalog_leaves);
+            }
+            const auto source_catalog =
+                cell_catalog_detail::build<Mode>(*data.hierarchy, source_catalog_leaves, budget);
+            const auto target_catalog = cell_catalog_detail::build<Mode>(*target, target_catalog_leaves, budget);
+            CellWorkspace active_geometry(Mode, budget, data.options.maximum_face_geometry_operations);
+            for (const auto& request : requests)
+            {
+                const auto& source_leaf = from.at(request.source_gid)->leaf;
+                const auto& target_leaf = to.at(request.target_gid)->leaf;
+                if (ownership && Mode == ArithmeticMode::Ordinary &&
+                    request.kind == AMR::AdaptiveAncestryRelation::Kind::Unchanged &&
+                    data.cells.contains(request.source) &&
+                    cell_catalog_detail::same_native_recipe(source_leaf, target_leaf) &&
+                    cell_catalog_detail::same_native_representation(
+                        native_cell_geometry(data, data.cells.at(request.source)),
+                        {target_catalog.ordinary, target_catalog_slots.at(request.target)}))
+                {
+                    const auto source_metric =
+                        source_catalog.native_metrics.at(source_catalog_slots.at(request.source));
+                    const auto target_metric =
+                        target_catalog.native_metrics.at(target_catalog_slots.at(request.target));
+                    if (request.kind != AMR::AdaptiveAncestryRelation::Kind::Unchanged ||
+                        request.source != request.target || source_leaf.revision != request.source_revision ||
+                        target_leaf.revision != request.target_revision ||
+                        source_metric.volume != target_metric.volume ||
+                        source_metric.centroid != target_metric.centroid ||
+                        !structural_targets.insert(request.target).second)
+                        throw std::invalid_argument(
+                            "Finite identity recipient lacks its complete native singleton proof.");
+                    continue;
+                }
                 if (!local_source_geometry.contains(request.source))
                 {
                     const auto existing = data.cells.find(request.source);
-                    auto geometry =
-                        existing != data.cells.end()
-                            ? cell_geometry.at(request.source)
-                            : PLIC::ConvexCellGeometry<Mode>::from_geometry(*from.at(request.source_gid)->geometry,
-                                  geometry_limits(data.options.arithmetic_mode, limit));
-                    budget.add(geometry->storage_bytes());
+                    PLIC::ConvexGeometryPtr<Mode> geometry;
+                    if (existing != data.cells.end())
+                    {
+                        if (!cell_geometry.contains(request.source))
+                        {
+                            auto materialized = active_geometry.materialize(
+                                general_vof_detail::cell_geometry<Mode>(data, existing->second));
+                            retain_overlap(materialized, budget);
+                            cell_geometry.emplace(request.source, std::move(materialized));
+                        }
+                        geometry = cell_geometry.at(request.source);
+                    }
+                    else
+                        geometry = active_geometry.materialize(
+                            source_catalog.template view<Mode>(source_catalog_slots.at(request.source)));
+                    retain_overlap(geometry, budget);
                     local_source_geometry.emplace(request.source, std::move(geometry));
                 }
                 if (!imported_targets.contains(request.target))
                 {
-                    auto geometry = PLIC::ConvexCellGeometry<Mode>::from_geometry(
-                        *to.at(request.target_gid)->geometry, geometry_limits(data.options.arithmetic_mode, limit));
-                    budget.add(geometry->storage_bytes());
+                    auto geometry = active_geometry.materialize(
+                        target_catalog.template view<Mode>(target_catalog_slots.at(request.target)));
+                    retain_overlap(geometry, budget);
                     imported_targets.emplace(request.target, std::move(geometry));
                 }
                 const auto& source_geometry = local_source_geometry.at(request.source);
@@ -670,11 +853,13 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     overlap = source_geometry->intersect(*target_geometry);
                 if (!overlap)
                     throw std::invalid_argument("Finite remap recipient overlap is empty.");
+                retain_overlap(overlap, budget);
                 target_covers[request.target].push_back(std::move(overlap));
             }
             for (const auto& [key, leaf] : target->owned())
-                imported_targets.at(key)->certify_fragment_partition(
-                    target_covers.at(key), options.maximum_relative_target_defect);
+                if (!structural_targets.contains(key))
+                    imported_targets.at(key)->certify_fragment_partition(
+                        target_covers.at(key), options.maximum_relative_target_defect);
         });
     // Build only geometry/maps in a private pure placeholder. Actual remapped
     // inventories and their inherited error evidence are installed together.
@@ -683,11 +868,13 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     wire::collective(*comm,
         [&]
         {
+            wire::Budget metric_budget{limit};
+            cell_catalog_detail::NativeMetrics target_metrics(*target, Mode, metric_budget);
             for (const auto& [key, leaf] : target->owned())
             {
                 order.push_back(key);
                 zero.push_back(0);
-                native_volume.push_back(target->metrics(leaf).volume);
+                native_volume.push_back(target_metrics(leaf).volume);
             }
         });
     const auto placeholder = std::make_shared<const GeneralVoF>(target, order, zero, native_volume, data.options);
@@ -699,6 +886,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         {
             reset_finite_phase_publication(*candidate);
             wire::Budget budget{limit};
+            budget.add(overlap_retained_bytes);
             candidate->retained_interfaces.clear();
             if (ownership)
                 candidate->retained_interfaces.reserve(std::count_if(rows.begin(), rows.end(), [](const auto& entry)
@@ -710,7 +898,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 auto& row = rows.at(key);
                 const auto totals = row.phases.value(), history = row.history.value();
                 const auto actual =
-                    runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+                    runtime_value<Mode>(general_vof_detail::cell_geometry<Mode>(*candidate, cell).volume());
                 const auto closure = Math::subtract(totals.bulk, actual);
                 const auto defect_bound = phase_allowance<Mode>(actual, options.maximum_relative_target_defect);
                 if (!Math::closure_within(closure, defect_bound))
@@ -776,8 +964,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                                                    ? 0
                                                    : fp::upper_double(Math::upper(row.pure_fit.value()));
                 }
-                validate_cell<Mode>(
-                    cell, data.options, ownership && row.retained_interface ? &*row.retained_interface : nullptr);
+                validate_cell<Mode>(*candidate, cell, data.options,
+                    ownership && row.retained_interface ? &*row.retained_interface : nullptr);
                 append_finite_phase_publication(*candidate, cell);
                 GeneralVoFFiniteOwnedChannels output;
                 output.key = key;

@@ -8,6 +8,8 @@ set(SIMPLEFLUID_GENERAL_VOF_INSTANTIATION_SOURCES
 set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
     GeneralVoF.cc
     details/GeneralVoFState.cc
+    details/GeneralVoF/CellGeometry.cc
+    details/GeneralVoF/FetchedNativeSources.cc
     details/GeneralVoF/Reconstruction.cc
     details/GeneralVoF/RetainedStorage.cc
     details/GeneralVoF/RetainedInterfaces.cc
@@ -41,6 +43,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
 )
 set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_FRAGMENTS
     details/GeneralVoF/Transport.tcc
+    details/GeneralVoF/CellCatalog.tcc
     details/GeneralVoF/Remap.tcc
     details/GeneralVoF/PhaseAllocation.tcc
     details/GeneralVoF/PhasePublication.tcc

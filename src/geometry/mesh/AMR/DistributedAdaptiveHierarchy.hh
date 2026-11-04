@@ -76,6 +76,10 @@ public:
     [[nodiscard]] const DistributedAdaptiveOptions& options() const noexcept;
     [[nodiscard]] std::uint64_t global_cells() const noexcept;
     [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf&) const;
+    /** Trusted actual-kernel factory capability; never inferred from provider labels. */
+    [[nodiscard]] bool has_native_cartesian_geometry() const;
+    [[nodiscard]] std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
+        const AdaptiveLeaf&) const;
     [[nodiscard]] AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
     [[nodiscard]] std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const;
     [[nodiscard]] HierarchyObservation observation() const noexcept;

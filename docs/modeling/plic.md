@@ -6,6 +6,18 @@ face integration and a safeguarded minority-phase offset solve; see
 Its numerical error estimates are not certified bounds. The legacy scalar and
 explicit surface construction paths described below remain available.
 
+Phase samples hold immutable `CellGeometryView<Mode>` values. An Ordinary native
+Cartesian sample pins a shared source catalog, while other modes and explicit
+geometry pin their existing materialized owners. Routine sample validation,
+occupancy and gradient queries use the view. Geometry-dependent fitting creates
+explicit shells in an invocation-local `CellGeometryOperationWorkspace`; pure
+and gradient-only paths keep preparation lazy. Pure stencil samples remain in
+the original fitting order whenever a mixed target needs the complete fit.
+There is no implicit conversion from a view to a shell. Explicit batch
+materialization preserves range order, admits its output descriptors before
+allocation, and returns no partial output on failure; spent workspace charges
+remain cumulative.
+
 Each reconstruction prepares its target boundary once and reuses it across trial
 normals and offset evaluations. Prepared neighbors are constructed only when the
 selected fitting path needs them. Preparation pins immutable geometry and borrows

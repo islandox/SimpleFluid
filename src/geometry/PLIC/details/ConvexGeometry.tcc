@@ -580,4 +580,39 @@ Point<Mode> backtrace_constrained(const Point<Mode>& source, GeometryPoint veloc
         input[0], velocity, timestep, dynamic_walls, typed_limits<Mode>(limits)), input));
 }
 
+template<ArithmeticMode Mode>
+Point<Mode> backtrace_constrained(const Point<Mode>& source, GeometryPoint velocity, double timestep,
+    std::span<const CellGeometryFaceConstraint<Mode>> walls, GeometryLimits limits)
+    requires(Mode != ArithmeticMode::Exact)
+{
+    details::Operation scope(typed_limits<Mode>(limits));
+    details::active_work->charge(walls.size(), sizeof(DynamicFaceConstraint));
+    std::vector<DynamicFaceConstraint> dynamic_walls;
+    dynamic_walls.reserve(walls.size());
+    if (dynamic_walls.capacity() > walls.size())
+        details::active_work->charge(dynamic_walls.capacity() - walls.size(), sizeof(DynamicFaceConstraint));
+    for (const auto& wall : walls)
+    {
+        if (!wall.geometry || wall.face >= wall.geometry.num_faces())
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid original view wall constraint.");
+        DynamicFaceConstraint constraint;
+        constraint.face = wall.face;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (wall.geometry.is_procedural())
+            {
+                details::active_work->charge(1, sizeof(DynamicOriginalFaceConstraint) + 2 * sizeof(void*));
+                constraint.original = std::make_shared<const DynamicOriginalFaceConstraint>(
+                    details::NativeFaceConstraintAccess::make(wall.geometry, wall.face));
+            }
+        if (!constraint.original)
+            constraint.geometry =
+                details::NativeCellGeometrySourceAccess::existing_geometry(wall.geometry)->dynamic_geometry();
+        dynamic_walls.push_back(std::move(constraint));
+    }
+    const std::array input{source.dynamic()};
+    return Point<Mode>(derived_point_authority(SelectedGeometryKernel<Mode>::backtrace(input[0], velocity, timestep,
+                                                   dynamic_walls, typed_limits<Mode>(limits)),
+        input));
+}
+
 } // namespace SimpleFluid::PLIC

@@ -1272,6 +1272,19 @@ PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> DistributedAdaptiveHierarchy::
         throw std::invalid_argument("Distributed resident geometry moved.");
     return data_->kernel->geometry(leaf);
 }
+bool DistributedAdaptiveHierarchy::has_native_cartesian_geometry() const
+{
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Distributed resident geometry moved.");
+    return AMR::has_native_cartesian_geometry(*data_->kernel);
+}
+std::optional<AdaptiveCartesianGeometryBounds> DistributedAdaptiveHierarchy::native_cartesian_geometry_bounds(
+    const AdaptiveLeaf& leaf) const
+{
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Distributed resident geometry moved.");
+    return AMR::native_cartesian_geometry_bounds(*data_->kernel, leaf);
+}
 AdaptiveCellMetrics DistributedAdaptiveHierarchy::metrics(const AdaptiveLeaf& leaf) const
 {
     if (!geometry_unchanged())

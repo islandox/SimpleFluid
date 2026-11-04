@@ -585,8 +585,7 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                               << " control=" << data.control << " cell=" << c.gid << " before=" << int(old.declaration)
                               << " after=" << int(c.declaration) << " gas=" << c.phase.gas_volume
                               << " carrier=" << c.phase.carrier_volume << '\n';
-                const auto geometric_volume =
-                    PLIC::ConvexCellGeometry<mode>::from_dynamic(c.finite_geometry)->volume().value;
+                const auto geometric_volume = cell_geometry<mode>(data, c).volume().value;
                 SimpleFluid::detail::CompensatedSum<long double> defect_sum;
                 defect_sum += pg.first;
                 defect_sum += pl.first;
@@ -654,7 +653,7 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                         c.declaration == GeneralVoFPhaseGeometry::PureGas ? c.roundoff.carrier : c.roundoff.gas;
                     c.occupancy.fit_bound = fp::upper_double(fp::bound_add(pure_fit[c.gid], publication));
                 }
-                validate_cell<mode>(c, data.options);
+                validate_cell<mode>(data, c, data.options);
                 ledger.diagnostics.maximum_occupancy_defect =
                     std::max(ledger.diagnostics.maximum_occupancy_defect, std::abs(defect));
                 consume_cell(c);

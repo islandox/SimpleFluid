@@ -2,6 +2,8 @@
  * @brief Compiled mode-selected distributed curvature assembly.
  */
 #include "solvers/details/GeneralVoF/Curvature.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/OrdinaryCurvature.hh"
 #include "solvers/details/GeneralVoFCurvature.hh"
@@ -70,25 +72,41 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
         {
             PLIC::GeometryAllocationLedger point_exports;
             std::size_t point_export_bytes = 0;
+            PLIC::GeometryLimits materialization_limits;
+            materialization_limits.byte_budget = byte_budget;
+            materialization_limits.arithmetic_mode = Mode;
+            PLIC::CellGeometryOperationWorkspace materialization(materialization_limits);
             for (const auto& patch : patches)
             {
+                const auto& shape = PLIC::reconstruction_geometry(patch.interface);
+                if (shape.pure_gas || shape.pure_carrier) continue;
                 const auto sample = [&]
                 {
                     if constexpr (Mode == ArithmeticMode::Exact)
                         return GeneralVoFCurvature::patch<ArithmeticMode::Exact>(patch.cell,
-                            *PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(*patch.geometry),
+                            *PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(
+                                *PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(patch.geometry)),
                             PLIC::reconstruction_geometry(patch.interface));
                     else
-                        return GeneralVoFCurvature::patch<Mode>(patch.cell,
-                            *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry),
+                    {
+                        auto remaining = materialization.remaining_limits(Mode);
+                        const auto used = std::min(materialization.bytes_used(), byte_budget);
+                        const auto left = byte_budget - used;
+                        remaining.byte_budget = std::min(remaining.byte_budget, left - std::min(point_export_bytes, left));
+                        materialization.restrict_remaining(remaining);
+                        const auto owner = PLIC::materialize_cell(patch.finite_geometry.template get<Mode>(), materialization);
+                        return GeneralVoFCurvature::patch<Mode>(patch.cell, *owner,
                             PLIC::reconstruction_geometry(patch.interface),
-                            point_exports, point_export_bytes, byte_budget);
+                            point_exports, point_export_bytes,
+                            byte_budget - std::min(materialization.bytes_used(), byte_budget));
+                    }
                 }();
                 if (sample)
                     surface.push_back(*sample);
             }
+            const auto available_budget = byte_budget - std::min(materialization.bytes_used(), byte_budget);
             constexpr auto index_entry_bytes = sizeof(std::pair<const std::uint64_t, std::size_t>) + 4 * sizeof(void*);
-            if (surface.size() > (byte_budget - point_export_bytes) / index_entry_bytes)
+            if (surface.size() > (available_budget - point_export_bytes) / index_entry_bytes)
                 throw std::runtime_error("General VoF curvature index exceeds its byte budget.");
             const auto index_bytes = surface.size() * index_entry_bytes;
             std::map<std::uint64_t, std::size_t> surface_index;
@@ -100,7 +118,7 @@ std::vector<double> Curvature<Mode>::assemble(const MeshHandle<>& mesh_view, con
                 if (local >= 0)
                 {
                     const auto support = phases.cell_support(patch.cell);
-                    if (support.size() > (byte_budget - point_export_bytes - index_bytes) / sizeof(std::size_t))
+                    if (support.size() > (available_budget - point_export_bytes - index_bytes) / sizeof(std::size_t))
                         throw std::runtime_error("General VoF curvature support index exceeds its byte budget.");
                     std::vector<std::size_t> selected;
                     selected.reserve(support.size());

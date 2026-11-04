@@ -54,6 +54,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testDeferredOwnerCharges"
       OR TEST_NAME STREQUAL "testPooledLineExchange"
       OR TEST_NAME STREQUAL "testFrozenTopology"
+      OR TEST_NAME STREQUAL "testCellGeometryView"
+      OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${TEST_NAME} PRIVATE -fno-fast-math -ffp-contract=off -frounding-math -fno-lto)

@@ -4,6 +4,7 @@
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include <cmath>
 #include <stdexcept>
@@ -22,7 +23,7 @@ PhaseStorage<ArithmeticMode::Exact>::Result PhaseStorage<ArithmeticMode::Exact>:
     std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> authority;
     execution.require(gas.size() == owned_count && carrier.size() == owned_count,
         "General VoF phase/native storage dimensions differ.");
-    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> geometry;
+    PLIC::CellGeometryRange<ArithmeticMode::Ordinary> geometry;
     execution.collective(
         [&]
         {
@@ -42,7 +43,7 @@ PhaseStorage<ArithmeticMode::Exact>::Result PhaseStorage<ArithmeticMode::Exact>:
                                  authority[c].carrier.scaled(material.liquid_density);
                 const auto& mass = result.mass[c];
                 const auto density = mass.divided_by(
-                    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*geometry[c]),
+                    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(geometry[c])),
                     byte_budget);
                 result.density[c] = density.sign() ? density.certified().as_double() : 0;
                 if (mass.sign() <= 0 || !std::isfinite(result.density[c]) || !(result.density[c] > 0) ||

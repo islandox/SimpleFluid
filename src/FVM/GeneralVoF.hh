@@ -2,28 +2,29 @@
  * @brief Source-pinned unsplit phase transport on authority-certified native cells.
  */
 #pragma once
-#include "FVM/GeneralVoFSurface.hh"
-#include "FVM/GeneralVoFWork.hh"
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/ExperimentalPhaseInventory.hh"
+#include "FVM/GeneralVoFSurface.hh"
+#include "FVM/GeneralVoFWork.hh"
 #include "FVM/PhaseVolumes.hh"
 #include "geometry/GeometryStatisticsSnapshot.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/swept_volume/SweptGeometry.hh"
-#include "geometry/swept_volume/OrdinaryTrajectorySnapshot.hh"
-#include <iterator>
-#include <variant>
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/swept_volume/OrdinaryTrajectorySnapshot.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "utils/ArithmeticMode.hh"
 #include <array>
 #include <cstdint>
-#include <memory>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <variant>
 #include <vector>
 namespace SimpleFluid::VoF
 {
@@ -217,7 +218,7 @@ struct GeneralVoFFiniteCommonCell
     Meshes::AMR::AdaptiveCellKey source_key, target_key;
     std::uint64_t source_gid = 0, target_gid = 0;
     int target_owner = -1;
-    PLIC::DynamicConvexGeometryPtr geometry;
+    PLIC::DynamicCellGeometryView geometry;
 };
 struct GeneralVoFFiniteRemapOptions
 {
@@ -521,10 +522,10 @@ struct GeneralVoFSupportCell
 {
     std::uint64_t cell = 0, revision = 0;
     int owner = -1;
-    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
+    SimpleFluid::PLIC::CellGeometryView<SimpleFluid::ArithmeticMode::Ordinary> geometry;
     SimpleFluid::PLIC::GeometryPoint centroid{};
     Meshes::AMR::AdaptiveCellKey key;
-    PLIC::DynamicConvexGeometryPtr finite_geometry;
+    PLIC::DynamicCellGeometryView finite_geometry;
 };
 /** Owned refinement requests, collected without preparing an expensive fit. */
 struct GeneralVoFResolutionRequest
@@ -537,10 +538,35 @@ struct GeneralVoFReconstructionPatch
 {
     std::uint64_t cell = 0;
     int owner = -1;
-    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
+    SimpleFluid::PLIC::CellGeometryView<SimpleFluid::ArithmeticMode::Ordinary> geometry;
     PLIC::DynamicPolyhedralReconstructionResult interface;
-    PLIC::DynamicConvexGeometryPtr finite_geometry;
+    PLIC::DynamicCellGeometryView finite_geometry;
 };
+/** Immutable owner-authenticated fetched boundary and original source geometry.
+ * Geometry rows follow draft().owned, then draft().ghosts. A detached view pins
+ * its catalog independently; neither this snapshot nor a view authorizes a
+ * phase handoff or replaces the existing source/target observation checks. */
+class SIMPLEFLUID_FVM_EXPORT GeneralVoFFetchedNativeSources
+{
+public:
+    [[nodiscard]] const Meshes::AMR::AdaptiveNativeDraft& draft() const noexcept;
+    [[nodiscard]] PLIC::CellGeometryRange<ArithmeticMode::Ordinary> geometry() const;
+    /** Monotone caller admission consumed by returned draft ownership, new
+     * facade/catalog/gather construction and spent lookup scratch. Includes
+     * authenticated accepted catalog roots that coexist during construction;
+     * this is not a recomputed live-byte or process-memory measurement. */
+    [[nodiscard]] std::size_t admitted_bytes() const noexcept;
+    /** The unchanged independent hierarchy fetch construction boundary. The
+     * returned draft ownership also joins admitted_bytes() before catalog construction. */
+    [[nodiscard]] std::size_t fetch_byte_budget() const noexcept;
+
+private:
+    friend class GeneralVoF;
+    struct Storage;
+    explicit GeneralVoFFetchedNativeSources(std::shared_ptr<const Storage> storage) : storage_(std::move(storage)) {}
+    std::shared_ptr<const Storage> storage_;
+};
+
 class SIMPLEFLUID_FVM_EXPORT GeneralVoF
 {
 public:
@@ -630,10 +656,16 @@ public:
     /** Retained tile ordinals incident to a canonical node, in tiles() order.
      * The immutable incidence storage is shared by accepted transport states. */
     [[nodiscard]] const std::vector<std::size_t>& node_tiles(std::uint64_t node) const;
-    [[nodiscard]] std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
-    owned_geometry() const;
-    template<ArithmeticMode Mode>
-    [[nodiscard]] std::vector<PLIC::ConvexGeometryPtr<Mode>> owned_finite_geometry() const;
+    [[nodiscard]] SimpleFluid::PLIC::CellGeometryRange<SimpleFluid::ArithmeticMode::Ordinary> owned_geometry() const;
+    /** Collective on hierarchy()->communicator(), including empty owners.
+     * Invoke directly, outside a rank-local collective action: local admission
+     * is synchronized before the nested authenticated compact fetch begins.
+     * The fetch keeps its existing hierarchy budget; the passed operation
+     * allowance admits returned draft ownership and the new immutable facade,
+     * catalog and gather scratch. */
+    [[nodiscard]] GeneralVoFFetchedNativeSources fetch_native_sources(
+        std::span<const Key> requested, std::size_t operation_byte_budget) const;
+    template<ArithmeticMode Mode> [[nodiscard]] PLIC::CellGeometryRange<Mode> owned_finite_geometry() const;
     /** Immutable original node constructions for a retained canonical face. */
     template<ArithmeticMode Mode>
     [[nodiscard]] std::vector<PLIC::Point<Mode>> finite_face_points(std::uint64_t face) const;

@@ -6,6 +6,7 @@
  * Original state SHA256: 0a13e30b4c9908d767bee9c18bcf29a603387da08ed4ff5e6ed72d672ad73a8a
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
 #include <cstdint>
@@ -562,6 +563,6 @@ inline Sample sample(const Row& row)
     const bool gas_minor = row.physical_gas <= row.physical_carrier;
     const double minority = gas_minor ? row.physical_gas : row.physical_carrier;
     const double dominant = double(geometry->volume().value - minority);
-    return {geometry, gas_minor ? minority : dominant, gas_minor ? dominant : minority, row.id, row.mixed};
+    return {SimpleFluid::PLIC::test::view(geometry), gas_minor ? minority : dominant, gas_minor ? dominant : minority, row.id, row.mixed};
 }
 } // namespace captured_native_gradient_selection

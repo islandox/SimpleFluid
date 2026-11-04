@@ -10,6 +10,7 @@
 
 namespace SimpleFluid::PLIC::details
 {
+class OrdinaryIntersectionAccess;
 template<ArithmeticMode Mode> struct NativePointDefinition
 {
     std::array<long double, 3> value{}, absolute_error{};
@@ -177,8 +178,8 @@ public:
     using DynamicConvexGeometry::arithmetic_mode;
     using DynamicConvexGeometry::faces;
     std::shared_ptr<const Impl> impl_;
-    using DynamicConvexGeometry::origin;
     using DynamicConvexGeometry::export_points;
+    using DynamicConvexGeometry::origin;
     using DynamicConvexGeometry::vertex_count;
     std::size_t storage_bytes() const { return DynamicConvexGeometry::storage_bytes<Mode>(); }
     static std::vector<DynamicConvexGeometryPtr> validate_donors(
@@ -209,12 +210,19 @@ public:
     DynamicClipResult clip(const GeometryHalfspace& input, bool measure_section) const;
     DynamicClipResult clip_by_face(const DynamicConvexGeometry& source, std::size_t face, bool measure_section) const;
     DynamicClipResult clip_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>& source, std::size_t plane_id,
-        bool measure_section, bool construct_outside = true, bool partition_proof = false, int orientation_override = 0) const;
+        bool measure_section, bool construct_outside = true, bool partition_proof = false,
+        int orientation_override = 0) const;
     DynamicClipResult clip_plane(const CutPlaneDescriptor<Mode>& source, std::size_t plane_id, bool measure_section,
         bool construct_outside = true, bool partition_proof = false, int orientation_override = 0) const;
     DynamicPhaseMeasures phases(const GeometryHalfspace& gas) const;
     bool bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
     DynamicConvexGeometryPtr intersect(const DynamicConvexGeometry& other) const;
+
+private:
+    friend class ::SimpleFluid::PLIC::details::OrdinaryIntersectionAccess;
+    DynamicConvexGeometryPtr intersect_after_bound_screen(const DynamicConvexGeometry& other) const;
+
+public:
     DynamicConvexGeometryPtr translated(GeometryPoint displacement) const;
     void certify_partition(std::span<const DynamicConvexGeometryPtr> pieces, double relative_budget) const;
     std::vector<char> encode(const GeometryPacketContext& context, std::size_t byte_budget) const;
@@ -329,6 +337,8 @@ bool construction_contains(const std::shared_ptr<const Ancestry>& parent, std::s
 template<ArithmeticMode Mode>
 bool construction_disjoint(std::shared_ptr<const Ancestry> a, std::shared_ptr<const Ancestry> b);
 template<ArithmeticMode Mode>
+bool separated_framed_bounds(const CoordinateBox&, const Frame&, const CoordinateBox&, const Frame&);
+template<ArithmeticMode Mode>
 bool separated_bounds(const DynamicConvexGeometry::Impl& a, const DynamicConvexGeometry::Impl& b);
 template<ArithmeticMode Mode>
 bool structural_cover(
@@ -370,7 +380,7 @@ template<ArithmeticMode Mode> bool planar_line_contact(const PlanarPolygon& poly
 template<ArithmeticMode Mode>
 DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace ordinary_kernel
+} // namespace SIMPLEFLUID_LOCAL ordinary_kernel
 
 } // namespace SimpleFluid::PLIC::details
 
@@ -645,5 +655,5 @@ template<ArithmeticMode Mode> bool planar_line_contact(const PlanarPolygon& poly
 template<ArithmeticMode Mode>
 DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
     std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
-} // namespace certification_kernel
+} // namespace SIMPLEFLUID_LOCAL certification_kernel
 } // namespace SimpleFluid::PLIC::details

@@ -2,6 +2,7 @@
  * @brief Compiled transfer kernel with explicit source/target execution boundaries.
  */
 #include "FVM/ExactFaceTransfer.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
@@ -20,6 +21,7 @@
 #include <set>
 #include <stdexcept>
 #include <tuple>
+#include <type_traits>
 namespace SimpleFluid::detail::general_vof
 {
 template<ArithmeticMode Mode>
@@ -44,40 +46,94 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
     using Support = PLIC::PlaneAuthority;
     const auto comm = source_input.mesh.owned_cell_map()->getComm();
     const auto& common = trial.source_common_cells();
-    std::vector<PLIC::ConvexGeometryPtr<Mode>> common_geometry;
-    std::size_t common_geometry_bytes = 0;
+    std::size_t retained_bytes = 0;
+    const auto charge = [&](std::size_t bytes)
+    {
+        if (bytes > controls.byte_budget - std::min(retained_bytes, controls.byte_budget))
+            throw std::runtime_error("Finite common-face handoff storage cap exhausted.");
+        retained_bytes += bytes;
+    };
+    const auto charge_items = [&](std::size_t count, std::size_t width)
+    {
+        if (width && count > (controls.byte_budget - std::min(retained_bytes, controls.byte_budget)) / width)
+            throw std::runtime_error("Finite common-face handoff metadata cap exhausted.");
+        charge(count * width);
+    };
+    const auto charge_key_copy = [&](const Key& key)
+    {
+        std::visit([&](const auto& ancestry)
+        {
+            const auto path = [&](const auto& value)
+            { charge_items(value.size(), sizeof(typename std::decay_t<decltype(value)>::value_type)); };
+            if constexpr (requires { ancestry.path; }) path(ancestry.path);
+            else if constexpr (requires { ancestry.base.path; }) { path(ancestry.base.path); path(ancestry.axial.path); }
+        }, key.ancestry);
+    };
+    std::vector<PLIC::CellGeometryView<Mode>> common_geometry;
+    std::vector<Key> requested;
+    std::map<Key, std::vector<std::size_t>> columns;
     source_execution.collective(
         [&]
         {
-            constexpr auto per_cell = sizeof(PLIC::ConvexGeometryPtr<Mode>) + sizeof(PLIC::ConvexCellGeometry<Mode>);
-            if (common.size() > controls.byte_budget / per_cell)
-                throw std::runtime_error("Finite common-cell typed geometry storage cap exhausted.");
-            common_geometry_bytes = common.size() * per_cell;
+            charge_items(common.size(), sizeof(PLIC::CellGeometryView<Mode>));
             common_geometry.reserve(common.size());
-            for (const auto& cell : common)
-                common_geometry.push_back(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.geometry));
+            if (common_geometry.capacity() > common.size())
+                charge_items(common_geometry.capacity() - common.size(), sizeof(PLIC::CellGeometryView<Mode>));
+            charge_items(common.size(), sizeof(Key));
+            requested.reserve(common.size());
+            if (requested.capacity() > common.size()) charge_items(requested.capacity() - common.size(), sizeof(Key));
+            for (std::size_t i = 0; i < common.size(); ++i)
+            {
+                common_geometry.push_back(common[i].geometry.template get<Mode>());
+                if (!columns.contains(common[i].source_key))
+                {
+                    charge(sizeof(typename decltype(columns)::value_type) + 4 * sizeof(void*));
+                    charge_key_copy(common[i].source_key);
+                }
+                auto& column = columns[common[i].source_key];
+                if (column.size() == column.capacity())
+                {
+                    const auto next = column.capacity() ? 2 * column.capacity() : 1;
+                    charge_items(next, sizeof(std::size_t));
+                    column.reserve(next);
+                }
+                column.push_back(i);
+                charge_key_copy(common[i].target_key);
+                requested.push_back(common[i].target_key);
+            }
         });
-    std::vector<Key> requested;
-    std::map<Key, std::vector<std::size_t>> columns;
-    for (std::size_t i = 0; i < common.size(); ++i)
-    {
-        columns[common[i].source_key].push_back(i);
-        requested.push_back(common[i].target_key);
-    }
-    const auto draft = Meshes::AMR::fetch_adaptive_native_draft(*target.phases.hierarchy(), requested);
-    std::map<Key, SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> native_sources;
+    // This factory performs its own collective preflight and native fetch.
+    // It must not be nested in a rank-local lambda before that collective.
+    const auto fetched = target.phases.fetch_native_sources(requested, controls.byte_budget - retained_bytes);
+    const auto& draft = fetched.draft();
+    const auto native_geometry = fetched.geometry();
+    std::map<Key, std::size_t> native_sources;
     std::map<std::uint64_t, std::set<Key>> native_fans;
     source_execution.collective(
         [&]
         {
+            charge(fetched.admitted_bytes());
+            std::size_t slot = 0;
             for (const auto* leaves : {&draft.owned, &draft.ghosts})
                 for (const auto& leaf : *leaves)
-                    native_sources.emplace(leaf.key, target.phases.hierarchy()->geometry(leaf));
+                {
+                    charge(sizeof(typename decltype(native_sources)::value_type) + 4 * sizeof(void*));
+                    charge_key_copy(leaf.key);
+                    native_sources.emplace(leaf.key, slot++);
+                }
+            if (slot != native_geometry.size())
+                throw std::runtime_error("Fetched native source catalog order differs from its authenticated draft.");
             for (const auto& tile : draft.tiles)
                 for (auto node : tile.node_gids)
                     for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                         if (key && native_sources.contains(*key))
-                            native_fans[node].insert(*key);
+                        {
+                            if (!native_fans.contains(node))
+                                charge(sizeof(typename decltype(native_fans)::value_type) + 4 * sizeof(void*));
+                            auto& fan = native_fans[node];
+                            if (!fan.contains(*key)) { charge(sizeof(Key) + 4 * sizeof(void*)); charge_key_copy(*key); }
+                            fan.insert(*key);
+                        }
         });
     std::map<std::uint64_t, Point> native_points;
     source_execution.collective(
@@ -86,12 +142,29 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
             for (const auto& node : draft.nodes)
             {
                 const auto fan = native_fans.find(node.gid);
-                if (fan == native_fans.end() || fan->second.empty())
-                    continue;
-                std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> cells;
-                for (const auto& key : fan->second)
-                    cells.push_back(native_sources.at(key));
-                native_points.emplace(node.gid, PLIC::source_point<Mode>(cells, node.coordinate_identity));
+                if (fan == native_fans.end() || fan->second.empty()) continue;
+                std::vector<std::size_t> cells;
+                charge_items(fan->second.size(), sizeof(std::size_t));
+                cells.reserve(fan->second.size());
+                if (cells.capacity() > fan->second.size())
+                    charge_items(cells.capacity() - fan->second.size(), sizeof(std::size_t));
+                // Keep the original per-node sorted Key fan order.
+                for (const auto& key : fan->second) cells.push_back(native_sources.at(key));
+                PLIC::GeometryLimits limits;
+                limits.arithmetic_mode = Mode;
+                limits.byte_budget = controls.byte_budget - retained_bytes;
+                PLIC::CellGeometryOperationWorkspace workspace(limits);
+                const std::array<PLIC::NativeSourcePointRequest,1> request{{{node.coordinate_identity,0,cells.size()}}};
+                bool consumed = false;
+                try
+                {
+                    const auto points = PLIC::source_points<Mode>(native_geometry, cells, request, workspace);
+                    charge(workspace.bytes_used());
+                    consumed = true;
+                    charge(sizeof(typename decltype(native_points)::value_type) + 4 * sizeof(void*));
+                    native_points.emplace(node.gid, points.front());
+                }
+                catch (...) { if (!consumed && workspace.bytes_used() <= controls.byte_budget - retained_bytes) charge(workspace.bytes_used()); throw; }
             }
         });
     std::map<std::uint64_t, Loop> target_loops;
@@ -99,15 +172,31 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
     source_execution.collective(
         [&]
         {
-            std::set<Key> required(requested.begin(), requested.end());
+            std::set<Key> required;
+            for (const auto& key : requested)
+            {
+                if (!required.contains(key)) { charge(sizeof(Key) + 4 * sizeof(void*)); charge_key_copy(key); }
+                required.insert(key);
+            }
             for (const auto& tile : draft.tiles)
                 if (required.contains(tile.first))
                 {
                     Loop loop;
-                    for (auto node : tile.node_gids)
-                        loop.push_back(native_points.at(node));
+                    charge_items(tile.node_gids.size(), sizeof(Point));
+                    loop.reserve(tile.node_gids.size());
+                    if (loop.capacity() > tile.node_gids.size()) charge_items(loop.capacity() - tile.node_gids.size(), sizeof(Point));
+                    for (auto node : tile.node_gids) loop.push_back(native_points.at(node));
+                    charge(sizeof(typename decltype(target_loops)::value_type) + 4 * sizeof(void*));
                     target_loops.emplace(tile.face_gid, std::move(loop));
-                    target_faces[tile.first].push_back(&tile);
+                    if (!target_faces.contains(tile.first)) { charge(sizeof(typename decltype(target_faces)::value_type) + 4 * sizeof(void*)); charge_key_copy(tile.first); }
+                    auto& faces = target_faces[tile.first];
+                    if (faces.size() == faces.capacity())
+                    {
+                        const auto next = faces.capacity() ? 2 * faces.capacity() : 1;
+                        charge_items(next, sizeof(const Meshes::AMR::AdaptiveTile*));
+                        faces.reserve(next);
+                    }
+                    faces.push_back(&tile);
                 }
         });
     const auto rates =
@@ -129,14 +218,8 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
     PLIC::GeometryLimits geometry_limits;
     geometry_limits.byte_budget = controls.byte_budget / 2;
     geometry_limits.arithmetic_mode = source_input.arithmetic_mode;
-    std::size_t pairs = 0, patches = 0, retained_bytes = common_geometry_bytes;
+    std::size_t pairs = 0, patches = 0;
     PLIC::GeometryAllocationLedger point_exports;
-    const auto charge = [&](std::size_t bytes)
-    {
-        if (bytes > controls.byte_budget - std::min(retained_bytes, controls.byte_budget))
-            throw std::runtime_error("Finite common-face handoff storage cap exhausted.");
-        retained_bytes += bytes;
-    };
     const auto shared_support = [](const Loop& first, const Loop& second) -> std::optional<Support>
     {
         const auto a = PLIC::common_supports<Mode>(first), b = PLIC::common_supports<Mode>(second);
@@ -241,9 +324,18 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                 std::vector<Facet> facets;
                 std::vector<std::vector<std::size_t>> cell_facets(indices.size());
                 std::map<std::uint64_t, std::vector<Loop>> old_cover;
+                PLIC::GeometryLimits active_limits = geometry_limits;
+                active_limits.byte_budget = controls.byte_budget - retained_bytes;
+                PLIC::CellGeometryOperationWorkspace active_geometry(active_limits);
                 for (std::size_t c = 0; c < indices.size(); ++c)
                 {
-                    const auto& geometry = *common_geometry[indices[c]];
+                    auto remaining = active_geometry.remaining_limits(Mode);
+                    remaining.byte_budget = std::min(remaining.byte_budget, controls.byte_budget - retained_bytes);
+                    active_geometry.restrict_remaining(remaining);
+                    const auto before = active_geometry.bytes_used();
+                    const auto owner = PLIC::materialize_cell(common_geometry[indices[c]], active_geometry);
+                    charge(active_geometry.bytes_used() - before);
+                    const auto& geometry = *owner;
                     const auto exported = geometry.export_points(point_exports, retained_bytes, controls.byte_budget);
                     const auto points = exported.points();
                     for (const auto& face : geometry.faces())
@@ -373,7 +465,7 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                     const auto& residual = remaining[cell];
                     const auto allowed = bounded_mode ? residual.absolute_error
                                                       : static_cast<long double>(controls.divergence_tolerance) *
-                                                            common_geometry[indices[cell]]->volume().value;
+                                                            common_geometry[indices[cell]].volume().value;
                     if (std::abs(residual.value) > allowed)
                         throw std::runtime_error("Finite new common-face extension fails source-free closure.");
                 }

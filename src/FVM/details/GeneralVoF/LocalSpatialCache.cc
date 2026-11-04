@@ -179,14 +179,13 @@ Frontier make_frontier(
             throw std::invalid_argument("Local VoF retained halo frontier lacks its outside owner.");
     }
     frontier.geometry = tile.geometry;
-    work.charge(sizeof(Geometry) + 2 * sizeof(void*));
-    frontier.retained_geometry = Geometry::from_dynamic(cell.finite_geometry);
+    frontier.retained_geometry = cell_geometry<mode>(data, cell);
     frontier.support_identity = PLIC::planar_support<mode>(*tile.geometry);
     bool matched = false;
-    for (std::size_t face = 0; face < frontier.retained_geometry->num_faces(); ++face)
+    for (std::size_t face = 0; face < frontier.retained_geometry.num_faces(); ++face)
     {
         work.test();
-        const auto support = PLIC::planar_support<mode>(*frontier.retained_geometry->face_geometry(face));
+        const auto support = frontier.retained_geometry.source_support(face);
         work.allocations.retain(support, work.bytes, work.limits.byte_budget);
         if (support != *frontier.support_identity)
             continue;
@@ -198,7 +197,8 @@ Frontier make_frontier(
     }
     if (!matched)
         throw std::invalid_argument("Local VoF retained frontier lacks its original immutable cell support.");
-    frontier.original_boundary.emplace(PLIC::FaceConstraint<mode>{frontier.retained_geometry, frontier.retained_face});
+    frontier.original_boundary.emplace(
+        PLIC::CellGeometryFaceConstraint<mode>{frontier.retained_geometry, frontier.retained_face});
     work.charge(frontier.original_boundary->storage_bytes() - sizeof(PLIC::OrdinaryBoundary));
     work.allocations.retain(*frontier.support_identity, work.bytes, work.limits.byte_budget);
     work.charge(frontier.tile_identity.capacity() + frontier.boundary.capacity());
@@ -221,7 +221,7 @@ void prove_retained(const GeneralVoF::Data& data, const LocalSpatialCache& cache
     const auto cell = data.cells.find(frontier.retained_key);
     if (cell == data.cells.end() || cell->second.key != frontier.retained_key ||
         cell->second.gid != frontier.retained_gid || cell->second.owner != frontier.retained_owner ||
-        !frontier.retained_geometry || cell->second.finite_geometry != frontier.retained_geometry->dynamic_geometry() ||
+        !frontier.retained_geometry || cell_geometry<mode>(data, cell->second) != frontier.retained_geometry ||
         !frontier.original_boundary || (frontier.outside_key && data.cells.contains(*frontier.outside_key)))
         reach_failure(frontier, "original support lacks current retained cell/owner authority", recipe.face);
     const auto check = [&](const PLIC::Point<mode>& point, const char* role, std::size_t index)
@@ -267,7 +267,10 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
         {
             work.test();
             if (identity.key != cell->first || identity.key != cell->second.key || identity.gid != cell->second.gid ||
-                identity.owner != cell->second.owner || identity.geometry != cell->second.finite_geometry)
+                identity.owner != cell->second.owner || identity.geometry_slot != cell->second.geometry_slot ||
+                previous->geometry_catalog != (data.topology->ordinary_cell_geometry
+                                                      ? data.topology->ordinary_cell_geometry
+                                                      : data.topology->cell_geometry))
             {
                 matches = false;
                 break;
@@ -293,22 +296,22 @@ std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF
     cache->observation = data.observation;
     cache->supplied_observation = data.supplied_observation;
     cache->topology_identity = data.topology.get();
+    cache->geometry_catalog =
+        data.topology->ordinary_cell_geometry ? data.topology->ordinary_cell_geometry : data.topology->cell_geometry;
     // Map order is exactly the former key/GID sort order: keys are unique.
     for (const auto& [key, cell] : data.cells)
     {
         work.test();
-        if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != mode)
+        if (!cell_geometry<mode>(data, cell))
             throw std::invalid_argument("Local VoF retained native geometry is missing or has another mode.");
         work.charge(AMR::encode_adaptive_key(key).size());
-        work.push(cache->cells, LocalSpatialCache::CellIdentity{key, cell.gid, cell.owner, cell.finite_geometry});
+        work.push(cache->cells, LocalSpatialCache::CellIdentity{key, cell.gid, cell.owner, cell.geometry_slot});
         Box box;
-        const auto before_export = work.bytes;
-        const auto exported = cell.finite_geometry->export_points(work.allocations, work.bytes, work.limits.byte_budget);
-        point_export_bytes += work.bytes - before_export;
-        for (const auto& p : exported.points())
+        const auto geometry = cell_geometry<mode>(data, cell);
+        for (std::size_t vertex = 0; vertex < geometry.vertex_count(); ++vertex)
         {
             work.test();
-            box.add(p.value);
+            box.add(geometry.corner(vertex));
         }
         work.push(cache->cell_boxes, box);
     }

@@ -144,7 +144,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     // This explicitly selected reference export reconstructs
                     // diagnostic centers only; the accepted finite allowance
                     // is not replaced by a new input-admission tolerance.
-                    const auto exact = phase_measures(cell);
+                    const auto exact = phase_measures(*self.data_, cell);
                     const auto defect = exact.gas + exact.carrier - exact.bulk;
                     if ((defect.sign() < 0 ? defect.scaled(-1) : defect)
                             .compare(Measure::from_value(e.admitted_bound)) > 0)
@@ -165,26 +165,31 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     capsule.geometry = *retained;
                     capsule.geometry_ready = true;
                 }
-                if (cell.declaration != GeneralVoFPhaseGeometry::Infer || !phase_measures(cell).gas.sign() ||
-                    !phase_measures(cell).carrier.sign())
+                if (cell.declaration != GeneralVoFPhaseGeometry::Infer ||
+                    !phase_measures(*self.data_, cell).gas.sign() || !phase_measures(*self.data_, cell).carrier.sign())
                 {
                     PLIC::reconstruction_geometry(capsule.geometry).pure_gas =
-                        cell.declaration == GeneralVoFPhaseGeometry::PureGas || !phase_measures(cell).carrier.sign();
+                        cell.declaration == GeneralVoFPhaseGeometry::PureGas ||
+                        !phase_measures(*self.data_, cell).carrier.sign();
                     PLIC::reconstruction_geometry(capsule.geometry).pure_carrier =
-                        cell.declaration == GeneralVoFPhaseGeometry::PureCarrier || !phase_measures(cell).gas.sign();
+                        cell.declaration == GeneralVoFPhaseGeometry::PureCarrier ||
+                        !phase_measures(*self.data_, cell).gas.sign();
                     capsule.geometry_ready = true;
                 }
                 if (capsule.geometry_ready)
                 {
-                    const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
-                    const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
-                    const auto raw =
-                        phases(*SimpleFluid::geometry::swept_volume::ConvexFragment<
-                                   SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell.phase.geometry),
-                            PLIC::reconstruction_geometry(capsule.geometry));
+                    const bool gas =
+                        phase_measures(*self.data_, cell).gas.compare(phase_measures(*self.data_, cell).carrier) <= 0;
+                    const auto target =
+                        gas ? phase_measures(*self.data_, cell).gas : phase_measures(*self.data_, cell).carrier;
+                    const auto raw = phases(
+                        *SimpleFluid::geometry::swept_volume::ConvexFragment<
+                            SimpleFluid::ArithmeticMode::Exact>::from_geometry(*existing_native_geometry(*self.data_,
+                            cell)),
+                        PLIC::reconstruction_geometry(capsule.geometry));
                     const auto fit_diagnostic = detail::round_phase_residual(target - (gas ? raw.gas : raw.carrier));
                     capsule.error.fit_residual = fit_diagnostic.value;
-                    const auto sample = reconstruction_sample<ArithmeticMode::Exact>(cell, retained);
+                    const auto sample = reconstruction_sample<ArithmeticMode::Exact>(*self.data_, cell, retained);
                     const auto view = Measure::from_value(gas ? sample.gas_volume : sample.carrier_volume);
                     const auto conversion = target - view;
                     auto fit_bound = view.scaled(self.data_->options.reconstruction.volume_tolerance) +

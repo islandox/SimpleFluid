@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/LocalGeometry.hh"
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
+#include "FVM/details/GeneralVoF/CellWorkspace.hh"
 #include "FVM/details/GeneralVoF/DonorSlots.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
@@ -346,14 +347,14 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data,
     wire::collective(*comm,
         [&]
         {
+            CellWorkspace active_geometry(mode, work, data.options.maximum_face_geometry_operations);
             std::map<Key, PLIC::ConvexGeometryPtr<mode>> geometries;
             std::map<Key, PhaseLabel<mode>> labels;
             for (const auto& key : requested)
             {
                 const auto& cell = data.cells.at(key);
-                work.charge(sizeof(typename decltype(geometries)::value_type) +
-                            sizeof(typename decltype(labels)::value_type) + 8 * sizeof(void*) + sizeof(Geometry));
-                auto geometry = Geometry::from_dynamic(cell.finite_geometry);
+                work.charge(sizeof(typename decltype(labels)::value_type) + 4 * sizeof(void*));
+                const auto geometry_view = cell_geometry<mode>(data, cell);
                 const auto& plane = planes.at(key);
                 record_transport_plane_quality(result.diagnostics.reconstruction_quality, cell.gid, plane);
                 if ((cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0) &&
@@ -361,9 +362,17 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data,
                     !PLIC::reconstruction_geometry(plane).pure_carrier)
                     throw std::invalid_argument(
                         "Local VoF absent phase requires pure geometry for normalized history transport.");
-                labels.emplace(key,
-                    phase_label<mode>(cell, *geometry, PLIC::reconstruction_geometry(plane), work.volume_tolerance));
-                geometries.emplace(key, std::move(geometry));
+                if (PLIC::reconstruction_geometry(plane).pure_gas || PLIC::reconstruction_geometry(plane).pure_carrier)
+                    labels.emplace(key, pure_phase_label(cell, geometry_view, PLIC::reconstruction_geometry(plane)));
+                else
+                {
+                    work.charge(
+                        sizeof(typename decltype(geometries)::value_type) + 4 * sizeof(void*) + sizeof(Geometry));
+                    auto geometry = active_geometry.materialize(geometry_view);
+                    labels.emplace(key, phase_label<mode>(cell, *geometry, PLIC::reconstruction_geometry(plane),
+                                            work.volume_tolerance));
+                    geometries.emplace(key, std::move(geometry));
+                }
             }
             std::size_t capture_face = 0;
             for (const auto& entry : pending.faces())
@@ -459,7 +468,10 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data,
                             const auto& plane = planes.at(cell.key);
                             SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor donor;
                             donor.id = i;
-                            donor.geometry = geometries.at(cell.key);
+                            if (const auto prepared = geometries.find(cell.key); prepared != geometries.end())
+                                donor.geometry = prepared->second;
+                            else
+                                donor.geometry_view = cell_geometry<mode>(data, cell);
                             donor.pure_gas = PLIC::reconstruction_geometry(plane).pure_gas;
                             donor.pure_carrier = PLIC::reconstruction_geometry(plane).pure_carrier;
                             if (!PLIC::reconstruction_geometry(plane).pure_gas &&
@@ -603,7 +615,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data,
                             const auto amount = label.apply(raw), history = label.history(raw);
                             const auto allocation = label.allocation(raw);
                             ++result.diagnostics.plane_measurements;
-                            const auto inventory = phase_inventory<mode>(cell, *geometries.at(cell.key));
+                            const auto inventory = phase_inventory(cell, cell_geometry<mode>(data, cell));
                             const auto share = Math::divide(amount.bulk, inventory.bulk).value;
                             SimpleFluid::detail::CompensatedSum<> source_defect, cut_closure;
                             source_defect += inventory.gas.value;

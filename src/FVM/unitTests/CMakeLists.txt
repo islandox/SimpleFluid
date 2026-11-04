@@ -9,6 +9,9 @@ set_source_files_properties(
 
 set(FVM_ONLY_TESTS
     testGeneralVoFRetentionCensus
+    testGeneralVoFNativeIdentity
+    testGeneralVoFFetchedSources
+    testGeneralVoFFetchedSourcesMPI
     testGeneralVoFBalance
     testGeneralVoFPhaseCleanup
     testGeneralVoFFaceWorkspace
@@ -73,6 +76,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/LocalSpatialCache.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFNativeIdentity" OR TEST_NAME STREQUAL "testGeneralVoFFetchedSources")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/CellGeometry.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/FaceWorkspaceBudget.cc)
@@ -448,7 +454,7 @@ foreach(PROCS IN ITEMS 2 4)
 endforeach()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
+    set_source_files_properties(testGeneralVoFNativeIdentity.cc testGeneralVoFFetchedSources.cc testGeneralVoFFetchedSourcesMPI.cc ../details/GeneralVoF/CellGeometry.cc testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
         testGeneralVoFFaceTransport.cc testGeneralVoFLimiterProtocol.cc testPolyhedralReconstruction.cc testExactPolyhedralReconstruction.cc
         testGeneralVoFReconstructionSupport.cc ${GENERAL_VOF_MOTION_SOURCES}
         testGeneralVoFPhaseConservation.cc ../details/GeneralVoF/PhasePublication.cc
@@ -537,6 +543,10 @@ foreach(PROCS 2 4)
 endforeach()
 
 foreach(PROCS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFFetchedSources_${PROCS}procs
+    TARGET testGeneralVoFFetchedSourcesMPI PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFetchedSourcesMPI.*"
+    LABELS "vof;geometry;collective;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFPreparedTransport_${PROCS}procs
     TARGET testGeneralVoFPreparedTransport PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFPreparedTransport.*"

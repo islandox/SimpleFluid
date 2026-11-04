@@ -94,10 +94,11 @@ public:
             return;
         if (value->options.arithmetic_mode == ArithmeticMode::Exact)
             complete_manifest = false;
-        for (const auto& [key, cell] : value->cells)
+        if (value->topology)
         {
-            pointer(cell.phase.geometry, group);
-            pointer(cell.finite_geometry, group);
+            pointer(value->topology->cell_geometry, group);
+            pointer(value->topology->ordinary_cell_geometry, group);
+            pointer(value->topology->bounded_cell_geometry, group);
         }
         hierarchy(value->hierarchy.get(), group);
         if (value->supplied_hierarchy.get() != value->hierarchy.get())
@@ -125,16 +126,13 @@ public:
             {
                 pointer(wall.geometry, group);
                 add(wall.finite_normal, group);
-                pointer(wall.finite_constraint.geometry, group);
             }
         if (const auto* cache = t.spatial_cache.get())
         {
-            for (const auto& cell : cache->cells)
-                pointer(cell.geometry, group);
+            pointer(cache->geometry_catalog, group);
             for (const auto& f : cache->frontiers)
             {
                 pointer(f.geometry, group);
-                pointer(f.retained_geometry, group);
                 if (f.support_identity)
                     add(*f.support_identity, group);
                 if (f.original_boundary)

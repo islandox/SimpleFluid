@@ -59,9 +59,9 @@ struct Source
     PhaseError occupancy;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
 };
-Source source_record(const Cell& c)
+Source source_record(const GeneralVoF::Data& data, const Cell& c)
 {
-    const auto volume = PLIC::ConvexCellGeometry<local_mode>::from_dynamic(c.finite_geometry)->volume().value;
+    const auto volume = cell_geometry<local_mode>(data, c).volume().value;
     return {c.gid, c.revision, c.owner, {volume, c.phase.gas_volume, c.phase.carrier_volume}, c.finite_history,
         c.occupancy, c.declaration};
 }
@@ -456,7 +456,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     const auto& tile = data.topology->tiles[index];
                     canonical += (tile.first == key ? -1 : 1) * controls.flux.at(tile.face_gid).value;
                 }
-                const auto old = source_record(c).old;
+                const auto old = source_record(data, c).old;
                 // Use the unrounded positive ledger. Binary64 publication can
                 // round an endpoint capacity upward before a limiting correction.
                 const auto baseline = low.endpoint_capacity.at(c.gid);
@@ -586,7 +586,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
             for (const auto& key : data.topology->order)
             {
                 const auto& c = data.cells.at(key);
-                const auto s = source_record(c);
+                const auto s = source_record(data, c);
                 auto& coefficient = updates[c.gid].donors[c.gid];
                 coefficient.owner = rank;
                 coefficient.revision = c.revision;
@@ -709,7 +709,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     throw std::invalid_argument("Interface source descriptor owner/revision differs.");
                 wire::Writer w;
                 stamp(w, data, trial.transaction_);
-                source(w, source_record(c));
+                source(w, source_record(data, c));
                 budget.packet(w.data.size());
                 packets.push_back({packet.peer, std::move(w.data)});
             }
@@ -823,7 +823,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
             for (const auto& key : data.topology->order)
             {
                 const auto& c = data.cells.at(key);
-                const auto old = source_record(c).old;
+                const auto old = source_record(data, c).old;
                 const auto& b = budgets.at(c.gid);
                 const auto positive = b.positive.value(), negative = b.negative.value(), diagonal = b.diagonal.value();
                 if (!b.self)
@@ -897,7 +897,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                     }
                 }
                 const auto final = total.value();
-                const auto old_amount = source_record(old).old;
+                const auto old_amount = source_record(data, old).old;
                 const auto face_update = update.face_update.value(), gross = update.face_magnitude.value();
                 const auto u = (64.L + 16.L * update.donors.size() + 16.L * data.topology->cell_tiles.at(key).size()) *
                                std::numeric_limits<long double>::epsilon();
@@ -955,7 +955,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 c.occupancy.fit_residual = c.declaration == GeneralVoFPhaseGeometry::Infer     ? 0
                                            : c.declaration == GeneralVoFPhaseGeometry::PureGas ? carrier.first
                                                                                                : gas.first;
-                validate_cell<local_mode>(c, data.options);
+                validate_cell<local_mode>(data, c, data.options);
                 append_finite_phase_publication(*candidate, c);
                 Sum canonical;
                 for (const auto index : data.topology->cell_tiles.at(key))

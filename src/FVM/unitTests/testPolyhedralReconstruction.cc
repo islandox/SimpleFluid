@@ -1,6 +1,7 @@
 /** @file testPolyhedralReconstruction.cc
  * @brief Resolution requests, bounded PLIC fitting and retained finite inventories.
  */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/unitTests/point_export_test_helpers.hh"
 #include "FVM/GeneralVoF.hh"
 #include "FVM/GeometricVoF.hh"
@@ -62,13 +63,13 @@ PLIC::PolyhedralPhaseSample<Mode> uniform_sample(std::array<int, 3> index, doubl
         upper[a] = (index[a] + 1) * scale;
     }
     const double volume = scale * scale * scale;
-    return {PLIC::ConvexCellGeometry<Mode>::box(lower, upper), fraction * volume, (1 - fraction) * volume};
+    return {SimpleFluid::PLIC::test::view(PLIC::ConvexCellGeometry<Mode>::box(lower, upper)), fraction * volume, (1 - fraction) * volume};
 }
 
 static_assert(std::is_same_v<decltype(PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>{}.geometry),
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Exact>>);
+    PLIC::CellGeometryView<ArithmeticMode::Exact>>);
 static_assert(std::is_same_v<decltype(PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary>{}.geometry),
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>>);
+    PLIC::CellGeometryView<ArithmeticMode::Ordinary>>);
 static_assert(!std::is_convertible_v<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>,
     PLIC::ConvexGeometryPtr<ArithmeticMode::Exact>>);
 
@@ -85,11 +86,11 @@ template<ArithmeticMode Mode> void typed_offset_and_reconstruction()
 {
     using Sample = PLIC::PolyhedralPhaseSample<Mode>;
     using Geometry = PLIC::ConvexCellGeometry<Mode>;
-    const Sample target{Geometry::box({0, 0, 0}, {1, 1, 1}), .25, .75};
+    const Sample target{SimpleFluid::PLIC::test::view(Geometry::box({0, 0, 0}, {1, 1, 1})), .25, .75};
     PLIC::reset_geometry_statistics();
     GeneralVoF::reset_geometry_statistics();
     const auto offset = PLIC::PolyhedralReconstruction<Mode>::solve_offset(target, {1, 0, 0});
-    const auto phases = target.geometry->phases(offset.geometry.gas);
+    const auto phases = SimpleFluid::PLIC::test::shell(target.geometry)->phases(offset.geometry.gas);
     EXPECT_LE(std::abs(phases.gas.value - .25L), .25L * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
     EXPECT_EQ(offset.target_volume_difference.arithmetic_mode, Mode);
     EXPECT_EQ(target.gas_volume, .25);
@@ -101,7 +102,7 @@ template<ArithmeticMode Mode> void typed_offset_and_reconstruction()
         const PLIC::GeometryPoint lower{double(index[0]), double(index[1]), double(index[2])};
         const PLIC::GeometryPoint upper{double(index[0] + 1), double(index[1] + 1), double(index[2] + 1)};
         const double gas = index[0] < 0 ? 1 : index[0] > 0 ? 0 : .25;
-        stencil.push_back({Geometry::box(lower, upper), gas, 1 - gas});
+        stencil.push_back({SimpleFluid::PLIC::test::view(Geometry::box(lower, upper)), gas, 1 - gas});
     }
     const auto fitted = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil);
     EXPECT_TRUE(fitted.fit_converged);
@@ -134,7 +135,7 @@ TEST(PolyhedralReconstruction, OrdinaryOffsetFitRetainsPhysicalMinorityResidualA
     {
         const auto sample = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, gas ? .25 : .75);
         const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 0, 0});
-        const auto phases = sample.geometry->phases(fit.geometry.gas);
+        const auto phases = SimpleFluid::PLIC::test::shell(sample.geometry)->phases(fit.geometry.gas);
         const auto measured = gas ? phases.gas : phases.carrier;
         EXPECT_EQ(measured.arithmetic_mode, ArithmeticMode::Ordinary);
         EXPECT_EQ(fit.target_volume_difference.arithmetic_mode, ArithmeticMode::Ordinary);
@@ -199,7 +200,7 @@ TEST(PolyhedralReconstruction, OrdinarySupportAndModelGatesRemainIndependentOfCe
     // storage boundary must reject a foreign-mode shell as well.
     const auto foreign = uniform_sample<ArithmeticMode::BoundedCertification>({-1, 0, 0}, 1, 1);
     EXPECT_THROW(
-        (void) PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(foreign.geometry->dynamic_geometry()),
+        (void) PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(SimpleFluid::PLIC::test::shell(foreign.geometry)->dynamic_geometry()),
         std::invalid_argument);
     EXPECT_EQ(target.gas_volume, .25);
     EXPECT_EQ(target.carrier_volume, .75);
@@ -500,7 +501,7 @@ TEST(PolyhedralReconstruction, GeometryCoverageAndConditionRemainIndependentAdmi
     auto incomplete = planar;
     incomplete.resize(3);
     EXPECT_EQ(Kernel::assess_resolution(target, incomplete).reason, Reason::InsufficientStencil);
-    planar.front().geometry.reset();
+    planar.front().geometry = {};
     EXPECT_THROW((void) Kernel::assess_resolution(target, planar), std::invalid_argument);
 
     constexpr double d = 1e-6;
@@ -510,7 +511,7 @@ TEST(PolyhedralReconstruction, GeometryCoverageAndConditionRemainIndependentAdmi
         const auto geometry =
             PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1});
         const auto volume = geometry->volume().as_double();
-        nearly_collinear.push_back({geometry, shift[0] < 0 ? volume : 0, shift[0] < 0 ? 0 : volume});
+        nearly_collinear.push_back({SimpleFluid::PLIC::test::view(geometry), shift[0] < 0 ? volume : 0, shift[0] < 0 ? 0 : volume});
     }
     const auto assessment = Kernel::assess_resolution(target, nearly_collinear);
     EXPECT_EQ(assessment.reason, Reason::IllConditionedStencil);
@@ -522,7 +523,7 @@ TEST(PolyhedralReconstruction, GeometryCoverageAndConditionRemainIndependentAdmi
         const auto geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(
             shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1});
         const auto volume = geometry->volume().as_double();
-        nearly_coplanar.push_back({geometry, shift[0] < 0 ? volume : 0, shift[0] < 0 ? 0 : volume});
+        nearly_coplanar.push_back({SimpleFluid::PLIC::test::view(geometry), shift[0] < 0 ? volume : 0, shift[0] < 0 ? 0 : volume});
     }
     EXPECT_EQ(Kernel::assess_resolution(target, nearly_coplanar).reason, Reason::IllConditionedStencil);
     EXPECT_THROW((void) Kernel::reconstruct(target, nearly_coplanar), PLIC::PolyhedralResolutionRequired);
@@ -733,7 +734,7 @@ TEST(PolyhedralReconstruction, CapturedFull50Step3AdmitsSupportedTinyPhaseWithou
     for (const auto& sample : stencil)
     {
         const auto residual =
-            (sample.geometry->phases(fit.geometry.gas).gas.value - sample.gas_volume) / sample.geometry->volume().value;
+            (SimpleFluid::PLIC::test::shell(sample.geometry)->phases(fit.geometry.gas).gas.value - sample.gas_volume) / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
         sum += residual * residual;
     }
     const auto rms = std::sqrt(sum / stencil.size());
@@ -770,7 +771,7 @@ BoundedSample plane_sample(
     }
     const auto gas = GeometricVoF::box_plane_volume(lower, upper, normal, offset * scale);
     const double volume = scale * scale * scale;
-    return {BoundedGeometry::box(lower, upper), gas, volume - gas};
+    return {SimpleFluid::PLIC::test::view(BoundedGeometry::box(lower, upper)), gas, volume - gas};
 }
 
 TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndPreservesAmounts)
@@ -830,7 +831,7 @@ TEST(PolyhedralReconstruction, ResolvedGrazingPlaneUsesNeighborSupport)
     EXPECT_TRUE(fit.resolution.admitted());
     for (auto n : fit.geometry.gas.normal)
         EXPECT_NEAR(n, 1 / std::sqrt(3.), 2e-7);
-    EXPECT_TRUE(target.geometry->phases(fit.geometry.gas).gas.relative_error_at_most(target.gas_volume, 8e-15));
+    EXPECT_TRUE(SimpleFluid::PLIC::test::shell(target.geometry)->phases(fit.geometry.gas).gas.relative_error_at_most(target.gas_volume, 8e-15));
 }
 TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
 {
@@ -843,7 +844,7 @@ TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
         const double width = std::max(0., std::min(upper[0], .2) - std::max(lower[0], .1));
         const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
         const double gas = width * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return BoundedSample{BoundedGeometry::box(lower, upper), gas, volume - gas};
+        return BoundedSample{SimpleFluid::PLIC::test::view(BoundedGeometry::box(lower, upper)), gas, volume - gas};
     };
     const auto coarse = layer({0, 0, 0}, 1, 0);
     std::vector<BoundedSample> coarse_stencil;
@@ -897,7 +898,7 @@ TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
     for (double direction : {-1., 1.})
         for (bool minority_gas : {false, true})
         {
-            const BoundedSample sample{numerical, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
+            const BoundedSample sample{SimpleFluid::PLIC::test::view(numerical), minority_gas ? .225 : .675, minority_gas ? .675 : .225};
             const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
                 sample, {direction, 0, 0});
             ASSERT_EQ(decltype(fit.target_volume_difference)::arithmetic_mode, ArithmeticMode::BoundedCertification);
@@ -922,12 +923,12 @@ TEST(PolyhedralReconstruction, PureEndpointsAndRejectedArithmeticDoNotChangePoli
         for (bool gas : {false, true})
         {
             const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
-                {geometry, gas ? 1. : 0., gas ? 0. : 1.}, {direction, 0, 0});
+                {SimpleFluid::PLIC::test::view(geometry), gas ? 1. : 0., gas ? 0. : 1.}, {direction, 0, 0});
             EXPECT_TRUE(gas ? fit.geometry.pure_gas : fit.geometry.pure_carrier);
             const auto phases = geometry->phases(fit.geometry.gas);
             EXPECT_EQ((gas ? phases.carrier : phases.gas).upper(), 0);
         }
-    BoundedSample sample{geometry, .3, .7};
+    BoundedSample sample{SimpleFluid::PLIC::test::view(geometry), .3, .7};
     PLIC::PolyhedralReconstructionOptions options;
     options.maximum_clip_evaluations = 1;
     EXPECT_THROW((void) PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
@@ -947,7 +948,7 @@ TEST(PolyhedralReconstruction, FarMinoritySupportRetainsOffsetPrecisionForBothLa
     for (double direction : {-1., 1.})
         for (bool gas : {false, true})
         {
-            const BoundedSample sample{geometry, gas ? 1e-6 : 1 - 1e-6, gas ? 1 - 1e-6 : 1e-6};
+            const BoundedSample sample{SimpleFluid::PLIC::test::view(geometry), gas ? 1e-6 : 1 - 1e-6, gas ? 1 - 1e-6 : 1e-6};
             const auto fitted = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
                 sample, {direction, 0, 0});
             const auto phases = geometry->phases(fitted.geometry.gas);
@@ -971,7 +972,7 @@ template<ArithmeticMode Mode> void coarse_fine_passage_minority_fit()
             local[p].value[axis] = normalized[p][axis] * .5L;
     const auto geometry = PLIC::ConvexCellGeometry<Mode>::make_local(
         {.6, .5, .5}, local, {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}});
-    const PLIC::PolyhedralPhaseSample<Mode> sample{geometry, 6.3984438984441292e-8, .0078124360155610159};
+    const PLIC::PolyhedralPhaseSample<Mode> sample{SimpleFluid::PLIC::test::view(geometry), 6.3984438984441292e-8, .0078124360155610159};
     const auto fitted = PLIC::PolyhedralReconstruction<Mode>::solve_offset(
         sample, {.96128421995518143, .27109170276597788, .049415960545162486});
     const auto actual = geometry->phases(fitted.geometry.gas);
@@ -1934,8 +1935,8 @@ OrdinarySample captured_sheared_sample(PLIC::GeometryPoint lower, PLIC::Geometry
         const auto y = i & 2 ? upper[1] : lower[1];
         points[i].value = {x + shear * y, y, i & 4 ? upper[2] : lower[2]};
     }
-    return {Cell::make_points(points,
-                {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {1, 3, 7, 5}, {3, 2, 6, 7}, {2, 0, 4, 6}}),
+    return {SimpleFluid::PLIC::test::view(Cell::make_points(points,
+                {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {1, 3, 7, 5}, {3, 2, 6, 7}, {2, 0, 4, 6}})),
         gas, carrier, id};
 }
 
@@ -2417,7 +2418,7 @@ TEST(PolyhedralReconstruction, OrdinaryMeasureOffsetSolvesTinyPhasesWithoutCutCe
     const double minority = 1e-27;
     for (const bool gas : {false, true})
     {
-        const OrdinarySample sample{cell, gas ? minority : 1., gas ? 1. : minority};
+        const OrdinarySample sample{SimpleFluid::PLIC::test::view(cell), gas ? minority : 1., gas ? 1. : minority};
         PLIC::reset_geometry_statistics();
         PLIC::PolyhedralReconstructionOptions options;
         options.measure_only = true;
@@ -2451,7 +2452,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17RetainsRepresentedShellAndFit
         const auto& row = fixture::rows[i];
         SCOPED_TRACE(row.id);
         const auto sample = fixture::sample(row);
-        const auto& cell = *sample.geometry;
+        const auto& cell = *SimpleFluid::PLIC::test::shell(sample.geometry);
         ASSERT_EQ(sample.id, i == 0 ? 17u : fixture::stencil_ids[i - 1]);
         EXPECT_TRUE(sample.observed_mixed);
         EXPECT_EQ(sample.gas_volume, row.gas);
@@ -2500,7 +2501,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell17RetainedPlaneMatchesIndepende
     {
         const auto sample = fixture::sample(fixture::rows[i]);
         SCOPED_TRACE(sample.id);
-        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(fixture::retained_plane);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(fixture::retained_plane);
         ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
         const auto volume = sample.id == 2 ? 0x1p-4L : 0x1p-7L;
         const auto residual = (measured.volume - sample.gas_volume) / volume;
@@ -2638,7 +2639,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell8RetainsActualCandidateShellAnd
         const auto& row = fixture::rows[i];
         SCOPED_TRACE(row.id);
         const auto sample = fixture::sample(row);
-        const auto& cell = *sample.geometry;
+        const auto& cell = *SimpleFluid::PLIC::test::shell(sample.geometry);
         ASSERT_EQ(sample.id, i == 0 ? 8u : fixture::stencil_ids[i - 1]);
         EXPECT_EQ(sample.observed_mixed, row.observed_mixed);
         EXPECT_EQ(sample.gas_volume, row.gas);
@@ -2685,7 +2686,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell8RetainedPlanePassesIndependent
         const auto& row = fixture::rows[i];
         const auto sample = fixture::sample(row);
         SCOPED_TRACE(sample.id);
-        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(fixture::retained_plane);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(fixture::retained_plane);
         ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
         const auto residual = (measured.volume - sample.gas_volume) / row.stored_volume;
         const auto oracle = fixture::gas_fraction_residuals[i];
@@ -2958,8 +2959,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell34CompleteCurrentHaloRequiresQu
     {
         const auto& row = fixture::rows[i];
         stencil.push_back(fixture::sample(row));
-        EXPECT_EQ(stencil.back().geometry->volume().value, row.stored_volume);
-        EXPECT_EQ(stencil.back().geometry->encode_certificate(), fixture::certificate(row));
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(stencil.back().geometry)->volume().value, row.stored_volume);
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(stencil.back().geometry)->encode_certificate(), fixture::certificate(row));
         EXPECT_EQ(stencil.back().id, fixture::stencil_ids[i - 1]);
     }
     const auto original = stencil;
@@ -3426,9 +3427,9 @@ void expect_native_local_prefix_fit(const OrdinarySample& target, std::span<cons
                     component = -component;
                 plane.offset = -plane.offset;
             }
-            const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane);
+            const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(plane);
             const auto difference = measured.volume - (gas ? sample.gas_volume : sample.carrier_volume);
-            const auto residual = difference / sample.geometry->volume().value;
+            const auto residual = difference / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
             measured_squared += residual * residual;
         }
         const auto prefix_rms = std::sqrt(measured_squared / fitting_cells);
@@ -3574,8 +3575,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell37LocalFitUsesFullPhaseAvailabi
         const auto& row = fixture::rows[i];
         support.push_back(fixture::sample(row));
         EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
-        EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
-        EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->volume().value, row.stored_volume);
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->encode_certificate(), fixture::certificate(row));
     }
     // Independent Decimal65 constrained fit: native-cell37/review/local_fit.json.
     expect_native_local_prefix_fit(target, support, fixture::options(),
@@ -3595,8 +3596,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell33NegativeCurvatureQualifiesWit
         const auto& row = fixture::rows[i];
         support.push_back(fixture::sample(row));
         EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
-        EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
-        EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->volume().value, row.stored_volume);
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->encode_certificate(), fixture::certificate(row));
     }
     // Same NEW4 input-015 target/full20/prefix6 as the retained IterationLimit
     // trajectory. Independent Decimal85 stationary witness from
@@ -3614,7 +3615,7 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36PrimaryPlaneRetainsIndependen
     const auto target = fixture::sample(fixture::rows.front());
     const auto options = fixture::options();
     ASSERT_LT(target.gas_volume, target.carrier_volume);
-    const auto measured = PLIC::OrdinaryPlaneMeasure(*target.geometry).below(fixture::captured_bad_plane);
+    const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(target.geometry)).below(fixture::captured_bad_plane);
     ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
     const auto target_difference = measured.volume - target.gas_volume;
     EXPECT_LE(std::abs(target_difference - fixture::captured_bad_target_difference),
@@ -3634,9 +3635,9 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36PrimaryPlaneRetainsIndependen
                 component = -component;
             plane.offset = -plane.offset;
         }
-        const auto phase = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane);
+        const auto phase = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(plane);
         const auto difference = phase.volume - (gas ? sample.gas_volume : sample.carrier_volume);
-        const auto residual = difference / sample.geometry->volume().as_double();
+        const auto residual = difference / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().as_double();
         squared += residual * residual;
     }
     const auto rms = std::sqrt(squared / fixture::first_ring_size);
@@ -3666,8 +3667,8 @@ TEST(PolyhedralReconstruction, CapturedNativeCell36FaceRestartConvergesForBothPh
             const auto& row = fixture::rows[i];
             support.push_back(fixture::sample(row));
             EXPECT_EQ(support.back().id, fixture::stencil_ids[i - 1]);
-            EXPECT_EQ(support.back().geometry->volume().value, row.stored_volume);
-            EXPECT_EQ(support.back().geometry->encode_certificate(), fixture::certificate(row));
+            EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->volume().value, row.stored_volume);
+            EXPECT_EQ(SimpleFluid::PLIC::test::shell(support.back().geometry)->encode_certificate(), fixture::certificate(row));
         }
         auto expected_normal = optimum;
         if (swapped)
@@ -3870,7 +3871,7 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     for (const auto& row : fixture::rows)
     {
         samples.push_back(fixture::fit_sample(row));
-        EXPECT_EQ(samples.back().geometry->volume().value, 0x1p-9L);
+        EXPECT_EQ(SimpleFluid::PLIC::test::shell(samples.back().geometry)->volume().value, 0x1p-9L);
         EXPECT_EQ(row.ring, samples.size() == 1 ? 0u : samples.size() <= 6 ? 1u : 2u);
     }
     const auto original_samples = samples;
@@ -3892,7 +3893,7 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     EXPECT_GT(assessment.stencil_condition, 1);
     EXPECT_LT(assessment.stencil_condition, 2);
     EXPECT_GE(std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
-                  std::cbrt(target.geometry->volume().value),
+                  std::cbrt(SimpleFluid::PLIC::test::shell(target.geometry)->volume().value),
         options.minimum_optimized_phase_length_ratio);
     // The capture distinguishes physical inventories from geometric fit labels:
     // the target's independently stored dominant amount differs by one ulp.
@@ -3911,9 +3912,9 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     long double squared = 0;
     for (const auto& sample : stencil)
     {
-        const auto measured = PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(offset.geometry.gas);
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(offset.geometry.gas);
         ASSERT_EQ(measured.status, PLIC::PlaneMeasureStatus::Resolved);
-        const auto residual = (measured.volume - sample.gas_volume) / sample.geometry->volume().value;
+        const auto residual = (measured.volume - sample.gas_volume) / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
         squared += residual * residual;
     }
     const auto diagnostic_rms = std::sqrt(squared / stencil.size());
@@ -3968,7 +3969,7 @@ TEST(PolyhedralReconstruction, CapturedSinglePlaneTargetUsesCompleteFiveFaceNeig
     namespace fixture = captured_algebraic_corner;
     using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
     const auto target = fixture::fit_sample(fixture::rows.front());
-    EXPECT_NEAR(target.gas_volume / target.geometry->volume().value, .4535127712971186L, 1e-16L);
+    EXPECT_NEAR(target.gas_volume / SimpleFluid::PLIC::test::shell(target.geometry)->volume().value, .4535127712971186L, 1e-16L);
     EXPECT_NEAR(fixture::physical_fraction(fixture::rows.front()), .4535127712971186L, 3.4e-16L);
     std::vector<OrdinarySample> stencil;
     for (const auto& row : fixture::rows)
@@ -3993,8 +3994,8 @@ TEST(PolyhedralReconstruction, CapturedSinglePlaneTargetUsesCompleteFiveFaceNeig
         long double sum = 0;
         for (const auto& sample : stencil)
         {
-            const auto residual = (PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane).volume -
-                                     sample.gas_volume) / sample.geometry->volume().value;
+            const auto residual = (PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(sample.geometry)).below(plane).volume -
+                                     sample.gas_volume) / SimpleFluid::PLIC::test::shell(sample.geometry)->volume().value;
             sum += residual * residual;
         }
         return std::sqrt(sum / stencil.size());
@@ -4117,7 +4118,7 @@ TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSke
             }
             gas /= 6 * normal[0] * normal[1] * normal[2];
         }
-        return OrdinarySample{geometry, double(gas), double(volume - gas), id};
+        return OrdinarySample{SimpleFluid::PLIC::test::view(geometry), double(gas), double(volume - gas), id};
     };
     const auto target = sample({0, 0, 0}, {.125, .25, .25}, 8);
     std::vector<OrdinarySample> stencil{
@@ -4188,7 +4189,7 @@ TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSke
     // The unchanged one-plane target witness excludes z+ geometrically, so
     // retaining its positive phase creates a real nonzero objective residual.
     const auto physical = Kernel::solve_offset(target, {1, .17, .11}, options);
-    const auto measured = PLIC::OrdinaryPlaneMeasure(*received[1].geometry).below(physical.geometry.gas);
+    const auto measured = PLIC::OrdinaryPlaneMeasure(*SimpleFluid::PLIC::test::shell(received[1].geometry)).below(physical.geometry.gas);
     EXPECT_EQ(measured.volume, 0);
     EXPECT_EQ((measured.volume - received[1].gas_volume) / 0x1p-7L, -0x1p-18L);
     EXPECT_LE(
@@ -4215,7 +4216,7 @@ template<ArithmeticMode Mode> void separated_phase_context_validation()
     malformed.back().gas_volume = std::numeric_limits<double>::quiet_NaN();
     auto null_geometry = full;
     null_geometry.push_back(full.front());
-    null_geometry.back().geometry.reset();
+    null_geometry.back().geometry = {};
     const std::vector<Sample> unused{malformed.back()};
     PLIC::reset_geometry_statistics();
     GeneralVoF::reset_geometry_statistics();
@@ -4313,7 +4314,7 @@ TEST(PolyhedralReconstruction, TransportAngularSupportRejectsIllConditionedMixed
     for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}})
         stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == 1 ? 0 : 1));
     for (const PLIC::GeometryPoint shift : {PLIC::GeometryPoint{0, 1, 0}, {0, 2, 1e-6}})
-        stencil.push_back({Cell::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1}), .5, .5});
+        stencil.push_back({SimpleFluid::PLIC::test::view(Cell::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1})), .5, .5});
     ASSERT_TRUE(Kernel::assess_stencil_geometry(target, stencil).admitted());
     PLIC::reset_geometry_statistics();
     const auto support = Kernel::assess_transport_support(target, stencil);

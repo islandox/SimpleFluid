@@ -304,7 +304,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 else
                     cell.experimental_exact.reset();
                 r.done();
-                validate_cell<Mode>(cell, data.options, retained_interface(data, cell));
+                validate_cell<Mode>(data, cell, data.options, retained_interface(data, cell));
             }
             if (seen.size() != request_count)
                 throw std::invalid_argument("General VoF incomplete phase replies.");

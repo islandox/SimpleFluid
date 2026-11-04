@@ -12,6 +12,7 @@
  * geometric incompatibility certificate.
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
 #include <cstdint>
@@ -91,7 +92,7 @@ inline PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> fit_sample(const Ro
     const bool gas = row.physical_gas <= row.physical_liquid;
     const double minority = gas ? row.physical_gas : row.physical_liquid;
     const double dominant = static_cast<double>(geometry->volume().value - minority);
-    return {geometry, gas ? minority : dominant, gas ? dominant : minority, row.gid};
+    return {SimpleFluid::PLIC::test::view(geometry), gas ? minority : dominant, gas ? dominant : minority, row.gid};
 }
 // Independent analytic rectangle/half-plane area: integrate the positive part
 // quadratic CDF of a*x+b*y. No production PLIC offset or clipped measure enters.

@@ -290,10 +290,7 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
                         if (source.declaration != GeneralVoFPhaseGeometry::Infer)
                             continue;
                         const auto gas = source.phase.gas_volume, carrier = source.phase.carrier_volume;
-                        const auto actual =
-                            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(source.finite_geometry)
-                                ->volume()
-                                .value;
+                        const auto actual = cell_geometry<ArithmeticMode::Ordinary>(data, source).volume().value;
                         const unsigned minority = gas <= carrier ? 0 : 1;
                         const double small = minority == 0 ? gas : carrier;
                         if (!(small > 0) || static_cast<long double>(small) > options.relative_cutoff * actual)
@@ -319,7 +316,7 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
                             minority == 0 ? GeneralVoFPhaseGeometry::PureCarrier : GeneralVoFPhaseGeometry::PureGas;
                         cell.requires_interface = false;
                         cell.occupancy.fit_residual = 0;
-                        validate_cell<ArithmeticMode::Ordinary>(cell, data.options);
+                        validate_cell<ArithmeticMode::Ordinary>(data, cell, data.options);
                         budget.add(sizeof(cell) + sizeof(Key) + sizeof(delta) + 8 * sizeof(void*));
                         proposed.push_back(delta);
                         const auto replacement = replacements.emplace(key, std::move(cell)).first;

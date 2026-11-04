@@ -2358,3 +2358,134 @@ TEST(OrdinaryAggregateMetric, BorrowedRetentionObserverPreservesEnvironmentCount
     EXPECT_EQ(observer.exits, 2u);
     EXPECT_GT(observer.owners, 0u);
 }
+
+namespace
+{
+CellGeometryView<ArithmeticMode::Ordinary> native_donor_view(GeometryPoint lower, GeometryPoint upper)
+{
+    CartesianSourceDescription description;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        description.axes[axis] = {lower[axis], upper[axis]};
+    CartesianSourceCellSlot cell;
+    cell.upper = {1, 1, 1};
+    description.cells.push_back(cell);
+    return {CellGeometryCatalog<ArithmeticMode::Ordinary>::cartesian(
+                CartesianCellSource::make(std::move(description), ordinary_limits()), ordinary_limits()),
+        0};
+}
+void same_native_donor_result(const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& actual,
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& expected)
+{
+    using Group = SimpleFluid::geometry::swept_volume::OrdinaryAggregateGroup;
+    EXPECT_EQ(actual.signed_source_volume, expected.signed_source_volume);
+    ASSERT_EQ(actual.groups.size(), expected.groups.size());
+    for (std::size_t i = 0; i < actual.groups.size(); ++i)
+    {
+        const auto& a = actual.groups[i];
+        const auto& b = expected.groups[i];
+        EXPECT_EQ(a.donor, b.donor);
+        EXPECT_EQ(a.sign, b.sign);
+        for (const auto member : {&Group::nominal, &Group::numerical_error_estimate, &Group::approximation_bound})
+        {
+            EXPECT_EQ((a.*member).bulk, (b.*member).bulk);
+            EXPECT_EQ((a.*member).gas, (b.*member).gas);
+            EXPECT_EQ((a.*member).carrier, (b.*member).carrier);
+        }
+        EXPECT_EQ(a.bulk_positive, b.bulk_positive);
+        EXPECT_EQ(a.gas_positive, b.gas_positive);
+        EXPECT_EQ(a.carrier_positive, b.carrier_positive);
+    }
+    EXPECT_EQ(actual.statistics.pair_tests, expected.statistics.pair_tests);
+    // Native views reconstruct formerly stored facts. Keep that executed work
+    // charged, while requiring the subsequent numerical kernels to be unchanged.
+    EXPECT_EQ(expected.statistics.native_fact_preparation_operations, 0u);
+    ASSERT_GE(actual.statistics.operations, actual.statistics.native_fact_preparation_operations);
+    EXPECT_EQ(actual.statistics.operations - actual.statistics.native_fact_preparation_operations,
+        expected.statistics.operations);
+    EXPECT_EQ(actual.statistics.cancelled_boundaries, expected.statistics.cancelled_boundaries);
+}
+} // namespace
+
+TEST(OrdinaryAggregateNativeViews, FourSlabsPreserveOrderedNumericsAndIndependentPhaseVolumes)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const std::array tetrahedra{
+        FixtureTetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+    const OrdinaryAggregateSource source(make_batch(tetrahedra), {}, ordinary_limits());
+    std::array<OrdinaryAggregateDonor, 4> owning, views;
+    for (unsigned i = 0; i < owning.size(); ++i)
+    {
+        const double a = i / 4., b = (i + 1) / 4.;
+        const long double volume = ((1.L - a) * (1.L - a) * (1.L - a) - (1.L - b) * (1.L - b) * (1.L - b)) / 6;
+        owning[i] = cut_donor(Geometry::box({a, 0, 0}, {b, 1, 1}), {{0, 1, -1}, {}, 0}, volume, volume / 2);
+        owning[i].id = i;
+        views[i] = owning[i];
+        views[i].geometry.reset();
+        views[i].geometry_view = native_donor_view({a, 0, 0}, {b, 1, 1});
+    }
+    for (unsigned order = 0; order < 2; ++order)
+    {
+        const auto expected = source.measure(owning);
+        const auto actual = source.measure(views);
+        same_native_donor_result(actual, expected);
+        long double bulk = 0, gas = 0, carrier = 0;
+        for (const auto& group : actual.groups)
+        {
+            bulk += group.nominal.bulk;
+            gas += group.nominal.gas;
+            carrier += group.nominal.carrier;
+        }
+        expect_amount(bulk, 1.L / 6);
+        expect_amount(gas, 1.L / 12);
+        expect_amount(carrier, 1.L / 12);
+        auto mixed = views;
+        mixed[1] = owning[1];
+        mixed[3] = owning[3];
+        same_native_donor_result(source.measure(mixed), expected);
+        std::reverse(owning.begin(), owning.end());
+        std::reverse(views.begin(), views.end());
+    }
+}
+
+TEST(OrdinaryAggregateNativeViews, PureAdjacentDonorsKeepZeroOppositePhaseAndCanonicalGroups)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const OrdinaryAggregateSource source(make_batch(cube_tetrahedra()), {}, ordinary_limits());
+    std::array<OrdinaryAggregateDonor, 2> owning, views;
+    for (unsigned i = 0; i < owning.size(); ++i)
+    {
+        const double lower = i / 2., upper = (i + 1) / 2.;
+        auto& donor = owning[i];
+        donor.id = 31 + i;
+        donor.geometry = Geometry::box({lower, 0, 0}, {upper, 1, 1});
+        donor.pure_gas = i == 0;
+        donor.pure_carrier = i == 1;
+        donor.bulk_budget = .5L * relative_allowance;
+        donor.gas_budget = donor.pure_gas ? donor.bulk_budget : 0;
+        donor.carrier_budget = donor.pure_carrier ? donor.bulk_budget : 0;
+        views[i] = donor;
+        views[i].geometry.reset();
+        views[i].geometry_view = native_donor_view({lower, 0, 0}, {upper, 1, 1});
+    }
+    const auto expected = source.measure(owning);
+    const auto actual = source.measure(views);
+    same_native_donor_result(actual, expected);
+    ASSERT_EQ(actual.groups.size(), 2u);
+    for (const auto& group : actual.groups)
+    {
+        expect_amount(group.nominal.bulk, .5L);
+        if (group.donor == 31)
+        {
+            expect_amount(group.nominal.gas, .5L);
+            EXPECT_EQ(group.nominal.carrier, 0);
+            EXPECT_FALSE(group.carrier_positive);
+        }
+        else
+        {
+            EXPECT_EQ(group.donor, 32u);
+            expect_amount(group.nominal.carrier, .5L);
+            EXPECT_EQ(group.nominal.gas, 0);
+            EXPECT_FALSE(group.gas_positive);
+        }
+    }
+}

@@ -1,4 +1,5 @@
 /** Independent manufactured-motion oracle and opt-in algebraic VoF qualification. */
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "ReferenceOracle.hh"
@@ -951,9 +952,9 @@ void dump_failure(const Fixture& f, const Case& c, unsigned n, const std::string
         out << "support gid " << sample.cell << " owner " << sample.owner << " key ";
         write_key(out, key);
         out << " center " << sample.centroid[0] << ' ' << sample.centroid[1] << ' ' << sample.centroid[2] << '\n';
-        const auto geometry = sample.finite_geometry;
+        const auto geometry = PLIC::test::shell(sample.finite_geometry.template get<ArithmeticMode::Ordinary>());
         const auto certificate =
-            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(geometry)->encode_certificate();
+            geometry->encode_certificate();
         const auto certificate_name = filename + ".gid" + std::to_string(sample.cell) + ".certificate.bin";
         std::ofstream binary(std::filesystem::path(destination) / certificate_name, std::ios::binary);
         binary.write(certificate.data(), static_cast<std::streamsize>(certificate.size()));

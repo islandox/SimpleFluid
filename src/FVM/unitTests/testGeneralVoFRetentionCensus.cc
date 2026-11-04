@@ -213,7 +213,7 @@ TEST(GeneralVoFRetentionCensus, RejectionAndExhaustedDiagnosticScratchPreserveAc
     std::array<std::byte, 1> storage{};
     census::ProbeScratch scratch(storage);
     ASSERT_FALSE(accepted->cells.empty());
-    const auto root = census::root(*accepted->cells.begin()->second.phase.geometry);
+    const auto root = census::root(*accepted->topology->cell_geometry);
     const auto report = census::inspect_retention(std::span(&root, 1), {}, scratch, {.complete_root_manifest = true});
     EXPECT_FALSE(report.complete());
     EXPECT_EQ(Access::data(source), accepted);

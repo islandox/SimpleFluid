@@ -267,16 +267,27 @@ public:
         auto center = region.geometry().cell_centroid(leaf.native_cell);
         return {region.geometry().cell_volume(leaf.native_cell), {center.x, center.y, center.z}};
     }
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
+    bool has_native_cartesian_geometry() const noexcept override { return true; }
+    std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
+        const AdaptiveLeaf& leaf) const override
+    {
+        return geometry_bounds(leaf);
+    }
+    AdaptiveCartesianGeometryBounds geometry_bounds(const AdaptiveLeaf& leaf) const
     {
         const auto& cell = ancestry(grid_, leaf.key);
-        PLIC::GeometryPoint lower{}, upper{};
+        AdaptiveCartesianGeometryBounds result;
         for (std::size_t a = 0; a < 3; ++a)
         {
-            lower[a] = coordinate(grid_, a, cell.index[a], cell.level);
-            upper[a] = coordinate(grid_, a, cell.index[a] + 1, cell.level);
+            result.lower[a] = coordinate(grid_, a, cell.index[a], cell.level);
+            result.upper[a] = coordinate(grid_, a, cell.index[a] + 1, cell.level);
         }
-        return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(lower, upper);
+        return result;
+    }
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
+    {
+        const auto bounds = geometry_bounds(leaf);
+        return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(bounds.lower, bounds.upper);
     }
     std::vector<AdaptiveSurface> surfaces_from_shape(
         const AdaptiveLeaf& leaf, const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& shape,
@@ -471,6 +482,15 @@ public:
     }
 };
 } // namespace
+bool has_native_cartesian_geometry(const AdaptiveProviderKernel& kernel) noexcept
+{
+    return kernel.has_native_cartesian_geometry();
+}
+std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
+    const AdaptiveProviderKernel& kernel, const AdaptiveLeaf& leaf)
+{
+    return kernel.native_cartesian_geometry_bounds(leaf);
+}
 std::shared_ptr<const AdaptiveProviderKernel> cartesian_adaptive_kernel(AMRGrid grid)
 {
     return std::make_shared<const CartesianKernel>(std::move(grid));

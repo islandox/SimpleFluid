@@ -11,6 +11,7 @@
  * they support a target-volume oracle independent of production clipping.
  */
 #pragma once
+#include "FVM/unitTests/cell_geometry_view_test_helpers.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
 #include <cstdint>
@@ -1601,7 +1602,7 @@ inline Sample sample(const Row& row)
     const bool gas_minor = row.physical_gas <= row.physical_carrier;
     const double minority = gas_minor ? row.physical_gas : row.physical_carrier;
     const double dominant = double(geometry->volume().value - minority);
-    return {geometry, gas_minor ? minority : dominant, gas_minor ? dominant : minority, row.id, row.mixed};
+    return {SimpleFluid::PLIC::test::view(geometry), gas_minor ? minority : dominant, gas_minor ? dominant : minority, row.id, row.mixed};
 }
 inline PLIC::PolyhedralReconstructionOptions options()
 {

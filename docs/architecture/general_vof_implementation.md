@@ -210,21 +210,87 @@ the ledger pins those owners and includes its bookkeeping in admission.
 Allocation measurements report their scope and exclusions separately from these
 conservative admission estimates; neither metric is process RSS.
 
-Ordinary procedural Cartesian cells perform the existing authenticated source
-import before selecting their retained owners. When the original leaf has no
-explicit geometry owner, an exact representation check can make that imported
-root serve both native and numerical queries. The check preserves frame and
-reference origin, ordered vertices/faces/incidence, native support identities,
-plane coefficients, volume, canonical exports and moments; it uses no geometric
-tolerance. Constructed, rebased, numerical-only and explicit native roots retain
-their original ownership. BoundedCertification still retains its separately
-certified geometry. A failed equivalence proof keeps both roots.
+Ordinary procedural Cartesian cells retain an immutable source context and a
+catalog slot. The context owns the evaluated source axes, cell intervals,
+original support facts, captured arithmetic environment and represented metrics.
+State publication primes moment data at the same boundary as its original import
+path. It has no backpointer to the hierarchy or phase state, general plane
+owners, frozen cell topology or export cache. The native adapter authenticates
+the actual provider capability, source recipe, typed ancestry and recipe-relative
+ordinal before selecting this representation. Raw geometry bounds use the original
+provider coordinate expression under the current construction controls. Stored
+recipe axes retain their separate native binary64 metric role. A Cartesian
+provider label alone is insufficient.
+Constructed, rebased, numerical-only and explicit native roots use existing
+materialized owners. BoundedCertification retains its separately certified
+geometry; Exact retains its existing import and arithmetic workflow.
 
-This selection retires an unnecessary native shell rather than discounting a
-live owner. Import and comparison retain their operation and storage admissions;
-destruction does not refund cumulative construction charges. The final retained
-audit visits the actual surviving owners, including shared support payloads and
-its tracking storage.
+State publication also requires a sufficient exact representation check. Under
+supported construction controls it checks raw-coordinate subtraction and scaling
+witnesses, signed coordinate roundtrips, and identical source/import frames and
+normalized corners. A failed proof preserves the original and separately imported
+materialized representations. It neither rejects the cell nor forces moment
+preparation. This matters for large coordinate ratios where a raw endpoint or its
+error witness cannot survive the original import unchanged.
+
+Accepted cells store catalog slots and phase amounts. The topology owns the
+catalogs, with owned cells first and retained support cells afterwards. Public
+owned-geometry ranges, remap common cells, reconstruction patches, support cells and phase samples
+yield immutable `CellGeometryView<Mode>` values, or their runtime counterpart.
+Ranges, iterators and returned cell/face values pin the catalog independently.
+They provide checked indexed and range access without an implicit shell or
+pointer conversion. Reordering builds a flat catalog of source references rather
+than a chain of previous catalogs. Recipe-relative slots establish neither
+canonical identity nor transaction authority.
+
+Routine volume, moment, support, bounds, face and occupancy queries use these
+views. Native binary64 mesh metrics remain separate from represented PLIC
+metrics. Shared fixed-box and planar evaluators preserve the original frame,
+corner/face order, integration, support and error arithmetic. Original source
+supports are distinct from reconstructed canonical face coordinates; wall and
+frontier constraints retain those original facts. Complete source-point fans
+include hanging points on coarse edges and face interiors.
+
+Active clipping, donor/overlap work and reconstruction explicitly call
+`materialize_cell(view, workspace)` or the ordered `materialize_cells(range,
+workspace)` batch. The operation-local workspace admits shell
+construction, scratch and temporary ownership and tracks remaining arithmetic
+and pair work. Temporary shells never enter an accepted cache ledger simply
+because an operation needed them. A clipped result, snapshot or replay dependency
+that survives the operation receives complete retained admission before
+publication. Early destruction does not refund cumulative charges. Exact views
+forward their existing owners explicitly and do not acquire a finite workspace.
+
+Adapted face transfer obtains complete remote target support through the
+collective `fetch_native_sources` facade. Its immutable result owns the fetched
+draft and an original-source geometry range in owned-then-ghost order. A returned
+view can outlive that result; a borrowed draft requires the result to remain alive.
+The existing native fetch keeps its hierarchy construction cap. Returned draft
+ownership is admitted into the caller's operation budget before allocating the
+new catalog and gathers. The reported admission includes spent scratch and is
+not a live-memory or RSS measurement. These geometric views establish neither
+handoff authority nor permission to omit a remote fan or coverage proof.
+Fresh raw source contexts retain the original box's lazy first-moment behavior:
+the first successful moment or centroid query fixes its integration cache under
+that caller's controls. Constructor volume remains separate; later origin shifts
+use the current caller. Materialization copies an established cache or leaves an
+unprepared raw result lazy. Inline cache publication is synchronized and a failed
+query can retry without publishing a partial result.
+
+Ordinary aggregate donors can carry an original cell view. Pure labels read its
+represented bulk measure; ordered cut facts and framed bounds come from the same
+original plane data. This avoids building a general cell solely to read its
+planes. Existing owning donors keep their original path, and an unresolved
+overlap still uses the established intersection kernel and complete donor checks.
+Reconstructing formerly stored facts is charged as preparation work and reported
+separately from the unchanged numerical integration work. It is never refunded.
+
+Ownership-only remap reuse additionally requires exact source recipe and
+represented geometry agreement, including ordered corners, original supports,
+frame and face facts. Equal keys, volumes or centroids alone do not establish
+that proof. A missing or failed proof uses the existing geometric coverage
+checks. The final retained audit visits actual surviving catalogs, contexts,
+support payloads, fallback geometry and tracking storage.
 
 The allocation ledger stores a strong pin for each kind-qualified owner address.
 Payload and bookkeeping totals belong to the admission scope rather than to

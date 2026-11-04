@@ -3,16 +3,17 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PolyhedralInterface.hh"
-#include <span>
-#include <stdexcept>
 #include <cstdint>
 #include <limits>
-#include <vector>
+#include <span>
+#include <stdexcept>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace SimpleFluid::PLIC
 {
@@ -22,7 +23,7 @@ namespace SimpleFluid::PLIC
  * backend entry; that lift does not recover earlier ordinary construction history. */
 template<ArithmeticMode Mode> struct PolyhedralPhaseSample
 {
-    ConvexGeometryPtr<Mode> geometry;
+    CellGeometryView<Mode> geometry;
     double gas_volume = 0, carrier_volume = 0;
     std::uint64_t id = std::numeric_limits<std::uint64_t>::max(); ///< Optional caller's persistent cell ID.
     /** Transport support evidence only. Independent inventory on validated pure
@@ -145,6 +146,9 @@ struct PolyhedralReconstructionOptions
      * angular fit above maximum_model_residual. All geometric, target-volume,
      * observability, convergence and work gates remain unchanged. */
     PlicModelPolicy model_policy = PlicModelPolicy::RequireModelAgreement;
+    /** Local cumulative materialization admission, independent of model/clip
+     * acceptance. The owning FVM operation supplies its remaining lease. */
+    GeometryLimits geometry_limits;
 };
 enum class PolyhedralOrientationMethod : uint8_t
 {

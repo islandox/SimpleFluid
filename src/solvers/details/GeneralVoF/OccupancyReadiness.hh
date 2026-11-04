@@ -30,7 +30,7 @@ inline GeneralVoFFiniteProjectionProvenance::TransportReadiness occupancy_readin
             for (std::size_t c = 0; c < amounts.size(); ++c)
             {
                 result.volume[c] =
-                    SimpleFluid::geometry::swept_volume::runtime_value<ArithmeticMode::Ordinary>(geometry[c]->volume())
+                    SimpleFluid::geometry::swept_volume::runtime_value<ArithmeticMode::Ordinary>(geometry[c].volume())
                         .value;
                 CompensatedSum<long double> sum;
                 sum += amounts[c].gas;
