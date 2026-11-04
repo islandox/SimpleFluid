@@ -455,4 +455,161 @@ TEST(ClosedContactIndex, IncrementalErasureReplacementAndOwnershipCoversKeepAllI
             (std::vector<AMR::AdaptiveCellKey>{key(id)}));
     EXPECT_THROW((void) index.ownership_covers(0), std::invalid_argument);
 }
+TEST(ClosedContactIndex, ForkOwnsIndependentEntriesAndExactAggregateBounds)
+{
+    D::ClosedContactIndex source(ample);
+    EXPECT_FALSE(source.aggregate_bounds().has_value());
+    const auto first = entry(1, {-3, -2, 0}, {-1, 1, 2}, 'd', 0);
+    const auto second = entry(2, {4, 3, -5}, {7, 8, -1}, 'x', 1);
+    source.insert(first);
+    source.insert(second);
+    const auto wide = image({-10, -10, -10}, {10, 10, 10});
+    const auto source_d = query(source, wide, 'd');
+    const auto source_x = query(source, wide, 'x');
+    EXPECT_EQ(source_d, (std::vector<AMR::AdaptiveCellKey>{first.key}));
+    EXPECT_EQ(source_x, (std::vector<AMR::AdaptiveCellKey>{second.key}));
+    const auto source_bounds = source.aggregate_bounds();
+    ASSERT_TRUE(source_bounds);
+    EXPECT_EQ(source_bounds->lower, (Wide{-3, -2, -5}));
+    EXPECT_EQ(source_bounds->upper, (Wide{7, 8, 2}));
+
+    auto candidate = source.fork(ample);
+    const auto fork_peak = candidate.statistics().peak_bytes;
+    const auto fork_retained = candidate.statistics().retained_bytes;
+    EXPECT_EQ(candidate.statistics().entries, 2u);
+    EXPECT_EQ(query(candidate, wide, 'd'), source_d);
+    EXPECT_EQ(query(candidate, wide, 'x'), source_x);
+    ASSERT_GT(fork_retained, 0u);
+    EXPECT_THROW((void) source.fork(fork_retained - 1), std::invalid_argument);
+    auto exact_peak = source.fork(fork_peak);
+    EXPECT_EQ(exact_peak.statistics().entries, 2u);
+
+    candidate.erase(first.key);
+    auto replacement = entry(2, {20, 30, 40}, {21, 31, 41}, 'x', 1);
+    replacement.revision = 2;
+    candidate.replace(replacement);
+    const auto candidate_bounds = candidate.aggregate_bounds();
+    ASSERT_TRUE(candidate_bounds);
+    EXPECT_EQ(candidate_bounds->lower, (Wide{20, 30, 40}));
+    EXPECT_EQ(candidate_bounds->upper, (Wide{21, 31, 41}));
+    EXPECT_TRUE(query(candidate, wide, 'd').empty());
+    EXPECT_TRUE(query(candidate, wide, 'x').empty());
+    EXPECT_EQ(query(candidate, image({20, 30, 40}, {20, 30, 40}), 'x'),
+        (std::vector<AMR::AdaptiveCellKey>{second.key}));
+    ASSERT_NE(candidate.find(second.key), nullptr);
+    EXPECT_EQ(candidate.find(second.key)->revision, 2u);
+
+    ASSERT_NE(source.find(first.key), nullptr);
+    ASSERT_NE(source.find(second.key), nullptr);
+    EXPECT_EQ(source.find(second.key)->revision, 1u);
+    EXPECT_EQ(query(source, wide, 'd'), source_d);
+    EXPECT_EQ(query(source, wide, 'x'), source_x);
+    const auto unchanged = source.aggregate_bounds();
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->lower, (Wide{-3, -2, -5}));
+    EXPECT_EQ(unchanged->upper, (Wide{7, 8, 2}));
+}
+
+TEST(ClosedContactIndex, RebindRejectsBelowRetentionAndLaterGrowthPreservesSource)
+{
+    D::ClosedContactIndex source(ample);
+    const auto first = entry(1, {-2, -1, 0}, {0, 1, 2}, 'd');
+    const auto second = entry(2, {2, 3, 4}, {4, 5, 6}, 'x');
+    source.insert(first);
+    source.insert(second);
+    auto candidate = source.fork(ample);
+    const auto retained = candidate.statistics().retained_bytes;
+    ASSERT_GT(retained, 0u);
+    const auto before = candidate.aggregate_bounds();
+    ASSERT_TRUE(before);
+    EXPECT_THROW(candidate.rebind_budget(retained - 1), std::invalid_argument);
+    EXPECT_EQ(candidate.statistics().retained_bytes, retained);
+    const auto after = candidate.aggregate_bounds();
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->lower, before->lower);
+    EXPECT_EQ(after->upper, before->upper);
+    EXPECT_EQ(query(candidate, image({-2, -1, 0}, {-2, -1, 0}), 'd'),
+        (std::vector<AMR::AdaptiveCellKey>{first.key}));
+    EXPECT_NO_THROW(candidate.rebind_budget(ample));
+    const auto third = entry(3, {-9, 10, 11}, {-8, 12, 13}, 'd');
+    EXPECT_NO_THROW(candidate.insert(third));
+    const auto expanded = candidate.aggregate_bounds();
+    ASSERT_TRUE(expanded);
+    EXPECT_EQ(expanded->lower, (Wide{-9, -1, 0}));
+    EXPECT_EQ(expanded->upper, (Wide{4, 12, 13}));
+    EXPECT_EQ(query(candidate, image({-9, 10, 11}, {-9, 10, 11}), 'd'),
+        (std::vector<AMR::AdaptiveCellKey>{third.key}));
+    EXPECT_EQ(source.find(third.key), nullptr);
+    EXPECT_EQ(query(source, image({-2, -1, 0}, {-2, -1, 0}), 'd'),
+        (std::vector<AMR::AdaptiveCellKey>{first.key}));
+    EXPECT_EQ(query(source, image({2, 3, 4}, {2, 3, 4}), 'x'),
+        (std::vector<AMR::AdaptiveCellKey>{second.key}));
+}
+
+TEST(ClosedContactIndex, HomogeneousFrontierUsesBoundedSubtreesWithoutOmittingImages)
+{
+    D::ClosedContactIndex index(ample);
+    EXPECT_TRUE(index.ownership_frontier_covers().empty());
+    EXPECT_THROW((void) index.ownership_frontier_covers(0), std::invalid_argument);
+    for (unsigned i = 0; i < 64; ++i)
+        index.insert(entry(i, {3.L * i, 0, 0}, {3.L * i + 1, 1, 1}, 'd', 0));
+    const auto covers = index.ownership_frontier_covers(8);
+    EXPECT_EQ(covers.size(), 8u);
+    std::size_t total = 0;
+    for (const auto& cover : covers)
+    {
+        EXPECT_EQ(cover.domain, (AMR::AdaptiveBytes{'d'}));
+        EXPECT_EQ(cover.owner, 0);
+        total += cover.images;
+    }
+    EXPECT_EQ(total, 64u);
+    for (unsigned i = 0; i < 64; ++i)
+    {
+        const auto expected = image({3.L * i, 0, 0}, {3.L * i + 1, 1, 1});
+        EXPECT_TRUE(std::any_of(covers.begin(), covers.end(), [&](const auto& cover) {
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                if (cover.bounds.lower[axis] > expected.bounds.lower[axis] ||
+                    cover.bounds.upper[axis] < expected.bounds.upper[axis]) return false;
+            return true;
+        }));
+    }
+    EXPECT_THROW((void) index.ownership_frontier_covers(8, 1), std::invalid_argument);
+    EXPECT_EQ(query(index, image({0, 0, 0}, {0, 0, 0})), (std::vector<AMR::AdaptiveCellKey>{key(0)}));
+}
+
+TEST(ClosedContactIndex, MixedFrontierKeepsOwnerDomainCountsAndWholeImageBounds)
+{
+    D::ClosedContactIndex index(ample);
+    constexpr unsigned count = 24;
+    for (unsigned i = 0; i < count; ++i)
+        index.insert(entry(i, {2.L * i, -1, 0}, {2.L * i + 1, 1, 1}, i % 2 ? 'x' : 'd', i % 3));
+    const auto covers = index.ownership_frontier_covers(1);
+    std::array<std::array<std::size_t, 3>, 2> totals{};
+    for (const auto& cover : covers)
+    {
+        ASSERT_TRUE(cover.domain == AMR::AdaptiveBytes{'d'} || cover.domain == AMR::AdaptiveBytes{'x'});
+        ASSERT_GE(cover.owner, 0);
+        ASSERT_LT(cover.owner, 3);
+        totals[cover.domain == AMR::AdaptiveBytes{'x'}][std::size_t(cover.owner)] += cover.images;
+    }
+    for (const auto& by_owner : totals)
+        for (const auto images : by_owner) EXPECT_EQ(images, 4u);
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const auto expected = image({2.L * i, -1, 0}, {2.L * i + 1, 1, 1});
+        const AMR::AdaptiveBytes domain{i % 2 ? 'x' : 'd'};
+        EXPECT_TRUE(std::any_of(covers.begin(), covers.end(), [&](const auto& cover) {
+            if (cover.domain != domain || cover.owner != int(i % 3)) return false;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                if (cover.bounds.lower[axis] > expected.bounds.lower[axis] ||
+                    cover.bounds.upper[axis] < expected.bounds.upper[axis]) return false;
+            return true;
+        }));
+    }
+    const auto total_bounds = index.aggregate_bounds();
+    ASSERT_TRUE(total_bounds);
+    EXPECT_EQ(total_bounds->lower, (Wide{0, -1, 0}));
+    EXPECT_EQ(total_bounds->upper, (Wide{47, 1, 1}));
+}
+
 } // namespace

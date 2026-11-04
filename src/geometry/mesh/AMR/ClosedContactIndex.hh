@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include <limits>
 #include <memory>
+#include <optional>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
@@ -46,6 +47,17 @@ public:
     ClosedContactIndex& operator=(ClosedContactIndex&&) noexcept;
     ClosedContactIndex(const ClosedContactIndex&) = delete;
     ClosedContactIndex& operator=(const ClosedContactIndex&) = delete;
+    /** Rebuild candidate metadata in canonical cell-key order. The cap applies
+     * to candidate retained storage and its construction scratch; the caller
+     * separately accounts the still-live source. Query counters are inherited,
+     * while admission statistics describe the new candidate's construction. */
+    [[nodiscard]] ClosedContactIndex fork(std::size_t byte_budget) const;
+    /** Rebind the index cap to the caller's current available credit. Failure
+     * leaves the previous cap unchanged. The retained index must fit. */
+    void rebind_budget(std::size_t byte_budget);
+    /** Allocation-free spatial union across all indexed images, irrespective of
+     * owner or domain. Empty indexes have no bounds. */
+    [[nodiscard]] std::optional<AdaptiveContactBounds> aggregate_bounds() const noexcept;
     void insert(ClosedContactEntry);
     void erase(const AdaptiveCellKey&);
     void replace(ClosedContactEntry);
@@ -54,13 +66,19 @@ public:
      * sorted by the complete canonical typed cell key. Closed bounds use <.
      * scratch_cap admits old and new result buffers during capacity growth;
      * callers subtract their other live operation buffers before supplying it. */
-    [[nodiscard]] std::vector<const ClosedContactEntry*> query(
-        std::span<const char> domain, std::span<const AdaptiveContactImage> images,
+    [[nodiscard]] std::vector<const ClosedContactEntry*> query(std::span<const char> domain,
+        std::span<const AdaptiveContactImage> images,
         std::size_t scratch_cap = std::numeric_limits<std::size_t>::max());
     /** Bounded-size actual subtree fragments, split at owner/domain boundaries.
      * Empty owners emit nothing; disconnected ownership remains fragmented. */
-    [[nodiscard]] std::vector<ClosedContactCover> ownership_covers(std::size_t maximum_fragment_images = 8,
-        std::size_t scratch_cap = std::numeric_limits<std::size_t>::max());
+    [[nodiscard]] std::vector<ClosedContactCover> ownership_covers(
+        std::size_t maximum_fragment_images = 8, std::size_t scratch_cap = std::numeric_limits<std::size_t>::max());
+    /** Bounded actual-subtree frontier. Mixed owner/domain subtrees are always
+     * split; homogeneous subtrees are split only until the requested target is
+     * reached. A mixed tree may require more than the target. Bounds are
+     * conservative and every returned subtree has exactly one owner/domain. */
+    [[nodiscard]] std::vector<ClosedContactCover> ownership_frontier_covers(
+        std::size_t target_fragments = 8, std::size_t scratch_cap = std::numeric_limits<std::size_t>::max());
     [[nodiscard]] const ClosedContactIndexStatistics& statistics() const noexcept;
 
 private:

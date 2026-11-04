@@ -36,6 +36,8 @@ public:
     struct Storage
     {
         std::size_t owned_leaves = 0, ghost_leaves = 0, family_capsules = 0, directory_entries = 0;
+        // owned_bytes includes the contact cache, excluding Data admission already
+        // reported in the other capacity categories.
         std::size_t owned_bytes = 0, ancestor_bytes = 0, directory_bytes = 0, procedural_bytes = 0;
         std::size_t native_bytes = 0, native_map_entries = 0;
     };

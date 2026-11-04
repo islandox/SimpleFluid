@@ -35,8 +35,20 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testPointSnapshot"
       OR TEST_NAME STREQUAL "testGeometryRetentionCensus"
       OR TEST_NAME STREQUAL "testClosedContactIndex"
+      OR TEST_NAME STREQUAL "testContactCoverIndex"
       OR TEST_NAME STREQUAL "testAdaptiveClosureRecords"
       OR TEST_NAME STREQUAL "testSpatialAdaptiveClosure"
+      OR TEST_NAME STREQUAL "testCompleteSupportOverlay"
+      OR TEST_NAME STREQUAL "testCompactIncidenceMetadata"
+      OR TEST_NAME STREQUAL "testDistributedAdaptiveOwnerOverlay"
+      OR TEST_NAME STREQUAL "testIncrementalAdaptiveClosure"
+      OR TEST_NAME STREQUAL "testIncrementalAdaptiveHierarchy"
+      OR TEST_NAME STREQUAL "testAdaptiveIdentityPool"
+      OR TEST_NAME STREQUAL "testContactPointArray"
+      OR TEST_NAME STREQUAL "testContactPairSet"
+      OR TEST_NAME STREQUAL "testContactRecordStorage"
+      OR TEST_NAME STREQUAL "testDeferredOwnerCharges"
+      OR TEST_NAME STREQUAL "testPooledLineExchange"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -266,7 +278,7 @@ simplefluid_add_mpi_test(NAME NativeUnstructuredMapping_2procs
 foreach(_spatial_closure_ranks IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME SpatialAdaptiveClosure_${_spatial_closure_ranks}procs
     TARGET testSpatialAdaptiveClosure PROCS ${_spatial_closure_ranks}
-    ARGS "--gtest_filter=SpatialAdaptiveClosure.*-SpatialAdaptiveClosure.CubicN32FourSlabHaloUnder64MiB"
+    ARGS "--gtest_filter=SpatialAdaptiveClosure.*-SpatialAdaptiveClosure.CubicN32*"
     LABELS "mpi;amr;closure;spatial;empty_rank" TIMEOUT 240)
 endforeach()
 simplefluid_add_mpi_test(NAME SpatialAdaptiveClosureN32_4procs
@@ -277,3 +289,48 @@ if(TEST SpatialAdaptiveClosureN32_4procs)
   set_tests_properties(SpatialAdaptiveClosureN32_4procs PROPERTIES
     ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
 endif()
+
+simplefluid_add_mpi_test(NAME SpatialAdaptiveCanonicalN16_4procs
+  TARGET testSpatialAdaptiveClosure PROCS 4
+  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN16CanonicalCacheStorageObservation"
+  LABELS "mpi;amr;closure;spatial;resource" TIMEOUT 600)
+if(TEST SpatialAdaptiveCanonicalN16_4procs)
+  set_tests_properties(SpatialAdaptiveCanonicalN16_4procs PROPERTIES
+    ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
+endif()
+
+# Full canonical cache construction is a separate Debug storage probe. Its
+# byte cap is unchanged; allow the setup walk to reach byte admission.
+simplefluid_add_mpi_test(NAME SpatialAdaptiveCanonicalN32_4procs
+  TARGET testSpatialAdaptiveClosure PROCS 4
+  ARGS "--gtest_filter=SpatialAdaptiveClosure.CubicN32CanonicalCacheUnder64MiB"
+  LABELS "mpi;amr;closure;spatial;resource" TIMEOUT 1800)
+if(TEST SpatialAdaptiveCanonicalN32_4procs)
+  set_tests_properties(SpatialAdaptiveCanonicalN32_4procs PROPERTIES
+    ENVIRONMENT "SIMPLEFLUID_SPATIAL_CLOSURE_N32=1;OMP_NUM_THREADS=1")
+endif()
+
+# Sparse owner authority and complete support partition regressions. The
+# support geometry fixture is rank-local; the owner fixture uses collectives.
+foreach(_incremental_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME DistributedAdaptiveOwnerOverlay_${_incremental_ranks}procs
+    TARGET testDistributedAdaptiveOwnerOverlay PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=DistributedAdaptiveOwnerOverlay.*:DistributedAncestryRegistrationLease.*"
+    LABELS "mpi;amr;owner_overlay;collective" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME CompleteSupportOverlay_${_incremental_ranks}procs
+    TARGET testCompleteSupportOverlay PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=CompleteSupportOverlay.*"
+    LABELS "mpi;amr;support;rank_local" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME IncrementalAdaptiveClosure_${_incremental_ranks}procs
+    TARGET testIncrementalAdaptiveClosure PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=IncrementalAdaptiveClosure.*"
+    LABELS "mpi;amr;closure;incremental;empty_rank" TIMEOUT 240)
+  simplefluid_add_mpi_test(NAME PooledLineExchange_${_incremental_ranks}procs
+    TARGET testPooledLineExchange PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=PooledLineExchange.*"
+    LABELS "mpi;amr;closure;incremental;protocol;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME IncrementalAdaptiveHierarchy_${_incremental_ranks}procs
+    TARGET testIncrementalAdaptiveHierarchy PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=IncrementalAdaptiveHierarchy.*"
+    LABELS "mpi;amr;closure;incremental;empty_rank" TIMEOUT 240)
+endforeach()

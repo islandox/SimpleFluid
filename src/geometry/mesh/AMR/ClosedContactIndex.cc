@@ -307,9 +307,8 @@ struct ClosedContactIndex::Impl
             {
                 const auto a = extent(united(sibling->left->bounds, leaf->bounds));
                 const auto b = extent(united(sibling->right->bounds, leaf->bounds));
-                sibling = a < b || (a == b && sibling->left->height <= sibling->right->height)
-                              ? sibling->left.get()
-                              : sibling->right.get();
+                sibling = a < b || (a == b && sibling->left->height <= sibling->right->height) ? sibling->left.get()
+                                                                                               : sibling->right.get();
             }
             auto& target = link(sibling);
             auto branch = std::move(pending.branches[image]);
@@ -361,6 +360,35 @@ ClosedContactIndex::ClosedContactIndex(std::size_t budget) : impl_(std::make_uni
 ClosedContactIndex::~ClosedContactIndex() = default;
 ClosedContactIndex::ClosedContactIndex(ClosedContactIndex&&) noexcept = default;
 ClosedContactIndex& ClosedContactIndex::operator=(ClosedContactIndex&&) noexcept = default;
+ClosedContactIndex ClosedContactIndex::fork(std::size_t budget) const
+{
+    ClosedContactIndex candidate(budget);
+    for (const auto& [key, state] : impl_->records)
+    {
+        // state->bytes includes both key owners, all image/frame capacities,
+        // metadata nodes and temporary node pointers. It conservatively covers
+        // the still-unattached entry copy before any copy allocation occurs.
+        candidate.impl_->admit(state->bytes);
+        ClosedContactEntry entry = state->entry;
+        candidate.insert(std::move(entry));
+    }
+    candidate.impl_->stats.queries = impl_->stats.queries;
+    candidate.impl_->stats.visited_nodes = impl_->stats.visited_nodes;
+    candidate.impl_->stats.scanned_entries = impl_->stats.scanned_entries;
+    return candidate;
+}
+void ClosedContactIndex::rebind_budget(std::size_t budget)
+{
+    if (!budget || budget < impl_->stats.retained_bytes)
+        throw std::invalid_argument("Closed-contact index cap is below retained storage.");
+    impl_->limit = budget;
+}
+std::optional<AdaptiveContactBounds> ClosedContactIndex::aggregate_bounds() const noexcept
+{
+    if (!impl_->root)
+        return {};
+    return impl_->root->bounds;
+}
 void ClosedContactIndex::insert(ClosedContactEntry entry)
 {
     const MetadataEnvironment environment;
@@ -462,9 +490,8 @@ std::vector<ClosedContactCover> ClosedContactIndex::ownership_covers(
             admit_scratch(add(previous, entry.domain.size()), scratch_cap);
             impl_->admit(entry.domain.size(), previous);
             output_payload = add(output_payload, entry.domain.size());
-            impl_->append(
-                output, ClosedContactCover{entry.domain, node->bounds, entry.owner, node->count}, output_payload,
-                scratch_cap);
+            impl_->append(output, ClosedContactCover{entry.domain, node->bounds, entry.owner, node->count},
+                output_payload, scratch_cap);
             return;
         }
         self(self, node->left.get());
@@ -473,5 +500,88 @@ std::vector<ClosedContactCover> ClosedContactIndex::ownership_covers(
     visit(visit, impl_->root.get());
     return output;
 }
-const ClosedContactIndexStatistics& ClosedContactIndex::statistics() const noexcept { return impl_->stats; }
+std::vector<ClosedContactCover> ClosedContactIndex::ownership_frontier_covers(
+    std::size_t target_fragments, std::size_t scratch_cap)
+{
+    const MetadataEnvironment environment;
+    if (!target_fragments)
+        throw std::invalid_argument("Closed-contact frontier needs a positive target.");
+    std::vector<const Impl::Node*> frontier;
+    std::vector<ClosedContactCover> output;
+    std::size_t output_payload = 0;
+    auto append_node = [&](const Impl::Node* node)
+    {
+        if (frontier.size() == frontier.capacity())
+        {
+            const auto old = product(frontier.capacity(), sizeof(const Impl::Node*));
+            const auto capacity = frontier.capacity() ? product(frontier.capacity(), 2) : 1;
+            const auto next = product(capacity, sizeof(const Impl::Node*));
+            const auto other = add(product(output.capacity(), sizeof(ClosedContactCover)), output_payload);
+            const auto previous = add(old, other);
+            admit_scratch(add(previous, next), scratch_cap);
+            impl_->admit(next, previous);
+            frontier.reserve(capacity);
+            if (frontier.capacity() != capacity)
+                throw std::invalid_argument("Closed-contact frontier capacity differs from admission.");
+        }
+        frontier.push_back(node);
+    };
+    // Every heterogeneous branch must be examined, but an entirely homogeneous
+    // subtree contributes one actual node without visiting its descendants.
+    auto mandatory = [&](auto&& self, const Impl::Node* node) -> void
+    {
+        if (!node) return;
+        if (node->homogeneous)
+        {
+            append_node(node);
+            return;
+        }
+        self(self, node->left.get());
+        self(self, node->right.get());
+    };
+    mandatory(mandatory, impl_->root.get());
+    std::size_t active = frontier.size();
+    for (std::size_t cursor = 0; active < target_fragments && cursor < frontier.size(); ++cursor)
+    {
+        const auto* node = frontier[cursor];
+        if (!node || node->state) continue;
+        // A homogeneous parent has homogeneous children. Keep the selected
+        // node's place as a tombstone so queue expansion remains linear.
+        frontier[cursor] = nullptr;
+        append_node(node->left.get());
+        append_node(node->right.get());
+        ++active;
+    }
+    for (const auto* node : frontier)
+    {
+        if (!node) continue;
+        const auto& entry = node->homogeneous->entry;
+        const auto frontier_bytes = product(frontier.capacity(), sizeof(const Impl::Node*));
+        const auto old_output = product(output.capacity(), sizeof(ClosedContactCover));
+        const auto live = add(add(frontier_bytes, old_output), output_payload);
+        admit_scratch(add(live, entry.domain.size()), scratch_cap);
+        impl_->admit(entry.domain.size(), live);
+        ClosedContactCover cover{entry.domain, node->bounds, entry.owner, node->count};
+        if (cover.domain.capacity() != entry.domain.size())
+            throw std::invalid_argument("Closed-contact frontier domain capacity differs from admission.");
+        output_payload = add(output_payload, cover.domain.capacity());
+        if (output.size() == output.capacity())
+        {
+            const auto capacity = output.capacity() ? product(output.capacity(), 2) : 1;
+            const auto next = product(capacity, sizeof(ClosedContactCover));
+            const auto previous = add(add(frontier_bytes, old_output), output_payload);
+            admit_scratch(add(previous, next), scratch_cap);
+            impl_->admit(next, previous);
+            output.reserve(capacity);
+            if (output.capacity() != capacity)
+                throw std::invalid_argument("Closed-contact frontier output capacity differs from admission.");
+        }
+        output.push_back(std::move(cover));
+    }
+    return output;
+}
+const ClosedContactIndexStatistics& ClosedContactIndex::statistics() const noexcept
+{
+    return impl_->stats;
+}
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

@@ -3,13 +3,15 @@
  */
 #pragma once
 #include "geometry/PLIC/PlanarGeometryDeclarations.hh"
+#include <array>
+#include <span>
 namespace SimpleFluid::PLIC
 {
 namespace details
 {
 class NativeSupportAccess;
 class RetentionAccess;
-}
+} // namespace details
 template<>
 [[nodiscard]] PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(
     const PlanarFace<ArithmeticMode::Ordinary>&);
@@ -46,6 +48,16 @@ template<>
     const PlanarFace<ArithmeticMode::Ordinary>&);
 template<> class EdgePointIndex<ArithmeticMode::Ordinary>;
 
+/** Private retained plane frame for reconstructing an incidence-only loop. */
+struct OrdinaryIncidenceFrame
+{
+    PlaneSupportIdentity<ArithmeticMode::Ordinary> support;
+    std::array<long double, 3> normal;
+};
+[[nodiscard]] SIMPLEFLUID_LOCAL OrdinaryIncidenceFrame capture_incidence_frame(
+    const PlanarFace<ArithmeticMode::Ordinary>&);
+[[nodiscard]] SIMPLEFLUID_LOCAL PlanarFacePtr<ArithmeticMode::Ordinary> restore_incidence_loop(
+    const OrdinaryIncidenceFrame&, std::span<const PointIdentity<ArithmeticMode::Ordinary>>);
 /** Reusable, explicitly bounded Ordinary edge-query storage. Results borrow
  * immutable index identities until clear(), release(), or the next query. Copy any
  * published result before reuse. Clear retains allocation; release frees it.
@@ -93,9 +105,8 @@ public:
         const PointIdentity<ArithmeticMode::Ordinary>& second) const;
     /** Scratch must hold at least the index's unique point count. Failure
      * empties its logical result; the immutable index remains unchanged. */
-    void closed_segment(
-        const PointIdentity<ArithmeticMode::Ordinary>& first, const PointIdentity<ArithmeticMode::Ordinary>& second,
-        OrdinaryEdgeQueryScratch& scratch) const;
+    void closed_segment(const PointIdentity<ArithmeticMode::Ordinary>& first,
+        const PointIdentity<ArithmeticMode::Ordinary>& second, OrdinaryEdgeQueryScratch& scratch) const;
     [[nodiscard]] std::size_t storage_bytes() const;
 
 private:
@@ -164,6 +175,9 @@ private:
     friend std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend class details::NativeSupportAccess;
     friend class details::RetentionAccess;
+    friend OrdinaryIncidenceFrame capture_incidence_frame(const PlanarFace&);
+    friend PlanarFacePtr<ArithmeticMode::Ordinary> restore_incidence_loop(
+        const OrdinaryIncidenceFrame&, std::span<const PointIdentity<ArithmeticMode::Ordinary>>);
     friend PlaneSupportIdentity<ArithmeticMode::Ordinary> planar_support<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend int planar_orientation<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend std::vector<PlanarFacePtr<ArithmeticMode::Ordinary>> subtract_planar_faces<ArithmeticMode::Ordinary>(

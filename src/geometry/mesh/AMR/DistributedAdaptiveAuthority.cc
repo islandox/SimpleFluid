@@ -2,6 +2,7 @@
  * @brief Complete support authority overlays and canonical edge-point routing.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
+#include "geometry/mesh/AMR/CompleteSupportOverlay.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
@@ -56,18 +57,7 @@ std::pair<std::uint64_t, std::uint64_t> entity_range(std::uint64_t local, const 
     Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, 1, &local, &global);
     return {inclusive - local, global};
 }
-struct Occurrence
-{
-    AdaptiveCellKey cell;
-    int rank, orientation;
-    AdaptiveBytes domain;
-    DisplacementIdentity image;
-    std::uint64_t native_face;
-    bool exterior, native_whole = false;
-    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> whole_geometry;
-    std::string boundary;
-    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
-};
+using Occurrence = SupportOccurrence;
 // Read only the leading full support identity. Sorting must not duplicate the
 // encoded packet storage, and malformed prefixes fail inside the collective phase.
 std::span<const char> support_prefix(std::span<const char> packet)
@@ -443,32 +433,6 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     }
                     const bool exterior = entries[0].exterior;
                     const auto& boundary = entries[0].boundary;
-                    lease(entries.size() * sizeof(std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>));
-                    // Charge the maximum retained overlap table before quadratic pair work.
-                    if (entries.size() && entries.size() > budget / entries.size() /
-                                                               sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>))
-                        throw std::invalid_argument("Authority overlap budget exhausted.");
-                    lease(entries.size() * entries.size() * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
-                    std::vector<std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> coverage(entries.size());
-                    lease((coverage.capacity() - coverage.size()) * sizeof(decltype(coverage)::value_type));
-                    for (auto& row : coverage)
-                    {
-                        row.reserve(entries.size());
-                        lease(
-                            (row.capacity() - entries.size()) * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
-                    }
-                    std::set<AdaptiveCellKey> unique;
-                    for (std::size_t i = 0; i < entries.size(); ++i)
-                    {
-                        const auto& a = entries[i];
-                        if (a.domain.empty() || a.domain != entries[0].domain || a.exterior != exterior ||
-                            a.boundary != boundary || !unique.insert(a.cell).second || (!exterior && !boundary.empty()))
-                            throw std::invalid_argument("Inconsistent support membership.");
-                        lease(sizeof(AdaptiveCellKey) + 4 * sizeof(void*) + encode_adaptive_key(a.cell).size());
-                        for (std::size_t j = 0; j < i; ++j)
-                            if (a.orientation == entries[j].orientation && a.face->intersection(*entries[j].face))
-                                throw std::invalid_argument("Same-side support overlap.");
-                    }
                     auto emit = [&](std::size_t i, std::optional<std::size_t> j,
                                     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face)
                     {
@@ -539,41 +503,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         else
                             replies.push_back({tile.first_owner, std::move(bytes)});
                     };
-                    if (exterior)
-                    {
-                        for (std::size_t i = 0; i < entries.size(); ++i)
-                        {
-                            if (entries[i].orientation != entries[0].orientation)
-                                throw std::invalid_argument("Exterior support has opposite side.");
-                            emit(i, {}, entries[i].face);
-                        }
-                    }
-                    else
-                    {
-                        for (std::size_t i = 0; i < entries.size(); ++i)
-                            if (entries[i].orientation > 0)
-                                for (std::size_t j = 0; j < entries.size(); ++j)
-                                    if (entries[j].orientation < 0)
-                                    {
-                                        auto face = entries[i].face->intersection(*entries[j].face);
-                                        if (!face)
-                                            continue;
-                                        if (entries[i].native_whole && entries[j].native_whole &&
-                                            !face->equivalent(*entries[i].whole_geometry) &&
-                                            !face->equivalent(*entries[j].whole_geometry))
-                                            throw std::invalid_argument(
-                                                "Crossed procedural traces need compatible native "
-                                                "closure; mortar tiles are not admitted.");
-                                        if (!entries[i].face->oppositely_oriented(*entries[j].face))
-                                            throw std::invalid_argument("Interior support normals disagree.");
-                                        face_lease(face);
-                                        coverage[i].push_back(face);
-                                        coverage[j].push_back(face);
-                                        emit(i, j, std::move(face));
-                                    }
-                        for (std::size_t i = 0; i < entries.size(); ++i)
-                            entries[i].face->certify_partition(coverage[i]);
-                    }
+                    overlay_complete_support(entries, budget, emit, lease, face_lease);
                 }
                 // Only these leased objects have died. Incoming capacity,
                 // unconsumed packets, indices, identities and replies stay charged.

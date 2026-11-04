@@ -209,10 +209,95 @@ std::vector<AdaptiveOwner> directory_lookup_leased(std::span<const AdaptiveBytes
 
 DistributedAncestryDirectory::DistributedAncestryDirectory(
     std::span<const AdaptiveOwner> owned, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
+    : DistributedAncestryDirectory(owned, std::move(comm), budget, {})
+{
+}
+DistributedAncestryDirectory::DistributedAncestryDirectory(std::span<const AdaptiveOwner> owned,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget,
+    std::optional<std::size_t> registration_transient_cap)
     : comm_(std::move(comm)), budget_(budget)
 {
     if (comm_.is_null())
         throw std::invalid_argument("Directory needs a communicator.");
+    const int mode = registration_transient_cap.has_value();
+    const int local_mode[2]{mode, -mode};
+    int global_mode[2]{};
+    Teuchos::reduceAll(*comm_, Teuchos::REDUCE_MAX, 2, local_mode, global_mode);
+    if (global_mode[0] != -global_mode[1])
+        throw std::invalid_argument("Directory registration lease presence differs across ranks.");
+    if (registration_transient_cap)
+    {
+        const auto cap = *registration_transient_cap;
+        std::vector<OwnerPacket> packets;
+        collective(*comm_,
+            [&]
+            {
+                if (!cap || cap > budget_)
+                    throw std::invalid_argument("Invalid directory registration lease.");
+                Budget input{cap};
+                directory_array(input, owned.size(), sizeof(OwnerPacket));
+                packets.resize(owned.size());
+                if (packets.capacity() != owned.size())
+                    throw std::invalid_argument("Directory registration packet capacity grew.");
+                for (std::size_t i = 0; i < owned.size(); ++i)
+                {
+                    const auto& entry = owned[i];
+                    if (entry.key.empty() || entry.owner != comm_->getRank() || entry.key.size() > cap ||
+                        cap - entry.key.size() < 24)
+                        throw std::invalid_argument("Invalid bounded directory registration.");
+                    input.add(24 + entry.key.size());
+                    auto& packet = packets[i];
+                    packet.peer = authority(entry.key, comm_->getSize());
+                    packet.bytes.resize(24 + entry.key.size());
+                    if (packet.bytes.capacity() != packet.bytes.size())
+                        throw std::invalid_argument("Directory registration payload capacity grew.");
+                    std::size_t offset = 0;
+                    directory_key(packet.bytes, offset, entry.key);
+                    directory_word(packet.bytes, offset, entry.revision);
+                    directory_word(packet.bytes, offset, entry.address);
+                }
+            });
+        std::size_t exchange_cap = 0;
+        collective(*comm_,
+            [&]
+            {
+                const auto resident = directory_packets(packets, cap);
+                if (resident >= cap)
+                    throw std::invalid_argument("Directory registration exchange lease exhausted.");
+                exchange_cap = cap - resident;
+            });
+        auto incoming = exchange_owner_packets(packets, comm_, exchange_cap);
+        registration_ = incoming.stats;
+        std::vector<OwnerPacket>().swap(packets);
+        collective(*comm_,
+            [&]
+            {
+                const auto packet_bytes = directory_packets(incoming.packets, cap);
+                Budget storage{cap - packet_bytes};
+                storage.add(sizeof(*this));
+                for (const auto& packet : incoming.packets)
+                {
+                    Reader r{packet.bytes};
+                    auto key = r.bytes_view();
+                    auto revision = r.word(), address = r.word();
+                    r.done();
+                    if (key.empty() || authority(key, comm_->getSize()) != comm_->getRank())
+                        throw std::invalid_argument("Misrouted bounded adaptive registration.");
+                    storage.add(sizeof(AdaptiveOwner) + sizeof(AdaptiveBytes) + 4 * sizeof(void*));
+                    // One temporary lookup key plus independent map and value keys.
+                    storage.add(key.size());
+                    storage.add(key.size());
+                    storage.add(key.size());
+                    AdaptiveBytes name(key.begin(), key.end());
+                    if (name.capacity() != key.size() ||
+                        !shard_.emplace(name, AdaptiveOwner{name, packet.peer, revision, address}).second)
+                        throw std::invalid_argument("Duplicate bounded adaptive owner.");
+                }
+                if (storage_bytes() > cap - packet_bytes || storage_bytes() > budget_)
+                    throw std::invalid_argument("Bounded directory resident storage exceeds lease.");
+            });
+        return;
+    }
     std::vector<OwnerPacket> packets;
     collective(*comm_,
         [&]
@@ -369,7 +454,7 @@ std::size_t DistributedAncestryDirectory::storage_bytes() const noexcept
 {
     std::size_t result = sizeof(*this);
     for (const auto& [key, value] : shard_)
-        result += sizeof(key) + sizeof(value) + key.capacity() + value.key.capacity() + 3 * sizeof(void*);
+        result += sizeof(key) + sizeof(value) + key.capacity() + value.key.capacity() + 4 * sizeof(void*);
     return result;
 }
 } // namespace SimpleFluid::Meshes::AMR

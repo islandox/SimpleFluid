@@ -22,6 +22,10 @@ public:
      * Collective duplicate registration and budget failures reject all ranks. */
     DistributedAncestryDirectory(std::span<const AdaptiveOwner> owned,
         Teuchos::RCP<const Teuchos::Comm<int>> communicator, std::size_t byte_budget);
+    /** Explicit collective transient lease; the configured lookup budget remains unchanged. */
+    DistributedAncestryDirectory(std::span<const AdaptiveOwner> owned,
+        Teuchos::RCP<const Teuchos::Comm<int>> communicator, std::size_t byte_budget,
+        std::optional<std::size_t> registration_transient_cap);
     /** Collective sparse requests. Output preserves local request order.
      * An explicit transient cap partitions live packet/result arenas, cannot
      * exceed the configured budget and rejects collectively on exhaustion.

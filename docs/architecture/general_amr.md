@@ -1150,6 +1150,21 @@ coarsening, closure, directory lookup, migration and native publication operate
 on detached owner-local records and explicit bounded messages. They do not call
 the legacy global `adapt` path. Existing Cartesian, extruded, local-product,
 polyhedral and Mixed APIs remain bounded bootstrap/reference implementations.
+The hierarchy retains its accepted spatial contact session and forks a private
+candidate for adaptation or migration. Sparse owner/revision changes, dirty
+support reconstruction and layered line replay update contact rows before
+publication; a leaf's incidence generation may change without a revision change.
+The one-time candidate metadata fork, transactional rollback, ownership rebind and
+admission boundaries are specified in [Spatial adaptive closure](spatial_adaptive_closure.md).
+Its private identity pools share fixed-size pages across forks and use full-value
+identity checks, while compact support membership, per-cell point counts and
+layered line replay preserve complete incidence. The production halo cover
+borrows normalized point groups; the provider-bounds index remains a separate
+foundation. Resident tile roles and line subscribers use compact private storage
+without changing public exports, reconstruction or the line wire format. Deferred
+credits for owners still pinned by an accepted state remain conservative until
+reaped at an operation boundary. This pooling is separate from PLIC point-snapshot storage and
+does not change the nested provider/geometry admission boundary.
 
 Persistent keys identify physical region and typed construction ancestry
 independently of current numeric GIDs. Material remains separately retained
@@ -1196,8 +1211,11 @@ ordering capacities enter the request-builder byte lease; the catalogue remains
 alive through all pending references and packet writes, then is destroyed before
 request exchange.
 
-Every original unordered cell pair at each contact point still consumes its
-original work admission. Trace cross-products may reuse a result only when
+The following point-comparison and reply-lifetime details describe the private
+legacy hash-authority closure oracle. The production spatial session uses the
+pair and work accounting in [Spatial adaptive closure](spatial_adaptive_closure.md).
+In the oracle, every original unordered cell pair at each contact point consumes
+its original work admission. Trace cross-products may reuse a result only when
 neither immutable record contains a point-membership face. The cache keys the
 unordered pair of unique record identities and retains the direction of any
 required refinement. A face in either record preserves evaluation at each
@@ -1245,8 +1263,9 @@ per-record geometry scratch, including the certificate and decoded-shell
 overlap. This scratch metric does not measure nested serializer allocation
 peaks or process RSS.
 Diagnostics separate the peak admitted live estimate from the cumulative
-admitted byte charges; neither the cumulative object counters nor the
-pair/trace work budget resets between cells or rounds. The tile-authority input
+admitted byte charges. Cumulative admission counters do not reset between pages;
+the pair/trace work budget is shared within a closure round and resets for the next
+geometry refinement pass. The tile-authority input
 retains support faces without materializing unused full cell shells.
 These representation changes retain all configured byte, object, contact and
 round limits. Construction can still reject when unique required state or

@@ -228,7 +228,7 @@ AdaptiveBytes encode_contact(const ContactRecord& contact, Budget& budget)
 {
     const auto before = budget.used;
     auto result = write_contact(
-        contact.key, contact.domain, contact.traces, contact.spans,
+        contact.key, contact.domain, contact.trace_faces(), contact.spans,
         [&](std::size_t axis) { return contact.factors[axis]; }, budget, [&](std::size_t bytes) { budget.add(bytes); }, true);
     budget.used -= budget.used - before - result.capacity();
     return result;

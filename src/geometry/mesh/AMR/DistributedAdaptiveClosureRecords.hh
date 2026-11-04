@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -22,6 +23,12 @@ struct SIMPLEFLUID_LOCAL ContactRecord
     std::array<std::uint64_t, 3> factors{};
     std::vector<AdaptiveTraceFace> traces;
     bool traces_point_independent = true;
+    std::shared_ptr<const std::vector<AdaptiveTraceFace>> shared_traces;
+    [[nodiscard]] std::span<const AdaptiveTraceFace> trace_faces() const noexcept
+    {
+        return shared_traces ? std::span<const AdaptiveTraceFace>(*shared_traces) :
+                               std::span<const AdaptiveTraceFace>(traces);
+    }
 };
 struct SIMPLEFLUID_LOCAL ClosureRequirements
 {

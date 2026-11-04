@@ -306,6 +306,18 @@ OrdinaryFacePtr OrdinaryFace::from_retained_support(
                 on::reject("nonconvex retained native face loop.");
     return OrdinaryFacePtr(new OrdinaryFace(std::move(impl)));
 }
+OrdinaryIncidenceFrame capture_incidence_frame(const OrdinaryFace& face)
+{
+    return {*face.impl_->support, face.impl_->normal};
+}
+OrdinaryFacePtr restore_incidence_loop(const OrdinaryIncidenceFrame& frame, std::span<const OrdinaryPoint> points)
+{
+    std::vector<OrdinaryFace::WidePoint> coordinates;
+    coordinates.reserve(points.size());
+    for (const auto& point : points)
+        coordinates.push_back(IdentityAccess::point(point));
+    return OrdinaryFace::from_retained_support(coordinates, frame.normal, frame.support);
+}
 OrdinaryFacePtr OrdinaryFace::from_native_face(const MultiRegionMesh& mesh, std::uint64_t face)
 {
     const auto lease = mesh.acquire_execution_view();

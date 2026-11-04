@@ -9,8 +9,31 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveAuthority.cc
     mesh/AMR/DistributedAdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveClosure.cc
+    mesh/AMR/ContactPairSet.cc
+    mesh/AMR/ContactTracePool.cc
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
     mesh/AMR/DistributedAdaptiveContactHalo.cc
+    mesh/AMR/DistributedAdaptiveIncidence.cc
+    mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/CompleteLineQuery.cc
+    mesh/AMR/PooledLineQuery.cc
+    mesh/AMR/PooledLineRegistry.cc
+    mesh/AMR/PooledLineExchange.cc
+    mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/PooledSupportRegistry.cc
+    mesh/AMR/SupportRegistryExchange.cc
+    mesh/AMR/SupportSurfaceCodec.cc
+    mesh/AMR/SupportGroupFetch.cc
+    mesh/AMR/PrivateTileRecipe.cc
+    mesh/AMR/TileRecipeCodec.cc
+    mesh/AMR/PooledTileCodec.cc
+    mesh/AMR/IncidenceTileDelivery.cc
+    mesh/AMR/ResidentSupportCertification.cc
+    mesh/AMR/TilePointContributions.cc
+    mesh/AMR/PooledCellPoints.cc
+    mesh/AMR/IncidenceOwnerRows.cc
+    mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
+    mesh/AMR/ContactCoverIndex.cc
     mesh/AMR/ClosedContactIndex.cc
     mesh/AMR/DistributedAdaptiveBalance.cc
     mesh/AMR/DistributedCartesianKernel.cc
@@ -119,8 +142,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
     # Closure retains the strict arithmetic policy for transported long-double spans.
     set_source_files_properties(mesh/AMR/DistributedAdaptiveClosure.cc
+        mesh/AMR/ContactPairSet.cc
+        mesh/AMR/ContactTracePool.cc
         mesh/AMR/DistributedAdaptiveClosureRecords.cc
         mesh/AMR/DistributedAdaptiveContactHalo.cc
+        mesh/AMR/DistributedAdaptiveIncidence.cc
+        mesh/AMR/CompleteSupportOverlay.cc
+        mesh/AMR/CompleteLineQuery.cc
+        mesh/AMR/PooledLineQuery.cc
+        mesh/AMR/PooledLineRegistry.cc
+        mesh/AMR/PooledLineExchange.cc
+        mesh/AMR/OwnedSupportMembership.cc
+        mesh/AMR/PooledSupportRegistry.cc
+        mesh/AMR/SupportRegistryExchange.cc
+        mesh/AMR/SupportSurfaceCodec.cc
+        mesh/AMR/SupportGroupFetch.cc
+        mesh/AMR/PrivateTileRecipe.cc
+        mesh/AMR/TileRecipeCodec.cc
+        mesh/AMR/PooledTileCodec.cc
+        mesh/AMR/IncidenceTileDelivery.cc
+        mesh/AMR/ResidentSupportCertification.cc
+        mesh/AMR/TilePointContributions.cc
+        mesh/AMR/PooledCellPoints.cc
+        mesh/AMR/IncidenceOwnerRows.cc
+        mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
+        mesh/AMR/ContactCoverIndex.cc
         mesh/AMR/ClosedContactIndex.cc
         PLIC/GeometryIdentity.cc
         PLIC/details/ordinary/GeometryIdentity.cc
@@ -173,8 +219,31 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveAuthority.cc
     mesh/AMR/DistributedAdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveClosure.cc
+    mesh/AMR/ContactPairSet.cc
+    mesh/AMR/ContactTracePool.cc
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
     mesh/AMR/DistributedAdaptiveContactHalo.cc
+    mesh/AMR/DistributedAdaptiveIncidence.cc
+    mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/CompleteLineQuery.cc
+    mesh/AMR/PooledLineQuery.cc
+    mesh/AMR/PooledLineRegistry.cc
+    mesh/AMR/PooledLineExchange.cc
+    mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/PooledSupportRegistry.cc
+    mesh/AMR/SupportRegistryExchange.cc
+    mesh/AMR/SupportSurfaceCodec.cc
+    mesh/AMR/SupportGroupFetch.cc
+    mesh/AMR/PrivateTileRecipe.cc
+    mesh/AMR/TileRecipeCodec.cc
+    mesh/AMR/PooledTileCodec.cc
+    mesh/AMR/IncidenceTileDelivery.cc
+    mesh/AMR/ResidentSupportCertification.cc
+    mesh/AMR/TilePointContributions.cc
+    mesh/AMR/PooledCellPoints.cc
+    mesh/AMR/IncidenceOwnerRows.cc
+    mesh/AMR/DistributedAdaptiveOwnerOverlay.cc
+    mesh/AMR/ContactCoverIndex.cc
     mesh/AMR/ClosedContactIndex.cc
     mesh/AMR/DistributedAdaptiveBalance.cc
     mesh/AMR/DistributedCartesianKernel.cc

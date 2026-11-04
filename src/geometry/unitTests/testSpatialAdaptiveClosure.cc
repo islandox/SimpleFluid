@@ -17,6 +17,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -248,7 +249,7 @@ std::uint64_t incidence_pairs(const SlabFixture& fixture)
     const std::uint64_t n = fixture.n, w = fixture.width, transverse = (4 * n - 2) * (4 * n - 2);
     return (transverse * (4 * w - 2) - 8 * n * n * w) / 2 + fixture.sides * transverse;
 }
-void check_slab(unsigned n)
+void check_slab(unsigned n, bool canonical = false)
 {
     const auto comm = Tpetra::getDefaultComm();
     const auto fixture = slab(n);
@@ -265,7 +266,15 @@ void check_slab(unsigned n)
     AMR::AdaptiveClosureOptions options;
     options.byte_budget = cap64;
     D::DistributedAdaptiveContactHalo halo(*fixture.detached.kernel, comm, options, {7, 11, 13, 0});
-    halo.bootstrap(leaves, slab_rows(fixture));
+    if (canonical)
+    {
+        std::map<AMR::AdaptiveCellKey, const AMR::AdaptiveLeaf*> source;
+        for (const auto& leaf : leaves)
+            source.emplace(leaf.key, &leaf);
+        halo.bootstrap_canonical(leaves, [&](const auto& key) -> const AMR::AdaptiveLeaf& { return *source.at(key); });
+    }
+    else
+        halo.bootstrap(leaves, slab_rows(fixture));
     EXPECT_TRUE(halo.required_refinements().empty());
     const auto statistics = halo.statistics();
     EXPECT_EQ(statistics.owned_records, expected_owned);
@@ -297,6 +306,24 @@ void check_slab(unsigned n)
     ::testing::Test::RecordProperty("slab_width", fixture.width);
     ::testing::Test::RecordProperty("remote_records", int(statistics.remote_records));
     ::testing::Test::RecordProperty("peak_bytes", int(statistics.peak_bytes));
+    ::testing::Test::RecordProperty("retained_bytes", std::to_string(statistics.retained_bytes));
+    ::testing::Test::RecordProperty("cumulative_bytes", std::to_string(statistics.cumulative_bytes));
+    ::testing::Test::RecordProperty("owned_records", std::to_string(statistics.owned_records));
+    ::testing::Test::RecordProperty("unique_cell_pairs", std::to_string(statistics.unique_cell_pairs));
+    struct
+    {
+        std::size_t count = 0, point_storage_bytes = 0, shared_normalized_rows = 0;
+    } rows;
+    halo.for_each_incidence_row(
+        [&rows](const D::ContactIncidenceRow& row)
+        {
+            ++rows.count;
+            rows.point_storage_bytes += row.points.storage_bytes();
+            rows.shared_normalized_rows += row.points.shares_normalized_storage();
+        });
+    ::testing::Test::RecordProperty("incidence_rows", std::to_string(rows.count));
+    ::testing::Test::RecordProperty("incidence_point_storage_bytes", std::to_string(rows.point_storage_bytes));
+    ::testing::Test::RecordProperty("incidence_shared_normalized_rows", std::to_string(rows.shared_normalized_rows));
 }
 
 TEST(SpatialAdaptiveClosure, CartesianEightCellAxisSlabsHaveExactSurfaceHalos)
@@ -305,6 +332,13 @@ TEST(SpatialAdaptiveClosure, CartesianEightCellAxisSlabsHaveExactSurfaceHalos)
     if (size > 8 || 8 % size)
         GTEST_SKIP() << "This slab oracle requires a rank count dividing eight.";
     check_slab(8);
+}
+TEST(SpatialAdaptiveClosure, CartesianEightCellCanonicalCacheHasExactSurfaceHalos)
+{
+    const auto size = Tpetra::getDefaultComm()->getSize();
+    if (size > 8 || 8 % size)
+        GTEST_SKIP() << "This slab oracle requires a rank count dividing eight.";
+    check_slab(8, true);
 }
 TEST(SpatialAdaptiveClosure, CartesianSixteenCellAxisSlabsHaveExactSurfaceHalos)
 {
@@ -328,6 +362,38 @@ TEST(SpatialAdaptiveClosure, CubicN32FourSlabHaloUnder64MiB)
         GTEST_SKIP() << "The original N32 storage oracle requires exactly four ranks.";
     // check_slab independently requires 1024, 2048, 2048, 1024 remote records.
     check_slab(32);
+}
+
+TEST(SpatialAdaptiveClosure, CubicN16CanonicalCacheStorageObservation)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const int requested = std::getenv("SIMPLEFLUID_SPATIAL_CLOSURE_N32") != nullptr;
+    int minimum = 0, maximum = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &requested, &minimum);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &requested, &maximum);
+    ASSERT_EQ(minimum, maximum);
+    if (!requested)
+        GTEST_SKIP() << "Set SIMPLEFLUID_SPATIAL_CLOSURE_N32 for the explicit N32 storage observation.";
+    if (comm->getSize() != 4)
+        GTEST_SKIP() << "The canonical storage observation requires exactly four ranks.";
+    // Independent N16 halo sizes are 256, 512, 512, 256 records.
+    check_slab(16, true);
+}
+
+TEST(SpatialAdaptiveClosure, CubicN32CanonicalCacheUnder64MiB)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const int requested = std::getenv("SIMPLEFLUID_SPATIAL_CLOSURE_N32") != nullptr;
+    int minimum = 0, maximum = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &requested, &minimum);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &requested, &maximum);
+    ASSERT_EQ(minimum, maximum);
+    if (!requested)
+        GTEST_SKIP() << "Set SIMPLEFLUID_SPATIAL_CLOSURE_N32 for the explicit N32 storage observation.";
+    if (comm->getSize() != 4)
+        GTEST_SKIP() << "The original N32 storage oracle requires exactly four ranks.";
+    // check_slab independently requires 1024, 2048, 2048, 1024 remote records.
+    check_slab(32, true);
 }
 
 TEST(SpatialAdaptiveClosure, IsolatedEdgeVertexAndTJunctionMatchIndependentMarksAndLegacy)
@@ -576,10 +642,10 @@ TEST(SpatialAdaptiveClosure, WireFailuresRejectCollectivelyAndAllowCleanRetry)
             if (comm->getRank() + 1 != comm->getSize() || injected || packets.empty())
                 return;
             auto& bytes = packets.front().bytes;
-            // Private protocol v1 has twelve little-endian uint64 header
-            // words. Context epoch is word 3; final completion is word 11.
-            constexpr std::size_t header_bytes = 12 * 8;
-            if (defect == 0 && kind == D::ContactHaloMessageKind::Fan && wire_word(bytes, 11 * 8) == 1)
+            // Private protocol v2 has thirteen little-endian uint64 header
+            // words. Context epoch is word 3; final completion is word 12.
+            constexpr std::size_t header_bytes = 13 * 8;
+            if (defect == 0 && kind == D::ContactHaloMessageKind::Fan && wire_word(bytes, 12 * 8) == 1)
                 packets.clear();
             else if (defect == 1 && kind == D::ContactHaloMessageKind::Records)
             {

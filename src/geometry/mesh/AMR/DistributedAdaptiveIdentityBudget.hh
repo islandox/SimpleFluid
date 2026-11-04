@@ -16,6 +16,11 @@ class IdentityBudget
 
 public:
     explicit IdentityBudget(bool reserve_growth = false) : multiplier_(reserve_growth ? 4 : 1) {}
+    [[nodiscard]] std::size_t admitted_bytes() const noexcept { return charged_ * multiplier_; }
+    [[nodiscard]] std::size_t metadata_bytes() const noexcept
+    {
+        return (charged_ - allocations_.payload_bytes()) * multiplier_;
+    }
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return allocations_.payload_bytes(); }
     template<class Value> void retain(Budget& budget, const Value& value)
     {
