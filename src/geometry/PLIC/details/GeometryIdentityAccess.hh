@@ -5,9 +5,27 @@
 #include "geometry/PLIC/GeometryIdentity.hh"
 #include "geometry/PLIC/details/GeometryIdentityBacking.hh"
 #include "geometry/PLIC/details/OrdinaryIdentitySupport.hh"
+#include <array>
+#include <cstddef>
 #include <span>
+#include <stdexcept>
 namespace SimpleFluid::PLIC::details
 {
+/** Immutable canonical scalar copied from an already-issued ordinary point.
+ * There is no arbitrary scalar constructor: composing these copies preserves
+ * the existing finite/canonical-zero admission without normalizing again. */
+class CanonicalPointComponent
+{
+public:
+    CanonicalPointComponent(const CanonicalPointComponent&) = default;
+    CanonicalPointComponent& operator=(const CanonicalPointComponent&) = default;
+    [[nodiscard]] long double value() const noexcept { return value_; }
+
+private:
+    explicit CanonicalPointComponent(long double value) noexcept : value_(value) {}
+    long double value_;
+    friend class GeometryIdentityAccess;
+};
 class GeometryIdentityAccess
 {
 public:
@@ -39,6 +57,21 @@ public:
     [[nodiscard]] static const OrdinaryIdentityPoint& point(const PointIdentity<ArithmeticMode::Ordinary>& identity)
     {
         return identity.storage_;
+    }
+    [[nodiscard]] static CanonicalPointComponent point_component(
+        const PointIdentity<ArithmeticMode::Ordinary>& identity, std::size_t axis)
+    {
+        if (axis >= 3)
+            throw std::out_of_range("Invalid canonical point component axis.");
+        return CanonicalPointComponent(identity.storage_[axis]);
+    }
+    /** Lossless value assembly only. Source dictionaries must separately prove
+     * the complete assembled identity equals their certified original point. */
+    [[nodiscard]] static PointIdentity<ArithmeticMode::Ordinary> point_components(
+        const std::array<CanonicalPointComponent, 3>& components) noexcept
+    {
+        return PointIdentity<ArithmeticMode::Ordinary>(
+            OrdinaryIdentityPoint{components[0].value_, components[1].value_, components[2].value_});
     }
     [[nodiscard]] static const OrdinaryIdentityPoint& displacement(
         const DisplacementIdentity<ArithmeticMode::Ordinary>& identity)

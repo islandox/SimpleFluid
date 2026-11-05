@@ -127,6 +127,11 @@ class CartesianKernel final : public AdaptiveProviderKernel
 
 public:
     explicit CartesianKernel(AMRGrid grid) : grid_(std::move(grid)) { validate_grid(grid_); }
+    bool native_cartesian_incidence_grid(AMRGrid& output) const noexcept override
+    {
+        output = grid_;
+        return true;
+    }
     void validate(const AdaptiveLeaf& leaf) const override
     {
         const auto& cell = ancestry(grid_, leaf.key);
@@ -171,8 +176,8 @@ public:
     {
         (void) ancestry(grid_, leaf.key);
         const bool periodic = grid_.periodic[0] || grid_.periodic[1] || grid_.periodic[2];
-        return {periodic ? AdaptiveContactNormalization::PeriodicCartesian
-                         : AdaptiveContactNormalization::PhysicalIdentity,
+        return {
+            periodic ? AdaptiveContactNormalization::PeriodicCartesian : AdaptiveContactNormalization::PhysicalIdentity,
             false, false};
     }
     std::vector<AdaptiveContactImage> closed_contact_images(const AdaptiveLeaf& leaf) const override
@@ -289,9 +294,8 @@ public:
         const auto bounds = geometry_bounds(leaf);
         return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(bounds.lower, bounds.upper);
     }
-    std::vector<AdaptiveSurface> surfaces_from_shape(
-        const AdaptiveLeaf& leaf, const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& shape,
-        bool bounded_capacity = false) const
+    std::vector<AdaptiveSurface> surfaces_from_shape(const AdaptiveLeaf& leaf,
+        const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& shape, bool bounded_capacity = false) const
     {
         const auto& cell = ancestry(grid_, leaf.key);
         std::vector<AdaptiveSurface> result;
@@ -494,6 +498,17 @@ std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
 std::shared_ptr<const AdaptiveProviderKernel> cartesian_adaptive_kernel(AMRGrid grid)
 {
     return std::make_shared<const CartesianKernel>(std::move(grid));
+}
+std::size_t adaptive_detail::native_cartesian_kernel_payload_bytes() noexcept
+{
+    return sizeof(CartesianKernel);
+}
+std::optional<AMRGrid> trusted_cartesian_incidence_grid(const AdaptiveProviderKernel& kernel) noexcept
+{
+    AMRGrid grid;
+    if (!kernel.native_cartesian_incidence_grid(grid))
+        return std::nullopt;
+    return grid;
 }
 AdaptiveLeaf cartesian_adaptive_leaf(const AMRGrid& grid, AdaptiveCellKey key, AdaptiveBytes domain)
 {

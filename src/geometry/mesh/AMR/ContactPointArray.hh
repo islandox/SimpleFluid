@@ -21,11 +21,11 @@ struct ContactPointIncidence
 {
     ContactPointIdentity normalized, physical;
 };
-/** Immutable readers borrow the exact normalized and physical values. Ordinary
- * identities normalize signed zero at construction, so equal identities share
- * the physical array without changing their canonical representation. A second
- * array is allocated only when some normalization actually changes a point.
- * Mutators are construction-only; references survive until the next mutation. */
+/** Immutable readers return owned normalized/physical identity values. Stored
+ * pages and certified source components preserve the exact original identities;
+ * reads neither normalize nor keep references to assembled temporaries. Equal
+ * identities share the physical array; a second array is allocated only when
+ * publication normalization actually changes a point. Mutators are construction-only. */
 class ContactPointArray
 {
     struct Owning
@@ -34,8 +34,15 @@ class ContactPointArray
     };
     template<class UInt> struct Pooled
     {
+        using Reference = CapturedPointReference;
         std::vector<UInt> physical, normalized;
         std::shared_ptr<const ContactPointPageView> view;
+    };
+    template<class UInt> struct Sourced
+    {
+        using Reference = CapturedSourcePointReference;
+        std::vector<UInt> physical, normalized;
+        std::shared_ptr<const ContactSourcePointView> view;
     };
 
 public:
@@ -43,11 +50,13 @@ public:
     {
         const ContactPointPageView* view;
         CapturedPointReference reference;
+        const ContactSourcePointView* source_view = nullptr;
+        CapturedSourcePointReference source_reference{};
     };
     struct Reference
     {
-        const ContactPointIdentity& normalized;
-        const ContactPointIdentity& physical;
+        ContactPointIdentity normalized;
+        ContactPointIdentity physical;
         operator ContactPointIncidence() const { return {normalized, physical}; }
     };
     class const_iterator
@@ -91,6 +100,13 @@ public:
     static ContactPointArray pooled(ContactPointBatch& batch, std::size_t capacity, Budget& budget)
     {
         ContactPointArray result;
+        if (batch.source_backed())
+        {
+            auto& source = result.storage_.emplace<Sourced<std::uint32_t>>();
+            source.view = batch.source_view();
+            reserve_references(source.physical, capacity, budget);
+            return result;
+        }
         auto& pooled = result.storage_.emplace<Pooled<std::uint32_t>>();
         pooled.view = batch.view();
         reserve_references(pooled.physical, capacity, budget);
@@ -112,7 +128,8 @@ public:
             [&](auto& values)
             {
                 using Values = std::decay_t<decltype(values)>;
-                if constexpr (std::is_same_v<Values, Owning>)
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
                     throw std::invalid_argument("Contact point array does not use pooled references.");
                 else
                 {
@@ -125,6 +142,35 @@ public:
                         append_reference(values.normalized, normalized.value, budget);
                     append_reference(values.physical, physical.value, budget);
                 }
+            },
+            storage_);
+    }
+    void push_reference(CapturedSourcePointReference physical, CapturedSourcePointReference normalized, Budget& budget)
+    {
+        const auto view = source_page_view();
+        if (!view || view->frozen())
+            throw std::invalid_argument("Source point reference requires an active source batch.");
+        if ((reference_uses_wide(physical.value) || reference_uses_wide(normalized.value)) &&
+            std::holds_alternative<Sourced<std::uint32_t>>(storage_))
+            widen_source(budget);
+        std::visit(
+            [&](auto& values)
+            {
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
+                {
+                    if (values.normalized.empty() && normalized != physical)
+                    {
+                        reserve_references(values.normalized, values.physical.capacity(), budget);
+                        values.normalized.assign(values.physical.begin(), values.physical.end());
+                    }
+                    if (!values.normalized.empty() || normalized != physical)
+                        append_reference(values.normalized, normalized.value, budget);
+                    append_reference(values.physical, physical.value, budget);
+                }
+                else
+                    throw std::invalid_argument("Source reference used for a physical point array.");
             },
             storage_);
     }
@@ -201,9 +247,9 @@ public:
                     return {values.normalized.empty() ? values.physical[i] : values.normalized[i], values.physical[i]};
                 else
                 {
-                    const auto physical = CapturedPointReference{values.physical[i]};
+                    const auto physical = typename Values::Reference{values.physical[i]};
                     const auto normalized =
-                        values.normalized.empty() ? physical : CapturedPointReference{values.normalized[i]};
+                        values.normalized.empty() ? physical : typename Values::Reference{values.normalized[i]};
                     return {values.view->get(normalized), values.view->get(physical)};
                 }
             },
@@ -224,19 +270,27 @@ public:
     [[nodiscard]] std::optional<Locator> physical_locator(std::size_t i) const { return locator(i, false); }
     [[nodiscard]] const ContactPointPageView* borrowed_page_view() const noexcept
     {
-        return std::visit([](const auto& values) -> const ContactPointPageView*
+        return std::visit(
+            [](const auto& values) -> const ContactPointPageView*
             {
-                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>) return nullptr;
-                else return values.view.get();
-            }, storage_);
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
+                    return nullptr;
+                else
+                    return values.view.get();
+            },
+            storage_);
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
             contact_payload_object(visitor, this, ContactPayloadRole::PointArrayObject, sizeof(*this));
-        std::visit([&](const auto& values)
+        std::visit(
+            [&](const auto& values)
             {
-                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Owning>)
                 {
                     contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysical, values.physical);
                     contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayNormalized, values.normalized);
@@ -244,20 +298,91 @@ public:
                 else
                 {
                     contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysicalRefs, values.physical);
-                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayNormalizedRefs, values.normalized);
-                    if (values.view) values.view->visit_borrowed_payload(visitor);
+                    contact_payload_buffer(
+                        visitor, this, ContactPayloadRole::PointArrayNormalizedRefs, values.normalized);
+                    if (values.view)
+                        values.view->visit_borrowed_payload(visitor);
                 }
-            }, storage_);
+            },
+            storage_);
     }
     [[nodiscard]] std::shared_ptr<const ContactPointPageView> page_view() const noexcept
     {
         return std::visit(
             [](const auto& values) -> std::shared_ptr<const ContactPointPageView>
             {
-                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
                     return {};
                 else
                     return values.view;
+            },
+            storage_);
+    }
+    [[nodiscard]] std::shared_ptr<const ContactSourcePointView> source_page_view() const noexcept
+    {
+        return std::visit(
+            [](const auto& values) -> std::shared_ptr<const ContactSourcePointView>
+            {
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
+                    return values.view;
+                else
+                    return {};
+            },
+            storage_);
+    }
+
+    /** Construction-only transfer for a new row that has NEVER escaped
+     * its session. Buffers keep exact widths/capacities; published row/page
+     * generations are never redirected. */
+    bool bind_private_initial_source(
+        IncidencePointDirectory<>& pool, const std::shared_ptr<ContactSourcePointView>& target)
+    {
+        if (!target || target->frozen() || target->source() != pool.source())
+            throw std::invalid_argument("Invalid private source-row construction binding.");
+        return std::visit(
+            [&](auto& values) -> bool
+            {
+                using Values = std::decay_t<decltype(values)>;
+                if constexpr (std::is_same_v<Values, Pooled<std::uint32_t>> ||
+                              std::is_same_v<Values, Pooled<std::uint64_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                              std::is_same_v<Values, Sourced<std::uint64_t>>)
+                {
+                    using UInt = typename std::remove_reference_t<decltype(values.physical)>::value_type;
+                    if (pool.source_size() && pool.source_size() - 1 > std::numeric_limits<UInt>::max())
+                        return false;
+                    const auto map = [&](UInt reference)
+                    {
+                        const auto point = [&]
+                        {
+                            if constexpr (std::is_same_v<Values, Pooled<UInt>>)
+                                return values.view->get(CapturedPointReference{reference});
+                            else
+                                return values.view->get(CapturedSourcePointReference{reference});
+                        }();
+                        const auto slot = pool.find(point);
+                        if (!slot || *slot >= pool.source_size())
+                            throw std::invalid_argument("Private source row lacks its full original point identity.");
+                        return static_cast<UInt>(target->capture(pool, *slot).value);
+                    };
+                    for (const auto reference : values.physical)
+                        (void) map(reference);
+                    for (const auto reference : values.normalized)
+                        (void) map(reference);
+                    for (auto& reference : values.physical)
+                        reference = map(reference);
+                    for (auto& reference : values.normalized)
+                        reference = map(reference);
+                    Sourced<UInt> source{std::move(values.physical), std::move(values.normalized), target};
+                    storage_.template emplace<Sourced<UInt>>(std::move(source));
+                    return true;
+                }
+                else
+                    return false;
             },
             storage_);
     }
@@ -272,10 +397,21 @@ private:
             {
                 if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
                     return {};
+                else if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Sourced<std::uint32_t>> ||
+                                   std::is_same_v<std::decay_t<decltype(values)>, Sourced<std::uint64_t>>)
+                {
+                    const CapturedSourcePointReference reference{
+                        normalized && !values.normalized.empty() ? values.normalized[i] : values.physical[i]};
+                    if (const auto stored = values.view->stored_location(reference))
+                        return Locator{stored->view, stored->reference};
+                    return Locator{nullptr, {0}, values.view.get(), reference};
+                }
                 else
-                    return Locator{values.view.get(), CapturedPointReference{
-                        normalized && !values.normalized.empty() ? values.normalized[i] : values.physical[i]}};
-            }, storage_);
+                    return Locator{values.view.get(),
+                        CapturedPointReference{
+                            normalized && !values.normalized.empty() ? values.normalized[i] : values.physical[i]}};
+            },
+            storage_);
     }
     template<class Value> static std::size_t buffer_bytes(const std::vector<Value>& array)
     {
@@ -351,6 +487,33 @@ private:
         storage_.emplace<Pooled<std::uint64_t>>(std::move(wide));
         budget.used -= previous;
     }
-    std::variant<Owning, Pooled<std::uint32_t>, Pooled<std::uint64_t>> storage_;
+    void widen_source(Budget& budget)
+    {
+        const auto& narrow = std::get<Sourced<std::uint32_t>>(storage_);
+        Sourced<std::uint64_t> wide;
+        std::size_t admitted = 0;
+        try
+        {
+            reserve_references(wide.physical, narrow.physical.capacity(), budget);
+            admitted += buffer_bytes(wide.physical);
+            reserve_references(wide.normalized, narrow.normalized.capacity(), budget);
+            admitted += buffer_bytes(wide.normalized);
+            wide.physical.assign(narrow.physical.begin(), narrow.physical.end());
+            wide.normalized.assign(narrow.normalized.begin(), narrow.normalized.end());
+            wide.view = narrow.view;
+        }
+        catch (...)
+        {
+            std::vector<std::uint64_t>().swap(wide.physical);
+            std::vector<std::uint64_t>().swap(wide.normalized);
+            budget.used -= admitted;
+            throw;
+        }
+        const auto previous = buffer_bytes(narrow.physical) + buffer_bytes(narrow.normalized);
+        storage_.emplace<Sourced<std::uint64_t>>(std::move(wide));
+        budget.used -= previous;
+    }
+    std::variant<Owning, Pooled<std::uint32_t>, Pooled<std::uint64_t>, Sourced<std::uint32_t>, Sourced<std::uint64_t>>
+        storage_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

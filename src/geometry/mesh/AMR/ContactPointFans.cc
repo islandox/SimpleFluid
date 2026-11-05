@@ -1,4 +1,4 @@
-#include "geometry/mesh/AMR/ContactPointFans.hh"
+#include "ContactPointFans.hh"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -16,8 +16,8 @@ std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(std::shared_ptr<Bud
     result->allocation_.transfer_from(admission, sizeof(ContactFanCatalog) + 128);
     return result;
 }
-std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(const ContactFanCatalog& source,
-    std::shared_ptr<Budget> arena, const PointFactDirectory::PointPool* target_pool)
+std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(
+    const ContactFanCatalog& source, std::shared_ptr<Budget> arena, const PointFactDirectory::PointPool* target_pool)
 {
     ContactGroupAllocation admission(arena);
     admission.add(sizeof(ContactFanCatalog) + 128);
@@ -25,8 +25,8 @@ std::shared_ptr<ContactFanCatalog> ContactFanCatalog::create(const ContactFanCat
     result->allocation_.transfer_from(admission, sizeof(ContactFanCatalog) + 128);
     return result;
 }
-ContactFanCatalog::ContactFanCatalog(const ContactFanCatalog& source, std::shared_ptr<Budget> arena,
-    const PointFactDirectory::PointPool* target_pool)
+ContactFanCatalog::ContactFanCatalog(
+    const ContactFanCatalog& source, std::shared_ptr<Budget> arena, const PointFactDirectory::PointPool* target_pool)
     : points(source.points, arena, target_pool, false), allocation_(std::move(arena))
 {
     allocation_.reserve(bindings_, source.bindings_.size());
@@ -130,8 +130,9 @@ void ContactFanCatalog::ensure_binding_lookup()
         if (bindings_[slot].refs || bindings_[slot].retired)
         {
             const auto& value = bindings_[slot].value;
-            auto bucket = static_cast<std::size_t>(
-                binding_hash(value.row.get(), value.incidence_generation, value.record)) & (capacity - 1);
+            auto bucket =
+                static_cast<std::size_t>(binding_hash(value.row.get(), value.incidence_generation, value.record)) &
+                (capacity - 1);
             while (replacement[bucket] != empty_binding)
                 bucket = (bucket + 1) & (capacity - 1);
             replacement[bucket] = slot;
@@ -189,8 +190,9 @@ void ContactFanCatalog::reclaim()
         if (!entry.retired)
             continue;
         const auto mask = buckets_.size() - 1;
-        auto bucket = static_cast<std::size_t>(binding_hash(
-            entry.value.row.get(), entry.value.incidence_generation, entry.value.record)) & mask;
+        auto bucket = static_cast<std::size_t>(
+                          binding_hash(entry.value.row.get(), entry.value.incidence_generation, entry.value.record)) &
+                      mask;
         while (buckets_[bucket] != i)
             bucket = (bucket + 1) & mask;
         buckets_[bucket] = retired_bucket;
@@ -248,11 +250,15 @@ std::shared_ptr<const ContactFanBlock> ContactFanBlock::build(
                 for (const auto& value : group.remote)
                     arrays.remote.push_back({static_cast<UInt>(value.record), static_cast<UInt>(value.physical.slot)});
             }
-        }, result->data_);
+        },
+        result->data_);
     allocation.transfer_from(staged, staged.bytes());
     return result;
 }
-bool ContactFanBlock::wide() const noexcept { return data_.index() == 1; }
+bool ContactFanBlock::wide() const noexcept
+{
+    return data_.index() == 1;
+}
 std::size_t ContactFanBlock::groups() const noexcept
 {
     return std::visit([](const auto& a) { return a.slices.size(); }, data_);
@@ -267,37 +273,44 @@ std::size_t ContactFanBlock::remote_count(std::size_t group) const
 }
 std::pair<std::size_t, std::size_t> ContactFanBlock::local(std::size_t group, std::size_t occurrence) const
 {
-    return std::visit([&](const auto& a) -> std::pair<std::size_t, std::size_t>
+    return std::visit(
+        [&](const auto& a) -> std::pair<std::size_t, std::size_t>
         {
             const auto& slice = a.slices.at(group);
             if (occurrence >= slice.locals)
                 throw std::out_of_range("Contact local fan index out of range.");
             const auto& value = a.local[std::size_t(slice.local) + occurrence];
             return {value.binding, value.point};
-        }, data_);
+        },
+        data_);
 }
 std::pair<std::size_t, std::size_t> ContactFanBlock::remote(std::size_t group, std::size_t occurrence) const
 {
-    return std::visit([&](const auto& a) -> std::pair<std::size_t, std::size_t>
+    return std::visit(
+        [&](const auto& a) -> std::pair<std::size_t, std::size_t>
         {
             const auto& slice = a.slices.at(group);
             if (occurrence >= slice.remotes)
                 throw std::out_of_range("Contact remote fan index out of range.");
             const auto& value = a.remote[std::size_t(slice.remote) + occurrence];
             return {value.record, value.physical};
-        }, data_);
+        },
+        data_);
 }
 std::size_t ContactFanBlock::storage_bytes() const noexcept
 {
-    return std::visit([](const auto& a)
+    return std::visit(
+        [](const auto& a)
         {
             return sizeof(ContactFanBlock) + 128 + a.local.capacity() * sizeof(a.local[0]) +
-                a.remote.capacity() * sizeof(a.remote[0]) + a.slices.capacity() * sizeof(a.slices[0]);
-        }, data_);
+                   a.remote.capacity() * sizeof(a.remote[0]) + a.slices.capacity() * sizeof(a.slices[0]);
+        },
+        data_);
 }
 ContactFanOwner::ContactFanOwner(std::shared_ptr<ContactFanCatalog> catalog)
     : allocation_(catalog->arena()), body_admission_(catalog->arena()), catalog_(std::move(catalog))
-{}
+{
+}
 std::shared_ptr<ContactFanOwner> ContactFanOwner::create(std::shared_ptr<ContactFanCatalog> catalog)
 {
     ContactGroupAllocation admission(catalog->arena());
@@ -416,7 +429,8 @@ void ContactFanOwner::finish_staging() const
 bool ContactFanOwner::has_live_slices() const noexcept
 {
     for (const auto count : views_)
-        if (count && count != std::numeric_limits<std::size_t>::max()) return true;
+        if (count && count != std::numeric_limits<std::size_t>::max())
+            return true;
     return false;
 }
 ContactFanOwner::~ContactFanOwner()
@@ -432,8 +446,9 @@ ContactFanView::ContactFanView(std::shared_ptr<const ContactFanOwner> value, std
         owner_->pin_slice(group_);
 }
 ContactFanView::ContactFanView(const ContactFanView& other) : ContactFanView(other.owner_, other.group_) {}
-ContactFanView::ContactFanView(ContactFanView&& other) noexcept
-    : owner_(std::move(other.owner_)), group_(other.group_) {}
+ContactFanView::ContactFanView(ContactFanView&& other) noexcept : owner_(std::move(other.owner_)), group_(other.group_)
+{
+}
 ContactFanView& ContactFanView::operator=(ContactFanView other) noexcept
 {
     owner_.swap(other.owner_);
@@ -449,7 +464,7 @@ const ContactRowBinding& ContactFanOwner::binding(std::size_t slot) const
 {
     return catalog_->binding(catalog_->pinned_binding(slot));
 }
-const ContactPointIdentity& ContactFanOwner::physical(std::size_t slot) const
+ContactPointIdentity ContactFanOwner::physical(std::size_t slot) const
 {
     return catalog_->points.get(catalog_->points.pinned_reference(slot));
 }

@@ -2,6 +2,7 @@
  * @brief Candidate-local physical tile contribution accounting.
  */
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "PooledCellPoints.hh"
 #include "PooledTile.hh"
@@ -55,6 +56,21 @@ public:
         for (const auto& [slot, entry] : cells_)
             bytes += entry.points->metadata_bytes();
         return bytes;
+    }
+
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::OwnerRowsObject, sizeof(*this));
+        for (const auto& value : cells_)
+        {
+            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnerRowsCellNodes, value);
+            const auto& points = value.second.points;
+            if (points)
+                points->visit_borrowed_payload(visitor, true);
+        }
+        for (const auto& value : dirty_)
+            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnerRowsDirtyNodes, value);
     }
 
 private:

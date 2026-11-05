@@ -31,6 +31,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
+  if(TEST_NAME STREQUAL "testCartesianCompactFamilies")
+    target_compile_definitions(${TEST_NAME} PRIVATE SIMPLEFLUID_TEST_EXPECT_LINE_INDEX_WIDTH=4)
+  endif()
   if((TEST_NAME STREQUAL "testOrdinaryPredicateAccounting" OR TEST_NAME STREQUAL "testGeometryProvenanceBorrow"
       OR TEST_NAME STREQUAL "testPointSnapshot"
       OR TEST_NAME STREQUAL "testGeometryRetentionCensus"
@@ -53,6 +56,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testContactRecordStorage"
       OR TEST_NAME STREQUAL "testDeferredOwnerCharges"
       OR TEST_NAME STREQUAL "testPooledLineExchange"
+      OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
+      OR TEST_NAME STREQUAL "testIncidencePointDirectory"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
@@ -339,4 +344,20 @@ foreach(_incremental_ranks IN ITEMS 2 4)
     TARGET testIncrementalAdaptiveHierarchy PROCS ${_incremental_ranks}
     ARGS "--gtest_filter=IncrementalAdaptiveHierarchy.*"
     LABELS "mpi;amr;closure;incremental;empty_rank" TIMEOUT 240)
+endforeach()
+
+# Actual native-source closure and control waves, including empty owners.
+foreach(_source_ranks 2 4)
+  simplefluid_add_mpi_test(NAME CartesianIncidenceSession_${_source_ranks}procs
+    TARGET testCartesianIncidenceSession PROCS ${_source_ranks}
+    ARGS "--gtest_filter=CartesianIncidenceSession.*"
+    LABELS "mpi;geometry;amr;collective;storage" TIMEOUT 240)
+  simplefluid_add_mpi_test(NAME CartesianLineControls_${_source_ranks}procs
+    TARGET testCartesianLineControlsMPI PROCS ${_source_ranks}
+    ARGS "--gtest_filter=CartesianLineControlsMPI.*"
+    LABELS "mpi;geometry;amr;collective;storage" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME CartesianCachedLineControls_${_source_ranks}procs
+    TARGET testCartesianCachedLineControls PROCS ${_source_ranks}
+    ARGS "--gtest_filter=CartesianCachedLineControls.*"
+    LABELS "mpi;geometry;amr;collective;storage" TIMEOUT 180)
 endforeach()

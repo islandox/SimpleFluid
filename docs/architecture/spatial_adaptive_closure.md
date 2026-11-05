@@ -77,11 +77,46 @@ never fall through to an obsolete base entry; addresses are not used as ancestry
 The final state is repacked and registered after convergence rather than once per
 refinement pass.
 
-Authority membership always comes from `kernel.surfaces(source_leaf)` in a
+Authority membership is established by `kernel.surfaces(source_leaf)` in a
 transient copy. A retained polyhedral leaf can already have physical support
 records whose keys and boundary aliases differ from the mapped authority view;
 the cache must preserve those source records and must not bypass the mapping
 because the retained surface list is nonempty.
+
+Actual Cartesian providers may certify immutable source ranges through an
+explicit provider capability. A public provider label, descriptor, hash or
+recipe-relative slot cannot authorize that representation. Sources retain their
+complete domain, ancestry ranges, revisions, evaluated axes and arithmetic
+environment. Support lookup filters original full canonical keys; logical
+adjacency or hull overlap never establishes complete membership. An uncertified
+inverse lookup regenerates its authenticated contributing ranges and filters
+their full generated keys.
+
+The original complete support overlay and complete line query run before a
+recipe is certified. Its complete ordered output identities must agree exactly
+with the proposed representation. Translated images, inverse periodic
+translation, projection ties, winding, support order and the existing layer
+limit remain part of that proof. A mismatch keeps explicit evidence; a
+Cartesian label alone never permits an implicit answer.
+
+Owner manifests bind the complete contributing inventory to the source versions
+and membership generation. Every owner supplies a completion, including an empty
+owner. The manifest contains authenticated source facts, rather than a complete
+cell-neighbor or cell-pair table. Existing v2 line-data packets retain their
+canonical bytes. Separate typed control messages carry source dependencies and
+their context, layer, wave, page and ordered full-value bindings. Missing,
+duplicate, stale, reordered or truncated controls cannot become empty results.
+
+Regular edits enter certification after the existing support/line fixed point
+and before their changed rows publish. New immutable source inventories retain
+the exact captured evaluation facts of unchanged sources; authenticated retired
+and inserted ancestry ranges determine the new active membership. Changed
+sources retain the caller environment under which their original kernels ran.
+Advancing the inventory generation does not retag old numerical facts with new
+controls. Old/new supports, then old/new lines and every affected tile, retain
+the established invalidation order. Dirty line recipes are checked against the
+completed real-query results, and unchanged certificates require the same full
+dependency proof. Numerically exceptional neighborhoods keep explicit results.
 
 A changed support is reconstructed from its complete, authenticated owner
 membership. Dirty supports are fetched in byte-bounded pages and preserve member
@@ -102,7 +137,7 @@ and the associated pair requirements are recomputed. Empty owners participate in
 the same collective phases. A failed plan discards the candidate and its overlay,
 leaving the accepted hierarchy, cache and source observations intact.
 
-The incidence identity pools store full values in pages of sixteen records. Byte,
+Explicit incidence identity pools store full values in pages of sixteen records. Byte,
 cell and point keys use templated hashing policies and flat hash-slot lookup with
 full-value collision checks; plane, normal and image keys retain tree lookup. Point hashing isolates and
 restores the caller's floating-point environment while emitting canonical words. Hash buckets and stable pool slots are private
@@ -127,6 +162,32 @@ page size. Rows preserve full physical-identity ordering and the existing
 normalization and duplicate checks. Normalized references share the physical
 array while every pair is equal; a separate reference array is retained only
 when normalization differs. Standalone/manual rows retain their owning adapter.
+
+Certified Cartesian point storage uses immutable canonical component tables and
+checked compact selectors, with complete explicit identities for exceptions.
+Components come from actual validated point identities; reading them performs no
+normalization or geometry evaluation. A source-backed directory preserves logical
+pool slots while using a distinct captured-reference namespace from physical
+sixteen-record pages. A new source snapshot must reproduce every referenced full
+identity before publication. Previously published rows and captured physical
+references keep their original snapshots and pages after edits or source
+destruction; they never redirect to a newer generation.
+
+Repeated captures share a flat directory of immutable value blocks. Unchanged
+component and point indices retain their meanings and widths; new blocks append
+only new components, selectors and lookup entries. Before reuse, the new capture
+checks every prior full identity against the actual current values. Value blocks
+contain no older snapshot or owner-manifest binding. Current certificates retain
+their own proof, while surviving older rows and recipes keep the exact historical
+proof they require. Indexed reads select blocks without walking a recursive
+snapshot ancestry chain.
+
+Point-row iteration and indexed access return immutable identity values. Consumers
+that need a stable borrow retain an exact row/page/generation locator and resolve
+it synchronously. There is no hidden expanded point array or proxy conversion to
+a reference whose lifetime ends with the accessor call. The cover index and
+physical pair evaluation follow those locators without copying resident full-key
+arrays.
 
 Each arena independently admits shared point pages once. Published directories
 retain the originating arena until their last row/view is destroyed. Forked
@@ -157,6 +218,13 @@ retain the old bodies and histories until contribution removal completes.
 Vector-backed replay inputs explicitly pin their layer owner through replacement
 or pruning; page-backed inputs retain their page reference.
 
+After exact source-point certification, a derivable Cartesian tile ring retains
+its immutable source recipe instead of an individual ring in the page's flat
+array. Other polygon degrees and nonmatching outputs retain their explicit rings.
+Scalars, source orientation and emission identity remain unchanged. Replacing a
+private body does not rewrite an older page still borrowed by a contribution,
+accepted state or escaped view.
+
 Retirement releases a private page when no tile/view needs it. If an accepted
 source still retains the immutable body, its candidate body credit moves to a
 weak-owner table until physical expiry. Re-adoption transfers that existing
@@ -186,7 +254,62 @@ certified layer containing only its intrinsic endpoints can be represented
 implicitly; its subscriptions and output are reconstructed from the intrinsic
 loop when needed. A private v2 line wave checks the complete subscriber identity,
 rejects duplicate completions and verifies the completion count for each source.
-A completed page alone is not proof that the full wave arrived.
+A completed page alone is not proof that the full wave arrived. Certified
+Cartesian subscribers instead use shared actual-axis maps and ordered
+source-coordinate families with range/mask membership. Nonforward complete
+results, including coarse/fine intermediate points, use certified result
+selectors. Neither representation retains an expanded subscriber or output-point
+mirror. A synchronous read reconstructs one record in the original order from
+its exact source dependencies. Certification and storage observations include
+every stored completed layer, not only the currently effective final layer.
+Each recipe retains the exact layer and full completed-output witness of its
+bucket. Genuine exceptions retain the explicit form.
+
+Published family descriptors use one checked 32-bit or 64-bit private-index
+alternative per recipe. Fixed and mapped components share one selector array
+with explicit tags; numerical components and wire/generation words retain their
+precision and limits. Small memberships live inline, while general masks,
+ranges and result selectors use exact-capacity flat buffers. Complete prototype
+bytes share a catalog table by full equality. Construction drafts and reusable
+per-line metadata scratch remain invocation-local and fully admitted alongside
+old and new owners until whole-pass validation succeeds.
+
+Tile residents own compact result receipts for remote authority answers. A
+receipt is issued only after the original reply, control, member, chunk and
+completion checks succeed. It binds the original request endpoints; v2 reply
+data does not contain those endpoint fields. Current read context and effective
+layer are distinct from the actual stored kernel-witness layer. If an intrinsic
+endpoint-only answer was previously discarded, an on-demand bounded control
+phase reads that already completed authority result before the original layer
+rebuild. It does not rerun a line query, normalization or translation. Empty
+participants complete the same control phases; zero logical requests do not
+imply zero envelope traffic when the phase is invoked.
+
+Saved loops share exact ordered edge-result parts and select the physical
+contour slice for periodic images. Full loop replay precedes release of old
+input, output, endpoint and result arrays. Shared layer bodies detach before
+sealing even when their allocation budget matches the editing branch. Compact
+views retain exact proof dependencies; temporary expanded receipt results
+retire after successful sealing. Uniform endpoint-only tiles retain no
+permanent receipt inventory.
+
+Before sealing an owning receipt, the exchange may lend its authenticated reply
+to a synchronous consumer after all terminal, peer and global completion-count
+checks succeed. The borrow and its spans last only for that callback. A tile
+without a materialized body consumes a reply only when it matches the exact
+ordered original endpoints and their context, layer, membership and point-pool
+binding. Consumption records the receive and dirty-subscription counts once,
+then destroys the pending result before releasing its live allocation credit.
+Declined replies follow the owning-receipt path. If a later edge requires a
+saved layer, authenticated cached-proof recovery can add control waves; it does
+not replay the earlier receive or dirty-subscription counts.
+
+Pooled-line point packets append their canonical body and the common geometry
+envelope directly to admitted output capacity. The append checks the complete
+frame before modifying the destination and creates no temporary key or packet
+owner. Packet bytes and the caller's canonical scalar evaluation environment
+remain those of the owning encoder; only the eliminated heap scratch loses its
+prospective admission charge.
 
 Ownership migration rebinds the candidate session by retiring moved memberships at
 old owners and inserting them at new owners, including when the key and revision
@@ -199,7 +322,7 @@ One stable typed point-group catalog owns local and remote fan slices. Domains
 and complete normalized identities refer to immutable pooled facts; periodic
 remote physical identities remain separate where required. Canonical rows import
 only their referenced point pages, while owning inputs use packed fallback pages.
-The cover index borrows coordinates from those stable identity owners rather
+The cover index resolves coordinates from those stable identity owners rather
 than retaining another coordinate array. No resident serialized point-key mirror
 is retained.
 
@@ -256,8 +379,10 @@ that closure round, while logical point-incidence pairs are reported separately.
 refinement pass begins a new round; paging within a round never resets its work
 cap or cumulative admission counters.
 
-These are private representation changes; public exports and reconstruction
-behavior are unchanged. The candidate arena admits actual capacities and the
+These closure representation changes preserve numerical exports and reconstruction
+behavior. The public cell-view API and explicit materialization boundary are
+described in [the general VoF ownership contract](general_vof_implementation.md).
+The candidate arena admits actual capacities and the
 one-time source/candidate metadata overlap and
 retains charges for shared bodies once in that candidate. The source-overlap
 reservation is released at publication, while the accepted candidate retains its
@@ -274,6 +399,31 @@ operations retain their own nested admission policies; the outer accounting is
 not a bound on all allocator activity or process RSS. `storage()` includes the
 retained contact cache in its owned-byte estimate without adding the bound Data
 admission a second time.
+
+Source inventories, evaluated-axis maps, point directories, certificates and
+exceptions participate in the borrowed retention census. Shared immutable payload
+and referencing metadata are separate. Each candidate independently admits shared
+source bodies once in its own arena; the accepted arena's live header, lookup
+nodes, credit tokens and tile-source metadata remain part of simultaneous
+overlap. Exact owner identities govern transfers from overlap to an escaping
+lease. Ancestor credit metadata remains distinct even when it retains the same
+body. Buffer capacity, old/new replacements and complete-group replay scratch
+are admitted before allocation; successful retirement never refunds cumulative
+spending. Live allocation traffic, census extents, admission and RSS are separate
+measurements.
+
+Canonical pooled plane identities and the existing PLIC ledger have separate
+borrowed root access. Their required plane owners and ledger pins are reported
+independently from contact-container payload. Temporary support-fetch and decode
+ledgers retain their operation-local lifetimes; certification does not reset a
+production ledger or refund cumulative admission.
+
+Returned row vectors retain their caller-owned buffer credit only after a
+successful return. A later certification or collective failure destroys their
+current buffers before releasing live admission, including when compaction
+replaces a vector. Temporary patches and retired-key precharges use the same
+destruction-before-release discipline. Cumulative construction charges remain
+spent on every failed path.
 
 The old closure implementation remains an explicit private test oracle, never a
 production fallback. The standalone closure call still creates a complete

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -45,6 +46,8 @@ using PageData = std::variant<CompactData, WideData>;
 struct BodyPage
 {
     PageData data;
+    std::shared_ptr<const ContactSourcePointSnapshot> source;
+    unsigned source_bits = 0;
     bool sealed = false;
 };
 template<class UInt> BodyRecord<UInt> record(const PooledTile& source, std::size_t offset)
@@ -81,11 +84,27 @@ std::size_t ring_capacity(std::size_t old, std::size_t required)
     return std::max(required, doubled ? doubled : std::size_t{1});
 }
 } // namespace
+struct TileSourceCredit
+{
+    Budget* budget = nullptr;
+    std::shared_ptr<Budget> keeper;
+    std::shared_ptr<const ContactSourcePointSnapshot> source;
+    std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> leases;
+    std::size_t bytes = 0;
+    ~TileSourceCredit()
+    {
+        source.reset();
+        decltype(leases){}.swap(leases);
+        if (budget)
+            budget->used -= bytes;
+    }
+};
 struct TileBodyPageCredit
 {
     Budget* budget;
     std::shared_ptr<Budget> keeper;
     std::shared_ptr<BodyPage> page;
+    std::shared_ptr<TileSourceCredit> source;
     std::size_t bytes = 0, ordinal = 0;
     std::array<std::atomic<std::size_t>, records_per_page> references{};
     TileBodyPageCredit(Budget& arena, std::shared_ptr<Budget> owner) : budget(&arena), keeper(std::move(owner)) {}
@@ -108,9 +127,112 @@ struct TileBodyPageCredit
 };
 namespace
 {
+std::shared_ptr<TileSourceCredit> source_credit(std::shared_ptr<const ContactSourcePointSnapshot> source,
+    Budget& budget, const std::shared_ptr<Budget>& keeper, const std::shared_ptr<CartesianAuthorityArena>& arena)
+{
+    if (!source || !arena || arena->budget != &budget)
+        throw std::invalid_argument("Tile source loops require their explicit arena.");
+    cartesian_detail::Allocation memory(budget);
+    memory.retain(sizeof(TileSourceCredit) + 128);
+    cartesian_detail::CreditConstruction credits(arena);
+    auto result = std::make_shared<TileSourceCredit>();
+    result->source = std::move(source);
+    credits.retain(result->source, result->source->allocation_budget(), result->source->metadata_bytes(),
+        result->source->has_arena_keeper(), result->leases, memory);
+    result->source->visit_dependencies(
+        [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
+        {
+            using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
+            const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
+            credits.retain(fixed, origin, bytes, keep, result->leases, memory);
+        });
+    result->budget = &budget;
+    result->keeper = keeper;
+    result->bytes = std::exchange(memory.bytes, 0);
+    credits.committed = true;
+    return result;
+}
+template<class UInt> std::uint64_t quad_code(const BodyRecord<UInt>& record)
+{
+    if constexpr (sizeof(UInt) == 4)
+        return std::uint64_t(record.offset) | (std::uint64_t(record.count) << 32);
+    else
+        return record.offset;
+}
+std::optional<std::size_t> source_corner(
+    const ContactSourcePointSnapshot& source, std::uint64_t code, unsigned bits, std::size_t corner)
+{
+    if (corner >= 4 || bits > 12)
+        return {};
+    const auto mask = bits ? (std::uint64_t(1) << bits) - 1 : 0;
+    std::array<std::size_t, 3> point{};
+    for (unsigned a = 0; a < 3; ++a)
+        point[a] = (code >> (a * bits)) & mask;
+    const auto a = unsigned((code >> (5 * bits)) & 3), b = unsigned((code >> (5 * bits + 2)) & 3);
+    if (a >= 3 || b >= 3 || a == b)
+        return {};
+    if (corner == 1 || corner == 2)
+        point[a] = (code >> (3 * bits)) & mask;
+    if (corner == 2 || corner == 3)
+        point[b] = (code >> (4 * bits)) & mask;
+    return source.find_components(point);
+}
+bool certify_quad(const ContactSourcePointSnapshot& source, std::span<const std::size_t, 4> points, unsigned bits,
+    std::uint64_t& code)
+{
+    std::array<std::array<std::size_t, 3>, 4> values{};
+    for (unsigned p = 0; p < 4; ++p)
+    {
+        const auto value = source.component_indices({points[p]});
+        if (!value)
+            return false;
+        values[p] = *value;
+    }
+    unsigned a = 3, b = 3;
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        if (values[0][axis] != values[1][axis])
+        {
+            if (a != 3)
+                return false;
+            a = axis;
+        }
+        if (values[0][axis] != values[3][axis])
+        {
+            if (b != 3)
+                return false;
+            b = axis;
+        }
+    }
+    if (a == 3 || b == 3 || a == b)
+        return false;
+    auto opposite = values[0];
+    opposite[a] = values[1][a];
+    opposite[b] = values[3][b];
+    if (opposite != values[2])
+        return false;
+    code = 0;
+    const std::array<std::size_t, 5> selected{values[0][0], values[0][1], values[0][2], values[1][a], values[3][b]};
+    const auto maximum = bits ? (std::uint64_t(1) << bits) - 1 : 0;
+    for (unsigned field = 0; field < 5; ++field)
+    {
+        if (selected[field] > maximum)
+            return false;
+        code |= std::uint64_t(selected[field]) << (field * bits);
+    }
+    code |= std::uint64_t(a) << (5 * bits);
+    code |= std::uint64_t(b) << (5 * bits + 2);
+    for (unsigned p = 0; p < 4; ++p)
+    {
+        const auto replay = source_corner(source, code, bits, p);
+        if (!replay || *replay != points[p] || source.value({*replay}) != source.value({points[p]}))
+            return false;
+    }
+    return true;
+}
 constexpr auto credit_overhead = sizeof(TileBodyPageCredit) + 128;
-std::shared_ptr<TileBodyPageCredit> make_credit(
-    Budget& budget, const std::shared_ptr<Budget>& keeper, std::shared_ptr<BodyPage> page, std::size_t body_bytes)
+std::shared_ptr<TileBodyPageCredit> make_credit(Budget& budget, const std::shared_ptr<Budget>& keeper,
+    std::shared_ptr<BodyPage> page, std::size_t body_bytes, std::shared_ptr<TileSourceCredit> source = {})
 {
     budget.add(credit_overhead);
     std::shared_ptr<TileBodyPageCredit> credit;
@@ -126,6 +248,7 @@ std::shared_ptr<TileBodyPageCredit> make_credit(
     credit->bytes = credit_overhead;
     credit->admit(body_bytes);
     credit->page = std::move(page);
+    credit->source = std::move(source);
     return credit;
 }
 std::size_t occupied(const TileBodyPageCredit& credit) noexcept
@@ -342,15 +465,32 @@ bool operator==(const TileBodyLoopView& first, const TileBodyLoopView& second)
 }
 std::size_t TileBodyLoopView::size() const noexcept
 {
+    if (indexed_at_)
+        return indexed_count_;
     if (!handle_)
         return direct_.size();
+    if (handle_.credit_->page->source)
+        return 4;
     return std::visit([&](const auto& data) { return static_cast<std::size_t>(data.records[handle_.slot_].count); },
         handle_.credit_->page->data);
 }
 std::size_t TileBodyLoopView::operator[](std::size_t index) const
 {
+    if (indexed_at_)
+        return indexed_at_(indexed_owner_, index);
     if (!handle_)
         return direct_[index];
+    if (handle_.credit_->page->source)
+        return std::visit(
+            [&](const auto& data)
+            {
+                const auto slot = source_corner(*handle_.credit_->page->source, quad_code(data.records[handle_.slot_]),
+                    handle_.credit_->page->source_bits, index);
+                if (!slot)
+                    throw std::invalid_argument("Certified tile source lost a complete corner identity.");
+                return *slot;
+            },
+            handle_.credit_->page->data);
     return std::visit(
         [&](const auto& data)
         {
@@ -371,9 +511,11 @@ TileBodyPages::TileBodyPages(Budget& budget, std::shared_ptr<Budget> keeper)
     if (keeper_ && keeper_.get() != &budget)
         throw std::invalid_argument("Tile body budget keeper mismatch.");
 }
-TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::shared_ptr<Budget> keeper)
+TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::shared_ptr<Budget> keeper,
+    std::shared_ptr<CartesianAuthorityArena> source_arena)
     : TileBodyPages(budget, std::move(keeper))
 {
+    source_arena_ = std::move(source_arena);
     for (const auto& credit : source.pages_)
         if (credit && !credit->page->sealed)
             throw std::invalid_argument("Tile body source must be frozen before fork.");
@@ -387,7 +529,8 @@ TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::s
         for (std::size_t i = 0; i < source.pages_.size(); ++i)
             if (const auto& old = source.pages_[i])
             {
-                pages_[i] = make_credit(*budget_, keeper_, old->page, old->bytes - credit_overhead);
+                pages_[i] = make_credit(*budget_, keeper_, old->page, old->bytes - credit_overhead,
+                    old->page->source ? source_context(old->page->source) : nullptr);
                 pages_[i]->ordinal = i;
             }
         while (first_free_ < pages_.size() && pages_[first_free_])
@@ -422,10 +565,84 @@ TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::s
 TileBodyPages::~TileBodyPages()
 {
     decltype(pages_)().swap(pages_);
+    source_credit_.reset();
     // Retiring this admission domain follows DeferredOwnerCharges: surviving
     // foreign bodies have independent admission in their remaining domains.
     release_deferred();
     budget_->used -= charged_;
+}
+std::shared_ptr<TileSourceCredit> TileBodyPages::source_context(
+    std::shared_ptr<const ContactSourcePointSnapshot> source)
+{
+    if (source_credit_ && source_credit_->source == source)
+        return source_credit_;
+    for (const auto& credit : pages_)
+        if (credit && credit->source && credit->source->source == source)
+            return credit->source;
+    source_credit_ = source_credit(std::move(source), *budget_, keeper_, source_arena_);
+    return source_credit_;
+}
+std::size_t TileBodyPages::certify_private_source_loops(
+    std::shared_ptr<const ContactSourcePointSnapshot> source, std::shared_ptr<CartesianAuthorityArena> arena)
+{
+    if (!source || !arena || arena->budget != budget_ || source->allocation_budget() != budget_)
+        throw std::invalid_argument("Foreign private tile-source certification arena.");
+    freeze(); // Encoded source pages can never become a later append tail.
+    source_arena_ = std::move(arena);
+    std::size_t maximum = 0;
+    for (const auto count : source->component_counts())
+        if (count)
+            maximum = std::max(maximum, count - 1);
+    const auto bits = unsigned(std::bit_width(maximum));
+    if (bits > 12)
+        return 0;
+    std::size_t records = 0;
+    for (auto& credit : pages_)
+        if (credit && !credit->page->source && credit->page.use_count() == 1)
+        {
+            std::array<std::uint64_t, records_per_page> codes{};
+            const bool matches = std::visit(
+                [&](const auto& data)
+                {
+                    for (std::size_t index = 0; index < data.records.size(); ++index)
+                    {
+                        const auto& entry = data.records[index];
+                        if (entry.count != 4 || entry.offset > data.rings.size() ||
+                            data.rings.size() - entry.offset < 4)
+                            return false;
+                        std::array<std::size_t, 4> loop{};
+                        for (unsigned p = 0; p < 4; ++p)
+                            loop[p] = data.rings[entry.offset + p];
+                        if (!certify_quad(*source, loop, bits, codes[index]))
+                            return false;
+                    }
+                    return true;
+                },
+                credit->page->data);
+            if (!matches)
+                continue;
+            auto context = source_context(source); // All throwing admission precedes publication.
+            std::size_t old_rings = 0;
+            std::visit(
+                [&](auto& data)
+                {
+                    using UInt = typename std::remove_cvref_t<decltype(data)>::Index;
+                    for (std::size_t index = 0; index < data.records.size(); ++index)
+                    {
+                        data.records[index].offset = UInt(codes[index]);
+                        data.records[index].count = sizeof(UInt) == 4 ? UInt(codes[index] >> 32) : 0;
+                    }
+                    old_rings = product(data.rings.capacity(), sizeof(UInt));
+                    decltype(data.rings){}.swap(data.rings);
+                },
+                credit->page->data);
+            credit->page->source = source;
+            credit->page->source_bits = bits;
+            credit->source = std::move(context);
+            credit->release(old_rings);
+            records += occupied(*credit);
+        }
+    return records;
 }
 void TileBodyPages::release_deferred() noexcept
 {
@@ -512,7 +729,8 @@ TileBodyHandle TileBodyPages::adopt(const TileBodyHandle& source)
     const WeakBodyOwner owner(source.credit_->page);
     const auto deferred = deferred_.find(owner);
     const auto body_bytes = physical_body_bytes(*source.credit_->page);
-    auto credit = make_credit(*budget_, keeper_, source.credit_->page, deferred == deferred_.end() ? body_bytes : 0);
+    auto credit = make_credit(*budget_, keeper_, source.credit_->page, deferred == deferred_.end() ? body_bytes : 0,
+        source.credit_->page->source ? source_context(source.credit_->page->source) : nullptr);
     const auto index = install(std::move(credit));
     if (deferred != deferred_.end())
     {
@@ -589,6 +807,8 @@ TileBodyReapStatistics TileBodyPages::reap()
             first_free_ = std::min(first_free_, credit->ordinal);
             credit.reset();
         }
+    if (source_credit_ && source_credit_.use_count() == 1)
+        source_credit_.reset();
     return result;
 }
 TileBodyPageStatistics TileBodyPages::statistics() const noexcept
@@ -602,6 +822,11 @@ TileBodyPageStatistics TileBodyPages::statistics() const noexcept
         if (credit)
         {
             ++result.pages;
+            if (credit->page->source)
+            {
+                ++result.source_pages;
+                result.source_records += occupied(*credit);
+            }
             result.wide_pages += std::holds_alternative<WideData>(credit->page->data);
             result.occupied_records += occupied(*credit);
             result.record_capacity += records_per_page;
@@ -621,6 +846,78 @@ TileBodyPageStatistics TileBodyPages::statistics() const noexcept
                 credit->page->data);
         }
     return result;
+}
+void TileBodyPages::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
+{
+    contact_payload_buffer(visitor, this, ContactPayloadRole::TilePageDirectory, pages_);
+    for (const auto& entry : deferred_)
+        contact_payload_node_value(visitor, this, ContactPayloadRole::DeferredOwnerChargeNodes, entry);
+    const auto visit_source = [&](const std::shared_ptr<TileSourceCredit>& source)
+    {
+        if (!source)
+            return;
+        contact_payload_object(
+            visitor, source.get(), ContactPayloadRole::TileSourceCreditObject, sizeof(TileSourceCredit), true);
+        contact_payload_buffer(visitor, source.get(), ContactPayloadRole::TileSourceLeaseValues, source->leases);
+        for (const auto& lease : source->leases)
+            lease->visit_borrowed_payload(visitor);
+        if (source->source)
+            source->source->visit_borrowed_payload(visitor);
+    };
+    visit_source(source_credit_);
+    for (const auto& credit : pages_)
+        if (credit)
+        {
+            contact_payload_object(
+                visitor, credit.get(), ContactPayloadRole::TilePageCreditObject, sizeof(TileBodyPageCredit), true);
+            const auto& page = *credit->page;
+            contact_payload_object(visitor, &page, ContactPayloadRole::TilePageObject, sizeof(BodyPage), true);
+            std::visit(
+                [&](const auto& data)
+                {
+                    contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRecords, data.records);
+                    contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRings, data.rings);
+                },
+                page.data);
+            if (page.source)
+                page.source->visit_borrowed_payload(visitor);
+            visit_source(credit->source);
+        }
+}
+bool TileBodyPages::imports_source_owner(const void* identity) const noexcept
+{
+    const auto contains = [&](const std::shared_ptr<TileSourceCredit>& credit)
+    {
+        bool found = false;
+        if (credit)
+            credit->source->visit_dependencies(
+                [&](const auto& owner, const Budget*, std::size_t, bool) { found = found || owner.get() == identity; });
+        return found;
+    };
+    if (contains(source_credit_))
+        return true;
+    for (const auto& page : pages_)
+        if (page && contains(page->source))
+            return true;
+    return false;
+}
+std::size_t TileBodyPages::metadata_bytes() const noexcept
+{
+    auto bytes = charged_ + deferred_metadata_bytes_;
+    if (source_credit_)
+        bytes += source_credit_->bytes;
+    // Several pages share one source context. Count each independently owned
+    // context once, including older contexts still held by live pages.
+    for (std::size_t i = 0; i < pages_.size(); ++i)
+        if (const auto& credit = pages_[i]; credit && credit->source && credit->source != source_credit_)
+        {
+            bool seen = false;
+            for (std::size_t j = 0; j < i; ++j)
+                seen = seen || (pages_[j] && pages_[j]->source == credit->source);
+            if (!seen)
+                bytes += credit->source->bytes;
+        }
+    return bytes;
 }
 std::size_t TileBodyPages::retained_bytes() const noexcept
 {

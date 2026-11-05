@@ -1,8 +1,10 @@
 /** @file ContactCoverIndex.cc
  * @brief Flat balanced bounds tree borrowing normalized point groups.
  */
-#include "geometry/mesh/AMR/ContactCoverIndex.hh"
-#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "ContactCoverIndex.hh"
+#include "ContactPointFacts.hh"
+#include "DistributedAdaptiveWire.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
 #include <cfenv>
 #include <cmath>
@@ -116,7 +118,16 @@ struct ContactCoverIndex::Impl
     struct Leaf
     {
         const std::array<long double, 3>* point = nullptr;
+        const PointFactDirectory* directory = nullptr;
+        ContactPointRef reference{};
         const AdaptiveBytes* domain = nullptr;
+        [[nodiscard]] std::array<long double, 3> coordinates() const
+        {
+            if (!directory)
+                return *point;
+            const auto value = directory->get(reference);
+            return PLIC::details::GeometryIdentityAccess::point(value);
+        }
         std::size_t parent = absent;
     };
     struct Branch
@@ -156,7 +167,8 @@ struct ContactCoverIndex::Impl
     {
         if (!is_leaf(tag))
             return branch(tag).bounds;
-        return {*leaf(tag).point, *leaf(tag).point};
+        const auto point = leaf(tag).coordinates();
+        return {point, point};
     }
     std::size_t storage_bytes() const noexcept
     {
@@ -271,7 +283,7 @@ struct ContactCoverIndex::Impl
     }
     Leaf& checked_leaf(std::size_t handle)
     {
-        if (handle >= leaf_slots || !leaves[handle].point)
+        if (handle >= leaf_slots || (!leaves[handle].point && !leaves[handle].directory))
             throw std::invalid_argument("Contact-cover handle is not live.");
         return leaves[handle];
     }
@@ -317,8 +329,21 @@ void ContactCoverIndex::reserve(std::size_t maximum_points)
 ContactCoverIndex::Handle ContactCoverIndex::insert(
     const std::array<long double, 3>* point, const AdaptiveBytes* domain)
 {
+    return insert_binding(point, nullptr, {}, domain);
+}
+ContactCoverIndex::Handle ContactCoverIndex::insert(
+    const PointFactDirectory& directory, ContactPointRef reference, const AdaptiveBytes* domain)
+{
+    return insert_binding(nullptr, &directory, reference, domain);
+}
+ContactCoverIndex::Handle ContactCoverIndex::insert_binding(const std::array<long double, 3>* point,
+    const PointFactDirectory* directory, ContactPointRef reference, const AdaptiveBytes* domain)
+{
     const MetadataEnvironment environment;
-    validate(point, domain);
+    Impl::Leaf binding{point, directory, reference, domain, absent};
+    // Resolve only into operation-local storage; leaves never borrow an assembled value.
+    const auto coordinates = directory ? binding.coordinates() : std::array<long double, 3>{};
+    validate(directory ? &coordinates : point, domain);
     auto& tree = *impl_;
     // Both needed slots exist before any membership or topology changes.
     if (tree.free_leaf == absent && tree.leaf_slots == tree.capacity)
@@ -327,7 +352,7 @@ ContactCoverIndex::Handle ContactCoverIndex::insert(
     if (tree.free_leaf != absent)
         tree.free_leaf = tree.leaves[slot].parent;
     auto& leaf = tree.leaves[slot];
-    leaf = {point, domain, absent};
+    leaf = binding;
     const auto tag = Impl::leaf_tag(slot);
     if (tree.root == absent)
         tree.root = tag;
@@ -337,7 +362,8 @@ ContactCoverIndex::Handle ContactCoverIndex::insert(
         if (tree.free_branch != absent)
             tree.free_branch = tree.branches[branch_slot].parent;
         auto sibling = tree.root;
-        const AdaptiveContactBounds point_bounds{*point, *point};
+        const auto value = directory ? coordinates : *point;
+        const AdaptiveContactBounds point_bounds{value, value};
         while (!Impl::is_leaf(sibling))
         {
             const auto& node = tree.branch(sibling);
@@ -378,6 +404,8 @@ void ContactCoverIndex::erase(Handle handle)
         tree.balance(grandparent);
     }
     leaf.point = nullptr;
+    leaf.directory = nullptr;
+    leaf.reference = {};
     leaf.domain = nullptr;
     leaf.parent = tree.free_leaf;
     tree.free_leaf = handle;
@@ -389,6 +417,20 @@ void ContactCoverIndex::rebind(Handle handle, const std::array<long double, 3>* 
     validate(point, domain);
     auto& leaf = impl_->checked_leaf(handle);
     leaf.point = point;
+    leaf.directory = nullptr;
+    leaf.reference = {};
+    leaf.domain = domain;
+}
+void ContactCoverIndex::rebind(
+    Handle handle, const PointFactDirectory& directory, ContactPointRef reference, const AdaptiveBytes* domain)
+{
+    const MetadataEnvironment environment;
+    const auto value = directory.get(reference);
+    validate(&PLIC::details::GeometryIdentityAccess::point(value), domain);
+    auto& leaf = impl_->checked_leaf(handle);
+    leaf.point = nullptr;
+    leaf.directory = &directory;
+    leaf.reference = reference;
     leaf.domain = domain;
 }
 std::optional<AdaptiveContactBounds> ContactCoverIndex::aggregate_bounds() const noexcept

@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <limits>
 #include <map>
@@ -89,6 +90,16 @@ public:
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return body_bytes_ + metadata_bytes_; }
     [[nodiscard]] std::size_t body_bytes() const noexcept { return body_bytes_; }
     [[nodiscard]] std::size_t owners() const noexcept { return entries_.size(); }
+
+    /** Weak entries are value payload; their targets are never promoted. */
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::DeferredOwnerChargesObject, sizeof(*this));
+        for (const auto& value : entries_)
+            visitor(ContactPayloadAllocation{{&value, ContactPayloadRole::DeferredOwnerChargeNodes}, this,
+                ContactPayloadKind::NodeValue, sizeof(value), sizeof(value), 1, 1, sizeof(value), true, true, true});
+    }
 
 private:
     Budget* budget_;

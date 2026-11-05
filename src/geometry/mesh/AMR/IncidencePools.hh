@@ -1,5 +1,6 @@
 #pragma once
 #include "IdentityPool.hh"
+#include "IncidencePointDirectory.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include <array>
 #include <cmath>
@@ -43,7 +44,7 @@ struct IncidencePools
     };
     IdentityPool<AdaptiveCellKey> cells;
     IdentityPool<AdaptiveBytes> domains, supports, lines;
-    IdentityPool<Point> points;
+    IncidencePointDirectory<> points;
     IdentityPool<Plane> planes;
     IdentityPool<Normal> normals;
     IdentityPool<Image> images;
@@ -55,11 +56,12 @@ struct IncidencePools
           normals(arena), images(arena), budget(&arena), identities(&ledger)
     {
     }
-    IncidencePools(
-        const IncidencePools& source, Budget& arena, IdentityBudget& ledger, std::shared_ptr<Budget> keeper = {})
+    IncidencePools(const IncidencePools& source, Budget& arena, IdentityBudget& ledger,
+        std::shared_ptr<Budget> keeper = {}, std::shared_ptr<CartesianAuthorityArena> source_arena = {})
         : cells(source.cells, arena), domains(source.domains, arena), supports(source.supports, arena),
-          lines(source.lines, arena), points(source.points, arena, std::move(keeper)), planes(source.planes, arena),
-          normals(source.normals, arena), images(source.images, arena), budget(&arena), identities(&ledger)
+          lines(source.lines, arena), points(source.points, arena, std::move(keeper), std::move(source_arena)),
+          planes(source.planes, arena), normals(source.normals, arena), images(source.images, arena), budget(&arena),
+          identities(&ledger)
     {
         for (std::size_t slot = 0; slot < planes.size(); ++slot)
             identities->retain(arena, planes.get(slot));

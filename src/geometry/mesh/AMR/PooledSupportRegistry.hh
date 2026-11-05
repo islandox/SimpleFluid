@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "DeferredOwnerCharges.hh"
 #include "IdentityPool.hh"
 #include "SmallMembership.hh"
@@ -53,6 +54,27 @@ public:
     }
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return charged_ + deferred_.retained_bytes(); }
     void reap_deferred() noexcept { deferred_.reap(); }
+
+    /** Borrow resident values only; pool targets are separate census roots. */
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::SupportRegistryObject, sizeof(*this));
+        for (const auto& value : groups_)
+        {
+            contact_payload_node_value(visitor, this, ContactPayloadRole::SupportRegistryGroupNodes, value);
+            const auto& spill = value.second.members.spill();
+            if (spill)
+            {
+                contact_payload_object(
+                    visitor, spill.get(), ContactPayloadRole::SupportMembershipSpill, sizeof(Members::Spill), true);
+                contact_payload_buffer(visitor, spill.get(), ContactPayloadRole::SupportMembershipValues, *spill);
+            }
+        }
+        for (const auto& value : dirty_)
+            contact_payload_node_value(visitor, this, ContactPayloadRole::SupportRegistryDirtyNodes, value);
+        deferred_.visit_borrowed_payload(visitor);
+    }
 
 private:
     struct Group

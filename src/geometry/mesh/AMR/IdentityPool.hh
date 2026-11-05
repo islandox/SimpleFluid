@@ -1,9 +1,9 @@
 #pragma once
+#include "ContactStorageBreakdown.hh"
+#include "IdentityPoolBorrowedPayload.hh"
 #include "IdentityPoolHash.hh"
 #include "IdentityPoolPayload.hh"
-#include "IdentityPoolBorrowedPayload.hh"
 #include "PhysicalOwnerIndex.hh"
-#include "ContactStorageBreakdown.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
 #include <cstdint>
@@ -60,13 +60,16 @@ template<class T, class Hasher = IdentityPoolHasher<T>, class Payload = Identity
 
     template<class Visitor> static void visit_credit_payload(const PageCredit& credit, Visitor& visitor)
     {
-        contact_payload_object(visitor, &credit, ContactPayloadRole::IdentityPageCreditObject, sizeof(PageCredit), true);
+        contact_payload_object(
+            visitor, &credit, ContactPayloadRole::IdentityPageCreditObject, sizeof(PageCredit), true);
         const auto& page = *credit.page;
         contact_payload_object(visitor, &page, ContactPayloadRole::IdentityPageObject, sizeof(Page), true);
-        contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPageValues, page.values,
-            page.values.size(), !IdentityPoolBorrowedPayload<T>::complete);
-        for (const auto& value : page.values) IdentityPoolBorrowedPayload<T>::visit(value, visitor);
+        contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPageValues, page.values, page.values.size(),
+            !IdentityPoolBorrowedPayload<T>::complete);
+        for (const auto& value : page.values)
+            IdentityPoolBorrowedPayload<T>::visit(value, visitor);
     }
+
 public:
     using Slot = std::size_t;
     using PayloadPolicy = Payload;
@@ -135,6 +138,46 @@ public:
         const auto found = by_value_.find(value);
         return found == by_value_.end() ? std::optional<Slot>{} : found->second;
     }
+    /** Borrowed canonical byte ranges avoid constructing a temporary vector.
+     * A compatible typed policy hashes the identical stream; custom policies
+     * lacking that overload use full-value search rather than a different hash.
+     * No route/hash decides equality. Existing pool/payload policies are intact. */
+    template<class View>
+        requires(std::is_same_v<T, AdaptiveBytes>)
+    [[nodiscard]] std::optional<Slot> find_borrowed(const View& value) const
+    {
+        const auto equal = [&](Slot slot)
+        {
+            const auto& stored = *by_slot_[slot];
+            if (stored.size() != value.size())
+                return false;
+            for (std::size_t i = 0; i < stored.size(); ++i)
+                if (static_cast<unsigned char>(stored[i]) != static_cast<unsigned char>(value[i]))
+                    return false;
+            return true;
+        };
+        if constexpr (Hasher::enabled && requires(const Hasher& hash) { hash(value); })
+        {
+            if (buckets_.empty())
+                return {};
+            const auto mask = buckets_.size() - 1;
+            auto bucket = static_cast<Slot>(mixed_hash(hasher_(value))) & mask;
+            for (std::size_t visited = 0; visited < buckets_.size(); ++visited)
+            {
+                const auto slot = buckets_[bucket];
+                if (slot == empty_slot)
+                    return {};
+                if (equal(slot))
+                    return slot;
+                bucket = (bucket + 1) & mask;
+            }
+            throw std::invalid_argument("Borrowed identity lookup lacks an empty slot.");
+        }
+        for (Slot slot = 0; slot < by_slot_.size(); ++slot)
+            if (equal(slot))
+                return slot;
+        return {};
+    }
     [[nodiscard]] std::size_t size() const noexcept { return by_slot_.size(); }
     [[nodiscard]] std::size_t retained_bytes() const noexcept
     {
@@ -146,7 +189,8 @@ public:
     [[nodiscard]] std::size_t metadata_bytes() const noexcept
     {
         return by_value_.size() * node_bytes() + by_slot_.capacity() * sizeof(const T*) +
-               pages_.capacity() * sizeof(PageEntry) + buckets_.capacity() * sizeof(Slot) + page_index_.metadata_bytes();
+               pages_.capacity() * sizeof(PageEntry) + buckets_.capacity() * sizeof(Slot) +
+               page_index_.metadata_bytes();
     }
     [[nodiscard]] std::size_t page_credit_overhead_bytes() const noexcept
     {
@@ -185,8 +229,7 @@ public:
     {
         for (const auto& entry : pages_)
             visitor(ContactBorrowedPage<T>{entry.credit.get(), entry.credit->page.get(), sizeof(PageCredit),
-                sizeof(Page), entry.credit->page->values,
-                entry.credit->page->values.capacity()});
+                sizeof(Page), entry.credit->page->values, entry.credit->page->values.capacity()});
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
@@ -198,7 +241,8 @@ public:
         for (const auto& value : by_value_)
             contact_payload_node_value(visitor, this, ContactPayloadRole::IdentityOrderedValues, value);
         page_index_.visit_borrowed_payload(visitor, ContactPayloadRole::IdentityPageOwnerBuckets);
-        for (const auto& entry : pages_) visit_credit_payload(*entry.credit, visitor);
+        for (const auto& entry : pages_)
+            visit_credit_payload(*entry.credit, visitor);
     }
     [[nodiscard]] std::size_t lookup_bucket_capacity() const noexcept { return buckets_.capacity(); }
     [[nodiscard]] std::size_t owner_pages() const noexcept { return pages_.size(); }
@@ -366,8 +410,8 @@ public:
         template<class Visitor> void visit_borrowed_pages(Visitor&& visitor) const
         {
             for (const auto& credit : directory_)
-                visitor(ContactBorrowedPage<T>{credit.get(), credit->page.get(), sizeof(PageCredit),
-                    sizeof(Page), credit->page->values, credit->page->values.capacity()});
+                visitor(ContactBorrowedPage<T>{credit.get(), credit->page.get(), sizeof(PageCredit), sizeof(Page),
+                    credit->page->values, credit->page->values.capacity()});
         }
         [[nodiscard]] const void* metadata_identity() const noexcept { return &charged_; }
         template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
@@ -376,7 +420,8 @@ public:
             contact_payload_buffer(visitor, this, ContactPayloadRole::PageViewDirectory, directory_);
             for (const auto& value : index_)
                 contact_payload_node_value(visitor, this, ContactPayloadRole::PageViewCaptureValues, value);
-            for (const auto& credit : directory_) visit_credit_payload(*credit, visitor);
+            for (const auto& credit : directory_)
+                visit_credit_payload(*credit, visitor);
         }
         [[nodiscard]] std::size_t page_count() const noexcept { return directory_.size(); }
         [[nodiscard]] std::size_t page_capacity() const noexcept { return directory_.capacity(); }

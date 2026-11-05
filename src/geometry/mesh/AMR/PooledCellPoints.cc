@@ -204,9 +204,11 @@ ContactIncidenceRow PooledCellPoints::make_row(
                 // Preserve physical sorting and contact_point call order. Pool
                 // lookup work restores the caller's floating-point environment.
                 const auto contact_slot = pools_->points.intern(std::move(contact));
-                const auto physical = batch->capture(slot);
-                const auto normalized = batch->capture(contact_slot);
-                result.points.push_reference(physical, normalized, *budget_);
+                if (batch->source_backed())
+                    result.points.push_reference(
+                        batch->capture_source(slot), batch->capture_source(contact_slot), *budget_);
+                else
+                    result.points.push_reference(batch->capture(slot), batch->capture(contact_slot), *budget_);
             }
             else
                 result.points.push_back({std::move(contact), point});

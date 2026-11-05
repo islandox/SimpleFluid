@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>
 #include <cstddef>
@@ -51,6 +52,31 @@ public:
     /** Clone one live metadata record per source key; the transform explicitly
      * rebinds body handles into the candidate's already-forked body arena. */
     template<class Transform> void clone_from(const CompactTileIndex&, Transform&&);
+
+    /** Raw arrays own capacity-sized allocations; page objects include their
+     * union cells. Do not emit embedded Entry objects a second time. */
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::TileIndexObject, sizeof(*this));
+        const auto array = [&](const auto& values, ContactPayloadRole role)
+        {
+            if (!values.capacity)
+                return;
+            using Value = std::remove_reference_t<decltype(values[0])>;
+            visitor(ContactPayloadAllocation{{values.data.get(), role}, this, ContactPayloadKind::Buffer, 0,
+                sizeof(Value), values.count, values.capacity, values.capacity * sizeof(Value)});
+        };
+        array(pages_, ContactPayloadRole::TileIndexPageDirectory);
+        array(compact_, ContactPayloadRole::TileIndexCompactDescriptors);
+        array(wide_, ContactPayloadRole::TileIndexWideDescriptors);
+        for (std::size_t i = 0; i < pages_.count; ++i)
+        {
+            const auto& page = pages_[i];
+            if (page)
+                contact_payload_object(visitor, page.get(), ContactPayloadRole::TileIndexPageObject, sizeof(Page));
+        }
+    }
 
 private:
     static_assert(std::is_nothrow_move_constructible_v<Entry> && std::is_nothrow_destructible_v<Entry>);

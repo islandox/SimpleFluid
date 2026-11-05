@@ -4,25 +4,38 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-template<class H> std::shared_ptr<typename ContactPointGroups<H>::Readers>
-ContactPointGroups<H>::make_readers(const std::shared_ptr<Budget>& arena)
+template<class H>
+std::shared_ptr<typename ContactPointGroups<H>::Readers> ContactPointGroups<H>::make_readers(
+    const std::shared_ptr<Budget>& arena)
 {
     constexpr auto bytes = sizeof(Readers) + 128;
     arena->add(bytes);
     Readers* readers;
-    try { readers = new Readers; }
-    catch (...) { arena->used -= bytes; throw; }
-    return std::shared_ptr<Readers>(readers, [arena](Readers* value)
+    try
+    {
+        readers = new Readers;
+    }
+    catch (...)
+    {
+        arena->used -= bytes;
+        throw;
+    }
+    return std::shared_ptr<Readers>(readers,
+        [arena](Readers* value)
         {
             delete value;
             arena->used -= bytes;
         });
 }
-template<class H> ContactPointGroups<H>::ContactPointGroups(std::shared_ptr<Budget> arena, H hash)
+template<class H>
+ContactPointGroups<H>::ContactPointGroups(std::shared_ptr<Budget> arena, H hash)
     : allocation_(arena), domains_(*arena, arena), catalog_(ContactFanCatalog::create(arena)),
-      readers_(make_readers(arena)), hasher_(std::move(hash)), fan_owners_(*arena) {}
-template<class H> ContactPointGroups<H>::ContactPointGroups(const ContactPointGroups& source,
-    std::shared_ptr<Budget> arena, const PointFactDirectory::PointPool* target_pool)
+      readers_(make_readers(arena)), hasher_(std::move(hash)), fan_owners_(*arena)
+{
+}
+template<class H>
+ContactPointGroups<H>::ContactPointGroups(
+    const ContactPointGroups& source, std::shared_ptr<Budget> arena, const PointFactDirectory::PointPool* target_pool)
     : allocation_(arena), domains_(source.domains_, *arena, arena),
       catalog_(ContactFanCatalog::create(*source.catalog_, arena, target_pool)), readers_(make_readers(arena)),
       hasher_(source.hasher_), fan_owners_(*arena)
@@ -83,14 +96,13 @@ const typename ContactPointGroups<H>::Group& ContactPointGroups<H>::checked(Cont
         throw std::out_of_range("Stale contact group ID.");
     return groups_[id.slot];
 }
-template<class H>
-typename ContactPointGroups<H>::Group& ContactPointGroups<H>::checked(ContactGroupId id, bool retired)
+template<class H> typename ContactPointGroups<H>::Group& ContactPointGroups<H>::checked(ContactGroupId id, bool retired)
 {
     return const_cast<Group&>(std::as_const(*this).checked(id, retired));
 }
 template<class H> ContactPointKeyView ContactPointGroups<H>::key(const Group& group) const
 {
-    return {domains_.get(group.domain), &catalog_->points.get(group.normalized)};
+    return {domains_.get(group.domain), catalog_->points.get(group.normalized)};
 }
 template<class H> ContactPointKeyView ContactPointGroups<H>::key(ContactGroupId id) const
 {
@@ -100,17 +112,28 @@ template<class H> const AdaptiveBytes& ContactPointGroups<H>::domain(ContactGrou
 {
     return domains_.get(checked(id, true).domain);
 }
-template<class H> const ContactPointIdentity& ContactPointGroups<H>::normalized(ContactGroupId id) const
+template<class H> ContactPointIdentity ContactPointGroups<H>::normalized(ContactGroupId id) const
 {
     return catalog_->points.get(checked(id, true).normalized);
 }
-template<class H> ContactFanView ContactPointGroups<H>::fan(ContactGroupId id) const { return checked(id, true).fan; }
-template<class H> std::size_t ContactPointGroups<H>::cover(ContactGroupId id) const { return checked(id, true).cover; }
+template<class H> ContactPointRef ContactPointGroups<H>::normalized_reference(ContactGroupId id) const
+{
+    return checked(id, true).normalized;
+}
+template<class H> ContactFanView ContactPointGroups<H>::fan(ContactGroupId id) const
+{
+    return checked(id, true).fan;
+}
+template<class H> std::size_t ContactPointGroups<H>::cover(ContactGroupId id) const
+{
+    return checked(id, true).cover;
+}
 template<class H> void ContactPointGroups<H>::set_cover(ContactGroupId id, std::size_t cover)
 {
     checked(id).cover = cover;
 }
-template<class H> template<class Probe>
+template<class H>
+template<class Probe>
 std::optional<ContactGroupId> ContactPointGroups<H>::find_probe(const Probe& probe) const
 {
     if (buckets_.empty())
@@ -184,9 +207,9 @@ template<class H> void ContactPointGroups<H>::ensure_lookup()
     std::vector<std::size_t>().swap(replacement);
     allocation_.release(old * sizeof(std::size_t));
 }
-template<class H> ContactGroupId ContactPointGroups<H>::intern(const AdaptiveBytes& domain,
-    const ContactPointIdentity& point, std::optional<ContactPointArray::Locator> locator,
-    const PointFactDirectory::PointPool* target_pool)
+template<class H>
+ContactGroupId ContactPointGroups<H>::intern(const AdaptiveBytes& domain, const ContactPointIdentity& point,
+    std::optional<ContactPointArray::Locator> locator, const PointFactDirectory::PointPool* target_pool)
 {
     if (const auto old = find({domain, &point}))
         return *old;
@@ -211,7 +234,10 @@ template<class H> ContactGroupId ContactPointGroups<H>::intern(const AdaptiveByt
     group.normalized = normalized;
     group.live = true;
     group.retired = false;
-    try { insert_bucket(slot); }
+    try
+    {
+        insert_bucket(slot);
+    }
     catch (...)
     {
         group.live = false;
@@ -225,7 +251,8 @@ template<class H> void ContactPointGroups<H>::replace_fans(std::span<const Edit>
 {
     replace_fans_generated(edits.size(), [&](std::size_t i) { return edits[i]; });
 }
-template<class H> template<class EditAt>
+template<class H>
+template<class EditAt>
 void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& edit_at)
 {
     ContactGroupAllocation scratch(allocation_.keeper());
@@ -240,9 +267,11 @@ void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& e
     scratch.reserve(inputs, count);
     std::vector<std::size_t> ordered;
     scratch.reserve(ordered, count);
-    for (std::size_t i = 0; i < count; ++i) ordered.push_back(i);
+    for (std::size_t i = 0; i < count; ++i)
+        ordered.push_back(i);
     duplicate_work_ = 0;
-    std::sort(ordered.begin(), ordered.end(), [&](std::size_t a, std::size_t b)
+    std::sort(ordered.begin(), ordered.end(),
+        [&](std::size_t a, std::size_t b)
         {
             ++duplicate_work_;
             const auto first = edit_at(a).group, second = edit_at(b).group;
@@ -261,7 +290,8 @@ void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& e
             throw std::invalid_argument("Contact local fan size overflows.");
         if (group.fan.local_count())
             scratch.reserve(next.local, group.fan.local_count() + edit.append_local.size());
-        if (!edit.replace_remote) scratch.reserve(next.remote, group.fan.remote_count());
+        if (!edit.replace_remote)
+            scratch.reserve(next.remote, group.fan.remote_count());
         for (std::size_t i = 0; i < group.fan.local_count(); ++i)
         {
             const auto [slot, point] = group.fan.owner()->block().local(group.fan.group(), i);
@@ -287,8 +317,8 @@ void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& e
                 const auto [record, slot] = group.fan.owner()->block().remote(group.fan.group(), i);
                 next.remote.push_back({record, catalog_->points.pinned_reference(slot)});
             }
-        inputs.push_back({local_values, edit.replace_remote ? edit.remote :
-            std::span<const ContactRemoteOccurrence>(next.remote)});
+        inputs.push_back(
+            {local_values, edit.replace_remote ? edit.remote : std::span<const ContactRemoteOccurrence>(next.remote)});
     }
     if (!count)
         return;
@@ -346,9 +376,14 @@ template<class H> void ContactPointGroups<H>::reclaim()
     ContactGroupAllocation scratch(allocation_.keeper());
     std::vector<const void*> dead;
     scratch.reserve(dead, fan_owners_.size());
-    fan_owners_.visit([&](const void* identity, const auto& owner)
-        { if (!owner->has_live_slices()) dead.push_back(identity); });
-    for (const auto identity : dead) (void) fan_owners_.erase(identity);
+    fan_owners_.visit(
+        [&](const void* identity, const auto& owner)
+        {
+            if (!owner->has_live_slices())
+                dead.push_back(identity);
+        });
+    for (const auto identity : dead)
+        (void) fan_owners_.erase(identity);
     catalog_->reclaim();
 }
 template<class H>
@@ -390,7 +425,8 @@ template<class H> ContactStorageBreakdown ContactPointGroups<H>::storage_breakdo
     result.domain_shared_body = domains_.shared_body_bytes();
     result.binding_metadata = catalog_->private_metadata_bytes();
     catalog_->points.contribute_breakdown(result);
-    fan_owners_.visit([&](const void*, const auto& owner)
+    fan_owners_.visit(
+        [&](const void*, const auto& owner)
         {
             result.fan_owner_metadata += owner->private_metadata_bytes();
             result.fan_shared_body += owner->shared_body_bytes();
@@ -407,11 +443,15 @@ template<class H> template<class Visitor> void ContactPointGroups<H>::visit_admi
         { visitor(ContactStorageAdmission{metadata, owner, body, bytes}); });
     visitor(ContactStorageAdmission{catalog_->metadata_identity(), catalog_->private_metadata_bytes(), nullptr, 0});
     catalog_->points.visit_admissions(visitor);
-    fan_owners_.visit([&](const void*, const auto& owner)
-        { visitor(ContactStorageAdmission{owner->metadata_identity(), owner->private_metadata_bytes(),
-            &owner->block(), owner->shared_body_bytes()}); });
+    fan_owners_.visit(
+        [&](const void*, const auto& owner)
+        {
+            visitor(ContactStorageAdmission{owner->metadata_identity(), owner->private_metadata_bytes(),
+                &owner->block(), owner->shared_body_bytes()});
+        });
 }
-template<class H> template<class Visitor>
+template<class H>
+template<class Visitor>
 void ContactPointGroups<H>::visit_borrowed_payload(Visitor&& visitor, bool include_object) const
 {
     if (include_object)

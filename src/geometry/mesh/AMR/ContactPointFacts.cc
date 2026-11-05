@@ -1,4 +1,4 @@
-#include "geometry/mesh/AMR/ContactPointFacts.hh"
+#include "ContactPointFacts.hh"
 #include <limits>
 #include <utility>
 
@@ -34,18 +34,29 @@ PointFactDirectory::PointFactDirectory(
         target.live = page.live;
         if (page.view)
         {
-            PointPool factory(allocation_.arena(), allocation_.keeper());
+            IdentityPool<ContactPointIdentity> factory(allocation_.arena(), allocation_.keeper());
             auto view = factory.page_view();
             // Each page view in this directory has precisely one physical page.
-            (void) view->import_reference(*page.view, {0}, target_pool);
+            (void) view->import_reference(*page.view, {0}, target_pool ? &target_pool->physical_pool() : nullptr);
             view->freeze();
             target.view = std::move(view);
         }
+        else if (page.source_view)
+        {
+            if (!target_pool || !target_pool->source_arena())
+                throw std::invalid_argument("Source fact fork requires its explicit candidate source arena.");
+            auto view = ContactSourcePointView::create(
+                page.source_view->source(), allocation_.arena(), allocation_.keeper(), target_pool->source_arena());
+            (void) view->import_reference(*page.source_view, {0}, target_pool);
+            view->freeze();
+            target.source_view = std::move(view);
+        }
         else if (page.fallback)
         {
-            target.fallback = page.fallback->body->sealed &&
-                page.fallback->metadata.keeper().get() == allocation_.keeper().get() ? page.fallback :
-                make_fallback(page.fallback.get());
+            target.fallback =
+                page.fallback->body->sealed && page.fallback->metadata.keeper().get() == allocation_.keeper().get()
+                    ? page.fallback
+                    : make_fallback(page.fallback.get());
             target.identity = target.fallback->body.get();
             if (!target.fallback->body->sealed)
                 fallback_tail_ = pages_.size();
@@ -69,8 +80,7 @@ const PointFactDirectory::Entry& PointFactDirectory::checked(ContactPointRef ref
         throw std::out_of_range("Stale contact-point reference.");
     return entries_[ref.slot];
 }
-std::optional<ContactPointRef> PointFactDirectory::find(
-    const ContactPointIdentity& value, std::uint64_t hash) const
+std::optional<ContactPointRef> PointFactDirectory::find(const ContactPointIdentity& value, std::uint64_t hash) const
 {
     if (buckets_.empty())
         return {};
@@ -86,7 +96,8 @@ std::optional<ContactPointRef> PointFactDirectory::find(
         if (slot != tombstone)
         {
             const auto& entry = entries_[slot];
-            const ContactPointKeyView key{{}, &pages_[entry.page].get(entry.reference)};
+            const auto value = pages_[entry.page].get(entry.reference);
+            const ContactPointKeyView key{{}, &value};
             if (entry.hash == hash && !less(key, probe) && !less(probe, key))
                 return ContactPointRef{slot, entry.generation};
         }
@@ -134,12 +145,15 @@ void PointFactDirectory::ensure_lookup()
     std::vector<std::size_t>().swap(replacement);
     allocation_.release(old * sizeof(std::size_t));
 }
-const ContactPointIdentity& PointFactDirectory::Page::get(CapturedPointReference reference) const
+ContactPointIdentity PointFactDirectory::Page::get(Reference reference) const
 {
-    if (view) return view->get(reference);
-    if (!fallback || reference.value >= fallback->body->size)
+    if (source_view)
+        return source_view->value(reference.source);
+    if (view)
+        return view->get(reference.stored);
+    if (!fallback || reference.stored.value >= fallback->body->size)
         throw std::out_of_range("Invalid fallback point reference.");
-    return fallback->body->values[reference.value];
+    return fallback->body->values[reference.stored.value];
 }
 std::shared_ptr<PointFactDirectory::FallbackCredit> PointFactDirectory::make_fallback(const FallbackCredit* source)
 {
@@ -161,21 +175,32 @@ std::shared_ptr<PointFactDirectory::FallbackCredit> PointFactDirectory::make_fal
 std::size_t PointFactDirectory::add_page(Page page)
 {
     auto index = free_pages_.empty() ? pages_.size() : free_pages_.back();
-    if (index == pages_.size()) allocation_.append(pages_);
+    if (index == pages_.size())
+        allocation_.append(pages_);
     allocation_.add(page_node_bytes);
-    try { page_index_.emplace(page.identity, index); }
-    catch (...) { allocation_.release(page_node_bytes); throw; }
-    if (index == pages_.size()) pages_.push_back({});
-    else free_pages_.pop_back();
+    try
+    {
+        page_index_.emplace(page.identity, index);
+    }
+    catch (...)
+    {
+        allocation_.release(page_node_bytes);
+        throw;
+    }
+    if (index == pages_.size())
+        pages_.push_back({});
+    else
+        free_pages_.pop_back();
     pages_[index] = std::move(page);
     return index;
 }
-ContactPointRef PointFactDirectory::add_entry(
-    std::size_t page, CapturedPointReference reference, std::uint64_t hash)
+ContactPointRef PointFactDirectory::add_entry(std::size_t page, Page::Reference reference, std::uint64_t hash)
 {
     const auto slot = free_entries_.empty() ? entries_.size() : free_entries_.back();
-    if (free_entries_.empty()) entries_.push_back({});
-    else free_entries_.pop_back();
+    if (free_entries_.empty())
+        entries_.push_back({});
+    else
+        free_entries_.pop_back();
     auto& entry = entries_[slot];
     entry.refs = 1;
     entry.retired = false;
@@ -191,7 +216,8 @@ ContactPointRef PointFactDirectory::retain_page(
     std::shared_ptr<const ContactPointPageView> view, CapturedPointReference reference, std::uint64_t hash)
 {
     ensure_lookup();
-    if (free_entries_.empty()) allocation_.append(entries_);
+    if (free_entries_.empty())
+        allocation_.append(entries_);
     const auto identity = view->physical_page_identity(reference);
     const auto found = page_index_.find(identity);
     const auto page = found == page_index_.end() ? add_page({std::move(view), {}, identity, 0}) : found->second;
@@ -199,6 +225,38 @@ ContactPointRef PointFactDirectory::retain_page(
 }
 ContactPointRef PointFactDirectory::retain(ContactPointArray::Locator locator, const PointPool* target_pool)
 {
+    if (locator.source_view)
+    {
+        const auto value = locator.source_view->value(locator.source_reference);
+        const auto hash = ContactPointWireHasher{}({{}, value});
+        if (const auto existing = find(value, hash))
+        {
+            pin(*existing);
+            return *existing;
+        }
+        if (!target_pool || !target_pool->source_arena())
+            throw std::invalid_argument("Source fact import requires its explicit source arena.");
+        const auto identity = locator.source_view->source().get();
+        auto page = page_index_.find(identity);
+        std::size_t slot;
+        if (page == page_index_.end())
+        {
+            auto view = ContactSourcePointView::create(
+                locator.source_view->source(), allocation_.arena(), allocation_.keeper(), target_pool->source_arena());
+            (void) view->import_reference(*locator.source_view, locator.source_reference, target_pool);
+            view->freeze();
+            Page input;
+            input.identity = identity;
+            input.source_view = std::move(view);
+            slot = add_page(std::move(input));
+        }
+        else
+            slot = page->second;
+        ensure_lookup();
+        if (free_entries_.empty())
+            allocation_.append(entries_);
+        return add_entry(slot, Page::Reference(locator.source_reference), hash);
+    }
     if (!locator.view)
         throw std::invalid_argument("Missing point-page locator.");
     const auto& value = locator.view->get(locator.reference);
@@ -211,9 +269,10 @@ ContactPointRef PointFactDirectory::retain(ContactPointArray::Locator locator, c
     const auto identity = locator.view->physical_page_identity(locator.reference);
     if (const auto found = page_index_.find(identity); found != page_index_.end())
         return retain_page(pages_[found->second].view, {locator.reference.value % 16}, hash);
-    PointPool factory(allocation_.arena(), allocation_.keeper());
+    IdentityPool<ContactPointIdentity> factory(allocation_.arena(), allocation_.keeper());
     auto view = factory.page_view();
-    const auto reference = view->import_reference(*locator.view, locator.reference, target_pool);
+    const auto reference =
+        view->import_reference(*locator.view, locator.reference, target_pool ? &target_pool->physical_pool() : nullptr);
     view->freeze();
     return retain_page(std::move(view), reference, hash);
 }
@@ -226,7 +285,8 @@ ContactPointRef PointFactDirectory::retain(const ContactPointIdentity& value)
         return *existing;
     }
     ensure_lookup();
-    if (free_entries_.empty()) allocation_.append(entries_);
+    if (free_entries_.empty())
+        allocation_.append(entries_);
     if (fallback_tail_ == empty)
     {
         auto credit = make_fallback();
@@ -245,7 +305,7 @@ ContactPointRef PointFactDirectory::retain(const ContactPointIdentity& value)
         body.sealed = true;
         fallback_tail_ = empty;
     }
-    return add_entry(page, {offset}, hash);
+    return add_entry(page, Page::Reference(CapturedPointReference{offset}), hash);
 }
 void PointFactDirectory::seal_fallback() noexcept
 {
@@ -258,7 +318,8 @@ void PointFactDirectory::seal_fallback() noexcept
 std::size_t PointFactDirectory::fallback_pages() const noexcept
 {
     std::size_t count = 0;
-    for (const auto& page : pages_) count += bool(page.fallback);
+    for (const auto& page : pages_)
+        count += bool(page.fallback);
     return count;
 }
 void PointFactDirectory::pin(ContactPointRef ref)
@@ -276,7 +337,7 @@ void PointFactDirectory::release(ContactPointRef ref)
         throw std::invalid_argument("Contact-point reference already retired.");
     entry.retired = --entry.refs == 0;
 }
-const ContactPointIdentity& PointFactDirectory::get(ContactPointRef ref) const
+ContactPointIdentity PointFactDirectory::get(ContactPointRef ref) const
 {
     const auto& entry = checked(ref);
     return pages_[entry.page].get(entry.reference);
@@ -324,7 +385,8 @@ void PointFactDirectory::reclaim()
         auto& page = pages_[entry.page];
         if (--page.live == 0)
         {
-            if (fallback_tail_ == entry.page) fallback_tail_ = empty;
+            if (fallback_tail_ == entry.page)
+                fallback_tail_ = empty;
             page_index_.erase(page.identity);
             allocation_.release(page_node_bytes);
             page = {};
@@ -350,7 +412,14 @@ const void* PointFactDirectory::credit_identity(ContactPointRef ref) const
 {
     const auto& entry = checked(ref);
     const auto& page = pages_[entry.page];
-    return page.view ? page.view->page_credit_identity(entry.reference) : page.fallback.get();
+    if (page.source_view)
+    {
+        const void* identity = nullptr;
+        page.source_view->visit_source_admissions(
+            [&](const void* credit, const void*, auto, auto) { identity = credit; });
+        return identity;
+    }
+    return page.view ? page.view->page_credit_identity(entry.reference.stored) : page.fallback.get();
 }
 void PointFactDirectory::contribute_breakdown(ContactStorageBreakdown& result) const
 {
@@ -360,7 +429,18 @@ void PointFactDirectory::contribute_breakdown(ContactStorageBreakdown& result) c
         if (page.view)
         {
             result.fact_view_metadata += page.view->metadata_bytes();
-            page.view->visit_page_admissions([&](const void*, const void*, std::size_t metadata, std::size_t body)
+            page.view->visit_page_admissions(
+                [&](const void*, const void*, std::size_t metadata, std::size_t body)
+                {
+                    result.point_credit_metadata += metadata;
+                    result.point_shared_body += body;
+                });
+        }
+        else if (page.source_view)
+        {
+            result.fact_view_metadata += page.source_view->metadata_bytes();
+            page.source_view->visit_source_admissions(
+                [&](const void*, const void*, std::size_t metadata, std::size_t body)
                 {
                     result.point_credit_metadata += metadata;
                     result.point_shared_body += body;

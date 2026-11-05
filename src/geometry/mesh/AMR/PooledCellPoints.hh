@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactPayloadCensus.hh"
 #include "IncidencePools.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
 #include <vector>
@@ -26,6 +27,14 @@ public:
      * to the caller. Temporary normalization/audit storage is scoped here. */
     [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&);
     [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch&);
+
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
+    {
+        if (include_object)
+            contact_payload_object(visitor, this, ContactPayloadRole::CellPointsObject, sizeof(*this));
+        contact_payload_buffer(visitor, this, ContactPayloadRole::CellPointCounts, counts_);
+        contact_payload_buffer(visitor, this, ContactPayloadRole::CellPointsBefore, before_);
+    }
 
 private:
     [[nodiscard]] ContactIncidenceRow make_row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch*);

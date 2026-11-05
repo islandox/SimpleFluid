@@ -1,8 +1,10 @@
 #pragma once
+#include "ContactSourcePoints.hh"
 #include "PooledTile.hh"
 #include "SimpleFluidExport.hh"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -14,6 +16,7 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct TileBodyPageCredit;
+struct TileSourceCredit;
 class TileBodyView;
 class TileBodyLoopView;
 /** A page owner and a record ordinal, without an individual body allocation. */
@@ -84,6 +87,11 @@ public:
     TileBodyLoopView() = default;
     TileBodyLoopView(std::span<const std::size_t> values) : direct_(values) {}
     TileBodyLoopView(const std::vector<std::size_t>& values) : direct_(values) {}
+    /** Borrowed indexed saved storage; caller retains its immutable owner. */
+    TileBodyLoopView(const void* owner, std::size_t count, std::size_t (*at)(const void*, std::size_t))
+        : indexed_owner_(owner), indexed_count_(count), indexed_at_(at)
+    {
+    }
     friend bool operator==(const TileBodyLoopView&, const TileBodyLoopView&);
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
@@ -96,6 +104,9 @@ private:
     friend class TileBodyView;
     friend class TileBodyHandle;
     explicit TileBodyLoopView(TileBodyHandle handle) : handle_(std::move(handle)) {}
+    const void* indexed_owner_ = nullptr;
+    std::size_t indexed_count_ = 0;
+    std::size_t (*indexed_at_)(const void*, std::size_t) = nullptr;
     std::span<const std::size_t> direct_;
     TileBodyHandle handle_;
 };
@@ -118,6 +129,7 @@ struct TileBodyPageStatistics
     std::size_t metadata_bytes = 0, page_credit_bytes = 0;
     std::size_t page_body_bytes = 0, page_credit_overhead_bytes = 0;
     std::size_t deferred_pages = 0, deferred_body_bytes = 0, deferred_metadata_bytes = 0;
+    std::size_t source_pages = 0, source_records = 0;
 };
 struct TileBodyReapStatistics
 {
@@ -132,7 +144,8 @@ class SIMPLEFLUID_LOCAL TileBodyPages
 {
 public:
     explicit TileBodyPages(Budget&, std::shared_ptr<Budget> keeper = {});
-    TileBodyPages(const TileBodyPages&, Budget&, std::shared_ptr<Budget> keeper = {});
+    TileBodyPages(const TileBodyPages&, Budget&, std::shared_ptr<Budget> keeper = {},
+        std::shared_ptr<CartesianAuthorityArena> source_arena = {});
     ~TileBodyPages();
     TileBodyPages(const TileBodyPages&) = delete;
     TileBodyPages& operator=(const TileBodyPages&) = delete;
@@ -144,8 +157,14 @@ public:
      * a failed admission leaves that page unchanged. Re-adoption reuses it. */
     [[nodiscard]] TileBodyReapStatistics reap();
     [[nodiscard]] TileBodyPageStatistics statistics() const noexcept;
-    [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charged_ + deferred_metadata_bytes_; }
+    /** Only unexposed initial-session pages. Whole loops and FULL identities
+     * match the real support/line outputs before their ring arrays retire. */
+    std::size_t certify_private_source_loops(
+        std::shared_ptr<const ContactSourcePointSnapshot>, std::shared_ptr<CartesianAuthorityArena>);
+    [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     [[nodiscard]] std::size_t retained_bytes() const noexcept;
+    [[nodiscard]] bool imports_source_owner(const void*) const noexcept;
+    void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
     template<class Visitor> void visit_credit_owners(Visitor&& visitor) const
     {
         for (const auto& credit : pages_)
@@ -160,10 +179,13 @@ private:
     void defer_body(TileBodyPageCredit&);
     void release_deferred() noexcept;
     static std::size_t credit_bytes(const std::shared_ptr<TileBodyPageCredit>&) noexcept;
+    std::shared_ptr<TileSourceCredit> source_context(std::shared_ptr<const ContactSourcePointSnapshot>);
     void grow_directory();
     [[nodiscard]] std::size_t install(std::shared_ptr<TileBodyPageCredit>);
     Budget* budget_;
     std::shared_ptr<Budget> keeper_;
+    std::shared_ptr<CartesianAuthorityArena> source_arena_;
+    std::shared_ptr<TileSourceCredit> source_credit_;
     std::size_t charged_ = 0;
     std::size_t active_ = std::numeric_limits<std::size_t>::max(), first_free_ = 0;
     std::vector<std::shared_ptr<TileBodyPageCredit>> pages_;

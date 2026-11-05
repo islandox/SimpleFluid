@@ -102,6 +102,15 @@ void expect_point(const Point& actual, const Point& expected)
     EXPECT_EQ(actual, expected);
     EXPECT_EQ(P::encode_identity(actual), P::encode_identity(expected));
 }
+// These fixtures use physical page batches. Identity reads return values, so
+// inspect their captured page references when checking actual record sharing.
+const Point* borrowed_stored_point(const D::ContactPointArray& array, std::size_t index, bool normalized = false)
+{
+    const auto locator = normalized ? array.normalized_locator(index) : array.physical_locator(index);
+    if (!locator || !locator->view || locator->source_view)
+        throw std::logic_error("Fixture requires a captured physical page reference.");
+    return &locator->view->get(locator->reference);
+}
 
 TEST(PooledContactRows, PartialPageForksKeepLiteralValuesAndIndependentArenaLifetimes)
 {
@@ -191,8 +200,10 @@ TEST(PooledContactRows, PhysicalOrderPrecedesNormalizationAndRowsBorrowPoolIdent
             const auto actual = row.value.points[i];
             expect_point(actual.physical, expected_physical[i]);
             expect_point(actual.normalized, expected_normalized[i]);
-            EXPECT_EQ(&actual.physical, &pools.points.get(*pools.points.find(expected_physical[i])));
-            EXPECT_EQ(&actual.normalized, &pools.points.get(*pools.points.find(expected_normalized[i])));
+            EXPECT_EQ(borrowed_stored_point(row.value.points, i),
+                &pools.points.physical_pool().get(*pools.points.find(expected_physical[i])));
+            EXPECT_EQ(borrowed_stored_point(row.value.points, i, true),
+                &pools.points.physical_pool().get(*pools.points.find(expected_normalized[i])));
         }
         EXPECT_EQ(row.value.points.storage_bytes(), 8 * sizeof(std::uint32_t));
         EXPECT_EQ(batch.page_count(), 1u); // Capture did not seal a page between normalizations.
@@ -228,8 +239,8 @@ TEST(PooledContactRows, FullPrecisionCanonicalZeroAndFloatingEnvironmentSurviveF
         array.value.push_reference(rb, rb, *budget);
         batch.freeze();
         EXPECT_TRUE(array.value.shares_normalized_storage());
-        EXPECT_EQ(&array.value[0].physical, &array.value[0].normalized);
-        EXPECT_EQ(&array.value[1].physical, &pool.get(b));
+        EXPECT_EQ(borrowed_stored_point(array.value, 0), borrowed_stored_point(array.value, 0, true));
+        EXPECT_EQ(borrowed_stored_point(array.value, 1), &pool.get(b));
         EXPECT_EQ(array.value[0].physical, first);
         EXPECT_EQ(array.value[1].physical, second);
         EXPECT_EQ(std::fegetround(), FE_UPWARD);
@@ -266,7 +277,7 @@ TEST(PooledContactRows, ReferencedPagesAndSharedDirectoryOutlivePoolWithoutDupli
         EXPECT_LT(budget->used, retained - metadata); // The two unreferenced pages were released.
         expect_point(first.value[0].physical, point(17));
         expect_point(second.value[0].physical, point(17));
-        EXPECT_EQ(&first.value[0].physical, &second.value[0].physical);
+        EXPECT_EQ(borrowed_stored_point(first.value, 0), borrowed_stored_point(second.value, 0));
         EXPECT_GT(budget->used, first.value.storage_bytes() + second.value.storage_bytes());
     }
     EXPECT_EQ(budget->used, 0u);
@@ -334,10 +345,10 @@ TEST(PooledContactRows, NarrowBoundaryWidensExactlyAndRejectsInvalidLookup)
         D::ContactPointBatch batch(pool);
         ArrayOwner array(budget);
         array.value = D::ContactPointArray::pooled(batch, 3, *budget);
-        array.value.push_reference({maximum - 1}, {maximum - 1}, *budget);
-        array.value.push_reference({maximum}, {maximum}, *budget);
+        array.value.push_reference(Pool::CapturedReference{maximum - 1}, Pool::CapturedReference{maximum - 1}, *budget);
+        array.value.push_reference(Pool::CapturedReference{maximum}, Pool::CapturedReference{maximum}, *budget);
         EXPECT_EQ(array.value.storage_bytes(), 3 * sizeof(std::uint32_t));
-        array.value.push_reference({maximum + 1}, {maximum + 1}, *budget);
+        array.value.push_reference(Pool::CapturedReference{maximum + 1}, Pool::CapturedReference{maximum + 1}, *budget);
         EXPECT_EQ(array.value.storage_bytes(), 3 * sizeof(std::uint64_t));
         EXPECT_EQ(array.value.size(), 3u);
         batch.freeze();
@@ -361,7 +372,8 @@ TEST(PooledContactRows, FailedSecondWideBufferPreservesExistingValuesAndNeverRef
         const auto old_bytes = array.value.storage_bytes();
         budget->limit = before + 2 * sizeof(std::uint64_t);
         constexpr auto wide = std::uint64_t{std::numeric_limits<std::uint32_t>::max()} + 1;
-        EXPECT_THROW(array.value.push_reference({wide}, {wide}, *budget), std::invalid_argument);
+        EXPECT_THROW(array.value.push_reference(Pool::CapturedReference{wide}, Pool::CapturedReference{wide}, *budget),
+            std::invalid_argument);
         EXPECT_EQ(budget->used, before);
         EXPECT_GT(budget->cumulative, cumulative);
         EXPECT_EQ(array.value.capacity(), 2u);

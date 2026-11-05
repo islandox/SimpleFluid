@@ -1,11 +1,11 @@
 #pragma once
 #include "ContactPayloadCensus.hh"
-#include "geometry/mesh/AMR/ContactPointFacts.hh"
-#include "geometry/mesh/AMR/ContactStorageBreakdown.hh"
-#include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
+#include "ContactPointFacts.hh"
+#include "ContactStorageBreakdown.hh"
+#include "DistributedAdaptiveContactHalo.hh"
 #include <cstdint>
-#include <memory>
 #include <limits>
+#include <memory>
 #include <span>
 #include <utility>
 #include <variant>
@@ -71,8 +71,8 @@ public:
         {
             const auto& entry = bindings_[i];
             if (entry.refs || entry.retired)
-                visitor(BorrowedBinding{&entry, {i, entry.generation}, entry.refs, entry.retired,
-                    entry.value.row.get(), entry.value.incidence_generation, entry.value.record});
+                visitor(BorrowedBinding{&entry, {i, entry.generation}, entry.refs, entry.retired, entry.value.row.get(),
+                    entry.value.incidence_generation, entry.value.record});
         }
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = true) const
@@ -110,16 +110,24 @@ private:
 class ContactFanBlock
 {
 public:
-    template<class UInt> struct Local { UInt binding, point; };
-    template<class UInt> struct Remote { UInt record, physical; };
-    template<class UInt> struct Slice { UInt local, locals, remote, remotes; };
+    template<class UInt> struct Local
+    {
+        UInt binding, point;
+    };
+    template<class UInt> struct Remote
+    {
+        UInt record, physical;
+    };
+    template<class UInt> struct Slice
+    {
+        UInt local, locals, remote, remotes;
+    };
     struct Input
     {
         std::span<const ContactLocalOccurrence> local;
         std::span<const ContactRemoteOccurrence> remote;
     };
-    [[nodiscard]] static std::shared_ptr<const ContactFanBlock> build(
-        std::span<const Input>, ContactGroupAllocation&);
+    [[nodiscard]] static std::shared_ptr<const ContactFanBlock> build(std::span<const Input>, ContactGroupAllocation&);
     [[nodiscard]] bool wide() const noexcept;
     [[nodiscard]] std::size_t groups() const noexcept;
     [[nodiscard]] std::size_t local_count(std::size_t group) const;
@@ -131,19 +139,26 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
         contact_payload_object(visitor, this, ContactPayloadRole::FanBlockObject, sizeof(*this), true);
-        std::visit([&](const auto& arrays)
+        std::visit(
+            [&](const auto& arrays)
             {
                 contact_payload_buffer(visitor, this, ContactPayloadRole::FanLocal, arrays.local);
                 contact_payload_buffer(visitor, this, ContactPayloadRole::FanRemote, arrays.remote);
                 contact_payload_buffer(visitor, this, ContactPayloadRole::FanSlices, arrays.slices);
-            }, data_);
+            },
+            data_);
     }
     template<class Visitor> void visit_borrowed_arrays(Visitor&& visitor) const
     {
-        std::visit([&](const auto& arrays)
-            { visitor(std::span(arrays.local), arrays.local.capacity(), std::span(arrays.remote),
-                arrays.remote.capacity(), std::span(arrays.slices), arrays.slices.capacity()); }, data_);
+        std::visit(
+            [&](const auto& arrays)
+            {
+                visitor(std::span(arrays.local), arrays.local.capacity(), std::span(arrays.remote),
+                    arrays.remote.capacity(), std::span(arrays.slices), arrays.slices.capacity());
+            },
+            data_);
     }
+
 private:
     template<class UInt> struct Arrays
     {
@@ -176,13 +191,15 @@ public:
     {
         contact_payload_object(visitor, this, ContactPayloadRole::FanOwnerObject, sizeof(*this), true);
         contact_payload_buffer(visitor, this, ContactPayloadRole::FanViews, views_);
-        if (block_) block_->visit_borrowed_payload(visitor);
+        if (block_)
+            block_->visit_borrowed_payload(visitor);
     }
     template<class Visitor> void visit_borrowed_slices(Visitor&& visitor) const
     {
         for (std::size_t i = 0; i < views_.size(); ++i)
             visitor(i, views_[i], block_.get());
     }
+
 private:
     friend struct ContactFanView;
     explicit ContactFanOwner(std::shared_ptr<ContactFanCatalog>);
@@ -191,7 +208,7 @@ private:
     void unpin_slice(std::size_t) const;
     void release_slice(std::size_t) const;
     [[nodiscard]] const ContactRowBinding& binding(std::size_t slot) const;
-    [[nodiscard]] const ContactPointIdentity& physical(std::size_t slot) const;
+    [[nodiscard]] ContactPointIdentity physical(std::size_t slot) const;
     ContactGroupAllocation allocation_;
     ContactGroupAllocation body_admission_;
     std::shared_ptr<ContactFanCatalog> catalog_;
@@ -204,6 +221,7 @@ struct ContactFanView
 private:
     std::shared_ptr<const ContactFanOwner> owner_;
     std::size_t group_ = 0;
+
 public:
     [[nodiscard]] const std::shared_ptr<const ContactFanOwner>& owner() const noexcept { return owner_; }
     [[nodiscard]] std::size_t group() const noexcept { return group_; }
@@ -220,12 +238,12 @@ public:
         ContactBindingId id;
         const ContactRowBinding& binding;
         std::size_t point;
-        [[nodiscard]] const ContactPointIdentity& physical() const { return binding.row->points.at(point).physical; }
+        [[nodiscard]] ContactPointIdentity physical() const { return binding.row->points.at(point).physical; }
     };
     struct Remote
     {
         std::size_t record;
-        const ContactPointIdentity& physical;
+        ContactPointIdentity physical;
     };
     [[nodiscard]] Local local(std::size_t i) const;
     [[nodiscard]] Remote remote(std::size_t i) const;

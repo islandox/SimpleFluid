@@ -1,5 +1,6 @@
-#include "geometry/mesh/AMR/ContactPointWire.hh"
+#include "ContactPointWire.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
 #include <algorithm>
 #include <array>
 #include <cfenv>
@@ -18,7 +19,11 @@ public:
         if (std::feholdexcept(&saved_) != 0)
             throw std::runtime_error("Cannot isolate contact-point floating-point environment.");
     }
-    ~Environment() { if (active_) std::fesetenv(&saved_); }
+    ~Environment()
+    {
+        if (active_)
+            std::fesetenv(&saved_);
+    }
     void restore()
     {
         if (std::fesetenv(&saved_) != 0)
@@ -27,6 +32,7 @@ public:
     }
     Environment(const Environment&) = delete;
     Environment& operator=(const Environment&) = delete;
+
 private:
     std::fenv_t saved_;
     bool active_ = true;
@@ -38,10 +44,10 @@ struct Stream
     std::size_t length;
     explicit Stream(ContactPointKeyView key) : domain(key.domain)
     {
-        if (!key.point || domain.size() > std::numeric_limits<std::size_t>::max() - 16 - point.bytes.size())
+        if (domain.size() > std::numeric_limits<std::size_t>::max() - 16 - point.bytes.size())
             throw std::invalid_argument("Invalid contact-point key view.");
         // Ordinary points have a statically bounded inline representation.
-        PLIC::details::GeometryIdentityAccess::emit_canonical(*key.point, &point,
+        PLIC::details::GeometryIdentityAccess::emit_canonical(key.point, &point,
             [](void* context, std::span<const char> bytes)
             {
                 auto& output = *static_cast<PLIC::details::OrdinaryIdentityKey*>(context);
@@ -138,13 +144,15 @@ std::size_t framed_contact_point_key_size(ContactPointKeyView value)
 void emit_framed_contact_point_key(
     ContactPointKeyView value, void* context, void (*append)(void*, std::span<const char>))
 {
-    if (!append) throw std::invalid_argument("Missing contact key emitter.");
+    if (!append)
+        throw std::invalid_argument("Missing contact key emitter.");
     Environment environment;
     const Stream stream(value);
     const auto word = [&](std::size_t n)
     {
         std::array<char, 8> bytes;
-        for (unsigned i = 0; i < 8; ++i) bytes[i] = static_cast<char>(std::uint64_t(n) >> (8 * i));
+        for (unsigned i = 0; i < 8; ++i)
+            bytes[i] = static_cast<char>(std::uint64_t(n) >> (8 * i));
         append(context, bytes);
     };
     word(stream.size());
@@ -156,10 +164,39 @@ void emit_framed_contact_point_key(
 }
 void append_framed_contact_point_key(Writer& writer, ContactPointKeyView value)
 {
-    emit_framed_contact_point_key(value, &writer, [](void* context, std::span<const char> bytes)
+    emit_framed_contact_point_key(value, &writer,
+        [](void* context, std::span<const char> bytes)
         {
             auto& output = static_cast<Writer*>(context)->data;
             output.insert(output.end(), bytes.begin(), bytes.end());
         });
+}
+void append_framed_contact_point_identity(Writer& writer, const ContactPointIdentity& value)
+{
+    PLIC::details::OrdinaryIdentityKey key;
+    // Unlike contact-key comparison queries, legacy identity packets emit their
+    // canonical scalar words directly in the caller's floating-point environment.
+    PLIC::details::GeometryIdentityAccess::emit_canonical(value, &key,
+        [](void* context, std::span<const char> bytes)
+        {
+            auto& output = *static_cast<PLIC::details::OrdinaryIdentityKey*>(context);
+            if (bytes.size() > output.bytes.size() - output.size)
+                throw std::invalid_argument("Contact-point canonical key exceeds inline bound.");
+            std::copy(bytes.begin(), bytes.end(), output.bytes.begin() + output.size);
+            output.size += bytes.size();
+        });
+    const auto header = PLIC::details::geometry_packet_header(
+        PLIC::GeometryPacketKind::PointIdentity, ArithmeticMode::Ordinary, key.size);
+    // Validate every length and the actual reserved capacity before mutation.
+    if (key.size > std::numeric_limits<std::size_t>::max() - header.size())
+        throw std::invalid_argument("Framed contact identity size overflows.");
+    const auto packet_bytes = header.size() + key.size;
+    if (packet_bytes > std::numeric_limits<std::uint64_t>::max() ||
+        packet_bytes > std::numeric_limits<std::size_t>::max() - 8 ||
+        packet_bytes + 8 > writer.data.capacity() - writer.data.size())
+        throw std::invalid_argument("Framed contact identity exceeds reserved capacity.");
+    writer.word(static_cast<std::uint64_t>(packet_bytes));
+    writer.data.insert(writer.data.end(), header.begin(), header.end());
+    writer.data.insert(writer.data.end(), key.bytes.begin(), key.bytes.begin() + key.size);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

@@ -1,8 +1,8 @@
 #pragma once
 #include "ContactPayloadCensus.hh"
-#include "geometry/mesh/AMR/ContactPointFans.hh"
-#include "geometry/mesh/AMR/ContactPointWire.hh"
-#include "geometry/mesh/AMR/PhysicalOwnerIndex.hh"
+#include "ContactPointFans.hh"
+#include "ContactPointWire.hh"
+#include "PhysicalOwnerIndex.hh"
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -92,7 +92,9 @@ public:
     [[nodiscard]] std::optional<ContactGroupId> find_encoded(std::span<const char>) const;
     [[nodiscard]] ContactPointKeyView key(ContactGroupId) const;
     [[nodiscard]] const AdaptiveBytes& domain(ContactGroupId) const;
-    [[nodiscard]] const ContactPointIdentity& normalized(ContactGroupId) const;
+    [[nodiscard]] ContactPointIdentity normalized(ContactGroupId) const;
+    [[nodiscard]] ContactPointRef normalized_reference(ContactGroupId) const;
+    [[nodiscard]] const PointFactDirectory& point_directory() const noexcept { return catalog_->points; }
     [[nodiscard]] ContactFanView fan(ContactGroupId) const;
     [[nodiscard]] std::size_t cover(ContactGroupId) const;
     void set_cover(ContactGroupId, std::size_t);
@@ -117,7 +119,7 @@ public:
         ContactGroupId id;
         const AdaptiveBytes* domain;
         ContactPointRef normalized_reference;
-        const ContactPointIdentity* normalized;
+        ContactPointIdentity normalized;
         const ContactFanView* fan;
         std::size_t cover;
         bool live, retired;
@@ -129,7 +131,7 @@ public:
             const auto& group = groups_[i];
             if (group.live || group.retired)
                 visitor(BorrowedGroup{&group, {i, group.generation}, &domains_.get(group.domain), group.normalized,
-                    &catalog_->points.get(group.normalized), &group.fan, group.cover, group.live, group.retired});
+                    catalog_->points.get(group.normalized), &group.fan, group.cover, group.live, group.retired});
         }
     }
     [[nodiscard]] std::size_t last_duplicate_check_work() const noexcept { return duplicate_work_; }
@@ -157,4 +159,4 @@ private:
     std::size_t duplicate_work_ = 0, fork_owner_work_ = 0;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
-#include "geometry/mesh/AMR/ContactPointGroups.ipp"
+#include "ContactPointGroups.ipp"

@@ -2,8 +2,9 @@
  * @brief Borrowed owner-local point bounds for closure ownership discovery.
  */
 #pragma once
+#include "ClosedContactIndex.hh"
+#include "ContactPointRef.hh"
 #include "SimpleFluidExport.hh"
-#include "geometry/mesh/AMR/ClosedContactIndex.hh"
 #include <array>
 #include <cstddef>
 #include <memory>
@@ -13,8 +14,10 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct Budget;
-/** The caller owns distinct normalized point coordinates and interned domains.
- * Their addresses and values remain stable until erase(). Handles survive
+class PointFactDirectory;
+/** Directory bindings retain only typed references; the caller keeps their
+ * immutable directory generations and interned domains alive until erase().
+ * Explicit coordinate pointer bindings also require stable addresses. Handles survive
  * metadata growth and copies. No geometry or provenance is retained here.
  * The shared budget must outlive this object, which releases its live charge.
  */
@@ -34,10 +37,12 @@ public:
      * points. Zero needs no arrays; existing capacity is never shrunk. */
     void reserve(std::size_t maximum_points);
     [[nodiscard]] Handle insert(const std::array<long double, 3>*, const AdaptiveBytes* domain);
+    [[nodiscard]] Handle insert(const PointFactDirectory&, ContactPointRef, const AdaptiveBytes* domain);
     void erase(Handle);
     /** Allocation-free rebinding. The caller proves coordinates and complete
      * domain bytes equal the former binding; old pointers are never read. */
     void rebind(Handle, const std::array<long double, 3>*, const AdaptiveBytes* domain);
+    void rebind(Handle, const PointFactDirectory&, ContactPointRef, const AdaptiveBytes* domain);
     [[nodiscard]] std::optional<AdaptiveContactBounds> aggregate_bounds() const noexcept;
     /** Actual homogeneous-domain subtrees, refined toward a soft target.
      * Mixed domains always split, even beyond the target. Returned vector and
@@ -47,6 +52,8 @@ public:
     [[nodiscard]] std::size_t point_count() const noexcept;
 
 private:
+    Handle insert_binding(
+        const std::array<long double, 3>*, const PointFactDirectory*, ContactPointRef, const AdaptiveBytes* domain);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

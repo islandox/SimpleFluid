@@ -1,4 +1,4 @@
-#include "geometry/mesh/AMR/ContactPointGroups.hh"
+#include "ContactPointGroups.hh"
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 template class ContactPointGroups<ContactPointWireHasher>;

@@ -7,6 +7,7 @@
 #include <optional>
 namespace SimpleFluid::Meshes::AMR
 {
+struct AMRGrid;
 struct AdaptiveSplitResult
 {
     AdaptiveFamily family;
@@ -126,7 +127,14 @@ public:
      * performs no allocation or coordinate arithmetic. */
     [[nodiscard]] virtual bool has_native_cartesian_geometry() const noexcept { return false; }
     [[nodiscard]] virtual std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
-        const AdaptiveLeaf&) const { return {}; }
+        const AdaptiveLeaf&) const
+    {
+        return {};
+    }
+    /** Explicit opt-in to the exact Cartesian incidence-source contract.
+     * Default unsupported; enum tags, names and descriptor parsing are not
+     * authorization. Successful providers copy their complete fixed grid. */
+    [[nodiscard]] virtual bool native_cartesian_incidence_grid(AMRGrid&) const noexcept { return false; }
     /** Complete immediate source membership is verified by distributed family
      * authority before this exact local inverse is evaluated. */
     [[nodiscard]] AdaptiveLeaf coarsen(const AdaptiveFamily&, std::span<const AdaptiveLeaf>) const;

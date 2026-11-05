@@ -22,6 +22,11 @@ public:
         return (charged_ - allocations_.payload_bytes()) * multiplier_;
     }
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return allocations_.payload_bytes(); }
+    /** Separate PLIC retention-census root; borrowed, with no pin/counter mutation. */
+    [[nodiscard]] const PLIC::GeometryAllocationLedger& borrowed_geometry_ledger() const noexcept
+    {
+        return allocations_;
+    }
     template<class Value> void retain(Budget& budget, const Value& value)
     {
         const auto available = (budget.limit - std::min(budget.used, budget.limit)) / multiplier_;

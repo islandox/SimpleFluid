@@ -1,15 +1,27 @@
 #pragma once
-#include "geometry/mesh/AMR/ContactPointPageView.hh"
+#include "ContactPointPageView.hh"
 #include <cstdint>
 #include <span>
+#include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-/** Borrowed full key; neither the framing bytes nor a canonical-key owner is retained. */
+/** Inline point value with borrowed domain bytes; no serialized key is retained. */
 struct ContactPointKeyView
 {
     std::span<const char> domain;
-    const ContactPointIdentity* point;
+    ContactPointIdentity point;
+    ContactPointKeyView(std::span<const char> domain_, ContactPointIdentity point_)
+        : domain(domain_), point(std::move(point_))
+    {
+    }
+    /** Compatibility probes copy the pointed value immediately. */
+    ContactPointKeyView(std::span<const char> domain_, const ContactPointIdentity* point_)
+        : ContactPointKeyView(
+              domain_, point_ ? *point_ : throw std::invalid_argument("Invalid contact-point key view."))
+    {
+    }
 };
 /** The legacy key is LE64(domain.size), domain, LE64(point-key.size), point-key.
  * Comparison deliberately uses char, including its platform signedness. */
@@ -32,4 +44,8 @@ struct ContactPointWireHasher
 [[nodiscard]] std::size_t framed_contact_point_key_size(ContactPointKeyView);
 void emit_framed_contact_point_key(ContactPointKeyView, void*, void (*)(void*, std::span<const char>));
 void append_framed_contact_point_key(Writer&, ContactPointKeyView);
+/** Append the legacy Writer::bytes(encode_identity(point)) without heap scratch.
+ * The caller must have admitted and reserved the entire destination capacity.
+ * Canonical scalar emission retains the legacy caller floating-point environment. */
+void append_framed_contact_point_identity(Writer&, const ContactPointIdentity&);
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

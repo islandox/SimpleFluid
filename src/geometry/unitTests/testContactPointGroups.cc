@@ -12,6 +12,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace
@@ -104,6 +105,18 @@ Bytes old_key(const Bytes& domain, const D::ContactPointIdentity& value)
     writer.bytes(domain);
     writer.bytes(P::canonical_key(value));
     return std::move(writer.data);
+}
+std::optional<std::pair<const void*, D::CapturedPointReference>> physical_location(
+    const D::PointFactDirectory& directory, D::ContactPointRef reference)
+{
+    std::optional<std::pair<const void*, D::CapturedPointReference>> location;
+    directory.visit_borrowed_facts(
+        [&](const D::PointFactDirectory::BorrowedFact& fact)
+        {
+            if (fact.reference == reference && fact.physical_page)
+                location.emplace(fact.physical_page, fact.captured);
+        });
+    return location;
 }
 std::shared_ptr<D::ContactIncidenceRow> row(long double physical, std::uint64_t generation, long double normalized = 0)
 {
@@ -238,13 +251,16 @@ TEST(ContactPointGroups, FullValueCollisionEqualityAndArbitraryEncodedProbes)
         for (const auto id : ordered.ids())
         {
             const auto key = groups.key(id);
-            actual.push_back(old_key(Bytes(key.domain.begin(), key.domain.end()), *key.point));
+            actual.push_back(old_key(Bytes(key.domain.begin(), key.domain.end()), key.point));
         }
         EXPECT_TRUE(std::is_sorted(actual.begin(), actual.end()));
         const std::array selected{ids.back(), ids.front(), ids.back()};
         const auto ordered_selected = groups.ordered_ids(std::span<const D::ContactGroupId>(selected));
         EXPECT_EQ(ordered_selected.ids().size(), 2u);
-        EXPECT_EQ(&groups.normalized(ids.front()), groups.key(ids.front()).point);
+        EXPECT_EQ(groups.normalized(ids.front()), groups.key(ids.front()).point);
+        EXPECT_EQ(
+            groups.point_directory().get(groups.normalized_reference(ids.front())), groups.key(ids.front()).point);
+        EXPECT_EQ(groups.point_directory().live_points(), ids.size());
         EXPECT_EQ(groups.domain(ids.front()), domain);
     }
     EXPECT_EQ(arena->used, 0u);
@@ -403,7 +419,7 @@ TEST(ContactPointGroups, OrderedIdsDelayGroupReuseAndRejectStaleIds)
         auto ordered = groups.ordered_ids();
         groups.retire(old);
         groups.reclaim();
-        EXPECT_EQ(*groups.key(old).point, point(1));
+        EXPECT_EQ(groups.key(old).point, point(1));
         const auto other = groups.intern({}, point(2));
         EXPECT_NE(other.slot, old.slot);
     }
@@ -599,10 +615,11 @@ TEST(ContactPointGroups, FallbackPagesPackReclaimAndForkPartialTailsIndependentl
     for (unsigned i = 0; i < 49; ++i)
         refs.push_back(source->retain(point(i + 1024)));
     ASSERT_EQ(source->fallback_pages(), 4u);
-    const auto* stable = &source->get(refs[0]);
+    const auto stable = physical_location(*source, refs[0]);
+    ASSERT_TRUE(stable);
     source->seal_fallback();
     D::PointFactDirectory fork(*source, fork_arena);
-    EXPECT_EQ(&fork.get(refs[0]), stable);
+    EXPECT_EQ(physical_location(fork, refs[0]), stable);
     EXPECT_NE(fork.credit_identity(refs[0]), source->credit_identity(refs[0]));
     for (unsigned i = 0; i < 16; ++i)
         source->release(refs[i]);
@@ -625,7 +642,11 @@ TEST(ContactPointGroups, FallbackPagesPackReclaimAndForkPartialTailsIndependentl
     (void) partial.retain(point(2));
     (void) partial.retain(point(3));
     D::PointFactDirectory other(partial, fork_arena);
-    EXPECT_NE(&other.get(first), &partial.get(first));
+    const auto partial_location = physical_location(partial, first), other_location = physical_location(other, first);
+    ASSERT_TRUE(partial_location);
+    ASSERT_TRUE(other_location);
+    EXPECT_NE(other_location->first, partial_location->first);
+    EXPECT_EQ(other_location->second, partial_location->second);
     const auto fourth = other.retain(point(99));
     EXPECT_EQ(other.fallback_pages(), 1u);
     EXPECT_EQ(partial.fallback_pages(), 1u);
@@ -682,6 +703,141 @@ TEST(ContactPointGroups, FramedEmissionMatchesIndependentNestedWriterOracle)
         EXPECT_EQ(D::contact_point_key_size(key), old_key(domain, value).size());
         EXPECT_EQ(D::framed_contact_point_key_size(key), oracle.data.size());
     }
+}
+TEST(ContactPointGroups, IdentityPacketAppendMatchesLegacyBytesAndFloatingEnvironmentWithoutHeapScratch)
+{
+    struct Restore
+    {
+        std::fenv_t value;
+        Restore() { std::feholdexcept(&value); }
+        ~Restore() { std::fesetenv(&value); }
+    } restore;
+    const auto maximum = std::numeric_limits<long double>::max();
+    const auto minimum = std::numeric_limits<long double>::min();
+    const auto tiny = std::numeric_limits<long double>::denorm_min();
+    const std::array points{point(0, -0.L, 0), point(1.1L, -2.3L, 4.7L),
+        point(0x1p40L + 1.1L, -0x1p40L + 2.3L, 0x1p40L + 4.7L), point(maximum, -maximum, minimum),
+        point(tiny, -tiny, minimum), point(std::nextafter(1.L, 2.L), -1, 0)};
+    std::size_t supported_modes = 0;
+    for (const auto rounding : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO})
+    {
+        if (std::fesetround(rounding) != 0)
+            continue; // Only supported rounding modes form part of this oracle.
+        ++supported_modes;
+        for (const auto initial_flags : {0, FE_DIVBYZERO | FE_INEXACT})
+        {
+            for (const auto& value : points)
+            {
+                const auto body = P::canonical_key(value);
+                using Header = P::GeometryPacketHeader;
+                // Independent original v3 envelope oracle: zero all natural padding,
+                // then set frozen metadata and little-endian lengths explicitly.
+                Bytes expected(8 + sizeof(Header) + body.size(), 0);
+                const auto word = [&](std::size_t offset, std::uint64_t n)
+                {
+                    for (unsigned i = 0; i < 8; ++i)
+                        expected[offset + i] = static_cast<char>(n >> (8 * i));
+                };
+                word(0, sizeof(Header) + body.size());
+                expected[8 + offsetof(Header, family)] = static_cast<char>(P::GeometryPacketFamily::Geometry);
+                expected[8 + offsetof(Header, version)] = 3;
+                expected[8 + offsetof(Header, kind)] = static_cast<char>(P::GeometryPacketKind::PointIdentity);
+                expected[8 + offsetof(Header, mode)] = static_cast<char>(SimpleFluid::ArithmeticMode::Ordinary);
+                using Profile = P::GeometryNumericProfile;
+                constexpr auto profile = std::numeric_limits<long double>::digits == 53 ? Profile::Binary64 :
+                    std::numeric_limits<long double>::digits == 64 ? Profile::X87Binary80 : Profile::Binary128;
+                expected[8 + offsetof(Header, profile)] = static_cast<char>(profile);
+                word(8 + offsetof(Header, body_length), body.size());
+                std::copy(body.begin(), body.end(), expected.begin() + 8 + sizeof(Header));
+                D::Writer legacy, actual;
+                actual.data.reserve(expected.size());
+                const auto capacity = actual.data.capacity();
+                const auto* storage = actual.data.data();
+                const auto reset_environment = [&]
+                {
+                    std::feclearexcept(FE_ALL_EXCEPT);
+                    std::feraiseexcept(initial_flags);
+#if defined(__GLIBC__)
+                    feenableexcept(FE_INVALID);
+#endif
+                };
+                reset_environment();
+                legacy.bytes(P::encode_identity(value));
+                const auto legacy_flags = std::fetestexcept(FE_ALL_EXCEPT);
+                const auto legacy_rounding = std::fegetround();
+#if defined(__GLIBC__)
+                const auto legacy_traps = fegetexcept();
+#endif
+                reset_environment();
+                std::size_t allocations = 0;
+                struct CountScope
+                {
+                    explicit CountScope(std::size_t& count) { allocation_count = &count; }
+                    ~CountScope() { allocation_count = nullptr; }
+                };
+                {
+                    CountScope monitor(allocations);
+                    D::append_framed_contact_point_identity(actual, value);
+                }
+                const auto flags = std::fetestexcept(FE_ALL_EXCEPT);
+                const auto mode = std::fegetround();
+#if defined(__GLIBC__)
+                const auto traps = fegetexcept();
+#endif
+                EXPECT_EQ(allocations, 0u);
+                EXPECT_EQ(actual.data.data(), storage);
+                EXPECT_EQ(actual.data.capacity(), capacity);
+                EXPECT_EQ(actual.data, expected);
+                EXPECT_EQ(actual.data, legacy.data);
+                EXPECT_EQ(flags, legacy_flags);
+                EXPECT_EQ(mode, legacy_rounding);
+#if defined(__GLIBC__)
+                EXPECT_EQ(traps, legacy_traps);
+#endif
+            }
+        }
+    }
+    EXPECT_GT(supported_modes, 0u);
+    RecordProperty("identity_packet_supported_rounding_modes", std::to_string(supported_modes));
+}
+TEST(ContactPointGroups, IdentityPacketAppendRejectsOneByteShortBeforeMutationAndReusesExactCapacity)
+{
+    const auto value = point(1.1L, -2.3L, 4.7L);
+    D::Writer legacy;
+    legacy.bytes(P::encode_identity(value));
+    const auto required = legacy.data.size();
+    D::Writer actual;
+    actual.data.reserve(required + 7);
+    const auto capacity = actual.data.capacity();
+    // Use actual capacity, including any implementation-specific reserve growth.
+    actual.data.resize(capacity - required + 1, char(0x83));
+    const auto before = actual.data;
+    const auto* storage = actual.data.data();
+    EXPECT_THROW(D::append_framed_contact_point_identity(actual, value), std::invalid_argument);
+    EXPECT_EQ(actual.data, before);
+    EXPECT_EQ(actual.data.data(), storage);
+    EXPECT_EQ(actual.data.capacity(), capacity);
+    actual.data.pop_back();
+    const auto prefix = actual.data.size();
+    ASSERT_EQ(actual.data.capacity() - actual.data.size(), required);
+    std::size_t allocations = 0;
+    allocation_count = &allocations;
+    try
+    {
+        D::append_framed_contact_point_identity(actual, value);
+    }
+    catch (...)
+    {
+        allocation_count = nullptr;
+        throw;
+    }
+    allocation_count = nullptr;
+    EXPECT_EQ(allocations, 0u);
+    EXPECT_EQ(actual.data.data(), storage);
+    EXPECT_EQ(actual.data.capacity(), capacity);
+    EXPECT_EQ(actual.data.size(), capacity);
+    EXPECT_TRUE(std::equal(actual.data.begin(), actual.data.begin() + prefix, before.begin()));
+    EXPECT_TRUE(std::equal(actual.data.begin() + prefix, actual.data.end(), legacy.data.begin(), legacy.data.end()));
 }
 TEST(ContactPointGroups, PartialBlockFailureLeavesSurvivingCallerLedgerUnchanged)
 {
@@ -791,14 +947,14 @@ TEST(ContactPointGroups, TargetPoolPageCreditLookupHasLinearWorkForLargeBatch)
         refs.push_back(view->capture(source, 16 * i));
     view->freeze();
     D::PointFactDirectory::PointPool target(source, *target_arena, target_arena);
-    const auto before = target.page_owner_lookup_probes();
+    const auto before = target.physical_pool().page_owner_lookup_probes();
     D::PointFactDirectory directory(target_arena);
     for (std::size_t i = 0; i < pages; ++i)
     {
         const auto ref = directory.retain({view.get(), refs[i]}, &target);
         EXPECT_EQ(directory.get(ref), point(16 * i));
     }
-    const auto work = target.page_owner_lookup_probes() - before;
+    const auto work = target.physical_pool().page_owner_lookup_probes() - before;
     EXPECT_LT(work, 64 * pages);
     EXPECT_EQ(directory.live_pages(), pages);
     EXPECT_EQ(directory.fallback_pages(), 0u);

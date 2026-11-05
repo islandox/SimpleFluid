@@ -22,6 +22,10 @@ struct PooledLineSubscriber
     std::uint8_t image = 0;
     ResultState result_state = ResultState::Unset;
     std::uint64_t edge = 0;
+    /** Actual authenticated complete-support generation, carried only by the
+     * explicitly enabled native-source line protocol. It never changes order. */
+    std::uint64_t source_generation = 0;
+    bool native_source = false;
     // Registry consumers use the accessors: a cached forward-endpoint answer
     // owns no vector. Decoded wire replies retain their explicit vector.
     std::vector<Slot> result;

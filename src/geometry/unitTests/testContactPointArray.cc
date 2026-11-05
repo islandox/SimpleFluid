@@ -20,8 +20,11 @@ static_assert(D::IdentityPool<SimpleFluid::Meshes::AMR::AdaptiveCellKey>::uses_h
 static_assert(!D::IdentityPool<D::IncidencePools::Plane>::uses_hashing);
 static_assert(!D::IdentityPool<D::IncidencePools::Normal>::uses_hashing);
 static_assert(!D::IdentityPool<D::IncidencePools::Image>::uses_hashing);
-static_assert(std::is_same_v<decltype(D::IncidencePools::points), D::IdentityPool<D::ContactPointIdentity>>);
+static_assert(std::is_same_v<decltype(D::IncidencePools::points), D::IncidencePointDirectory<>>);
+static_assert(std::is_same_v<D::IncidencePointDirectory<>::Store, D::IdentityPool<D::ContactPointIdentity>>);
 static_assert(std::is_empty_v<D::IdentityPool<D::ContactPointIdentity>::HashPolicy>);
+static_assert(std::is_same_v<decltype(D::ContactPointArray::Reference::normalized), D::ContactPointIdentity>);
+static_assert(std::is_same_v<decltype(D::ContactPointArray::Reference::physical), D::ContactPointIdentity>);
 D::ContactPointIdentity point(long double x, long double y = 0, long double z = 0)
 {
     return P::details::GeometryIdentityAccess::point({x, y, z});
@@ -32,6 +35,17 @@ std::vector<std::pair<D::ContactPointIdentity, D::ContactPointIdentity>> values(
     for (const auto& value : array)
         result.emplace_back(value.normalized, value.physical);
     return result;
+}
+const void* buffer_identity(const D::ContactPointArray& array, D::ContactPayloadRole role)
+{
+    const void* identity = nullptr;
+    array.visit_borrowed_payload(
+        [&](const D::ContactPayloadAllocation& allocation)
+        {
+            if (allocation.identity.role == role)
+                identity = allocation.identity.address;
+        });
+    return identity;
 }
 TEST(ContactPointArray, EmptyAndIdentityRowsHaveNoUnusedNormalizedArray)
 {
@@ -47,7 +61,7 @@ TEST(ContactPointArray, EmptyAndIdentityRowsHaveNoUnusedNormalizedArray)
         const auto value = point(i, i + 1, i + 2);
         array.push_back({value, value});
         EXPECT_EQ(array[i].physical, value);
-        EXPECT_EQ(&array[i].normalized, &array[i].physical);
+        EXPECT_FALSE(buffer_identity(array, D::ContactPayloadRole::PointArrayNormalized));
         EXPECT_EQ(P::encode_identity(array[i].normalized), P::encode_identity(value));
     }
     EXPECT_TRUE(array.shares_normalized_storage());
@@ -74,7 +88,9 @@ TEST(ContactPointArray, FirstDifferentNormalizationPreservesEveryEarlierAndLater
         }
     }
     EXPECT_EQ(array.storage_bytes(), 4 * sizeof(D::ContactPointIncidence));
-    EXPECT_NE(&array[0].normalized, &array[0].physical);
+    ASSERT_TRUE(buffer_identity(array, D::ContactPayloadRole::PointArrayNormalized));
+    EXPECT_NE(buffer_identity(array, D::ContactPayloadRole::PointArrayNormalized),
+        buffer_identity(array, D::ContactPayloadRole::PointArrayPhysical));
 }
 TEST(ContactPointArray, CopiesAndMovesOwnCompleteArraysAfterSourceDestruction)
 {
@@ -84,18 +100,20 @@ TEST(ContactPointArray, CopiesAndMovesOwnCompleteArraysAfterSourceDestruction)
         D::ContactPointArray source{{point(0), point(0)}, {point(1), point(33)}, {point(2), point(2)}};
         expected = values(source);
         copied = source;
-        EXPECT_NE(&copied[0].physical, &source[0].physical);
-        EXPECT_NE(&copied[1].normalized, &source[1].normalized);
+        EXPECT_NE(buffer_identity(copied, D::ContactPayloadRole::PointArrayPhysical),
+            buffer_identity(source, D::ContactPayloadRole::PointArrayPhysical));
+        EXPECT_NE(buffer_identity(copied, D::ContactPayloadRole::PointArrayNormalized),
+            buffer_identity(source, D::ContactPayloadRole::PointArrayNormalized));
         source.push_back({point(4), point(36)});
         EXPECT_EQ(values(copied), expected);
     }
     EXPECT_EQ(values(copied), expected);
-    const auto* physical = &copied[1].physical;
-    const auto* normalized = &copied[1].normalized;
+    const auto* physical = buffer_identity(copied, D::ContactPayloadRole::PointArrayPhysical);
+    const auto* normalized = buffer_identity(copied, D::ContactPayloadRole::PointArrayNormalized);
     D::ContactPointArray moved(std::move(copied));
     EXPECT_EQ(values(moved), expected);
-    EXPECT_EQ(&moved[1].physical, physical);
-    EXPECT_EQ(&moved[1].normalized, normalized);
+    EXPECT_EQ(buffer_identity(moved, D::ContactPayloadRole::PointArrayPhysical), physical);
+    EXPECT_EQ(buffer_identity(moved, D::ContactPayloadRole::PointArrayNormalized), normalized);
     moved.reserve(17);
     EXPECT_EQ(values(moved), expected);
     moved.push_back({point(5), point(37)});

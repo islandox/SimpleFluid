@@ -2,6 +2,7 @@
 #include "geometry/PLIC/GeometryIdentity.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include <cfenv>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <type_traits>
@@ -78,6 +79,21 @@ template<> struct IdentityPoolHasher<AdaptiveBytes>
 {
     static constexpr bool enabled = true;
     std::uint64_t operator()(const AdaptiveBytes& bytes) const noexcept { return adaptive_route_hash(bytes); }
+    template<class View>
+        requires requires(const View& view, std::size_t i) {
+            view.size();
+            static_cast<unsigned char>(view[i]);
+        }
+    std::uint64_t operator()(const View& bytes) const noexcept
+    {
+        std::uint64_t value = 14695981039346656037ULL;
+        for (std::size_t i = 0; i < bytes.size(); ++i)
+        {
+            value ^= static_cast<unsigned char>(bytes[i]);
+            value *= 1099511628211ULL;
+        }
+        return value;
+    }
 };
 template<> struct IdentityPoolHasher<PLIC::PointIdentity<ArithmeticMode::Ordinary>>
 {

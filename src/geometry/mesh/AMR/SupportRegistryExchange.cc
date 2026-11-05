@@ -92,14 +92,15 @@ void verify_header(Reader& r, ContactHaloContext c, std::uint64_t page)
 } // namespace
 
 void exchange_support_registry_stream(PooledSupportRegistry& registry, const std::function<bool(RegistryChange&)>& next,
-    ContactHaloContext context, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t page_bytes, Budget& budget)
+    ContactHaloContext context, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t page_bytes, Budget& budget,
+    std::size_t cursor_capacity)
 {
     if (comm.is_null())
         throw std::invalid_argument("Support registry requires communicator.");
     collective(*comm,
         [&]
         {
-            if (!next || !page_bytes || page_bytes > budget.limit)
+            if (!next || !page_bytes || page_bytes > budget.limit || !cursor_capacity || cursor_capacity > budget.limit)
                 throw std::invalid_argument("Invalid support registry page limit or cursor.");
         });
     Scope pending_memory{budget};
@@ -120,9 +121,7 @@ void exchange_support_registry_stream(PooledSupportRegistry& registry, const std
                     if (!pending && !ended)
                     {
                         Scope callback_memory{budget};
-                        const auto cap = budget.limit - budget.used;
-                        if (!cap)
-                            throw std::invalid_argument("Support registry cursor lease exhausted.");
+                        const auto cap = cursor_capacity;
                         callback_memory.add(cap);
                         RegistryChange value;
                         if (next(value))

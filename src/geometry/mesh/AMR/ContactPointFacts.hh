@@ -1,33 +1,28 @@
 #pragma once
+#include "ContactGroupAllocation.hh"
 #include "ContactPayloadCensus.hh"
-#include "geometry/mesh/AMR/ContactGroupAllocation.hh"
-#include "geometry/mesh/AMR/ContactPointArray.hh"
-#include "geometry/mesh/AMR/ContactPointWire.hh"
-#include "geometry/mesh/AMR/ContactStorageBreakdown.hh"
+#include "ContactPointArray.hh"
+#include "ContactPointRef.hh"
+#include "ContactPointWire.hh"
+#include "ContactStorageBreakdown.hh"
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <array>
-#include <memory>
-#include <map>
 #include <limits>
+#include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-struct ContactPointRef
-{
-    std::size_t slot;
-    std::uint64_t generation;
-    bool operator==(const ContactPointRef&) const = default;
-};
 /** Owns only referenced immutable point pages. Refcounts include staging and
  * immutable fan owners. release() retires; reclaim() is the evaluation barrier. */
 class PointFactDirectory
 {
 public:
-    using PointPool = IdentityPool<ContactPointIdentity>;
+    using PointPool = IncidencePointDirectory<>;
     explicit PointFactDirectory(std::shared_ptr<Budget>);
     PointFactDirectory(const PointFactDirectory&, std::shared_ptr<Budget>, const PointPool* target_pool = nullptr,
         bool preserve_pins = true);
@@ -38,7 +33,7 @@ public:
     [[nodiscard]] ContactPointRef retain(const ContactPointIdentity&);
     void pin(ContactPointRef);
     void release(ContactPointRef);
-    [[nodiscard]] const ContactPointIdentity& get(ContactPointRef) const;
+    [[nodiscard]] ContactPointIdentity get(ContactPointRef) const;
     /** Synchronous readers may resolve a slot only while their immutable fan
      * owns a pin. Escaped snapshots retain this entire directory/catalog. */
     [[nodiscard]] ContactPointRef pinned_reference(std::size_t slot) const;
@@ -60,14 +55,23 @@ public:
         {
             if (page.view)
             {
-                visitor(ContactStorageAdmission{page.view->metadata_identity(), page.view->metadata_bytes(), nullptr, 0});
-                page.view->visit_page_admissions([&](const void* credit, const void* body,
-                    std::size_t metadata, std::size_t bytes)
+                visitor(
+                    ContactStorageAdmission{page.view->metadata_identity(), page.view->metadata_bytes(), nullptr, 0});
+                page.view->visit_page_admissions(
+                    [&](const void* credit, const void* body, std::size_t metadata, std::size_t bytes)
                     { visitor(ContactStorageAdmission{credit, metadata, body, bytes}); });
             }
             else if (page.fallback)
                 visitor(ContactStorageAdmission{page.fallback->metadata.identity(), page.fallback->metadata.bytes(),
                     page.fallback->body.get(), page.fallback->body_admission.bytes(), page.fallback->body->sealed});
+            else if (page.source_view)
+            {
+                visitor(ContactStorageAdmission{
+                    page.source_view->metadata_identity(), page.source_view->metadata_bytes(), nullptr, 0});
+                page.source_view->visit_source_admissions(
+                    [&](const void* credit, const void* body, std::size_t metadata, std::size_t bytes)
+                    { visitor(ContactStorageAdmission{credit, metadata, body, bytes}); });
+            }
         }
     }
     struct BorrowedFact
@@ -78,7 +82,9 @@ public:
         bool retired;
         const void* physical_page;
         CapturedPointReference captured;
-        const ContactPointIdentity* value;
+        ContactPointIdentity value;
+        const void* source_snapshot = nullptr;
+        CapturedSourcePointReference source_captured{};
     };
     template<class Visitor> void visit_borrowed_facts(Visitor&& visitor) const
     {
@@ -87,7 +93,11 @@ public:
             const auto& entry = entries_[i];
             if (entry.refs || entry.retired)
                 visitor(BorrowedFact{&entry, {i, entry.generation}, entry.refs, entry.retired,
-                    pages_[entry.page].identity, entry.reference, &pages_[entry.page].get(entry.reference)});
+                    pages_[entry.page].source_view ? nullptr : pages_[entry.page].identity,
+                    pages_[entry.page].source_view ? CapturedPointReference{0} : entry.reference.stored,
+                    pages_[entry.page].get(entry.reference),
+                    pages_[entry.page].source_view ? pages_[entry.page].identity : nullptr,
+                    pages_[entry.page].source_view ? entry.reference.source : CapturedSourcePointReference{0}});
         }
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
@@ -102,7 +112,10 @@ public:
         for (const auto& value : page_index_)
             contact_payload_node_value(visitor, this, ContactPayloadRole::FactPageIndexValues, value);
         for (const auto& page : pages_)
-            if (page.view) page.view->visit_borrowed_payload(visitor);
+            if (page.view)
+                page.view->visit_borrowed_payload(visitor);
+            else if (page.source_view)
+                page.source_view->visit_borrowed_payload(visitor);
             else if (page.fallback)
             {
                 contact_payload_object(visitor, page.fallback.get(), ContactPayloadRole::FallbackCreditObject,
@@ -146,14 +159,23 @@ private:
         std::shared_ptr<FallbackCredit> fallback;
         const void* identity = nullptr;
         std::size_t live = 0;
-        [[nodiscard]] bool present() const noexcept { return bool(view) || bool(fallback); }
-        [[nodiscard]] const ContactPointIdentity& get(CapturedPointReference reference) const;
+        std::shared_ptr<const ContactSourcePointView> source_view;
+        [[nodiscard]] bool present() const noexcept { return bool(view) || bool(fallback) || bool(source_view); }
+        union Reference
+        {
+            CapturedPointReference stored;
+            CapturedSourcePointReference source;
+            Reference() : stored{0} {}
+            Reference(CapturedPointReference value) : stored(value) {}
+            Reference(CapturedSourcePointReference value) : source(value) {}
+        };
+        [[nodiscard]] ContactPointIdentity get(Reference reference) const;
     };
     struct Entry
     {
         std::uint64_t generation = 1;
         std::size_t refs = 0, page = 0;
-        CapturedPointReference reference{};
+        Page::Reference reference{};
         std::uint64_t hash = 0;
         bool retired = false;
     };
@@ -163,7 +185,7 @@ private:
         std::shared_ptr<const ContactPointPageView>, CapturedPointReference, std::uint64_t hash);
     std::shared_ptr<FallbackCredit> make_fallback(const FallbackCredit* source = nullptr);
     std::size_t add_page(Page);
-    ContactPointRef add_entry(std::size_t page, CapturedPointReference, std::uint64_t hash);
+    ContactPointRef add_entry(std::size_t page, Page::Reference, std::uint64_t hash);
     std::optional<ContactPointRef> find(const ContactPointIdentity&, std::uint64_t hash) const;
     void ensure_lookup();
     void insert_bucket(std::size_t);

@@ -3,6 +3,8 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/mesh/AMR/ContactHaloContext.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/ContactPointArray.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
@@ -23,11 +25,6 @@ struct ContactIncidenceRow
     AdaptiveBytes domain;
     ContactPointArray points;
     std::uint64_t incidence_generation = 0;
-};
-struct ContactHaloContext
-{
-    std::uint64_t epoch = 0, topology = 0, partition = 0, round = 0, transaction = 0;
-    auto operator<=>(const ContactHaloContext&) const = default;
 };
 struct Budget;
 /** Owns a result whose allocation remains charged to the originating halo.
@@ -80,6 +77,25 @@ struct ContactHaloStatistics
     std::size_t recomputed_tiles = 0;
     std::size_t point_groups = 0, group_private_metadata_bytes = 0, group_shared_body_bytes = 0;
     std::size_t reused_point_credit_metadata_bytes = 0, reused_point_body_bytes = 0;
+    /** Effective source path observations; no timing or physical qualification. */
+    std::size_t source_owner_manifests = 0, source_membership_cells = 0;
+    std::size_t source_coordinate_points = 0, explicit_coordinate_points = 0;
+    std::size_t source_tile_records = 0, explicit_tile_ring_slots = 0;
+    std::size_t source_line_records = 0, source_line_nonforward_records = 0, source_line_families = 0;
+    std::size_t source_axis_maps = 0, source_result_selectors = 0;
+    std::size_t explicit_line_records = 0, stride_line_records = 0;
+    std::size_t retained_explicit_line_records = 0, retained_stride_line_records = 0, retained_source_line_records = 0;
+    std::size_t source_point_recaptures = 0, source_point_recaptured_records = 0;
+    std::size_t source_point_recapture_admitted_bytes = 0;
+    std::size_t active_saved_layers = 0, retained_saved_layers = 0;
+    std::size_t retained_explicit_layer_input_slots = 0, retained_explicit_layer_output_slots = 0;
+    std::size_t retained_explicit_layer_edge_result_slots = 0;
+    std::size_t retained_certified_layer_input_slots = 0, retained_certified_layer_output_slots = 0;
+    std::size_t retained_certified_layer_edge_result_slots = 0, retained_certified_layer_descriptor_bytes = 0;
+    std::size_t retained_layer_endpoint_identity_slots = 0;
+    std::size_t cached_completion_requests = 0, cached_completion_remote_requests = 0;
+    std::size_t cached_completion_received = 0, retained_completion_owners = 0;
+    std::size_t retained_expanded_completion_result_slots = 0;
 };
 struct ContactFanView;
 struct ContactHaloBorrowedGroup
@@ -88,7 +104,7 @@ struct ContactHaloBorrowedGroup
     std::size_t slot;
     std::uint64_t generation;
     const AdaptiveBytes* domain;
-    const ContactPointIdentity* normalized;
+    ContactPointIdentity normalized;
     std::size_t normalized_slot;
     std::uint64_t normalized_generation;
     const ContactFanView* fan;
@@ -104,7 +120,9 @@ struct ContactHaloBorrowedFact
     bool retired;
     const void* physical_page;
     std::uint64_t captured;
-    const ContactPointIdentity* value;
+    ContactPointIdentity value;
+    const void* source_snapshot = nullptr;
+    std::uint64_t source_captured = 0;
 };
 struct ContactHaloBorrowedBinding
 {
@@ -148,6 +166,17 @@ public:
     /** Synchronous borrowed census. The caller keeps this controller alive and
      * prevents mutation; callbacks must not retain references or copy owners. */
     void for_each_borrowed_contact_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
+    /** PLIC geometry/identity pins are inspected separately from known C++
+     * contact payload. Caller holds this halo and all borrowed roots quiescent. */
+    void for_each_borrowed_geometry_ledger(const std::function<void(const PLIC::GeometryAllocationLedger&)>&) const;
+    void for_each_borrowed_plane_identity(
+        const std::function<void(const PLIC::PlaneSupportIdentity<ArithmeticMode::Ordinary>&)>&) const;
+    void for_each_borrowed_contact_face(
+        const std::function<void(const PLIC::PlanarFace<ArithmeticMode::Ordinary>&)>&) const;
+    void for_each_borrowed_source_admission(const std::function<void(const void*, std::size_t)>&) const;
+    void for_each_borrowed_overlap_credit(const std::function<void(const void*, std::size_t, bool)>&) const;
+    [[nodiscard]] std::size_t source_arena_overlap_metadata_bytes() const noexcept;
+    [[nodiscard]] std::size_t current_fork_overlap_bytes() const noexcept;
     void for_each_borrowed_contact_group(const std::function<void(const ContactHaloBorrowedGroup&)>&) const;
     void for_each_borrowed_contact_fact(const std::function<void(const ContactHaloBorrowedFact&)>&) const;
     void for_each_borrowed_contact_binding(const std::function<void(const ContactHaloBorrowedBinding&)>&) const;

@@ -1,7 +1,9 @@
 #include "geometry/PLIC/GeometryPacketCodec.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
 #include <array>
 #include <bit>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 namespace SimpleFluid::PLIC
 {
@@ -61,25 +63,32 @@ GeometryNumericProfile supported_profile(ArithmeticMode mode)
     return profile;
 }
 } // namespace
-std::vector<char> encode_geometry_packet(
-    GeometryPacketKind kind, ArithmeticMode mode, std::span<const char> body, std::size_t budget)
+std::array<char, geometry_packet_header_bytes> details::geometry_packet_header(
+    GeometryPacketKind kind, ArithmeticMode mode, std::size_t body_bytes, std::size_t budget)
 {
     const auto profile = supported_profile(mode);
     if (!supported(kind) || budget < geometry_packet_header_bytes ||
-        body.size() > budget - geometry_packet_header_bytes)
+        body_bytes > budget - geometry_packet_header_bytes || body_bytes > std::numeric_limits<std::uint64_t>::max())
         throw std::invalid_argument("Geometry packet exceeds its kind or byte budget.");
-    std::vector<char> bytes;
-    bytes.reserve(geometry_packet_header_bytes + body.size());
     // Initialize serialized storage, not a struct whose padding may be
     // indeterminate after member assignments. Only member bytes are overwritten.
-    bytes.resize(geometry_packet_header_bytes, 0);
+    std::array<char, geometry_packet_header_bytes> bytes{};
     bytes[offsetof(Header, family)] = static_cast<char>(GeometryPacketFamily::Geometry);
     bytes[offsetof(Header, version)] = static_cast<char>(geometry_packet_version);
     bytes[offsetof(Header, kind)] = static_cast<char>(kind);
     bytes[offsetof(Header, mode)] = static_cast<char>(mode);
     bytes[offsetof(Header, profile)] = static_cast<char>(profile);
-    const auto length = little_endian(static_cast<std::uint64_t>(body.size()));
+    const auto length = little_endian(static_cast<std::uint64_t>(body_bytes));
     std::memcpy(bytes.data() + offsetof(Header, body_length), &length, sizeof(length));
+    return bytes;
+}
+std::vector<char> encode_geometry_packet(
+    GeometryPacketKind kind, ArithmeticMode mode, std::span<const char> body, std::size_t budget)
+{
+    const auto header = details::geometry_packet_header(kind, mode, body.size(), budget);
+    std::vector<char> bytes;
+    bytes.reserve(geometry_packet_header_bytes + body.size());
+    bytes.insert(bytes.end(), header.begin(), header.end());
     bytes.insert(bytes.end(), body.begin(), body.end());
     return bytes;
 }
