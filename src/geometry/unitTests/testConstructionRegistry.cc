@@ -2,11 +2,15 @@
  * @brief Finite source-edge incidence and authenticated construction packet replay.
  */
 #include "geometry/PLIC/ConstructionRegistry.hh"
+#include "geometry/PLIC/CellGeometryView.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/unitTests/point_export_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include <algorithm>
 #include <array>
+#include <cfenv>
 #include <gtest/gtest.h>
 
 namespace
@@ -265,7 +269,7 @@ template<ArithmeticMode Mode> void rebase_clip_chain()
     EXPECT_EQ(rebased->rebase().input.anchor, cut.anchor);
     EXPECT_EQ(rebased->rebase().input.offset, cut.offset);
     ASSERT_EQ(rebased->rebase().parent->kind(), Node::Kind::Source);
-    EXPECT_EQ(rebased->rebase().parent->source().source, source_impl);
+    EXPECT_EQ(rebased->rebase().parent->source().geometry(), source_impl);
     EXPECT_FALSE(source_impl->construction); // The pinned source cannot point back to its recipe.
 
     const P::GeometryPacketContext pins{{47, 53, 59, 61}};
@@ -338,5 +342,310 @@ TEST(ConstructionRegistryTest, BinaryExactSourceRebaseClipRebaseChainsKeepRootsA
     rebase_clip_chain<ArithmeticMode::Ordinary>();
     if (P::certification_environment())
         rebase_clip_chain<ArithmeticMode::BoundedCertification>();
+}
+
+std::shared_ptr<const P::CartesianCellSource> native_box(double upper_x = 1,
+    D::NativeCellGeometryMoments policy = D::NativeCellGeometryMoments::PrimedState)
+{
+    P::CartesianSourceDescription input;
+    input.axes = {{{0, upper_x}, {0, 1}, {0, 1}}};
+    P::CartesianSourceCellSlot cell;
+    cell.upper = {1, 1, 1};
+    input.cells.push_back(cell);
+    return D::NativeCellGeometrySourceAccess::make(std::move(input), {}, policy);
+}
+P::ConvexGeometryPtr<ArithmeticMode::Ordinary> native_materialize(
+    const std::shared_ptr<const P::CartesianCellSource>& source, P::CellGeometryOperationWorkspace& workspace)
+{
+    const auto catalog = P::CellGeometryCatalog<ArithmeticMode::Ordinary>::cartesian(source);
+    return P::materialize_cell(P::CellGeometryView<ArithmeticMode::Ordinary>(catalog, 0), workspace);
+}
+
+TEST(ConstructionRegistryTest, NativeCutsReleaseInputShellsAndMatchExplicitReplayBytes)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const P::GeometryHalfspace x{{1, 0, 0}, {0, 0, 0}, .25};
+    const P::GeometryHalfspace y{{0, 1, 0}, {0, 0, 0}, .5};
+    const P::GeometryPacketContext pins{{41, 0, 0, 43}};
+    P::ConstructionRegistry<mode> registry(pins);
+    registry.register_plane(0, x);
+    registry.register_plane(1, y);
+    P::ConvexGeometryPtr<mode> quarter, eighth, outside;
+    std::weak_ptr<const P::DynamicConvexGeometry::Impl> original;
+    {
+        P::CellGeometryOperationWorkspace workspace;
+        const auto source = native_materialize(native_box(), workspace);
+        original = P::DynamicGeometryAccess::implementation(*source->dynamic_geometry());
+        registry.register_native(9, 0, source);
+        registry.register_native(0, 0, source);
+        const auto first = source->clip(x, false);
+        quarter = first.inside;
+        outside = first.outside;
+        eighth = quarter->clip(y, false).inside;
+    }
+    EXPECT_TRUE(original.expired());
+    ASSERT_TRUE(quarter);
+    ASSERT_TRUE(outside);
+    ASSERT_TRUE(eighth);
+    EXPECT_EQ(quarter->volume().value, .25L);
+    EXPECT_EQ(outside->volume().value, .75L);
+    EXPECT_EQ(eighth->volume().value, .125L);
+    EXPECT_EQ(quarter->centroid(), (P::GeometryPoint{.125, .5, .5}));
+    EXPECT_EQ(eighth->centroid(), (P::GeometryPoint{.125, .25, .5}));
+    const auto packet = eighth->encode(registry);
+    const auto decoded = Geometry<mode>::decode(packet, registry);
+    EXPECT_EQ(decoded->encode(registry), packet);
+    EXPECT_EQ(decoded->encode_certificate(), eighth->encode_certificate());
+    const auto explicit_source = Geometry<mode>::from_geometry(*Geometry<mode>::box({0, 0, 0}, {1, 1, 1}));
+    P::ConstructionRegistry<mode> explicit_registry(pins);
+    explicit_registry.register_native(0, 0, explicit_source);
+    explicit_registry.register_plane(0, x);
+    explicit_registry.register_plane(1, y);
+    const auto expected = explicit_source->clip(x, false).inside->clip(y, false).inside;
+    EXPECT_EQ(packet, expected->encode(explicit_registry));
+    const auto replay_work = [&](const auto& authority, P::GeometryLimits limits)
+    {
+        limits.arithmetic_mode = mode;
+        D::Operation operation(limits);
+        static_cast<void>(Geometry<mode>::decode(packet, authority, limits));
+        return std::pair{operation.work.operations, operation.work.pairs};
+    };
+    const auto work = replay_work(explicit_registry, {});
+    EXPECT_EQ(replay_work(registry, {}), work);
+    P::GeometryLimits exact;
+    exact.maximum_operations = work.first;
+    exact.maximum_pair_tests = work.second;
+    EXPECT_EQ(replay_work(registry, exact), work);
+    EXPECT_EQ(replay_work(explicit_registry, exact), work);
+    ASSERT_GT(work.first, 1u);
+    --exact.maximum_operations;
+    EXPECT_THROW(static_cast<void>(replay_work(registry, exact)), P::GeometryError);
+    EXPECT_THROW(static_cast<void>(replay_work(explicit_registry, exact)), P::GeometryError);
+}
+
+TEST(ConstructionRegistryTest, NativeParentAndCutterAuthenticateAcrossMaterializationOnlyWithinTheirSource)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const auto input = native_box();
+    const auto cutter_input = native_box(.25);
+    P::ConvexGeometryPtr<mode> cut;
+    std::weak_ptr<const P::DynamicConvexGeometry::Impl> original, original_cutter;
+    std::weak_ptr<const D::NativeGeometryBody> cutter_body;
+    {
+        P::CellGeometryOperationWorkspace workspace;
+        const auto source = native_materialize(input, workspace);
+        const auto cutter = native_materialize(cutter_input, workspace);
+        original = P::DynamicGeometryAccess::implementation(*source->dynamic_geometry());
+        original_cutter = P::DynamicGeometryAccess::implementation(*cutter->dynamic_geometry());
+        cutter_body = P::DynamicGeometryAccess::implementation(*cutter->dynamic_geometry())
+                          ->construction->source().native()->body;
+        cut = source->clip_by_face(*cutter, 1, false).inside;
+    }
+    ASSERT_TRUE(cut);
+    EXPECT_TRUE(original.expired());
+    EXPECT_TRUE(original_cutter.expired());
+    EXPECT_FALSE(cutter_body.expired());
+    ASSERT_TRUE(P::DynamicGeometryAccess::implementation(*cut->dynamic_geometry())
+                    ->construction->clip().clip->native_plane_source);
+    const P::GeometryPacketContext pins{{47, 0, 0, 53}};
+    {
+        P::ConstructionRegistry<mode> registry(pins);
+        {
+            P::CellGeometryOperationWorkspace workspace;
+            registry.register_native(9, 0, native_materialize(input, workspace));
+            registry.register_native(0, 0, native_materialize(input, workspace));
+            registry.register_native(1, 0, native_materialize(cutter_input, workspace));
+        }
+        const auto packet = cut->encode(registry);
+        EXPECT_EQ(Geometry<mode>::decode(packet, registry)->encode(registry), packet);
+        EXPECT_TRUE(registry.derived_from(*cut, {P::ConstructionRootKey::Kind::Native, 0, 0, 0, {}}));
+        const auto explicit_parent = Geometry<mode>::from_geometry(*Geometry<mode>::box({0, 0, 0}, {1, 1, 1}));
+        const auto explicit_cutter = Geometry<mode>::from_geometry(*Geometry<mode>::box({0, 0, 0}, {.25, 1, 1}));
+        P::ConstructionRegistry<mode> explicit_registry(pins);
+        explicit_registry.register_native(0, 0, explicit_parent);
+        explicit_registry.register_native(1, 0, explicit_cutter);
+        EXPECT_EQ(packet, explicit_parent->clip_by_face(*explicit_cutter, 1, false).inside->encode(explicit_registry));
+        P::ConstructionRegistry<mode> foreign(pins);
+        {
+            P::CellGeometryOperationWorkspace workspace;
+            foreign.register_native(0, 0, native_materialize(native_box(), workspace));
+            foreign.register_native(1, 0, native_materialize(cutter_input, workspace));
+        }
+        provenance_failure([&] { static_cast<void>(cut->encode(foreign)); });
+        EXPECT_FALSE(foreign.derived_from(*cut, {P::ConstructionRootKey::Kind::Native, 0, 0, 0, {}}));
+    }
+    EXPECT_FALSE(cutter_body.expired()); // Only the cut retains its authenticated native input body now.
+    cut.reset();
+    EXPECT_TRUE(cutter_body.expired());
+}
+
+TEST(ConstructionRegistryTest, DeferredNativeRepresentationsKeepIndependentFirstQueryCaches)
+{
+    std::fenv_t saved;
+    ASSERT_EQ(std::fegetenv(&saved), 0);
+    struct Restore
+    {
+        std::fenv_t state;
+        ~Restore() { static_cast<void>(std::fesetenv(&state)); }
+    } restore{saved};
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    const P::GeometryPoint lower{-.1, .3, -.7}, upper{.8, 1.7, .4};
+    P::CartesianSourceDescription description;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        description.axes[axis] = {lower[axis], upper[axis]};
+    P::CartesianSourceCellSlot cell;
+    cell.upper = {1, 1, 1};
+    description.cells.push_back(cell);
+    const auto input = D::NativeCellGeometrySourceAccess::make(
+        std::move(description), {}, D::NativeCellGeometryMoments::DeferredRaw);
+    P::CellGeometryOperationWorkspace first_workspace, second_workspace;
+    const auto first = native_materialize(input, first_workspace);
+    const auto second = native_materialize(input, second_workspace);
+    const auto a = P::DynamicGeometryAccess::implementation(*first->dynamic_geometry())->construction;
+    const auto b = P::DynamicGeometryAccess::implementation(*second->dynamic_geometry())->construction;
+    ASSERT_TRUE(a->source().native());
+    ASSERT_TRUE(b->source().native());
+    EXPECT_FALSE(D::same_native_construction(*a, *b));
+    EXPECT_NE(a->source().native()->moments, b->source().native()->moments);
+    std::size_t index = 0;
+    for (const auto direction : {FE_UPWARD, FE_DOWNWARD})
+    {
+        ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+        const auto explicit_source = Geometry<ArithmeticMode::Ordinary>::box(lower, upper);
+        ASSERT_EQ(std::fesetround(direction), 0);
+        const auto expected = explicit_source->moments();
+        const auto& candidate = index++ ? second : first;
+        const auto actual = candidate->moments();
+        EXPECT_EQ(actual.volume.value, expected.volume.value);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
+        ASSERT_EQ(std::feclearexcept(FE_ALL_EXCEPT), 0);
+        ASSERT_EQ(std::feraiseexcept(FE_DIVBYZERO), 0);
+        static_cast<void>(D::OrdinaryExportCoordinates(*candidate).at(0));
+        EXPECT_EQ(std::fegetround(), direction);
+        EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), FE_DIVBYZERO);
+    }
+}
+
+TEST(ConstructionRegistryTest, NativeRebaseExportsAndCachedMomentsSurviveOriginalShell)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const P::GeometryHalfspace enclosing{{1, 0, 0}, {8, 0, 0}, 0};
+    const P::GeometryPacketContext pins{{59, 0, 0, 61}};
+    P::ConstructionRegistry<mode> registry(pins);
+    registry.register_plane(0, enclosing);
+    P::ConvexGeometryPtr<mode> rebased;
+    std::weak_ptr<const P::DynamicConvexGeometry::Impl> original;
+    std::vector<char> expected_certificate;
+    {
+        P::CellGeometryOperationWorkspace workspace;
+        const auto source = native_materialize(native_box(), workspace);
+        original = P::DynamicGeometryAccess::implementation(*source->dynamic_geometry());
+        EXPECT_EQ(source->moments().first_moment[0].value, .5L);
+        expected_certificate = source->encode_certificate();
+        registry.register_native(0, 0, source);
+        rebased = source->clip(enclosing, false).inside;
+    }
+    ASSERT_TRUE(rebased);
+    EXPECT_TRUE(original.expired());
+    EXPECT_EQ(rebased->encode_certificate(), expected_certificate);
+    EXPECT_EQ(rebased->moments().first_moment[0].value, .5L);
+    const auto points = exported_points(*rebased);
+    ASSERT_EQ(points.size(), 8u);
+    for (const auto& point : points)
+        for (const auto value : point.value)
+            EXPECT_TRUE(value == 0 || value == 1);
+    const auto packet = rebased->encode(registry);
+    const auto decoded = Geometry<mode>::decode(packet, registry);
+    EXPECT_EQ(decoded->encode(registry), packet);
+    EXPECT_EQ(decoded->encode_certificate(), expected_certificate);
+}
+
+TEST(ConstructionRegistryTest, InheritedNativeFacesKeepCanonicalMinimumRegisteredRoot)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const auto input = native_box();
+    const auto cutter_input = native_box(.25);
+    const P::GeometryPacketContext pins{{67, 0, 0, 71}};
+    for (const bool rebase_only : {false, true})
+    {
+        SCOPED_TRACE(rebase_only);
+        P::CellGeometryOperationWorkspace workspace;
+        const auto source = native_materialize(input, workspace);
+        const auto cutter = native_materialize(cutter_input, workspace);
+        const P::GeometryHalfspace change = rebase_only
+            ? P::GeometryHalfspace{{1, 0, 0}, {8, 0, 0}, 0}
+            : P::GeometryHalfspace{{0, 1, 0}, {0, 0, 0}, .75};
+        const auto derived_cutter = cutter->clip(change, false).inside;
+        ASSERT_TRUE(derived_cutter);
+        const auto face = upper_face(*derived_cutter, 0, .25L);
+        const auto cut = source->clip_by_face(*derived_cutter, face, false).inside;
+        ASSERT_TRUE(cut);
+        P::ConstructionRegistry<mode> registry(pins);
+        registry.register_native(9, 0, source);
+        registry.register_native(2, 0, cutter);
+        const auto native_packet = cut->encode(registry);
+        EXPECT_EQ(Geometry<mode>::decode(native_packet, registry)->encode(registry), native_packet);
+        registry.register_native(1, 0, derived_cutter);
+        const auto canonical = cut->encode(registry);
+        const auto roots = P::ConstructionRegistry<mode>::required_roots(canonical, pins);
+        const P::ConstructionRootKey derived_key{P::ConstructionRootKey::Kind::Native, 1, 0, 0, {}};
+        const P::ConstructionRootKey original_key{P::ConstructionRootKey::Kind::Native, 2, 0, 0, {}};
+        EXPECT_NE(std::find(roots.begin(), roots.end(), derived_key), roots.end());
+        EXPECT_EQ(std::find(roots.begin(), roots.end(), original_key), roots.end());
+        EXPECT_EQ(Geometry<mode>::decode(canonical, registry)->encode(registry), canonical);
+    }
+}
+
+TEST(ConstructionRegistryTest, InheritedOtherNativeCutterBodySurvivesWithoutBecomingAGeometricParent)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const P::GeometryPacketContext pins{{73, 0, 0, 79}};
+    for (const bool rebase : {false, true})
+    {
+        SCOPED_TRACE(rebase);
+        const auto donor_input = native_box();
+        const auto irrelevant_parent_input = native_box();
+        const auto cutter_input = native_box(.5);
+        P::ConvexGeometryPtr<mode> cut;
+        std::weak_ptr<const D::NativeGeometryBody> cutter_body, irrelevant_parent_body;
+        std::weak_ptr<const P::DynamicConvexGeometry::Impl> temporary_cutter;
+        {
+            P::CellGeometryOperationWorkspace workspace;
+            const auto donor = native_materialize(donor_input, workspace);
+            const auto parent = native_materialize(irrelevant_parent_input, workspace);
+            const auto cutter = native_materialize(cutter_input, workspace);
+            irrelevant_parent_body = P::DynamicGeometryAccess::implementation(*parent->dynamic_geometry())
+                                         ->construction->source().native()->body;
+            cutter_body = P::DynamicGeometryAccess::implementation(*cutter->dynamic_geometry())
+                              ->construction->source().native()->body;
+            temporary_cutter = P::DynamicGeometryAccess::implementation(*cutter->dynamic_geometry());
+            auto inherited = parent->clip_by_face(*cutter, 1, false).inside;
+            ASSERT_TRUE(inherited);
+            if (rebase)
+                inherited = inherited->clip({{1, 0, 0}, {8, 0, 0}, 0}, false).inside;
+            ASSERT_TRUE(inherited);
+            cut = donor->clip_by_face(*inherited, upper_face(*inherited, 0, .5L), false).inside;
+        }
+        ASSERT_TRUE(cut);
+        EXPECT_TRUE(temporary_cutter.expired());
+        EXPECT_TRUE(irrelevant_parent_body.expired());
+        EXPECT_FALSE(cutter_body.expired());
+        {
+            P::ConstructionRegistry<mode> registry(pins);
+            P::CellGeometryOperationWorkspace workspace;
+            registry.register_native(0, 0, native_materialize(donor_input, workspace));
+            registry.register_native(1, 0, native_materialize(cutter_input, workspace));
+            const auto packet = cut->encode(registry);
+            const auto roots = P::ConstructionRegistry<mode>::required_roots(packet, pins);
+            EXPECT_EQ(roots.size(), 2u);
+            EXPECT_EQ(Geometry<mode>::decode(packet, registry)->encode(registry), packet);
+            EXPECT_TRUE(registry.derived_from(*cut, {P::ConstructionRootKey::Kind::Native, 0, 0, 0, {}}));
+            EXPECT_FALSE(registry.derived_from(*cut, {P::ConstructionRootKey::Kind::Native, 1, 0, 0, {}}));
+            EXPECT_EQ(cut->volume().value, .5L);
+        }
+        cut.reset();
+        EXPECT_TRUE(cutter_body.expired());
+    }
 }
 } // namespace

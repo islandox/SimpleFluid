@@ -61,6 +61,14 @@ public:
     void retain(const std::shared_ptr<const CellGeometryCatalog<Mode>>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Admit one immutable procedural context and its shared original supports. */
     void retain(const std::shared_ptr<const CartesianCellSource>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    /** Admit detached immutable application metadata by actual owner identity.
+     * The byte count covers exclusively owned storage; admit child owners separately. */
+    void retain_external_owner(const std::shared_ptr<const void>&, std::size_t exclusive_bytes,
+        std::size_t& cumulative_bytes, std::size_t byte_limit);
+    /** Admit one Ordinary face shell, its immutable polygon owner and support
+     * ancestry by physical allocation identity shared with retention probes. */
+    void retain_planar_face(const std::shared_ptr<const PlanarFace<ArithmeticMode::Ordinary>>&,
+        std::size_t& cumulative_bytes, std::size_t byte_limit);
     [[nodiscard]] std::size_t owner_count() const noexcept;
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t bookkeeping_bytes() const noexcept;

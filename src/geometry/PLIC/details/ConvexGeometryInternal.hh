@@ -16,6 +16,7 @@
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include "geometry/PLIC/details/PointSnapshot.hh"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cfenv>
 #include <cfloat>
@@ -41,6 +42,7 @@ namespace SimpleFluid::PLIC
 using namespace details;
 namespace details
 {
+struct NativeGeometryBody;
 template<class Visitor> void visit_provenance_children(PointProvenanceView point, Visitor&& visitor)
 {
     if (const auto origin = point.source_origin())
@@ -140,6 +142,8 @@ public:
     template<ArithmeticMode Mode>
     static void retain_geometry_storage(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
         GeometryAllocationLedger&, std::size_t&, std::size_t);
+    static void retain_native_body(const std::shared_ptr<const details::NativeGeometryBody>&,
+        GeometryAllocationLedger&, std::size_t&, std::size_t);
 };
 
 namespace SIMPLEFLUID_LOCAL details
@@ -226,9 +230,21 @@ struct Frame
 };
 
 struct GeometryConstruction;
+template<ArithmeticMode Mode> struct StoredMomentCache;
+struct NativeGeometryConstruction
+{
+    std::shared_ptr<const CartesianCellSource> source;
+    std::size_t cell_slot = 0;
+    bool primed = false;
+    GeometryLimits limits;
+    std::shared_ptr<StoredMomentCache<ArithmeticMode::Ordinary>> moments;
+    std::shared_ptr<const NativeGeometryBody> body;
+};
 struct GeometryClipConstruction
 {
     std::shared_ptr<const GeometryConstruction> parent;
+    /** Retention/proof input only; it is not a geometric parent or wire DAG node. */
+    std::shared_ptr<const GeometryConstruction> native_plane_source;
     std::shared_ptr<const void> plane;
     std::shared_ptr<const PointSnapshotContextBase> point_context;
     std::vector<DynamicStoredPointRef> retained_points;
@@ -246,7 +262,21 @@ struct GeometryConstruction
     };
     struct Source
     {
-        std::shared_ptr<const DynamicConvexGeometry::Impl> source;
+        using Payload = std::variant<std::shared_ptr<const DynamicConvexGeometry::Impl>,
+            std::unique_ptr<const NativeGeometryConstruction>>;
+        Payload payload;
+        explicit Source(std::shared_ptr<const DynamicConvexGeometry::Impl> value) : payload(std::move(value)) {}
+        explicit Source(std::unique_ptr<const NativeGeometryConstruction> value) : payload(std::move(value)) {}
+        [[nodiscard]] const NativeGeometryConstruction* native() const
+        {
+            const auto* value = std::get_if<std::unique_ptr<const NativeGeometryConstruction>>(&payload);
+            return value ? value->get() : nullptr;
+        }
+        [[nodiscard]] std::shared_ptr<const DynamicConvexGeometry::Impl> geometry() const
+        {
+            const auto* value = std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(&payload);
+            return value ? *value : nullptr;
+        }
     };
     struct Clip
     {
@@ -501,6 +531,7 @@ template<ArithmeticMode Mode> struct StoredMomentCache
 {
     std::once_flag prepared;
     std::optional<StoredIntegrals<Mode>> integrals;
+    std::atomic<bool> ready{false};
 };
 } // namespace SIMPLEFLUID_LOCAL details
 
@@ -534,11 +565,14 @@ struct SIMPLEFLUID_LOCAL PointExportCache
 
 struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
 {
+    Impl() = default;
+    explicit Impl(std::shared_ptr<const Ancestry> source_ancestry) : ancestry(std::move(source_ancestry)) {}
     Frame frame;
     GeometryPoint reference_origin{};
     FaceRange faces;
     std::shared_ptr<PointExportCache> point_export_cache;
     std::shared_ptr<const Impl> export_source;
+    std::shared_ptr<const GeometryConstruction> native_export_source;
     bool export_seal = false;
     GeometryLimits limits;
     CoordinateBox bounds;
@@ -554,16 +588,103 @@ namespace details
 template<ArithmeticMode Mode> struct GeometryMetadata : DynamicConvexGeometry::Impl
 {
     GeometryMetadata() { limits.arithmetic_mode = Mode; }
+    explicit GeometryMetadata(std::shared_ptr<const Ancestry> source_ancestry)
+        : DynamicConvexGeometry::Impl(std::move(source_ancestry))
+    {
+        limits.arithmetic_mode = Mode;
+    }
     std::shared_ptr<const PointSnapshotContext<Mode>> point_context;
     StoredValue<Mode> volume;
     std::shared_ptr<StoredMomentCache<Mode>> moment_cache;
 };
+/** Normal construction owns its array. Evaluation contexts may borrow an
+ * immutable original array; copying a context retains the established deep
+ * copy contract used by rebase and other mutation paths. */
+template<ArithmeticMode Mode> class FrozenVertexBuffer
+{
+public:
+    using value_type = FrozenVertex<Mode>;
+    FrozenVertexBuffer() = default;
+    explicit FrozenVertexBuffer(std::vector<value_type>&& values) : owned_(std::move(values)) {}
+    FrozenVertexBuffer(const FrozenVertexBuffer& other)
+    {
+        if (!other.empty())
+            owned_.assign(other.begin(), other.end());
+    }
+    FrozenVertexBuffer(FrozenVertexBuffer&&) noexcept = default;
+    FrozenVertexBuffer& operator=(FrozenVertexBuffer&&) noexcept = default;
+    FrozenVertexBuffer& operator=(const FrozenVertexBuffer& other)
+    {
+        if (this != &other)
+        {
+            require_owned();
+            owned_.assign(other.begin(), other.end());
+        }
+        return *this;
+    }
+    void borrow(std::span<const value_type> values, std::size_t capacity)
+    {
+        if (is_borrowed_ || !owned_.empty() || owned_.capacity() || capacity < values.size())
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Borrowed vertices require an empty binding.");
+        borrowed_ = values;
+        borrowed_capacity_ = capacity;
+        is_borrowed_ = true;
+    }
+    [[nodiscard]] bool borrowed() const noexcept { return is_borrowed_; }
+    [[nodiscard]] std::size_t size() const noexcept { return is_borrowed_ ? borrowed_.size() : owned_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+    [[nodiscard]] std::size_t capacity() const noexcept
+    { return is_borrowed_ ? borrowed_capacity_ : owned_.capacity(); }
+    [[nodiscard]] std::size_t owned_capacity() const noexcept { return owned_.capacity(); }
+    [[nodiscard]] const value_type* data() const noexcept { return is_borrowed_ ? borrowed_.data() : owned_.data(); }
+    [[nodiscard]] const value_type* begin() const noexcept { return data(); }
+    [[nodiscard]] const value_type* end() const noexcept { return empty() ? data() : data() + size(); }
+    [[nodiscard]] const value_type& operator[](std::size_t index) const noexcept { return data()[index]; }
+    [[nodiscard]] const value_type& at(std::size_t index) const
+    {
+        if (index >= size())
+            throw std::out_of_range("frozen vertex index");
+        return data()[index];
+    }
+    [[nodiscard]] const value_type& front() const { return at(0); }
+    [[nodiscard]] value_type* begin() { require_owned(); return owned_.data(); }
+    [[nodiscard]] value_type* end()
+    { require_owned(); return owned_.empty() ? owned_.data() : owned_.data() + owned_.size(); }
+    [[nodiscard]] value_type& operator[](std::size_t index) { require_owned(); return owned_[index]; }
+    [[nodiscard]] value_type& at(std::size_t index) { require_owned(); return owned_.at(index); }
+    [[nodiscard]] value_type& front() { require_owned(); return owned_.front(); }
+    void reserve(std::size_t count) { require_owned(); owned_.reserve(count); }
+    void resize(std::size_t count) { require_owned(); owned_.resize(count); }
+    template<class Iterator> void assign(Iterator first, Iterator last)
+    { require_owned(); owned_.assign(first, last); }
+private:
+    void require_owned() const
+    {
+        if (is_borrowed_)
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Evaluation vertices are immutable borrows.");
+    }
+    std::vector<value_type> owned_;
+    std::span<const value_type> borrowed_;
+    std::size_t borrowed_capacity_ = 0;
+    bool is_borrowed_ = false;
+};
 template<ArithmeticMode Mode> struct GeometryStorage : GeometryMetadata<Mode>
 {
     std::shared_ptr<const FrozenTopology<Mode>> topology;
-    std::vector<FrozenVertex<Mode>> vertices;
+    FrozenVertexBuffer<Mode> vertices;
+    using VertexOwner = std::variant<std::monostate, std::shared_ptr<const DynamicConvexGeometry::Impl>,
+        std::shared_ptr<const NativeGeometryBody>>;
+    VertexOwner vertex_owner;
     SurfaceRange<Mode> surfaces;
     GeometryStorage() = default;
+    GeometryStorage(const GeometryStorage& other)
+        : GeometryMetadata<Mode>(other), topology(other.topology), vertices(other.vertices), surfaces(topology.get())
+    {
+    }
+    explicit GeometryStorage(std::shared_ptr<const Ancestry> source_ancestry)
+        : GeometryMetadata<Mode>(std::move(source_ancestry))
+    {
+    }
     GeometryStorage(GeometryMetadata<Mode>&& metadata, std::shared_ptr<const FrozenTopology<Mode>> owner,
         std::vector<FrozenVertex<Mode>>&& payload)
         : GeometryMetadata<Mode>(std::move(metadata)), topology(std::move(owner)), vertices(std::move(payload)),
@@ -571,6 +692,21 @@ template<ArithmeticMode Mode> struct GeometryStorage : GeometryMetadata<Mode>
     {
         this->faces = topology->faces();
     }
+};
+/** Validated original mesh-source representation. It owns original numerical
+ * facts and certificates without retaining a published geometry Impl/wrapper. */
+struct NativeGeometryBody
+{
+    Frame frame;
+    GeometryPoint reference_origin{};
+    CoordinateBox bounds;
+    std::shared_ptr<const FrozenTopology<ArithmeticMode::Ordinary>> topology;
+    std::vector<FrozenVertex<ArithmeticMode::Ordinary>> vertices;
+    std::shared_ptr<const PointSnapshotContext<ArithmeticMode::Ordinary>> point_context;
+    StoredValue<ArithmeticMode::Ordinary> volume;
+    std::shared_ptr<PointExportCache> export_cache;
+    std::shared_ptr<const Ancestry> ancestry;
+    bool export_seal = false;
 };
 /** Mutable construction only. No draft instance is ever published. */
 template<ArithmeticMode Mode> struct GeometryDraft : GeometryMetadata<Mode>
@@ -626,6 +762,14 @@ template<ArithmeticMode Mode>
 std::shared_ptr<const GeometryConstruction> construction_source(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
 std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Source);
+std::shared_ptr<const GeometryConstruction> construction_native(NativeGeometryConstruction);
+std::shared_ptr<const GeometryConstruction> retained_native_plane_source(
+    std::shared_ptr<const GeometryConstruction>, const void* plane);
+bool same_native_construction(const GeometryConstruction&, const GeometryConstruction&);
+ConvexGeometryPtr<ArithmeticMode::Ordinary> materialize_native_construction(
+    const std::shared_ptr<const GeometryConstruction>&);
+void retain_rebase_export(const std::shared_ptr<const DynamicConvexGeometry::Impl>&,
+    DynamicConvexGeometry::Impl&);
 std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Clip);
 std::shared_ptr<const GeometryConstruction> construction_rebase(
     std::shared_ptr<const GeometryConstruction>, const GeometryHalfspace&);

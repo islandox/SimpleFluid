@@ -1,10 +1,10 @@
 /** @file testDistributedProductKernel.cc
  * @brief Detached product factors, source lifetime and distributed exact inverses.
  */
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
-#include "geometry/VoFWireProtocol.hh"
 #include "geometry/unitTests/adaptive_native_draft_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -116,9 +116,9 @@ TEST(DistributedProductKernel, CanonicalTraceBytesRetainOriginalRootIdentityAcro
     ASSERT_TRUE(product.base.path.empty());
     const auto root = old_root_identity(g);
     std::vector<char> base_key;
-    for (auto word : {std::uint64_t{0x5346414450543631ULL}, std::uint64_t{1}, std::uint64_t{0}, std::uint64_t{0},
-             std::uint64_t{2}, product.base.root, product.base.root_template, std::uint64_t{0}, std::uint64_t{0},
-             std::uint64_t{0}})
+    for (auto word :
+        {std::uint64_t{0x5346414450543631ULL}, std::uint64_t{1}, std::uint64_t{0}, std::uint64_t{0}, std::uint64_t{2},
+            product.base.root, product.base.root_template, std::uint64_t{0}, std::uint64_t{0}, std::uint64_t{0}})
         append_old_word(base_key, word);
     std::vector<char> base_trace;
     append_old_word(base_trace, 0x5346504254524336ULL);
@@ -180,9 +180,9 @@ TEST(DistributedProductKernel, FactorCapsuleByteHeadersRejectMalformedAndActualO
         };
         for (size_t size = 0; size < sizeof(Frame); ++size)
             reject(AMR::AdaptiveBytes(packet.begin(), packet.begin() + size));
-        for (const auto [offset, value] : {std::pair{offsetof(Frame, family), uint8_t{255}},
-                 std::pair{offsetof(Frame, version), uint8_t{6}}, std::pair{offsetof(Frame, kind), uint8_t{255}},
-                 std::pair{offsetof(Frame, kind), uint8_t{3}}})
+        for (const auto [offset, value] :
+            {std::pair{offsetof(Frame, family), uint8_t{255}}, std::pair{offsetof(Frame, version), uint8_t{6}},
+                std::pair{offsetof(Frame, kind), uint8_t{255}}, std::pair{offsetof(Frame, kind), uint8_t{3}}})
         {
             auto bad = packet;
             bad[offset] = static_cast<char>(value);
@@ -375,4 +375,61 @@ TEST(DistributedProductKernel, CrossedNativeXYAndAxialTracesRejectWithoutChangin
     EXPECT_NO_THROW(zfine->native_draft());
 }
 
+} // namespace
+
+namespace
+{
+TEST(DistributedProductKernel, MeshSnapshotCannotReuseMalformedFactorCapsules)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "Focused snapshot factor-authentication oracle is serial.";
+    const auto warm = source(), cold = source();
+    const auto& valid = warm->owned().begin()->second;
+    ASSERT_TRUE(valid.factor_recipe);
+    const std::array<const AMR::AdaptiveLeaf*, 1> rows{&valid};
+    std::size_t used = 0;
+    const auto snapshot = warm->geometry_snapshot(
+        rows, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024);
+    const auto reject = [&](const AMR::AdaptiveLeaf& malformed)
+    {
+        EXPECT_THROW((void) cold->geometry(malformed), std::invalid_argument);
+        const std::array<const AMR::AdaptiveLeaf*, 1> bad{&malformed};
+        std::size_t cold_used = 0, warm_used = 0;
+        EXPECT_THROW((void) cold->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         cold_used, 16 * 1024 * 1024),
+            std::invalid_argument);
+        EXPECT_THROW((void) warm->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         warm_used, 16 * 1024 * 1024),
+            std::invalid_argument);
+        used = 0;
+        EXPECT_EQ(warm->geometry_snapshot(
+                      rows, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024),
+            snapshot);
+    };
+    auto missing = valid;
+    missing.factor_recipe.reset();
+    reject(missing);
+    using Member = std::shared_ptr<const AMR::AdaptiveBytes> AMR::AdaptiveFactorRecipe::*;
+    for (const Member member :
+        {&AMR::AdaptiveFactorRecipe::root, &AMR::AdaptiveFactorRecipe::base, &AMR::AdaptiveFactorRecipe::axis})
+    {
+        auto malformed = valid;
+        auto factors = std::make_shared<AMR::AdaptiveFactorRecipe>(*valid.factor_recipe);
+        factors.get()->*member = std::make_shared<const AMR::AdaptiveBytes>(AMR::AdaptiveBytes{'b', 'a', 'd'});
+        malformed.factor_recipe = std::move(factors);
+        reject(malformed);
+    }
+    auto independent = valid;
+    auto factors = std::make_shared<AMR::AdaptiveFactorRecipe>(*valid.factor_recipe);
+    factors->root = std::make_shared<const AMR::AdaptiveBytes>(*valid.factor_recipe->root);
+    factors->base = std::make_shared<const AMR::AdaptiveBytes>(*valid.factor_recipe->base);
+    factors->axis = std::make_shared<const AMR::AdaptiveBytes>(*valid.factor_recipe->axis);
+    independent.factor_recipe = std::move(factors);
+    const std::array<const AMR::AdaptiveLeaf*, 1> equal{&independent};
+    used = 0;
+    EXPECT_EQ(warm->geometry_snapshot(
+                  equal, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024),
+        snapshot);
+}
 } // namespace

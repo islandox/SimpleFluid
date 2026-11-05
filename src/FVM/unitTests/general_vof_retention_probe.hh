@@ -50,10 +50,12 @@ inline void write_report(const char* workload, const char* checkpoint, const cen
         << ",\"scratch_bytes\":" << r.probe_used_bytes << ",\"scratch_capacity_bytes\":" << r.probe_capacity_bytes
         << ",\"manifest\":{\"scope\":\"PLIC retained owners reachable from supplied quiescent application roots\","
            "\"observation\":\"application boundary; transient FVM planning peak not observed\","
-           "\"covered\":[\"cell_shells\",\"hierarchy_explicit_shells\",\"topology_tiles_walls_identities\","
+           "\"covered\":[\"cell_shells\",\"hierarchy_explicit_shells\",\"mesh_geometry_snapshots_and_recipe_owners\","
+           "\"topology_tiles_walls_identities\","
            "\"canonical_point_snapshot\",\"spatial_cache_shells\",\"prepared_source_candidate\","
            "\"copied_point_trajectory_PLIC_provenance\",\"supplied_work_ledgers\"],"
-           "\"excluded\":[\"native_recipes_mesh_partition_fields\",\"non_PLIC_application_buffers\","
+           "\"excluded\":[\"native_recipes_outside_geometry_snapshots\",\"mesh_partition_fields\","
+           "\"non_PLIC_application_buffers\","
            "\"trajectory_owner_entry_buffers\",\"allocator_control_blocks\",\"MPI_allocations\","
            "\"unprovided_external_roots\"]},\"groups\":[";
     static constexpr std::array labels{"accepted", "candidate", "prepared_source", "prepared_candidate",

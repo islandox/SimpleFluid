@@ -616,7 +616,7 @@ template<ArithmeticMode Mode> void construction_payload_contract()
     EXPECT_EQ(short_used, rejected_used);
 
     const auto& recipe = P::DynamicGeometryAccess::implementation(*pair[0]->dynamic_geometry())->construction;
-    const auto source = recipe->rebase().parent->clip().clip->parent->rebase().parent->source().source;
+    const auto source = recipe->rebase().parent->clip().clip->parent->rebase().parent->source().geometry();
     const auto source_bytes = P::DynamicGeometryAccess::geometry(source)->template storage_bytes<Mode>();
     EXPECT_EQ(D::construction_storage_bytes(recipe),
         4 * sizeof(Node) + 2 * sizeof(Node::Rebase) + sizeof(D::GeometryClipConstruction) + source_bytes);
@@ -626,5 +626,82 @@ TEST(GeometryAllocationLedgerTest, ExclusiveRebasePayloadsAndSharedRecipesHaveEx
     construction_payload_contract<ArithmeticMode::Ordinary>();
     if (P::certification_environment())
         construction_payload_contract<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(GeometryAllocationLedgerTest, ExternalMetadataPinsOwnersDeduplicatesAndPoisonsChangedSizes)
+{
+    auto owner = std::make_shared<const std::array<int, 3>>(std::array<int, 3>{1, 2, 3});
+    std::weak_ptr<const std::array<int, 3>> weak = owner;
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain_external_owner(owner, sizeof(*owner), used, byte_limit);
+    const auto exact_cap = used;
+    EXPECT_EQ(ledger.owner_count(), 1u);
+    EXPECT_EQ(ledger.payload_bytes(), sizeof(*owner));
+    ledger.retain_external_owner(owner, sizeof(*owner), used, byte_limit);
+    EXPECT_EQ(used, exact_cap);
+    P::GeometryAllocationLedger exact;
+    std::size_t exact_used = 0;
+    EXPECT_NO_THROW(exact.retain_external_owner(owner, sizeof(*owner), exact_used, exact_cap));
+    P::GeometryAllocationLedger short_cap;
+    std::size_t short_used = 0;
+    EXPECT_THROW(short_cap.retain_external_owner(owner, sizeof(*owner), short_used, exact_cap - 1), P::GeometryError);
+    const auto rejected_used = short_used;
+    EXPECT_THROW(short_cap.retain_external_owner(owner, sizeof(*owner), short_used, byte_limit), P::GeometryError);
+    EXPECT_EQ(short_used, rejected_used);
+    EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(*owner) + 1, used, byte_limit), P::GeometryError);
+    EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(*owner), used, byte_limit), P::GeometryError);
+    owner.reset();
+    EXPECT_FALSE(weak.expired());
+}
+
+TEST(GeometryAllocationLedgerTest, SharedPlanarPayloadHasCanonicalOwnerAdmissionAndExactCap)
+{
+    using Face = P::PlanarFace<ArithmeticMode::Ordinary>;
+    const std::array<P::GeometryPoint, 3> triangle{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    auto original = Face::make(triangle);
+    auto snapshot_alias = original;
+    const auto second_shell = std::make_shared<const Face>(*original);
+    ASSERT_EQ(second_shell->storage_identity(), original->storage_identity());
+    const auto support = P::planar_support<ArithmeticMode::Ordinary>(*original);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(support, used, byte_limit);
+    const auto support_bytes = ledger.payload_bytes();
+    ledger.retain_planar_face(original, used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes(), support_bytes + sizeof(Face) + original->exclusive_storage_bytes());
+    const auto first_used = used, first_payload = ledger.payload_bytes(), first_tracking = ledger.bookkeeping_bytes();
+    ledger.retain_planar_face(snapshot_alias, used, byte_limit);
+    EXPECT_EQ(used, first_used);
+    ledger.retain_planar_face(second_shell, used, byte_limit);
+    EXPECT_EQ(ledger.payload_bytes() - first_payload, sizeof(Face));
+    EXPECT_GT(ledger.bookkeeping_bytes(), first_tracking);
+    EXPECT_EQ(used - first_used, sizeof(Face) + ledger.bookkeeping_bytes() - first_tracking);
+    RecordProperty("shared_polygon_payload_bytes", static_cast<int>(original->exclusive_storage_bytes()));
+    RecordProperty("additional_wrapper_payload_bytes", static_cast<int>(sizeof(Face)));
+    RecordProperty("additional_wrapper_tracking_bytes", static_cast<int>(ledger.bookkeeping_bytes() - first_tracking));
+    P::GeometryAllocationLedger exact;
+    std::size_t exact_used = 0;
+    exact.retain(support, exact_used, used);
+    exact.retain_planar_face(original, exact_used, used);
+    EXPECT_NO_THROW(exact.retain_planar_face(second_shell, exact_used, used));
+    EXPECT_EQ(exact_used, used);
+    P::GeometryAllocationLedger short_cap;
+    std::size_t short_used = 0;
+    short_cap.retain(support, short_used, used - 1);
+    short_cap.retain_planar_face(original, short_used, used - 1);
+    EXPECT_THROW(short_cap.retain_planar_face(second_shell, short_used, used - 1), P::GeometryError);
+    const auto rejected = short_used;
+    EXPECT_THROW(short_cap.retain_planar_face(second_shell, short_used, byte_limit), P::GeometryError);
+    EXPECT_EQ(short_used, rejected);
+    std::weak_ptr<const Face> weak = original;
+    original.reset();
+    snapshot_alias.reset();
+    exact = P::GeometryAllocationLedger{};
+    short_cap = P::GeometryAllocationLedger{};
+    EXPECT_FALSE(weak.expired());
+    EXPECT_EQ(weak.lock()->area().value, .5L);
+    ledger = P::GeometryAllocationLedger{};
+    EXPECT_TRUE(weak.expired());
 }
 } // namespace

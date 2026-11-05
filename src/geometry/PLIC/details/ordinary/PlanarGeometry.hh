@@ -175,6 +175,7 @@ private:
     friend std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend class details::NativeSupportAccess;
     friend class details::RetentionAccess;
+    friend class GeometryAllocationLedger;
     friend OrdinaryIncidenceFrame capture_incidence_frame(const PlanarFace&);
     friend PlanarFacePtr<ArithmeticMode::Ordinary> restore_incidence_loop(
         const OrdinaryIncidenceFrame&, std::span<const PointIdentity<ArithmeticMode::Ordinary>>);

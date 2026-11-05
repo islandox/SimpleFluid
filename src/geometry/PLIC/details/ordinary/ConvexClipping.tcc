@@ -475,7 +475,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     {
         active_work->charge(geometry_metadata_copy_bytes<Mode>(*impl_), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
-        rebased->export_source = impl_->export_source ? impl_->export_source : impl_;
+        retain_rebase_export(impl_, *rebased);
         rebased->frame.origin = input.anchor;
         rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
         active_work->charge(1, sizeof(MomentCache));
@@ -922,6 +922,9 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         active_work->charge(1, sizeof(GeometryClipConstruction));
         auto construction = std::make_shared<GeometryClipConstruction>();
         construction->parent = construction_source<Mode>(impl_);
+        if (descriptor.owner)
+            construction->native_plane_source =
+                retained_native_plane_source(descriptor.owner->construction, plane.get());
         construction->plane = plane;
         construction->mode = Mode;
         construction->orientation = support.orientation;

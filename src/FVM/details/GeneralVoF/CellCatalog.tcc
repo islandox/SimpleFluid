@@ -1,398 +1,256 @@
 /** @file CellCatalog.tcc
- * @brief Compiled mode-specific sparse native/fallback catalog construction.
+ * @brief FVM ordering adapters over mesh-owned immutable geometry sources.
  */
 #pragma once
 #include "FVM/details/GeneralVoF/CellCatalogInternal.hh"
+#include <type_traits>
+#include "geometry/PLIC/details/CellGeometryEvaluation.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include <map>
-#include <numeric>
-#include <stdexcept>
-#include <utility>
-#include <vector>
 namespace SimpleFluid::VoF::general_vof_detail::cell_catalog_detail
 {
 namespace
 {
 template<class T> void reserve_checked(std::vector<T>& values, std::size_t count, wire::Budget& budget)
 {
-    if (count > values.max_size())
-        throw PLIC::GeometryError(
-            PLIC::GeometryErrorCode::ResourceLimit, "Native geometry vector count exceeds its representable size.");
     charge_items(budget, count, sizeof(T));
     values.reserve(count);
     if (values.capacity() > count)
         charge_items(budget, values.capacity() - count, sizeof(T));
+}
+template<ArithmeticMode Mode>
+using EvaluationOwners = std::map<const PLIC::ConvexCellGeometry<Mode>*, std::array<PLIC::ConvexGeometryPtr<Mode>, 2>>;
+template<ArithmeticMode Mode>
+bool same_source_owner(const PLIC::CellGeometryView<Mode>& first, const PLIC::CellGeometryView<Mode>& second)
+{
+    if (first.is_procedural() != second.is_procedural())
+        return false;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (first.is_procedural())
+        {
+            const auto a = PLIC::details::NativeCellGeometrySourceAccess::source_cell(first);
+            const auto b = PLIC::details::NativeCellGeometrySourceAccess::source_cell(second);
+            return a.source == b.source && a.cell_slot == b.cell_slot;
+        }
+    return PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(first) ==
+           PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(second);
+}
+template<ArithmeticMode Mode>
+std::vector<const Cell*> reusable_evaluations(const GeneralVoF::Hierarchy& hierarchy,
+    std::span<const AMR::AdaptiveLeaf* const> leaves, std::span<const std::size_t> slots,
+    const AMR::AdaptiveGeometrySnapshot& source, const GeneralVoF::Data& reuse,
+    const CatalogConstructionControls& controls, wire::Budget& budget)
+{
+    std::vector<const Cell*> result;
+    reserve_checked(result, leaves.size(), budget);
+    result.resize(leaves.size(), nullptr);
+    if (!reuse.topology->geometry_snapshot)
+        return result;
+    const auto& previous = *reuse.topology->geometry_snapshot;
+    if (previous.arithmetic_mode() != Mode || source.arithmetic_mode() != Mode)
+        return result;
+    for (std::size_t slot = 0; slot < leaves.size(); ++slot)
+    {
+        if (construction_controls() != controls)
+            break;
+        const auto& leaf = *leaves[slot];
+        const auto owned = hierarchy.owned().find(leaf.key);
+        if (owned == hierarchy.owned().end())
+            continue;
+        const auto& original = owned->second;
+        const auto found = reuse.cells.find(leaf.key);
+        if (found == reuse.cells.end() || found->second.revision != leaf.revision ||
+            found->second.owner != hierarchy.communicator()->getRank() ||
+            !(same_native_recipe(original, leaf) ||
+                (leaf.geometry && original.geometry == leaf.geometry && original.key == leaf.key &&
+                    original.revision == leaf.revision && original.material == leaf.material &&
+                    original.domain == leaf.domain && original.provider == leaf.provider &&
+                    original.native_cell == leaf.native_cell && original.native_recipe == leaf.native_recipe)))
+            continue;
+        const auto old_slot = previous.find(original);
+        if (!old_slot ||
+            !same_source_owner(PLIC::CellGeometryView<ArithmeticMode::Ordinary>(previous.ordinary_catalog(), *old_slot),
+                PLIC::CellGeometryView<ArithmeticMode::Ordinary>(source.ordinary_catalog(), slots[slot])))
+            continue;
+        const auto& old_policy = previous.evaluation_policy(*old_slot);
+        const auto& new_policy = source.evaluation_policy(slots[slot]);
+        if (old_policy.original_integrals != new_policy.original_integrals)
+            continue;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            const auto& old_selected =
+                previous.finite_ordinary_catalog() ? previous.finite_ordinary_catalog() : previous.ordinary_catalog();
+            const auto& new_selected =
+                source.finite_ordinary_catalog() ? source.finite_ordinary_catalog() : source.ordinary_catalog();
+            if (!same_source_owner(PLIC::CellGeometryView<Mode>(old_selected, *old_slot),
+                    PLIC::CellGeometryView<Mode>(new_selected, slots[slot])) ||
+                old_policy.ordinary_integrals != new_policy.ordinary_integrals)
+                continue;
+        }
+        else if constexpr (Mode == ArithmeticMode::BoundedCertification)
+            if (!same_source_owner(PLIC::CellGeometryView<Mode>(previous.bounded_catalog(), *old_slot),
+                    PLIC::CellGeometryView<Mode>(source.bounded_catalog(), slots[slot])) ||
+                old_policy.bounded_integrals != new_policy.bounded_integrals)
+                continue;
+        result[slot] = &found->second;
+    }
+    return result;
+}
+template<ArithmeticMode Mode>
+std::shared_ptr<const PLIC::CellGeometryCatalog<Mode>> evaluation_catalog(
+    const std::shared_ptr<const PLIC::CellGeometryCatalog<Mode>>& source, std::span<const std::size_t> slots,
+    std::span<const AMR::AdaptiveLeaf* const> leaves, const AMR::AdaptiveGeometrySnapshot& snapshot,
+    bool original_policy, wire::Budget& budget, PLIC::GeometryAllocationLedger& owners,
+    EvaluationOwners<Mode>& evaluations, std::span<const Cell* const> reused_cells, const GeneralVoF::Data* reuse,
+    const CatalogConstructionControls& controls)
+{
+    using Catalog = PLIC::CellGeometryCatalog<Mode>;
+    typename Catalog::SourceTable sources;
+    std::vector<typename Catalog::Entry> entries;
+    reserve_checked(sources, slots.size(), budget);
+    reserve_checked(entries, slots.size(), budget);
+    std::map<const PLIC::CartesianCellSource*, std::size_t> source_slots;
+    for (std::size_t index = 0; index < slots.size(); ++index)
+    {
+        const PLIC::CellGeometryView<Mode> view(source, slots[index]);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (view.is_procedural())
+            {
+                const auto ref = PLIC::details::NativeCellGeometrySourceAccess::source_cell(view);
+                auto found = source_slots.find(ref.source.get());
+                if (found == source_slots.end())
+                {
+                    charge_items(budget, 1, sizeof(typename decltype(source_slots)::value_type) + 4 * sizeof(void*));
+                    found = source_slots.emplace(ref.source.get(), sources.size()).first;
+                    sources.push_back(ref.source);
+                }
+                entries.emplace_back(PLIC::NativeCellGeometrySlot{found->second, ref.cell_slot});
+                continue;
+            }
+        if (!reused_cells.empty() && reused_cells[index] && construction_controls() == controls)
+        {
+            PLIC::ConvexGeometryPtr<Mode> evaluation;
+            if constexpr (Mode == ArithmeticMode::Ordinary)
+                evaluation = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(
+                    original_policy ? native_cell_geometry(*reuse, *reused_cells[index])
+                                    : cell_geometry<Mode>(*reuse, *reused_cells[index]));
+            else
+                evaluation = existing_cell_geometry<Mode>(*reuse, *reused_cells[index]);
+            owners.retain(evaluation, budget.used, budget.limit);
+            entries.emplace_back(std::move(evaluation));
+            continue;
+        }
+        auto geometry = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(view);
+        bool share_explicit_original = false;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            share_explicit_original = original_policy && leaves[index]->geometry && geometry == leaves[index]->geometry;
+        if (!share_explicit_original)
+        {
+            const auto& policy = snapshot.evaluation_policy(slots[index]);
+            const bool copy_integrals = original_policy                    ? policy.original_integrals
+                                        : Mode == ArithmeticMode::Ordinary ? policy.ordinary_integrals
+                                                                           : policy.bounded_integrals;
+            auto found = evaluations.find(geometry.get());
+            if (found == evaluations.end())
+            {
+                charge_items(budget, 1,
+                    sizeof(typename std::remove_cvref_t<decltype(evaluations)>::value_type) + 4 * sizeof(void*));
+                found = evaluations.emplace(geometry.get(), std::array<PLIC::ConvexGeometryPtr<Mode>, 2>{}).first;
+            }
+            auto& evaluation = found->second[copy_integrals ? 1 : 0];
+            if (!evaluation)
+            {
+                evaluation = PLIC::details::clone_cell_evaluation<Mode>(
+                    geometry, copy_integrals, geometry_limits(Mode, budget.limit - budget.used));
+                owners.retain(evaluation, budget.used, budget.limit);
+            }
+            geometry = evaluation;
+        }
+        entries.emplace_back(std::move(geometry));
+    }
+    auto result =
+        Catalog::make(std::move(sources), std::move(entries), geometry_limits(Mode, budget.limit - budget.used));
+    owners.retain(result, budget.used, budget.limit);
+    return result;
 }
 } // namespace
 template<ArithmeticMode Mode>
 CatalogBuild build(const GeneralVoF::Hierarchy& hierarchy, std::span<const AMR::AdaptiveLeaf* const> leaves,
     wire::Budget& budget, const GeneralVoF::Data* reuse, CatalogPurpose purpose,
     PLIC::GeometryAllocationLedger* admitted_originals, const CatalogReuseAuthority* reuse_authority,
-    const void* construction_operation)
+    const void* construction_operation, const AMR::AdaptiveNativeDraft* native_draft,
+    const AMR::HierarchyObservation* source_observation)
 {
-    constexpr auto ordinary_mode = ArithmeticMode::Ordinary;
-    using Catalog = PLIC::CellGeometryCatalog<ordinary_mode>;
-    using BoundedCatalog = PLIC::CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
     CatalogBuild result;
-    const bool state_purpose = purpose == CatalogPurpose::State;
+    PLIC::GeometryAllocationLedger local_ordinary, bounded;
+    auto& ordinary = admitted_originals ? *admitted_originals : local_ordinary;
     const auto controls = construction_controls();
-    bool stable_controls = controls.supported;
-    const auto observe_controls = [&] { stable_controls = stable_controls && construction_controls() == controls; };
-    // Source-only callers reproduce fresh provider construction under their
-    // current controls; accepted catalogs are never equivalent by recipe alone.
-    if (!state_purpose)
+    if (purpose != CatalogPurpose::State)
         reuse = nullptr;
-    PLIC::GeometryAllocationLedger local_ordinary_owners, bounded_owners;
-    auto& ordinary_owners = admitted_originals ? *admitted_originals : local_ordinary_owners;
     if (reuse)
     {
         if (reuse->hierarchy.get() != &hierarchy || reuse->options.arithmetic_mode != Mode)
-            throw std::invalid_argument("Native catalog reuse lacks its matching hierarchy/arithmetic authority.");
-        ordinary_owners.retain(reuse->topology->cell_geometry, budget.used, budget.limit);
-        if (state_purpose && reuse->topology->ordinary_cell_geometry)
-            ordinary_owners.retain(reuse->topology->ordinary_cell_geometry, budget.used, budget.limit);
+            throw std::invalid_argument("Native catalog reuse lacks matching hierarchy/arithmetic authority.");
+        // Prior evaluations stay admitted even when controls or operation proof
+        // prohibit reuse, preserving old/new overlap and spent prefixes.
+        if (reuse->topology->geometry_snapshot)
+            reuse->topology->geometry_snapshot->retain(ordinary, bounded, budget.used, budget.limit);
+        ordinary.retain(reuse->topology->cell_geometry, budget.used, budget.limit);
+        if (reuse->topology->ordinary_cell_geometry)
+            ordinary.retain(reuse->topology->ordinary_cell_geometry, budget.used, budget.limit);
         if constexpr (Mode == ArithmeticMode::BoundedCertification)
-            if (state_purpose)
-                bounded_owners.retain(reuse->topology->bounded_cell_geometry, budget.used, budget.limit);
+            bounded.retain(reuse->topology->bounded_cell_geometry, budget.used, budget.limit);
     }
-    // Old roots above stay admitted even when numeric controls prohibit
-    // binding reuse. Only the matching in-constructor operation may reuse.
-    const bool reuse_bindings = reuse && state_purpose && construction_operation && reuse_authority &&
-                                reuse_authority->stable && reuse_authority->operation == construction_operation &&
+    const bool reuse_bindings = reuse && construction_operation && reuse_authority && reuse_authority->stable &&
+                                reuse_authority->operation == construction_operation &&
                                 reuse_authority->original_catalog == reuse->topology->cell_geometry.get() &&
+                                reuse_authority->source_snapshot == reuse->topology->geometry_snapshot.get() &&
                                 controls.supported && reuse_authority->controls == controls;
-    std::vector<Catalog::Entry> entries;
-    reserve_checked(entries, leaves.size(), budget);
-    entries.resize(leaves.size());
-    if (state_purpose)
+    const auto snapshot_purpose = purpose == CatalogPurpose::State ? AMR::GeometrySnapshotPurpose::State
+                                                                   : AMR::GeometrySnapshotPurpose::OriginalSources;
+    if (native_draft)
     {
+        if (!source_observation)
+            throw std::invalid_argument("Native geometry catalog lacks its authenticated source observation.");
+        result.snapshot = AMR::adaptive_detail::GeometrySnapshotAccess::native_draft(hierarchy, *native_draft, leaves,
+            *source_observation, Mode, snapshot_purpose, budget.used, budget.limit, ordinary, bounded);
+    }
+    else
+        result.snapshot =
+            hierarchy.geometry_snapshot(leaves, Mode, snapshot_purpose, budget.used, budget.limit, &ordinary, &bounded);
+    const auto& source = *result.snapshot;
+    std::vector<std::size_t> slots;
+    reserve_checked(slots, leaves.size(), budget);
+    if (purpose == CatalogPurpose::State)
         reserve_checked(result.native_metrics, leaves.size(), budget);
-        result.native_metrics.resize(leaves.size());
-    }
-    if (std::any_of(leaves.begin(), leaves.end(), [](const auto* leaf) { return leaf == nullptr; }))
-        throw std::invalid_argument("Native geometry catalog lacks an authenticated source leaf.");
-    std::vector<Catalog::Entry> finite_ordinary_entries;
-    bool separate_ordinary = false;
-    if constexpr (Mode == ArithmeticMode::Ordinary)
+    for (const auto* leaf : leaves)
     {
-        separate_ordinary = state_purpose && std::any_of(leaves.begin(), leaves.end(),
-                                                 [&](const auto* leaf) { return !eligible(hierarchy, *leaf, Mode); });
-        if (separate_ordinary)
-        {
-            reserve_checked(finite_ordinary_entries, leaves.size(), budget);
-            finite_ordinary_entries.resize(leaves.size());
-        }
+        const auto slot = source.find(*leaf);
+        if (!slot)
+            throw std::invalid_argument("Mesh geometry snapshot lacks its selected authenticated binding.");
+        slots.push_back(*slot);
+        if (purpose == CatalogPurpose::State)
+            result.native_metrics.push_back(source.native_metrics().at(*slot));
     }
-    std::vector<typename BoundedCatalog::Entry> bounded_entries;
+    std::vector<const Cell*> reused_cells;
+    if (reuse_bindings && construction_controls() == controls)
+        reused_cells = reusable_evaluations<Mode>(hierarchy, leaves, slots, source, *reuse, controls, budget);
+    EvaluationOwners<ArithmeticMode::Ordinary> ordinary_evaluations;
+    result.ordinary = evaluation_catalog<ArithmeticMode::Ordinary>(source.ordinary_catalog(), slots, leaves, source,
+        true, budget, ordinary, ordinary_evaluations, reused_cells, reuse, controls);
+    if (source.finite_ordinary_catalog())
+        result.finite_ordinary = evaluation_catalog<ArithmeticMode::Ordinary>(source.finite_ordinary_catalog(), slots,
+            leaves, source, false, budget, ordinary, ordinary_evaluations, reused_cells, reuse, controls);
     if constexpr (Mode == ArithmeticMode::BoundedCertification)
-    {
-        if (state_purpose)
+        if (source.bounded_catalog())
         {
-            reserve_checked(bounded_entries, leaves.size(), budget);
-            bounded_entries.resize(leaves.size());
+            EvaluationOwners<Mode> bounded_evaluations;
+            result.bounded = evaluation_catalog<Mode>(source.bounded_catalog(), slots, leaves, source, false, budget,
+                bounded, bounded_evaluations, reused_cells, reuse, controls);
         }
-    }
-    struct Group
-    {
-        std::size_t count = 0, source_ordinal = 0;
-        std::vector<std::size_t> slots;
-    };
-    std::map<const Meshes::NativeFragmentDescriptor*, Group> groups;
-    using ReusedSource = std::pair<std::size_t, std::shared_ptr<const PLIC::CartesianCellSource>>;
-    std::map<const PLIC::CartesianCellSource*, ReusedSource> reused_sources;
-    std::vector<AMR::AdaptiveCartesianGeometryBounds> raw_bounds;
-    if constexpr (Mode == ArithmeticMode::Ordinary)
-    {
-        if (std::any_of(
-                leaves.begin(), leaves.end(), [&](const auto* leaf) { return eligible(hierarchy, *leaf, Mode); }))
-        {
-            reserve_checked(raw_bounds, leaves.size(), budget);
-            raw_bounds.resize(leaves.size());
-        }
-    }
-    std::vector<unsigned char> reused_slots;
-    reserve_checked(reused_slots, leaves.size(), budget);
-    reused_slots.resize(leaves.size(), 0);
-    std::vector<unsigned char> native_slots;
-    reserve_checked(native_slots, leaves.size(), budget);
-    native_slots.resize(leaves.size(), 0);
-    const auto require_separate_ordinary = [&]
-    {
-        if constexpr (Mode == ArithmeticMode::Ordinary)
-            if (!separate_ordinary)
-            {
-                reserve_checked(finite_ordinary_entries, leaves.size(), budget);
-                finite_ordinary_entries.assign(entries.begin(), entries.end());
-                separate_ordinary = true;
-            }
-    };
-    for (std::size_t slot = 0; slot < leaves.size(); ++slot)
-    {
-        const auto& leaf = *leaves[slot];
-        if (eligible(hierarchy, leaf, Mode))
-        {
-            // Invoke the actual private final kernel once, in source traversal
-            // order. Stored descriptor axes remain metric/ordinal authority;
-            // they are not the caller-controlled geometry() coordinates.
-            const auto bounds = hierarchy.native_cartesian_geometry_bounds(leaf);
-            if (!bounds)
-                throw std::logic_error("Trusted Cartesian geometry capability changed.");
-            raw_bounds[slot] = *bounds;
-            observe_controls();
-            native_slots[slot] =
-                !state_purpose || PLIC::details::NativeCellGeometrySourceAccess::state_compatible(bounds->lower,
-                                      bounds->upper, geometry_limits(ordinary_mode, budget.limit - budget.used));
-            observe_controls();
-            if (state_purpose && !native_slots[slot])
-                require_separate_ordinary();
-        }
-        const Cell* reused_cell = nullptr;
-        if (reuse_bindings && stable_controls && construction_controls() == controls &&
-            hierarchy.owned().contains(leaf.key))
-        {
-            const auto found = reuse->cells.find(leaf.key);
-            const auto& original_leaf = hierarchy.owned().at(leaf.key);
-            if (found != reuse->cells.end() && found->second.revision == leaf.revision &&
-                found->second.owner == hierarchy.communicator()->getRank() &&
-                (same_native_recipe(original_leaf, leaf) ||
-                    (leaf.geometry && original_leaf.geometry == leaf.geometry && original_leaf.key == leaf.key &&
-                        original_leaf.revision == leaf.revision && original_leaf.material == leaf.material &&
-                        original_leaf.domain == leaf.domain && original_leaf.provider == leaf.provider &&
-                        original_leaf.native_cell == leaf.native_cell &&
-                        original_leaf.native_recipe == leaf.native_recipe)))
-                reused_cell = &found->second;
-        }
-        if constexpr (Mode == ArithmeticMode::Ordinary)
-            if (reused_cell && native_cell_geometry(*reuse, *reused_cell).is_procedural() != bool(native_slots[slot]))
-                reused_cell = nullptr;
-        if (reused_cell && native_slots[slot])
-        {
-            const auto ref =
-                PLIC::details::NativeCellGeometrySourceAccess::source_cell(native_cell_geometry(*reuse, *reused_cell));
-            auto found = reused_sources.find(ref.source.get());
-            if (found == reused_sources.end())
-            {
-                charge_items(budget, 1, sizeof(typename decltype(reused_sources)::value_type) + 4 * sizeof(void*));
-                found = reused_sources.emplace(ref.source.get(), ReusedSource{reused_sources.size(), ref.source}).first;
-            }
-            ordinary_owners.retain(ref.source, budget.used, budget.limit);
-            reused_slots[slot] = 1;
-            entries[slot] = PLIC::NativeCellGeometrySlot{found->second.first, ref.cell_slot};
-            if (separate_ordinary)
-                finite_ordinary_entries[slot] = entries[slot];
-            if (state_purpose)
-                result.native_metrics[slot] = {reused_cell->native_volume, reused_cell->centroid};
-            continue;
-        }
-        if (reused_cell)
-        {
-            auto original = existing_native_geometry(*reuse, *reused_cell);
-            ordinary_owners.retain(original, budget.used, budget.limit);
-            entries[slot] = std::move(original);
-            if (state_purpose)
-                result.native_metrics[slot] = {reused_cell->native_volume, reused_cell->centroid};
-            if constexpr (Mode == ArithmeticMode::Ordinary)
-            {
-                if (state_purpose)
-                {
-                    auto imported = existing_cell_geometry<Mode>(*reuse, *reused_cell);
-                    ordinary_owners.retain(imported, budget.used, budget.limit);
-                    finite_ordinary_entries[slot] = std::move(imported);
-                }
-            }
-            else if constexpr (Mode == ArithmeticMode::BoundedCertification)
-            {
-                if (state_purpose)
-                {
-                    auto imported = existing_cell_geometry<Mode>(*reuse, *reused_cell);
-                    bounded_owners.retain(imported, budget.used, budget.limit);
-                    bounded_entries[slot] = std::move(imported);
-                }
-            }
-            continue;
-        }
-        if (native_slots[slot])
-        {
-            const auto found = groups.find(leaf.native_recipe.get());
-            if (found == groups.end())
-            {
-                budget.add(sizeof(typename decltype(groups)::value_type) + 4 * sizeof(void*));
-                const auto ordinal = groups.size();
-                auto& group = groups[leaf.native_recipe.get()];
-                group.source_ordinal = ordinal;
-                ++group.count;
-            }
-            else
-                ++found->second.count;
-            continue;
-        }
-        auto original = hierarchy.geometry(leaf);
-        observe_controls();
-        ordinary_owners.retain(original, budget.used, budget.limit);
-        if (state_purpose)
-        {
-            result.native_metrics[slot] = hierarchy.metrics(leaf);
-            observe_controls();
-        }
-        if constexpr (Mode != ArithmeticMode::Exact)
-        {
-            if (state_purpose)
-            {
-                auto imported = PLIC::ConvexCellGeometry<Mode>::from_geometry(
-                    *original, geometry_limits(Mode, budget.limit - budget.used));
-                observe_controls();
-                if constexpr (Mode == ArithmeticMode::Ordinary)
-                    ordinary_owners.retain(imported, budget.used, budget.limit);
-                else
-                    bounded_owners.retain(imported, budget.used, budget.limit);
-                if constexpr (Mode == ordinary_mode)
-                {
-                    finite_ordinary_entries[slot] = imported;
-                    if (!leaf.geometry && std::holds_alternative<AMR::CartesianCellAncestry>(leaf.key.ancestry) &&
-                        original->same_native_representation(*imported))
-                        original = imported;
-                }
-                else
-                    bounded_entries[slot] = std::move(imported);
-            }
-        }
-        entries[slot] = std::move(original);
-    }
-    for (auto& [recipe, group] : groups)
-    {
-        reserve_checked(group.slots, group.count, budget);
-    }
-    for (std::size_t slot = 0; slot < leaves.size(); ++slot)
-        if (native_slots[slot] && !reused_slots[slot])
-            groups.at(leaves[slot]->native_recipe.get()).slots.push_back(slot);
-    typename Catalog::SourceTable sources;
-    if (groups.size() > std::numeric_limits<std::size_t>::max() - reused_sources.size())
-        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Native source table count overflows.");
-    reserve_checked(sources, groups.size() + reused_sources.size(), budget);
-    sources.resize(reused_sources.size());
-    for (const auto& [pointer, record] : reused_sources)
-        sources.at(record.first) = record.second;
-    std::vector<const Meshes::NativeFragmentDescriptor*> recipe_order;
-    reserve_checked(recipe_order, groups.size(), budget);
-    recipe_order.resize(groups.size());
-    for (const auto& [recipe, group] : groups)
-        recipe_order.at(group.source_ordinal) = recipe;
-    for (const auto* recipe : recipe_order)
-    {
-        const auto& slots = groups.at(recipe).slots;
-        const RecipeAxes axes(*recipe);
-        struct BoundCoordinate
-        {
-            std::uint64_t index = 0;
-            double value = 0;
-        };
-        std::array<std::vector<BoundCoordinate>, 3> selected;
-        for (auto& indices : selected)
-        {
-            reserve_checked(indices, checked_product(slots.size(), 2), budget);
-        }
-        for (auto slot : slots)
-        {
-            const auto location = axes.location(*leaves[slot]);
-            for (unsigned axis = 0; axis < 3; ++axis)
-            {
-                selected[axis].push_back({location[axis], raw_bounds[slot].lower[axis]});
-                selected[axis].push_back({location[axis] + 1, raw_bounds[slot].upper[axis]});
-            }
-        }
-        PLIC::CartesianSourceDescription description;
-        for (unsigned axis = 0; axis < 3; ++axis)
-        {
-            auto& indices = selected[axis];
-            std::sort(indices.begin(), indices.end(), [](const auto& a, const auto& b) { return a.index < b.index; });
-            for (std::size_t i = 1; i < indices.size(); ++i)
-                if (indices[i - 1].index == indices[i].index && std::bit_cast<std::uint64_t>(indices[i - 1].value) !=
-                                                                    std::bit_cast<std::uint64_t>(indices[i].value))
-                    throw std::invalid_argument("Cartesian shared raw coordinate construction differs.");
-            indices.erase(std::unique(indices.begin(), indices.end(),
-                              [](const auto& a, const auto& b) { return a.index == b.index; }),
-                indices.end());
-            if (indices.size() > std::numeric_limits<std::uint32_t>::max())
-                throw std::invalid_argument("Native Cartesian compact coordinate index overflows.");
-            reserve_checked(description.axes[axis], indices.size(), budget);
-            for (const auto& coordinate : indices)
-                description.axes[axis].push_back(coordinate.value);
-        }
-        reserve_checked(description.cells, slots.size(), budget);
-        for (auto slot : slots)
-        {
-            const auto location = axes.location(*leaves[slot]);
-            PLIC::CartesianSourceCellSlot cell;
-            PLIC::GeometryPoint lower{}, upper{}, center{};
-            for (unsigned axis = 0; axis < 3; ++axis)
-            {
-                const auto& indices = selected[axis];
-                cell.lower[axis] = static_cast<std::uint32_t>(
-                    std::lower_bound(indices.begin(), indices.end(), location[axis],
-                        [](const auto& coordinate, std::uint64_t index) { return coordinate.index < index; }) -
-                    indices.begin());
-                cell.upper[axis] = static_cast<std::uint32_t>(
-                    std::lower_bound(indices.begin(), indices.end(), location[axis] + 1,
-                        [](const auto& coordinate, std::uint64_t index) { return coordinate.index < index; }) -
-                    indices.begin());
-                if (state_purpose)
-                {
-                    lower[axis] = axes.value(axis, location[axis]);
-                    upper[axis] = axes.value(axis, location[axis] + 1);
-                    center[axis] = std::midpoint(lower[axis], upper[axis]);
-                }
-            }
-            // Keep RegionProviders.cc's binary64 subtraction/multiplication order.
-            if (state_purpose)
-            {
-                const double native_volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-                result.native_metrics[slot] = {native_volume, center};
-            }
-            entries[slot] = PLIC::NativeCellGeometrySlot{sources.size(), description.cells.size()};
-            if (separate_ordinary)
-                finite_ordinary_entries[slot] = entries[slot];
-            description.cells.push_back(cell);
-        }
-        auto source = PLIC::details::NativeCellGeometrySourceAccess::make(std::move(description),
-            geometry_limits(ordinary_mode, budget.limit - budget.used),
-            state_purpose ? PLIC::details::NativeCellGeometryMoments::PrimedState
-                          : PLIC::details::NativeCellGeometryMoments::DeferredRaw);
-        observe_controls();
-        ordinary_owners.retain(source, budget.used, budget.limit);
-        sources.push_back(std::move(source));
-    }
-    typename Catalog::SourceTable finite_ordinary_sources;
-    if (separate_ordinary)
-    {
-        reserve_checked(finite_ordinary_sources, sources.size(), budget);
-        finite_ordinary_sources.insert(finite_ordinary_sources.end(), sources.begin(), sources.end());
-    }
-    result.ordinary = Catalog::make(
-        std::move(sources), std::move(entries), geometry_limits(ordinary_mode, budget.limit - budget.used));
-    ordinary_owners.retain(result.ordinary, budget.used, budget.limit);
-    if (separate_ordinary)
-    {
-        result.finite_ordinary = Catalog::make(std::move(finite_ordinary_sources), std::move(finite_ordinary_entries),
-            geometry_limits(ordinary_mode, budget.limit - budget.used));
-        ordinary_owners.retain(result.finite_ordinary, budget.used, budget.limit);
-    }
-    if constexpr (Mode == ArithmeticMode::BoundedCertification)
-    {
-        if (state_purpose)
-        {
-            result.bounded = BoundedCatalog::make(typename BoundedCatalog::SourceTable{}, std::move(bounded_entries),
-                geometry_limits(Mode, budget.limit - budget.used));
-            bounded_owners.retain(result.bounded, budget.used, budget.limit);
-        }
-    }
-    observe_controls();
-    result.reuse_authority = {construction_operation, result.ordinary.get(), controls, stable_controls};
+    result.reuse_authority = {construction_operation, result.ordinary.get(), result.snapshot.get(), controls,
+        controls.supported && source.stable_controls() && construction_controls() == controls};
     return result;
 }
 } // namespace SimpleFluid::VoF::general_vof_detail::cell_catalog_detail

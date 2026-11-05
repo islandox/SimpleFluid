@@ -43,6 +43,7 @@ template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool part
         active_work->charge(poly.point_export_cache->vertex_provenance.capacity() - poly.vertices.size(),
             sizeof(DynamicStoredPointRef));
     poly.export_source.reset();
+    poly.native_export_source.reset();
     // Recipe attachment after finish must not change the point publication policy.
     poly.export_seal = bool(poly.construction) || poly.numerical_only;
     for (auto& v : poly.vertices)
@@ -609,6 +610,7 @@ template<ArithmeticMode Mode> DynamicGeometryMoments GeometryKernel<Mode>::momen
         {
             ++statistics.moment_evaluations;
             impl_->moment_cache->integrals = integrate<Mode>(*impl_, true);
+            impl_->moment_cache->ready.store(true, std::memory_order_release);
         });
     return represented_moments(*impl_->moment_cache->integrals, impl_->frame, origin);
 }

@@ -58,7 +58,7 @@ struct CellGeometryFaceMetrics
  * It owns no mesh, hierarchy, general planes, topology or point-export cache.
  * Volumes/moments are represented PLIC measures, independent of native binary64
  * mesh metrics. The higher-level adapter authenticates eligibility and ancestry. */
-class CartesianCellSource
+class CartesianCellSource : public std::enable_shared_from_this<CartesianCellSource>
 {
 public:
     struct Impl;
@@ -66,6 +66,10 @@ public:
     CartesianCellSource& operator=(const CartesianCellSource&) = delete;
     [[nodiscard]] static std::shared_ptr<const CartesianCellSource> make(
         CartesianSourceDescription, GeometryLimits = {});
+    /** Fresh raw query state over the same immutable coordinates/support facts. */
+    [[nodiscard]] static std::shared_ptr<const CartesianCellSource> clone_deferred(
+        const std::shared_ptr<const CartesianCellSource>&, GeometryLimits = {});
+    [[nodiscard]] const void* base_identity() const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
     /** Exclusive buffers; shared original-support ancestry is admitted by a ledger. */
     [[nodiscard]] std::size_t storage_bytes() const;
@@ -96,8 +100,12 @@ private:
     [[nodiscard]] static std::shared_ptr<const CartesianCellSource> make_authenticated(
         CartesianSourceDescription, GeometryLimits, details::NativeCellGeometryMoments);
     [[nodiscard]] std::array<std::size_t, 3> retention_bytes() const;
+    [[nodiscard]] std::array<std::size_t, 3> base_retention_bytes() const;
+    [[nodiscard]] std::shared_ptr<const void> base_owner() const;
     [[nodiscard]] std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> retained_supports() const;
     [[nodiscard]] GeometryLimits query_limits() const;
+    [[nodiscard]] std::pair<ConvexGeometryPtr<ArithmeticMode::Ordinary>, ConvexGeometryPtr<ArithmeticMode::Ordinary>>
+    materialize_inputs(std::size_t, GeometryLimits) const;
     [[nodiscard]] details::NativeOriginalFace original_face(std::size_t, std::size_t) const;
     [[nodiscard]] details::NativeFramedBounds framed_bounds(std::size_t) const;
     void visit_local_coordinates(

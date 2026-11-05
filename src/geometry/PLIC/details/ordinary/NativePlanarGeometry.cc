@@ -10,6 +10,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
@@ -46,6 +47,29 @@ const PlaneSupportIdentity<ArithmeticMode::Ordinary>* details::RetentionAccess::
     const OrdinaryFace& face) noexcept
 {
     return face.impl_->support ? &*face.impl_->support : nullptr;
+}
+void GeometryAllocationLedger::retain_planar_face(const OrdinaryFacePtr& face, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (!face)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null Ordinary planar face admission.");
+        begin_admission(used, limit);
+        if (impl_->mode)
+            details::require_mode(*impl_->mode, ArithmeticMode::Ordinary);
+        else
+            impl_->mode = ArithmeticMode::Ordinary;
+        impl_->admit({allocation_detail::Kind::PlanarWrapper, face}, sizeof(OrdinaryFace), used, limit);
+        impl_->admit({allocation_detail::Kind::PlanarPayload, face->impl_}, face->exclusive_storage_bytes(), used, limit);
+        if (face->impl_->support)
+            impl_->retain_identity(*face->impl_->support, used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
 }
 struct EdgePointIndex<ArithmeticMode::Ordinary>::Impl
 {

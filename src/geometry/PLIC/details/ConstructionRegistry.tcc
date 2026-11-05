@@ -5,6 +5,8 @@
 #include "geometry/PLIC/ConstructionRegistry.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include <cstdint>
+#include <tuple>
 namespace SimpleFluid::PLIC
 {
 namespace SIMPLEFLUID_LOCAL construction_detail
@@ -161,7 +163,16 @@ template<ArithmeticMode Mode> struct ConstructionRegistry<Mode>::Impl
     GeometryPacketContext context;
     GeometryLimits limits;
     std::size_t bytes = sizeof(Impl);
+    using NativeIdentity = std::tuple<std::uintptr_t, std::size_t, std::uintptr_t>;
+    static NativeIdentity native_identity(const details::GeometryConstruction& root)
+    {
+        const auto& native = *root.source().native();
+        return {reinterpret_cast<std::uintptr_t>(native.source.get()), native.cell_slot,
+            native.primed ? 0 : reinterpret_cast<std::uintptr_t>(&native)};
+    }
     std::map<ConstructionRootKey, ConvexGeometryPtr<Mode>> geometries;
+    std::map<ConstructionRootKey, std::shared_ptr<const details::GeometryConstruction>> native_geometries;
+    std::map<NativeIdentity, ConstructionRootKey> native_roots;
     std::map<ConstructionRootKey, GeometryHalfspace> planes;
     std::map<const DynamicConvexGeometry::Impl*, ConstructionRootKey> geometry_roots;
     std::map<const details::GeometryConstruction*, ConstructionRootKey> node_roots;
@@ -195,6 +206,68 @@ void ConstructionRegistry<Mode>::register_geometry(ConstructionRootKey key, Conv
     if (source->partition_proof_only)
         construction_detail::fail(
             GeometryErrorCode::ProvenanceMismatch, "A private witness cannot be a construction root.");
+    if (source->construction && source->construction->kind() == details::GeometryConstruction::Kind::Source &&
+        source->construction->source().native())
+    {
+        const auto& native = source->construction;
+        if (impl_->geometries.contains(key))
+            construction_detail::fail(GeometryErrorCode::ProvenanceMismatch, "Conflicting authenticated construction root.");
+        if (const auto found = impl_->native_geometries.find(key); found != impl_->native_geometries.end())
+        {
+            if (!details::same_native_construction(*native, *found->second))
+                construction_detail::fail(GeometryErrorCode::ProvenanceMismatch, "Conflicting authenticated native root.");
+            return;
+        }
+        const auto identity = Impl::native_identity(*native);
+        auto preflight = impl_->bytes;
+        const auto reserve = [&](const auto& map, const auto& entry)
+        {
+            if (!map.contains(entry))
+                construction_detail::charge(preflight,
+                    sizeof(typename std::decay_t<decltype(map)>::value_type) + 4 * sizeof(void*), impl_->limits.byte_budget);
+        };
+        reserve(impl_->native_geometries, key);
+        reserve(impl_->native_roots, identity);
+        reserve(impl_->node_roots, native.get());
+        const auto& body = *native->source().native()->body;
+        for (std::size_t face = 0; face < body.topology->faces().size(); ++face)
+            reserve(impl_->plane_roots, body.topology->surface(face).plane.get());
+        const auto insert = [&](auto& map, const auto& entry, auto value)
+        {
+            const auto found = map.find(entry);
+            if (found == map.end())
+            {
+                construction_detail::charge(impl_->bytes,
+                    sizeof(typename std::decay_t<decltype(map)>::value_type) + 4 * sizeof(void*), impl_->limits.byte_budget);
+                map.emplace(entry, std::move(value));
+            }
+            else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, ConstructionRootKey>)
+            {
+                if (value < found->second)
+                    found->second = std::move(value);
+            }
+        };
+        insert(impl_->native_geometries, key, native);
+        insert(impl_->native_roots, identity, key);
+        insert(impl_->node_roots, native.get(), key);
+        for (std::size_t face = 0; face < body.topology->faces().size(); ++face)
+        {
+            const auto* plane = body.topology->surface(face).plane.get();
+            const construction_detail::PlaneReference reference{key, face, {}, false};
+            const auto found = impl_->plane_roots.find(plane);
+            if (found == impl_->plane_roots.end())
+            {
+                construction_detail::charge(impl_->bytes,
+                    sizeof(typename decltype(impl_->plane_roots)::value_type) + 4 * sizeof(void*), impl_->limits.byte_budget);
+                impl_->plane_roots.emplace(plane, reference);
+            }
+            else if (key < found->second.key)
+                found->second = reference;
+        }
+        return;
+    }
+    if (impl_->native_geometries.contains(key))
+        construction_detail::fail(GeometryErrorCode::ProvenanceMismatch, "Conflicting authenticated construction root.");
     if (const auto found = impl_->geometries.find(key); found != impl_->geometries.end())
     {
         if (found->second->storage_identity() != geometry->storage_identity())
@@ -302,7 +375,7 @@ void ConstructionRegistry<Mode>::register_plane(std::uint64_t id, const Geometry
 }
 template<ArithmeticMode Mode> bool ConstructionRegistry<Mode>::contains(const ConstructionRootKey& key) const
 {
-    return impl_->geometries.contains(key) || impl_->planes.contains(key);
+    return impl_->geometries.contains(key) || impl_->native_geometries.contains(key) || impl_->planes.contains(key);
 }
 template<ArithmeticMode Mode>
 bool ConstructionRegistry<Mode>::derived_from(
@@ -310,21 +383,28 @@ bool ConstructionRegistry<Mode>::derived_from(
 {
     details::Operation scope(impl_->limits);
     const auto found = impl_->geometries.find(key);
-    if (found == impl_->geometries.end())
+    const auto native_found = impl_->native_geometries.find(key);
+    if (found == impl_->geometries.end() && native_found == impl_->native_geometries.end())
         return false;
-    const auto& target = DynamicGeometryAccess::implementation(*found->second->dynamic_geometry());
+    const auto target = found == impl_->geometries.end() ? nullptr :
+        DynamicGeometryAccess::implementation(*found->second->dynamic_geometry());
     const auto& source = DynamicGeometryAccess::implementation(*geometry.dynamic_geometry());
-    if (source->numerical_only || target->numerical_only)
+    if (source->numerical_only || (target && target->numerical_only))
         return false;
     if (source == target)
         return true;
     for (auto node = source->construction; node;)
     {
         details::active_work->pair();
-        if (target->construction && node == target->construction)
+        if (target && target->construction && node == target->construction)
             return true;
         if (node->kind() == details::GeometryConstruction::Kind::Source)
-            return node->source().source == target;
+        {
+            if (node->source().native())
+                return native_found != impl_->native_geometries.end() &&
+                    details::same_native_construction(*node, *native_found->second);
+            return node->source().geometry() == target;
+        }
         if (node->kind() == details::GeometryConstruction::Kind::Clip)
         {
             if (!node->clip().clip || (node->clip().outside && !node->clip().clip->construct_outside))
@@ -426,6 +506,17 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
         result.terminal = emit_root(root->second);
         return result;
     }
+    if (terminal->construction && terminal->construction->kind() == Node::Kind::Source &&
+        terminal->construction->source().native())
+    {
+        const auto found = registry.native_roots.find(
+            ConstructionRegistry<Mode>::Impl::native_identity(*terminal->construction));
+        if (found != registry.native_roots.end())
+        {
+            result.terminal = emit_root(found->second);
+            return result;
+        }
+    }
     if (!terminal->construction)
         fail(GeometryErrorCode::ProvenanceMismatch, "Geometry has no authenticated construction recipe.");
     std::map<const Node*, Reference> emitted;
@@ -442,14 +533,23 @@ EncodePlan<Mode> construction_plan(const std::shared_ptr<const DynamicConvexGeom
             fail(GeometryErrorCode::ProvenanceMismatch, "Missing construction dependency.");
         if (emitted.contains(node.get()))
             continue;
-        if (const auto root = node_roots.find(node.get()); root != node_roots.end())
+        if (const auto root = node_roots.find(node.get()); root != node_roots.end() &&
+            !(node->kind() == Node::Kind::Source && node->source().native()))
         {
             emitted.emplace(node.get(), emit_root(root->second));
             continue;
         }
         if (node->kind() == Node::Kind::Source)
         {
-            const auto& source = node->source().source;
+            if (node->source().native())
+            {
+                const auto found = registry.native_roots.find(ConstructionRegistry<Mode>::Impl::native_identity(*node));
+                if (found == registry.native_roots.end())
+                    fail(GeometryErrorCode::ProvenanceMismatch, "Native source is absent from authenticated registry.");
+                emitted.emplace(node.get(), emit_root(found->second));
+                continue;
+            }
+            const auto source = node->source().geometry();
             const auto found = geometry_roots.find(source.get());
             if (!source || found == geometry_roots.end())
                 fail(GeometryErrorCode::ProvenanceMismatch,
@@ -531,7 +631,7 @@ DynamicConvexGeometryPtr rebase_geometry(const DynamicConvexGeometryPtr& source,
     const auto typed = details::checked_geometry_storage<Mode>(original);
     details::active_work->charge(details::geometry_metadata_copy_bytes<Mode>(*typed), 1);
     auto rebased = std::make_shared<details::GeometryStorage<Mode>>(*typed);
-    rebased->export_source = original->export_source ? original->export_source : original;
+    details::retain_rebase_export(original, *rebased);
     rebased->frame.origin = input.anchor;
     details::active_work->charge(1, sizeof(details::StoredMomentCache<Mode>));
     rebased->moment_cache = std::make_shared<details::StoredMomentCache<Mode>>();
@@ -715,7 +815,8 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
         if (record.kind == Record::Kind::Root)
         {
             record.root = root_reference();
-            if (!registry.impl_->geometries.contains(roots[record.root]))
+            if (!registry.impl_->geometries.contains(roots[record.root]) &&
+                !registry.impl_->native_geometries.contains(roots[record.root]))
                 fail(GeometryErrorCode::ProvenanceMismatch, "Plane root cannot stand for a geometry body.");
         }
         else if (record.kind == Record::Kind::Rebase)
@@ -742,7 +843,10 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
             {
                 const auto face = reader.word();
                 const auto source = registry.impl_->geometries.find(roots[record.root]);
-                if (source == registry.impl_->geometries.end() || face >= source->second->faces().size())
+                const auto native = registry.impl_->native_geometries.find(roots[record.root]);
+                const auto face_count = source != registry.impl_->geometries.end() ? source->second->faces().size() :
+                    (native != registry.impl_->native_geometries.end() ? 6u : 0u);
+                if (face >= face_count)
                     fail(GeometryErrorCode::ProvenanceMismatch, "Invalid registered source face.");
                 record.face = static_cast<std::size_t>(face);
             }
@@ -794,12 +898,29 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
             fail(GeometryErrorCode::ProvenanceMismatch, "Construction references an absent or boundary-only child.");
         return value;
     };
+    std::map<ConstructionRootKey, ConvexGeometryPtr<Mode>> materialized_native;
+    const auto root_geometry = [&](const ConstructionRootKey& key) -> ConvexGeometryPtr<Mode>
+    {
+        if (const auto explicit_root = registry.impl_->geometries.find(key); explicit_root != registry.impl_->geometries.end())
+            return explicit_root->second;
+        if (const auto cached = materialized_native.find(key); cached != materialized_native.end())
+            return cached->second;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            details::active_work->charge(1,
+                sizeof(typename decltype(materialized_native)::value_type) + 4 * sizeof(void*));
+            auto geometry = details::materialize_native_construction(registry.impl_->native_geometries.at(key));
+            materialized_native.emplace(key, geometry);
+            return geometry;
+        }
+        fail(GeometryErrorCode::ProvenanceMismatch, "Native source has an incompatible arithmetic mode.");
+    };
     for (const auto& record : parsed)
     {
         details::active_work->pair();
         const auto& key = roots[record.root];
         if (record.kind == Record::Kind::Root)
-            outputs.push_back({registry.impl_->geometries.at(key)->dynamic_geometry(), {}});
+            outputs.push_back({root_geometry(key)->dynamic_geometry(), {}});
         else if (record.kind == Record::Kind::Rebase)
             outputs.push_back({rebase_geometry<Mode>(resolve(record.parent), registry.impl_->planes.at(key)), {}});
         else
@@ -809,7 +930,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::decode(
                                     ? input_plane_source<Mode>(registry.impl_->planes.at(key), record.frame, limits)
                                     : details::CutPlaneDescriptor<Mode>(
                                           details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(
-                                              *registry.impl_->geometries.at(key)->dynamic_geometry())),
+                                              *root_geometry(key)->dynamic_geometry())),
                                           record.face);
             const auto split = Kernel<Mode>(DynamicGeometryAccess::implementation(*parent))
                                    .clip_plane(source, record.face, record.flags & 1, record.flags & 2,

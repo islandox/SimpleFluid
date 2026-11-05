@@ -28,7 +28,8 @@ namespace SimpleFluid::PLIC::details::retention
 namespace
 {
 using K = allocation_detail::Kind;
-constexpr unsigned planar_wrapper = 100, planar_payload = 101;
+constexpr unsigned planar_wrapper = static_cast<unsigned>(K::PlanarWrapper),
+                   planar_payload = static_cast<unsigned>(K::PlanarPayload);
 struct Overflow
 {
 };
@@ -95,7 +96,7 @@ const char* owner_label(unsigned kind)
 {
     static constexpr const char* labels[] = {"typed_wrapper", "dynamic_wrapper", "geometry", "topology", "export_cache",
         "dynamic_export", "typed_export", "compact_batch", "plane", "point_context", "native_facts", "moment",
-        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog"};
+        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog", "native_source_body", "external_owner"};
     if (kind < std::size(labels))
         return labels[kind];
     return kind == planar_wrapper ? "planar_wrapper" : "planar_payload";
@@ -104,7 +105,7 @@ class Census
 {
 public:
     Census(Report& r, ProbeScratch& s, ProbeLimits l)
-        : report(r), limits(l), nodes(&s), work(&s), records(&s), contexts(&s), owner_edges(&s), point_edges(&s),
+        : report(r), limits(l), nodes(&s), work(&s), records(&s), contexts(&s), external_sizes(&s), owner_edges(&s), point_edges(&s),
           colors(&s), depths(&s), frames(&s)
     {
     }
@@ -114,6 +115,7 @@ public:
     std::pmr::vector<CensusWork> work;
     std::pmr::map<RecordKey, std::size_t> records;
     std::pmr::map<const PointSnapshotContextBase*, std::size_t, std::less<const PointSnapshotContextBase*>> contexts;
+    std::pmr::map<const void*, std::array<std::size_t, 3>, std::less<const void*>> external_sizes;
     using EdgeMap = std::pmr::map<std::pair<std::size_t, std::size_t>, bool>;
     EdgeMap owner_edges, point_edges;
     struct Frame
@@ -333,6 +335,14 @@ public:
         populated = census_add(populated, census_mul(values.size(), sizeof(T)));
         unused = census_add(unused, census_mul(values.capacity() - values.size(), sizeof(T)));
     }
+    template<ArithmeticMode M>
+    void table(const FrozenVertexBuffer<M>& values, std::size_t& populated, std::size_t& unused)
+    {
+        if (values.borrowed())
+            return; // The owning geometry/body edge accounts for this storage.
+        populated = census_add(populated, census_mul(values.size(), sizeof(FrozenVertex<M>)));
+        unused = census_add(unused, census_mul(values.owned_capacity() - values.size(), sizeof(FrozenVertex<M>)));
+    }
     template<ArithmeticMode M> void visit(CensusNode& n, const CensusWork& w)
     {
         using namespace SimpleFluid::PLIC::details;
@@ -375,11 +385,18 @@ public:
                     const auto& g =
                         *static_cast<const GeometryStorage<M>*>(static_cast<const DynamicConvexGeometry::Impl*>(p));
                     metadata = sizeof(g);
-                    table(g.vertices, populated, unused);
+                    if (!g.vertices.borrowed())
+                        table(g.vertices, populated, unused);
+                    if (const auto* owner = std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(
+                            &g.vertex_owner))
+                        push(K::Geometry, owner->get(), w);
+                    else if (const auto* owner = std::get_if<std::shared_ptr<const NativeGeometryBody>>(&g.vertex_owner))
+                        push(K::NativeSourceBody, owner->get(), w);
                     push(K::Topology, g.topology.get(), w);
                     push(K::PointSnapshot, g.point_context.get(), w);
                     push(K::ExportCache, g.point_export_cache.get(), w);
                     push(K::Geometry, g.export_source.get(), w);
+                    push(K::Recipe, g.native_export_source.get(), w);
                     push(K::Moment, g.moment_cache.get(), w);
                     push(K::Ancestry, g.ancestry.get(), w);
                     push(K::Certificate, g.partition_certificate.get(), w);
@@ -389,6 +406,27 @@ public:
                         {
                             incidence(g.point_context.get(), vertex.authorities, w);
                             point(resolve_point(g.point_context.get(), vertex.source_identity), 0, false, true);
+                        }
+                    break;
+                }
+                case K::ExternalOwner: {
+                    const auto bytes = external_sizes.at(p);
+                    metadata = bytes[0]; populated = bytes[1]; unused = bytes[2];
+                    break;
+                }
+                case K::NativeSourceBody: {
+                    const auto& body = *static_cast<const NativeGeometryBody*>(p);
+                    metadata = sizeof(body);
+                    table(body.vertices, populated, unused);
+                    push(K::Topology, body.topology.get(), w);
+                    push(K::PointSnapshot, body.point_context.get(), w);
+                    push(K::ExportCache, body.export_cache.get(), w);
+                    push(K::Ancestry, body.ancestry.get(), w);
+                    if (w.required)
+                        for (const auto& vertex : body.vertices)
+                        {
+                            incidence(body.point_context.get(), vertex.authorities, w);
+                            point(resolve_point(body.point_context.get(), vertex.source_identity), 0, false, true);
                         }
                     break;
                 }
@@ -535,7 +573,17 @@ public:
                     auto child = w;
                     child.depth = census_add(w.depth, 1);
                     if (r.kind() == GeometryConstruction::Kind::Source)
-                        push(K::Geometry, r.source().source.get(), child);
+                    {
+                        if (const auto* native = r.source().native())
+                        {
+                            metadata = census_add(metadata, sizeof(NativeGeometryConstruction));
+                            push(K::CartesianSource, native->source.get(), child);
+                            push(K::NativeSourceBody, native->body.get(), child);
+                            push(K::Moment, native->moments.get(), child);
+                        }
+                        else
+                            push(K::Geometry, r.source().geometry().get(), child);
+                    }
                     else if (r.kind() == GeometryConstruction::Kind::Clip)
                         push(K::Clip, r.clip().clip.get(), child);
                     else
@@ -550,6 +598,7 @@ public:
                     metadata = sizeof(c);
                     table(c.retained_points, populated, unused);
                     push(K::Recipe, c.parent.get(), w);
+                    push(K::Recipe, c.native_plane_source.get(), w);
                     push(K::Plane, c.plane.get(), w);
                     push(K::PointSnapshot, c.point_context.get(), w);
                     if (w.required)
@@ -596,6 +645,9 @@ public:
                     const auto& source = *static_cast<const CartesianCellSource*>(p);
                     const auto bytes = RetentionAccess::cartesian_bytes(source);
                     metadata = bytes[0]; populated = bytes[1]; unused = bytes[2];
+                    const auto base = NativeCellGeometrySourceAccess::base_owner(source);
+                    external_sizes.insert_or_assign(base.get(), NativeCellGeometrySourceAccess::base_bytes(source));
+                    push(K::ExternalOwner, base.get(), w);
                     for (const auto& support : RetentionAccess::cartesian_supports(source))
                         push(K::IdentityPayload, GeometryIdentityAccess::backing(support).get(), w);
                     break;
@@ -606,6 +658,9 @@ public:
                     table(a, populated, unused);
                     break;
                 }
+                case K::PlanarWrapper:
+                case K::PlanarPayload:
+                    throw InvalidGraph{}; // Opaque planar owners use the normalizing branches above.
             }
         account(n, metadata, populated, unused);
     }
@@ -858,6 +913,10 @@ public:
             case RootKind::CellCatalog:
                 push(K::CellCatalog, r.object, w);
                 break;
+            case RootKind::ExternalOwner:
+                external_sizes.emplace(r.object, std::array<std::size_t, 3>{r.exclusive_bytes, 0, 0});
+                push(K::ExternalOwner, r.object, w);
+                break;
             case RootKind::CartesianSource:
                 push(K::CartesianSource, r.object, w);
                 break;
@@ -961,7 +1020,17 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
             report.ledger_tracking_bytes = census_add(report.ledger_tracking_bytes, tracking);
             const auto mode = impl->mode.value_or(ArithmeticMode::Ordinary);
             for (const auto& [key, value] : impl->owners)
+            {
+                // Polygon payload pins name opaque implementation storage.
+                // Its retained face wrapper supplies the normalizing borrow
+                // and publishes the same physical payload key when visited.
+                if (key.kind == K::PlanarPayload)
+                    continue;
+                if (key.kind == K::ExternalOwner)
+                    census.external_sizes.emplace(value.pin.get(),
+                        std::array<std::size_t, 3>{value.payload_bytes, 0, 0});
                 census.push(static_cast<unsigned>(key.kind), value.pin.get(), mode, 0, true, false);
+            }
             report.pending_pins = census_add(report.pending_pins, impl->pending.size());
             for (const auto& pending : impl->pending)
                 census.push(static_cast<unsigned>(pending.kind), pending.owner.get(), mode, 0, true, false);

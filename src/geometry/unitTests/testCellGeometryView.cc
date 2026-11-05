@@ -1,6 +1,9 @@
 /** Independent native-view geometry, ownership and admission contracts. */
 #include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/CellGeometryEvaluation.hh"
+#include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include <algorithm>
 #include <array>
 #include <cfenv>
@@ -353,4 +356,193 @@ TEST(CellGeometryView, CachedCoordinatesAndMaterializationRestoreCallerEnvironme
                 expected.first_moment[axis].binary64_absolute_error());
         }
     }
+}
+
+TEST(CellGeometryView, DeferredClonesShareImmutableBaseAndAdmitOnlyTheirOwnEvaluationState)
+{
+    auto original = source({-.1, .3, -.7}, {.8, 1.7, .4});
+    const auto clone = Source::clone_deferred(original, limits());
+    const auto volume = original->volume(0).value;
+    EXPECT_EQ(clone->base_identity(), original->base_identity());
+    EXPECT_NE(clone.get(), original.get());
+    EXPECT_EQ(clone->volume(0).value, original->volume(0).value);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(original, used, cap);
+    const auto payload = ledger.payload_bytes();
+    const auto expected = P::details::NativeCellGeometrySourceAccess::exclusive_bytes(*clone);
+    ledger.retain(clone, used, cap);
+    EXPECT_EQ(ledger.payload_bytes() - payload, expected[0] + expected[1] + expected[2]);
+    const auto after = used;
+    ledger.retain(clone, used, cap);
+    EXPECT_EQ(used, after);
+    std::weak_ptr<const Source> weak = original;
+    original.reset();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_EQ(clone->source_support(0, 0), weak.lock()->source_support(0, 0));
+    std::array<R::BorrowedRoot, 1> roots{R::root(*clone)};
+    std::array<const P::GeometryAllocationLedger*, 1> ledgers{&ledger};
+    std::vector<std::byte> scratch_bytes(1024 * 1024);
+    R::ProbeScratch scratch(scratch_bytes);
+    const auto census = R::inspect_retention(roots, ledgers, scratch, {1000, 1000, true});
+    ASSERT_TRUE(census.complete()) << census.detail;
+    EXPECT_EQ(census.ledger_payload_admission, ledger.payload_bytes());
+    ledger = P::GeometryAllocationLedger{};
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(clone->volume(0).value, volume);
+}
+
+TEST(CellGeometryView, OriginalEvaluationClonesKeepDirectedLazyMomentsAndShareOnlyImmutableVertices)
+{
+    Environment restore;
+    ASSERT_EQ(fesetround(FE_TONEAREST), 0);
+    const P::GeometryPoint lower{-.1, .3, -.7}, upper{.8, 1.7, .4};
+    const auto original = Geometry::box(lower, upper);
+    const auto original_storage = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*original->dynamic_geometry()));
+    ASSERT_FALSE(original_storage->moment_cache->ready.load(std::memory_order_acquire));
+    ASSERT_EQ(feclearexcept(FE_ALL_EXCEPT), 0);
+    ASSERT_EQ(feraiseexcept(FE_DIVBYZERO), 0);
+    const auto first = P::details::clone_cell_evaluation<ordinary>(original, false, limits());
+    const auto second = P::details::clone_cell_evaluation<ordinary>(original, false, limits());
+    EXPECT_EQ(fetestexcept(FE_ALL_EXCEPT), FE_DIVBYZERO);
+    const auto first_storage = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*first->dynamic_geometry()));
+    const auto second_storage = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*second->dynamic_geometry()));
+    EXPECT_EQ(first_storage->vertices.data(), original_storage->vertices.data());
+    EXPECT_EQ(second_storage->vertices.data(), original_storage->vertices.data());
+    EXPECT_EQ(first_storage->vertices.owned_capacity(), 0u);
+    EXPECT_NE(first_storage->moment_cache, second_storage->moment_cache);
+    std::size_t index = 0;
+    for (const auto direction : {FE_UPWARD, FE_DOWNWARD})
+    {
+        ASSERT_EQ(fesetround(FE_TONEAREST), 0);
+        const auto oracle = Geometry::box(lower, upper);
+        ASSERT_EQ(fesetround(direction), 0);
+        const auto expected = oracle->moments();
+        const auto actual = (index++ ? second : first)->moments();
+        EXPECT_EQ(actual.volume.value, expected.volume.value);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
+    }
+    EXPECT_FALSE(original_storage->moment_cache->ready.load(std::memory_order_acquire));
+    ASSERT_EQ(fesetround(FE_UPWARD), 0);
+    static_cast<void>(original->moments());
+    ASSERT_TRUE(P::details::cell_evaluation_cache_ready<ordinary>(original));
+    ASSERT_EQ(fesetround(FE_TONEAREST), 0);
+    const auto oracle = Geometry::box(lower, upper);
+    const auto after_template_query = P::details::clone_cell_evaluation<ordinary>(original, false, limits());
+    ASSERT_EQ(fesetround(FE_DOWNWARD), 0);
+    const auto expected = oracle->moments(), actual = after_template_query->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
+}
+
+template<ArithmeticMode Mode> void imported_evaluation_cache_contract()
+{
+    const auto original = P::ConvexCellGeometry<ordinary>::box({-.1, .3, -.7}, {.8, 1.7, .4});
+    const auto selected = P::ConvexCellGeometry<Mode>::from_geometry(*original);
+    const auto selected_storage = P::details::checked_geometry_storage<Mode>(
+        P::DynamicGeometryAccess::implementation(*selected->dynamic_geometry()));
+    ASSERT_FALSE(selected_storage->moment_cache->ready.load(std::memory_order_acquire));
+    ASSERT_FALSE(P::details::cell_evaluation_cache_ready<Mode>(selected));
+    P::GeometryLimits selected_limits;
+    selected_limits.arithmetic_mode = Mode;
+    P::details::Operation work(selected_limits);
+    const auto lazy = P::details::clone_cell_evaluation<Mode>(selected, false, selected_limits);
+    EXPECT_EQ(work.work.operations, 0u);
+    EXPECT_EQ(work.work.pairs, 0u);
+    const auto lazy_storage = P::details::checked_geometry_storage<Mode>(
+        P::DynamicGeometryAccess::implementation(*lazy->dynamic_geometry()));
+    EXPECT_FALSE(lazy_storage->moment_cache->ready.load(std::memory_order_acquire));
+    EXPECT_EQ(lazy_storage->vertices.data(), selected_storage->vertices.data());
+    static_cast<void>(selected->moments());
+    ASSERT_TRUE(selected_storage->moment_cache->ready.load(std::memory_order_acquire));
+    ASSERT_TRUE(P::details::cell_evaluation_cache_ready<Mode>(selected));
+    const auto before_operations = work.work.operations, before_pairs = work.work.pairs;
+    const auto primed = P::details::clone_cell_evaluation<Mode>(selected, true, selected_limits);
+    EXPECT_EQ(work.work.operations, before_operations);
+    EXPECT_EQ(work.work.pairs, before_pairs);
+    const auto primed_storage = P::details::checked_geometry_storage<Mode>(
+        P::DynamicGeometryAccess::implementation(*primed->dynamic_geometry()));
+    EXPECT_NE(primed_storage->moment_cache, selected_storage->moment_cache);
+    EXPECT_TRUE(primed_storage->moment_cache->ready.load(std::memory_order_acquire));
+    const auto expected = selected->moments(), actual = primed->moments();
+    EXPECT_EQ(actual.volume.value, expected.volume.value);
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
+        if constexpr (Mode == bounded)
+            EXPECT_EQ(actual.first_moment[axis].absolute_error, expected.first_moment[axis].absolute_error);
+    }
+    EXPECT_FALSE(lazy_storage->moment_cache->ready.load(std::memory_order_acquire));
+    const auto still_lazy = P::details::clone_cell_evaluation<Mode>(selected, false, selected_limits);
+    EXPECT_FALSE(P::details::cell_evaluation_cache_ready<Mode>(still_lazy));
+}
+TEST(CellGeometryView, ImportedEvaluationClonesPreserveCompletedFactsWithoutPrimingLazyCaches)
+{
+    imported_evaluation_cache_contract<ordinary>();
+    if (P::certification_environment())
+        imported_evaluation_cache_contract<bounded>();
+}
+
+TEST(CellGeometryView, EvaluationCloneAdmissionCountsTheSharedVertexArrayOnceAndFlattensOwners)
+{
+    const auto original = Geometry::box({0, 0, 0}, {1, 1, 1});
+    const auto first = P::details::clone_cell_evaluation<ordinary>(original, false, limits());
+    const auto second = P::details::clone_cell_evaluation<ordinary>(first, false, limits());
+    const auto first_storage = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*first->dynamic_geometry()));
+    const auto second_storage = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*second->dynamic_geometry()));
+    EXPECT_EQ(std::get<std::shared_ptr<const P::DynamicConvexGeometry::Impl>>(first_storage->vertex_owner),
+        std::get<std::shared_ptr<const P::DynamicConvexGeometry::Impl>>(second_storage->vertex_owner));
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(original, used, cap);
+    const auto original_payload = ledger.payload_bytes();
+    ledger.retain(first, used, cap);
+    const auto evaluation_bytes = sizeof(Geometry) + sizeof(P::DynamicConvexGeometry) +
+        sizeof(P::details::GeometryStorage<ordinary>) + sizeof(P::details::StoredMomentCache<ordinary>);
+    EXPECT_EQ(ledger.payload_bytes(), original_payload + evaluation_bytes);
+    ledger.retain(second, used, cap);
+    EXPECT_EQ(ledger.payload_bytes(), original_payload + 2 * evaluation_bytes);
+    const std::array roots{R::root(*second)};
+    const std::array<const P::GeometryAllocationLedger*, 1> ledgers{&ledger};
+    std::vector<std::byte> scratch_bytes(1024 * 1024);
+    R::ProbeScratch scratch(scratch_bytes);
+    const auto report = R::inspect_retention(roots, ledgers, scratch, {1000, 1000, true});
+    ASSERT_TRUE(report.complete()) << report.detail;
+    EXPECT_EQ(report.ledger_payload_admission, ledger.payload_bytes());
+    P::GeometryAllocationLedger exact;
+    std::size_t exact_used = 0;
+    exact.retain(original, exact_used, used);
+    exact.retain(first, exact_used, used);
+    EXPECT_NO_THROW(exact.retain(second, exact_used, used));
+    EXPECT_EQ(exact_used, used);
+    P::GeometryAllocationLedger short_cap;
+    std::size_t short_used = 0;
+    short_cap.retain(original, short_used, used - 1);
+    short_cap.retain(first, short_used, used - 1);
+    EXPECT_THROW(short_cap.retain(second, short_used, used - 1), P::GeometryError);
+}
+
+TEST(CellGeometryView, NativeEvaluationCloneBorrowsInputBodyWithoutRetainingItsTemporaryImpl)
+{
+    P::ConvexGeometryPtr<ordinary> evaluation;
+    std::weak_ptr<const P::DynamicConvexGeometry::Impl> weak;
+    {
+        const View native(Catalog::cartesian(source(), limits()), 0);
+        P::CellGeometryOperationWorkspace workspace(limits());
+        const auto original = P::materialize_cell(native, workspace);
+        weak = P::DynamicGeometryAccess::implementation(*original->dynamic_geometry());
+        evaluation = P::details::clone_cell_evaluation<ordinary>(original, false, limits());
+    }
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(evaluation->volume().value, 1);
+    EXPECT_EQ(evaluation->moments().first_moment[0].value, .5L);
+    const auto stored = P::details::checked_geometry_storage<ordinary>(
+        P::DynamicGeometryAccess::implementation(*evaluation->dynamic_geometry()));
+    EXPECT_TRUE(std::holds_alternative<std::shared_ptr<const P::details::NativeGeometryBody>>(stored->vertex_owner));
 }

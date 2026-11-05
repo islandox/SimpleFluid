@@ -38,7 +38,7 @@ class SIMPLEFLUID_LOCAL OrdinaryExportCoordinates
 {
 public:
     explicit OrdinaryExportCoordinates(const DynamicConvexGeometry& geometry)
-        : geometry_(canonical(geometry)), operation_(geometry_->limits)
+        : operation_(DynamicGeometryAccess::implementation(geometry)->limits), geometry_(canonical(geometry))
     {
     }
     explicit OrdinaryExportCoordinates(const ConvexCellGeometry<ArithmeticMode::Ordinary>& geometry)
@@ -58,14 +58,17 @@ private:
         const DynamicConvexGeometry& geometry)
     {
         const auto& storage = DynamicGeometryAccess::implementation(geometry);
-        const auto source = storage->export_source ? storage->export_source : storage;
+        const auto source = storage->native_export_source
+                                ? DynamicGeometryAccess::implementation(
+                                      *materialize_native_construction(storage->native_export_source)->dynamic_geometry())
+                                : (storage->export_source ? storage->export_source : storage);
         const auto typed = checked_geometry_storage<ArithmeticMode::Ordinary>(source);
         if (!typed->point_export_cache)
             throw GeometryError(
                 GeometryErrorCode::InvalidTopology, "Canonical coordinates require a finished finite geometry.");
         return typed;
     }
-    const std::shared_ptr<const GeometryStorage<ArithmeticMode::Ordinary>> geometry_;
     Operation operation_;
+    const std::shared_ptr<const GeometryStorage<ArithmeticMode::Ordinary>> geometry_;
 };
 } // namespace SimpleFluid::PLIC::details

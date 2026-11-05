@@ -235,8 +235,11 @@ bool ConvexCellGeometry<Mode>::same_native_representation(const ConvexCellGeomet
     const auto right = details::checked_geometry_storage<Mode>(other.geometry_->impl_);
     const auto source_root = [](const auto& geometry)
     {
-        return !geometry.numerical_only && !geometry.partition_proof_only && !geometry.construction &&
-               !geometry.partition_certificate && !geometry.export_source && !geometry.export_seal &&
+        return !geometry.numerical_only && !geometry.partition_proof_only &&
+               (!geometry.construction || (geometry.construction->kind() == details::GeometryConstruction::Kind::Source &&
+                   geometry.construction->source().native())) &&
+               !geometry.partition_certificate && !geometry.export_source && !geometry.native_export_source &&
+               !geometry.export_seal &&
                geometry.ancestry && !geometry.ancestry->parent && !geometry.ancestry->split &&
                !geometry.ancestry->outside && geometry.ancestry->depth == 0;
     };

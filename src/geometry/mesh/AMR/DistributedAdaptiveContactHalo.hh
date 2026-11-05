@@ -46,6 +46,30 @@ private:
     Budget* budget_ = nullptr;
     std::size_t charged_ = 0;
 };
+/** Additive external residency tied only to the allocation arena. It never
+ * retains a halo, provider, hierarchy, partition, or mesh. */
+class SIMPLEFLUID_LOCAL ContactExternalResidencyLease
+{
+public:
+    ContactExternalResidencyLease() = default;
+    ContactExternalResidencyLease(std::shared_ptr<Budget>, std::shared_ptr<std::size_t>);
+    ~ContactExternalResidencyLease();
+    ContactExternalResidencyLease(ContactExternalResidencyLease&&) noexcept;
+    ContactExternalResidencyLease& operator=(ContactExternalResidencyLease&&) noexcept;
+    ContactExternalResidencyLease(const ContactExternalResidencyLease&) = delete;
+    ContactExternalResidencyLease& operator=(const ContactExternalResidencyLease&) = delete;
+    /** Admission preserves old/new overlap until the caller publishes then
+     * shrinks to the new resident union. Cumulative allocation stays monotonic. */
+    void resize(std::size_t);
+    /** Transfer a charge already present in this arena from caller scratch. */
+    void adopt_precharged(std::size_t);
+    [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
+
+private:
+    std::shared_ptr<Budget> arena_;
+    std::shared_ptr<std::size_t> total_;
+    std::size_t bytes_ = 0;
+};
 struct ContactRetiredLeaf
 {
     AdaptiveCellKey key;
@@ -158,6 +182,7 @@ public:
     void apply_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>, ContactHaloContext,
         const ContactOwnedLeafLookup&);
     [[nodiscard]] Budget& allocation() noexcept;
+    [[nodiscard]] ContactExternalResidencyLease external_residency_lease() const;
     void bind_external_retained_bytes(std::size_t) noexcept;
     [[nodiscard]] std::size_t cache_storage_bytes() const noexcept;
     [[nodiscard]] std::vector<AdaptiveMark> required_refinements();

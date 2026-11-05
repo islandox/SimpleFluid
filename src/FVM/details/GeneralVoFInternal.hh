@@ -291,6 +291,7 @@ struct GeneralVoF::Data
             SurfaceTileOwner owner;
             std::size_t index;
         };
+        std::shared_ptr<const AMR::AdaptiveGeometrySnapshot> geometry_snapshot;
         std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> cell_geometry;
         std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> ordinary_cell_geometry;
         std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::BoundedCertification>> bounded_cell_geometry;

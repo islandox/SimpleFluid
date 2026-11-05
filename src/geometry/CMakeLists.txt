@@ -20,6 +20,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/PooledLineRegistry.cc
     mesh/AMR/PooledLineExchange.cc
     mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/AdaptiveGeometrySnapshot.cc
     mesh/AMR/CartesianIncidenceSource.cc
     mesh/AMR/CartesianIncidenceAuthority.cc
     mesh/AMR/CartesianSourceInventory.cc
@@ -167,6 +168,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/PooledLineRegistry.cc
         mesh/AMR/PooledLineExchange.cc
         mesh/AMR/OwnedSupportMembership.cc
+        mesh/AMR/AdaptiveGeometrySnapshot.cc
         mesh/AMR/CartesianIncidenceSource.cc
         mesh/AMR/CartesianIncidenceAuthority.cc
         mesh/AMR/CartesianSourceInventory.cc
@@ -231,6 +233,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # caller's environment; prohibit motion across those fenv boundaries.
     set_property(SOURCE PLIC/details/ordinary/Predicates.cc swept_volume/OrdinaryAggregate.cc
         PLIC/CellGeometryView.cc
+        mesh/AMR/AdaptiveGeometrySnapshot.cc
         mesh/AMR/CartesianIncidenceSource.cc
         mesh/AMR/CartesianIncidenceAuthority.cc
         mesh/AMR/CartesianSourceInventory.cc
@@ -266,6 +269,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/PooledLineRegistry.cc
     mesh/AMR/PooledLineExchange.cc
     mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/AdaptiveGeometrySnapshot.cc
     mesh/AMR/CartesianIncidenceSource.cc
     mesh/AMR/CartesianIncidenceAuthority.cc
     mesh/AMR/CartesianSourceInventory.cc

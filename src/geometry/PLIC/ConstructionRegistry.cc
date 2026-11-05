@@ -20,6 +20,64 @@ std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstructi
     active_work->charge(1, sizeof(GeometryConstruction));
     return std::make_shared<const GeometryConstruction>(std::move(value));
 }
+std::shared_ptr<const GeometryConstruction> construction_native(NativeGeometryConstruction value)
+{
+    active_work->charge(1, sizeof(GeometryConstruction) + sizeof(NativeGeometryConstruction));
+    return std::make_shared<const GeometryConstruction>(GeometryConstruction::Source{
+        std::make_unique<const NativeGeometryConstruction>(std::move(value))});
+}
+std::shared_ptr<const GeometryConstruction> retained_native_plane_source(
+    std::shared_ptr<const GeometryConstruction> node, const void* plane)
+{
+    const auto owns_plane = [plane](const std::shared_ptr<const GeometryConstruction>& root)
+    {
+        if (!root || root->kind() != GeometryConstruction::Kind::Source)
+            return false;
+        const auto* native = root->source().native();
+        return native && native->body && std::any_of(native->body->topology->planes.begin(),
+            native->body->topology->planes.end(), [&](const auto& original) { return original.get() == plane; });
+    };
+    // Factory-created construction lineages are immutable and acyclic. Each
+    // retention edge terminates at a Source, so this walk needs no work arrays
+    // or numerical predicates and does not change the clip operation order.
+    while (node)
+    {
+        if (node->kind() == GeometryConstruction::Kind::Source)
+            return owns_plane(node) ? node : nullptr;
+        if (node->kind() == GeometryConstruction::Kind::Rebase)
+            node = node->rebase().parent;
+        else
+        {
+            const auto& clip = node->clip().clip;
+            if (!clip)
+                return {};
+            if (owns_plane(clip->native_plane_source))
+                return clip->native_plane_source;
+            node = clip->parent;
+        }
+    }
+    return {};
+}
+bool same_native_construction(const GeometryConstruction& first, const GeometryConstruction& second)
+{
+    if (first.kind() != GeometryConstruction::Kind::Source || second.kind() != GeometryConstruction::Kind::Source)
+        return false;
+    const auto* a = first.source().native();
+    const auto* b = second.source().native();
+    return a && b && (a == b || (a->primed && b->primed && a->source == b->source && a->cell_slot == b->cell_slot));
+}
+void retain_rebase_export(const std::shared_ptr<const DynamicConvexGeometry::Impl>& source,
+    DynamicConvexGeometry::Impl& target)
+{
+    if (source->native_export_source)
+        target.native_export_source = source->native_export_source;
+    else if (!source->export_source && source->construction &&
+             source->construction->kind() == GeometryConstruction::Kind::Source &&
+             source->construction->source().native())
+        target.native_export_source = source->construction;
+    else
+        target.export_source = source->export_source ? source->export_source : source;
+}
 std::shared_ptr<const GeometryConstruction> construction_rebase(
     std::shared_ptr<const GeometryConstruction> parent, const GeometryHalfspace& input)
 {
@@ -56,6 +114,7 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
     std::set<const GeometryConstruction*> nodes;
     std::set<const GeometryClipConstruction*> clips;
     std::set<const DynamicConvexGeometry::Impl*> sources;
+    std::set<const void*> moments;
     GeometryAllocationLedger retained_allocations;
     std::vector<std::shared_ptr<const GeometryConstruction>> pending{root};
     for (std::size_t i = 0; i < pending.size(); ++i)
@@ -66,7 +125,17 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
         recipe(1, sizeof(GeometryConstruction));
         if (node->kind() == GeometryConstruction::Kind::Source)
         {
-            const auto& owner = node->source().source;
+            if (const auto* native = node->source().native())
+            {
+                recipe(1, sizeof(NativeGeometryConstruction));
+                retained_allocations.retain(native->source, ledger_used, std::numeric_limits<std::size_t>::max());
+                DynamicGeometryAccess::retain_native_body(native->body, retained_allocations,
+                    ledger_used, std::numeric_limits<std::size_t>::max());
+                if (native->moments && moments.insert(native->moments.get()).second)
+                    recipe(1, sizeof(StoredMomentCache<ArithmeticMode::Ordinary>));
+                continue;
+            }
+            const auto owner = node->source().geometry();
             if (owner && sources.insert(owner.get()).second)
             {
                 if (owner->limits.arithmetic_mode == ArithmeticMode::Ordinary)
@@ -99,6 +168,7 @@ std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConst
                             clip->point_context, ledger_used, std::numeric_limits<std::size_t>::max());
                 }
                 pending.push_back(clip->parent);
+                pending.push_back(clip->native_plane_source);
             }
         }
     }

@@ -169,6 +169,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             const auto initial_catalog = cell_catalog_detail::build<Mode>(*hierarchy, owned_leaves, budget, nullptr,
                 cell_catalog_detail::CatalogPurpose::State, nullptr, nullptr, &catalog_operation);
             initial_catalog_authority = initial_catalog.reuse_authority;
+            topology->geometry_snapshot = initial_catalog.snapshot;
             topology->cell_geometry = initial_catalog.ordinary;
             topology->ordinary_cell_geometry = initial_catalog.finite_ordinary;
             topology->bounded_cell_geometry = initial_catalog.bounded;
@@ -365,7 +366,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 if (binding.full)
                     append_leaf(binding.key);
             auto catalog = cell_catalog_detail::build<Mode>(*hierarchy, catalog_leaves, budget, data.get(),
-                cell_catalog_detail::CatalogPurpose::State, nullptr, &initial_catalog_authority, &catalog_operation);
+                cell_catalog_detail::CatalogPurpose::State, nullptr, &initial_catalog_authority, &catalog_operation,
+                &topology->draft, &data->observation);
             for (const auto& binding : topology->draft.cell_bindings)
                 if (binding.full)
                 {
@@ -412,6 +414,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     if (!topology->by_gid.emplace(binding.gid, binding.key).second)
                         throw std::invalid_argument("General VoF duplicate native cell GID.");
                 }
+            topology->geometry_snapshot = std::move(catalog.snapshot);
             topology->cell_geometry = std::move(catalog.ordinary);
             topology->ordinary_cell_geometry = std::move(catalog.finite_ordinary);
             topology->bounded_cell_geometry = std::move(catalog.bounded);
@@ -495,11 +498,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 retained_loops.intern(metadata.node_gids, budget);
                 retained_loops.intern(metadata.second_node_gids, budget);
                 const auto& retained = owner.back();
-                budget.add(
-                    retained.identity.capacity() +
-                    retained.boundary.capacity() + retained.second_image_identity.payload_bytes() +
-                    AMR::encode_adaptive_key(retained.first).size() +
-                    (retained.second ? AMR::encode_adaptive_key(*retained.second).size() : 0));
+                budget.add(retained.identity.capacity() + retained.boundary.capacity() +
+                           retained.second_image_identity.payload_bytes() +
+                           AMR::encode_adaptive_key(retained.first).size() +
+                           (retained.second ? AMR::encode_adaptive_key(*retained.second).size() : 0));
                 using Owner = Data::Topology::SurfaceTileOwner;
                 const Data::Topology::SurfaceTileReference reference{
                     owned_incident ? Owner::OwnedTiles : Owner::ExtraSurfaceTiles, owner.size() - 1};

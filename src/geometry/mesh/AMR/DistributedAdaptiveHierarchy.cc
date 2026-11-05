@@ -2,6 +2,8 @@
  * @brief Distributed complete-family transactions with immutable local state.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
@@ -17,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <set>
 namespace SimpleFluid::Meshes::AMR
 {
@@ -32,8 +35,24 @@ struct AdaptivePublishedAdmission
             halo->allocation().used -= bytes;
     }
 };
+struct AdaptiveGeometrySnapshotCache
+{
+    std::mutex mutex;
+    std::array<std::shared_ptr<const AdaptiveGeometrySnapshot>, 6> roots;
+    std::optional<ContactExternalResidencyLease> lease;
+    std::size_t root_bytes() const
+    {
+        PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
+        std::size_t bytes = 0;
+        for (const auto& root : roots)
+            if (root)
+                root->retain(ordinary_owners, bounded_owners, bytes, std::numeric_limits<std::size_t>::max());
+        return bytes;
+    }
+};
 struct DistributedAdaptiveHierarchy::Data
 {
+    std::shared_ptr<AdaptiveGeometrySnapshotCache> geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
     std::map<AdaptiveCellKey, AdaptiveLeaf> owned;
     std::map<AdaptiveBytes, AdaptiveFamily> families;
     std::shared_ptr<const AdaptiveProviderKernel> kernel;
@@ -906,7 +925,7 @@ template<class Value> void charge_candidate_copy(ClosureScratch& memory, const V
     memory.held += memory.budget.used - before;
 }
 std::size_t fetch_retention(std::span<const AdaptiveLeaf>, std::span<const AdaptiveFamily>, std::size_t, bool);
-void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy::Data& state)
+void charge_source_base_residency(Budget& budget, const DistributedAdaptiveHierarchy::Data& state)
 {
     if (state.admission)
     {
@@ -927,6 +946,20 @@ void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy:
         fetch_copy_charge(budget, family);
     }
 }
+void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy::Data& state)
+{
+    if (state.geometry_cache)
+    {
+        std::lock_guard lock(state.geometry_cache->mutex);
+        budget.add(sizeof(AdaptiveGeometrySnapshotCache));
+        PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
+        for (const auto& root : state.geometry_cache->roots)
+            if (root)
+                root->retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
+    }
+    charge_source_base_residency(budget, state);
+}
+
 void close_candidate(DistributedAdaptiveHierarchy::Data& candidate, const DistributedAdaptiveHierarchy::Data& source,
     std::span<const AdaptiveOwner> initially_retired, std::span<const AdaptiveOwner> initially_inserted,
     DistributedAdaptiveContactHalo& frontier, ContactHaloContext context, AnchorIndex& anchored, ClosureScratch& memory,
@@ -1373,7 +1406,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             }
             charge_source_residency(binding_overlap, *data_);
             source_charge = binding_overlap.used;
-            binding_overlap.add(sizeof(Data) + 4 * sizeof(void*));
+            binding_overlap.add(sizeof(Data) + sizeof(AdaptiveGeometrySnapshotCache) + 4 * sizeof(void*));
             binding_overlap.add(data_->cells->storage_bytes());
             binding_overlap.add(data_->family_directory->storage_bytes());
             for (const auto& [key, leaf] : data_->owned)
@@ -1389,6 +1422,11 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             }
             binding_overlap.add(sizeof(AdaptivePublishedAdmission) + 4 * sizeof(void*));
             bound = std::make_shared<Data>(*data_);
+            bound->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
+            {
+                std::lock_guard lock(data_->geometry_cache->mutex);
+                bound->geometry_cache->roots = data_->geometry_cache->roots;
+            }
             bound->native = std::move(partition);
             bound->owned_map = map;
             auto holder = std::make_shared<const Teuchos::RCP<const DefaultTpetraTypes::map_type>>(map);
@@ -1421,6 +1459,14 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 throw std::invalid_argument("Native binding geometry changed while rebinding contact cache.");
             keepalive = std::shared_ptr<DistributedAdaptiveContactHalo>(std::move(rebound));
             admission = std::make_shared<AdaptivePublishedAdmission>();
+            // Immutable roots are shared with the source. Transfer their existing
+            // fork source-residency charge into this Data-local allocation lease.
+            const auto geometry_bytes = bound->geometry_cache->root_bytes();
+            if (geometry_bytes > source_memory.held)
+                throw std::logic_error("Snapshot residency transfer exceeds admitted source overlap.");
+            bound->geometry_cache->lease.emplace(keepalive->external_residency_lease());
+            bound->geometry_cache->lease->adopt_precharged(geometry_bytes);
+            source_memory.held -= geometry_bytes;
         });
     admission->halo = keepalive;
     admission->bytes = bound_memory.held;
@@ -1961,6 +2007,245 @@ std::vector<AdaptiveFamily> DistributedAdaptiveHierarchy::fetch_families(
         });
     return fetch_records(*data_, keys, true, cap, transient_cap.has_value()).families;
 }
+std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::geometry_snapshot(
+    std::span<const AdaptiveLeaf* const> leaves, ArithmeticMode mode, GeometrySnapshotPurpose purpose,
+    std::size_t& operation_used, std::size_t operation_limit, PLIC::GeometryAllocationLedger* supplied_ordinary,
+    PLIC::GeometryAllocationLedger* supplied_bounded) const
+{
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Distributed geometry snapshot source moved.");
+    for (const auto* leaf : leaves)
+    {
+        if (!leaf)
+            throw std::invalid_argument("Geometry snapshot lacks an authenticated source leaf.");
+        if (const auto owned = data_->owned.find(leaf->key); owned != data_->owned.end())
+        {
+            const auto& source = owned->second;
+            if (source.key != leaf->key || source.revision != leaf->revision || source.material != leaf->material ||
+                source.domain != leaf->domain || source.provider != leaf->provider ||
+                source.native_cell != leaf->native_cell ||
+                !GeometrySnapshotBinding::same_auxiliary_recipes(source, *leaf) ||
+                (purpose == GeometrySnapshotPurpose::State && source.geometry != leaf->geometry))
+                throw std::invalid_argument("Geometry snapshot source differs from current owned binding.");
+            if (source.native_recipe != leaf->native_recipe)
+            {
+                if (!source.native_recipe || !leaf->native_recipe)
+                    throw std::invalid_argument("Geometry snapshot source recipe owner differs.");
+                const auto& first = *source.native_recipe;
+                const auto& second = *leaf->native_recipe;
+                if (first.kind != second.kind || first.view != second.view || first.parts.size() != second.parts.size())
+                    throw std::invalid_argument("Geometry snapshot source recipe differs.");
+                for (std::size_t part = 0; part < first.parts.size(); ++part)
+                    if (!first.parts[part] || !second.parts[part] || *first.parts[part] != *second.parts[part])
+                        throw std::invalid_argument("Geometry snapshot source recipe payload differs.");
+            }
+        }
+    }
+    const auto mode_slot = static_cast<unsigned>(mode);
+    if (mode_slot > 2 ||
+        (purpose != GeometrySnapshotPurpose::State && purpose != GeometrySnapshotPurpose::OriginalSources))
+        throw std::invalid_argument("Unknown geometry snapshot policy.");
+    const auto slot = 2 * mode_slot + (purpose == GeometrySnapshotPurpose::OriginalSources ? 1 : 0);
+    PLIC::GeometryAllocationLedger local_ordinary, local_bounded;
+    auto& operation_ordinary = supplied_ordinary ? *supplied_ordinary : local_ordinary;
+    auto& operation_bounded = supplied_bounded ? *supplied_bounded : local_bounded;
+    std::lock_guard lock(data_->geometry_cache->mutex);
+    auto& current = data_->geometry_cache->roots[slot];
+    const auto controls = geometry_construction_controls();
+    const bool compatible =
+        current && current->stable_controls() && controls.supported && current->construction_controls() == controls;
+    if (compatible && purpose == GeometrySnapshotPurpose::State &&
+        std::all_of(leaves.begin(), leaves.end(), [&](const auto* leaf) { return leaf && current->find(*leaf); }))
+    {
+        current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
+        return current;
+    }
+    // Failed construction preserves the spent admission prefix while leaving
+    // the published cache unchanged. Both budgets admit old/new root overlap.
+    auto pending_used = operation_used;
+    struct SpentCounter
+    {
+        std::size_t& caller;
+        std::size_t& pending;
+        ~SpentCounter() { caller = std::max(caller, pending); }
+    } spent{operation_used, pending_used};
+    auto candidate = AdaptiveGeometrySnapshot::build(*this, leaves, mode, purpose, pending_used, operation_limit,
+        operation_ordinary, operation_bounded,
+        compatible ? current
+                   : (purpose == GeometrySnapshotPurpose::OriginalSources ? data_->geometry_cache->roots[2 * mode_slot]
+                                                                          : nullptr));
+    Budget hierarchy_budget{data_->options.byte_budget};
+    hierarchy_budget.add(sizeof(AdaptiveGeometrySnapshotCache));
+    charge_source_base_residency(hierarchy_budget, *data_);
+    if (data_->contact_halo)
+        hierarchy_budget.add(data_->contact_halo->cache_storage_bytes());
+    PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
+    std::size_t overlap_bytes = 0;
+    for (const auto& root : data_->geometry_cache->roots)
+        if (root)
+            root->retain(ordinary_owners, bounded_owners, overlap_bytes, data_->options.byte_budget);
+    candidate->retain(ordinary_owners, bounded_owners, overlap_bytes, data_->options.byte_budget);
+    hierarchy_budget.add(overlap_bytes);
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Distributed geometry snapshot source moved before publication.");
+    if (!data_->geometry_cache->lease)
+        data_->geometry_cache->lease.emplace(data_->contact_halo->external_residency_lease());
+    auto& lease = *data_->geometry_cache->lease;
+    const auto previous_lease_bytes = lease.bytes();
+    lease.resize(overlap_bytes);
+    const auto previous = current;
+    try
+    {
+        current = candidate;
+        const auto resident = data_->geometry_cache->root_bytes();
+        lease.resize(resident);
+    }
+    catch (...)
+    {
+        current = previous;
+        lease.resize(previous_lease_bytes);
+        operation_used = pending_used;
+        throw;
+    }
+    operation_used = pending_used;
+    return candidate;
+}
+std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapshotAccess::native_draft(
+    const DistributedAdaptiveHierarchy& hierarchy, const AdaptiveNativeDraft& draft,
+    std::span<const AdaptiveLeaf* const> selected, const HierarchyObservation& source_observation, ArithmeticMode mode,
+    GeometrySnapshotPurpose purpose, std::size_t& used, std::size_t limit,
+    PLIC::GeometryAllocationLedger& ordinary_owners, PLIC::GeometryAllocationLedger& bounded_owners)
+{
+    const auto& state = *hierarchy.data_;
+    if (!hierarchy.geometry_unchanged() || hierarchy.observation() != source_observation)
+        throw std::invalid_argument("Native geometry draft has a stale source observation.");
+    if (draft.global_cells != state.global_cells || draft.owned.size() != state.owned.size())
+        throw std::invalid_argument("Native geometry draft lacks complete current ownership.");
+    const auto mode_slot = static_cast<unsigned>(mode);
+    if (mode_slot > 2 ||
+        (purpose != GeometrySnapshotPurpose::State && purpose != GeometrySnapshotPurpose::OriginalSources))
+        throw std::invalid_argument("Unknown native geometry draft snapshot policy.");
+    Budget budget{limit, used};
+    struct SpentCounter
+    {
+        std::size_t& caller;
+        Budget& budget;
+        ~SpentCounter() { caller = std::max(caller, budget.used); }
+    } spent{used, budget};
+    struct Row
+    {
+        const AdaptiveLeaf* leaf = nullptr;
+        bool owned = false;
+        const AdaptiveNativeCellBinding* binding = nullptr;
+    };
+    std::map<AdaptiveCellKey, Row> rows;
+    bool provider_compatible = true;
+    const auto same_native_recipe = [](const auto& first, const auto& second)
+    {
+        if (first == second)
+            return true;
+        if (!first || !second || first->kind != second->kind || first->view != second->view ||
+            first->parts.size() != second->parts.size())
+            return false;
+        for (std::size_t part = 0; part < first->parts.size(); ++part)
+            if (!first->parts[part] || !second->parts[part] || *first->parts[part] != *second->parts[part])
+                return false;
+        return true;
+    };
+    for (const auto* values : {&draft.owned, &draft.ghosts})
+        for (const auto& leaf : *values)
+        {
+            const bool owned = values == &draft.owned;
+            budget.add(sizeof(decltype(rows)::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key));
+            if (!rows.emplace(leaf.key, Row{&leaf, owned, nullptr}).second)
+                throw std::invalid_argument("Native geometry draft repeats a full source key.");
+            if (owned)
+            {
+                const auto found = state.owned.find(leaf.key);
+                if (found == state.owned.end())
+                    throw std::invalid_argument("Native geometry draft contains foreign ownership.");
+                const auto& source = found->second;
+                if (source.revision != leaf.revision || source.provider != leaf.provider ||
+                    source.material != leaf.material || source.domain != leaf.domain ||
+                    source.native_cell != leaf.native_cell ||
+                    !same_native_recipe(source.native_recipe, leaf.native_recipe) ||
+                    !GeometrySnapshotBinding::same_auxiliary_capsules(source, leaf))
+                    throw std::invalid_argument("Native geometry draft changed its provider source binding.");
+                provider_compatible = provider_compatible && source.geometry == leaf.geometry &&
+                                      GeometrySnapshotBinding::same_auxiliary_recipes(source, leaf);
+            }
+            else if (leaf.join_recipe && leaf.geometry && leaf.provider == AdaptiveProviderKind::Polyhedral)
+                provider_compatible = false;
+        }
+    for (const auto& binding : draft.cell_bindings)
+    {
+        if (!binding.full)
+            continue;
+        const auto found = rows.find(binding.key);
+        if (found == rows.end() || found->second.binding)
+            throw std::invalid_argument("Native geometry draft full binding lacks its unique source row.");
+        const auto& row = found->second;
+        const auto& leaf = *row.leaf;
+        if (binding.owner < 0 || binding.owner >= state.comm->getSize() ||
+            row.owned != (binding.owner == state.comm->getRank()) || binding.provider != leaf.provider ||
+            binding.material != leaf.material || binding.native_cell != leaf.native_cell ||
+            binding.native_recipe != leaf.native_recipe)
+            throw std::invalid_argument("Native geometry draft full binding changed its source authority.");
+        found->second.binding = &binding;
+    }
+    if (std::any_of(rows.begin(), rows.end(), [](const auto& row) { return !row.second.binding; }))
+        throw std::invalid_argument("Native geometry draft lacks a full binding for its source row.");
+    std::vector<geometry_snapshot_detail::PublicationSource> publication;
+    geometry_snapshot_detail::charge_items(
+        budget, selected.size(), sizeof(geometry_snapshot_detail::PublicationSource));
+    publication.reserve(selected.size());
+    if (publication.capacity() > selected.size())
+        geometry_snapshot_detail::charge_items(
+            budget, publication.capacity() - selected.size(), sizeof(geometry_snapshot_detail::PublicationSource));
+    bool has_published_geometry = false;
+    for (const auto* leaf : selected)
+    {
+        if (!leaf)
+            throw std::invalid_argument("Native geometry draft selection lacks a source row.");
+        const auto found = rows.find(leaf->key);
+        if (found == rows.end() || found->second.leaf != leaf)
+            throw std::invalid_argument("Native geometry selection is not a row of its authenticated draft.");
+        publication.push_back({leaf, found->second.binding});
+        has_published_geometry = has_published_geometry || bool(leaf->geometry);
+    }
+    if (provider_compatible && !has_published_geometry)
+        return hierarchy.geometry_snapshot(
+            selected, mode, purpose, budget.used, limit, &ordinary_owners, &bounded_owners);
+    // A publication-derived representation is not a provider-input cache key.
+    // Exact matching source entries can still be reused, while differing rows
+    // remain operation-owned and cannot poison the hierarchy's provider cache.
+    std::lock_guard lock(state.geometry_cache->mutex);
+    const auto slot = 2 * mode_slot + (purpose == GeometrySnapshotPurpose::OriginalSources ? 1 : 0);
+    const auto& previous = state.geometry_cache->roots[slot] ? state.geometry_cache->roots[slot]
+                                                             : state.geometry_cache->roots[2 * mode_slot];
+    auto result = AdaptiveGeometrySnapshot::build(
+        hierarchy, selected, mode, purpose, budget.used, limit, ordinary_owners, bounded_owners, previous, publication);
+    Budget hierarchy_budget{state.options.byte_budget};
+    hierarchy_budget.add(sizeof(AdaptiveGeometrySnapshotCache));
+    charge_source_base_residency(hierarchy_budget, state);
+    hierarchy_budget.add(state.contact_halo->cache_storage_bytes());
+    PLIC::GeometryAllocationLedger hierarchy_ordinary, hierarchy_bounded;
+    for (const auto& root : state.geometry_cache->roots)
+        if (root)
+            root->retain(hierarchy_ordinary, hierarchy_bounded, hierarchy_budget.used, hierarchy_budget.limit);
+    result->retain(hierarchy_ordinary, hierarchy_bounded, hierarchy_budget.used, hierarchy_budget.limit);
+    if (!hierarchy.geometry_unchanged() || hierarchy.observation() != source_observation)
+        throw std::invalid_argument("Native geometry draft source changed during snapshot acquisition.");
+    return result;
+}
+void DistributedAdaptiveHierarchy::visit_geometry_snapshots(
+    const std::function<void(const AdaptiveGeometrySnapshot&)>& visitor) const
+{
+    std::lock_guard lock(data_->geometry_cache->mutex);
+    for (const auto& root : data_->geometry_cache->roots)
+        if (root)
+            visitor(*root);
+}
 DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() const
 {
     Storage result;
@@ -1969,9 +2254,10 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
     result.directory_entries = data_->cells->local_entries() + data_->family_directory->local_entries();
     result.directory_bytes = data_->cells->storage_bytes() + data_->family_directory->storage_bytes();
     result.owned_bytes = sizeof(Data);
+    result.owned_bytes += sizeof(AdaptiveGeometrySnapshotCache);
     if (data_->contact_halo)
         result.owned_bytes += data_->contact_halo->cache_storage_bytes();
-    std::set<const void*> parts, objects, geometry;
+    std::set<const void*> objects, geometry;
     auto key_dynamic = [](const AdaptiveCellKey& key)
     {
         return std::visit(
@@ -1989,11 +2275,25 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
     };
     auto part = [&](const std::shared_ptr<const AdaptiveBytes>& value)
     {
-        if (value && parts.insert(value.get()).second)
+        if (value && objects.insert(value.get()).second)
             result.procedural_bytes += sizeof(AdaptiveBytes) + value->capacity();
     };
     PLIC::GeometryAllocationLedger identity_allocations;
     std::size_t identity_counter = 0;
+    {
+        std::lock_guard lock(data_->geometry_cache->mutex);
+        PLIC::GeometryAllocationLedger bounded_owners;
+        const auto before = identity_allocations.payload_bytes();
+        for (const auto& root : data_->geometry_cache->roots)
+            if (root)
+            {
+                root->visit_external_owners([&](const void* owner, std::size_t) { objects.insert(owner); });
+                root->retain(
+                    identity_allocations, bounded_owners, identity_counter, std::numeric_limits<std::size_t>::max());
+            }
+        result.owned_bytes += identity_allocations.payload_bytes() - before + bounded_owners.payload_bytes();
+    }
+
     const auto payload_delta = [&](const auto& value)
     {
         const auto before = identity_allocations.payload_bytes();
@@ -2002,9 +2302,11 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
     };
     const auto face_bytes = [&](const auto& face) -> std::size_t
     {
-        if (!face || !geometry.insert(face.get()).second)
+        if (!face)
             return 0;
-        return face->exclusive_storage_bytes() + payload_delta(PLIC::planar_support<ArithmeticMode::Ordinary>(*face));
+        const auto before = identity_allocations.payload_bytes();
+        identity_allocations.retain_planar_face(face, identity_counter, std::numeric_limits<std::size_t>::max());
+        return identity_allocations.payload_bytes() - before;
     };
     auto leaf = [&](const AdaptiveLeaf& value, std::size_t& bytes)
     {
@@ -2030,7 +2332,9 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
             bytes += payload_delta(value.geometry);
         for (const auto& face : value.surfaces)
         {
-            bytes += face.key.capacity() + face.boundary.capacity() + face.authority_image.payload_bytes();
+            // authority_image is an inline Ordinary displacement, already in
+            // the AdaptiveSurface capacity counted above, with no owner edge.
+            bytes += face.key.capacity() + face.boundary.capacity();
             bytes += face_bytes(face.geometry);
             bytes += face_bytes(face.native_whole_geometry);
         }
@@ -2368,6 +2672,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 charge_candidate_copy(candidate_memory, family);
             }
             next = std::make_shared<Data>(*data_);
+            next->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
             next->token = std::make_shared<const char>(0);
             next->topology_token = next->token;
             next->partition_token = next->token;
@@ -2738,7 +3043,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
     incoming = {};
     {
         const auto requirements = frontier->lease_required_refinements();
-        collective(*data_->comm, [&]
+        collective(*data_->comm,
+            [&]
             {
                 if (!requirements.marks().empty())
                     throw std::invalid_argument("Ownership migration changed contact grading.");
@@ -2846,7 +3152,8 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             // kernel's explicit bounded materialization capability can select
             // the capacity contract. Any unsupported/supplied record preserves
             // the complete call's original cumulative expanded-size guard.
-            const bool bounded = compact_procedural && !data_->owned.empty() &&
+            const bool bounded =
+                compact_procedural && !data_->owned.empty() &&
                 std::all_of(data_->owned.begin(), data_->owned.end(), [&](const auto& entry)
                     { return data_->kernel->compact_native_materialization_bound(entry.second) != 0; });
             if (bounded)

@@ -2,6 +2,7 @@
  * @brief Source-pinned owner-local adaptation with split-family authority.
  */
 #pragma once
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
@@ -49,6 +50,8 @@ public:
     /** Capacity-based retained allocation estimate, shared components counted
      * once; excludes allocator/control-block overhead and is distinct from RSS. */
     [[nodiscard]] Storage storage() const;
+    /** Synchronous borrowed cache census; callers keep hierarchy mutation quiescent. */
+    void visit_geometry_snapshots(const std::function<void(const AdaptiveGeometrySnapshot&)>&) const;
     [[nodiscard]] std::uint64_t topology_generation() const noexcept;
     [[nodiscard]] std::uint64_t partition_generation() const noexcept;
     [[nodiscard]] const std::shared_ptr<const void>& identity() const noexcept;
@@ -81,6 +84,14 @@ public:
     [[nodiscard]] std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
         const AdaptiveLeaf&) const;
     [[nodiscard]] AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
+    /** Acquire immutable geometry for authenticated current-version source leaves.
+     * Selection/reordering never changes the mesh source identity. All new roots
+     * and retained overlap are admitted before the version cache is published. */
+    [[nodiscard]] std::shared_ptr<const AdaptiveGeometrySnapshot> geometry_snapshot(
+        std::span<const AdaptiveLeaf* const>, ArithmeticMode, GeometrySnapshotPurpose, std::size_t& operation_used,
+        std::size_t operation_limit, PLIC::GeometryAllocationLedger* ordinary_owners = nullptr,
+        PLIC::GeometryAllocationLedger* bounded_owners = nullptr) const;
+
     [[nodiscard]] std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const;
     [[nodiscard]] HierarchyObservation observation() const noexcept;
     [[nodiscard]] bool geometry_unchanged() const noexcept;
@@ -136,6 +147,7 @@ public:
     [[nodiscard]] AdaptiveNativeDraft native_draft() const;
 
 private:
+    friend class adaptive_detail::GeometrySnapshotAccess;
     friend AdaptiveNativeDraft adaptive_detail::compact_adaptive_native_draft(const DistributedAdaptiveHierarchy&);
     friend std::vector<AdaptiveLeaf> adaptive_detail::fetch_native_source_leaves(
         const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey>);

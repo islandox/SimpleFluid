@@ -1,13 +1,13 @@
 /** @file CellGeometry.cc
  * @brief Compiled sparse recipe decoding, catalog construction and existing-owner forwarding.
  */
-#include "FVM/details/GeneralVoF/CellCatalogInternal.hh"
 #include "FVM/details/GeneralVoF/CellCatalog.tcc"
+#include "FVM/details/GeneralVoF/CellCatalogInternal.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cfenv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -190,8 +190,8 @@ bool eligible(const GeneralVoF::Hierarchy& hierarchy, const AMR::AdaptiveLeaf& l
 {
     // These records come only from the hierarchy's validated owned/full native
     // leaf boundary. The public provider enum alone is never an authority.
-    return hierarchy.has_native_cartesian_geometry() && mode == ArithmeticMode::Ordinary && !leaf.geometry && leaf.native_recipe &&
-           leaf.native_recipe->kind == Meshes::NativeFragmentDescriptor::Kind::Cartesian &&
+    return hierarchy.has_native_cartesian_geometry() && mode == ArithmeticMode::Ordinary && !leaf.geometry &&
+           leaf.native_recipe && leaf.native_recipe->kind == Meshes::NativeFragmentDescriptor::Kind::Cartesian &&
            leaf.provider == AMR::AdaptiveProviderKind::Cartesian &&
            std::holds_alternative<AMR::CartesianCellAncestry>(leaf.key.ancestry);
 }
@@ -268,11 +268,16 @@ void reserve_indices(std::vector<std::size_t>& values, std::size_t count, wire::
 {
     reserve_checked(values, count, budget);
 }
-template CatalogBuild build<ArithmeticMode::Ordinary>(
-    const GeneralVoF::Hierarchy&, std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose, PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
-template CatalogBuild build<ArithmeticMode::BoundedCertification>(
-    const GeneralVoF::Hierarchy&, std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose, PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
+template CatalogBuild build<ArithmeticMode::Ordinary>(const GeneralVoF::Hierarchy&,
+    std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
+template CatalogBuild build<ArithmeticMode::BoundedCertification>(const GeneralVoF::Hierarchy&,
+    std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
 template CatalogBuild build<ArithmeticMode::Exact>(const GeneralVoF::Hierarchy&,
     std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
-    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
 } // namespace SimpleFluid::VoF::general_vof_detail::cell_catalog_detail

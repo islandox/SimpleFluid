@@ -29,7 +29,8 @@ enum class RootKind : std::uint8_t
     Authority,
     OrdinaryBoundary,
     CartesianSource,
-    CellCatalog
+    CellCatalog,
+    ExternalOwner
 };
 struct BorrowedRoot
 {
@@ -37,7 +38,10 @@ struct BorrowedRoot
     const void* object = nullptr;
     ArithmeticMode mode = ArithmeticMode::Ordinary;
     std::uint32_t group = 0;
+    std::size_t exclusive_bytes = 0;
 };
+inline BorrowedRoot external_root(const void* owner, std::size_t bytes, std::uint32_t group = 0)
+{ return {RootKind::ExternalOwner, owner, ArithmeticMode::Ordinary, group, bytes}; }
 template<ArithmeticMode M> BorrowedRoot root(const CellGeometryCatalog<M>& catalog, std::uint32_t group = 0)
 { return {RootKind::CellCatalog, &catalog, M, group}; }
 inline BorrowedRoot root(const CartesianCellSource& source, std::uint32_t group = 0)

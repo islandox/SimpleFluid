@@ -889,7 +889,14 @@ template<ArithmeticMode Mode, bool Typed>
 auto materialize_points(const std::shared_ptr<const DynamicConvexGeometry::Impl>& original,
     const PointExportCache& cache, ExportReservation& budget)
 {
-    const auto canonical = original->export_source ? original->export_source : original;
+    const auto canonical = [&]
+    {
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (original->native_export_source)
+                return DynamicGeometryAccess::implementation(
+                    *details::materialize_native_construction(original->native_export_source)->dynamic_geometry());
+        return original->export_source ? original->export_source : original;
+    }();
     const auto geometry = details::checked_geometry_storage<Mode>(canonical);
     using Payload = std::conditional_t<Typed, PointExportPayload<Mode>, DynamicPointExportPayload>;
     using PublishedPoint = std::conditional_t<Typed, Point<Mode>, DynamicPoint>;

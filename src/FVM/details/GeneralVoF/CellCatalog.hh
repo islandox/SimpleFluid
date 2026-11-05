@@ -57,11 +57,13 @@ struct CatalogReuseAuthority
 {
     const void* operation = nullptr;
     const void* original_catalog = nullptr;
+    const void* source_snapshot = nullptr;
     CatalogConstructionControls controls;
     bool stable = false;
 };
 struct CatalogBuild
 {
+    std::shared_ptr<const AMR::AdaptiveGeometrySnapshot> snapshot;
     std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> ordinary;
     // Present only when Ordinary fallback roots require the old separate import.
     std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> finite_ordinary;
@@ -87,14 +89,19 @@ template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL CatalogBuild build(const GeneralVoF::Hierarchy&, std::span<const AMR::AdaptiveLeaf* const>,
     wire::Budget&, const GeneralVoF::Data* reuse = nullptr, CatalogPurpose purpose = CatalogPurpose::State,
     PLIC::GeometryAllocationLedger* admitted_originals = nullptr,
-    const CatalogReuseAuthority* reuse_authority = nullptr, const void* construction_operation = nullptr);
+    const CatalogReuseAuthority* reuse_authority = nullptr, const void* construction_operation = nullptr,
+    const AMR::AdaptiveNativeDraft* native_draft = nullptr,
+    const AMR::HierarchyObservation* source_observation = nullptr);
 extern template CatalogBuild build<ArithmeticMode::Ordinary>(const GeneralVoF::Hierarchy&,
     std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
-    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
 extern template CatalogBuild build<ArithmeticMode::BoundedCertification>(const GeneralVoF::Hierarchy&,
     std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
-    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
 extern template CatalogBuild build<ArithmeticMode::Exact>(const GeneralVoF::Hierarchy&,
     std::span<const AMR::AdaptiveLeaf* const>, wire::Budget&, const GeneralVoF::Data*, CatalogPurpose,
-    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*);
+    PLIC::GeometryAllocationLedger*, const CatalogReuseAuthority*, const void*, const AMR::AdaptiveNativeDraft*,
+    const AMR::HierarchyObservation*);
 } // namespace SimpleFluid::VoF::general_vof_detail::cell_catalog_detail

@@ -52,6 +52,49 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
     }
 }
 
+void GeometryAllocationLedger::retain_external_owner(const std::shared_ptr<const void>& owner,
+    std::size_t exclusive_bytes, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (!owner)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null external allocation owner.");
+        begin_admission(used, limit);
+        const auto found = impl_->owners.find({allocation_detail::Kind::ExternalOwner, owner.get()});
+        if (found != impl_->owners.end() && found->second.payload_bytes != exclusive_bytes)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable external allocation size changed.");
+        impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, exclusive_bytes, used, limit);
+        impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        failed_ = true;
+        throw;
+    }
+}
+
+void DynamicGeometryAccess::retain_native_body(const std::shared_ptr<const details::NativeGeometryBody>& body,
+    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        if (!body)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Null native source representation admission.");
+        ledger.begin_admission(used, limit);
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, ArithmeticMode::Ordinary);
+        else
+            ledger.impl_->mode = ArithmeticMode::Ordinary;
+        ledger.impl_->push(allocation_detail::Kind::NativeSourceBody, body, used, limit);
+        ledger.impl_->walk<ArithmeticMode::Ordinary>(used, limit);
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+
 template<ArithmeticMode Mode>
 void GeometryAllocationLedger::retain(const ConvexGeometryPtr<Mode>& geometry, std::size_t& used, std::size_t limit)
 {

@@ -3,6 +3,7 @@
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
 namespace retention = PLIC::details::retention;
@@ -74,10 +75,30 @@ public:
             add(surface.authority_image, group);
         }
     }
+    void geometry_snapshot(const AMR::AdaptiveGeometrySnapshot& value, RetentionGroup group)
+    {
+        value.visit_external_owners(
+            [&](const void* owner, std::size_t bytes)
+            {
+                roots.push_back(retention::external_root(owner, bytes, static_cast<std::uint32_t>(group)));
+            });
+        pointer(value.ordinary_catalog(), group);
+        pointer(value.finite_ordinary_catalog(), group);
+        pointer(value.bounded_catalog(), group);
+        value.visit_authoritative_surfaces(
+            [&](const AMR::GeometrySnapshotSurface& binding)
+            {
+                pointer(binding.surface.geometry, group);
+                pointer(binding.surface.native_whole_geometry, group);
+                add(binding.surface.authority_image, group);
+            });
+    }
     void hierarchy(const GeneralVoF::Hierarchy* h, RetentionGroup group)
     {
         if (!h)
             return;
+        h->visit_geometry_snapshots([&](const AMR::AdaptiveGeometrySnapshot& value)
+            { geometry_snapshot(value, group); });
         for (const auto& [key, value] : h->owned())
             leaf(value, group);
         for (const auto& [key, value] : h->families())
@@ -96,6 +117,8 @@ public:
             complete_manifest = false;
         if (value->topology)
         {
+            if (value->topology->geometry_snapshot)
+                geometry_snapshot(*value->topology->geometry_snapshot, group);
             pointer(value->topology->cell_geometry, group);
             pointer(value->topology->ordinary_cell_geometry, group);
             pointer(value->topology->bounded_cell_geometry, group);

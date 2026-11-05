@@ -724,6 +724,7 @@ template<ArithmeticMode Mode> DynamicGeometryMoments GeometryKernel<Mode>::momen
         {
             ++statistics.moment_evaluations;
             impl_->moment_cache->integrals = integrate<Mode>(*impl_, true);
+            impl_->moment_cache->ready.store(true, std::memory_order_release);
         });
     auto result = *impl_->moment_cache->integrals;
     const auto shift = point<Mode>(impl_->frame.origin) - point<Mode>(origin);

@@ -210,9 +210,27 @@ the ledger pins those owners and includes its bookkeeping in admission.
 Allocation measurements report their scope and exclusions separately from these
 conservative admission estimates; neither metric is process RSS.
 
-Ordinary procedural Cartesian cells retain an immutable source context and a
-catalog slot. The context owns the evaluated source axes, cell intervals,
-original support facts, captured arithmetic environment and represented metrics.
+The hierarchy publishes immutable `AdaptiveGeometrySnapshot` roots. Cells and
+FVM catalogs select source entries from those roots; they do not construct a
+second authoritative geometry catalog. A snapshot owns detached source bindings,
+coordinates, original supports and represented geometry, with no backpointer to
+the hierarchy, partition or phase state. Retained views and PLIC construction
+records keep the required source version alive after a mesh handle is destroyed.
+Equal coordinates in independently constructed meshes do not identify one owner.
+
+Provider-input acquisition and authenticated native-publication acquisition are
+distinct. The private publication seam checks its source observation, complete
+bindings and actual selected draft rows. A published explicit cell already owns
+its mapped geometry and native metrics; that owner is referenced directly rather
+than passed through the provider mapping again. Compact rows still use the
+provider's original construction path. Publication-derived representations do
+not replace provider-input cache entries.
+
+Ordinary procedural Cartesian cells retain a shared source context and a catalog
+slot. Its immutable base owns the evaluated source axes, cell intervals and
+original support facts. Numerical evaluation caches are separate from that base.
+Snapshot reuse requires the actual source binding and supported named arithmetic
+controls; floating-point status flags and padding bytes are not cache keys.
 State publication primes moment data at the same boundary as its original import
 path. It has no backpointer to the hierarchy or phase state, general plane
 owners, frozen cell topology or export cache. The native adapter authenticates
@@ -260,6 +278,28 @@ because an operation needed them. A clipped result, snapshot or replay dependenc
 that survives the operation receives complete retained admission before
 publication. Early destruction does not refund cumulative charges. Exact views
 forward their existing owners explicitly and do not acquire a finite workspace.
+
+Native materialization publishes a validated immutable source body independently
+of its temporary geometry wrapper. Cut and rebase records retain that shared
+source body and the necessary numerical certificates, rather than retaining the
+temporary native-cell implementation. Replay binds already validated values;
+it does not repeat source construction arithmetic. Original cutter-plane identity
+and the registry's minimum-key selection rule remain unchanged. Weak body caches
+do not turn routine source queries into persistent full-cell materialization.
+
+Raw source first moments still use the first querying caller's controls. Fresh
+raw evaluations and generated fallback imports therefore receive independent
+lazy moment caches, even when their immutable geometry is shared. An explicitly
+supplied original geometry keeps its existing ownership and cache semantics.
+The initial and expanded catalogs within one constructor reuse their evaluation
+owners only under the matching operation, catalog, snapshot, arithmetic-control
+and source-binding proof. This preserves the original preparation order while
+keeping independent constructors isolated. Captured readiness policies describe
+facts established during source construction; later template queries cannot
+seed another evaluation's lazy cache.
+Snapshot-cache growth and old/new publication overlap are admitted before
+publication, including hierarchy residency leases and caller ledger bookkeeping.
+Rejected acquisition preserves published roots and spent cumulative charges.
 
 Adapted face transfer obtains complete remote target support through the
 collective `fetch_native_sources` facade. Its immutable result owns the fetched

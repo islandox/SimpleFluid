@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/CellGeometryCatalog.tcc"
 #include "geometry/PLIC/details/CellGeometryCoordinates.hh"
+#include "geometry/PLIC/details/CellGeometryEvaluation.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/LocalCoordinates.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
@@ -65,11 +66,20 @@ struct FixedFaceInput
 };
 struct CartesianCellSource::Impl
 {
-    struct Facts
+    struct InitialFacts
     {
         int exponent = 0;
         bool custom_supports = false;
         kernel::StorageScalar constructor_volume;
+    };
+    struct Base
+    {
+        CartesianSourceDescription description;
+        std::vector<InitialFacts> initial;
+    };
+    struct Facts
+    {
+        mutable std::weak_ptr<const details::NativeGeometryBody> representation;
         mutable std::once_flag moments_once;
         mutable std::optional<kernel::Integrals> integrals;
         mutable std::atomic<bool> moments_ready{false};
@@ -125,19 +135,20 @@ struct CartesianCellSource::Impl
         Facts& operator[](std::size_t i) { return at(i); }
         const Facts& operator[](std::size_t i) const { return at(i); }
     };
-    CartesianSourceDescription description;
+    std::shared_ptr<const Base> base;
     FactsArray facts;
     details::NativeCellGeometryMoments moment_policy = details::NativeCellGeometryMoments::PrimedState;
     std::fenv_t environment{};
     GeometryLimits limits;
+    mutable std::mutex representation_mutex;
     std::pair<GeometryPoint, GeometryPoint> corners(std::size_t slot) const
     {
-        const auto& cell = description.cells.at(slot);
+        const auto& cell = base->description.cells.at(slot);
         GeometryPoint lower, upper;
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            lower[axis] = description.axes[axis].at(cell.lower[axis]);
-            upper[axis] = description.axes[axis].at(cell.upper[axis]);
+            lower[axis] = base->description.axes[axis].at(cell.lower[axis]);
+            upper[axis] = base->description.axes[axis].at(cell.upper[axis]);
         }
         return {lower, upper};
     }
@@ -146,9 +157,9 @@ struct CartesianCellSource::Impl
         FrozenEnvironment environment_guard(environment);
         const auto [lower, upper] = corners(slot);
         kernel::FixedBoxEvaluation result(lower, upper);
-        if (result.frame.exponent != facts.at(slot).exponent)
+        if (result.frame.exponent != base->initial.at(slot).exponent)
             throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Cartesian source frame changed.");
-        result.volume = facts[slot].constructor_volume;
+        result.volume = base->initial.at(slot).constructor_volume;
         return result;
     }
     kernel::Integrals moment_integrals(std::size_t slot) const
@@ -221,7 +232,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
         work.operation_limit = per_cell_guard * description.cells.size();
     }
     const auto aggregate_guard = work.operation_limit;
-    work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
+    work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl) + sizeof(Impl::Base));
     for (const auto& axis : description.axes)
     {
         work.charge(axis.capacity(), sizeof(double));
@@ -240,45 +251,52 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
         work.retain_identity(support);
     }
     work.charge(description.cells.size(), sizeof(Impl::Facts));
+    work.charge(description.cells.size(), sizeof(Impl::InitialFacts));
     auto impl = std::make_shared<Impl>();
-    impl->description = std::move(description);
+    auto base = std::make_shared<Impl::Base>();
+    base->description = std::move(description);
+    base->initial.reserve(base->description.cells.size());
+    if (base->initial.capacity() > base->description.cells.size())
+        work.charge(base->initial.capacity() - base->description.cells.size(), sizeof(Impl::InitialFacts));
+    base->initial.resize(base->description.cells.size());
+    impl->base = base;
     impl->limits = limits;
     impl->moment_policy = moment_policy;
-    impl->facts.allocate(impl->description.cells.size());
+    impl->facts.allocate(base->description.cells.size());
     using SupportLookup = std::map<PlaneSupportIdentity<ordinary>, std::uint32_t>;
     SupportLookup support_lookup;
-    for (std::size_t index = 0; index < impl->description.original_supports.size(); ++index)
+    for (std::size_t index = 0; index < base->description.original_supports.size(); ++index)
     {
         if (index >= CartesianSourceCellSlot::canonical_support)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Cartesian support catalog exceeds compact slots.");
-        if (!support_lookup.contains(impl->description.original_supports[index]))
+        if (!support_lookup.contains(base->description.original_supports[index]))
         {
             work.charge(1, sizeof(SupportLookup::value_type) + 4 * sizeof(void*));
-            support_lookup.emplace(impl->description.original_supports[index], static_cast<std::uint32_t>(index));
+            support_lookup.emplace(base->description.original_supports[index], static_cast<std::uint32_t>(index));
         }
     }
     std::array<std::vector<std::uint32_t>, 3> canonical_support_slots;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        work.charge(impl->description.axes[axis].size(), sizeof(std::uint32_t));
+        work.charge(base->description.axes[axis].size(), sizeof(std::uint32_t));
         canonical_support_slots[axis].assign(
-            impl->description.axes[axis].size(), CartesianSourceCellSlot::canonical_support);
-        if (canonical_support_slots[axis].capacity() > impl->description.axes[axis].size())
+            base->description.axes[axis].size(), CartesianSourceCellSlot::canonical_support);
+        if (canonical_support_slots[axis].capacity() > base->description.axes[axis].size())
             work.charge(
-                canonical_support_slots[axis].capacity() - impl->description.axes[axis].size(), sizeof(std::uint32_t));
+                canonical_support_slots[axis].capacity() - base->description.axes[axis].size(), sizeof(std::uint32_t));
     }
-    for (std::size_t slot = 0; slot < impl->description.cells.size(); ++slot)
+    for (std::size_t slot = 0; slot < base->description.cells.size(); ++slot)
     {
         if (owned_default_guard)
             work.operation_limit =
                 per_cell_guard > aggregate_guard - work.operations ? aggregate_guard : work.operations + per_cell_guard;
-        auto& recipe = impl->description.cells[slot];
+        auto& recipe = base->description.cells[slot];
         for (std::size_t axis = 0; axis < 3; ++axis)
-            if (recipe.lower[axis] >= recipe.upper[axis] || recipe.upper[axis] >= impl->description.axes[axis].size())
+            if (recipe.lower[axis] >= recipe.upper[axis] || recipe.upper[axis] >= base->description.axes[axis].size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian source interval.");
         for (const auto support : recipe.support_slots)
             if (support != CartesianSourceCellSlot::canonical_support &&
-                support >= impl->description.original_supports.size())
+                support >= base->description.original_supports.size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian original-support slot.");
         const bool custom_supports = std::any_of(recipe.support_slots.begin(), recipe.support_slots.end(),
             [](const auto slot) { return slot != CartesianSourceCellSlot::canonical_support; });
@@ -297,9 +315,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
         box.volume = kernel::integrate_ordinary<ordinary>(box, false).volume;
         kernel::represented_positive_volume(box.volume);
         auto& fact = impl->facts.at(slot);
-        fact.exponent = box.frame.exponent;
-        fact.custom_supports = custom_supports;
-        fact.constructor_volume = box.volume;
+        base->initial[slot] = {box.frame.exponent, custom_supports, box.volume};
         if (moment_policy == details::NativeCellGeometryMoments::PrimedState)
         {
             std::call_once(fact.moments_once,
@@ -341,7 +357,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
                 cached_slot = found->second;
                 continue;
             }
-            auto& supports = impl->description.original_supports;
+            auto& supports = base->description.original_supports;
             if (supports.size() >= CartesianSourceCellSlot::canonical_support)
                 throw GeometryError(
                     GeometryErrorCode::ResourceLimit, "Cartesian support catalog exceeds compact slots.");
@@ -373,30 +389,66 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
 }
 std::size_t CartesianCellSource::size() const noexcept
 {
-    return impl_->description.cells.size();
+    return impl_->base->description.cells.size();
 }
 std::size_t CartesianCellSource::storage_bytes() const
 {
-    std::size_t bytes = sizeof(*this) + sizeof(Impl) + impl_->facts.capacity() * sizeof(Impl::Facts) +
-                        impl_->description.cells.capacity() * sizeof(CartesianSourceCellSlot) +
-                        impl_->description.original_supports.capacity() * sizeof(PlaneSupportIdentity<ordinary>);
-    for (const auto& axis : impl_->description.axes)
-        bytes += axis.capacity() * sizeof(double);
-    return bytes;
+    const auto base = base_retention_bytes();
+    return sizeof(*this) + sizeof(Impl) + impl_->facts.capacity() * sizeof(Impl::Facts) + base[0] + base[1] + base[2];
 }
 std::array<std::size_t, 3> CartesianCellSource::retention_bytes() const
 {
-    std::size_t populated = impl_->facts.size() * sizeof(Impl::Facts) +
-                            impl_->description.cells.size() * sizeof(CartesianSourceCellSlot) +
-                            impl_->description.original_supports.size() * sizeof(PlaneSupportIdentity<ordinary>);
-    for (const auto& axis : impl_->description.axes)
+    return {sizeof(*this) + sizeof(Impl), impl_->facts.size() * sizeof(Impl::Facts),
+        (impl_->facts.capacity() - impl_->facts.size()) * sizeof(Impl::Facts)};
+}
+std::shared_ptr<const void> CartesianCellSource::base_owner() const
+{
+    return impl_->base;
+}
+const void* CartesianCellSource::base_identity() const noexcept
+{
+    return impl_->base.get();
+}
+std::array<std::size_t, 3> CartesianCellSource::base_retention_bytes() const
+{
+    const auto& base = *impl_->base;
+    const auto& input = base.description;
+    std::size_t populated = input.cells.size() * sizeof(CartesianSourceCellSlot) +
+        input.original_supports.size() * sizeof(PlaneSupportIdentity<ordinary>) +
+        base.initial.size() * sizeof(Impl::InitialFacts);
+    std::size_t unused = (input.cells.capacity() - input.cells.size()) * sizeof(CartesianSourceCellSlot) +
+        (input.original_supports.capacity() - input.original_supports.size()) * sizeof(PlaneSupportIdentity<ordinary>) +
+        (base.initial.capacity() - base.initial.size()) * sizeof(Impl::InitialFacts);
+    for (const auto& axis : input.axes)
+    {
         populated += axis.size() * sizeof(double);
-    const auto metadata = sizeof(*this) + sizeof(Impl);
-    return {metadata, populated, storage_bytes() - metadata - populated};
+        unused += (axis.capacity() - axis.size()) * sizeof(double);
+    }
+    return {sizeof(Impl::Base), populated, unused};
+}
+std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
+    const std::shared_ptr<const CartesianCellSource>& original, GeometryLimits requested)
+{
+    if (!original)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Null Cartesian source evaluation clone.");
+    const auto limits = ordinary_limits(requested);
+    details::Operation operation(limits);
+    if (std::min(limits.maximum_vertices, details::active_work->limits.maximum_vertices) < 8 ||
+        std::min(limits.maximum_faces, details::active_work->limits.maximum_faces) < 6)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Cartesian source exceeds fixed geometry shape caps.");
+    details::active_work->charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
+    details::active_work->charge(original->size(), sizeof(Impl::Facts));
+    auto impl = std::make_shared<Impl>();
+    impl->base = original->impl_->base;
+    impl->facts.allocate(original->size());
+    impl->limits = limits;
+    impl->environment = original->impl_->environment;
+    impl->moment_policy = details::NativeCellGeometryMoments::DeferredRaw;
+    return std::shared_ptr<const CartesianCellSource>(new CartesianCellSource(std::move(impl)));
 }
 std::span<const PlaneSupportIdentity<ordinary>> CartesianCellSource::retained_supports() const
 {
-    return impl_->description.original_supports;
+    return impl_->base->description.original_supports;
 }
 void GeometryAllocationLedger::retain(
     const std::shared_ptr<const CartesianCellSource>& source, std::size_t& used, std::size_t limit)
@@ -410,7 +462,12 @@ void GeometryAllocationLedger::retain(
             details::require_mode(*impl_->mode, ordinary);
         else
             impl_->mode = ordinary;
-        impl_->admit({allocation_detail::Kind::CartesianSource, source}, source->storage_bytes(), used, limit);
+        const auto source_bytes = source->retention_bytes();
+        impl_->admit({allocation_detail::Kind::CartesianSource, source},
+            source_bytes[0] + source_bytes[1] + source_bytes[2], used, limit);
+        const auto base_bytes = source->base_retention_bytes();
+        impl_->admit({allocation_detail::Kind::ExternalOwner, source->base_owner()},
+            base_bytes[0] + base_bytes[1] + base_bytes[2], used, limit);
         for (const auto& support : source->retained_supports())
             impl_->retain_identity(support, used, limit);
         impl_->last_counter = used;
@@ -458,7 +515,7 @@ template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertificat
     const std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>&, std::size_t&, std::size_t);
 GeometryValue<ordinary> CartesianCellSource::volume(std::size_t slot) const
 {
-    return {impl_->facts.at(slot).constructor_volume.value};
+    return {impl_->base->initial.at(slot).constructor_volume.value};
 }
 GeometryPoint CartesianCellSource::origin(std::size_t slot) const
 {
@@ -467,7 +524,7 @@ GeometryPoint CartesianCellSource::origin(std::size_t slot) const
 GeometryMoments<ordinary> CartesianCellSource::moments(std::size_t slot, GeometryPoint origin) const
 {
     details::Operation operation(impl_->limits);
-    const auto frame = details::Frame{impl_->corners(slot).first, impl_->facts.at(slot).exponent};
+    const auto frame = details::Frame{impl_->corners(slot).first, impl_->base->initial.at(slot).exponent};
     const auto values = kernel::represented_moments(impl_->moment_integrals(slot), frame, origin);
     GeometryMoments<ordinary> result;
     result.origin = origin;
@@ -479,9 +536,9 @@ GeometryMoments<ordinary> CartesianCellSource::moments(std::size_t slot, Geometr
 GeometryPoint CartesianCellSource::centroid(std::size_t slot) const
 {
     details::Operation operation(impl_->limits);
-    const auto frame = details::Frame{origin(slot), impl_->facts.at(slot).exponent};
+    const auto frame = details::Frame{origin(slot), impl_->base->initial.at(slot).exponent};
     const auto values = kernel::represented_moments(impl_->moment_integrals(slot), frame, origin(slot));
-    return kernel::represented_centroid(values, impl_->facts.at(slot).constructor_volume, origin(slot));
+    return kernel::represented_centroid(values, impl_->base->initial.at(slot).constructor_volume, origin(slot));
 }
 std::array<long double, 3> CartesianCellSource::corner(std::size_t slot, std::size_t vertex) const
 {
@@ -518,7 +575,7 @@ Support<ordinary> CartesianCellSource::support(std::size_t slot, GeometryPoint n
 }
 PlaneSupportIdentity<ordinary> CartesianCellSource::source_support(std::size_t slot, std::size_t face) const
 {
-    return impl_->description.original_supports.at(impl_->description.cells.at(slot).support_slots.at(face));
+    return impl_->base->description.original_supports.at(impl_->base->description.cells.at(slot).support_slots.at(face));
 }
 namespace
 {
@@ -621,6 +678,71 @@ template void CellGeometryOperationWorkspace::retain_temporary<ArithmeticMode::O
     const ConvexGeometryPtr<ArithmeticMode::Ordinary>&);
 template void CellGeometryOperationWorkspace::retain_temporary<ArithmeticMode::BoundedCertification>(
     const ConvexGeometryPtr<ArithmeticMode::BoundedCertification>&);
+std::pair<ConvexGeometryPtr<ordinary>, ConvexGeometryPtr<ordinary>> CartesianCellSource::materialize_inputs(
+    std::size_t slot, GeometryLimits limits) const
+{
+    FrozenEnvironment environment(impl_->environment);
+    details::Operation operation(limits);
+    const auto [lower, upper] = impl_->corners(slot);
+    auto source = ConvexCellGeometry<ordinary>::box(lower, upper, limits);
+    if (impl_->base->initial.at(slot).custom_supports)
+    {
+        std::vector<PlaneSupportIdentity<ordinary>> supports;
+        details::active_work->charge(6, sizeof(PlaneSupportIdentity<ordinary>));
+        supports.reserve(6);
+        if (supports.capacity() > 6)
+            details::active_work->charge(supports.capacity() - 6, sizeof(PlaneSupportIdentity<ordinary>));
+        for (std::size_t face = 0; face < 6; ++face)
+            supports.push_back(source_support(slot, face));
+        source = details::NativeSupportAccess::cell_supports(*source, supports);
+    }
+    auto output = impl_->moment_policy == details::NativeCellGeometryMoments::DeferredRaw
+                      ? source
+                      : ConvexCellGeometry<ordinary>::from_geometry(*source, limits);
+    const auto& fact = impl_->facts.at(slot);
+    // Snapshot established cache state without evaluating an unqueried
+    // raw source. The copied values own no context/geometry references.
+    if (fact.moments_ready.load(std::memory_order_acquire))
+    {
+        const auto copied = *fact.integrals;
+        const auto stored = details::checked_geometry_storage<ordinary>(
+            DynamicGeometryAccess::implementation(*output->dynamic_geometry()));
+        std::call_once(stored->moment_cache->prepared,
+            [&]
+            {
+                stored->moment_cache->integrals = copied;
+                stored->moment_cache->ready.store(true, std::memory_order_release);
+            });
+    }
+    return std::pair{std::move(source), std::move(output)};
+}
+
+namespace
+{
+std::shared_ptr<const details::NativeGeometryBody> native_body(
+    const details::GeometryStorage<ordinary>& stored)
+{
+    details::active_work->charge(1, sizeof(details::NativeGeometryBody));
+    auto body = std::make_shared<details::NativeGeometryBody>();
+    details::active_work->charge(stored.vertices.size(), sizeof(details::FrozenVertex<ordinary>));
+    body->vertices.reserve(stored.vertices.size());
+    if (body->vertices.capacity() > stored.vertices.size())
+        details::active_work->charge(body->vertices.capacity() - stored.vertices.size(),
+            sizeof(details::FrozenVertex<ordinary>));
+    body->vertices.assign(stored.vertices.begin(), stored.vertices.end());
+    body->frame = stored.frame;
+    body->reference_origin = stored.reference_origin;
+    body->bounds = stored.bounds;
+    body->topology = stored.topology;
+    body->point_context = stored.point_context;
+    body->volume = stored.volume;
+    body->export_cache = stored.point_export_cache;
+    body->ancestry = stored.ancestry;
+    body->export_seal = stored.export_seal;
+    return body;
+}
+} // namespace
+
 ConvexGeometryPtr<ordinary> CartesianCellSource::materialize(
     std::size_t slot, CellGeometryOperationWorkspace& workspace) const
 {
@@ -630,6 +752,10 @@ ConvexGeometryPtr<ordinary> CartesianCellSource::materialize(
     auto& admission = *workspace.impl_;
     const auto limits = workspace.remaining_limits(ordinary);
     FrozenEnvironment environment(impl_->environment);
+    const bool primed = impl_->moment_policy == details::NativeCellGeometryMoments::PrimedState;
+    std::unique_lock<std::mutex> representation_lock(impl_->representation_mutex, std::defer_lock);
+    if (primed)
+        representation_lock.lock();
     try
     {
         auto [source, output] = [&]
@@ -646,36 +772,45 @@ ConvexGeometryPtr<ordinary> CartesianCellSource::materialize(
                     admission.pairs += work.pairs;
                 }
             } record{admission, operation.work};
-            const auto [lower, upper] = impl_->corners(slot);
-            auto source = ConvexCellGeometry<ordinary>::box(lower, upper, limits);
-            if (impl_->facts.at(slot).custom_supports)
+            std::shared_ptr<const details::NativeGeometryBody> body;
+            if (primed)
+                body = impl_->facts.at(slot).representation.lock();
+            if (body)
             {
-                std::vector<PlaneSupportIdentity<ordinary>> supports;
-                details::active_work->charge(6, sizeof(PlaneSupportIdentity<ordinary>));
-                supports.reserve(6);
-                if (supports.capacity() > 6)
-                    details::active_work->charge(supports.capacity() - 6, sizeof(PlaneSupportIdentity<ordinary>));
-                for (std::size_t face = 0; face < 6; ++face)
-                    supports.push_back(source_support(slot, face));
-                source = details::NativeSupportAccess::cell_supports(*source, supports);
+                details::active_work->charge(1, sizeof(details::StoredMomentCache<ordinary>));
+                auto moments = std::make_shared<details::StoredMomentCache<ordinary>>();
+                const auto& fact = impl_->facts.at(slot);
+                if (!fact.moments_ready.load(std::memory_order_acquire))
+                    throw GeometryError(GeometryErrorCode::InvalidTopology, "Primed source omitted its moment facts.");
+                std::call_once(moments->prepared,
+                    [&]
+                    {
+                        moments->integrals = *fact.integrals;
+                        moments->ready.store(true, std::memory_order_release);
+                    });
+                const auto root = details::construction_native({shared_from_this(), slot, primed, limits,
+                    std::move(moments), body});
+                auto output = details::materialize_native_construction(root);
+                return std::pair{output, std::move(output)};
             }
-            auto output = impl_->moment_policy == details::NativeCellGeometryMoments::DeferredRaw
-                              ? source
-                              : ConvexCellGeometry<ordinary>::from_geometry(*source, limits);
-            const auto& fact = impl_->facts.at(slot);
-            // Snapshot established cache state without evaluating an unqueried
-            // raw source. The copied values own no context/geometry references.
-            if (fact.moments_ready.load(std::memory_order_acquire))
-            {
-                const auto copied = *fact.integrals;
-                const auto stored = details::checked_geometry_storage<ordinary>(
-                    DynamicGeometryAccess::implementation(*output->dynamic_geometry()));
-                std::call_once(stored->moment_cache->prepared, [&] { stored->moment_cache->integrals = copied; });
-            }
+            auto [source, output] = materialize_inputs(slot, limits);
+            auto stored = std::const_pointer_cast<details::GeometryStorage<ordinary>>(
+                details::checked_geometry_storage<ordinary>(
+                    DynamicGeometryAccess::implementation(*output->dynamic_geometry())));
+            body = native_body(*stored);
+            stored->construction = details::construction_native({shared_from_this(), slot, primed, limits,
+                stored->moment_cache, body});
+            // Weak memoization changes no retained source ownership after admission.
+            // Publish only after this operation's complete output admission below.
             return std::pair{std::move(source), std::move(output)};
         }();
         admission.temporaries.retain(source, admission.bytes, admission.limits.byte_budget);
         admission.temporaries.retain(output, admission.bytes, admission.limits.byte_budget);
+        if (primed)
+        {
+            impl_->facts.at(slot).representation =
+                DynamicGeometryAccess::implementation(*output->dynamic_geometry())->construction->source().native()->body;
+        }
         return output;
     }
     catch (...)
@@ -1356,3 +1491,114 @@ bool details::NativeCellGeometrySourceAccess::state_compatible(
     return true;
 }
 } // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC::details
+{
+ConvexGeometryPtr<ArithmeticMode::Ordinary> materialize_native_construction(
+    const std::shared_ptr<const GeometryConstruction>& root)
+{
+    if (!root || root->kind() != GeometryConstruction::Kind::Source || !root->source().native())
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Missing authenticated native source recipe.");
+    const auto& native = *root->source().native();
+    if (!native.body)
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Missing validated native source body.");
+    const auto& body = *native.body;
+    Operation operation(native.limits);
+    active_work->charge(1, sizeof(GeometryStorage<ArithmeticMode::Ordinary>) + sizeof(DynamicConvexGeometry));
+    auto stored = std::make_shared<GeometryStorage<ArithmeticMode::Ordinary>>(body.ancestry);
+    active_work->charge(body.vertices.size(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
+    stored->vertices.reserve(body.vertices.size());
+    if (stored->vertices.capacity() > body.vertices.size())
+        active_work->charge(stored->vertices.capacity() - body.vertices.size(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
+    stored->vertices.assign(body.vertices.begin(), body.vertices.end());
+    stored->frame = body.frame;
+    stored->reference_origin = body.reference_origin;
+    stored->limits = native.limits;
+    stored->bounds = body.bounds;
+    stored->topology = body.topology;
+    stored->faces = body.topology->faces();
+    stored->surfaces = SurfaceRange<ArithmeticMode::Ordinary>(body.topology.get());
+    stored->point_context = body.point_context;
+    stored->volume = body.volume;
+    stored->moment_cache = native.moments;
+    stored->point_export_cache = body.export_cache;
+    stored->ancestry = body.ancestry;
+    stored->export_seal = body.export_seal;
+    stored->construction = root;
+    return ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(DynamicGeometryAccess::geometry(std::move(stored)));
+}
+} // namespace SimpleFluid::PLIC::details
+
+namespace SimpleFluid::PLIC::details
+{
+template<ArithmeticMode Mode>
+    requires(Mode != ArithmeticMode::Exact)
+bool cell_evaluation_cache_ready(const ConvexGeometryPtr<Mode>& geometry)
+{
+    if (!geometry)
+        return false;
+    const auto source = checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*geometry->dynamic_geometry()));
+    return source->moment_cache && source->moment_cache->ready.load(std::memory_order_acquire);
+}
+template bool cell_evaluation_cache_ready(const ConvexGeometryPtr<ArithmeticMode::Ordinary>&);
+template bool cell_evaluation_cache_ready(const ConvexGeometryPtr<ArithmeticMode::BoundedCertification>&);
+template<ArithmeticMode Mode>
+    requires(Mode != ArithmeticMode::Exact)
+ConvexGeometryPtr<Mode> clone_cell_evaluation(
+    const ConvexGeometryPtr<Mode>& original, bool copy_established_integrals, GeometryLimits limits)
+{
+    if (!original)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Null immutable cell evaluation source.");
+    limits.arithmetic_mode = Mode;
+    Operation operation(limits);
+    const auto source = checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*original->dynamic_geometry()));
+    if (source->vertices.size() > std::min(limits.maximum_vertices, active_work->limits.maximum_vertices) ||
+        source->faces.size() > std::min(limits.maximum_faces, active_work->limits.maximum_faces))
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Cell evaluation exceeds selected shape limits.");
+    if (copy_established_integrals && !source->moment_cache->ready.load(std::memory_order_acquire))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Established cell moment facts are absent.");
+    active_work->charge(1, sizeof(GeometryStorage<Mode>) + sizeof(DynamicConvexGeometry) + sizeof(StoredMomentCache<Mode>));
+    auto stored = std::make_shared<GeometryStorage<Mode>>(GeometryMetadata<Mode>(*source), source->topology,
+        std::vector<FrozenVertex<Mode>>{});
+    auto moments = std::make_shared<StoredMomentCache<Mode>>();
+    if (copy_established_integrals)
+        std::call_once(moments->prepared,
+            [&]
+            {
+                moments->integrals = *source->moment_cache->integrals;
+                moments->ready.store(true, std::memory_order_release);
+            });
+    stored->limits = limits;
+    stored->moment_cache = moments;
+    bool native_bound = false;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (source->construction && source->construction->kind() == GeometryConstruction::Kind::Source &&
+            source->construction->source().native())
+        {
+            auto native = *source->construction->source().native();
+            stored->vertex_owner = native.body;
+            stored->vertices.borrow(native.body->vertices, native.body->vertices.capacity());
+            native.moments = std::move(moments);
+            native.limits = limits;
+            native.primed = native.primed && copy_established_integrals;
+            stored->construction = construction_native(std::move(native));
+            native_bound = true;
+        }
+    if (!native_bound)
+    {
+        if (source->vertices.borrowed())
+        {
+            // The range already names its ultimate owner; avoid evaluation chains.
+            stored->vertex_owner = source->vertex_owner;
+        }
+        else
+            stored->vertex_owner = std::shared_ptr<const DynamicConvexGeometry::Impl>(source);
+        stored->vertices.borrow(std::span<const FrozenVertex<Mode>>(source->vertices), source->vertices.capacity());
+    }
+    return ConvexCellGeometry<Mode>::from_dynamic(DynamicGeometryAccess::geometry(std::move(stored)));
+}
+template ConvexGeometryPtr<ArithmeticMode::Ordinary> clone_cell_evaluation(
+    const ConvexGeometryPtr<ArithmeticMode::Ordinary>&, bool, GeometryLimits);
+template ConvexGeometryPtr<ArithmeticMode::BoundedCertification> clone_cell_evaluation(
+    const ConvexGeometryPtr<ArithmeticMode::BoundedCertification>&, bool, GeometryLimits);
+} // namespace SimpleFluid::PLIC::details

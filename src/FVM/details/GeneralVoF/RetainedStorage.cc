@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -91,8 +92,7 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
     const auto retain_face = [&](const auto& face)
     {
         const auto before = budget.used;
-        budget.add(face->exclusive_storage_bytes());
-        native_allocations.retain(PLIC::planar_support<ArithmeticMode::Ordinary>(*face), budget.used, budget.limit);
+        native_allocations.retain_planar_face(face, budget.used, budget.limit);
         geometry_root_bytes += budget.used - before;
     };
     category("state_and_cache");
@@ -107,6 +107,9 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                    data.experimental_catalog->capacity() *
                        sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>));
     const auto before_catalogs = budget.used;
+    if (data.topology->geometry_snapshot)
+        data.topology->geometry_snapshot->retain(
+            native_allocations, finite_allocations, budget.used, budget.limit);
     native_allocations.retain(data.topology->cell_geometry, budget.used, budget.limit);
     if (data.topology->ordinary_cell_geometry)
         native_allocations.retain(data.topology->ordinary_cell_geometry, budget.used, budget.limit);

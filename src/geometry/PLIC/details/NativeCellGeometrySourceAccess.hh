@@ -73,6 +73,23 @@ public:
     {
         return ref.source->query_limits();
     }
+    [[nodiscard]] static std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> retained_supports(
+        const CartesianCellSource& source)
+    {
+        return source.retained_supports();
+    }
+    [[nodiscard]] static std::array<std::size_t, 3> exclusive_bytes(const CartesianCellSource& source)
+    {
+        return source.retention_bytes();
+    }
+    [[nodiscard]] static std::array<std::size_t, 3> base_bytes(const CartesianCellSource& source)
+    {
+        return source.base_retention_bytes();
+    }
+    [[nodiscard]] static std::shared_ptr<const void> base_owner(const CartesianCellSource& source)
+    {
+        return source.base_owner();
+    }
     static void visit_local_coordinates(const NativeCartesianCellReference& ref, void* context,
         void (*visitor)(void*, std::size_t, const PointCoordinates<ArithmeticMode::Ordinary>&))
     {

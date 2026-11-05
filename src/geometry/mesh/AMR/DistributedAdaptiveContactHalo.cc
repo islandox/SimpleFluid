@@ -150,6 +150,7 @@ struct DistributedAdaptiveContactHalo::Impl
     ContactHaloContext context;
     ContactHaloBeforeSend before_send;
     std::shared_ptr<Budget> arena;
+    std::shared_ptr<std::size_t> external_lease_bytes = std::make_shared<std::size_t>(0);
     Budget& budget;
     DeferredOwnerCharges deferred_owners;
     IdentityBudget identities;
@@ -194,7 +195,8 @@ struct DistributedAdaptiveContactHalo::Impl
           budget(*arena), deferred_owners(budget), trace_pool(std::in_place, budget), affected_pairs(budget),
           records(budget), ranks(comm.is_null() ? 0 : comm->getSize()), rank(comm.is_null() ? -1 : comm->getRank())
     {
-        budget.add(sizeof(Impl) + sizeof(Budget) + 128 + sizeof(DistributedAdaptiveContactHalo) + sizeof(Groups));
+        budget.add(sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
+                   sizeof(Groups));
         groups = std::make_unique<Groups>(arena);
     }
     void initialize_collective()
@@ -696,7 +698,7 @@ std::size_t row_storage(const ContactIncidenceRow& row)
 std::size_t DistributedAdaptiveContactHalo::Impl::metadata_bytes() const
 {
     std::size_t bytes =
-        sizeof(Impl) + sizeof(Budget) + 128 + sizeof(DistributedAdaptiveContactHalo) +
+        sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
         rows.capacity() * sizeof(IncidenceRowHandle) + borrowed_rows.capacity() * sizeof(std::size_t) +
         records.storage_bytes() +
         (free_rows.capacity() + free_records.capacity() + retired_records.capacity()) * sizeof(std::size_t) +
@@ -2281,8 +2283,9 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
             if (!source.ready || !source.evaluated || !source.incidence)
                 throw std::invalid_argument("Contact candidate needs an evaluated canonical source.");
             const auto metadata = source.metadata_bytes();
-            constexpr auto header = sizeof(Impl) + sizeof(Budget) + 128 + sizeof(DistributedAdaptiveContactHalo) +
-                                    sizeof(Impl::Groups) + Impl::Groups::empty_dynamic_admission_bytes();
+            constexpr auto header = sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 +
+                                    sizeof(DistributedAdaptiveContactHalo) + sizeof(Impl::Groups) +
+                                    Impl::Groups::empty_dynamic_admission_bytes();
             if (caller_live_bytes > source.options.byte_budget ||
                 metadata > source.options.byte_budget - caller_live_bytes ||
                 header > source.options.byte_budget - caller_live_bytes - metadata)
@@ -2472,7 +2475,67 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
 }
 std::size_t DistributedAdaptiveContactHalo::cache_storage_bytes() const noexcept
 {
-    return impl_->budget.used - impl_->external_retained_bytes - impl_->fork_overlap_bytes;
+    return impl_->budget.used - impl_->external_retained_bytes - impl_->fork_overlap_bytes -
+           *impl_->external_lease_bytes;
+}
+ContactExternalResidencyLease DistributedAdaptiveContactHalo::external_residency_lease() const
+{
+    return ContactExternalResidencyLease(impl_->arena, impl_->external_lease_bytes);
+}
+ContactExternalResidencyLease::ContactExternalResidencyLease(
+    std::shared_ptr<Budget> arena, std::shared_ptr<std::size_t> total)
+    : arena_(std::move(arena)), total_(std::move(total))
+{
+}
+ContactExternalResidencyLease::~ContactExternalResidencyLease()
+{
+    if (arena_)
+    {
+        arena_->used -= bytes_;
+        *total_ -= bytes_;
+    }
+}
+ContactExternalResidencyLease::ContactExternalResidencyLease(ContactExternalResidencyLease&& other) noexcept
+    : arena_(std::move(other.arena_)), total_(std::move(other.total_)), bytes_(std::exchange(other.bytes_, 0))
+{
+}
+ContactExternalResidencyLease& ContactExternalResidencyLease::operator=(ContactExternalResidencyLease&& other) noexcept
+{
+    if (this != &other)
+    {
+        if (arena_)
+        {
+            arena_->used -= bytes_;
+            *total_ -= bytes_;
+        }
+        arena_ = std::move(other.arena_);
+        total_ = std::move(other.total_);
+        bytes_ = std::exchange(other.bytes_, 0);
+    }
+    return *this;
+}
+void ContactExternalResidencyLease::adopt_precharged(std::size_t bytes)
+{
+    if (!arena_ || bytes_ || bytes > arena_->used)
+        throw std::logic_error("Invalid pre-admitted external residency transfer.");
+    *total_ += bytes;
+    bytes_ = bytes;
+}
+void ContactExternalResidencyLease::resize(std::size_t bytes)
+{
+    if (!arena_)
+        throw std::logic_error("External residency lease lacks its allocation arena.");
+    if (bytes > bytes_)
+    {
+        arena_->add(bytes - bytes_);
+        *total_ += bytes - bytes_;
+    }
+    else
+    {
+        arena_->used -= bytes_ - bytes;
+        *total_ -= bytes_ - bytes;
+    }
+    bytes_ = bytes;
 }
 void DistributedAdaptiveContactHalo::bind_external_retained_bytes(std::size_t bytes) noexcept
 {

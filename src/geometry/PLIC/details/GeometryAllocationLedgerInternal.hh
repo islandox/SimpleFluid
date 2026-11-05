@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -42,7 +43,11 @@ enum class Kind
     IdentityPayload,
     AuthorityPayload,
     CartesianSource,
-    CellCatalog
+    CellCatalog,
+    NativeSourceBody,
+    ExternalOwner,
+    PlanarWrapper = 100,
+    PlanarPayload = 101
 };
 struct Item
 {
@@ -110,6 +115,7 @@ struct GeometryAllocationLedger::Impl
     struct Entry
     {
         std::shared_ptr<const void> pin;
+        std::size_t payload_bytes = 0;
     };
     std::map<allocation_detail::Key, Entry, allocation_detail::Less> owners;
     std::vector<allocation_detail::Item> pending;
@@ -155,8 +161,12 @@ struct GeometryAllocationLedger::Impl
     {
         using namespace allocation_detail;
         const Key key{item.kind, item.owner.get()};
-        if (owners.contains(key))
+        if (const auto found = owners.find(key); found != owners.end())
+        {
+            if (found->second.payload_bytes != bytes)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable allocation payload size changed.");
             return false;
+        }
         // Charge before publishing the seen identity. A failed call cannot
         // make an uncharged allocation disappear from a later admission.
         if (prepaid)
@@ -164,7 +174,7 @@ struct GeometryAllocationLedger::Impl
         else
             account(bytes, false, used, limit);
         account(sizeof(typename decltype(owners)::value_type) + 4 * sizeof(void*), true, used, limit);
-        owners.emplace(key, Entry{item.owner});
+        owners.emplace(key, Entry{item.owner, bytes});
         return true;
     }
 
@@ -229,20 +239,41 @@ struct GeometryAllocationLedger::Impl
                     const auto base = std::static_pointer_cast<const DynamicConvexGeometry::Impl>(item.owner);
                     const auto geometry = checked_geometry_storage<Mode>(base);
                     std::size_t bytes = sizeof(GeometryStorage<Mode>);
-                    add_bytes(bytes, geometry->vertices.capacity(), sizeof(FrozenVertex<Mode>));
+                    add_bytes(bytes, geometry->vertices.owned_capacity(), sizeof(FrozenVertex<Mode>));
                     if (!admit_owner(item, bytes, used, limit))
                         break;
                     push(Kind::Topology, geometry->topology, used, limit);
+                    if (const auto* owner = std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(
+                            &geometry->vertex_owner))
+                        push(Kind::Geometry, *owner, used, limit);
+                    else if (const auto* owner = std::get_if<std::shared_ptr<const NativeGeometryBody>>(
+                                 &geometry->vertex_owner))
+                        push(Kind::NativeSourceBody, *owner, used, limit);
                     push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(geometry->point_context),
                         used, limit);
                     push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(geometry->point_export_cache), used,
                         limit);
                     push(Kind::Geometry, geometry->export_source, used, limit);
+                    push(Kind::Recipe, geometry->native_export_source, used, limit);
                     push(Kind::Moment, std::shared_ptr<const StoredMomentCache<Mode>>(geometry->moment_cache), used,
                         limit);
                     push(Kind::Ancestry, geometry->ancestry, used, limit);
                     push(Kind::Certificate, geometry->partition_certificate, used, limit);
                     push(Kind::Recipe, geometry->construction, used, limit);
+                    break;
+                }
+                case Kind::NativeSourceBody: {
+                    require_mode(Mode, ArithmeticMode::Ordinary);
+                    const auto body = std::static_pointer_cast<const NativeGeometryBody>(item.owner);
+                    auto bytes = sizeof(NativeGeometryBody);
+                    add_bytes(bytes, body->vertices.capacity(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
+                    if (admit_owner(item, bytes, used, limit))
+                    {
+                        push(Kind::Topology, body->topology, used, limit);
+                        push(Kind::PointSnapshot, body->point_context, used, limit);
+                        push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(body->export_cache), used, limit);
+                        push(Kind::Ancestry, body->ancestry, used, limit);
+                    }
                     break;
                 }
                 case Kind::Topology: {
@@ -356,10 +387,23 @@ struct GeometryAllocationLedger::Impl
                     auto bytes = sizeof(GeometryConstruction);
                     if (recipe->kind() == GeometryConstruction::Kind::Rebase)
                         add_bytes(bytes, 1, sizeof(GeometryConstruction::Rebase));
+                    if (recipe->kind() == GeometryConstruction::Kind::Source && recipe->source().native())
+                        add_bytes(bytes, 1, sizeof(NativeGeometryConstruction));
                     if (admit_owner(item, bytes, used, limit))
                     {
                         if (recipe->kind() == GeometryConstruction::Kind::Source)
-                            push(Kind::Geometry, recipe->source().source, used, limit);
+                        {
+                            if (const auto* native = recipe->source().native())
+                            {
+                                require_mode(Mode, ArithmeticMode::Ordinary);
+                                push(Kind::CartesianSource, native->source, used, limit);
+                                push(Kind::NativeSourceBody, native->body, used, limit);
+                                push(Kind::Moment, std::shared_ptr<const StoredMomentCache<ArithmeticMode::Ordinary>>(
+                                    native->moments), used, limit);
+                            }
+                            else
+                                push(Kind::Geometry, recipe->source().geometry(), used, limit);
+                        }
                         else if (recipe->kind() == GeometryConstruction::Kind::Clip)
                             push(Kind::Clip, recipe->clip().clip, used, limit);
                         else
@@ -368,11 +412,27 @@ struct GeometryAllocationLedger::Impl
                     break;
                 }
                 case Kind::CellCatalog:
-                case Kind::CartesianSource:
                 case Kind::IdentityPayload:
                 case Kind::AuthorityPayload:
+                case Kind::ExternalOwner:
+                case Kind::PlanarWrapper:
+                case Kind::PlanarPayload:
                     throw GeometryError(GeometryErrorCode::InvalidTopology,
                         "Specialized immutable allocations must enter through their owner visitor.");
+                case Kind::CartesianSource: {
+                    require_mode(Mode, ArithmeticMode::Ordinary);
+                    const auto source = std::static_pointer_cast<const CartesianCellSource>(item.owner);
+                    const auto source_bytes = NativeCellGeometrySourceAccess::exclusive_bytes(*source);
+                    if (admit_owner(item, source_bytes[0] + source_bytes[1] + source_bytes[2], used, limit))
+                    {
+                        const auto base_bytes = NativeCellGeometrySourceAccess::base_bytes(*source);
+                        admit({Kind::ExternalOwner, NativeCellGeometrySourceAccess::base_owner(*source)},
+                            base_bytes[0] + base_bytes[1] + base_bytes[2], used, limit);
+                        for (const auto& support : NativeCellGeometrySourceAccess::retained_supports(*source))
+                            retain_identity(support, used, limit);
+                    }
+                    break;
+                }
                 case Kind::Clip: {
                     const auto clip = std::static_pointer_cast<const GeometryClipConstruction>(item.owner);
                     require_mode(clip->mode, Mode);
@@ -381,6 +441,7 @@ struct GeometryAllocationLedger::Impl
                     if (admit_owner(item, bytes, used, limit))
                     {
                         push(Kind::Recipe, clip->parent, used, limit);
+                        push(Kind::Recipe, clip->native_plane_source, used, limit);
                         push(Kind::Plane, std::static_pointer_cast<const StoredPlane<Mode>>(clip->plane), used, limit);
                         push(Kind::PointSnapshot, clip->point_context, used, limit);
                     }

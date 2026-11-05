@@ -183,6 +183,7 @@ public:
 struct GeneralVoFFetchedNativeSources::Storage
 {
     Meshes::AMR::AdaptiveNativeDraft draft;
+    std::shared_ptr<const Meshes::AMR::AdaptiveGeometrySnapshot> snapshot;
     std::shared_ptr<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>> catalog;
     std::size_t admitted = 0, fetch_limit = 0;
 };
@@ -209,6 +210,7 @@ GeneralVoFFetchedNativeSources GeneralVoF::fetch_native_sources(
     namespace catalog = detail::cell_catalog_detail;
     const auto& hierarchy = *data_->hierarchy;
     const auto comm = hierarchy.communicator();
+    const auto source_observation = hierarchy.observation();
     detail::wire::Budget budget{operation_byte_budget};
     std::shared_ptr<GeneralVoFFetchedNativeSources::Storage> result;
     // No local allocation/validation may fail before peers enter this guard.
@@ -255,19 +257,23 @@ GeneralVoFFetchedNativeSources GeneralVoF::fetch_native_sources(
             {
                 case ArithmeticMode::Ordinary:
                     built = catalog::build<ArithmeticMode::Ordinary>(hierarchy, leaves, budget, nullptr,
-                        catalog::CatalogPurpose::OriginalSources, &original_owners);
+                        catalog::CatalogPurpose::OriginalSources, &original_owners, nullptr, nullptr, &draft,
+                        &source_observation);
                     break;
                 case ArithmeticMode::BoundedCertification:
                     built = catalog::build<ArithmeticMode::BoundedCertification>(hierarchy, leaves, budget, nullptr,
-                        catalog::CatalogPurpose::OriginalSources, &original_owners);
+                        catalog::CatalogPurpose::OriginalSources, &original_owners, nullptr, nullptr, &draft,
+                        &source_observation);
                     break;
                 case ArithmeticMode::Exact:
                     built = catalog::build<ArithmeticMode::Exact>(hierarchy, leaves, budget, nullptr,
-                        catalog::CatalogPurpose::OriginalSources, &original_owners);
+                        catalog::CatalogPurpose::OriginalSources, &original_owners, nullptr, nullptr, &draft,
+                        &source_observation);
                     break;
                 default:
                     throw std::invalid_argument("Unknown fetched native source arithmetic mode.");
             }
+            result->snapshot = std::move(built.snapshot);
             result->catalog = std::move(built.ordinary);
             result->admitted = budget.used;
         });

@@ -496,6 +496,39 @@ TEST(GeometryRetentionCensus, PlanarPayloadSeparatesPolygonMetadataAndCapacity)
     EXPECT_GT(row->metadata_bytes, 0u);
 }
 
+TEST(GeometryRetentionCensus, SharedSourceSnapshotAndLedgerUseTheSamePlanarOwnerKeys)
+{
+    using Face = P::PlanarFace<ordinary>;
+    const std::array<P::GeometryPoint, 3> triangle{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+    const auto source = Face::make(triangle);
+    const auto snapshot = source;
+    const auto tile_shell = std::make_shared<const Face>(*source);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain_planar_face(source, used, cap);
+    ledger.retain_planar_face(snapshot, used, cap);
+    ledger.retain_planar_face(tile_shell, used, cap);
+    const std::array roots{R::root(*source, 0), R::root(*snapshot, 1), R::root(*tile_shell, 2)};
+    const std::array<const P::GeometryAllocationLedger*, 1> ledgers{&ledger};
+    Scratch scratch;
+    const auto report = R::inspect_retention(roots, ledgers, scratch.resource, {1000, 1000, true});
+    ASSERT_TRUE(report.complete()) << report.detail;
+    EXPECT_EQ(kind_count(report, "planar_wrapper"), 2u);
+    EXPECT_EQ(kind_count(report, "planar_payload"), 1u);
+    EXPECT_EQ(kind_count(report, "external_owner"), 0u);
+    EXPECT_EQ(report.owner_union.bytes, ledger.payload_bytes());
+    EXPECT_EQ(report.intersection.bytes, ledger.payload_bytes());
+    EXPECT_EQ(report.ledger_payload_admission, ledger.payload_bytes());
+    EXPECT_EQ(report.uncovered_required_owners, 0u);
+    const auto polygon = std::find_if(report.owners.begin(), report.owners.end(),
+        [](const auto& owner) { return std::string_view(owner.kind) == "planar_payload"; });
+    ASSERT_NE(polygon, report.owners.end());
+    EXPECT_EQ(polygon->bytes, source->exclusive_storage_bytes());
+    EXPECT_EQ(polygon->root_groups, 7u);
+    EXPECT_TRUE(polygon->application);
+    EXPECT_TRUE(polygon->ledger);
+}
+
 TEST(GeometryRetentionCensus, StrongOwnerCyclesAreIncompleteWithoutFollowingBorrowedPlaneContexts)
 {
     using Context = P::PointSnapshotContext<ordinary>;

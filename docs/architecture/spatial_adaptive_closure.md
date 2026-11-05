@@ -400,6 +400,17 @@ not a bound on all allocator activity or process RSS. `storage()` includes the
 retained contact cache in its owned-byte estimate without adding the bound Data
 admission a second time.
 
+Mesh geometry snapshots are immutable roots shared with FVM cell views and PLIC
+source references. Snapshot acquisition authenticates the actual source binding
+and arithmetic controls, and admits construction, cache metadata and replacement
+overlap before publishing a new root. Hierarchy residency leases pin only the
+allocation arena, never the halo or hierarchy. Rebinding copies the mutable cache
+shell while sharing immutable roots and transferring already admitted residency;
+adaptation starts a new cache for the changed geometry version. Snapshot and
+source views can outlive the hierarchy without retaining mutable transaction
+state. The borrowed census follows snapshot catalogs and their exact external
+recipe owners without locking weak caches or preparing numerical data.
+
 Source inventories, evaluated-axis maps, point directories, certificates and
 exceptions participate in the borrowed retention census. Shared immutable payload
 and referencing metadata are separate. Each candidate independently admits shared

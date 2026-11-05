@@ -9,6 +9,7 @@
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
+#include <algorithm>
 #include <array>
 #include <gtest/gtest.h>
 namespace
@@ -393,5 +394,84 @@ TEST(DistributedMixedKernel, ContactClosureKeepsRetainedPolyhedralSupportsSepara
     auto h = std::make_shared<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy>(
         std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     closed(*h);
+}
+} // namespace
+
+namespace
+{
+TEST(DistributedMixedKernel, MeshSnapshotCannotReuseMissingOrMalformedJoinCapsule)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "Focused snapshot join-authentication oracle is serial.";
+    const auto make_source = []
+    {
+        const AMR::MixedAMR mesh(test::mixed_joined_grid());
+        std::vector<std::uint64_t> owned;
+        for (std::uint64_t cell = 0; cell < mesh.geometry()->num_cells(); ++cell)
+            owned.push_back(cell);
+        auto input = mesh.detach_owned(owned, {'s', 'n', 'a', 'p', 's', 'h', 'o', 't'});
+        return std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
+            std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
+    };
+    const auto warm = make_source(), cold = make_source();
+    const auto found = std::find_if(warm->owned().begin(), warm->owned().end(),
+        [](const auto& row) { return row.second.provider == AMR::AdaptiveProviderKind::Polyhedral; });
+    ASSERT_NE(found, warm->owned().end());
+    const auto& valid = found->second;
+    ASSERT_TRUE(valid.geometry);
+    ASSERT_TRUE(valid.join_recipe);
+    ASSERT_FALSE(valid.surfaces.empty());
+    const std::array<const AMR::AdaptiveLeaf*, 1> rows{&valid};
+    std::size_t used = 0;
+    const auto snapshot = warm->geometry_snapshot(
+        rows, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024);
+    for (const bool missing : {true, false})
+    {
+        auto malformed = valid;
+        malformed.join_recipe =
+            missing ? nullptr : std::make_shared<const AMR::AdaptiveBytes>(AMR::AdaptiveBytes{'b', 'a', 'd'});
+        EXPECT_THROW((void) cold->geometry(malformed), std::invalid_argument);
+        const std::array<const AMR::AdaptiveLeaf*, 1> bad{&malformed};
+        std::size_t cold_used = 0, warm_used = 0;
+        EXPECT_THROW((void) cold->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         cold_used, 16 * 1024 * 1024),
+            std::invalid_argument);
+        EXPECT_THROW((void) warm->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         warm_used, 16 * 1024 * 1024),
+            std::invalid_argument);
+        used = 0;
+        EXPECT_EQ(warm->geometry_snapshot(
+                      rows, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024),
+            snapshot);
+    }
+    for (const bool missing : {true, false})
+    {
+        auto malformed = valid;
+        if (missing)
+            malformed.surfaces.clear();
+        else
+            malformed.surfaces.pop_back();
+        EXPECT_THROW((void) cold->geometry(malformed), std::exception);
+        const std::array<const AMR::AdaptiveLeaf*, 1> bad{&malformed};
+        std::size_t cold_used = 0, warm_used = 0;
+        EXPECT_THROW((void) cold->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         cold_used, 16 * 1024 * 1024),
+            std::exception);
+        EXPECT_THROW((void) warm->geometry_snapshot(bad, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State,
+                         warm_used, 16 * 1024 * 1024),
+            std::exception);
+        used = 0;
+        EXPECT_EQ(warm->geometry_snapshot(
+                      rows, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024),
+            snapshot);
+    }
+    auto independent = valid;
+    independent.join_recipe = std::make_shared<const AMR::AdaptiveBytes>(*valid.join_recipe);
+    const std::array<const AMR::AdaptiveLeaf*, 1> equal{&independent};
+    used = 0;
+    EXPECT_EQ(warm->geometry_snapshot(
+                  equal, ArithmeticMode::Ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024),
+        snapshot);
 }
 } // namespace

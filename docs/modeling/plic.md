@@ -6,9 +6,10 @@ face integration and a safeguarded minority-phase offset solve; see
 Its numerical error estimates are not certified bounds. The legacy scalar and
 explicit surface construction paths described below remain available.
 
-Phase samples hold immutable `CellGeometryView<Mode>` values. An Ordinary native
-Cartesian sample pins a shared source catalog, while other modes and explicit
-geometry pin their existing materialized owners. Routine sample validation,
+Phase samples hold immutable `CellGeometryView<Mode>` values selecting mesh-owned
+geometry snapshots. An Ordinary native Cartesian sample shares immutable source
+coordinates and supports, while other modes and explicit geometry retain their
+required represented geometry and numerical evidence. Routine sample validation,
 occupancy and gradient queries use the view. Geometry-dependent fitting creates
 explicit shells in an invocation-local `CellGeometryOperationWorkspace`; pure
 and gradient-only paths keep preparation lazy. Pure stencil samples remain in
@@ -17,6 +18,18 @@ There is no implicit conversion from a view to a shell. Explicit batch
 materialization preserves range order, admits its output descriptors before
 allocation, and returns no partial output on failure; spent workspace charges
 remain cumulative.
+
+PLIC owns generated intersections, cutting surfaces and connectivity, together
+with their numerical certificates and replay records. Native input geometry is
+a shared immutable source body. Retained cuts and numerical rebases reference
+that body without retaining the temporary input-cell implementation. Replay
+uses validated source values and the original plane identities; it does not
+repeat source-construction arithmetic. Raw and imported fallback evaluations
+keep independent lazy moment caches where the original first-query environment
+is part of the numerical contract. Sharing base geometry does not prime a cache
+or change the caller's rounding environment. Initial and expanded catalogs in
+one authenticated constructor retain their established evaluation reuse; this
+does not authorize sharing lazy evaluation state between independent states.
 
 Each reconstruction prepares its target boundary once and reuses it across trial
 normals and offset evaluations. Prepared neighbors are constructed only when the
