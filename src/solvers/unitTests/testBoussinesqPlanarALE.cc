@@ -1707,84 +1707,97 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
 
 TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetry)
 {
-    auto state = make_case(Coupling::PISO, 0.0, 3);
-    const auto geometry = capture_geometry(*state.mesh);
-    const auto primary = capture_primary(*state.solver);
-    const auto initial_time = state.solver->time();
-    const auto initial_step = state.solver->step_index();
-    const auto initial_history = state.coupling->free_surface_history().size();
-    const auto initial_surface = state.coupling->free_surface_diagnostics();
-    const auto initial_liquid = state.coupling->liquid_mass_inventory().diagnostics();
-    const auto initial_liquid_field = capture_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory());
-    const auto initial_density = capture_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity());
-    const auto initial_clear_level_field = capture_owned_values(state.coupling->clear_level());
-    const auto initial_pool_level_field = capture_owned_values(state.coupling->pool_level());
-    const auto initial_headspace_pressure_field = capture_owned_values(state.coupling->headspace_pressure());
-    const auto initial_pool_occupancy_field = capture_owned_values(state.coupling->pool_occupancy());
-    const auto initial_absolute_flux = capture_owned_face_values(state.solver->pressure_corrected_face_fluxes());
-
-    state.solver->reset_solver_phase_timings();
-    const auto valid_pressure_options = state.solver->pressure_linear_solver_options();
-    auto invalid_pressure_options = valid_pressure_options;
-    invalid_pressure_options.max_iterations = 0;
-    state.solver->set_pressure_linear_solver_options(invalid_pressure_options);
-
-    std::string failure;
-    try
+    for (const auto method : {SimpleFluid::PressureProjectionMethod::Anderson,
+             SimpleFluid::PressureProjectionMethod::FullOperator})
     {
-        state.coupling->step();
-        FAIL() << "Expected the in-trial pressure solve to reject its policy.";
+        SCOPED_TRACE(static_cast<int>(method));
+        auto state = make_case(Coupling::PISO, 0.0, 3);
+        if (method == SimpleFluid::PressureProjectionMethod::FullOperator)
+        {
+            auto options = state.solver->pressure_linear_solver_options();
+            options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+            options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+            state.solver->set_pressure_linear_solver_options(options);
+        }
+        state.solver->set_pressure_projection_method(method);
+        const auto geometry = capture_geometry(*state.mesh);
+        const auto primary = capture_primary(*state.solver);
+        const auto initial_time = state.solver->time();
+        const auto initial_step = state.solver->step_index();
+        const auto initial_history = state.coupling->free_surface_history().size();
+        const auto initial_surface = state.coupling->free_surface_diagnostics();
+        const auto initial_liquid = state.coupling->liquid_mass_inventory().diagnostics();
+        const auto initial_liquid_field = capture_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory());
+        const auto initial_density = capture_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity());
+        const auto initial_clear_level_field = capture_owned_values(state.coupling->clear_level());
+        const auto initial_pool_level_field = capture_owned_values(state.coupling->pool_level());
+        const auto initial_headspace_pressure_field = capture_owned_values(state.coupling->headspace_pressure());
+        const auto initial_pool_occupancy_field = capture_owned_values(state.coupling->pool_occupancy());
+        const auto initial_absolute_flux = capture_owned_face_values(state.solver->pressure_corrected_face_fluxes());
+
+        state.solver->reset_solver_phase_timings();
+        const auto valid_pressure_options = state.solver->pressure_linear_solver_options();
+        auto invalid_pressure_options = valid_pressure_options;
+        invalid_pressure_options.max_iterations = 0;
+        state.solver->set_pressure_linear_solver_options(invalid_pressure_options);
+
+        std::string failure;
+        try
+        {
+            state.coupling->step();
+            FAIL() << "Expected the in-trial pressure solve to reject its policy.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            failure = error.what();
+        }
+
+        EXPECT_NE(failure.find("BelosLinearSolver requires positive maximum iterations"), std::string::npos) << failure;
+        EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 1u);
+        EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 1u);
+        EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::PressureProjection).calls, 0u);
+        const auto rejected_trial_calls = state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls;
+        EXPECT_GT(rejected_trial_calls, 0u);
+        expect_geometry_restored(*state.mesh, geometry);
+        expect_primary_restored(*state.solver, primary);
+        EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
+        EXPECT_EQ(state.solver->step_index(), initial_step);
+        EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history);
+
+        const auto restored_surface = state.coupling->free_surface_diagnostics();
+        EXPECT_DOUBLE_EQ(restored_surface.clear_level, initial_surface.clear_level);
+        EXPECT_DOUBLE_EQ(restored_surface.pool_level, initial_surface.pool_level);
+        EXPECT_DOUBLE_EQ(restored_surface.liquid_volume, initial_surface.liquid_volume);
+        EXPECT_DOUBLE_EQ(restored_surface.pool_volume, initial_surface.pool_volume);
+        EXPECT_DOUBLE_EQ(restored_surface.headspace.pressure, initial_surface.headspace.pressure);
+        const auto restored_liquid = state.coupling->liquid_mass_inventory().diagnostics();
+        EXPECT_DOUBLE_EQ(restored_liquid.total_mass, initial_liquid.total_mass);
+        EXPECT_DOUBLE_EQ(restored_liquid.liquid_volume, initial_liquid.liquid_volume);
+        expect_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory(), initial_liquid_field);
+        expect_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity(), initial_density);
+        expect_owned_values(state.coupling->clear_level(), initial_clear_level_field);
+        expect_owned_values(state.coupling->pool_level(), initial_pool_level_field);
+        expect_owned_values(state.coupling->headspace_pressure(), initial_headspace_pressure_field);
+        expect_owned_values(state.coupling->pool_occupancy(), initial_pool_occupancy_field);
+        expect_owned_face_values(state.solver->pressure_corrected_face_fluxes(), initial_absolute_flux);
+        EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
+        EXPECT_EQ(state.coupling->planar_ale_diagnostics().last_rejection_reason, failure);
+
+        state.solver->set_pressure_linear_solver_options(valid_pressure_options);
+        ASSERT_NO_THROW(state.coupling->step());
+        EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+        EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
+        EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, rejected_trial_calls);
+
+        EXPECT_EQ(state.solver->step_index(), initial_step + 1);
+        EXPECT_NEAR(state.solver->time(), initial_time + 1.0e-2, 1.0e-15);
+        EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
+        EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_surface.pool_level);
+        EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
+        EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
+        EXPECT_TRUE(state.solver->last_step_statistics().converged);
+        expect_zero_relative_top_flux(state);
     }
-    catch (const std::invalid_argument& error)
-    {
-        failure = error.what();
-    }
-
-    EXPECT_NE(failure.find("BelosLinearSolver requires positive maximum iterations"), std::string::npos) << failure;
-    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 1u);
-    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 1u);
-    EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::PressureProjection).calls, 0u);
-    const auto rejected_trial_calls = state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls;
-    EXPECT_GT(rejected_trial_calls, 0u);
-    expect_geometry_restored(*state.mesh, geometry);
-    expect_primary_restored(*state.solver, primary);
-    EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
-    EXPECT_EQ(state.solver->step_index(), initial_step);
-    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history);
-
-    const auto restored_surface = state.coupling->free_surface_diagnostics();
-    EXPECT_DOUBLE_EQ(restored_surface.clear_level, initial_surface.clear_level);
-    EXPECT_DOUBLE_EQ(restored_surface.pool_level, initial_surface.pool_level);
-    EXPECT_DOUBLE_EQ(restored_surface.liquid_volume, initial_surface.liquid_volume);
-    EXPECT_DOUBLE_EQ(restored_surface.pool_volume, initial_surface.pool_volume);
-    EXPECT_DOUBLE_EQ(restored_surface.headspace.pressure, initial_surface.headspace.pressure);
-    const auto restored_liquid = state.coupling->liquid_mass_inventory().diagnostics();
-    EXPECT_DOUBLE_EQ(restored_liquid.total_mass, initial_liquid.total_mass);
-    EXPECT_DOUBLE_EQ(restored_liquid.liquid_volume, initial_liquid.liquid_volume);
-    expect_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory(), initial_liquid_field);
-    expect_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity(), initial_density);
-    expect_owned_values(state.coupling->clear_level(), initial_clear_level_field);
-    expect_owned_values(state.coupling->pool_level(), initial_pool_level_field);
-    expect_owned_values(state.coupling->headspace_pressure(), initial_headspace_pressure_field);
-    expect_owned_values(state.coupling->pool_occupancy(), initial_pool_occupancy_field);
-    expect_owned_face_values(state.solver->pressure_corrected_face_fluxes(), initial_absolute_flux);
-    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
-    EXPECT_EQ(state.coupling->planar_ale_diagnostics().last_rejection_reason, failure);
-
-    state.solver->set_pressure_linear_solver_options(valid_pressure_options);
-    ASSERT_NO_THROW(state.coupling->step());
-    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
-    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
-    EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, rejected_trial_calls);
-
-    EXPECT_EQ(state.solver->step_index(), initial_step + 1);
-    EXPECT_NEAR(state.solver->time(), initial_time + 1.0e-2, 1.0e-15);
-    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
-    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_surface.pool_level);
-    EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
-    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
-    EXPECT_TRUE(state.solver->last_step_statistics().converged);
-    expect_zero_relative_top_flux(state);
 }
 
 enum class MatrixMeshFamily

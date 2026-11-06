@@ -38,6 +38,13 @@ namespace SimpleFluid
 
 template<TpetraTypePack Pack> class SIMPLEFLUID_SOLVERS_EXPORT FluidSolver;
 
+/** @brief Algorithms for the corrected pressure-projection equation. */
+enum class PressureProjectionMethod
+{
+    Anderson,
+    FullOperator
+};
+
 namespace detail
 {
 
@@ -110,6 +117,11 @@ public:
     void set_linear_solver_options(LinearSolverOptions options);
 
     const LinearSolverOptions& linear_solver_options() const noexcept;
+
+    /** Select the corrected pressure solve collectively on all mesh ranks. */
+    void set_projection_method(PressureProjectionMethod method);
+
+    PressureProjectionMethod projection_method() const noexcept { return d_projection_method; }
 
     void rebuild_matrix() const;
 
@@ -218,10 +230,14 @@ private:
     void validate_fixed_boundary_flux_provider() const;
 
     SIMPLEFLUID_EQUATIONS_LOCAL
+    void validate_projection_policy(PressureProjectionMethod method, const LinearSolverOptions& options) const;
+
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void update_matrix(bool allow_graph_reuse) const;
 
     SP<const mesh_type> d_mesh;
     LinearSolverOptions d_linear_options;
+    PressureProjectionMethod d_projection_method = PressureProjectionMethod::Anderson;
     BoundaryConditionMap d_pressure_boundary_conditions;
     BoundaryConditionMap d_pressure_correction_boundary_conditions;
     FVM::CellGradientScheme d_gradient_scheme = FVM::CellGradientScheme::LeastSquares;

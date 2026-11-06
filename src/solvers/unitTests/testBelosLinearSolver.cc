@@ -201,6 +201,39 @@ private:
     mutable std::size_t d_application_count = 0;
 };
 
+/** @brief Expose a CRS matrix only through its general operator interface. */
+class ForwardingOperator final : public Pack::operator_type
+{
+public:
+    explicit ForwardingOperator(Teuchos::RCP<const Pack::matrix_type> matrix)
+        : d_matrix(std::move(matrix))
+    {
+    }
+
+    Teuchos::RCP<const Pack::map_type> getDomainMap() const override
+    {
+        return d_matrix->getDomainMap();
+    }
+
+    Teuchos::RCP<const Pack::map_type> getRangeMap() const override
+    {
+        return d_matrix->getRangeMap();
+    }
+
+    void apply(
+        const Pack::multi_vector_type& input,
+        Pack::multi_vector_type& output,
+        Teuchos::ETransp mode = Teuchos::NO_TRANS,
+        double alpha = 1.0,
+        double beta = 0.0) const override
+    {
+        d_matrix->apply(input, output, mode, alpha, beta);
+    }
+
+private:
+    Teuchos::RCP<const Pack::matrix_type> d_matrix;
+};
+
 /** @brief Reproduce recurrence/true-residual disagreement deterministically. */
 struct ResidualGap
 {
@@ -1352,6 +1385,151 @@ TEST(BelosLinearSolverTest, SupportsIfpack2PreconditionersForCrsMatrices)
         for (const auto value : solution.getData())
             EXPECT_NEAR(value, 3.0, 1.0e-12);
     }
+}
+
+/** @brief Krylov solves retain the full operator with a separate ILUT matrix. */
+TEST(BelosLinearSolverTest, SeparatePreconditioningMatrixUsesOriginalOperator)
+{
+    const auto matrix = block_matrix<2>({{{{4.0, 1.0}}, {{2.0, 3.0}}}});
+    const auto compact = block_matrix<2>({{{{4.0, 0.0}}, {{0.0, 3.0}}}});
+    const auto op = Teuchos::rcp(new ForwardingOperator(matrix));
+    const auto map = matrix->getRowMap();
+    Pack::vector_type exact(map, true);
+    {
+        auto values = exact.getDataNonConst();
+        values[0] = 1.0;
+        values[1] = -2.0;
+    }
+    Pack::vector_type rhs(map, true);
+    op->apply(exact, rhs);
+    for (const auto backend : {SimpleFluid::LinearSolverBackend::BiCGStab,
+             SimpleFluid::LinearSolverBackend::Gmres})
+    {
+        SCOPED_TRACE(SimpleFluid::to_string(backend));
+        SimpleFluid::LinearSolverOptions options;
+        options.backend = backend;
+        options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+        options.tolerance = 1.0e-12;
+        Pack::vector_type solution(map, true);
+        solution.putScalar(0.25);
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto statistics = solver.solve_with_statistics(
+            op, rhs, solution, options, {}, compact);
+        ASSERT_TRUE(statistics.converged);
+        EXPECT_LE(statistics.achieved_tolerance, options.tolerance);
+        EXPECT_LE(true_relative_residual(solver, op, rhs, solution), options.tolerance);
+        EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+        const auto values = solution.getData();
+        EXPECT_NEAR(values[0], 1.0, 1.0e-11);
+        EXPECT_NEAR(values[1], -2.0, 1.0e-11);
+    }
+}
+
+/** @brief Separate ILUT setup survives per-column solves and both initial-guess paths. */
+TEST(BelosLinearSolverTest, SeparatePreconditioningMatrixSupportsBiCGStabMultipleRhs)
+{
+    const auto matrix = block_matrix<2>({{{{4.0, 1.0}}, {{2.0, 3.0}}}});
+    const auto compact = block_matrix<2>({{{{4.0, 0.0}}, {{0.0, 3.0}}}});
+    const auto op = Teuchos::rcp(new ForwardingOperator(matrix));
+    const auto map = matrix->getRowMap();
+    Pack::multi_vector_type exact(map, 3, true);
+    {
+        auto first = exact.getDataNonConst(0);
+        first[0] = 1.0;
+        first[1] = -2.0;
+        auto third = exact.getDataNonConst(2);
+        third[0] = -3.0;
+        third[1] = 0.5;
+    }
+    Pack::multi_vector_type rhs(map, 3, true);
+    op->apply(exact, rhs);
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+    options.tolerance = 1.0e-12;
+    for (const bool zero_initial_guess : {false, true})
+    {
+        SCOPED_TRACE(zero_initial_guess);
+        Pack::multi_vector_type solution(map, 3, true);
+        solution.putScalar(0.25);
+        SimpleFluid::BelosLinearSolver<Pack> solver;
+        const auto statistics = zero_initial_guess
+            ? solver.solve_from_zero_with_statistics(op, rhs, solution, options, {}, compact)
+            : solver.solve_with_statistics(op, rhs, solution, options, {}, compact);
+        ASSERT_TRUE(statistics.converged);
+        EXPECT_LE(statistics.achieved_tolerance, options.tolerance);
+        EXPECT_LE(true_relative_residual(solver, op, rhs, solution), options.tolerance);
+        EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+        for (std::size_t column = 0; column < 3; ++column)
+        {
+            const auto actual = solution.getData(column);
+            const auto expected = exact.getData(column);
+            for (std::size_t row = 0; row < 2; ++row)
+                EXPECT_NEAR(actual[row], expected[row], 1.0e-11);
+        }
+    }
+}
+
+/** @brief Incompatible preconditioning maps are rejected before factor setup. */
+TEST(BelosLinearSolverTest, SeparatePreconditioningMatrixRejectsIncompatibleMaps)
+{
+    const auto matrix = block_matrix<2>({{{{4.0, 1.0}}, {{2.0, 3.0}}}});
+    const auto incompatible = block_matrix<3>({{
+        {{4.0, 0.0, 0.0}}, {{0.0, 3.0, 0.0}}, {{0.0, 0.0, 2.0}}}});
+    const auto op = Teuchos::rcp(new ForwardingOperator(matrix));
+    Pack::vector_type rhs(matrix->getRowMap(), true);
+    Pack::vector_type solution(matrix->getRowMap(), true);
+    rhs.putScalar(1.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    EXPECT_THROW(solver.solve_with_statistics(op, rhs, solution, options, {}, incompatible),
+        std::invalid_argument);
+    EXPECT_EQ(preconditioner_setup_count(solver), 0U);
+    const auto compact = block_matrix<2>({{{{4.0, 0.0}}, {{0.0, 3.0}}}});
+    Pack::vector_type incompatible_vector(incompatible->getRowMap(), true);
+    EXPECT_THROW(solver.solve_with_statistics(
+        op, incompatible_vector, solution, options, {}, compact), std::invalid_argument);
+    EXPECT_THROW(solver.solve_from_zero_with_statistics(
+        op, rhs, incompatible_vector, options, {}, compact), std::invalid_argument);
+    EXPECT_EQ(preconditioner_setup_count(solver), 0U);
+}
+
+/** @brief Reuse follows the supplied matrix identity, selection, and value invalidation. */
+TEST(BelosLinearSolverTest, SeparatePreconditioningMatrixControlsReuse)
+{
+    const auto matrix = block_matrix<2>({{{{4.0, 1.0}}, {{2.0, 3.0}}}});
+    const auto first_compact = block_matrix<2>({{{{4.0, 0.0}}, {{0.0, 3.0}}}});
+    const auto second_compact = block_matrix<2>({{{{5.0, 0.0}}, {{0.0, 2.0}}}});
+    const auto first_op = Teuchos::rcp(new ForwardingOperator(matrix));
+    const auto second_op = Teuchos::rcp(new ForwardingOperator(matrix));
+    Pack::vector_type rhs(matrix->getRowMap(), true);
+    Pack::vector_type solution(matrix->getRowMap(), true);
+    rhs.putScalar(1.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+    options.reuse_preconditioner = true;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    ASSERT_TRUE(solver.solve_with_statistics(
+        first_op, rhs, solution, options, {}, first_compact).converged);
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve_with_statistics(
+        second_op, rhs, solution, options, {}, first_compact).converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 1U);
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve_with_statistics(
+        second_op, rhs, solution, options, {}, second_compact).converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 2U);
+    options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve_with_statistics(
+        second_op, rhs, solution, options, {}, second_compact).converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 3U);
+    solver.notify_operator_values_changed();
+    solution.putScalar(0.0);
+    ASSERT_TRUE(solver.solve_with_statistics(
+        second_op, rhs, solution, options, {}, second_compact).converged);
+    EXPECT_EQ(preconditioner_setup_count(solver), 4U);
 }
 
 /** @brief Verify MueLu is rebuilt between solves unless reuse is enabled. */

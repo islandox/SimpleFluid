@@ -272,6 +272,12 @@ public:
     /** @brief Replace the pressure-projection policy for subsequent solves. */
     void set_pressure_linear_solver_options(LinearSolverOptions options);
 
+    /** Return the corrected pressure-projection algorithm. */
+    PressureProjectionMethod pressure_projection_method() const noexcept;
+
+    /** Select the corrected pressure-projection algorithm on every mesh rank. */
+    void set_pressure_projection_method(PressureProjectionMethod method);
+
     /** @brief Return the current pressure-corrected volumetric face fluxes. */
     const face_flux_field_type&
     pressure_corrected_face_fluxes() const;

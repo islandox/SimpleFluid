@@ -615,6 +615,27 @@ void FluidSolver<Pack>::set_pressure_linear_solver_options(
     }
 }
 
+/** @brief Return the corrected pressure-projection algorithm. */
+template<TpetraTypePack Pack>
+PressureProjectionMethod FluidSolver<Pack>::pressure_projection_method() const noexcept
+{
+    if (uses_legacy_backend())
+        return d_problem.template object<PressureProjectionEquation<Pack>>(
+            "pressure_projection").projection_method();
+    return d_problem.template object<pressure_projection_type>(
+        "pressure_projection").projection_method();
+}
+
+/** @brief Select the corrected pressure-projection algorithm. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::set_pressure_projection_method(PressureProjectionMethod method)
+{
+    if (uses_legacy_backend())
+        pressure_projection().set_projection_method(method);
+    else
+        native_pressure_projection().set_projection_method(method);
+}
+
 /**
  * @brief Return the Problem-owned base momentum equation.
  *

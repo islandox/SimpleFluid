@@ -10,11 +10,13 @@
  */
 
 #include "PressureProjectionEquation.hh"
+#include "PressureProjectionOperator.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
 #include <array>
 #include <cmath>
+#include <exception>
 #include <iomanip>
 #include <sstream>
 
@@ -56,6 +58,8 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
 template<TpetraTypePack Pack, class MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(LinearSolverOptions options)
 {
+    if (d_projection_method == PressureProjectionMethod::FullOperator && options.backend == LinearSolverBackend::Cg)
+        throw std::invalid_argument("FullOperator pressure projection requires a nonsymmetric Krylov backend.");
     if ((options.backend == LinearSolverBackend::Cg) != (d_linear_options.backend == LinearSolverBackend::Cg))
     {
         // CG eliminates the zero-pressure gauge column as well as its row.
@@ -70,6 +74,49 @@ template<TpetraTypePack Pack, class MeshType>
 const LinearSolverOptions& PressureProjectionEquation<Pack, MeshType>::linear_solver_options() const noexcept
 {
     return d_linear_options;
+}
+
+/** @brief Validate the selected pressure algorithm and linear policy collectively. */
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
+    PressureProjectionMethod method, const LinearSolverOptions& options) const
+{
+    std::exception_ptr failure;
+    try
+    {
+        BelosLinearSolver<Pack>::validate_options(options);
+        if (method != PressureProjectionMethod::Anderson && method != PressureProjectionMethod::FullOperator)
+            throw std::invalid_argument("Unknown PressureProjectionMethod value.");
+        if (method == PressureProjectionMethod::FullOperator && options.backend == LinearSolverBackend::Cg)
+            throw std::invalid_argument("FullOperator pressure projection requires a nonsymmetric Krylov backend.");
+    }
+    catch (...) { failure = std::current_exception(); }
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    const int local_invalid = failure ? 1 : 0;
+    int invalid = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_invalid, &invalid);
+    if (invalid)
+    {
+        if (failure) std::rethrow_exception(failure);
+        throw std::invalid_argument("Invalid pressure-projection policy on another rank.");
+    }
+    const std::array<double, 7> local{static_cast<double>(options.max_iterations), options.tolerance,
+        static_cast<double>(options.verbosity), static_cast<double>(options.backend),
+        static_cast<double>(options.preconditioner), options.reuse_preconditioner ? 1.0 : 0.0,
+        static_cast<double>(method)};
+    std::array<double, 7> minimum{}, maximum{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 7, local.data(), minimum.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 7, local.data(), maximum.data());
+    if (minimum != maximum)
+        throw std::invalid_argument("Pressure-projection policy must agree on every mesh rank.");
+}
+
+/** @brief Select the corrected pressure-projection algorithm. */
+template<TpetraTypePack Pack, class MeshType>
+void PressureProjectionEquation<Pack, MeshType>::set_projection_method(PressureProjectionMethod method)
+{
+    validate_projection_policy(method, d_linear_options);
+    d_projection_method = method;
 }
 
 /** @brief Refresh geometry-dependent state after a fixed-topology motion. */
@@ -602,6 +649,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     velocity_field_type& velocity, const continuity_target_type& continuity_target, field_type* accumulated_pressure,
     bool reuse_cached_predictor_flux, bool enforce_global_compatibility) -> ProjectionResult
 {
+    validate_projection_policy(d_projection_method, d_linear_options);
     EquationValidation::require_mesh_match(*d_mesh, pressure_correction, "PressureProjectionEquation");
     EquationValidation::require_mesh_match(*d_mesh, velocity, "PressureProjectionEquation");
     if (accumulated_pressure != nullptr)
@@ -707,8 +755,8 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
 
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix = d_cached_pressure_matrix;
     const LinearResidualScaling residual_scaling{reuse_cached_predictor_flux ? d_rhs_norm_reference : real_t{}};
-    // Retain the compact symmetric two-point matrix, and converge its lagged
-    // non-orthogonal face term with the same gradients and weights as Rhie--Chow.
+    // The compact two-point matrix and corrected face term use the same
+    // gradients and weights as Rhie--Chow. Both paths solve A p = b + C(p).
     // A p = b + div(grad(p) dot (S - alpha*d)), alpha = (S dot S) / (S dot d).
     if (d_non_orthogonal_base_rhs.is_null() || !d_non_orthogonal_base_rhs->getMap()->isSameAs(*owned_map))
     {
@@ -741,28 +789,16 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     bool correction_converged = false;
     const auto base_norm = base_rhs.norm2();
     const auto correction_scale = std::max(base_norm, residual_scaling.rhs_norm_floor);
-    auto correction_linear_options = d_linear_options;
-    typename Pack::vector_type fixed_point_residual(owned_map, false);
-    typename Pack::vector_type previous_fixed_point_rhs(owned_map, false);
-    typename Pack::vector_type previous_fixed_point_residual(owned_map, false);
-    scalar_type previous_fixed_point_norm_squared{};
-    bool have_fixed_point_history = false;
     // Accumulated pressure is reconstructed with the physical boundary map.
     // Use its homogeneous increment for both velocity and deferred correction.
     // The matrix map still handles prescribed correction fluxes separately.
     auto gradient_boundary_conditions = accumulated_pressure != nullptr
         ? d_pressure_boundary_conditions : d_pressure_correction_boundary_conditions;
     for (auto& [name, condition] : gradient_boundary_conditions) condition.value = scalar_type{};
-    for (int corrector = 0; corrector < 100; ++corrector)
+    const auto compute_non_orthogonal_correction = [&](field_type& unknown, typename Pack::vector_type& correction)
     {
-        fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
-        linear_statistics = d_linear_solver.solve_with_statistics(
-            const_matrix, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options, residual_scaling);
-        total_iterations += linear_statistics.iterations;
-        if (!linear_statistics.converged)
-            throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
-        d_mesh->sync_periodic_boundaries(pressure_correction);
-        FVM::cell_gradient(pressure_correction, gradient_boundary_conditions,
+        d_mesh->sync_periodic_boundaries(unknown);
+        FVM::cell_gradient(unknown, gradient_boundary_conditions,
             d_face_flux_workspace.pressure_gradient(), d_face_flux_workspace.gradient_cache(), d_gradient_scheme);
         d_face_flux_workspace.pressure_gradient().sync_ghosts();
         {
@@ -801,59 +837,118 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         }
         if constexpr (requires { d_non_orthogonal_flux.sync_ghosts(); })
             d_non_orthogonal_flux.sync_ghosts();
-        d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{});
+        correction.putScalar(scalar_type{});
         {
             const auto flux_values = FVM::face_flux_balance_read_view(d_non_orthogonal_flux);
-            const auto rhs_values = d_cached_rhs->getLocalViewHost(Tpetra::Access::ReadWrite);
+            const auto rhs_values = correction.getLocalViewHost(Tpetra::Access::ReadWrite);
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
                 const auto cell = static_cast<local_ordinal_type>(owned);
                 if (d_pressure_gauge_gid && owned_map->getGlobalElement(cell) == *d_pressure_gauge_gid) continue;
-                rhs_values(owned, 0) += d_non_orthogonal_balance.balance(flux_values, cell);
+                rhs_values(owned, 0) = d_non_orthogonal_balance.balance(flux_values, cell);
             }
         }
-        // Check the full corrected equation, including the inner linear residual.
+    };
+    if (d_projection_method == PressureProjectionMethod::FullOperator)
+    {
+        field_type operator_pressure(d_mesh, "pressure_operator_input");
+        using full_operator_type = detail::PressureProjectionOperator<Pack>;
+        const auto full_operator = Teuchos::rcp(new full_operator_type(const_matrix,
+            [&](const typename Pack::vector_type& input, typename Pack::vector_type& correction)
+            {
+                operator_pressure.owned_data().update(scalar_type{1}, input, scalar_type{});
+                compute_non_orthogonal_correction(operator_pressure, correction);
+            }));
+        // Belos retains its latest operator. Clear solve-local captures on every
+        // exit while preserving the operator's owned matrix and stable maps.
+        struct CallbackLifetime
+        {
+            Teuchos::RCP<full_operator_type> full_operator;
+            ~CallbackLifetime() { full_operator->deactivate(); }
+        } callback_lifetime{full_operator};
+        // A zero correction can already meet the original predictor-scaled
+        // criterion on an adjacent corrector. Check it before starting Krylov.
+        const bool zero_correction_converged = std::isfinite(base_norm) && std::isfinite(correction_scale) &&
+            base_norm <= d_linear_options.tolerance * correction_scale;
+        if (zero_correction_converged)
+            linear_statistics.converged = true;
+        else
+            linear_statistics = d_linear_solver.solve_from_zero_with_statistics(full_operator, base_rhs,
+                pressure_correction.owned_data(), d_linear_options, residual_scaling, const_matrix);
+        total_iterations = linear_statistics.iterations;
+        if (!linear_statistics.converged)
+            throw std::runtime_error("PressureProjectionEquation full-operator solve did not converge.");
+        // Recompute the accepted pressure gradient and independently check the
+        // identical full-equation residual used to accept an Anderson iterate.
+        compute_non_orthogonal_correction(pressure_correction, rhs_change);
+        d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{1}, rhs_change, scalar_type{});
         const_matrix->apply(pressure_correction.owned_data(), rhs_change);
         rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
         const auto defect_norm = rhs_change.norm2();
-        if (defect_norm <= d_linear_options.tolerance * correction_scale || defect_norm == scalar_type{})
+        correction_converged = defect_norm <= d_linear_options.tolerance * correction_scale ||
+                               defect_norm == scalar_type{};
+    }
+    else
+    {
+        auto correction_linear_options = d_linear_options;
+        typename Pack::vector_type fixed_point_residual(owned_map, false);
+        typename Pack::vector_type previous_fixed_point_rhs(owned_map, false);
+        typename Pack::vector_type previous_fixed_point_residual(owned_map, false);
+        scalar_type previous_fixed_point_norm_squared{};
+        bool have_fixed_point_history = false;
+        for (int corrector = 0; corrector < 100; ++corrector)
         {
-            correction_converged = true;
-            break;
-        }
-        // Anderson(1) accelerates only the next RHS. The accepted pressure and
-        // gradient above must satisfy the full corrected equation before mixing.
-        fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, -scalar_type{1});
-        const auto fixed_point_norm_squared = fixed_point_residual.dot(fixed_point_residual);
-        scalar_type mixing{};
-        if (have_fixed_point_history)
-        {
-            rhs_change.update(scalar_type{1}, fixed_point_residual,
-                -scalar_type{1}, previous_fixed_point_residual, scalar_type{});
-            const auto difference_norm_squared = rhs_change.dot(rhs_change);
-            const auto residual_product = rhs_change.dot(fixed_point_residual);
-            const auto history_scale = std::max(fixed_point_norm_squared, previous_fixed_point_norm_squared);
-            if (std::isfinite(fixed_point_norm_squared) && std::isfinite(previous_fixed_point_norm_squared) &&
-                std::isfinite(difference_norm_squared) && std::isfinite(residual_product) &&
-                difference_norm_squared > scalar_type{64} * std::numeric_limits<scalar_type>::epsilon() * history_scale &&
-                fixed_point_norm_squared <= scalar_type{4} * previous_fixed_point_norm_squared)
+            fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
+            linear_statistics = d_linear_solver.solve_with_statistics(
+                const_matrix, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options, residual_scaling);
+            total_iterations += linear_statistics.iterations;
+            if (!linear_statistics.converged)
+                throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
+            compute_non_orthogonal_correction(pressure_correction, rhs_change);
+            d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{1}, rhs_change, scalar_type{});
+            // Check the full corrected equation, including the inner linear residual.
+            const_matrix->apply(pressure_correction.owned_data(), rhs_change);
+            rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
+            const auto defect_norm = rhs_change.norm2();
+            if (defect_norm <= d_linear_options.tolerance * correction_scale || defect_norm == scalar_type{})
             {
-                const auto candidate = residual_product / difference_norm_squared;
-                // Bound the mixture when the one-step history is nearly singular.
-                if (std::isfinite(candidate)) mixing = std::clamp(candidate, -scalar_type{1}, scalar_type{1});
+                correction_converged = true;
+                break;
             }
-            rhs_change.update(scalar_type{1}, *d_cached_rhs,
-                -scalar_type{1}, previous_fixed_point_rhs, scalar_type{});
+            // Anderson(1) accelerates only the next RHS. The accepted pressure and
+            // gradient above must satisfy the full corrected equation before mixing.
+            fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, -scalar_type{1});
+            const auto fixed_point_norm_squared = fixed_point_residual.dot(fixed_point_residual);
+            scalar_type mixing{};
+            if (have_fixed_point_history)
+            {
+                rhs_change.update(scalar_type{1}, fixed_point_residual,
+                    -scalar_type{1}, previous_fixed_point_residual, scalar_type{});
+                const auto difference_norm_squared = rhs_change.dot(rhs_change);
+                const auto residual_product = rhs_change.dot(fixed_point_residual);
+                const auto history_scale = std::max(fixed_point_norm_squared, previous_fixed_point_norm_squared);
+                if (std::isfinite(fixed_point_norm_squared) && std::isfinite(previous_fixed_point_norm_squared) &&
+                    std::isfinite(difference_norm_squared) && std::isfinite(residual_product) &&
+                    difference_norm_squared > scalar_type{64} * std::numeric_limits<scalar_type>::epsilon() * history_scale &&
+                    fixed_point_norm_squared <= scalar_type{4} * previous_fixed_point_norm_squared)
+                {
+                    const auto candidate = residual_product / difference_norm_squared;
+                    // Bound the mixture when the one-step history is nearly singular.
+                    if (std::isfinite(candidate)) mixing = std::clamp(candidate, -scalar_type{1}, scalar_type{1});
+                }
+                rhs_change.update(scalar_type{1}, *d_cached_rhs,
+                    -scalar_type{1}, previous_fixed_point_rhs, scalar_type{});
+            }
+            previous_fixed_point_rhs.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
+            previous_fixed_point_residual.update(scalar_type{1}, fixed_point_residual, scalar_type{});
+            previous_fixed_point_norm_squared = fixed_point_norm_squared;
+            have_fixed_point_history = true;
+            if (mixing != scalar_type{}) d_cached_rhs->update(-mixing, rhs_change, scalar_type{1});
+            correction_linear_options.tolerance = d_linear_options.tolerance * real_t{0.1};
         }
-        previous_fixed_point_rhs.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
-        previous_fixed_point_residual.update(scalar_type{1}, fixed_point_residual, scalar_type{});
-        previous_fixed_point_norm_squared = fixed_point_norm_squared;
-        have_fixed_point_history = true;
-        if (mixing != scalar_type{}) d_cached_rhs->update(-mixing, rhs_change, scalar_type{1});
-        correction_linear_options.tolerance = d_linear_options.tolerance * real_t{0.1};
     }
     if (!correction_converged)
-        throw std::runtime_error("PressureProjectionEquation non-orthogonal correction did not converge.");
+        throw std::runtime_error("PressureProjectionEquation corrected pressure residual did not converge.");
     linear_statistics.iterations = total_iterations;
     linear_statistics.rhs_norm = base_norm;
     linear_statistics.achieved_tolerance = correction_scale > scalar_type{}

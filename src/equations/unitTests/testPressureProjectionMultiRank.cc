@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "equations/PressureProjectionEquation.hh"
+#include "equations/PressureProjectionOperator.hh"
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
@@ -25,6 +26,7 @@
 #include <Teuchos_CommHelpers.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -630,58 +632,69 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
     if (Tpetra::getDefaultComm()->getSize()!=1)
         GTEST_SKIP() << "Serial manufactured skew projection.";
     auto mesh=SimpleFluid::test::make_skewed_prism_mesh<Pack>();
-    FieldType pressure(mesh,"skew_projection_pressure");
-    VectorFieldType velocity(mesh,"skew_projection_velocity");
-    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    for (const auto method : {SimpleFluid::PressureProjectionMethod::Anderson,
+             SimpleFluid::PressureProjectionMethod::FullOperator})
     {
-        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
-        const auto x=mesh->cell_centroid(cell);
-        velocity.set_value(cell,{x.x*x.x+0.2*x.y,-0.3*x.y*x.y,0.1*x.z});
-    }
-    velocity.sync_ghosts();
-    const SimpleFluid::BoundaryConditionSet conditions;
-    const auto boundaries=SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
-    SimpleFluid::FaceField<Pack> initial_flux(mesh,"skew_initial_flux");
-    SimpleFluid::FVM::pressure_weighted_face_fluxes(
-        velocity,pressure,0.1,boundaries,conditions.pressure,initial_flux);
-    double initial_squared=0;
-    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
-        const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,initial_flux,cell);
-        initial_squared+=balance*balance;
-    }
-    ASSERT_GT(std::sqrt(initial_squared),1e-3);
-    SimpleFluid::LinearSolverOptions options;
-    options.tolerance=1e-11;
-    options.max_iterations=500;
-    options.preconditioner=SimpleFluid::LinearPreconditioner::None;
-    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh,options);
-    const auto result=equation.project(pressure,0.1,1.0,boundaries,velocity);
-    ASSERT_TRUE(result.linear_solve.converged);
-    EXPECT_GT(result.pressure_correction,1e-4);
-    SimpleFluid::FaceField<Pack> reconstructed(mesh,"skew_independent_final_flux");
-    SimpleFluid::FVM::pressure_weighted_face_fluxes(
-        velocity,pressure,0.1,boundaries,conditions.pressure,reconstructed);
-    double squared=0;
-    double reconstructed_squared=0;
-    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
-        const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(
-            *mesh,equation.corrected_face_fluxes(),cell);
-        const auto independent=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,reconstructed,cell);
-        squared+=balance*balance;
-        reconstructed_squared+=independent*independent;
-    }
-    EXPECT_LT(std::sqrt(squared),1e-8);
-    EXPECT_LT(std::sqrt(reconstructed_squared),1e-8);
-    EXPECT_NEAR(result.continuity,std::sqrt(squared),1e-13);
-    for (size_t local=0; local<mesh->num_faces(); ++local)
-    {
-        const auto face=static_cast<MeshType::local_ordinal_type>(local);
-        if (mesh->is_owned_face(face))
-            EXPECT_NEAR(equation.corrected_face_fluxes().value(face),reconstructed.value(face),1e-12);
+        SCOPED_TRACE(static_cast<int>(method));
+        FieldType pressure(mesh,"skew_projection_pressure");
+        VectorFieldType velocity(mesh,"skew_projection_velocity");
+        for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto x=mesh->cell_centroid(cell);
+            velocity.set_value(cell,{x.x*x.x+0.2*x.y,-0.3*x.y*x.y,0.1*x.z});
+        }
+        velocity.sync_ghosts();
+        const SimpleFluid::BoundaryConditionSet conditions;
+        const auto boundaries=SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
+        SimpleFluid::FaceField<Pack> initial_flux(mesh,"skew_initial_flux");
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,pressure,0.1,boundaries,conditions.pressure,initial_flux);
+        double initial_squared=0;
+        for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,initial_flux,cell);
+            initial_squared+=balance*balance;
+        }
+        ASSERT_GT(std::sqrt(initial_squared),1e-3);
+        SimpleFluid::LinearSolverOptions options;
+        options.tolerance=1e-11;
+        options.max_iterations=500;
+        options.preconditioner=SimpleFluid::LinearPreconditioner::None;
+        if (method == SimpleFluid::PressureProjectionMethod::FullOperator)
+        {
+            options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+            options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+        }
+        SimpleFluid::PressureProjectionEquation<Pack> equation(mesh,options);
+        equation.set_projection_method(method);
+        const auto result=equation.project(pressure,0.1,1.0,boundaries,velocity);
+        ASSERT_TRUE(result.linear_solve.converged);
+        EXPECT_GT(result.pressure_correction,1e-4);
+        SimpleFluid::FaceField<Pack> reconstructed(mesh,"skew_independent_final_flux");
+        SimpleFluid::FVM::pressure_weighted_face_fluxes(
+            velocity,pressure,0.1,boundaries,conditions.pressure,reconstructed);
+        double squared=0;
+        double reconstructed_squared=0;
+        for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(
+                *mesh,equation.corrected_face_fluxes(),cell);
+            const auto independent=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,reconstructed,cell);
+            squared+=balance*balance;
+            reconstructed_squared+=independent*independent;
+        }
+        EXPECT_LT(std::sqrt(squared),1e-8);
+        EXPECT_LT(std::sqrt(reconstructed_squared),1e-8);
+        EXPECT_NEAR(result.continuity,std::sqrt(squared),1e-13);
+        for (size_t local=0; local<mesh->num_faces(); ++local)
+        {
+            const auto face=static_cast<MeshType::local_ordinal_type>(local);
+            if (mesh->is_owned_face(face))
+                EXPECT_NEAR(equation.corrected_face_fluxes().value(face),reconstructed.value(face),1e-12);
+        }
     }
 }
 
@@ -725,53 +738,64 @@ TEST(PressureProjectionMultiRankTest, NativeSkewOutletProjectionIsConservativeAc
     SP<const Native> mesh=std::make_shared<Native>(distributed);
     ASSERT_GT(global_min(*comm,int(mesh->num_owned_cells())),0);
     ASSERT_FALSE(mesh->legacy_mesh());
-    ScalarCellFieldStored<Pack> pressure(mesh,"native_skew_pressure");
-    VectorCellFieldStored<Pack> velocity(mesh,"native_skew_velocity");
-    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+    for (const auto method : {SimpleFluid::PressureProjectionMethod::Anderson,
+             SimpleFluid::PressureProjectionMethod::FullOperator})
     {
-        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
-        const auto x=mesh->cell_centroid(cell);
-        velocity.set_owned_value(cell,{x.x*x.x+0.3*x.y,x.x*x.y-0.2*x.y*x.y,0.0});
+        SCOPED_TRACE(static_cast<int>(method));
+        ScalarCellFieldStored<Pack> pressure(mesh,"native_skew_pressure");
+        VectorCellFieldStored<Pack> velocity(mesh,"native_skew_velocity");
+        for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+        {
+            const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+            const auto x=mesh->cell_centroid(cell);
+            velocity.set_owned_value(cell,{x.x*x.x+0.3*x.y,x.x*x.y-0.2*x.y*x.y,0.0});
+        }
+        velocity.sync_ghosts();
+        BoundaryConditionSet conditions;
+        conditions.velocity["xmax"]={BoundaryConditionType::Neumann,{}};
+        conditions.pressure["xmax"]={BoundaryConditionType::Dirichlet,0.0};
+        const auto cache=FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
+        ScalarFaceFieldStored<Pack> initial(mesh,"native_skew_initial_flux");
+        FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,initial);
+        double initial_squared=0;
+        for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+        {
+            const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+            const auto q=FVM::cell_flux_balance<Pack>(*mesh,initial,cell);
+            initial_squared+=q*q;
+        }
+        ASSERT_GT(std::sqrt(global_sum(*comm,initial_squared)),1e-3);
+        LinearSolverOptions options;
+        options.tolerance=1e-11; options.max_iterations=500;
+        options.preconditioner=LinearPreconditioner::None;
+        if (method == SimpleFluid::PressureProjectionMethod::FullOperator)
+        {
+            options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+            options.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
+        }
+        PressureProjectionEquation<Pack,Native> equation(mesh,options,conditions.pressure);
+        equation.set_projection_method(method);
+        const auto result=equation.project(pressure,0.1,1.0,cache,velocity);
+        ASSERT_TRUE(result.linear_solve.converged);
+        EXPECT_GT(result.pressure_correction,1e-4);
+        ScalarFaceFieldStored<Pack> independent(mesh,"native_skew_reconstructed_flux");
+        FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,independent);
+        double squared=0,reconstructed_squared=0;
+        for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+        {
+            const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+            const auto q=FVM::cell_flux_balance<Pack>(*mesh,equation.corrected_face_fluxes(),cell);
+            const auto r=FVM::cell_flux_balance<Pack>(*mesh,independent,cell);
+            squared+=q*q; reconstructed_squared+=r*r;
+        }
+        const auto norm=std::sqrt(global_sum(*comm,squared));
+        EXPECT_LT(norm,1e-8);
+        EXPECT_LT(std::sqrt(global_sum(*comm,reconstructed_squared)),1e-8);
+        EXPECT_NEAR(result.continuity,norm,1e-13);
+        expect_replicated(*comm,result.continuity);
+        for(const auto face:independent.owned_face_ids())
+            EXPECT_NEAR(equation.corrected_face_fluxes().local_value(face),independent.local_value(face),1e-12);
     }
-    velocity.sync_ghosts();
-    BoundaryConditionSet conditions;
-    conditions.velocity["xmax"]={BoundaryConditionType::Neumann,{}};
-    conditions.pressure["xmax"]={BoundaryConditionType::Dirichlet,0.0};
-    const auto cache=FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
-    ScalarFaceFieldStored<Pack> initial(mesh,"native_skew_initial_flux");
-    FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,initial);
-    double initial_squared=0;
-    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
-    {
-        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
-        const auto q=FVM::cell_flux_balance<Pack>(*mesh,initial,cell);
-        initial_squared+=q*q;
-    }
-    ASSERT_GT(std::sqrt(global_sum(*comm,initial_squared)),1e-3);
-    LinearSolverOptions options;
-    options.tolerance=1e-11; options.max_iterations=500;
-    options.preconditioner=LinearPreconditioner::None;
-    PressureProjectionEquation<Pack,Native> equation(mesh,options,conditions.pressure);
-    const auto result=equation.project(pressure,0.1,1.0,cache,velocity);
-    ASSERT_TRUE(result.linear_solve.converged);
-    EXPECT_GT(result.pressure_correction,1e-4);
-    ScalarFaceFieldStored<Pack> independent(mesh,"native_skew_reconstructed_flux");
-    FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,independent);
-    double squared=0,reconstructed_squared=0;
-    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
-    {
-        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
-        const auto q=FVM::cell_flux_balance<Pack>(*mesh,equation.corrected_face_fluxes(),cell);
-        const auto r=FVM::cell_flux_balance<Pack>(*mesh,independent,cell);
-        squared+=q*q; reconstructed_squared+=r*r;
-    }
-    const auto norm=std::sqrt(global_sum(*comm,squared));
-    EXPECT_LT(norm,1e-8);
-    EXPECT_LT(std::sqrt(global_sum(*comm,reconstructed_squared)),1e-8);
-    EXPECT_NEAR(result.continuity,norm,1e-13);
-    expect_replicated(*comm,result.continuity);
-    for(const auto face:independent.owned_face_ids())
-        EXPECT_NEAR(equation.corrected_face_fluxes().local_value(face),independent.local_value(face),1e-12);
 }
 
 
@@ -904,70 +928,257 @@ TEST(PressureProjectionMultiRankTest, AccumulatedPressureFixedFluxMatchesPhysica
     conditions.velocity["xmax"] = {BoundaryConditionType::Neumann, {}};
     conditions.pressure["xmax"] = {BoundaryConditionType::Dirichlet, 0.0};
     const auto boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);
-    for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
+    for (const auto method : {SimpleFluid::PressureProjectionMethod::Anderson,
+             SimpleFluid::PressureProjectionMethod::FullOperator})
     {
-        FieldType pressure(mesh, "fixed_physical_p"), correction(mesh, "fixed_q");
-        VectorFieldType velocity(mesh, "fixed_u");
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        SCOPED_TRACE(static_cast<int>(method));
+        for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
         {
-            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-            const auto x = mesh->cell_centroid(cell);
-            pressure.set_value(cell, 0.04*std::sin(x.x + 0.3*x.y));
-            velocity.set_value(cell, {0.1*x.x*x.x, -0.03*x.y, 0.02*x.z});
-        }
-        pressure.sync_ghosts(); velocity.sync_ghosts();
-        LinearSolverOptions linear;
-        linear.tolerance = 1e-11;
-        linear.max_iterations = 500;
-        linear.preconditioner = LinearPreconditioner::None;
-        PressureProjectionEquation<Pack> equation(mesh, linear, conditions.pressure, scheme);
-        equation.set_fixed_boundary_flux_provider({"xmax"},
-            [](int, size_t, Pack::local_ordinal_type) { return 0.0; }, 1);
-        const auto override_outlet = [&](FaceField<Pack>& flux)
-        {
-            for (const auto& [batch, faces] : mesh->boundary_batches())
-                if (mesh->boundary_batch_name(batch) == "xmax")
-                    for (const auto face : faces.face_lids)
-                        if (mesh->is_owned_face(face)) flux.set_value(face, 0.0);
-        };
-        FVM::PressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
-        FaceField<Pack> independent(mesh, "fixed_independent_phi");
-        FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
-            boundaries, conditions.pressure, workspace, independent, scheme);
-        override_outlet(independent);
-        double initial_square = 0.0;
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-        {
-            const auto balance = FVM::cell_flux_balance<Pack>(*mesh, independent,
-                static_cast<Pack::local_ordinal_type>(owned));
-            initial_square += balance*balance;
-        }
-        ASSERT_GT(initial_square, 1e-6);
-        const auto projected = equation.project(pressure, correction, 0.13, 7.0, boundaries, velocity);
-        ASSERT_TRUE(projected.linear_solve.converged);
-        EXPECT_GT(projected.pressure_correction, 1e-7);
-        const auto check = [&]
-        {
-            FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
-                boundaries, conditions.pressure, workspace, independent, scheme);
-            override_outlet(independent);
+            FieldType pressure(mesh, "fixed_physical_p"), correction(mesh, "fixed_q");
+            VectorFieldType velocity(mesh, "fixed_u");
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
             {
                 const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-                EXPECT_NEAR(FVM::cell_flux_balance<Pack>(*mesh, independent, cell), 0.0, 1e-9);
+                const auto x = mesh->cell_centroid(cell);
+                pressure.set_value(cell, 0.04*std::sin(x.x + 0.3*x.y));
+                velocity.set_value(cell, {0.1*x.x*x.x, -0.03*x.y, 0.02*x.z});
             }
-            for (size_t local = 0; local < mesh->num_faces(); ++local)
+            pressure.sync_ghosts(); velocity.sync_ghosts();
+            LinearSolverOptions linear;
+            linear.tolerance = 1e-11;
+            linear.max_iterations = 500;
+            linear.preconditioner = LinearPreconditioner::None;
+            if (method == SimpleFluid::PressureProjectionMethod::FullOperator)
             {
-                const auto face = static_cast<Pack::local_ordinal_type>(local);
-                if (mesh->is_owned_face(face))
-                    EXPECT_NEAR(equation.corrected_face_fluxes().value(face), independent.value(face), 2e-12);
+                linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+                linear.preconditioner = SimpleFluid::LinearPreconditioner::ILUT;
             }
-            EXPECT_NEAR(correction.value(0), 0.0, 1e-14);
-        };
-        check();
-        const auto reused = detail::PressureProjectionEquationTestAccess<Pack>::reuse_predictor(
-            equation, pressure, correction, 0.13, 7.0, boundaries, velocity);
-        EXPECT_TRUE(reused.linear_solve.converged);
-        check();
+            PressureProjectionEquation<Pack> equation(mesh, linear, conditions.pressure, scheme);
+            equation.set_projection_method(method);
+            equation.set_fixed_boundary_flux_provider({"xmax"},
+                [](int, size_t, Pack::local_ordinal_type) { return 0.0; }, 1);
+            const auto override_outlet = [&](FaceField<Pack>& flux)
+            {
+                for (const auto& [batch, faces] : mesh->boundary_batches())
+                    if (mesh->boundary_batch_name(batch) == "xmax")
+                        for (const auto face : faces.face_lids)
+                            if (mesh->is_owned_face(face)) flux.set_value(face, 0.0);
+            };
+            FVM::PressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
+            FaceField<Pack> independent(mesh, "fixed_independent_phi");
+            FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
+                boundaries, conditions.pressure, workspace, independent, scheme);
+            override_outlet(independent);
+            double initial_square = 0.0;
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto balance = FVM::cell_flux_balance<Pack>(*mesh, independent,
+                    static_cast<Pack::local_ordinal_type>(owned));
+                initial_square += balance*balance;
+            }
+            ASSERT_GT(initial_square, 1e-6);
+            const auto projected = equation.project(pressure, correction, 0.13, 7.0, boundaries, velocity);
+            ASSERT_TRUE(projected.linear_solve.converged);
+            EXPECT_GT(projected.pressure_correction, 1e-7);
+            const auto check = [&]
+            {
+                FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
+                    boundaries, conditions.pressure, workspace, independent, scheme);
+                override_outlet(independent);
+                for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                    EXPECT_NEAR(FVM::cell_flux_balance<Pack>(*mesh, independent, cell), 0.0, 1e-9);
+                }
+                for (size_t local = 0; local < mesh->num_faces(); ++local)
+                {
+                    const auto face = static_cast<Pack::local_ordinal_type>(local);
+                    if (mesh->is_owned_face(face))
+                        EXPECT_NEAR(equation.corrected_face_fluxes().value(face), independent.value(face), 2e-12);
+                }
+                EXPECT_NEAR(correction.value(0), 0.0, 1e-14);
+            };
+            check();
+            std::vector<double> previous_pressure;
+            std::vector<vec3<double>> previous_velocity;
+            double remaining_rhs_squared = 0.0;
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                previous_pressure.push_back(pressure.value(cell));
+                previous_velocity.push_back(velocity.value(cell));
+                if (mesh->owned_cell_map()->getGlobalElement(cell) == 0) continue;
+                const auto rhs = FVM::cell_flux_balance<Pack>(*mesh, equation.corrected_face_fluxes(), cell) / 0.13;
+                remaining_rhs_squared += rhs * rhs;
+            }
+            const auto reused = detail::PressureProjectionEquationTestAccess<Pack>::reuse_predictor(
+                equation, pressure, correction, 0.13, 7.0, boundaries, velocity);
+            EXPECT_TRUE(reused.linear_solve.converged);
+            if (method == PressureProjectionMethod::FullOperator)
+            {
+                // This positive residual is accepted against the original RHS floor.
+                EXPECT_GT(remaining_rhs_squared, 0.0);
+                EXPECT_LE(std::sqrt(remaining_rhs_squared), linear.tolerance * projected.linear_solve.rhs_norm);
+                EXPECT_EQ(reused.linear_solve.iterations, 0);
+                EXPECT_DOUBLE_EQ(correction.owned_data().norm2(), 0.0);
+                for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                    EXPECT_DOUBLE_EQ(pressure.value(cell), previous_pressure[owned]);
+                    const auto actual = velocity.value(cell);
+                    EXPECT_DOUBLE_EQ(actual.x, previous_velocity[owned].x);
+                    EXPECT_DOUBLE_EQ(actual.y, previous_velocity[owned].y);
+                    EXPECT_DOUBLE_EQ(actual.z, previous_velocity[owned].z);
+                }
+            }
+            check();
+        }
     }
+}
+
+
+/** The full action handles strided columns, gauge coupling and Tpetra apply algebra. */
+TEST(PressureProjectionMultiRankTest, FullOperatorApplyMatchesIndependentMatrix)
+{
+    using Operator = SimpleFluid::detail::PressureProjectionOperator<Pack>;
+    const auto comm = Tpetra::getDefaultComm();
+    const auto map = Teuchos::rcp(new Pack::map_type(2, 0, comm));
+    const auto make_matrix = [&](const std::array<std::array<double, 2>, 2>& coefficients)
+    {
+        auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 2));
+        const Teuchos::Array<global_ordinal_type> columns{0, 1};
+        for (size_t owned = 0; owned < map->getLocalNumElements(); ++owned)
+        {
+            const auto row = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(owned));
+            const Teuchos::Array<double> values{coefficients[row][0], coefficients[row][1]};
+            matrix->insertGlobalValues(row, columns(), values());
+        }
+        matrix->fillComplete();
+        return matrix;
+    };
+    // Row-only gauge retains an arbitrary gauge input's remote contribution.
+    const auto compact = make_matrix({{{1.0, 0.0}, {-0.5, 0.5}}});
+    const auto correction = make_matrix({{{0.0, 0.0}, {0.2, -0.2}}});
+    Operator full(compact, [correction](const Pack::vector_type& input, Pack::vector_type& output)
+        { correction->apply(input, output); });
+    Pack::multi_vector_type storage(map, 5, true), output_storage(map, 5, true);
+    const Teuchos::Array<size_t> selected{0, 2, 4};
+    auto input = storage.subViewNonConst(selected());
+    auto output = output_storage.subViewNonConst(selected());
+    for (size_t column = 0; column < input->getNumVectors(); ++column)
+    {
+        auto x = input->getDataNonConst(column);
+        auto y = output->getDataNonConst(column);
+        for (size_t owned = 0; owned < map->getLocalNumElements(); ++owned)
+        {
+            const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(owned));
+            x[owned] = 1.0 + gid + 3.0 * column;
+            y[owned] = 4.0 - gid + 2.0 * column;
+        }
+    }
+    full.apply(*input, *output, Teuchos::NO_TRANS, -0.7, 0.3);
+    for (size_t column = 0; column < input->getNumVectors(); ++column)
+    {
+        const auto x = input->getData(column);
+        const auto y = output->getData(column);
+        for (size_t owned = 0; owned < map->getLocalNumElements(); ++owned)
+        {
+            const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(owned));
+            const auto expected_action = gid == 0 ? 1.0 + 3.0 * column : 0.7;
+            const auto initial_output = 4.0 - gid + 2.0 * column;
+            EXPECT_NEAR(y[owned], -0.7 * expected_action + 0.3 * initial_output, 2e-14);
+            EXPECT_DOUBLE_EQ(x[owned], 1.0 + gid + 3.0 * column);
+        }
+    }
+    // All input columns are read before overlapping output is changed.
+    full.apply(*input, *input);
+    for (size_t column = 0; column < input->getNumVectors(); ++column)
+    {
+        const auto values = input->getData(column);
+        for (size_t owned = 0; owned < map->getLocalNumElements(); ++owned)
+        {
+            const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(owned));
+            EXPECT_NEAR(values[owned], gid == 0 ? 1.0 + 3.0 * column : 0.7, 2e-14);
+        }
+    }
+    input->putScalar(0.0);
+    output->putScalar(std::numeric_limits<double>::quiet_NaN());
+    full.apply(*input, *output);
+    Teuchos::Array<double> norms(3);
+    output->norm2(norms());
+    for (const auto norm : norms) EXPECT_DOUBLE_EQ(norm, 0.0);
+    output->putScalar(std::numeric_limits<double>::quiet_NaN());
+    const auto applications = full.applications();
+    full.apply(*input, *output, Teuchos::NO_TRANS, 0.0, 0.0);
+    EXPECT_EQ(full.applications(), applications);
+    output->norm2(norms());
+    for (const auto norm : norms) EXPECT_DOUBLE_EQ(norm, 0.0);
+    EXPECT_THROW(full.apply(*input, *output, Teuchos::TRANS), std::invalid_argument);
+    Pack::multi_vector_type wrong_columns(map, 1, true);
+    EXPECT_THROW(full.apply(*input, wrong_columns), std::invalid_argument);
+    const auto other_map = Teuchos::rcp(new Pack::map_type(4, 0, comm));
+    Pack::multi_vector_type wrong_map(other_map, 3, true);
+    EXPECT_THROW(full.apply(*input, wrong_map), std::invalid_argument);
+    full.deactivate();
+    EXPECT_TRUE(full.getDomainMap()->isSameAs(*map));
+    EXPECT_THROW(full.apply(*input, *output), std::invalid_argument);
+}
+
+
+/** Reject incompatible or divergent policies before changing the selected mode. */
+TEST(PressureProjectionMultiRankTest, FullOperatorSelectionValidatesCollectively)
+{
+    using namespace SimpleFluid;
+    const auto mesh = test::build_mesh<Pack>(test::make_box_database(4, 1, 1, 0.25));
+    const auto comm = mesh->owned_cell_map()->getComm();
+    LinearSolverOptions options;
+    PressureProjectionEquation<Pack> equation(mesh, options);
+    equation.set_projection_method(PressureProjectionMethod::FullOperator);
+    options.backend = LinearSolverBackend::Cg;
+    EXPECT_THROW(equation.set_linear_solver_options(options), std::invalid_argument);
+    EXPECT_EQ(equation.linear_solver_options().backend, LinearSolverBackend::Gmres);
+    EXPECT_EQ(equation.projection_method(), PressureProjectionMethod::FullOperator);
+    equation.set_projection_method(PressureProjectionMethod::Anderson);
+    equation.set_linear_solver_options(options);
+    EXPECT_THROW(equation.set_projection_method(PressureProjectionMethod::FullOperator), std::invalid_argument);
+    EXPECT_EQ(equation.projection_method(), PressureProjectionMethod::Anderson);
+    options.backend = LinearSolverBackend::BiCGStab;
+    options.preconditioner = LinearPreconditioner::ILUT;
+    equation.set_linear_solver_options(options);
+    const auto invalid = comm->getRank() == 0 ? static_cast<PressureProjectionMethod>(-1)
+                                              : PressureProjectionMethod::Anderson;
+    EXPECT_THROW(equation.set_projection_method(invalid), std::invalid_argument);
+    EXPECT_EQ(equation.projection_method(), PressureProjectionMethod::Anderson);
+    if (comm->getSize() > 1)
+    {
+        const auto divergent = comm->getRank() == 0 ? PressureProjectionMethod::FullOperator
+                                                   : PressureProjectionMethod::Anderson;
+        EXPECT_THROW(equation.set_projection_method(divergent), std::invalid_argument);
+        EXPECT_EQ(equation.projection_method(), PressureProjectionMethod::Anderson);
+    }
+}
+
+
+/** A homogeneous zero RHS is accepted before preconditioning or Krylov iteration. */
+TEST(PressureProjectionMultiRankTest, FullOperatorAcceptsZeroCorrectionAndDefersInvalidOptions)
+{
+    using namespace SimpleFluid;
+    const auto mesh = test::build_mesh<Pack>(test::make_box_database(4, 1, 1, 0.25));
+    LinearSolverOptions options;
+    options.backend = LinearSolverBackend::BiCGStab;
+    options.preconditioner = LinearPreconditioner::ILUT;
+    PressureProjectionEquation<Pack> equation(mesh, options);
+    equation.set_projection_method(PressureProjectionMethod::FullOperator);
+    FieldType pressure(mesh, "zero_full_pressure");
+    VectorFieldType velocity(mesh, vec3{}, "zero_full_velocity");
+    const BoundaryConditionSet conditions;
+    const auto boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);
+    const auto result = equation.project(pressure, 0.1, 1.0, boundaries, velocity);
+    EXPECT_TRUE(result.linear_solve.converged);
+    EXPECT_EQ(result.linear_solve.iterations, 0);
+    EXPECT_DOUBLE_EQ(result.linear_solve.achieved_tolerance, 0.0);
+    EXPECT_DOUBLE_EQ(result.continuity, 0.0);
+    options.max_iterations = 0;
+    EXPECT_NO_THROW(equation.set_linear_solver_options(options));
+    EXPECT_THROW(equation.project(pressure, 0.1, 1.0, boundaries, velocity), std::invalid_argument);
 }

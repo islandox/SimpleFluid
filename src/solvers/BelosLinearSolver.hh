@@ -234,12 +234,12 @@ struct LinearSolverOptions
     LinearPreconditioner preconditioner = LinearPreconditioner::None;
     /**
      * @brief Reuse a preconditioner for consecutive solves with the exact
-     *        same operator object.
+     *        same preconditioning matrix object.
      *
-     * This is opt-in because an operator may be updated in place without its
-     * identity changing. Enable reuse only when the operator's numerical
-     * values remain unchanged between solves. A different operator object
-     * always triggers a rebuild.
+     * This is opt-in because a matrix may be updated in place without its
+     * identity changing. Enable reuse only when the preconditioning matrix's
+     * numerical values remain unchanged between solves. A different matrix
+     * object always triggers a rebuild.
      */
     bool reuse_preconditioner = false;
 };
@@ -341,6 +341,7 @@ public:
      * @param solution Initial guesses replaced by computed solutions.
      * @param options Linear solver and preconditioner controls.
      * @param residual_scaling Optional component scaling for residual checks.
+     * @param preconditioning_matrix Optional CRS matrix used to build the preconditioner.
      * @return Convergence flag, iteration count, and achieved tolerance.
      */
     LinearSolveStatistics solve_with_statistics(
@@ -348,9 +349,11 @@ public:
         const multi_vector_type& rhs,
         multi_vector_type& solution,
         const LinearSolverOptions& options = {},
-        LinearResidualScaling residual_scaling = {})
+        LinearResidualScaling residual_scaling = {},
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null)
     {
-        return solve_impl(matrix, rhs, solution, options, residual_scaling, false);
+        return solve_impl(matrix, rhs, solution, options, residual_scaling, false,
+            preconditioning_matrix);
     }
 
     /**
@@ -365,9 +368,11 @@ public:
         const multi_vector_type& rhs,
         multi_vector_type& solution,
         const LinearSolverOptions& options = {},
-        LinearResidualScaling residual_scaling = {})
+        LinearResidualScaling residual_scaling = {},
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null)
     {
-        return solve_impl(matrix, rhs, solution, options, residual_scaling, true);
+        return solve_impl(matrix, rhs, solution, options, residual_scaling, true,
+            preconditioning_matrix);
     }
 
     bool solve(
@@ -386,6 +391,7 @@ public:
      * @param solution Initial guess replaced by the computed solution.
      * @param options Linear solver and preconditioner controls.
      * @param residual_scaling Optional component scaling for residual checks.
+     * @param preconditioning_matrix Optional CRS matrix used to build the preconditioner.
      * @return Convergence flag, iteration count, and achieved tolerance.
      */
     LinearSolveStatistics solve_with_statistics(
@@ -393,14 +399,15 @@ public:
         const vector_type& rhs,
         vector_type& solution,
         const LinearSolverOptions& options = {},
-        LinearResidualScaling residual_scaling = {})
+        LinearResidualScaling residual_scaling = {},
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null)
     {
         auto x = Teuchos::rcp_implicit_cast<multi_vector_type>(
             Teuchos::rcpFromRef(solution));
         auto b = Teuchos::rcp_implicit_cast<const multi_vector_type>(
             Teuchos::rcpFromRef(rhs));
         return solve_with_statistics(
-            matrix, *b, *x, options, residual_scaling);
+            matrix, *b, *x, options, residual_scaling, preconditioning_matrix);
     }
 
     /** @brief Validate local option values before callers agree across ranks. */
@@ -437,7 +444,8 @@ private:
         multi_vector_type& solution,
         const LinearSolverOptions& options,
         LinearResidualScaling residual_scaling,
-        bool zero_initial_guess)
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
     {
         validate_options(options);
         validate_residual_scaling(residual_scaling);
@@ -445,12 +453,23 @@ private:
             && rhs.getNumVectors() > 1)
         {
             return solve_bicgstab_columns(
-                matrix, rhs, solution, options, residual_scaling, zero_initial_guess);
+                matrix, rhs, solution, options, residual_scaling, zero_initial_guess,
+                preconditioning_matrix);
         }
         if (matrix.is_null())
         {
             throw std::invalid_argument(
                 "BelosLinearSolver requires a non-null operator.");
+        }
+        if (!preconditioning_matrix.is_null()
+            && options.preconditioner != LinearPreconditioner::None
+            && (!preconditioning_matrix->getDomainMap()->isSameAs(*matrix->getDomainMap())
+                || !preconditioning_matrix->getRangeMap()->isSameAs(*matrix->getRangeMap())
+                || !preconditioning_matrix->getDomainMap()->isSameAs(*solution.getMap())
+                || !preconditioning_matrix->getRangeMap()->isSameAs(*rhs.getMap())))
+        {
+            throw std::invalid_argument(
+                "BelosLinearSolver requires matching operator, preconditioning matrix, and vector maps.");
         }
         if (zero_initial_guess)
         {
@@ -485,7 +504,7 @@ private:
                 new problem_type(matrix, x, b));
             d_parameters = Teuchos::rcp(new Teuchos::ParameterList());
             configure(options);
-            configure_preconditioner(matrix, options);
+            configure_preconditioner(matrix, options, preconditioning_matrix);
             if (!set_problem_with_prepared_residual())
             {
                 return {};
@@ -500,7 +519,7 @@ private:
             d_problem->setRHS(b);
             configure(options);
             d_solver->setParameters(d_parameters);
-            configure_preconditioner(matrix, options);
+            configure_preconditioner(matrix, options, preconditioning_matrix);
             if (!set_problem_with_prepared_residual())
             {
                 return {};
@@ -675,7 +694,8 @@ private:
         const multi_vector_type& rhs, multi_vector_type& solution,
         const LinearSolverOptions& options,
         LinearResidualScaling residual_scaling,
-        bool zero_initial_guess)
+        bool zero_initial_guess,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
     {
         if (rhs.getNumVectors() != solution.getNumVectors())
         {
@@ -713,7 +733,8 @@ private:
             }
             const auto statistics = solve_impl(
                 matrix, *d_bicgstab_rhs_workspace, *d_bicgstab_solution_workspace,
-                column_options, residual_scaling, zero_initial_guess);
+                column_options, residual_scaling, zero_initial_guess,
+                preconditioning_matrix);
             {
                 const auto source = d_bicgstab_solution_workspace->getData(0);
                 auto destination = solution.getDataNonConst(column);
@@ -868,7 +889,8 @@ private:
      */
     void configure_preconditioner(
         const Teuchos::RCP<const operator_type>& matrix,
-        const LinearSolverOptions& options)
+        const LinearSolverOptions& options,
+        const Teuchos::RCP<const matrix_type>& preconditioning_matrix)
     {
         if (options.preconditioner == LinearPreconditioner::None)
         {
@@ -876,8 +898,9 @@ private:
             return;
         }
 
-        const auto crs_matrix =
-            Teuchos::rcp_dynamic_cast<const matrix_type>(matrix, false);
+        const auto crs_matrix = preconditioning_matrix.is_null()
+            ? Teuchos::rcp_dynamic_cast<const matrix_type>(matrix, false)
+            : preconditioning_matrix;
         if (crs_matrix.is_null())
         {
             throw std::invalid_argument(
@@ -889,7 +912,7 @@ private:
             options.reuse_preconditioner
             && !d_preconditioner.is_null()
             && !d_preconditioner_operator.is_null()
-            && d_preconditioner_operator.getRawPtr() == matrix.getRawPtr()
+            && d_preconditioner_operator.getRawPtr() == crs_matrix.getRawPtr()
             && d_preconditioner_kind.has_value()
             && *d_preconditioner_kind == options.preconditioner;
         if (can_reuse)
@@ -1022,7 +1045,7 @@ private:
                     "BelosLinearSolver received an unknown preconditioner.");
         }
 
-        d_preconditioner_operator = matrix;
+        d_preconditioner_operator = crs_matrix;
         d_preconditioner_kind = options.preconditioner;
         ++d_preconditioner_setup_count;
         // Belos CG applies this inverse to the residual in its PCG recurrence
