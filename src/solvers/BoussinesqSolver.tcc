@@ -836,6 +836,19 @@ void BoussinesqSolver<Pack>::advance_temperature_transport(
 {
     const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Temperature);
     LinearSolveStatistics temperature_statistics;
+    if(this->diagnostic_history_enabled() && transport.ale) {
+        const auto n=d_mesh->num_owned_cells();
+        d_diagnostic_old_state.new_density.resize(n);
+        d_diagnostic_old_state.total_power.resize(n);
+        for(size_t i=0;i<n;++i) {
+            const auto c=static_cast<local_ordinal_type>(i);
+            if(transport.liquid_mass_inventory) d_diagnostic_old_state.old_density[i]=transport.liquid_mass_inventory->value(c);
+            if(transport.old_heat_capacity) d_diagnostic_old_state.old_cp[i]=transport.old_heat_capacity->value(c);
+            d_diagnostic_old_state.total_power[i]=stored_temperature_sources().total_power_density(c);
+            if(transport.power_sink) d_diagnostic_old_state.total_power[i]+=-transport.power_sink->value(c)+transport.power_release->value(c);
+            d_diagnostic_old_state.new_density[i]=transport.temperature_density ? transport.temperature_density->value(c) : stored_material_properties().density.value(c);
+        }
+    }
     if (physical_transport_enabled())
     {
         const auto* turbulence = find_turbulence_model();
@@ -1211,6 +1224,17 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::solve_flow(const Flow
 {
     const auto previous = d_flow_transport;
     d_flow_transport = inputs;
+    if(inputs.ale && this->diagnostic_history_enabled()) {
+        DiagnosticALEState snapshot=d_diagnostic_old_state;
+        snapshot.time_step=inputs.ale->time_step();
+        snapshot.velocity_boundary=boussinesq_velocity_boundary_cache();snapshot.boundaries=d_problem.boundary_conditions();
+        snapshot.old_volume.assign(inputs.ale->old_cell_volumes().begin(),inputs.ale->old_cell_volumes().end());
+        snapshot.new_volume.assign(inputs.ale->new_cell_volumes().begin(),inputs.ale->new_cell_volumes().end());
+        snapshot.mesh_flux.assign(inputs.ale->face_mesh_fluxes().begin(),inputs.ale->face_mesh_fluxes().end());
+        if(this->volume_continuity_target()) snapshot.continuity_target.assign(this->volume_continuity_target()->owned_integrated_rates().begin(),this->volume_continuity_target()->owned_integrated_rates().end());
+        else snapshot.continuity_target.assign(d_mesh->num_owned_cells(),scalar_type{});
+        d_pending_diagnostic_ale=std::move(snapshot);
+    } else d_pending_diagnostic_ale.reset();
     try
     {
         solve_pressure_velocity_coupling();
@@ -1271,3 +1295,216 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::validate_step_state()
 }
 
 } // namespace SimpleFluid
+
+namespace SimpleFluid {
+template<TpetraTypePack Pack>
+auto BoussinesqSolver<Pack>::evaluate_diagnostics(const SolverDiagnosticsOptions& options) const -> SolverDiagnosticsResult<scalar_type>
+{
+    this->validate_diagnostic_options(options);
+    velocity_field_type diagnostic_u(d_mesh,"diagnostic_turbulence_velocity");
+    field_type diagnostic_p(d_mesh,"diagnostic_turbulence_pressure");
+    diagnostic_u.owned_data().update(scalar_type{1},this->velocity().owned_data(),scalar_type{});
+    diagnostic_p.owned_data().update(scalar_type{1},this->pressure().owned_data(),scalar_type{});
+    diagnostic_u.sync_ghosts();diagnostic_p.sync_ghosts();
+    const auto* ale=d_accepted_diagnostic_ale && d_accepted_diagnostic_ale->accepted_step==this->step_index() ? &*d_accepted_diagnostic_ale : nullptr;
+    const auto* active = find_turbulence_model();
+    std::optional<typename turbulence_model_type::Diagnostics> turbulence;
+    const auto cache=ale ? *ale->velocity_boundary : FVM::cache_velocity_boundary_conditions<Pack>(d_mesh,d_problem.boundary_conditions());
+    auto reconstruct=[&](face_flux_field_type& output) {
+        canonical_face_flux_workspace_type workspace(d_mesh);
+        const auto& physical_bc=ale ? ale->boundaries.pressure : d_problem.boundary_conditions().pressure;
+        auto flux_bc=physical_bc;
+        std::vector<std::string> kinematic;
+        if(ale) for(auto& [name,condition]:flux_bc) {
+            const auto velocity_type=cache.type_by_name.find(name);
+            if(condition.type==BoundaryConditionType::Dirichlet && velocity_type!=cache.type_by_name.end()
+                && velocity_type->second!=BoundaryConditionType::Neumann) {
+                condition={BoundaryConditionType::Neumann,0.0};kinematic.push_back(name);
+            }
+        }
+        velocity_field_type gradient(d_mesh,"diagnostic_ALE_flux_gradient");
+        FVM::cell_gradient(diagnostic_p,physical_bc,gradient,workspace.gradient_cache(),d_problem.time_options().pressure_gradient_scheme);
+        const auto coefficient=static_cast<scalar_type>(options.pressure_coefficient_time_step.value_or(d_problem.time_options().time_step))/d_model_options.reference_density;
+        FVM::detail::pressure_weighted_stored_face_fluxes_impl(diagnostic_u,diagnostic_p,coefficient,cache,
+            &flux_bc,workspace,&gradient,output,d_problem.time_options().pressure_gradient_scheme);
+        if(ale) {
+            for(const auto& [id,batch]:d_mesh->boundary_batches())
+                if(std::find(kinematic.begin(),kinematic.end(),d_mesh->boundary_batch_name(id))!=kinematic.end())
+                    for(auto f:batch.face_lids) if(d_mesh->is_owned_face(f)) output.set_owned_value(f,ale->mesh_flux.at(f));
+            output.sync_ghosts();
+        }
+    };
+    face_flux_field_type flux(d_mesh,"turbulence_diagnostic_flux");
+    flux.data().update(scalar_type{1},this->pressure_corrected_face_fluxes().data(),scalar_type{});flux.sync_ghosts();
+    if (this->step_index()==0 || options.pressure_coefficient_time_step) {
+        reconstruct(flux);
+    }
+    const auto gravity=d_problem.time_options().gravity_vector();
+    const turbulence_buoyancy_context_type buoyancy{&temperature(),&d_problem.boundary_conditions().temperature,
+        {gravity.x,gravity.y,gravity.z},d_problem.time_options().thermal_expansion,d_model_options.density_feedback_enabled};
+    if(active) turbulence.emplace(active->evaluate_diagnostics(diagnostic_u,flux,cache,
+        d_problem.time_options().time_step,stored_material_properties(),d_model_options.reference_density,
+        d_problem.time_options().non_orthogonal_treatment,&buoyancy,d_problem.time_options().physical_time,options.include_cell_data));
+    const auto* rebuilt=turbulence ? turbulence->model.get() : nullptr;
+    const auto& viscosity=rebuilt ? rebuilt->effective_dynamic_viscosity() : stored_material_properties().dynamic_viscosity;
+    auto acceleration=[&](local_ordinal_type c)->vec_type {
+        const auto& o=d_problem.time_options();const auto g=o.gravity_vector();
+        const auto scale=d_model_options.density_feedback_enabled ?
+            (stored_material_properties().density.value(c)-d_model_options.reference_density)/d_model_options.reference_density :
+            -o.thermal_expansion*(temperature().value(c)-o.reference_temperature);
+        return {g.x*scale,g.y*scale,g.z*scale};
+    };
+
+    auto flow_options=options;flow_options.include_cell_data=true;
+    auto result=this->evaluate_flow_diagnostics(flow_options,viscosity,d_model_options.reference_density,
+        rebuilt && true ? &rebuilt->turbulent_kinetic_energy_gradient() : nullptr,
+        rebuilt ? rebuilt->effective_dynamic_viscosity_boundary_cache() : nullptr,acceleration,
+        ale ? &ale->mesh_flux : nullptr,ale ? &ale->continuity_target : nullptr,
+        ale ? &*ale->velocity_boundary : nullptr,ale ? &ale->boundaries : nullptr);
+    if(!ale) {
+        result.geometry_kind="current_geometry_without_history";
+        result.unavailable.push_back("ALE relative flux, storage and GCL require retained accepted geometry history; no accepted ALE history is present");
+    }
+    if(physical_transport_enabled()) {
+        face_flux_field_type mass_flux(d_mesh,"diagnostic_mass_flux_reconstruction");
+        reconstruct(mass_flux);
+        for(auto& boundary:result.boundaries) {
+            scalar_type local[2]{},global[2]{};
+            for(const auto& [id,batch]:d_mesh->boundary_batches()) if(d_mesh->boundary_batch_name(id)==boundary.name)
+                for(const auto f:batch.face_lids) if(d_mesh->is_owned_face(f)) {
+                    const auto density=stored_material_properties().density.value(d_mesh->owner_cell(f));
+                    local[0]+=density*this->pressure_corrected_face_fluxes().value(f);local[1]+=density*mass_flux.value(f);
+                }
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,2,local,global);
+            boundary.stored_mass=global[0];boundary.reconstructed_mass=global[1];
+        }
+    }
+    if(turbulence) {
+        result.turbulent_k=turbulence->k.pde;result.turbulent_secondary=turbulence->secondary.pde;
+        result.turbulent_k_constraints=turbulence->k.constraints;result.turbulent_secondary_constraints=turbulence->secondary.constraints;
+        result.turbulence_secondary_residual_units=rebuilt->dissipation_rate() ? "m^2/s^4" : "1/s^2";
+        result.turbulence_model_name=std::to_string(static_cast<int>(active->type()));
+        scalar_type local[2]{},global[2]{};
+        for(size_t i=0;i<d_mesh->num_owned_cells();++i) {
+            const auto c=static_cast<local_ordinal_type>(i);
+            const auto difference=active->turbulent_kinematic_viscosity().value(c)-rebuilt->turbulent_kinematic_viscosity().value(c);
+            local[0]+=difference*difference;local[1]=std::max(local[1],std::abs(difference));
+        }
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,local,global);
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_MAX,1,local+1,global+1);
+        result.retained_nut_closure_l2=std::sqrt(global[0]);result.retained_nut_closure_max=global[1];
+    }
+    field_type t(d_mesh,"diagnostic_temperature");
+    t.owned_data().update(scalar_type{1},temperature().owned_data(),scalar_type{});t.sync_ghosts();
+    const auto& original=d_problem.template object<temperature_equation_type>("temperature_equation");
+    auto power=[&](local_ordinal_type c){return ale && !ale->total_power.empty() ? ale->total_power.at(c) : physical_transport_enabled() ? stored_temperature_sources().total_power_density(c) : scalar_type{};};
+    std::optional<material_type> simple_material;
+    if(!physical_transport_enabled()) {
+        BoussinesqModelOptions model;model.reference_density=1;model.density=1;model.specific_heat_capacity=1;
+        simple_material.emplace(d_mesh,model,d_problem.time_options());
+    }
+    const auto& material=simple_material ? *simple_material : stored_material_properties();
+    if(ale) {
+        for(size_t i=0;i<d_mesh->num_owned_faces();++i) {
+            const auto f=static_cast<local_ordinal_type>(i);flux.set_owned_value(f,flux.value(f)-ale->mesh_flux.at(i));
+        }
+        flux.sync_ghosts();
+    }
+    std::optional<field_type> diagnostic_density;
+    if(ale && ale->new_density.size()==d_mesh->num_owned_cells()) {
+        diagnostic_density.emplace(d_mesh,"diagnostic_ALE_temperature_density");
+        for(size_t i=0;i<ale->new_density.size();++i) diagnostic_density->set_owned_value(static_cast<local_ordinal_type>(i),ale->new_density[i]);
+        diagnostic_density->sync_ghosts();
+    }
+    const auto system=original.assemble_steady_physical(t,flux,d_problem.time_options().time_step,material,power,
+        d_problem.time_options().non_orthogonal_treatment,
+        rebuilt ? &rebuilt->effective_thermal_conductivity() : nullptr,
+        rebuilt ? rebuilt->effective_thermal_conductivity_boundary_cache() : nullptr,
+        d_problem.time_options().coefficient_interpolation,diagnostic_density ? &*diagnostic_density : nullptr);
+    std::vector<scalar_type> volumes(d_mesh->num_owned_cells());
+    for(size_t i=0;i<volumes.size();++i) volumes[i]=d_mesh->cell_volume(static_cast<local_ordinal_type>(i));
+    result.temperature=FVM::steady_residual_report<Pack>(*system.matrix,*system.rhs,t.owned_data(),volumes,{},true);
+    result.temperature_residual_units=physical_transport_enabled() ? "W/m^3" : "K/s";
+    if(ale) {
+        scalar_type local_max{},local_rate{},global_rate{};
+        for(size_t i=0;i<d_mesh->num_owned_cells();++i) {
+            const auto c=static_cast<local_ordinal_type>(i);scalar_type swept{};
+            for(const auto f:d_mesh->faces(c)) swept+=(d_mesh->owner_cell(f)==c ? scalar_type{1} : scalar_type{-1})*ale->mesh_flux.at(f);
+            const auto rate=(ale->new_volume[i]-ale->old_volume[i])/ale->time_step;
+            local_max=std::max(local_max,std::abs(rate-swept));local_rate+=rate;
+        }
+        scalar_type global_max{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_MAX,1,&local_max,&global_max);
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local_rate,&global_rate);
+        result.gcl_max=global_max;result.mesh_volume_rate=global_rate;
+        const auto comm=d_mesh->owned_cell_map()->getComm();
+        for(size_t component=0;component<3;++component) {
+            std::vector<scalar_type> storage(volumes.size()),scale(volumes.size()),total(volumes.size()),total_scale(volumes.size());
+            const auto u=this->velocity().owned_read_view();
+            for(size_t i=0;i<volumes.size();++i) {
+                const auto current=ale->new_volume[i]*u(i,component)/ale->time_step;
+                const auto old=ale->old_volume[i]*ale->old_velocity[i][component]/ale->time_step;
+                storage[i]=current-old;scale[i]=std::abs(current)+std::abs(old);
+                total[i]=storage[i]+result.momentum[component].integrated[i];
+                total_scale[i]=scale[i]+result.momentum[component].algebraic_scale[i];
+            }
+            result.momentum_storage[component]=FVM::integrated_residual_report<scalar_type>(storage,scale,volumes,*comm,options.include_cell_data);
+            result.momentum_total[component]=FVM::integrated_residual_report<scalar_type>(total,total_scale,volumes,*comm,options.include_cell_data);
+        }
+        if(ale->new_density.size()==volumes.size()) {
+            std::vector<scalar_type> storage(volumes.size()),scale(volumes.size()),total(volumes.size()),total_scale(volumes.size());
+            for(size_t i=0;i<volumes.size();++i) {
+                const auto c=static_cast<local_ordinal_type>(i);
+                const auto current=ale->new_volume[i]*ale->new_density[i]*stored_material_properties().specific_heat_capacity.value(c)*temperature().value(c)/ale->time_step;
+                const auto old=ale->old_volume[i]*ale->old_density[i]*ale->old_cp[i]*ale->old_temperature[i]/ale->time_step;
+                storage[i]=current-old;scale[i]=std::abs(current)+std::abs(old);
+                total[i]=storage[i]+result.temperature->integrated[i];total_scale[i]=scale[i]+result.temperature->algebraic_scale[i];
+            }
+            result.temperature_storage=FVM::integrated_residual_report<scalar_type>(storage,scale,volumes,*comm,options.include_cell_data);
+            result.temperature_total=FVM::integrated_residual_report<scalar_type>(total,total_scale,volumes,*comm,options.include_cell_data);
+        }
+        result.geometry_kind="frozen_ALE_geometry";
+
+    }
+    if(!options.include_cell_data) {
+        auto clear=[](auto& r){r.integrated.clear();r.density.clear();r.algebraic_scale.clear();};
+        for(auto& r:result.momentum) clear(r);
+        clear(*result.temperature);clear(result.stored_continuity);clear(result.reconstructed_continuity);result.cell_volume.clear();
+    }
+    return result;
+}
+}
+
+namespace SimpleFluid {
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::finish_step()
+{
+    base_type::finish_step();
+    if(this->diagnostic_history_enabled() && d_pending_diagnostic_ale) {
+        d_pending_diagnostic_ale->old_density=d_diagnostic_old_state.old_density;
+        d_pending_diagnostic_ale->old_cp=d_diagnostic_old_state.old_cp;
+        d_pending_diagnostic_ale->new_density=d_diagnostic_old_state.new_density;
+        d_pending_diagnostic_ale->total_power=d_diagnostic_old_state.total_power;
+        if(this->volume_continuity_target()) d_pending_diagnostic_ale->continuity_target.assign(this->volume_continuity_target()->owned_integrated_rates().begin(),this->volume_continuity_target()->owned_integrated_rates().end());
+        d_accepted_diagnostic_ale=d_pending_diagnostic_ale;
+        d_accepted_diagnostic_ale->accepted_step=this->step_index();
+    } else d_accepted_diagnostic_ale.reset();
+}
+}
+
+namespace SimpleFluid {
+template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::begin_step()
+{
+    base_type::begin_step();
+    if(!this->diagnostic_history_enabled()) return;
+    const auto n=d_mesh->num_owned_cells();
+    d_diagnostic_old_state.old_velocity.resize(n);d_diagnostic_old_state.old_temperature.resize(n);
+    d_diagnostic_old_state.old_density.resize(n);d_diagnostic_old_state.old_cp.resize(n);
+    for(size_t i=0;i<n;++i) {
+        const auto c=static_cast<local_ordinal_type>(i);const auto u=this->velocity().value(c);
+        d_diagnostic_old_state.old_velocity[i]={u.x,u.y,u.z};
+        d_diagnostic_old_state.old_temperature[i]=temperature().value(c);
+        d_diagnostic_old_state.old_density[i]=stored_material_properties().density.value(c);
+        d_diagnostic_old_state.old_cp[i]=stored_material_properties().specific_heat_capacity.value(c);
+    }
+}
+}

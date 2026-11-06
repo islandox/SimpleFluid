@@ -1407,8 +1407,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
         const auto owned = static_cast<size_t>(cell_lid);
         const auto cell_storage = storage_data(cell_lid, 0);
         const auto cell_advection = advection_data(cell_lid, 0);
-        const auto transient = cell_storage * volume / time_step;
-        const auto old_transient = old_storage_data(cell_lid, 0) * volume / time_step;
+        const bool steady = discretization.mode == AssemblyMode::Steady;
+        const auto transient = steady ? scalar_type{} : cell_storage * volume / time_step;
+        const auto old_transient = steady ? scalar_type{} : old_storage_data(cell_lid, 0) * volume / time_step;
         const auto sink = sink_values[owned];
 
         row_values.clear();
@@ -1630,12 +1631,12 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
     ScalarCellValueProvider<Pack> power_density, NonOrthogonalTreatment treatment,
     const CellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     const BoundaryCache<Pack>* boundary_thermal_conductivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation)
+    FaceCoefficientInterpolation coefficient_interpolation, AssemblyMode mode)
 {
     return physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
         density, specific_heat_capacity, thermal_conductivity, std::move(boundary_condition),
         std::move(boundary_value), std::move(power_density), treatment, correction_field,
-        std::move(cached_matrix), boundary_thermal_conductivity, geometry_cache, coefficient_interpolation, false);
+        std::move(cached_matrix), boundary_thermal_conductivity, geometry_cache, coefficient_interpolation, false, mode);
 }
 
 template<TpetraTypePack Pack>
@@ -1646,12 +1647,13 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
     ScalarCellValueProvider<Pack> power_density, NonOrthogonalTreatment treatment,
     const CellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     const BoundaryCache<Pack>* boundary_thermal_conductivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only)
+    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only, AssemblyMode mode)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
     const auto& mesh = old_temperature.mesh();
+    detail::validate_assembly_mode(mesh, mode);
     const auto non_orthogonal_weights = detail::validate_non_orthogonal_transport_selection<Pack>(
         mesh, treatment, correction_field, "physical_temperature_transport_system");
     if (&face_fluxes.mesh() != &mesh || &density.mesh() != &mesh || &specific_heat_capacity.mesh() != &mesh ||
@@ -1726,7 +1728,7 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
         [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
         const auto cell_capacity = density_data(cell_lid, 0) * heat_capacity_data(cell_lid, 0);
-        const auto transient = cell_capacity * volume / time_step;
+        const auto transient = mode == AssemblyMode::Steady ? scalar_type{} : cell_capacity * volume / time_step;
         row_values.clear();
         detail::add_matrix_entry(row_values, cell_lid, transient);
         rhs->replaceLocalValue(
@@ -1875,13 +1877,14 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
     VectorCellValueProvider<Pack> acceleration_source, NonOrthogonalTreatment treatment,
     const VectorCellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     BoundaryFaceSelector boundary_diffusion, const BoundaryCache<Pack>* boundary_dynamic_viscosity,
-    const TransportGeometryCache<Mesh<Pack>>* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation)
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation, AssemblyMode mode)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = VectorCellField<Pack>::num_components;
 
     const auto& mesh = old_velocity.mesh();
+    detail::validate_assembly_mode(mesh, mode);
     const auto non_orthogonal_weights = detail::validate_non_orthogonal_transport_selection<Pack>(
         mesh, treatment, correction_field, "physical_momentum_transport_system");
     if (&face_fluxes.mesh() != &mesh || &dynamic_viscosity.mesh() != &mesh)
@@ -1949,7 +1952,7 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
     detail::visit_transport_assembly_rows(mesh, assembly_geometry,
         [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto transient = volume / time_step;
+        const auto transient = mode == AssemblyMode::Steady ? scalar_type{} : volume / time_step;
         const auto source_value = acceleration_source(cell_lid);
 
         row_values.clear();

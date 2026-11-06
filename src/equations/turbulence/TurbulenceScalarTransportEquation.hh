@@ -13,6 +13,7 @@
 
 #include "SimpleFluidExport.hh"
 #include "FVM/TransportSystem.hh"
+#include "FVM/SteadyDiagnostics.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -24,6 +25,21 @@
 
 namespace SimpleFluid
 {
+
+/** Global floor corrections; volume_integral has scalar times volume units. */
+struct PositivityClippingStatistics
+{
+    std::size_t count = 0;
+    real_t max_correction = 0;
+    real_t volume_integral = 0;
+};
+
+template<class Scalar> struct TurbulenceScalarDiagnostics
+{
+    FVM::SteadyResidualReport<Scalar> pde;
+    /** Density/RMS units are transported scalar; signed_sum is mismatch times volume. */
+    FVM::SteadyResidualReport<Scalar> constraints;
+};
 
 namespace detail
 {
@@ -120,6 +136,20 @@ public:
             FVM::FaceCoefficientInterpolation coefficient_interpolation =
                 FVM::FaceCoefficientInterpolation::Harmonic) const;
 
+    /** Collectively reduce accepted local floor corrections only when requested. */
+    PositivityClippingStatistics clipping_statistics() const;
+    const PositivityClippingStatistics& local_clipping_statistics() const noexcept { return d_clipping; }
+
+    /** Storage-free assembly in independent storage; fixed wall rows are separate. */
+    TurbulenceScalarDiagnostics<scalar_type> evaluate_diagnostics(
+        const field_type& values, const face_field_type& face_fluxes,
+        const field_type& effective_diffusivity,
+        const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
+        scalar_type positive_floor, FVM::NonOrthogonalTreatment treatment,
+        const boundary_overrides_type* boundary_overrides = nullptr,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation = FVM::FaceCoefficientInterpolation::Harmonic,
+        bool include_cells = false) const;
+
     /** @brief Return the configured scalar boundary conditions. */
     const BoundaryConditionMap& boundary_conditions() const noexcept
     {
@@ -127,6 +157,15 @@ public:
     }
 
 private:
+    LinearSolveStatistics run(
+        const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
+        const field_type& effective_diffusivity, field_type& state,
+        const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
+        scalar_type positive_floor, FVM::NonOrthogonalTreatment treatment,
+        const LinearSolverOptions& linear_options, const boundary_overrides_type* boundary_overrides,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation,
+        TurbulenceScalarDiagnostics<scalar_type>* diagnostics, bool include_cells) const;
+    mutable PositivityClippingStatistics d_clipping;
     friend struct detail::TransportEquationTestAccess<Pack>;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;

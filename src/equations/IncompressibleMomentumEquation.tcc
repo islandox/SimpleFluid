@@ -520,6 +520,28 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const FVM::ALEControlVolumeState* ale) const
     -> system_type
 {
+    return assemble_physical_system(
+        old_velocity, face_fluxes, velocity_boundary_cache, options,
+        dynamic_viscosity, reference_density, acceleration_source,
+        correction_field, boundary_dynamic_viscosity, ale,
+        FVM::AssemblyMode::Transient);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
+    const velocity_field_type& old_velocity,
+    const face_flux_field_type& face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache,
+    const TimeStepperOptions& options,
+    const field_type& dynamic_viscosity,
+    scalar_type reference_density,
+    const source_type& acceleration_source,
+    const velocity_field_type* correction_field,
+    const boundary_cache_type* boundary_dynamic_viscosity,
+    const FVM::ALEControlVolumeState* ale,
+    FVM::AssemblyMode mode) const
+    -> system_type
+{
     validate_transport_inputs(
         old_velocity, face_fluxes, velocity_boundary_cache, options,
         correction_field, ale);
@@ -576,6 +598,18 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
             && type != BoundaryConditionType::Neumann;
     };
 
+    FVM::BoundaryFaceSelector zero_gradient_stress;
+    if (options.velocity_neumann_zero_gradient_stress)
+    {
+        if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
+        {
+            throw std::invalid_argument("zero-gradient Neumann stress requires mapped momentum fields.");
+        }
+        zero_gradient_stress = [&](int boundary_id, size_t)
+        {
+            return velocity_boundary_cache.type.at(boundary_id) == BoundaryConditionType::Neumann;
+        };
+    }
     detach_protected_numeric_generation();
     const auto requires_non_orthogonal_graph =
         options.non_orthogonal_treatment
@@ -611,7 +645,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
                     correction_field, d_cached_physical_transport_matrix,
                     boundary_diffusion, boundary_dynamic_viscosity,
                     &d_transport_geometry_cache,
-                    options.coefficient_interpolation);
+                    options.coefficient_interpolation, mode);
             }
             else
             {
@@ -626,7 +660,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
                     correction_field, d_cached_physical_transport_matrix,
                     boundary_diffusion, boundary_dynamic_viscosity,
                     &d_transport_geometry_cache,
-                    options.coefficient_interpolation, ale, &*d_stress_gradients);
+                    options.coefficient_interpolation, ale, &*d_stress_gradients, zero_gradient_stress, mode);
             }
         }
         catch (...)

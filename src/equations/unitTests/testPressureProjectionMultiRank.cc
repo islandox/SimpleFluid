@@ -16,6 +16,10 @@
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
+#include "geometry/MeshHandle.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -608,4 +612,155 @@ TEST(PressureProjectionMultiRankTest,
             EXPECT_NEAR(dic_equation.corrected_face_fluxes().value(face_lid),
                         gmres_equation.corrected_face_fluxes().value(face_lid), 1.0e-11);
     }
+}
+
+
+/** @brief A nontrivial skew projection solves the operator used by final fluxes. */
+TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndContinuity)
+{
+    if (Tpetra::getDefaultComm()->getSize()!=1)
+        GTEST_SKIP() << "Serial manufactured skew projection.";
+    auto mesh=SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    FieldType pressure(mesh,"skew_projection_pressure");
+    VectorFieldType velocity(mesh,"skew_projection_velocity");
+    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+        const auto x=mesh->cell_centroid(cell);
+        velocity.set_value(cell,{x.x*x.x+0.2*x.y,-0.3*x.y*x.y,0.1*x.z});
+    }
+    velocity.sync_ghosts();
+    const SimpleFluid::BoundaryConditionSet conditions;
+    const auto boundaries=SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
+    SimpleFluid::FaceField<Pack> initial_flux(mesh,"skew_initial_flux");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,pressure,0.1,boundaries,conditions.pressure,initial_flux);
+    double initial_squared=0;
+    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+        const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,initial_flux,cell);
+        initial_squared+=balance*balance;
+    }
+    ASSERT_GT(std::sqrt(initial_squared),1e-3);
+    SimpleFluid::LinearSolverOptions options;
+    options.tolerance=1e-11;
+    options.max_iterations=500;
+    options.preconditioner=SimpleFluid::LinearPreconditioner::None;
+    SimpleFluid::PressureProjectionEquation<Pack> equation(mesh,options);
+    const auto result=equation.project(pressure,0.1,1.0,boundaries,velocity);
+    ASSERT_TRUE(result.linear_solve.converged);
+    EXPECT_GT(result.pressure_correction,1e-4);
+    SimpleFluid::FaceField<Pack> reconstructed(mesh,"skew_independent_final_flux");
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,pressure,0.1,boundaries,conditions.pressure,reconstructed);
+    double squared=0;
+    double reconstructed_squared=0;
+    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+        const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(
+            *mesh,equation.corrected_face_fluxes(),cell);
+        const auto independent=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,reconstructed,cell);
+        squared+=balance*balance;
+        reconstructed_squared+=independent*independent;
+    }
+    EXPECT_LT(std::sqrt(squared),1e-8);
+    EXPECT_LT(std::sqrt(reconstructed_squared),1e-8);
+    EXPECT_NEAR(result.continuity,std::sqrt(squared),1e-13);
+    for (size_t local=0; local<mesh->num_faces(); ++local)
+    {
+        const auto face=static_cast<MeshType::local_ordinal_type>(local);
+        if (mesh->is_owned_face(face))
+            EXPECT_NEAR(equation.corrected_face_fluxes().value(face),reconstructed.value(face),1e-12);
+    }
+}
+
+
+TEST(PressureProjectionMultiRankTest, NativeSkewOutletProjectionIsConservativeAcrossRanks)
+{
+    using namespace SimpleFluid;
+    const auto comm=Tpetra::getDefaultComm();
+    if (comm->getSize()!=2) GTEST_SKIP() << "Two-rank native skew outlet regression.";
+    using Geometry=Meshes::UnstructuredMesh;
+    using Partitioned=Meshes::PartitionedMesh<Geometry,Pack>;
+    using Native=MeshHandle<Pack>;
+    // A genuinely two-dimensional grid retains transverse pressure gradients.
+    constexpr size_t nx=4, ny=3;
+    const auto node=[](size_t i,size_t j,size_t k) {
+        return static_cast<Geometry::NodeID>(i+(nx+1)*(j+(ny+1)*k));
+    };
+    Arr<Geometry::Vec3> nodes;
+    for(size_t k=0;k<2;++k) for(size_t j=0;j<=ny;++j) for(size_t i=0;i<=nx;++i)
+    {
+        const double x=double(i)/nx,y=double(j)/ny;
+        nodes.push_back({x+0.3*y,y,double(k)});
+    }
+    Arr<Geometry::CellDefinition> cells;
+    Arr<Geometry::BoundaryFaceDefinition> exterior;
+    for(size_t j=0;j<ny;++j) for(size_t i=0;i<nx;++i)
+    {
+        const auto a=node(i,j,0),b=node(i+1,j,0),c=node(i+1,j+1,0),d=node(i,j+1,0);
+        const auto e=node(i,j,1),f=node(i+1,j,1),g=node(i+1,j+1,1),h=node(i,j+1,1);
+        cells.push_back({Geometry::CellType::HEXAHEDRON,{a,b,c,d,e,f,g,h}});
+        if(i==0) exterior.push_back({{d,h,e,a},1,"xmin"});
+        if(i+1==nx) exterior.push_back({{b,f,g,c},2,"xmax"});
+        if(j==0) exterior.push_back({{a,e,f,b},3,"ymin"});
+        if(j+1==ny) exterior.push_back({{d,c,g,h},4,"ymax"});
+        exterior.push_back({{a,b,c,d},5,"zmin"});
+        exterior.push_back({{e,h,g,f},6,"zmax"});
+    }
+    auto geometry=std::make_shared<Geometry>(nodes,cells,exterior);
+    auto partition=MeshPartitioner<Pack>::partition(*geometry,comm);
+    auto distributed=std::make_shared<Partitioned>(geometry,std::move(partition.indexer),comm);
+    SP<const Native> mesh=std::make_shared<Native>(distributed);
+    ASSERT_GT(global_min(*comm,int(mesh->num_owned_cells())),0);
+    ASSERT_FALSE(mesh->legacy_mesh());
+    ScalarCellFieldStored<Pack> pressure(mesh,"native_skew_pressure");
+    VectorCellFieldStored<Pack> velocity(mesh,"native_skew_velocity");
+    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+    {
+        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+        const auto x=mesh->cell_centroid(cell);
+        velocity.set_owned_value(cell,{x.x*x.x+0.3*x.y,x.x*x.y-0.2*x.y*x.y,0.0});
+    }
+    velocity.sync_ghosts();
+    BoundaryConditionSet conditions;
+    conditions.velocity["xmax"]={BoundaryConditionType::Neumann,{}};
+    conditions.pressure["xmax"]={BoundaryConditionType::Dirichlet,0.0};
+    const auto cache=FVM::cache_velocity_boundary_conditions<Pack>(mesh,conditions);
+    ScalarFaceFieldStored<Pack> initial(mesh,"native_skew_initial_flux");
+    FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,initial);
+    double initial_squared=0;
+    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+    {
+        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+        const auto q=FVM::cell_flux_balance<Pack>(*mesh,initial,cell);
+        initial_squared+=q*q;
+    }
+    ASSERT_GT(std::sqrt(global_sum(*comm,initial_squared)),1e-3);
+    LinearSolverOptions options;
+    options.tolerance=1e-11; options.max_iterations=500;
+    options.preconditioner=LinearPreconditioner::None;
+    PressureProjectionEquation<Pack,Native> equation(mesh,options,conditions.pressure);
+    const auto result=equation.project(pressure,0.1,1.0,cache,velocity);
+    ASSERT_TRUE(result.linear_solve.converged);
+    EXPECT_GT(result.pressure_correction,1e-4);
+    ScalarFaceFieldStored<Pack> independent(mesh,"native_skew_reconstructed_flux");
+    FVM::pressure_weighted_face_fluxes(velocity,pressure,0.1,cache,conditions.pressure,independent);
+    double squared=0,reconstructed_squared=0;
+    for(size_t owned=0;owned<mesh->num_owned_cells();++owned)
+    {
+        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+        const auto q=FVM::cell_flux_balance<Pack>(*mesh,equation.corrected_face_fluxes(),cell);
+        const auto r=FVM::cell_flux_balance<Pack>(*mesh,independent,cell);
+        squared+=q*q; reconstructed_squared+=r*r;
+    }
+    const auto norm=std::sqrt(global_sum(*comm,squared));
+    EXPECT_LT(norm,1e-8);
+    EXPECT_LT(std::sqrt(global_sum(*comm,reconstructed_squared)),1e-8);
+    EXPECT_NEAR(result.continuity,norm,1e-13);
+    expect_replicated(*comm,result.continuity);
+    for(const auto face:independent.owned_face_ids())
+        EXPECT_NEAR(equation.corrected_face_fluxes().local_value(face),independent.local_value(face),1e-12);
 }

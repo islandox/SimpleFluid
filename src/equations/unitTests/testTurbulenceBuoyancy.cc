@@ -566,4 +566,40 @@ TEST(TurbulenceBuoyancyTest, RejectsMissingOrUnknownAutomaticWallSelection)
     EXPECT_FALSE(model.enabled());
 }
 
+
+TEST(TurbulenceBuoyancyTest, NativeDiagnosticsReassembleSignedBuoyancyWithoutPublishingIt)
+{
+    auto mesh = make_mesh();
+    auto material = make_material(mesh);
+    const auto boundaries = zero_gradient_box_boundaries();
+    Field temperature(mesh, "temperature");
+    initialize_linear_temperature(temperature);
+    const auto thermal_boundaries = linear_temperature_boundaries();
+    SimpleFluid::TurbulenceBuoyancyContext<Pack> context;
+    context.temperature = &temperature;
+    context.temperature_boundary_conditions = &thermal_boundaries;
+    context.thermal_expansion = thermal_expansion;
+    VectorField velocity(mesh, VectorField::vec_type{1, 1, 0}, "velocity");
+    velocity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    for (const auto& closure : closure_cases)
+    {
+        SCOPED_TRACE(closure.name);
+        Model model(mesh, boundaries);
+        model.configure(buoyancy_options(closure), material, reference_density);
+        const auto accepted = model.buoyancy_production()->value(0);
+        for (double sign : {-1.0, 1.0})
+        {
+            context.gravity = {3 * sign, 0, 0};
+            auto diagnostic = model.evaluate_diagnostics(velocity, flux, cache, 1e-6,
+                material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+                &context);
+            EXPECT_LT(sign * diagnostic.model->buoyancy_production()->value(0), 0);
+            EXPECT_TRUE(std::isfinite(diagnostic.k.pde.dimensionless));
+            EXPECT_DOUBLE_EQ(model.buoyancy_production()->value(0), accepted);
+        }
+    }
+}
+
 } // namespace

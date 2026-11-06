@@ -10,9 +10,11 @@
  */
 
 #include "solvers/IncompressibleIsothermalSolver.hh"
+#include "FVM/TransportSystem.hh"
 
 #include "solvers/unitTests/CoupledBackendTestSupport.hh"
 #include <gtest/gtest.h>
+#include <Teuchos_CommHelpers.hpp>
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -23,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -264,4 +267,177 @@ TEST(IncompressibleIsothermalSolverTest, WritesTurbulenceFieldsWithoutTemperatur
     EXPECT_NE(contents.find("Name=\"epsilon\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"nu_t\""), std::string::npos);
     EXPECT_EQ(contents.find("Name=\"temperature\""), std::string::npos);
+}
+
+/** Modified pressure absorbs isotropic turbulence in both coupling paths. */
+TEST(IncompressibleIsothermalSolverTest, ModifiedPressureAbsorbsNonuniformK)
+{
+    for (const auto coupling : {SimpleFluid::PressureVelocityCoupling::PISO,
+                               SimpleFluid::PressureVelocityCoupling::CoupledKrylov})
+    {
+        double mechanical_pressure_range = 0.0;
+        for (const bool modified : {false, true})
+        {
+            auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
+            auto controls = stable_time_options(coupling);
+            controls.isothermal_modified_pressure = modified;
+            Solver solver(mesh, slip_box_boundaries(), controls, focused_linear_options(), 2.0);
+            auto& turbulence = solver.configure_turbulence(standard_k_epsilon_options());
+            Solver::turbulence_model_type::field_type k(solver.velocity().mesh_ptr(), 0.1, "restart_nonuniform_k");
+            for (size_t i = 0; i < k.num_owned_cells(); ++i)
+            {
+                const auto lid = static_cast<Pack::local_ordinal_type>(i);
+                k.set_owned_value(lid, 0.1 + 0.02 * k.mesh().cell_centroid(lid).x);
+            }
+            k.sync_ghosts();
+            turbulence.restore_transported_state(k, *turbulence.dissipation_rate(),
+                turbulence.turbulent_kinematic_viscosity(), solver.velocity(),
+                std::as_const(solver).material_properties(), 2.0);
+            ASSERT_NO_THROW(solver.step());
+            ASSERT_NO_THROW(solver.step());
+            double minimum = std::numeric_limits<double>::infinity();
+            double maximum = -std::numeric_limits<double>::infinity();
+            for (size_t i = 0; i < k.num_owned_cells(); ++i)
+            {
+                const double p = solver.pressure().value(static_cast<Pack::local_ordinal_type>(i));
+                minimum = std::min(minimum, p);
+                maximum = std::max(maximum, p);
+            }
+            // A partition may be constant locally while the mechanical
+            // pressure varies between ranks. Check the complete field range.
+            const auto comm = k.mesh().owned_cell_map()->getComm();
+            double global_minimum{}, global_maximum{};
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &minimum, &global_minimum);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &maximum, &global_maximum);
+            minimum = global_minimum;
+            maximum = global_maximum;
+            if (modified)
+            {
+                EXPECT_LT(maximum - minimum, 1.0e-10);
+                EXPECT_GT(mechanical_pressure_range, 1.0e-8);
+            }
+            else mechanical_pressure_range = maximum - minimum;
+        }
+    }
+}
+
+/** ZeroGradient retains tangential transpose traction and removes normal gradients. */
+TEST(IncompressibleIsothermalSolverTest, ZeroGradientOutletStressMatchesManufacturedShear)
+{
+    auto mesh = make_native_cartesian_mesh();
+    Solver::velocity_field_type velocity(mesh, Solver::vec_type{}, "outlet_test_U");
+    Solver::field_type viscosity(mesh, 1.0, "outlet_test_mu");
+    Solver::face_flux_field_type flux(mesh, 0.0, "outlet_test_phi");
+    for (const bool normal_profile : {false, true})
+    {
+        for (size_t i=0; i<velocity.num_owned_cells(); ++i)
+        {
+            const auto lid=static_cast<Pack::local_ordinal_type>(i);
+            const auto centre=mesh->cell_centroid(lid);
+            velocity.set_owned_value(lid, {normal_profile ? centre.x : centre.y, 0.0, 0.0});
+        }
+        velocity.sync_ghosts();
+        auto is_x_face = [&](int batch, size_t face)
+        {
+            const auto lid=mesh->boundary_face_batch(batch).face_lids[face];
+            const auto centre=mesh->face_centroid(lid);
+            return centre.x == 0.0 || centre.x == 2.0;
+        };
+        auto boundary = [&](int batch, size_t face)
+        {
+            const auto lid=mesh->boundary_face_batch(batch).face_lids[face];
+            const auto centre=mesh->face_centroid(lid);
+            return Solver::vec_type{normal_profile ? centre.x : centre.y, 0.0, 0.0};
+        };
+        auto diffusion = [&](int batch, size_t face) { return !is_x_face(batch,face); };
+        auto zero = [](Pack::local_ordinal_type) { return Solver::vec_type{}; };
+        auto assemble = [&](bool enabled)
+        {
+            SimpleFluid::FVM::BoundaryFaceSelector selector;
+            if (enabled) selector=is_x_face;
+            return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(velocity,flux,0.1,viscosity,1.0,
+                boundary,zero,SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,
+                diffusion,nullptr,nullptr,SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic,
+                nullptr,nullptr,selector);
+        };
+        const auto traction_free=assemble(false);
+        const auto zero_gradient=assemble(true);
+        const auto before=traction_free.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+        const auto after=zero_gradient.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+        for (size_t i=0; i<velocity.num_owned_cells(); ++i)
+        {
+            const auto centre=mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(i));
+            EXPECT_NEAR(after(i,0)-before(i,0),0.0,1e-12);
+            EXPECT_NEAR(after(i,1)-before(i,1),normal_profile ? 0.0 : (centre.x<1.0 ? -1.0 : 1.0),1e-12);
+            EXPECT_NEAR(after(i,2)-before(i,2),0.0,1e-12);
+        }
+    }
+}
+
+TEST(IncompressibleIsothermalSolverTest, IndependentDiagnosticsDetectPressureAndPreserveAcceptedState)
+{
+    auto mesh=make_native_cartesian_mesh();
+    auto time_options=stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO);
+    Solver solver(mesh,slip_box_boundaries(),time_options,focused_linear_options(),2.0);
+    SimpleFluid::SolverDiagnosticsOptions options;
+    options.include_cell_data=true;options.include_face_data=true;
+    const auto equilibrium=solver.evaluate_diagnostics(options);
+    EXPECT_NEAR(equilibrium.momentum_vector_rms,0.0,1e-14);
+    EXPECT_FALSE(equilibrium.stored_flux_available);
+    for(size_t i=0;i<mesh->num_owned_cells();++i) {
+        const auto lid=static_cast<Pack::local_ordinal_type>(i);
+        solver.pressure().set_owned_value(lid,mesh->cell_centroid(lid).x);
+    }
+    solver.pressure().sync_ghosts();
+    std::vector<double> before;
+    for(size_t i=0;i<mesh->num_owned_cells();++i) before.push_back(solver.pressure().value(static_cast<Pack::local_ordinal_type>(i)));
+    const auto report=solver.evaluate_diagnostics(options);
+    const auto repeated=solver.evaluate_diagnostics(options);
+    EXPECT_GT(report.momentum_vector_rms,1e-3);
+    EXPECT_DOUBLE_EQ(report.momentum_vector_rms,repeated.momentum_vector_rms);
+    EXPECT_EQ(solver.step_index(),0);EXPECT_DOUBLE_EQ(solver.time(),0.0);
+    for(size_t i=0;i<before.size();++i) EXPECT_DOUBLE_EQ(before[i],solver.pressure().value(static_cast<Pack::local_ordinal_type>(i)));
+    ASSERT_EQ(report.reconstructed_face_flux.size(),mesh->num_owned_faces());
+    for(size_t i=0;i<report.reconstructed_face_flux.size();++i)
+        EXPECT_NEAR(report.reconstructed_face_flux[i],report.velocity_face_flux[i]+report.pressure_face_flux[i],1e-14);
+    options.pressure_coefficient_time_step=0.0;
+    const auto zero_coefficient=solver.evaluate_diagnostics(options);
+    for(auto value:zero_coefficient.pressure_face_flux) EXPECT_DOUBLE_EQ(value,0.0);
+    EXPECT_EQ(solver.step_index(),0);
+}
+
+TEST(IncompressibleIsothermalSolverTest, DiagnosticsHistoryPublishedForAcceptedSteps)
+{
+    auto mesh=make_native_cartesian_mesh();
+    Solver solver(mesh,slip_box_boundaries(),stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO),focused_linear_options());
+    solver.enable_diagnostic_history();
+    EXPECT_FALSE(solver.evaluate_diagnostics().last_pressure_update_l2.has_value());
+    solver.step();
+    const auto report=solver.evaluate_diagnostics();
+    EXPECT_TRUE(report.stored_flux_available);
+    ASSERT_EQ(report.pressure_update_l2_history.size(),1u);
+    ASSERT_TRUE(report.accumulated_pressure_update_l2.has_value());
+    EXPECT_DOUBLE_EQ(*report.accumulated_pressure_update_l2,0.0);
+    EXPECT_EQ(solver.evaluate_diagnostics().pressure_update_l2_history.size(),1u);
+}
+
+TEST(IncompressibleIsothermalSolverTest, DiagnosticsDoNotChangeNextTurbulentStep)
+{
+    for(const auto coupling:{SimpleFluid::PressureVelocityCoupling::PISO,SimpleFluid::PressureVelocityCoupling::CoupledKrylov}) {
+        auto mesh=make_native_cartesian_mesh();
+        Solver observed(mesh,slip_box_boundaries(),stable_time_options(coupling),focused_linear_options());
+        Solver control(mesh,slip_box_boundaries(),stable_time_options(coupling),focused_linear_options());
+        initialize_shear(observed);initialize_shear(control);
+        observed.configure_turbulence(standard_k_epsilon_options());control.configure_turbulence(standard_k_epsilon_options());
+        ASSERT_NO_THROW(observed.evaluate_diagnostics());
+        ASSERT_NO_THROW(observed.evaluate_diagnostics());
+        observed.step();control.step();
+        for(size_t i=0;i<mesh->num_owned_cells();++i) {
+            const auto c=static_cast<Pack::local_ordinal_type>(i);
+            EXPECT_DOUBLE_EQ(observed.pressure().value(c),control.pressure().value(c));
+            const auto a=observed.velocity().value(c),b=control.velocity().value(c);
+            EXPECT_DOUBLE_EQ(a.x,b.x);EXPECT_DOUBLE_EQ(a.y,b.y);EXPECT_DOUBLE_EQ(a.z,b.z);
+            EXPECT_DOUBLE_EQ(observed.find_turbulence_model()->turbulent_kinetic_energy().value(c),control.find_turbulence_model()->turbulent_kinetic_energy().value(c));
+        }
+    }
 }

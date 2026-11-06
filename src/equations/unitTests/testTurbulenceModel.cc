@@ -152,6 +152,12 @@ TEST(TurbulenceModelTest, AdvancesStandardKEpsilonOnNativeMeshHandle)
 
     EXPECT_TRUE(summary.converged);
     EXPECT_EQ(summary.solves, 2);
+    auto diagnostic = model.evaluate_diagnostics(velocity, face_fluxes, velocity_boundary_cache,
+        0.1, material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    EXPECT_EQ(diagnostic.k.pde.included_count, mesh->num_owned_cells());
+    EXPECT_TRUE(std::isfinite(diagnostic.k.pde.dimensionless));
+    EXPECT_FALSE(diagnostic.model->turbulent_kinetic_energy().mesh().legacy_mesh());
+
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
@@ -1632,6 +1638,122 @@ TEST(TurbulenceModelTest, WallTreatmentRejectsUnknownAndNonNoSlipBoundaries)
     Model missing_model(mesh, missing);
     EXPECT_THROW(missing_model.configure(options, material, reference_density),
                  std::invalid_argument);
+}
+
+
+TEST(TurbulenceModelTest, NativeSteadyDiagnosticsCoverEveryClosureWithoutChangingAcceptedState)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    VectorFieldType velocity(mesh, "velocity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    const std::array types{ModelType::StandardKEpsilon, ModelType::RNGKEpsilon,
+        ModelType::RealizableKEpsilon, ModelType::StandardKOmega,
+        ModelType::BSLKOmega, ModelType::SSTKOmega, ModelType::SSTKOmegaSAS};
+    for (auto type : types)
+    {
+        SCOPED_TRACE(static_cast<int>(type));
+        Model model(mesh, boundaries);
+        auto options = make_model_options(type);
+        options.initial_wall_distance = 0.25;
+        model.configure(options, material, reference_density);
+        const auto k = model.turbulent_kinetic_energy().value(0);
+        const auto nu = model.turbulent_kinematic_viscosity().value(0);
+        auto diagnostic = model.evaluate_diagnostics(velocity, flux, cache, 0.1,
+            material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+            nullptr, true, true);
+        EXPECT_EQ(diagnostic.k.pde.included_count, 1);
+        EXPECT_GT(diagnostic.k.pde.max_density, 0);
+        EXPECT_TRUE(std::isfinite(diagnostic.secondary.pde.max_density));
+        EXPECT_DOUBLE_EQ(model.turbulent_kinetic_energy().value(0), k);
+        EXPECT_DOUBLE_EQ(model.turbulent_kinematic_viscosity().value(0), nu);
+        EXPECT_EQ(model.clipping_statistics().count, 0);
+        if (type == ModelType::SSTKOmegaSAS)
+        {
+            EXPECT_FALSE(model.sas_statistics().valid);
+            EXPECT_TRUE(diagnostic.model->sas_statistics().valid);
+            EXPECT_THROW(model.evaluate_diagnostics(velocity, flux, cache, 0.1,
+                material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+                nullptr, false), std::invalid_argument);
+        }
+
+        EXPECT_TRUE(std::isfinite(diagnostic.model->effective_dynamic_viscosity().value(0)));
+        Model baseline(mesh, boundaries);
+        baseline.configure(options, material, reference_density);
+        model.advance(velocity, flux, cache, 0.1, material, reference_density,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+        baseline.advance(velocity, flux, cache, 0.1, material, reference_density,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+        EXPECT_DOUBLE_EQ(model.turbulent_kinetic_energy().value(0),
+                         baseline.turbulent_kinetic_energy().value(0));
+        EXPECT_DOUBLE_EQ(model.turbulent_kinematic_viscosity().value(0),
+                         baseline.turbulent_kinematic_viscosity().value(0));
+
+    }
+}
+
+
+TEST(TurbulenceModelTest, DiagnosticsKeepWallRowsSeparateAndWallCachesIndependent)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.velocity["xmin"] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+    VectorFieldType velocity(mesh, "velocity");
+    velocity.set_owned_value(0, {0, 1, 0});
+    velocity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    for (auto treatment : {SimpleFluid::TurbulenceWallTreatmentType::StandardHighReKEpsilon,
+                          SimpleFluid::TurbulenceWallTreatmentType::ResolvedLowReKEpsilon})
+    {
+        Model model(mesh, boundaries);
+        auto options = make_model_options(ModelType::StandardKEpsilon);
+        options.wall_treatment = treatment;
+        options.wall_options.boundary_names = {"xmin"};
+        model.configure(options, material, reference_density);
+        auto diagnostics = model.evaluate_diagnostics(velocity, flux, cache, 0.1,
+            material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+        EXPECT_EQ(diagnostics.secondary.pde.included_count, 0);
+        EXPECT_EQ(diagnostics.secondary.constraints.included_count, 1);
+        EXPECT_NE(diagnostics.model->effective_dynamic_viscosity_boundary_cache(), nullptr);
+        EXPECT_NE(diagnostics.model->effective_dynamic_viscosity_boundary_cache(),
+                  model.effective_dynamic_viscosity_boundary_cache());
+        EXPECT_DOUBLE_EQ(model.dissipation_rate()->value(0), options.initial_dissipation_rate);
+    }
+}
+
+
+TEST(TurbulenceModelTest, AcceptedClippingRecordsStaySeparateAndSurviveDiagnosticsAndRestore)
+{
+    auto mesh = make_single_cell_mesh();
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    Model model(mesh, boundaries);
+    auto options = make_model_options(ModelType::StandardKEpsilon);
+    options.min_turbulent_kinetic_energy = 0.19;
+    options.min_dissipation_rate = 0.049;
+    model.configure(options, material, reference_density);
+    VectorFieldType velocity(mesh, "velocity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    const auto cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    model.advance(velocity, flux, cache, 1.0, material, reference_density,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    const auto before = model.clipping_statistics_by_field();
+    EXPECT_EQ(before.k.count, 1);
+    EXPECT_EQ(before.secondary.count, 1);
+    EXPECT_GT(before.k.max_correction, 0);
+    EXPECT_GT(before.secondary.max_correction, 0);
+    const auto snapshot = model.snapshot();
+    model.evaluate_diagnostics(velocity, flux, cache, 1.0, material, reference_density,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    EXPECT_DOUBLE_EQ(model.clipping_statistics_by_field().k.volume_integral, before.k.volume_integral);
+    EXPECT_DOUBLE_EQ(model.clipping_statistics_by_field().secondary.volume_integral, before.secondary.volume_integral);
+    model.restore(snapshot);
+    EXPECT_DOUBLE_EQ(model.clipping_statistics_by_field().k.max_correction, before.k.max_correction);
+    EXPECT_DOUBLE_EQ(model.clipping_statistics_by_field().secondary.max_correction, before.secondary.max_correction);
 }
 
 } // namespace

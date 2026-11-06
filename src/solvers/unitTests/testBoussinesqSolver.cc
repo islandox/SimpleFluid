@@ -2519,3 +2519,23 @@ TEST(BoussinesqSolverTest, CoupledKrylovUsesPhysicalMaterialPath)
     expect_finite_solution(*mesh, solver);
     EXPECT_GT(solver.last_step_statistics().linear_solves, 0);
 }
+
+TEST(BoussinesqSolverTest, FinalTemperatureDiagnosticsIncludeSourcesWithoutAdvancingState)
+{
+    auto mesh=make_single_cell_box_mesh();
+    SimpleFluid::TimeStepperOptions time;time.time_step=0.1;time.thermal_expansion=0;
+    SimpleFluid::BoussinesqModelOptions model;model.reference_density=2;model.density=2;
+    model.specific_heat_capacity=5;model.dynamic_viscosity=0;model.thermal_conductivity=0;
+    model.temperature_source_names={"heating","sink"};model.temperature_source_power_densities={20,-5};
+    SimpleFluid::BoussinesqSolver<Pack> solver(mesh,{},time,{},model);
+    solver.temperature().put_scalar(10.0);
+    SimpleFluid::SolverDiagnosticsOptions options;options.include_cell_data=true;
+    const auto report=solver.evaluate_diagnostics(options);
+    ASSERT_TRUE(report.temperature.has_value());
+    EXPECT_NEAR(report.temperature->signed_sum,-15.0,1e-12);
+    EXPECT_NEAR(report.temperature->volume_rms,15.0,1e-12);
+    EXPECT_EQ(report.temperature_residual_units,"W/m^3");
+    EXPECT_EQ(solver.step_index(),0);EXPECT_DOUBLE_EQ(solver.time(),0.0);
+    EXPECT_DOUBLE_EQ(solver.temperature().value(0),10.0);
+    EXPECT_DOUBLE_EQ(solver.evaluate_diagnostics().temperature->volume_rms,report.temperature->volume_rms);
+}

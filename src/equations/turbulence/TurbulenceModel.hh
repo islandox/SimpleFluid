@@ -283,6 +283,35 @@ public:
                                    buoyancy_context = nullptr,
                                bool physical_time = true);
 
+    /** Independent final-state coefficient workspace and storage-free residuals. */
+    struct Diagnostics
+    {
+        std::unique_ptr<TurbulenceModel> model;
+        TurbulenceScalarDiagnostics<scalar_type> k;
+        TurbulenceScalarDiagnostics<scalar_type> secondary;
+    };
+    /** Reassemble using production closure preparation without solving.
+     * Returned model owns final gradients, viscosity, properties, sources and wall caches.
+     * Live fields, solve caches and statistics remain untouched. SAS keeps its
+     * physical timestep limiter; only residual transport storage is omitted.
+     */
+    Diagnostics evaluate_diagnostics(
+        const velocity_field_type& velocity, const face_flux_field_type& projected_face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, scalar_type time_step,
+        const material_type& material, scalar_type reference_density,
+        FVM::NonOrthogonalTreatment treatment,
+        const TurbulenceBuoyancyContext<Pack, mesh_type>* buoyancy_context = nullptr,
+        bool physical_time = true, bool include_cells = false) const;
+    struct ClippingStatistics
+    {
+        PositivityClippingStatistics k;
+        PositivityClippingStatistics secondary;
+    };
+    /** Collectively reduce per-equation corrections from the last fully accepted step. */
+    ClippingStatistics clipping_statistics_by_field() const;
+    /** Legacy combined record; only count is meaningful across unlike scalar units. */
+    PositivityClippingStatistics clipping_statistics() const;
+
     /** Rebuild mu_eff and lambda_eff from current molecular and turbulent fields. */
     void refresh_effective_properties(const material_type& material, scalar_type reference_density);
 
@@ -353,6 +382,14 @@ public:
     const std::map<std::string, const field_type*>& output_fields() const noexcept;
 
 private:
+    LinearSolveSummary advance_impl(
+        const velocity_field_type& velocity, const face_flux_field_type& projected_face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache, scalar_type time_step,
+        const material_type& material, scalar_type reference_density,
+        FVM::NonOrthogonalTreatment treatment, const LinearSolverOptions& linear_options,
+        const TurbulenceBuoyancyContext<Pack, mesh_type>* buoyancy_context,
+        bool physical_time, Diagnostics* diagnostics, bool include_cells);
+
     /** @brief Lazily allocated closure, transport, and derived-field state. */
     struct SIMPLEFLUID_EQUATIONS_LOCAL State;
 

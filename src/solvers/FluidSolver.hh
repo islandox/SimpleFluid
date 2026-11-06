@@ -25,6 +25,7 @@
 #include "solvers/NoxNonlinearSolver.hh"
 #include "solvers/SolverProgress.hh"
 #include "solvers/SolverTimings.hh"
+#include "solvers/SolverDiagnostics.hh"
 
 #include <cstdint>
 #include <optional>
@@ -106,6 +107,16 @@ public:
     void reset_solver_phase_timings();
 
     virtual void step();
+    /** Configure before the first accepted step; late toggles cannot recover missing history. */
+    void enable_diagnostic_history(bool enabled = true)
+    {
+        if(d_step_index>0 && enabled!=d_diagnostic_history_enabled)
+            throw std::logic_error("Diagnostic history must be configured before the first accepted step.");
+        d_diagnostic_history_enabled=enabled;
+    }
+    bool diagnostic_history_enabled() const noexcept { return d_diagnostic_history_enabled; }
+    /** Collective read-only evaluation on independent equation workspaces. */
+    virtual SolverDiagnosticsResult<scalar_type> evaluate_diagnostics(const SolverDiagnosticsOptions& options = {}) const;
     /** @brief Advance one step and print rank-zero convergence progress. */
     void step(ProgressStream& progress_output);
     /**
@@ -480,6 +491,23 @@ protected:
     VTUWriter::ScalarData collect_scalar_field(
         const legacy_field_type& field) const;
 
+    void validate_diagnostic_options(const SolverDiagnosticsOptions& options) const;
+    SolverDiagnosticsResult<scalar_type> evaluate_flow_diagnostics(
+        const SolverDiagnosticsOptions& options, const field_type& dynamic_viscosity,
+        scalar_type reference_density, const velocity_field_type* turbulent_k_gradient = nullptr,
+        const FVM::MeshBoundaryCache<Pack, mesh_type>* boundary_viscosity = nullptr,
+        const typename momentum_equation_type::source_type& additional_acceleration = {},
+        const std::vector<scalar_type>* mesh_flux = nullptr,
+        const std::vector<scalar_type>* retained_continuity_target = nullptr,
+        const velocity_boundary_cache_type* retained_velocity_boundary = nullptr,
+        const BoundaryConditionSet* retained_boundaries = nullptr) const;
+    bool d_diagnostic_history_enabled = false;
+    std::vector<scalar_type> d_accepted_pressure_baseline;
+    std::vector<scalar_type> d_accumulated_pressure_update;
+    std::vector<scalar_type> d_pressure_update_history;
+    std::vector<scalar_type> d_pending_correction_norms;
+    std::vector<std::vector<scalar_type>> d_correction_norms_by_step;
+    void record_diagnostic_pressure_correction();
     SP<const mesh_type> d_mesh;
     SP<mesh_type> d_mutable_mesh;
     SP<const legacy_mesh_type> d_legacy_mesh;

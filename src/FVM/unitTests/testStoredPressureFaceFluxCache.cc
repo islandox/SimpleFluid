@@ -178,7 +178,13 @@ std::vector<double> check_quadratic_flux(const std::shared_ptr<Mesh>& mesh, Work
     for (size_t local = 0; local < mesh->num_faces(); ++local)
     {
         const auto face = static_cast<Pack::local_ordinal_type>(local);
-        EXPECT_DOUBLE_EQ(flux.local_value(face), normal.local_value(face));
+        // Zero weight preserves the positive weighted kernel's open-face
+        // owner extrapolation; the disabled gradient remains unread.
+        const auto expected_zero = mesh->is_boundary_face(face)
+                && std::abs(mesh->face_centroid(face).z - height) < 1e-12
+            ? velocity.local_value(mesh->owner_cell(face)).dot(mesh->face_area_vector(face))
+            : normal.local_value(face);
+        EXPECT_DOUBLE_EQ(flux.local_value(face), expected_zero);
     }
     return result;
 }
@@ -890,4 +896,76 @@ TEST(StoredPressureFaceFluxCacheTest, ExplicitTopologyInvalidationRejectsSharedS
     Workspace rebuilt(mesh);
     EXPECT_NO_THROW(static_cast<void>(rebuilt.acquire_execution()));
     EXPECT_FALSE(rebuilt.has_materialized_face_geometry());
+}
+
+
+// A sheared two-cell mesh makes S and the centre displacement non-parallel.
+// Exact supplied gradients isolate face stabilization from reconstruction.
+TEST(StoredPressureFaceFluxCacheTest, SkewAffinePressureVanishesButCellJumpRemains)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "Serial two-cell skew fixture.";
+    using Geometry = SimpleFluid::Meshes::UnstructuredMesh;
+    SimpleFluid::Arr<Geometry::Vec3> points{
+        {0,0,0},{1,0,0},{1,1,0},{0,1,0},
+        {0,0,1},{1,0,1},{1,1,1},{0,1,1},
+        {2,0,0},{2,1,0},{2,0,1},{2,1,1}};
+    for (auto& point : points) point.x += 0.4 * point.y + 0.2 * point.z;
+    auto geometry = std::make_shared<Geometry>(points,
+        SimpleFluid::Arr<Geometry::CellDefinition>{
+            {Geometry::CellType::HEXAHEDRON,{0,1,2,3,4,5,6,7}},
+            {Geometry::CellType::HEXAHEDRON,{1,8,9,2,5,10,11,6}}});
+    auto mesh = std::make_shared<Mesh>(geometry);
+    Workspace workspace(mesh);
+    VectorField velocity(mesh,"skew_velocity");
+    ScalarField pressure(mesh,"skew_pressure");
+    VectorField gradient(mesh,"skew_exact_gradient");
+    FluxField flux(mesh,"skew_pressure_flux");
+    velocity.put_value({});
+    const Vec exact_gradient{0.7,-1.1,0.3};
+    gradient.put_value(exact_gradient);
+    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell=static_cast<Pack::local_ordinal_type>(owned);
+        pressure.set_owned_value(cell,2.3+exact_gradient.dot(mesh->cell_centroid(cell)));
+    }
+    pressure.sync_ghosts();
+    const SimpleFluid::SP<const Mesh> const_mesh=mesh;
+    const auto boundaries=SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        const_mesh,SimpleFluid::BoundaryConditionSet{});
+    const SimpleFluid::BoundaryConditionMap pressure_boundaries;
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,pressure,gradient,0.13,boundaries,pressure_boundaries,workspace,flux);
+    size_t interior=0;
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face)) continue;
+        ++interior;
+        EXPECT_NEAR(flux.local_value(face),0.0,2e-14);
+        const auto owner=mesh->owner_cell(face);
+        const auto neighbor=mesh->opposite_or_periodic_neighbor_cell(face,owner);
+        const auto delta=mesh->cell_centroid(neighbor)-mesh->cell_centroid(owner);
+        const auto area=mesh->face_area_vector(face);
+        EXPECT_GT(std::abs(exact_gradient.dot(area)
+            -exact_gradient.dot(delta)*area.dot(delta)/delta.dot(delta)),0.01);
+    }
+    ASSERT_EQ(interior,1U);
+    // A non-affine jump with zero supplied gradient must retain stabilization.
+    pressure.set_owned_value(0,1.0);
+    pressure.set_owned_value(1,-1.0);
+    pressure.sync_ghosts();
+    gradient.put_value({});
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,pressure,gradient,0.13,boundaries,pressure_boundaries,workspace,flux);
+    for (const auto face : flux.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face)) continue;
+        const auto owner=mesh->owner_cell(face);
+        const auto neighbor=mesh->opposite_or_periodic_neighbor_cell(face,owner);
+        const auto delta=mesh->cell_centroid(neighbor)-mesh->cell_centroid(owner);
+        const auto expected=-0.13*(pressure.local_value(neighbor)-pressure.local_value(owner))
+            *mesh->face_area_vector(face).dot(delta)/delta.dot(delta);
+        EXPECT_GT(std::abs(expected),0.1);
+        EXPECT_NEAR(flux.local_value(face),expected,2e-14);
+    }
 }

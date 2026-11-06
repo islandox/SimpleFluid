@@ -70,6 +70,20 @@ def _manifest_boolean(value: Any, context: str) -> bool:
     return value
 
 
+def _manifest_mesh_multiplier(value: Any) -> int:
+    if type(value) is not int or value not in (1, 2):
+        raise ToleranceManifestError("mesh_multiplier must be integer 1 or 2")
+    return value
+
+
+def _manifest_transport_preconditioner(value: Any) -> str:
+    if not isinstance(value, str) or value not in ("none", "ilut"):
+        raise ToleranceManifestError(
+            "reference_definition.simplefluid_run.transport_preconditioner "
+            "must be none or ilut")
+    return value
+
+
 def _validate_source_checksums(
     manifest_path: Path, qualification: dict[str, Any]
 ) -> dict[str, str]:
@@ -164,6 +178,9 @@ def load_tolerance_manifest(
             f"{path} has scope {scope!r}; expected {required_scope!r}")
     source_checksums = _validate_source_checksums(path, qualification)
 
+    sampling_method = document.get('reference_definition', {}).get('sampling_method', 'nearest-layer-v1')
+    if sampling_method not in ('nearest-layer-v1', 'openfoam-cellPoint-matched-mesh-v1'):
+        raise ToleranceManifestError('unsupported sampling method')
     simplefluid_run = None
     reference_definition = document.get("reference_definition")
     if scope == "physical_reference":
@@ -282,6 +299,13 @@ def load_tolerance_manifest(
                 run_document.get("steady_progress_interval"),
                 "reference_definition.simplefluid_run."
                 "steady_progress_interval"),
+            "mesh_multiplier": _manifest_mesh_multiplier(run_document.get("mesh_multiplier", 1)),
+            "openfoam_outlet_stress": _manifest_boolean(run_document.get("openfoam_outlet_stress", False),
+                "reference_definition.simplefluid_run.openfoam_outlet_stress"),
+            "modified_pressure": _manifest_boolean(run_document.get("modified_pressure", False),
+                "reference_definition.simplefluid_run.modified_pressure"),
+            "transport_preconditioner": _manifest_transport_preconditioner(
+                run_document.get("transport_preconditioner")),
         }
         if simplefluid_run["steady_min_dt_s"] \
                 > simplefluid_run["steady_max_dt_s"]:
@@ -428,6 +452,7 @@ def load_tolerance_manifest(
         "qualification": qualification,
         "reference_definition": reference_definition,
         "simplefluid_run": simplefluid_run,
+        "sampling_method": sampling_method,
         "stations": normalized,
     }
 
@@ -573,12 +598,12 @@ def simplefluid_profile(
 
 def pitz_daily_profile_sample_count(cell_count: int) -> int | None:
     """Recover the transverse cell count from a supported pitzDaily mesh."""
-    for divisor in range(1, 1001):
-        upstream_x = max(1, (18 + divisor - 1) // divisor)
-        main_x = max(1, (180 + divisor - 1) // divisor)
-        outlet_x = max(1, (25 + divisor - 1) // divisor)
-        upper_y = max(1, (30 + divisor - 1) // divisor)
-        lower_y = max(1, (27 + divisor - 1) // divisor)
+    for multiplier, divisor in ((m,d) for m in (1,2) for d in range(1,1001)):
+        upstream_x = max(1, (18 * multiplier + divisor - 1) // divisor)
+        main_x = max(1, (180 * multiplier + divisor - 1) // divisor)
+        outlet_x = max(1, (25 * multiplier + divisor - 1) // divisor)
+        upper_y = max(1, (30 * multiplier + divisor - 1) // divisor)
+        lower_y = max(1, (27 * multiplier + divisor - 1) // divisor)
         expected_cells = (
             upstream_x * upper_y
             + main_x * (lower_y + upper_y)
@@ -632,8 +657,17 @@ def collect_metrics(
     openfoam_case: Path, simplefluid_patterns: list[str]
 ) -> dict[str, dict[str, Any]]:
     """Read all configured stations and compute component error norms."""
+    return collect_metrics_from_paths(
+        latest_common_profiles(openfoam_case), simplefluid_patterns)
+
+
+def collect_metrics_from_paths(
+    openfoam_paths: dict[str, Path], simplefluid_patterns: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Compare using the reference files actually authenticated by a manifest."""
+    if set(openfoam_paths) != set(STATIONS):
+        raise ValueError('every physical station requires an explicit reference')
     cells = read_simplefluid(simplefluid_patterns)
-    openfoam_paths = latest_common_profiles(openfoam_case)
     metrics: dict[str, dict[str, Any]] = {}
     for station_name, station_x in STATIONS.items():
         openfoam_path = openfoam_paths[station_name]
@@ -746,6 +780,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--openfoam-case", type=Path)
     parser.add_argument("--simplefluid-glob", nargs="+")
+    parser.add_argument("--simplefluid-profile-case", type=Path)
+    parser.add_argument("--use-retained-reference", action="store_true")
     parser.add_argument("--tolerances", type=Path)
     parser.add_argument("--required-scope")
     parser.add_argument("--check-only", action="store_true")
@@ -768,18 +804,23 @@ def main(argv: list[str] | None = None) -> int:
             arguments.max_l2 is not None or arguments.max_linf is not None):
         parser.error(
             "--tolerances cannot be combined with global --max-l2/--max-linf")
+    if arguments.use_retained_reference and arguments.tolerances is None:
+        parser.error('--use-retained-reference requires qualified tolerances')
+    if arguments.use_retained_reference and arguments.openfoam_case is not None:
+        parser.error('select retained references or a diagnostic OpenFOAM case')
     if (not arguments.check_only
             and not arguments.print_simplefluid_settings and (
-            arguments.openfoam_case is None
-            or arguments.simplefluid_glob is None)):
+            (arguments.openfoam_case is None and not arguments.use_retained_reference)
+            or (arguments.simplefluid_glob is None and arguments.simplefluid_profile_case is None))):
         parser.error(
-            "comparison requires --openfoam-case and --simplefluid-glob")
+            "comparison requires a reference and SimpleFluid cells or profiles")
 
     try:
         tolerance_manifest = None
         if arguments.tolerances is not None:
             tolerance_manifest = load_tolerance_manifest(
-                arguments.tolerances, arguments.required_scope)
+                arguments.tolerances,
+                'physical_reference' if arguments.use_retained_reference else arguments.required_scope)
             qualification = tolerance_manifest["qualification"]
             if not arguments.print_simplefluid_settings:
                 print(
@@ -812,13 +853,36 @@ def main(argv: list[str] | None = None) -> int:
                 repr(settings["steady_relaxed_linear_tolerance"]),
                 repr(settings["steady_full_accuracy_update_ratio"]),
                 settings["steady_progress_interval"],
+                settings["transport_preconditioner"],
+                int(settings["modified_pressure"]),
+                tolerance_manifest["sampling_method"],
+                int(settings["openfoam_outlet_stress"]),
+                settings["mesh_multiplier"],
             )
             return 0
         if arguments.check_only:
             return 0
 
-        metrics = collect_metrics(
-            arguments.openfoam_case, arguments.simplefluid_glob)
+        if arguments.use_retained_reference:
+            paths = {
+                station: tolerance_manifest['path'].parent / relative
+                for station, relative in tolerance_manifest['reference_definition']['openfoam_profile_files'].items()
+            }
+        else:
+            paths = latest_common_profiles(arguments.openfoam_case)
+        common = tolerance_manifest is not None and tolerance_manifest['sampling_method'] == 'openfoam-cellPoint-matched-mesh-v1'
+        if arguments.simplefluid_profile_case is not None:
+            if tolerance_manifest is not None and not common:
+                raise ValueError('profile representation differs from qualified manifest')
+            import common_sampling
+            metrics = common_sampling.profile_metrics_from_paths(
+                paths, latest_common_profiles(arguments.simplefluid_profile_case))
+            for station, metric in metrics.items():
+                metric.update(actual_x=STATIONS[station], reference_span_fraction=1.0, openfoam_path=paths[station])
+        else:
+            if common:
+                raise ValueError('qualified common sampling requires --simplefluid-profile-case')
+            metrics = collect_metrics_from_paths(paths, arguments.simplefluid_glob)
         print_metrics(metrics, tolerance_manifest)
         failures = evaluate_metrics(
             metrics,

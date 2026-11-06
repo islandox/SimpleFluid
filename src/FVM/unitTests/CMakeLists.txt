@@ -186,3 +186,9 @@ foreach(_ortho_ranks IN ITEMS 2 4 8)
         TARGET testOrthogonalDistributedOperators PROCS ${_ortho_ranks}
         LABELS "mpi;orthogonal;fields;transport;conservation;empty_rank" TIMEOUT 120)
 endforeach()
+
+foreach(_steady_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME SteadyDiagnostics_${_steady_ranks}procs
+    TARGET testSteadyDiagnostics PROCS ${_steady_ranks}
+    LABELS "mpi;fvm;steady;diagnostics;empty_rank" TIMEOUT 120)
+endforeach()

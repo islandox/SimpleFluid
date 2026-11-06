@@ -1271,7 +1271,8 @@ void pressure_weighted_face_fluxes_impl(
                     pressure_gradient_values(owner, 1),
                     pressure_gradient_values(owner, 2)};
             const auto interpolated_gradient_flux =
-                owner_gradient.dot(area_vector);
+                owner_gradient.dot(mesh.face_centroid(face_lid) - mesh.cell_centroid(owner))
+                * boundary_diffusion_coefficient(mesh, face_lid, owner, scalar_type{1});
             flux_values(face_lid, 0) +=
                 -pressure_coefficient
                 * (direct_gradient_flux
@@ -1287,12 +1288,11 @@ void pressure_weighted_face_fluxes_impl(
             continue;
         }
 
-        const auto& area_vector =
-            face_geometry.area_vector[face];
+        const auto pressure_projection = interior_diffusion_coefficient(mesh, face_lid, owner, neighbor, scalar_type{1});
         const auto direct_gradient_flux =
             (pressure_values(neighbor, 0)
              - pressure_values(owner, 0))
-            * area_vector.dot(center_delta) / distance_squared;
+            * pressure_projection;
         const auto [owner_weight, neighbor_weight] =
             interior_face_linear_weights(
                 mesh, face_lid, owner, neighbor);
@@ -1308,7 +1308,7 @@ void pressure_weighted_face_fluxes_impl(
                     + neighbor_weight
                     * pressure_gradient_values(neighbor, 2)};
         const auto interpolated_gradient_flux =
-            interpolated_gradient.dot(area_vector);
+            interpolated_gradient.dot(center_delta) * pressure_projection;
 
         flux_values(face_lid, 0) +=
             -pressure_coefficient
@@ -1533,6 +1533,29 @@ void pressure_weighted_face_fluxes(
         static_cast<VectorCellFieldStored<Pack, MeshType>*>(nullptr),
         fluxes,
         gradient_scheme);
+}
+
+/** Compute total and its velocity/pressure components in the identical face traversal.
+ * Pressure component is the Rhie--Chow stabilization contribution, not a pressure-only velocity.
+ * Outputs must be distinct and are synchronized with the same ownership policy.
+ */
+template<TpetraTypePack Pack, class MeshType>
+void pressure_weighted_face_flux_components(
+    const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const ScalarCellFieldStored<Pack, MeshType>& pressure,
+    typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions,
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
+    ScalarFaceFieldStored<Pack, MeshType>& total,
+    ScalarFaceFieldStored<Pack, MeshType>& velocity_component,
+    ScalarFaceFieldStored<Pack, MeshType>& pressure_component,
+    CellGradientScheme gradient_scheme = CellGradientScheme::LeastSquares)
+{
+    detail::pressure_weighted_stored_face_fluxes_impl(velocity, pressure, pressure_coefficient,
+        boundary_cache, &pressure_boundary_conditions, workspace,
+        static_cast<VectorCellFieldStored<Pack, MeshType>*>(nullptr), total, gradient_scheme,
+        &velocity_component, &pressure_component);
 }
 
 /**

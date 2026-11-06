@@ -513,12 +513,12 @@ TransportSystem<Pack> physical_temperature_transport_system(
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
-    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr, bool rhs_only = false)
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr, bool rhs_only = false, AssemblyMode mode = AssemblyMode::Transient)
 {
     return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
         specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
         std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
-        geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{},
+        geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{.mode = mode},
         static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr), old_density, old_specific_heat_capacity,
         ale, rhs_only);
 }
@@ -602,12 +602,13 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
-    std::type_identity_t<TensorCellFieldStored<Pack, MeshType>>* gradient_workspace = nullptr)
+    std::type_identity_t<TensorCellFieldStored<Pack, MeshType>>* gradient_workspace = nullptr,
+    BoundaryFaceSelector zero_gradient_stress = {}, AssemblyMode mode = AssemblyMode::Transient)
 {
     return detail::stored_physical_momentum_transport_system<Pack>(old_velocity, face_fluxes, time_step,
         dynamic_viscosity, reference_density, std::move(boundary_value), std::move(acceleration_source), treatment,
         correction_field, std::move(cached_matrix), std::move(boundary_diffusion), boundary_dynamic_viscosity,
-        geometry_cache, coefficient_interpolation, ale, gradient_workspace);
+        geometry_cache, coefficient_interpolation, ale, gradient_workspace, std::move(zero_gradient_stress), mode);
 }
 
 /**
@@ -924,7 +925,8 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr,
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
-    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    AssemblyMode mode = AssemblyMode::Transient);
 
 /** Explicitly retain an already prepared physical operator while refreshing the complete RHS. */
 template<TpetraTypePack Pack>
@@ -937,7 +939,7 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     const BoundaryCache<Pack>* boundary_thermal_conductivity,
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only);
+    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only, AssemblyMode mode = AssemblyMode::Transient);
 
 /**
  * @brief Assemble incompressible momentum transport with a variable dynamic
@@ -970,7 +972,8 @@ SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<Pack> physical_momentum_transport_s
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     const BoundaryCache<Pack>* boundary_dynamic_viscosity = nullptr,
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
-    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
+    FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+    AssemblyMode mode = AssemblyMode::Transient);
 
 /**
  * @brief Assemble the vector semi-implicit transport system with no

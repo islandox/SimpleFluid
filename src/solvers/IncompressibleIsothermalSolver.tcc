@@ -223,7 +223,7 @@ template<TpetraTypePack Pack> auto IncompressibleIsothermalSolver<Pack>::advance
     const auto* turbulence = find_turbulence_model();
     using gradient_view_type = decltype(predictor_pressure_gradient().owned_read_view());
     std::optional<gradient_view_type> turbulent_gradient_values;
-    if (turbulence != nullptr)
+    if (turbulence != nullptr && !d_problem.time_options().isothermal_modified_pressure)
     {
         turbulent_gradient_values.emplace(turbulence->turbulent_kinetic_energy_gradient().owned_read_view());
     }
@@ -263,7 +263,8 @@ auto IncompressibleIsothermalSolver<Pack>::assemble_coupled_system() -> coupled_
     return isothermal_coupled_pressure_velocity_solver().assemble(isothermal_momentum_equation(), velocity(),
         pressure(), old_face_fluxes(), isothermal_velocity_boundary_cache(), d_problem.boundary_conditions(),
         d_problem.time_options(), d_reference_density, &dynamic_viscosity,
-        turbulence != nullptr ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+        turbulence != nullptr && !d_problem.time_options().isothermal_modified_pressure
+            ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
         turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr,
         target != nullptr ? *target : zero_target);
 }
@@ -282,7 +283,8 @@ std::unique_ptr<CoupledNonlinearProblem> IncompressibleIsothermalSolver<Pack>::m
         const auto* turbulence = find_turbulence_model();
         const CoupledNonlinearProblem::FrozenIsothermalInput physical{
             turbulence ? turbulence->effective_dynamic_viscosity() : stored_material_properties().dynamic_viscosity,
-            turbulence ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
+            turbulence && !d_problem.time_options().isothermal_modified_pressure
+                ? &turbulence->turbulent_kinetic_energy_gradient() : nullptr,
             turbulence ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr};
         return std::make_unique<CoupledNonlinearProblem>(d_mesh, velocity(), pressure(),
             d_problem.boundary_conditions(), d_problem.time_options(), d_problem.time_options().nonlinear,
@@ -546,3 +548,54 @@ void IncompressibleIsothermalSolver<Pack>::write_parallel_solution_vtu(
 }
 
 } // namespace SimpleFluid
+
+namespace SimpleFluid {
+template<TpetraTypePack Pack>
+auto IncompressibleIsothermalSolver<Pack>::evaluate_diagnostics(const SolverDiagnosticsOptions& options) const -> SolverDiagnosticsResult<scalar_type>
+{
+    this->validate_diagnostic_options(options);
+    velocity_field_type diagnostic_u(d_mesh,"diagnostic_turbulence_velocity");
+    field_type diagnostic_p(d_mesh,"diagnostic_turbulence_pressure");
+    diagnostic_u.owned_data().update(scalar_type{1},this->velocity().owned_data(),scalar_type{});
+    diagnostic_p.owned_data().update(scalar_type{1},this->pressure().owned_data(),scalar_type{});
+    diagnostic_u.sync_ghosts();diagnostic_p.sync_ghosts();
+    const auto* active = find_turbulence_model();
+    std::optional<typename turbulence_model_type::Diagnostics> turbulence;
+    const auto cache=FVM::cache_velocity_boundary_conditions<Pack>(d_mesh,d_problem.boundary_conditions());
+    face_flux_field_type flux(d_mesh,"turbulence_diagnostic_flux");
+    flux.data().update(scalar_type{1},this->pressure_corrected_face_fluxes().data(),scalar_type{});flux.sync_ghosts();
+    if (this->step_index()==0 || options.pressure_coefficient_time_step) {
+        canonical_face_flux_workspace_type workspace(d_mesh);
+        FVM::pressure_weighted_face_fluxes(diagnostic_u,diagnostic_p,
+            static_cast<scalar_type>(options.pressure_coefficient_time_step.value_or(d_problem.time_options().time_step))/d_reference_density,
+            cache,d_problem.boundary_conditions().pressure,workspace,flux,d_problem.time_options().pressure_gradient_scheme);
+    }
+
+    if(active) turbulence.emplace(active->evaluate_diagnostics(diagnostic_u,flux,cache,
+        d_problem.time_options().time_step,stored_material_properties(),d_reference_density,
+        d_problem.time_options().non_orthogonal_treatment,nullptr,d_problem.time_options().physical_time,options.include_cell_data));
+    const auto* rebuilt=turbulence ? turbulence->model.get() : nullptr;
+    const auto& viscosity=rebuilt ? rebuilt->effective_dynamic_viscosity() : stored_material_properties().dynamic_viscosity;
+
+    auto result=this->evaluate_flow_diagnostics(options,viscosity,d_reference_density,
+        rebuilt && !d_problem.time_options().isothermal_modified_pressure ? &rebuilt->turbulent_kinetic_energy_gradient() : nullptr,
+        rebuilt ? rebuilt->effective_dynamic_viscosity_boundary_cache() : nullptr,{});
+    if(turbulence) {
+        result.turbulent_k=turbulence->k.pde;result.turbulent_secondary=turbulence->secondary.pde;
+        result.turbulent_k_constraints=turbulence->k.constraints;result.turbulent_secondary_constraints=turbulence->secondary.constraints;
+        result.turbulence_secondary_residual_units=rebuilt->dissipation_rate() ? "m^2/s^4" : "1/s^2";
+        result.turbulence_model_name=std::to_string(static_cast<int>(active->type()));
+        scalar_type local[2]{},global[2]{};
+        for(size_t i=0;i<d_mesh->num_owned_cells();++i) {
+            const auto c=static_cast<local_ordinal_type>(i);
+            const auto difference=active->turbulent_kinematic_viscosity().value(c)-rebuilt->turbulent_kinematic_viscosity().value(c);
+            local[0]+=difference*difference;local[1]=std::max(local[1],std::abs(difference));
+        }
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,local,global);
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_MAX,1,local+1,global+1);
+        result.retained_nut_closure_l2=std::sqrt(global[0]);result.retained_nut_closure_max=global[1];
+    }
+
+    return result;
+}
+}

@@ -779,7 +779,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                 return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
                     transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
                     boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
-                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation, retain_operator);
+                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation, retain_operator, d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient);
             }
             else
             {
@@ -787,7 +787,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                     transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
                     boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
                     boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation,
-                    ale, old_density, old_specific_heat_capacity, retain_operator);
+                    ale, old_density, old_specific_heat_capacity, retain_operator, d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient);
             }
         }
         catch (...)
@@ -804,6 +804,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     }
 
     d_prepared_rhs = system.rhs;
+    if (d_diagnostic_steady) return {};
     if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
     {
         if (d_using_prepared && !d_prepared_operator_ready)
@@ -997,3 +998,21 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(co
 }
 
 } // namespace SimpleFluid
+
+namespace SimpleFluid {
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack,MeshType>::assemble_steady_physical(const field_type& values,
+    const face_flux_field_type& flux, scalar_type time_step, const material_type& material,
+    const source_type& source, FVM::NonOrthogonalTreatment treatment, const field_type* conductivity,
+    const boundary_cache_type* boundary_conductivity, FVM::FaceCoefficientInterpolation interpolation,
+    const field_type* transport_density) const -> FVM::TransportSystem<Pack>
+{
+    BoundaryConditionSet bc; bc.temperature=*d_boundary_condition; bc.convection=d_convection_boundaries;
+    TemperatureDiffusionEquation scratch(d_mesh,bc);
+    scratch.set_boundary_heat_flux_snapshot(d_boundary_heat_flux);
+    scratch.d_diagnostic_steady=true;
+    field_type output(d_mesh,"unused_diagnostic_temperature");
+    scratch.advance_physical(values,flux,time_step,material,output,source,treatment,{},conductivity,boundary_conductivity,interpolation,nullptr,nullptr,nullptr,transport_density);
+    return {scratch.d_cached_physical_transport_matrix,scratch.d_prepared_rhs};
+}
+}

@@ -41,3 +41,10 @@ simplefluid_add_mpi_test(
   TARGET testMPIInterface
   PROCS 2
   LABELS mpi)
+
+foreach(_centroid_ranks IN ITEMS 1 2 3 4)
+  simplefluid_add_mpi_test(NAME PartitionedGradedQuadCentroids_${_centroid_ranks}procs
+    TARGET testMeshPartitioner PROCS ${_centroid_ranks}
+    ARGS "--gtest_filter=MeshPartitionerGeometryTest.GradedQuadCentroidsMatchSerialRule"
+    LABELS "mpi;geometry;partition;centroid" TIMEOUT 60)
+endforeach()

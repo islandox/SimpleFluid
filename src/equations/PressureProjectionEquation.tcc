@@ -40,7 +40,9 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
       d_linear_options(linear_options), d_pressure_boundary_conditions(std::move(pressure_boundary_conditions)),
       d_pressure_correction_boundary_conditions(d_pressure_boundary_conditions), d_gradient_scheme(gradient_scheme),
       d_cached_face_fluxes(d_mesh, "pressure_projection_face_flux"), d_face_flux_workspace(d_mesh),
-      d_flux_balance_cache(d_cached_face_fluxes)
+      d_flux_balance_cache(d_cached_face_fluxes),
+      d_non_orthogonal_flux(d_mesh, "pressure_non_orthogonal_flux"),
+      d_non_orthogonal_balance(d_non_orthogonal_flux)
 {
     require_owned_cell_map(d_mesh);
     for (auto& [name, condition] : d_pressure_correction_boundary_conditions)
@@ -74,6 +76,7 @@ const LinearSolverOptions& PressureProjectionEquation<Pack, MeshType>::linear_so
 template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pack, MeshType>::refresh_geometry()
 {
     d_matrix_values_stale = true;
+    d_non_orthogonal_geometry_stale = true;
     d_cached_predictor_flux_valid = false;
     d_rhs_norm_reference = {};
     d_cached_target_generation = 0;
@@ -704,17 +707,117 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
 
     Teuchos::RCP<const typename Pack::matrix_type> const_matrix = d_cached_pressure_matrix;
     const LinearResidualScaling residual_scaling{reuse_cached_predictor_flux ? d_rhs_norm_reference : real_t{}};
-    const auto linear_statistics = d_linear_solver.solve_from_zero_with_statistics(
-        const_matrix, *d_cached_rhs, pressure_correction.owned_data(), d_linear_options, residual_scaling);
-    if (!linear_statistics.converged)
+    // Retain the compact symmetric two-point matrix, and converge its lagged
+    // non-orthogonal face term with the same gradients and weights as Rhie--Chow.
+    // A p = b + div(grad(p) dot (S - alpha*d)), alpha = S dot d / |d|^2.
+    if (d_non_orthogonal_base_rhs.is_null() || !d_non_orthogonal_base_rhs->getMap()->isSameAs(*owned_map))
     {
-        throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
+        d_non_orthogonal_base_rhs = Teuchos::rcp(new typename Pack::vector_type(owned_map, false));
+        d_non_orthogonal_residual = Teuchos::rcp(new typename Pack::vector_type(owned_map, false));
     }
-    if (!reuse_cached_predictor_flux)
+    auto& base_rhs = *d_non_orthogonal_base_rhs;
+    auto& rhs_change = *d_non_orthogonal_residual;
+    base_rhs.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
+    if (d_non_orthogonal_geometry_stale)
     {
-        d_rhs_norm_reference = linear_statistics.rhs_norm;
+        const auto native_geometry = FVM::detail::acquire_pressure_native_geometry(*d_mesh);
+        const auto execution = acquire_mesh_execution(*d_mesh);
+        if (!d_non_orthogonal_topology)
+            d_non_orthogonal_topology = FVM::detail::make_pressure_face_topology<Pack>(
+                *d_mesh, d_face_flux_workspace.boundary_locations());
+        d_non_orthogonal_metrics = FVM::detail::pressure_face_metrics<Pack>(*d_mesh, *d_non_orthogonal_topology);
+        d_non_orthogonal_geometry_stale = false;
     }
-    d_mesh->sync_periodic_boundaries(pressure_correction);
+    const auto& correction_topology = d_non_orthogonal_topology;
+    const auto& correction_metrics = d_non_orthogonal_metrics;
+    using interior_range = DirectBatchRange<FVM::detail::InteriorPressureFaceTopology<Pack>,
+        FVM::detail::InteriorPressureFaceMetrics<Pack>>;
+    using boundary_range = DirectBatchRange<FVM::detail::BoundaryPressureFaceTopology<Pack>,
+        FVM::detail::BoundaryPressureFaceMetrics<Pack>>;
+    using zero_range = DirectBatchRange<FVM::detail::ZeroPressureFaceTopology<Pack>,
+        FVM::detail::ZeroPressureFaceMetrics<Pack>>;
+    LinearSolveStatistics linear_statistics;
+    int total_iterations = 0;
+    bool correction_converged = false;
+    const auto base_norm = base_rhs.norm2();
+    const auto correction_scale = std::max(base_norm, residual_scaling.rhs_norm_floor);
+    auto correction_linear_options = d_linear_options;
+    for (int corrector = 0; corrector < 100; ++corrector)
+    {
+        linear_statistics = d_linear_solver.solve_from_zero_with_statistics(
+            const_matrix, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options, residual_scaling);
+        total_iterations += linear_statistics.iterations;
+        if (!linear_statistics.converged)
+            throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
+        d_mesh->sync_periodic_boundaries(pressure_correction);
+        FVM::cell_gradient(pressure_correction, d_pressure_correction_boundary_conditions,
+            d_face_flux_workspace.pressure_gradient(), d_face_flux_workspace.gradient_cache(), d_gradient_scheme);
+        d_face_flux_workspace.pressure_gradient().sync_ghosts();
+        {
+            const auto execution = acquire_mesh_execution(*d_mesh);
+            const auto gradients = d_face_flux_workspace.pressure_gradient().local_read_view();
+            auto values = d_non_orthogonal_flux.owned_write_view();
+            const auto gradient = [&](local_ordinal_type cell)
+            {
+                return vec3<scalar_type>{gradients(cell, 0), gradients(cell, 1), gradients(cell, 2)};
+            };
+            interior_range::checked(correction_topology->interior, correction_metrics.interior).apply([&](const auto& face, const auto& metrics)
+            {
+                values(face.face, 0) = scalar_type{};
+                if (!face.owned_owner || metrics.distance_squared <= scalar_type{}) return;
+                const auto interpolated = gradient(face.owner) * metrics.owner_weight +
+                                          gradient(face.neighbor) * metrics.neighbor_weight;
+                const auto alpha = metrics.center_projection / metrics.distance_squared;
+                values(face.face, 0) = interpolated.dot(metrics.area_vector - metrics.center_delta * alpha);
+            });
+            zero_range::checked(correction_topology->zero_flux_faces, correction_metrics.zero_flux_faces).apply([&](const auto& face, const auto&)
+            { values(face.face, 0) = scalar_type{}; });
+            for (const auto& batch : correction_topology->boundary_groups)
+            {
+                const auto condition = d_pressure_correction_boundary_conditions.find(batch.name);
+                const bool dirichlet = condition != d_pressure_correction_boundary_conditions.end() &&
+                                       condition->second.type == BoundaryConditionType::Dirichlet;
+                boundary_range::checked(correction_topology->boundary, correction_metrics.boundary)
+                    .subrange(batch.begin, batch.count).apply([&](const auto& face, const auto& metrics)
+                {
+                    values(face.face, 0) = dirichlet && face.owned_owner
+                        ? gradient(face.owner).dot(metrics.area_vector -
+                                                  metrics.center_delta * metrics.boundary_diffusion)
+                        : scalar_type{};
+                });
+            }
+        }
+        if constexpr (requires { d_non_orthogonal_flux.sync_ghosts(); })
+            d_non_orthogonal_flux.sync_ghosts();
+        d_cached_rhs->update(scalar_type{1}, base_rhs, scalar_type{});
+        {
+            const auto flux_values = FVM::face_flux_balance_read_view(d_non_orthogonal_flux);
+            const auto rhs_values = d_cached_rhs->getLocalViewHost(Tpetra::Access::ReadWrite);
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                if (d_pressure_gauge_gid && owned_map->getGlobalElement(cell) == *d_pressure_gauge_gid) continue;
+                rhs_values(owned, 0) += d_non_orthogonal_balance.balance(flux_values, cell);
+            }
+        }
+        // Check the full corrected equation, including the inner linear residual.
+        const_matrix->apply(pressure_correction.owned_data(), rhs_change);
+        rhs_change.update(-scalar_type{1}, *d_cached_rhs, scalar_type{1});
+        const auto defect_norm = rhs_change.norm2();
+        if (defect_norm <= d_linear_options.tolerance * correction_scale || defect_norm == scalar_type{})
+        {
+            correction_converged = true;
+            break;
+        }
+        correction_linear_options.tolerance = d_linear_options.tolerance * real_t{0.1};
+    }
+    if (!correction_converged)
+        throw std::runtime_error("PressureProjectionEquation non-orthogonal correction did not converge.");
+    linear_statistics.iterations = total_iterations;
+    linear_statistics.rhs_norm = base_norm;
+    linear_statistics.achieved_tolerance = correction_scale > scalar_type{}
+        ? rhs_change.norm2() / correction_scale : scalar_type{};
+    if (!reuse_cached_predictor_flux) d_rhs_norm_reference = base_norm;
 
     scalar_type pressure_norm_squared = {};
     {
@@ -727,8 +830,6 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
         }
     }
 
-    FVM::cell_gradient(pressure_correction, d_pressure_correction_boundary_conditions,
-        d_face_flux_workspace.pressure_gradient(), d_face_flux_workspace.gradient_cache(), d_gradient_scheme);
     velocity.owned_data().update(-time_step, d_face_flux_workspace.pressure_gradient().owned_data(), 1.0);
 
     d_mesh->sync_periodic_boundaries(velocity);

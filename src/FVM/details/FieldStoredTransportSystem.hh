@@ -1017,6 +1017,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         older_values == nullptr
             ? 0
             : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
+    validate_assembly_mode(mesh, discretization.mode);
     const auto policy_state = scalar_transport_discretization_state(discretization, older_field_state);
     const std::array<int, 5> local_optional_state{
         has_distinct_old_storage ? 1 : 0,
@@ -1446,7 +1447,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         const auto old_volume = ale == nullptr
             ? volume
             : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        const auto transient = cell_storage * new_volume / time_step;
+        const auto transient = discretization.mode == AssemblyMode::Steady ? scalar_type{} : cell_storage * new_volume / time_step;
         const auto sink = sink_values[owned];
 
         row_values.clear();
@@ -1457,6 +1458,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                 + new_volume * sink);
         auto rhs_value = [&]
         {
+            if (discretization.mode == AssemblyMode::Steady) return new_volume * source_values[owned];
             if (!has_distinct_old_storage && ale == nullptr)
             {
                 return transient
@@ -2191,7 +2193,8 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
     const Stencils& stencils, const BoundaryLocations& boundary_locations,
     FaceCoefficientInterpolation coefficient_interpolation,
     const TransportAssemblyGeometry<MeshType>& assembly_geometry,
-    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr)
+    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr,
+    BoundaryFaceSelector zero_gradient_stress = {})
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -2252,9 +2255,20 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
                     return;
                 }
                 const auto location = boundary_locations[index];
-                if (!boundary_stress(location.batch_id, location.in_batch_id))
+                const bool zero_gradient = zero_gradient_stress &&
+                    zero_gradient_stress(location.batch_id, location.in_batch_id);
+                if (!boundary_stress(location.batch_id, location.in_batch_id) && !zero_gradient)
                 {
                     return;
+                }
+                if (zero_gradient)
+                {
+                    const auto area = metrics.face_area_vector_outward(face_lid, cell_lid);
+                    const auto normal = area / area.norm();
+                    for (auto& gradient : face_gradient)
+                    {
+                        gradient = gradient - normal * gradient.dot(normal);
+                    }
                 }
                 face_viscosity = boundary_viscosity(location.batch_id, location.in_batch_id, face_viscosity);
             }
@@ -2304,13 +2318,15 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     const BoundaryCache* boundary_dynamic_viscosity, const GeometryCache* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation,
     const ALEControlVolumeState* ale,
-    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr)
+    TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr,
+    BoundaryFaceSelector zero_gradient_stress = {}, AssemblyMode mode = AssemblyMode::Transient)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = 3;
 
     const auto& mesh = old_velocity.mesh();
+    validate_assembly_mode(mesh, mode);
     const auto execution = acquire_mesh_execution(mesh);
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
@@ -2462,8 +2478,8 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
             const auto old_volume = ale == nullptr
                 ? volume
                 : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-            const auto transient = new_volume / time_step;
-            const auto old_transient = old_volume / time_step;
+            const auto transient = mode == AssemblyMode::Steady ? scalar_type{} : new_volume / time_step;
+            const auto old_transient = mode == AssemblyMode::Steady ? scalar_type{} : old_volume / time_step;
             const auto old_value = vector_view_value<Pack>(velocity_values, cell_lid);
             const auto source_value = source(cell_lid);
             row_values.clear();
@@ -2619,7 +2635,7 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
 
     add_stored_deviatoric_transpose_gradient_stress<Pack>(old_velocity, dynamic_viscosity, reference_density, *rhs,
         boundary_diffusion, boundary_viscosity, gradient_stencils, *locations, coefficient_interpolation,
-        assembly_geometry, gradient_workspace);
+        assembly_geometry, gradient_workspace, std::move(zero_gradient_stress));
 
     const auto prepared = prepare_stored_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32, rows);
     const auto& matrix = prepared.matrix;

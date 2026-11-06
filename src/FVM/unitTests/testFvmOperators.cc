@@ -4405,3 +4405,43 @@ TEST(FvmOperatorsTest,
     EXPECT_NEAR(rhs.getData(2)[0], 0.0, 1.0e-12);
     EXPECT_NEAR(rhs.getData(2)[1], 0.0, 1.0e-12);
 }
+
+
+/** @brief Exact affine pressure produces no interior stabilization on skew faces. */
+TEST(FvmOperatorsTest, SkewAffinePressureWithExactGradientHasZeroStabilization)
+{
+    auto mesh=SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    VectorFieldType velocity(mesh,"affine_zero_velocity");
+    FieldType pressure(mesh,"affine_pressure");
+    VectorFieldType gradient(mesh,"affine_exact_gradient");
+    const SimpleFluid::vec3<double> exact{0.7,-1.1,0.3};
+    for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+        velocity.set_value(cell,{});
+        pressure.set_value(cell,2.3+exact.dot(mesh->cell_centroid(cell)));
+        gradient.set_value(cell,exact);
+    }
+    velocity.sync_ghosts(); pressure.sync_ghosts(); gradient.sync_ghosts();
+    const auto boundaries=SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        mesh,SimpleFluid::BoundaryConditionSet{});
+    FaceFluxWorkspace workspace(mesh);
+    SimpleFluid::FaceField<Pack> flux(mesh,"affine_skew_flux");
+    const SimpleFluid::BoundaryConditionMap pressure_boundaries;
+    SimpleFluid::FVM::pressure_weighted_face_fluxes(
+        velocity,pressure,gradient,0.13,boundaries,pressure_boundaries,workspace,flux);
+    size_t skew_faces=0;
+    for (size_t local=0; local<mesh->num_faces(); ++local)
+    {
+        const auto face=static_cast<MeshType::local_ordinal_type>(local);
+        if (!flux.is_owned_face(face) || mesh->is_boundary_face(face)) continue;
+        const auto owner=mesh->owner_cell(face);
+        const auto neighbor=mesh->opposite_or_periodic_neighbor_cell(face,owner);
+        const auto delta=mesh->cell_centroid(neighbor)-mesh->cell_centroid(owner);
+        const auto area=mesh->face_area_vector(face);
+        if (std::abs(exact.dot(area)-exact.dot(delta)*area.dot(delta)/delta.dot(delta))>1e-5)
+            ++skew_faces;
+        EXPECT_NEAR(flux.value(face),0.0,2e-13) << "face " << face;
+    }
+    EXPECT_GT(skew_faces,0U);
+}

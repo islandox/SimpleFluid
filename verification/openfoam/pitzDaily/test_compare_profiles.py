@@ -50,6 +50,10 @@ def qualified_simplefluid_run() -> dict[str, object]:
         "steady_relaxed_linear_tolerance": 1.0e-6,
         "steady_full_accuracy_update_ratio": 10.0,
         "steady_progress_interval": 1,
+        "transport_preconditioner": "none",
+        "modified_pressure": False,
+        "openfoam_outlet_stress": False,
+        "mesh_multiplier": 1,
         "rank_csv_files": ["simplefluid_cells_rank0.csv"],
     }
 
@@ -267,8 +271,24 @@ class PitzDailyComparatorTest(unittest.TestCase):
             self.assertEqual(
                 output.getvalue().strip(),
                 "1 1200 2.5e-06 1 1 1e-09 5 20 4 5 0.0001 1e-07 "
-                "0.05 0.8 1.5 0.5 0.9 1e-06 10.0 1",
+                "0.05 0.8 1.5 0.5 0.9 1e-06 10.0 1 none 0 nearest-layer-v1 0 1",
             )
+
+    def test_physical_manifest_requires_supported_transport_preconditioner(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            copied = Path(temporary_directory) / 'physical'
+            shutil.copytree(FIXTURE_DIR, copied)
+            path = copied / 'tolerances.json'
+            for value in (None, 'jacobi', 'ilut; unsafe', True):
+                document = copy.deepcopy(self.raw_manifest)
+                document['qualification']['scope'] = 'physical_reference'
+                settings = qualified_simplefluid_run()
+                settings['transport_preconditioner'] = value
+                document['reference_definition'] = qualified_reference_definition(settings)
+                path.write_text(json.dumps(document), encoding='utf-8')
+                with self.subTest(value=value), self.assertRaisesRegex(
+                        compare_profiles.ToleranceManifestError, 'transport_preconditioner must be none or ilut'):
+                    compare_profiles.load_tolerance_manifest(path, 'physical_reference')
 
     def test_physical_manifest_requires_every_solver_setting(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -439,7 +459,7 @@ class PitzDailyComparatorTest(unittest.TestCase):
             recorded_path = temporary_path / "recorded.json"
             expected_settings = (
                 "1 1200 2.5e-6 4 1 1e-9 5 20 4 5 1e-4 1e-7 5e-2 "
-                "0.8 1.5 0.5 0.9 1e-6 10 7"
+                "0.8 1.5 0.5 0.9 1e-6 10 7 ilut 0 nearest-layer-v1 0 1"
             )
             (case_path / "compare_profiles.py").write_text(
                 """#!/usr/bin/env python3
@@ -471,6 +491,11 @@ else:
         "SIMPLEFLUID_PITZ_STEADY_RELAXED_LINEAR_TOLERANCE",
         "SIMPLEFLUID_PITZ_STEADY_FULL_ACCURACY_UPDATE_RATIO",
         "SIMPLEFLUID_PITZ_STEADY_PROGRESS_INTERVAL",
+        "SIMPLEFLUID_PITZ_TRANSPORT_PRECONDITIONER",
+        "SIMPLEFLUID_PITZ_MODIFIED_PRESSURE",
+        "SIMPLEFLUID_PITZ_SAMPLING_METHOD",
+        "SIMPLEFLUID_PITZ_OPENFOAM_OUTLET_STRESS",
+        "SIMPLEFLUID_PITZ_MESH_MULTIPLIER",
         "SIMPLEFLUID_PITZ_OUTPUT_DIR",
     ]
     Path(os.environ["RECORDED_PATH"]).write_text(json.dumps({
@@ -487,6 +512,11 @@ else:
                 "RECORDED_PATH": str(recorded_path),
                 "SIMPLEFLUID_PITZ_OUTPUT_DIR": "selected profiles",
                 "SIMPLEFLUID_PITZ_STEADY_TARGET_COURANT": "999",
+                "SIMPLEFLUID_PITZ_TRANSPORT_PRECONDITIONER": "jacobi",
+                "SIMPLEFLUID_PITZ_MODIFIED_PRESSURE": "1",
+                "SIMPLEFLUID_PITZ_OPENFOAM_OUTLET_STRESS": "1",
+                "SIMPLEFLUID_PITZ_MESH_MULTIPLIER": "2",
+                "SIMPLEFLUID_PITZ_SAMPLING_METHOD": "untrusted",
             })
             result = subprocess.run(
                 ["/bin/sh", str(case_path / "run_comparison.sh"), "4"],

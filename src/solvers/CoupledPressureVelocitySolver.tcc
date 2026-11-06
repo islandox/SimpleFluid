@@ -957,7 +957,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::observe_storage() const
         observe(d_observed_matrices, m);
     for (size_t c = 0; c < 3; ++c)
         for (const auto& m : {system.gradient[c], system.divergence[c], d_static_geometry.gradient_operators[c],
-                 d_gradient_stabilization_products[c], d_schur_workspace.scaled_gradient[c],
+                 d_gradient_stabilization_products[c], d_projected_gradient_interpolation[c], d_schur_workspace.scaled_gradient[c],
                  d_schur_workspace.product[c]})
             observe(d_observed_matrices, m);
     observe(d_observed_operators, system.linear_operator);
@@ -1211,6 +1211,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
 {
     d_cached_system = {};
     d_static_geometry = {};
+    d_projected_gradient_interpolation = {};
     d_geometry_block_time_step = {};
     d_geometry_block_fixed_fluxes.clear();
     d_schur_workspace.clear();
@@ -1808,6 +1809,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 
     std::array<detail::PreparedCoupledMatrix<Pack>, 3> prepared_gradient;
     std::array<detail::PreparedCoupledMatrix<Pack>, 3> prepared_divergence;
+    std::array<detail::PreparedCoupledMatrix<Pack>, 3> prepared_projected;
     std::array<Teuchos::RCP<matrix_type>, 3> gradient;
     std::array<Teuchos::RCP<matrix_type>, 3> divergence;
     for (size_t component = 0; component < 3; ++component)
@@ -1826,6 +1828,10 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), d_mesh->overlap_cell_map(),
                     reuse_assembly_graph ? d_cached_system.divergence[component] : Teuchos::null, 16);
         }
+        prepared_projected[component] = reuse_geometry_blocks
+            ? detail::PreparedCoupledMatrix<Pack>{d_projected_gradient_interpolation[component], true}
+            : detail::prepare_coupled_matrix<Pack>(d_mesh->owned_cell_map(), d_mesh->overlap_cell_map(), Teuchos::null, 16);
+        d_projected_gradient_interpolation[component] = prepared_projected[component].matrix;
         gradient[component] = prepared_gradient[component].matrix;
         divergence[component] = prepared_divergence[component].matrix;
     }
@@ -1931,8 +1937,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     scalar_type local_continuity_target{};
     // A single row scratch buffer is reused across owned cells. Structural
     // masks retain explicitly inserted zeros without adding absent columns.
-    std::vector<std::array<scalar_type, 7>> coefficient_values;
-    std::vector<std::uint8_t> coefficient_masks;
+    std::vector<std::array<scalar_type, 10>> coefficient_values;
+    std::vector<std::uint16_t> coefficient_masks;
     Teuchos::Array<local_ordinal_type> local_columns;
     Teuchos::Array<global_ordinal_type> global_columns;
     Teuchos::Array<scalar_type> row_values;
@@ -1955,7 +1961,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             if (!reuse_geometry_blocks)
             {
                 coefficient_values[slot][component] += value;
-                coefficient_masks[slot] |= static_cast<std::uint8_t>(1U << component);
+                coefficient_masks[slot] |= static_cast<std::uint16_t>(1U << component);
             }
         };
         std::array<scalar_type, 3> momentum_boundary_rhs{};
@@ -1977,14 +1983,6 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 const auto other = d_coefficient_columns[coefficient_begin + other_slot];
                 const auto interpolation_weights = [&]() -> std::pair<scalar_type, scalar_type>
                 {
-                    // Preserve the established arithmetic interpolation for
-                    // legacy zero-target/fixed-grid assembly. Explicit
-                    // generalized targets use the same distance weights as
-                    // the final Rhie--Chow face reconstruction.
-                    if (!enforce_global_compatibility)
-                    {
-                        return {scalar_type{0.5}, scalar_type{0.5}};
-                    }
                     if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
                     {
                         return FVM::detail::interior_face_linear_weights(*d_mesh, face_lid, cell_lid, other);
@@ -1998,17 +1996,25 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 const auto other_weight = interpolation_weights.second;
                 for (size_t component = 0; component < 3; ++component)
                 {
-                    add_coefficient(0, component, cell_weight * area_components[component]);
-                    add_coefficient(other_slot, component, other_weight * area_components[component]);
-                    add_coefficient(0, component + 3, cell_weight * area_components[component]);
-                    add_coefficient(other_slot, component + 3, other_weight * area_components[component]);
+                    add_coefficient(0, component, (enforce_global_compatibility ? cell_weight : scalar_type{0.5}) * area_components[component]);
+                    add_coefficient(other_slot, component, (enforce_global_compatibility ? other_weight : scalar_type{0.5}) * area_components[component]);
+                    add_coefficient(0, component + 3, (enforce_global_compatibility ? cell_weight : scalar_type{0.5}) * area_components[component]);
+                    add_coefficient(other_slot, component + 3, (enforce_global_compatibility ? other_weight : scalar_type{0.5}) * area_components[component]);
                 }
 
                 const auto center_delta = d_mesh->cell_center_vector(face_lid, cell_lid);
                 const auto distance_squared = center_delta.dot(center_delta);
                 if (distance_squared > scalar_type{})
                 {
-                    const auto direct_weight = area.dot(center_delta) / distance_squared;
+                    const auto direct_weight = FVM::detail::interior_diffusion_coefficient(
+                        *d_mesh, face_lid, cell_lid, other, scalar_type{1});
+                    const auto projected = center_delta * direct_weight;
+                    const std::array<scalar_type, 3> projected_components{projected.x, projected.y, projected.z};
+                    for (size_t component = 0; component < 3; ++component)
+                    {
+                        add_coefficient(0, component + 7, cell_weight * projected_components[component]);
+                        add_coefficient(other_slot, component + 7, other_weight * projected_components[component]);
+                    }
                     add_coefficient(0, 6, time_options.time_step * direct_weight);
                     add_coefficient(other_slot, 6, -time_options.time_step * direct_weight);
                 }
@@ -2052,6 +2058,10 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                     }
                     const auto boundary_coefficient =
                         FVM::detail::boundary_diffusion_coefficient(*d_mesh, face_lid, cell_lid, scalar_type{1});
+                    const auto delta = d_mesh->face_centroid(face_lid) - d_mesh->cell_centroid(cell_lid);
+                    const std::array<scalar_type, 3> projected{delta.x * boundary_coefficient, delta.y * boundary_coefficient, delta.z * boundary_coefficient};
+                    for (size_t component = 0; component < 3; ++component)
+                        add_coefficient(0, component + 7, projected[component]);
                     add_coefficient(0, 6, time_options.time_step * boundary_coefficient);
                     continuity_rhs += time_options.time_step * boundary_coefficient * normalized_pressure_value;
                 }
@@ -2095,8 +2105,9 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
 
         if (!reuse_geometry_blocks)
         {
-            for (size_t component = 0; component < 6; ++component)
+            for (size_t component = 0; component < 10; ++component)
             {
+                if (component == 6) continue;
                 local_columns.clear();
                 row_values.clear();
                 for (size_t slot = 0; slot < coefficient_count; ++slot)
@@ -2108,7 +2119,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                     }
                 }
                 const auto& prepared =
-                    component < 3 ? prepared_gradient[component] : prepared_divergence[component - 3];
+                    component < 3 ? prepared_gradient[component] :
+                    (component < 6 ? prepared_divergence[component - 3] : prepared_projected[component - 7]);
                 detail::add_coupled_local_values<Pack>(prepared, cell_lid, local_columns(), row_values());
             }
             global_columns.clear();
@@ -2201,16 +2213,16 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
         {
             gradient[component]->fillComplete();
             divergence[component]->fillComplete();
+            d_projected_gradient_interpolation[component]->fillComplete();
         }
     }
 
-    // The divergence matrices contain the face interpolation weights.
-    // D*G therefore assembles the same owner-neighbor gradient average
-    // used by pressure_weighted_face_fluxes, including partition faces.
+    // Projected displacement interpolation matches the pressure stabilization
+    // in reconstructed face fluxes; velocity divergence retains full area vectors.
     for (size_t component = 0; component < 3; ++component)
     {
         vector_type constant_divergence(d_mesh->owned_cell_map(), true);
-        divergence[component]->apply(*pressure_gradient_constants[component], constant_divergence);
+        d_projected_gradient_interpolation[component]->apply(*pressure_gradient_constants[component], constant_divergence);
         const auto constant_divergence_data = constant_divergence.getData();
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -2226,11 +2238,11 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
             streamed ? Teuchos::RCP<matrix_type>{} : d_gradient_stabilization_products[component];
         if (gradient_stabilization.is_null())
         {
-            gradient_stabilization = Teuchos::rcp(new matrix_type(divergence[component]->getRowMap(), 32));
+            gradient_stabilization = Teuchos::rcp(new matrix_type(d_projected_gradient_interpolation[component]->getRowMap(), 32));
         }
         if (!streamed)
             d_gradient_stabilization_products[component] = gradient_stabilization;
-        Tpetra::MatrixMatrix::Multiply(*divergence[component], false, *pressure_gradient_operators[component], false,
+        Tpetra::MatrixMatrix::Multiply(*d_projected_gradient_interpolation[component], false, *pressure_gradient_operators[component], false,
             *gradient_stabilization, true);
         const auto product_col_map = gradient_stabilization->getColMap();
         for (size_t row = 0; row < gradient_stabilization->getLocalNumRows(); ++row)
