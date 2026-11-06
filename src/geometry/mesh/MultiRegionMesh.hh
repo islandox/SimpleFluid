@@ -311,6 +311,10 @@ public:
         SparseNativeMeshInput input, Teuchos::RCP<const Teuchos::Comm<int>> communicator);
     static std::shared_ptr<MultiRegionMesh> from_frozen_native(FrozenNativeMeshInput,Teuchos::RCP<const Teuchos::Comm<int>>);
     bool frozen_native() const noexcept;
+    /** Physical cell certificate from the retained native provider. */
+    std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>> certified_sparse_provider_cell_geometry(
+        ID cell) const;
+    /** Cell certificate with canonical sparse face subdivisions. */
     std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>> certified_sparse_cell_geometry(
         ID cell) const;
     PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> certified_sparse_face_geometry(ID face) const;

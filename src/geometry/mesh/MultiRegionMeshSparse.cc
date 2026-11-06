@@ -1,6 +1,7 @@
 /** @file MultiRegionMeshSparse.cc
  * @brief Sparse owner-local routes retaining procedural native interiors.
  */
+#include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
@@ -340,6 +341,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                 if (cell.full)
                 {
                     std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> canonical_shell, native_shell;
+                    bool periodic_image = false;
                     for (auto native :
                         mesh->topology(cell.region, [&](const auto& t) { return t.cell_faces(cell.native_cell); }))
                     {
@@ -359,6 +361,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             if (face.first != gid && face.second != gid)
                                 throw std::invalid_argument("Sparse native face row names a nonincident global cell.");
                             const auto tile = physical_incidence(face, second_occurrence(face, address, gid));
+                            periodic_image |= !face.second_image_identity.is_zero();
                             if (outward->oppositely_oriented(*tile))
                                 throw std::invalid_argument("Sparse full-cell tile is inward oriented.");
                             tiles.push_back(tile);
@@ -393,8 +396,12 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             authenticated_aliases.insert(alias);
                         }
                     }
-                    if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(canonical_shell)
-                            ->equivalent(*PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(native_shell)))
+                    const auto native_cell = PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(native_shell);
+                    if (periodic_image || canonical_shell.size() != native_shell.size())
+                        AMR::adaptive_detail::certify_adaptive_physical_boundary(
+                            native_cell, canonical_shell, budget.limit - budget.used);
+                    else if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(canonical_shell)
+                                  ->equivalent(*native_cell))
                         throw std::invalid_argument(
                             "Sparse canonical outward shell differs from native cell geometry.");
                 }
@@ -459,6 +466,34 @@ PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> MultiRegionMesh::certified_sparse_
     auto certificate = native_face_certificate(route.native);
     return native_flux_orientation(route.native, face) == 1 ? certificate : certificate->reversed();
 }
+std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>>
+MultiRegionMesh::certified_sparse_provider_cell_geometry(ID cell) const
+{
+    check_cell_id(cell);
+    if (frozen_native())
+        throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
+    const auto& route = d_sparse_native->cells.at(cell);
+    if (!route.full)
+        throw std::invalid_argument("Metric-only sparse neighbor has no cell certificate.");
+    const auto certificate = geometry(route.region,
+        [&](const auto& provider) -> PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>
+        {
+            if constexpr (requires { provider.certified_cell_geometry(route.native_cell); })
+                return provider.certified_cell_geometry(route.native_cell);
+            return {};
+        });
+    if (certificate)
+        return certificate;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
+    for (const auto native : topology(route.region, [&](const auto& t) { return t.cell_faces(route.native_cell); }))
+    {
+        const auto face = native_face_certificate({route.region, native});
+        const auto owner = topology(route.region, [&](const auto& t) { return t.owner_cell(native); });
+        faces.push_back(route.native_cell == owner ? face : face->reversed());
+    }
+    return PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces);
+}
+
 std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>>
 MultiRegionMesh::certified_sparse_cell_geometry(ID cell) const
 {

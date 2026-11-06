@@ -115,7 +115,7 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::from_native_cell(const MultiRe
 {
     (void) mesh.geometry_epoch();
     if (mesh.sparse_native())
-        return mesh.certified_sparse_cell_geometry(cell);
+        return mesh.certified_sparse_provider_cell_geometry(cell);
     if (!mesh.interfaces().empty())
         return from_native_cell_atomic(mesh, cell);
     const auto [region, local] = mesh.native_cell(cell);

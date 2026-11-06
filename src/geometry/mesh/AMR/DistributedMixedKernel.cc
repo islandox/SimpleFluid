@@ -524,6 +524,16 @@ class MixedKernel final : public AdaptiveProviderKernel
         return result;
     }
 
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> certified_cartesian_shape(
+        const AdaptiveLeaf& leaf, const AdaptiveLeaf& raw, const AdaptiveProviderKernel& provider) const
+    {
+        AdaptiveLeaf physical;
+        physical.geometry = provider.geometry(raw);
+        physical.surfaces = mapped(leaf);
+        adaptive_detail::validate_adaptive_leaf_boundary(physical, budget_);
+        return std::move(physical.geometry);
+    }
+
 public:
     MixedKernel(std::vector<DistributedMixedRoute> routes, std::size_t budget) : budget_(budget)
     {
@@ -557,6 +567,14 @@ public:
         const auto& provider = route(leaf);
         const auto raw = original(leaf);
         provider.kernel->validate(raw);
+        if (provider.kernel->has_native_cartesian_geometry())
+        {
+            // Each mapped piece belongs to one source face. Exact outward
+            // partitions preserve the certified box without re-importing all
+            // boundary-name subdivisions as a new convex cell.
+            (void) certified_cartesian_shape(leaf, raw, *provider.kernel);
+            return;
+        }
         std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (const auto& use : mapped(leaf))
             faces.push_back(use.geometry);
@@ -565,6 +583,9 @@ public:
     }
     PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
+        const auto& provider = route(leaf);
+        if (provider.kernel->has_native_cartesian_geometry())
+            return certified_cartesian_shape(leaf, original(leaf), *provider.kernel);
         std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (const auto& use : mapped(leaf))
             faces.push_back(use.geometry);

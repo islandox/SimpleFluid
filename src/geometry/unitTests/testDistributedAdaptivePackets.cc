@@ -2,6 +2,8 @@
  * @brief Shared active/ancestor procedural recipes and bounded lossless packets.
  */
 #include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
@@ -10,9 +12,12 @@
 #include "utils/testing_environment.hh"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <exception>
 #include <map>
 #include <numeric>
 #include <set>
+#include <vector>
 namespace
 {
 using std::uint8_t;
@@ -403,6 +408,104 @@ TEST(DistributedAdaptivePackets, FrozenContainersRejectUnstampedEmptyRecords)
         A::adaptive_detail::read_geometry_record_header(legacy, A::adaptive_detail::GeometryRecordKind::FrozenBatch),
         std::invalid_argument);
     EXPECT_THROW(A::encode_frozen_batch({}, empty.size() - 1), std::invalid_argument);
+}
+
+TEST(DistributedAdaptivePackets, SubdividedSurfaceOccurrencesRoundtripAndRequireExactPhysicalCoverage)
+{
+    namespace A = SimpleFluid::Meshes::AMR;
+    namespace D = A::adaptive_detail;
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    using Face = PLIC::PlanarFace<mode>;
+    using WidePoint = Face::WidePoint;
+    A::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    const auto kernel = A::cartesian_adaptive_kernel(grid);
+    auto leaf = A::cartesian_adaptive_leaf(grid, {0, A::CartesianCellAncestry{0, {0, 0, 0}}}, {'s'});
+    leaf.geometry = kernel->geometry(leaf);
+    leaf.surfaces = kernel->surfaces(leaf);
+    const auto original = std::find_if(leaf.surfaces.begin(), leaf.surfaces.end(),
+        [](const auto& surface)
+        {
+            return std::ranges::all_of(surface.geometry->points(), [](const auto& point) { return point[0] == 0; });
+        });
+    ASSERT_NE(original, leaf.surfaces.end());
+    const auto split = std::size_t(original - leaf.surfaces.begin());
+    auto second = *original;
+    const auto rectangle = [](long double lower, long double upper)
+    {
+        const std::array<WidePoint, 4> vertices{
+            WidePoint{0, lower, 0}, {0, lower, .5L}, {0, upper, .5L}, {0, upper, 0}};
+        return Face::make_wide(vertices);
+    };
+    original->geometry = rectangle(0, .25L);
+    original->boundary = "first";
+    second.geometry = rectangle(.25L, .5L);
+    second.key.push_back('2');
+    second.boundary = "second";
+    leaf.surfaces.push_back(std::move(second));
+    ASSERT_EQ(leaf.geometry->num_faces(), 6u);
+    ASSERT_EQ(leaf.surfaces.size(), 7u);
+
+    const auto single = A::encode_adaptive_leaf(leaf);
+    EXPECT_EQ(D::validate_adaptive_leaf_encoding(leaf, budget), single.size());
+    const auto decoded = A::decode_adaptive_leaf(single);
+    ASSERT_EQ(decoded.surfaces.size(), 7u);
+    EXPECT_EQ(A::encode_adaptive_leaf(decoded), single);
+    const auto batch = A::encode_adaptive_batch(std::span(&leaf, 1), {}, budget);
+    const auto decoded_batch = A::decode_adaptive_batch(batch, budget);
+    ASSERT_EQ(decoded_batch.leaves.size(), 1u);
+    ASSERT_EQ(decoded_batch.leaves.front().surfaces.size(), 7u);
+    EXPECT_EQ(A::encode_adaptive_batch(decoded_batch.leaves, {}, budget), batch);
+
+    const auto rejects = [&](const A::AdaptiveLeaf& malformed)
+    {
+        const auto encoded = A::encode_adaptive_leaf(malformed);
+        EXPECT_EQ(D::validate_adaptive_leaf_encoding(malformed, budget), encoded.size());
+        EXPECT_THROW((void) A::decode_adaptive_leaf(encoded), std::exception);
+        EXPECT_THROW((void) A::encode_adaptive_batch(std::span(&malformed, 1), {}, budget), std::exception);
+    };
+    auto duplicate = leaf;
+    duplicate.surfaces.push_back(duplicate.surfaces[split]);
+    rejects(duplicate);
+    auto outside = leaf;
+    outside.surfaces[split].geometry = outside.surfaces[split].geometry->translated(PLIC::GeometryPoint{-.125, 0, 0});
+    rejects(outside);
+    auto missing = leaf;
+    missing.surfaces.pop_back();
+    ASSERT_EQ(missing.surfaces.size(), missing.geometry->num_faces());
+    rejects(missing);
+    auto inward = leaf;
+    inward.surfaces[split].geometry = inward.surfaces[split].geometry->reversed();
+    rejects(inward);
+    auto wrong_whole = leaf;
+    wrong_whole.surfaces[split].native_whole_geometry = wrong_whole.surfaces[split].geometry;
+    rejects(wrong_whole);
+
+    auto folded = leaf;
+    const auto frame = PLIC::capture_incidence_frame(*leaf.surfaces[split].geometry);
+    auto points = leaf.surfaces[split].geometry->points();
+    points.front()[0] = -.03125L;
+    std::vector<PLIC::PointIdentity<mode>> vertices;
+    for (const auto& point : points)
+        vertices.push_back(PLIC::details::GeometryIdentityAccess::point(point));
+    folded.surfaces[split].geometry = PLIC::restore_incidence_loop(frame, vertices);
+    EXPECT_EQ(PLIC::planar_support<mode>(*folded.surfaces[split].geometry),
+        PLIC::planar_support<mode>(*leaf.surfaces[split].geometry));
+    rejects(folded);
+
+    // Mutate the framed incidence body without changing any record count or
+    // native certificate so the actual batch decoder must perform the proof.
+    D::Writer old_body, bad_body;
+    old_body.bytes(leaf.surfaces[split].geometry->encode_incidence());
+    bad_body.bytes(folded.surfaces[split].geometry->encode_incidence());
+    auto invalid_batch = batch;
+    const auto position =
+        std::search(invalid_batch.begin(), invalid_batch.end(), old_body.data.begin(), old_body.data.end());
+    ASSERT_NE(position, invalid_batch.end());
+    const auto offset = position - invalid_batch.begin();
+    invalid_batch.erase(position, position + old_body.data.size());
+    invalid_batch.insert(invalid_batch.begin() + offset, bad_body.data.begin(), bad_body.data.end());
+    EXPECT_THROW((void) A::decode_adaptive_batch(invalid_batch, budget), std::exception);
 }
 
 } // namespace

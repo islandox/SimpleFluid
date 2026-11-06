@@ -43,6 +43,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testSpatialAdaptiveClosure"
       OR TEST_NAME STREQUAL "testCompleteSupportOverlay"
       OR TEST_NAME STREQUAL "testSupportCandidateIndex"
+      OR TEST_NAME STREQUAL "testAdaptiveBoundaryProof"
       OR TEST_NAME STREQUAL "testCompactIncidenceMetadata"
       OR TEST_NAME STREQUAL "testDistributedAdaptiveOwnerOverlay"
       OR TEST_NAME STREQUAL "testIncrementalAdaptiveClosure"
@@ -362,4 +363,12 @@ foreach(_source_ranks 2 4)
     TARGET testCartesianCachedLineControls PROCS ${_source_ranks}
     ARGS "--gtest_filter=CartesianCachedLineControls.*"
     LABELS "mpi;geometry;amr;collective;storage" TIMEOUT 180)
+endforeach()
+
+# Focused provider coverage for owner-local layout changes and periodic shells.
+foreach(_layout_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME AdaptiveLayoutCartesian_${_layout_ranks}procs
+    TARGET testDistributedCartesianKernel PROCS ${_layout_ranks}
+    ARGS "--gtest_filter=DistributedCartesianKernel.DistributedBlockRefineSplitFamiliesCoarsenAndEmptyOwners:DistributedCartesianKernel.PeriodicPartnerBlocksRefineMigrateAndCoarsenTogether:DistributedCartesianKernel.PeriodicPhysicalShellsRetainDistinctNodeImages:DistributedCartesianKernel.WrongBlockRecipeOrNativeOrdinalRejectsCollectively:DistributedConvexHierarchy.SplitSiblingOwnersCoarsenExactParent:DistributedStaticHierarchy.CompactNativeDraftRetainsStaticCertificates"
+    LABELS "mpi;amr;layout;geometry" TIMEOUT 600)
 endforeach()

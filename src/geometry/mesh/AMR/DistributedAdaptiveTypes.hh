@@ -158,6 +158,11 @@ struct AdaptiveNativeDraft
 [[nodiscard]] AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf&);
 namespace adaptive_detail
 {
+/** Structural wire check. Geometry-free native rows carry no occurrences. */
+[[nodiscard]] bool adaptive_surface_count_valid(
+    const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>&, std::uint64_t count) noexcept;
+/** Authenticate explicit surface occurrences and optional complete native faces. */
+void validate_adaptive_leaf_boundary(const AdaptiveLeaf&, std::size_t byte_budget);
 /** Counting facade over the complete leaf/geometry encoding traversal.
  * Only the returned scratch capacity bound needs transient admission; no wire
  * packet, nested body, envelope, or writer growth is allocated. */

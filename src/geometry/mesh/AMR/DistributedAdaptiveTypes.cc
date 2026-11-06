@@ -2,11 +2,13 @@
  * @brief Versioned bounded lossless ancestry and owner-record encoding.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/VoFWireProtocol.hh"
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <limits>
@@ -272,8 +274,8 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
 {
     if (leaf.domain.empty())
         throw std::invalid_argument("Adaptive connected-domain provenance is required.");
-    if ((leaf.geometry && leaf.surfaces.size() != leaf.geometry->num_faces()) ||
-        (!leaf.geometry && (!leaf.surfaces.empty() || !leaf.native_recipe)))
+    if (!adaptive_detail::adaptive_surface_count_valid(leaf.geometry, leaf.surfaces.size()) ||
+        (!leaf.geometry && !leaf.native_recipe))
         throw std::invalid_argument("Incomplete adaptive leaf representation.");
     (void) leaf.work.total();
     packet_codec::write_header(w, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
@@ -297,7 +299,7 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
     for (const auto& s : leaf.surfaces)
     {
         if (s.key.empty() || !s.geometry || (s.orientation != 1 && s.orientation != -1) ||
-            (!s.exterior && !s.boundary.empty()))
+            (!s.exterior && !s.boundary.empty()) || (s.require_native_whole_tile && !s.native_whole_geometry))
             throw std::invalid_argument("Invalid adaptive surface.");
         w.bytes(s.key);
         if constexpr (std::is_same_v<PacketWriter, Writer>)
@@ -368,6 +370,54 @@ std::size_t adaptive_detail::validate_adaptive_leaf_encoding(const AdaptiveLeaf&
     return w.size;
 }
 
+bool adaptive_detail::adaptive_surface_count_valid(
+    const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& geometry, std::uint64_t count) noexcept
+{
+    return count <= PLIC::GeometryLimits{}.maximum_faces && (geometry ? count >= geometry->num_faces() : count == 0);
+}
+
+void adaptive_detail::validate_adaptive_leaf_boundary(const AdaptiveLeaf& leaf, std::size_t byte_budget)
+{
+    if (!adaptive_surface_count_valid(leaf.geometry, leaf.surfaces.size()))
+        throw std::invalid_argument("Invalid adaptive surface proof count.");
+    if (!leaf.geometry)
+        return;
+    Budget admission{byte_budget};
+    if (leaf.surfaces.capacity() > byte_budget / sizeof(AdaptiveSurface))
+        throw std::invalid_argument("Adaptive surface proof inputs exceed the byte budget.");
+    admission.add(leaf.surfaces.capacity() * sizeof(AdaptiveSurface));
+    bool has_whole = false;
+    for (const auto& surface : leaf.surfaces)
+    {
+        if (!surface.geometry || (surface.require_native_whole_tile && !surface.native_whole_geometry))
+            throw std::invalid_argument("Missing adaptive surface or whole-face certificate.");
+        admission.add(surface.key.capacity());
+        admission.add(surface.boundary.capacity());
+        has_whole |= surface.require_native_whole_tile;
+    }
+    const auto count = leaf.surfaces.size();
+    const auto row_bytes = sizeof(SupportFace) * (has_whole ? 2 : 1);
+    if (count > (admission.limit - admission.used) / row_bytes)
+        throw std::invalid_argument("Adaptive surface proof rows exceed the byte budget.");
+    admission.add(count * row_bytes);
+    std::vector<SupportFace> faces, wholes;
+    faces.reserve(count);
+    if (has_whole)
+        wholes.reserve(count);
+    if (faces.capacity() != count || (has_whole && wholes.capacity() != count))
+        throw std::invalid_argument("Adaptive surface proof row capacity differs from admission.");
+    for (const auto& surface : leaf.surfaces)
+    {
+        faces.push_back(surface.geometry);
+        if (has_whole)
+            wholes.push_back(surface.require_native_whole_tile ? surface.native_whole_geometry : nullptr);
+    }
+    if (has_whole || count != leaf.geometry->num_faces())
+        certify_adaptive_physical_boundary(leaf.geometry, faces, admission.limit - admission.used, nullptr, wholes);
+    else if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*leaf.geometry))
+        throw std::invalid_argument("Adaptive surface shell differs from leaf certificate.");
+}
+
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
     Reader r{packet};
@@ -385,8 +435,12 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
     if (!geometry.empty())
         leaf.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry);
     auto n = r.word();
-    if (n != (leaf.geometry ? leaf.geometry->num_faces() : 0) || n > (packet.size() - r.position) / 32)
+    if (!adaptive_detail::adaptive_surface_count_valid(leaf.geometry, n) || n > (packet.size() - r.position) / 32 ||
+        n > PLIC::geometry_packet_default_budget / sizeof(AdaptiveSurface))
         throw std::invalid_argument("Invalid adaptive surface count.");
+    leaf.surfaces.reserve(n);
+    if (leaf.surfaces.capacity() != n)
+        throw std::invalid_argument("Adaptive surface row capacity differs from admission.");
     for (std::uint64_t i = 0; i < n; ++i)
     {
         AdaptiveSurface s;
@@ -434,14 +488,9 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
     leaf.work = {std::bit_cast<double>(r.word()), std::bit_cast<double>(r.word()), std::bit_cast<double>(r.word()),
         std::bit_cast<double>(r.word())};
     r.done();
-    auto canonical = encode_adaptive_leaf(leaf);
-    if (canonical != AdaptiveBytes(packet.begin(), packet.end()))
+    if (!std::ranges::equal(encode_adaptive_leaf(leaf), packet))
         throw std::invalid_argument("Noncanonical adaptive leaf.");
-    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
-    for (const auto& s : leaf.surfaces)
-        faces.push_back(s.geometry);
-    if (leaf.geometry && !PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*leaf.geometry))
-        throw std::invalid_argument("Adaptive surface shell differs from leaf certificate.");
+    adaptive_detail::validate_adaptive_leaf_boundary(leaf, PLIC::geometry_packet_default_budget);
     return leaf;
 }
 AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)

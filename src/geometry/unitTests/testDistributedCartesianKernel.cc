@@ -12,9 +12,12 @@
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <array>
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 namespace
 {
 using namespace SimpleFluid;
@@ -846,6 +849,84 @@ std::set<::SimpleFluid::Meshes::AMR::AdaptiveBytes> periodic_signature(
     }
     return result;
 }
+// Independent Cartesian oracle: exact occupancy of the coordinate grid induced
+// by represented tile bounds. It uses neither support-identity equality nor the
+// production per-face clipping/partition proof.
+void expect_cartesian_physical_boundary(const ::SimpleFluid::Meshes::AMR::AdaptiveLeaf& leaf,
+    const ::SimpleFluid::Meshes::AMR::AdaptiveProviderKernel& kernel,
+    std::span<const SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>> pieces)
+{
+    const auto bounds = kernel.geometry(leaf)->closed_contact_bounds();
+    using Box = std::array<std::array<long double, 2>, 3>;
+    std::array<std::vector<Box>, 6> faces;
+    for (const auto& piece : pieces)
+    {
+        Box box;
+        const auto& points = piece->points();
+        ASSERT_FALSE(points.empty());
+        unsigned constant = 0, normal_axis = 0;
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            box[axis] = {points[0][axis], points[0][axis]};
+            for (const auto& point : points)
+            {
+                box[axis][0] = std::min(box[axis][0], point[axis]);
+                box[axis][1] = std::max(box[axis][1], point[axis]);
+                EXPECT_GE(point[axis], bounds[axis][0]);
+                EXPECT_LE(point[axis], bounds[axis][1]);
+            }
+            if (box[axis][0] == box[axis][1])
+            {
+                ++constant;
+                normal_axis = axis;
+            }
+        }
+        ASSERT_EQ(constant, 1u);
+        const bool lower = box[normal_axis][0] == bounds[normal_axis][0];
+        const bool upper = box[normal_axis][0] == bounds[normal_axis][1];
+        ASSERT_NE(lower, upper);
+        const auto normal = piece->area_vector();
+        EXPECT_GT((upper ? 1 : -1) * normal.component(normal_axis), 0);
+        const auto u = (normal_axis + 1) % 3, v = (normal_axis + 2) % 3;
+        EXPECT_EQ(normal.component(u), 0);
+        EXPECT_EQ(normal.component(v), 0);
+        unsigned corners = 0;
+        for (const auto& point : points)
+        {
+            const bool side_u = point[u] == box[u][0] || point[u] == box[u][1];
+            const bool side_v = point[v] == box[v][0] || point[v] == box[v][1];
+            EXPECT_TRUE(side_u || side_v);
+            if (side_u && side_v)
+                corners |= 1u << (unsigned(point[u] == box[u][1]) + 2 * unsigned(point[v] == box[v][1]));
+        }
+        EXPECT_EQ(corners, 15u);
+        faces[2 * normal_axis + unsigned(upper)].push_back(box);
+    }
+    for (unsigned face = 0; face < 6; ++face)
+    {
+        SCOPED_TRACE(face);
+        const auto u = (face / 2 + 1) % 3, v = (face / 2 + 2) % 3;
+        std::vector<long double> x{bounds[u][0], bounds[u][1]}, y{bounds[v][0], bounds[v][1]};
+        for (const auto& box : faces[face])
+        {
+            x.insert(x.end(), box[u].begin(), box[u].end());
+            y.insert(y.end(), box[v].begin(), box[v].end());
+        }
+        std::sort(x.begin(), x.end());
+        x.erase(std::unique(x.begin(), x.end()), x.end());
+        std::sort(y.begin(), y.end());
+        y.erase(std::unique(y.begin(), y.end()), y.end());
+        for (std::size_t i = 1; i < x.size(); ++i)
+            for (std::size_t j = 1; j < y.size(); ++j)
+                EXPECT_EQ(std::count_if(faces[face].begin(), faces[face].end(),
+                              [&](const auto& box)
+                              {
+                                  return box[u][0] <= x[i - 1] && x[i] <= box[u][1] && box[v][0] <= y[j - 1] &&
+                                         y[j] <= box[v][1];
+                              }),
+                    1);
+    }
+}
 TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
 {
     auto config = grid();
@@ -915,8 +996,7 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_periodic, &global_periodic);
     EXPECT_EQ(global_periodic, 12);
     for (const auto& leaf : state->owned_leaves())
-        EXPECT_TRUE(SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::cell_shell(shells[leaf.key])
-                ->equivalent(*kernel->geometry(leaf)));
+        expect_cartesian_physical_boundary(leaf, *kernel, shells[leaf.key]);
     auto baseline = periodic_signature(draft);
     EXPECT_EQ(baseline.size(), 51);
     std::vector<std::uint64_t> permuted;

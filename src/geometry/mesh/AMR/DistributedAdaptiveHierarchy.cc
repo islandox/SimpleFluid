@@ -2,6 +2,7 @@
  * @brief Distributed complete-family transactions with immutable local state.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
@@ -1492,7 +1493,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 if ((leaf.provider == AdaptiveProviderKind::Cartesian && family != RegionLayout::Family::Rectilinear) ||
                     (leaf.provider == AdaptiveProviderKind::Product && family != RegionLayout::Family::Extruded))
                     throw std::invalid_argument("Procedural adaptive family was flattened in native binding.");
-                if (!partition->geometry()->certified_sparse_cell_geometry(id)->equivalent(
+                if (!partition->geometry()->certified_sparse_provider_cell_geometry(id)->equivalent(
                         *data_->kernel->geometry(leaf)))
                     throw std::invalid_argument("Native binding differs from actual typed cell geometry.");
                 ++id;
@@ -3342,16 +3343,27 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
     collective(*data_->comm,
         [&]
         {
-            std::map<AdaptiveCellKey, std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> incidence;
+            struct Boundary
+            {
+                std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> pieces;
+                bool periodic_image = false;
+            };
+            std::map<AdaptiveCellKey, Boundary> incidence;
             for (const auto& tile : result.tiles)
             {
-                incidence[tile.first].push_back(tile.geometry);
+                const bool image = !tile.second_image_identity.is_zero();
+                auto& first = incidence[tile.first];
+                first.pieces.push_back(tile.geometry);
+                first.periodic_image = first.periodic_image || image;
                 if (tile.second)
-                    incidence[*tile.second].push_back(tile.second_image_identity.is_zero()
-                                                          ? tile.geometry->reversed()
-                                                          : tile.geometry->reversed()->translated(
-                                                                PLIC::displacement_difference<ArithmeticMode::Ordinary>(
-                                                                    {}, tile.second_image_identity)));
+                {
+                    auto& second = incidence[*tile.second];
+                    second.pieces.push_back(!image ? tile.geometry->reversed()
+                                                  : tile.geometry->reversed()->translated(
+                                                        PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                                            {}, tile.second_image_identity)));
+                    second.periodic_image = second.periodic_image || image;
+                }
             }
             for (const auto& leaf : result.owned)
             {
@@ -3359,8 +3371,10 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
                 // expanded draft that could remap a procedural cell ordinal.
                 const auto geometry =
                     leaf.geometry ? leaf.geometry : data_->kernel->geometry(owned_leaves().at(leaf.key));
-                if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(incidence.at(leaf.key))
-                        ->equivalent(*geometry))
+                const auto& boundary = incidence.at(leaf.key);
+                if (boundary.periodic_image || leaf.surfaces.size() != geometry->num_faces())
+                    certify_adaptive_physical_boundary(geometry, boundary.pieces, data_->options.byte_budget);
+                else if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(boundary.pieces)->equivalent(*geometry))
                     throw std::invalid_argument("Authority tiles do not form complete exact local shell.");
             }
         });

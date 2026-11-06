@@ -15,6 +15,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
     mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/AdaptiveBoundaryProof.cc
     mesh/AMR/SupportCandidateIndex.cc
     mesh/AMR/CompleteLineQuery.cc
     mesh/AMR/PooledLineQuery.cc
@@ -165,6 +166,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/DistributedAdaptiveContactHalo.cc
         mesh/AMR/DistributedAdaptiveIncidence.cc
         mesh/AMR/CompleteSupportOverlay.cc
+        mesh/AMR/AdaptiveBoundaryProof.cc
         mesh/AMR/SupportCandidateIndex.cc
         mesh/AMR/CompleteLineQuery.cc
         mesh/AMR/PooledLineQuery.cc
@@ -268,6 +270,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
     mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/AdaptiveBoundaryProof.cc
     mesh/AMR/SupportCandidateIndex.cc
     mesh/AMR/CompleteLineQuery.cc
     mesh/AMR/PooledLineQuery.cc

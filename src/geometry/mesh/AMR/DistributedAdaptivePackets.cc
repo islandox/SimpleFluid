@@ -127,14 +127,12 @@ struct Dictionary
     }
     std::uint64_t id(const Part& part) const { return part ? index.at(part) : 0; }
 };
-void validate(const AdaptiveLeaf& leaf)
+void validate(const AdaptiveLeaf& leaf, std::size_t byte_budget)
 {
     if (leaf.domain.empty() || std::uint64_t(leaf.provider) > 3 ||
-        (leaf.geometry && leaf.surfaces.size() != leaf.geometry->num_faces()) ||
-        (!leaf.geometry && (!leaf.surfaces.empty() || !leaf.native_recipe)))
+        !adaptive_detail::adaptive_surface_count_valid(leaf.geometry, leaf.surfaces.size()) || (!leaf.geometry && !leaf.native_recipe))
         throw std::invalid_argument("Incomplete adaptive batch leaf.");
     (void) leaf.work.total();
-    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
     for (const auto& s : leaf.surfaces)
     {
         if (s.key.empty() || !s.geometry || (s.orientation != 1 && s.orientation != -1) ||
@@ -142,16 +140,14 @@ void validate(const AdaptiveLeaf& leaf)
             throw std::invalid_argument("Invalid adaptive batch surface.");
         if (s.require_native_whole_tile && !s.native_whole_geometry)
             throw std::invalid_argument("Missing native whole-face certificate.");
-        faces.push_back(s.geometry);
     }
-    if (leaf.geometry && !PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*leaf.geometry))
-        throw std::invalid_argument("Adaptive batch surface shell differs from cell.");
+    adaptive_detail::validate_adaptive_leaf_boundary(leaf, byte_budget);
     if (leaf.native_recipe && std::uint64_t(leaf.native_recipe->kind) > 2)
         throw std::invalid_argument("Invalid native batch recipe kind.");
 }
 void write_leaf(Writer& w, const AdaptiveLeaf& leaf, const Dictionary& dict)
 {
-    validate(leaf);
+    validate(leaf, w.limit);
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
     w.word(leaf.material);
@@ -219,9 +215,12 @@ struct Decoder
             leaf.geometry =
                 PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry, byte_budget);
         const auto count = r.word();
-        if (count != (leaf.geometry ? leaf.geometry->num_faces() : 0) || count > (r.data.size() - r.offset) / 32)
+        if (!adaptive_detail::adaptive_surface_count_valid(leaf.geometry, count) || count > (r.data.size() - r.offset) / 32 ||
+            count > byte_budget / sizeof(AdaptiveSurface))
             throw std::invalid_argument("Invalid adaptive batch surface count.");
         leaf.surfaces.reserve(count);
+        if (leaf.surfaces.capacity() != count)
+            throw std::invalid_argument("Adaptive batch surface row capacity differs from admission.");
         for (std::uint64_t i = 0; i < count; ++i)
         {
             AdaptiveSurface s;
@@ -301,7 +300,7 @@ struct Decoder
         leaf.parent_family = r.bytes();
         leaf.work = {std::bit_cast<double>(r.word()), std::bit_cast<double>(r.word()), std::bit_cast<double>(r.word()),
             std::bit_cast<double>(r.word())};
-        validate(leaf);
+        validate(leaf, byte_budget);
         return leaf;
     }
 };
