@@ -20,6 +20,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/PooledLineRegistry.cc
     mesh/AMR/PooledLineExchange.cc
     mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/AdaptiveLeafPages.cc
     mesh/AMR/AdaptiveGeometrySnapshot.cc
     mesh/AMR/CartesianIncidenceSource.cc
     mesh/AMR/CartesianIncidenceAuthority.cc
@@ -269,6 +270,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/PooledLineRegistry.cc
     mesh/AMR/PooledLineExchange.cc
     mesh/AMR/OwnedSupportMembership.cc
+    mesh/AMR/AdaptiveLeafPages.cc
     mesh/AMR/AdaptiveGeometrySnapshot.cc
     mesh/AMR/CartesianIncidenceSource.cc
     mesh/AMR/CartesianIncidenceAuthority.cc
