@@ -29,9 +29,9 @@ Fixture setup(bool trace = false)
     Fixture f;
     f.hierarchy = SimpleFluid::VoF::test::small_fixtures::eight_cell_hierarchy(
         {'g', 'e', 'n', 'e', 'r', 'a', 'l', '_', 'v', 'o', 'f'});
-    for (const auto& [key, leaf] : f.hierarchy->owned())
+    for (const auto& leaf : f.hierarchy->owned_leaves())
     {
-        f.order.push_back(key);
+        f.order.push_back(leaf.key);
         auto c = f.hierarchy->geometry(leaf)->centroid();
         const double gas = trace ? 1e-310 : ((c[0] < 1 && c[1] < 1 && c[2] < 1) ? 1 : 0);
         f.gas.push_back(gas);
@@ -87,10 +87,10 @@ Fixture skew_setup(unsigned ownership_shift = 0)
     Fixture fixture;
     fixture.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(owned), std::vector<AdaptiveFamily>{}, convex_adaptive_kernel(2, 0), comm);
-    for (const auto& [key, leaf] : fixture.hierarchy->owned())
+    for (const auto& leaf : fixture.hierarchy->owned_leaves())
     {
-        fixture.order.push_back(key);
-        const auto root = std::get<ConvexCellAncestry>(key.ancestry).root;
+        fixture.order.push_back(leaf.key);
+        const auto root = std::get<ConvexCellAncestry>(leaf.key.ancestry).root;
         fixture.gas.push_back(root < 4 ? 1 : 0);
         fixture.carrier.push_back(root < 4 ? 1 : 2);
     }

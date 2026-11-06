@@ -68,12 +68,12 @@ std::shared_ptr<const AMR::DistributedAdaptiveHierarchy> native_fifty_cells()
     auto raw = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
     std::vector<AMR::AdaptiveMark> marks;
-    for (const auto& [key, leaf] : raw->owned())
+    for (const auto& leaf : raw->owned_leaves())
     {
         const auto center = Geometry::from_geometry(*raw->geometry(leaf), ordinary_limits())->centroid();
         const double xi = center[0] - .2 * center[1];
         if (xi > .5 && xi < .75)
-            marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
+            marks.push_back({leaf.key, AMR::AdaptiveSplit::Isotropic});
     }
     return raw->apply(raw->plan_adaptation(marks));
 }
@@ -122,10 +122,10 @@ struct CapturedFace20
     CapturedFace20()
     {
         const auto hierarchy = native_fifty_cells();
-        if (hierarchy->owned().size() != 50)
+        if (hierarchy->owned_leaves().size() != 50)
             throw std::logic_error("Captured native hierarchy must contain fifty cells.");
         std::vector<PLIC::ConvexGeometryPtr<mode>> native;
-        for (const auto& [key, leaf] : hierarchy->owned())
+        for (const auto& leaf : hierarchy->owned_leaves())
             native.push_back(hierarchy->geometry(leaf));
 
         // The serial hierarchy map order is the captured native GID order.

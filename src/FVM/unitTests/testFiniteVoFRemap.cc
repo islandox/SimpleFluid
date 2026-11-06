@@ -57,10 +57,10 @@ Input input(double scale = 1, SimpleFluid::PLIC::GeometryPoint origin = {}, bool
     std::vector<double> gas, carrier;
     // Explicit, test-only exact oracle. Neither the production remap nor its
     // acceptance path receives exact phase measures from this calculation.
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = OracleGeometry::from_geometry(*hierarchy->geometry(leaf));
-        order.push_back(key);
+        order.push_back(leaf.key);
         if (pure_carrier)
         {
             gas.push_back(0);
@@ -178,9 +178,9 @@ void allocation_oracle(const GeneralVoF& source, const GeneralVoF& target, const
             continue;
         }
         const auto source_geometry = OracleGeometry::from_geometry(
-            *source.hierarchy()->geometry(source.hierarchy()->owned().at(route.source_key)));
+            *source.hierarchy()->geometry(source.hierarchy()->owned_leaves().at(route.source_key)));
         const auto piece = OracleGeometry::from_geometry(
-            *target.hierarchy()->geometry(target.hierarchy()->owned().at(route.target_key)));
+            *target.hierarchy()->geometry(target.hierarchy()->owned_leaves().at(route.target_key)));
         const auto source_cut = source_geometry->clip(PLIC::reconstruction_geometry(plane).gas);
         const auto piece_cut = piece->clip(PLIC::reconstruction_geometry(plane).gas);
         const auto volume = Measure::volume(*source_geometry);
@@ -249,7 +249,7 @@ void plane_oracle(const GeneralVoF& state, SimpleFluid::PLIC::GeometryHalfspace 
     bool local_nonbinary = false;
     for (std::size_t i = 0; i < state.owned_order().size(); ++i)
     {
-        const auto& leaf = state.hierarchy()->owned().at(state.owned_order()[i]);
+        const auto& leaf = state.hierarchy()->owned_leaves().at(state.owned_order()[i]);
         const auto geometry = OracleGeometry::from_geometry(*state.hierarchy()->geometry(leaf));
         const auto cut = geometry->clip(plane); // Explicit independent exact reference.
         const double gas = cut.inside ? cut.inside->moments().volume.as_double() : 0;

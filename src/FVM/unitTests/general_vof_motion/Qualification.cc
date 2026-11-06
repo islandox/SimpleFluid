@@ -555,12 +555,12 @@ Fixture fixture(const Case& c, unsigned n)
     if (c.mesh == Mesh::CoarseFine)
     {
         std::vector<AMR::AdaptiveMark> marks;
-        for (const auto& [key, leaf] : hierarchy->owned())
+        for (const auto& leaf : hierarchy->owned_leaves())
         {
             const auto p = hierarchy->geometry(leaf)->centroid();
             const auto x = p[0] - double(s) * p[1];
             if (x > .375 && x < .625)
-                marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
+                marks.push_back({leaf.key, AMR::AdaptiveSplit::Isotropic});
         }
         hierarchy = hierarchy->apply(hierarchy->plan_adaptation(marks));
     }
@@ -570,10 +570,10 @@ Fixture fixture(const Case& c, unsigned n)
     std::vector<double> gas, carrier;
     Fixture f;
     const auto polygon = reference_polygon(c.motion, 0);
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         auto ref = cell(hierarchy->geometry(leaf), s);
-        order.push_back(key);
+        order.push_back(leaf.key);
         const auto g = phase(ref, c.motion, 0, polygon);
         gas.push_back(double(g));
         carrier.push_back(double(ref.volume() - g));

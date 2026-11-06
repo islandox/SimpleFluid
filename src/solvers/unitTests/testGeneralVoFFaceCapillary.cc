@@ -22,9 +22,9 @@ TEST_P(GeneralVoFFaceCapillary, SpatialPartitionRetainsCompleteCurvedSupport)
     // on every active owner. This does not claim support for larger components.
     if (!local_empty)
         EXPECT_EQ(source->support_cells().size(), 36u);
-    for (const auto& [key, leaf] : source->hierarchy()->owned())
+    for (const auto& leaf : source->hierarchy()->owned_leaves())
     {
-        const auto layer = std::get<AMR::ProductCellAncestry>(key.ancestry).axial.root;
+        const auto layer = std::get<AMR::ProductCellAncestry>(leaf.key.ancestry).axial.root;
         EXPECT_EQ(int(layer * active / 3), comm->getRank());
     }
     auto material = inviscid();

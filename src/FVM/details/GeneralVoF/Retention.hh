@@ -99,7 +99,7 @@ public:
             return;
         h->visit_geometry_snapshots([&](const AMR::AdaptiveGeometrySnapshot& value)
             { geometry_snapshot(value, group); });
-        for (const auto& [key, value] : h->owned())
+        for (const auto& value : h->owned_leaves())
             leaf(value, group);
         for (const auto& [key, value] : h->families())
             leaf(value.parent, group);

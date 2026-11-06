@@ -51,8 +51,8 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                 std::map<VoF::GeneralVoF::Key, int> requested;
                 for (std::size_t i = 0; i < destinations.size(); ++i)
                     requested.emplace(old.phases->owned_order()[i], destinations[i]);
-                for (const auto& [key, leaf] : hierarchy->owned())
-                    ordered.push_back(requested.at(key));
+                for (const auto& leaf : hierarchy->owned_leaves())
+                    ordered.push_back(requested.at(leaf.key));
             });
     }
     if constexpr (Mode == ArithmeticMode::Ordinary)

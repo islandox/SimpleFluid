@@ -103,7 +103,7 @@ void prepare_remap_schema(const GeneralVoF::Data& data, const GeneralVoF::Hierar
     else
         for (const auto& item : channels)
         {
-            if (!data.hierarchy->owned().contains(item.key) || item.amounts.size() != options.channels.size() ||
+            if (!data.hierarchy->owned_leaves().contains(item.key) || item.amounts.size() != options.channels.size() ||
                 !source_channels.emplace(item.key, item.amounts).second)
                 throw std::invalid_argument("Finite remap source channels have duplicate, foreign or missing keys.");
             budget.add(sizeof(GeneralVoFFiniteOwnedChannels) + item.amounts.size() * sizeof(PhaseValue));
@@ -197,12 +197,12 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             {
                 const auto& source_cell = *from.at(relation.source_gid);
                 const auto& target_cell = *to.at(relation.target_gid);
-                if (!target->owned().contains(target_cell.leaf.key))
+                if (!target->owned_leaves().contains(target_cell.leaf.key))
                     continue;
                 budget.add(sizeof(Relation) + 2 * sizeof(Key));
                 source_keys.push_back(source_cell.leaf.key);
                 requests.push_back({source_cell.leaf.key, target_cell.leaf.key, source_cell.gid, 0, target_cell.gid,
-                    target->owned().at(target_cell.leaf.key).revision, relation.kind, comm->getRank(), {}});
+                    target->owned_leaves().at(target_cell.leaf.key).revision, relation.kind, comm->getRank(), {}});
             }
         });
     const auto locations = data.hierarchy->lookup_cells(source_keys);
@@ -254,7 +254,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 column.target_revision = r.word();
                 const auto kind = r.word();
                 r.done();
-                if (!data.hierarchy->owned().contains(column.source) ||
+                if (!data.hierarchy->owned_leaves().contains(column.source) ||
                     !seen.emplace(column.source, column.target).second ||
                     kind > static_cast<unsigned>(AMR::AdaptiveAncestryRelation::Kind::ProductIntersection))
                     throw std::invalid_argument(
@@ -301,7 +301,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 const auto& column = columns[i];
                 const auto& leaf = target_leaves[i];
                 const auto& location = target_locations[i];
-                const auto& source_leaf = data.hierarchy->owned().at(column.source);
+                const auto& source_leaf = data.hierarchy->owned_leaves().at(column.source);
                 if (location.owner != column.target_owner || location.address != column.target_gid ||
                     location.revision != column.target_revision || leaf.key != column.target ||
                     leaf.revision != column.target_revision || leaf.material != source_leaf.material ||
@@ -322,7 +322,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 auto& column = columns[i];
                 const auto& location = target_locations[i];
                 const auto& leaf = target_leaves[i];
-                const auto& source_leaf = data.hierarchy->owned().at(column.source);
+                const auto& source_leaf = data.hierarchy->owned_leaves().at(column.source);
                 if (location.owner != column.target_owner || location.address != column.target_gid ||
                     location.revision != column.target_revision || leaf.key != column.target ||
                     leaf.revision != column.target_revision || leaf.material != source_leaf.material ||
@@ -754,7 +754,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 result.routes_.push_back(
                     {sk, tk, sgid, tgid, packet.peer, comm->getRank(), phases, allocation, inherited_fit});
             }
-            if (seen.size() != expected.size() || rows.size() != target->owned().size())
+            if (seen.size() != expected.size() || rows.size() != target->owned_leaves().size())
                 throw std::invalid_argument("Finite remap outputs do not cover every target owner.");
         });
     // Independently validate recipient geometry before physical publication.
@@ -856,10 +856,10 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 retain_overlap(overlap, budget);
                 target_covers[request.target].push_back(std::move(overlap));
             }
-            for (const auto& [key, leaf] : target->owned())
-                if (!structural_targets.contains(key))
-                    imported_targets.at(key)->certify_fragment_partition(
-                        target_covers.at(key), options.maximum_relative_target_defect);
+            for (const auto& leaf : target->owned_leaves())
+                if (!structural_targets.contains(leaf.key))
+                    imported_targets.at(leaf.key)->certify_fragment_partition(
+                        target_covers.at(leaf.key), options.maximum_relative_target_defect);
         });
     // Build only geometry/maps in a private pure placeholder. Actual remapped
     // inventories and their inherited error evidence are installed together.
@@ -870,9 +870,9 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         {
             wire::Budget metric_budget{limit};
             cell_catalog_detail::NativeMetrics target_metrics(*target, Mode, metric_budget);
-            for (const auto& [key, leaf] : target->owned())
+            for (const auto& leaf : target->owned_leaves())
             {
-                order.push_back(key);
+                order.push_back(leaf.key);
                 zero.push_back(0);
                 native_volume.push_back(target_metrics(leaf).volume);
             }

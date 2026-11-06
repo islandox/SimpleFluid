@@ -67,8 +67,8 @@ std::shared_ptr<const GeneralVoF> cube_state(ArithmeticMode arithmetic_mode = mo
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(source.owned), std::move(source.families), source.kernel, Tpetra::getDefaultComm());
     std::vector<GeneralVoF::Key> order;
-    for (const auto& [key, leaf] : hierarchy->owned())
-        order.push_back(key);
+    for (const auto& leaf : hierarchy->owned_leaves())
+        order.push_back(leaf.key);
     GeneralVoFOptions options;
     options.arithmetic_mode = arithmetic_mode;
     options.phase_cleanup.relative_cutoff = 0;
@@ -138,12 +138,12 @@ TEST(GeneralVoFNativeIdentity, EqualAuthenticatedRecipesKeepTheOwnershipRemap)
         const auto source_geometry = source->owned_geometry();
         for (std::size_t index = 0; index < source->owned_order().size(); ++index)
             original.emplace(source->owned_order()[index], source_geometry[index]);
-        auto expected = source->hierarchy()->owned().begin();
+        auto expected = source->hierarchy()->owned_leaves().begin();
         for (const auto& record : common)
         {
-            ASSERT_NE(expected, source->hierarchy()->owned().end());
-            EXPECT_EQ(record.source_key, expected->first);
-            EXPECT_EQ(record.target_key, expected->first);
+            ASSERT_NE(expected, source->hierarchy()->owned_leaves().end());
+            EXPECT_EQ(record.source_key, expected->key);
+            EXPECT_EQ(record.target_key, expected->key);
             ++expected;
             ASSERT_TRUE(record.geometry);
             const auto view = record.geometry.get<mode>();
@@ -330,7 +330,7 @@ TEST(GeneralVoFNativeIdentity, MeshSnapshotSharesActualSourcesAcrossStatesAndSel
     }
     const auto& hierarchy = *first->hierarchy();
     const std::array<const AMR::AdaptiveLeaf*, 2> selected{
-        &hierarchy.owned().at(reverse.front()), &hierarchy.owned().at(reverse.back())};
+        &hierarchy.owned_leaves().at(reverse.front()), &hierarchy.owned_leaves().at(reverse.back())};
     detail::wire::Budget budget{1024 * 1024};
     const auto catalog = detail::cell_catalog_detail::build<mode>(hierarchy, selected, budget);
     for (std::size_t i = 0; i < selected.size(); ++i)
@@ -359,7 +359,7 @@ TEST(GeneralVoFNativeIdentity, MeshSnapshotExpansionIsStableAndOldViewsOutliveHi
         auto hierarchy = std::make_shared<const GeneralVoF::Hierarchy>(
             std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
         lifetime = hierarchy;
-        const auto* first = &hierarchy->owned().begin()->second;
+        const auto* first = &*hierarchy->owned_leaves().begin();
         const std::array<const AMR::AdaptiveLeaf*, 1> subset{first};
         std::size_t used = 0;
         auto initial =
@@ -367,7 +367,7 @@ TEST(GeneralVoFNativeIdentity, MeshSnapshotExpansionIsStableAndOldViewsOutliveHi
         surviving = View(initial->ordinary_catalog(), *initial->find(*first));
         const auto before = PLIC::details::NativeCellGeometrySourceAccess::source_cell(surviving);
         std::vector<const AMR::AdaptiveLeaf*> full;
-        for (const auto& [key, leaf] : hierarchy->owned())
+        for (const auto& leaf : hierarchy->owned_leaves())
             full.push_back(&leaf);
         used = 0;
         const auto expanded =
@@ -397,7 +397,7 @@ TEST(GeneralVoFNativeIdentity, MeshSnapshotHotAdmissionHasExactBoundaryAndAtomic
         GTEST_SKIP() << "Focused snapshot admission oracle is serial.";
     const auto state = cube_state();
     const auto& hierarchy = *state->hierarchy();
-    const std::array<const AMR::AdaptiveLeaf*, 1> rows{&hierarchy.owned().begin()->second};
+    const std::array<const AMR::AdaptiveLeaf*, 1> rows{&*hierarchy.owned_leaves().begin()};
     std::size_t required = 0;
     const auto expected =
         hierarchy.geometry_snapshot(rows, mode, AMR::GeometrySnapshotPurpose::State, required, 1024 * 1024);
@@ -437,9 +437,9 @@ TEST(GeneralVoFNativeIdentity, BoundedFallbackEvaluationsKeepIndependentFirstQue
         std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
     std::vector<GeneralVoF::Key> order;
     std::vector<double> carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         carrier.push_back(hierarchy->metrics(leaf).volume);
     }
     GeneralVoFOptions options;
@@ -447,7 +447,7 @@ TEST(GeneralVoFNativeIdentity, BoundedFallbackEvaluationsKeepIndependentFirstQue
     options.phase_cleanup.relative_cutoff = 0;
     const GeneralVoF first(hierarchy, order, std::vector<double>(8, 0), carrier, options);
     std::vector<const AMR::AdaptiveLeaf*> rows;
-    for (const auto& [key, value] : hierarchy->owned())
+    for (const auto& value : hierarchy->owned_leaves())
         rows.push_back(&value);
     std::size_t admitted = 0;
     const auto mesh_snapshot = hierarchy->geometry_snapshot(
@@ -462,7 +462,7 @@ TEST(GeneralVoFNativeIdentity, BoundedFallbackEvaluationsKeepIndependentFirstQue
     ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
     static_cast<void>(bounded_template.moments());
     const GeneralVoF second(hierarchy, order, std::vector<double>(8, 0), carrier, options);
-    const auto& leaf = hierarchy->owned().at(first.owned_order()[0]);
+    const auto& leaf = hierarchy->owned_leaves().at(first.owned_order()[0]);
     auto raw_up = hierarchy->geometry(leaf), raw_down = hierarchy->geometry(leaf);
     auto bounded_up = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>::from_geometry(*raw_up);
     auto bounded_down = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>::from_geometry(*raw_down);
@@ -535,8 +535,8 @@ TEST(GeneralVoFNativeIdentity, MixedPublicationDraftPreservesOriginalGeometryAnd
     auto hierarchy = std::make_shared<const GeneralVoF::Hierarchy>(
         std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
     std::map<GeneralVoF::Key, PLIC::ConvexGeometryPtr<mode>> initial;
-    for (const auto& [key, leaf] : hierarchy->owned())
-        initial.emplace(key, hierarchy->geometry(leaf));
+    for (const auto& leaf : hierarchy->owned_leaves())
+        initial.emplace(leaf.key, hierarchy->geometry(leaf));
     const auto draft = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*hierarchy);
     // This fixture's compatible Product rows reused their initial provider
     // geometry in the original constructor. Polyhedral publication rows
@@ -547,7 +547,7 @@ TEST(GeneralVoFNativeIdentity, MixedPublicationDraftPreservesOriginalGeometryAnd
     {
         if (leaf.provider == AMR::AdaptiveProviderKind::Product)
         {
-            const auto& provider = hierarchy->owned().at(leaf.key);
+            const auto& provider = hierarchy->owned_leaves().at(leaf.key);
             ASSERT_EQ(leaf.revision, provider.revision);
             ASSERT_EQ(leaf.material, provider.material);
             ASSERT_EQ(leaf.domain, provider.domain);
@@ -575,9 +575,9 @@ TEST(GeneralVoFNativeIdentity, MixedPublicationDraftPreservesOriginalGeometryAnd
     }
     std::vector<GeneralVoF::Key> order;
     std::vector<double> carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         carrier.push_back(hierarchy->metrics(leaf).volume);
     }
     GeneralVoFOptions options;
@@ -591,7 +591,7 @@ TEST(GeneralVoFNativeIdentity, MixedPublicationDraftPreservesOriginalGeometryAnd
     {
         const auto baseline = View::from_existing(expected.at(first.owned_order()[cell]));
         const auto actual = geometry[cell];
-        if (hierarchy->owned().at(first.owned_order()[cell]).provider == AMR::AdaptiveProviderKind::Polyhedral)
+        if (hierarchy->owned_leaves().at(first.owned_order()[cell]).provider == AMR::AdaptiveProviderKind::Polyhedral)
         {
             const auto owner = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(actual);
             const auto& catalog = first_data->topology->geometry_snapshot->ordinary_catalog();
@@ -658,7 +658,7 @@ TEST(GeneralVoFNativeIdentity, ConstructorLocalFallbackEvaluationsRequireTheOrig
     const auto accepted = cube_state(bounded_mode);
     const auto hierarchy = accepted->hierarchy();
     std::vector<const AMR::AdaptiveLeaf*> owned;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
         owned.push_back(&leaf);
     const unsigned operation = 0, other_operation = 0;
     detail::wire::Budget initial_budget{16 * 1024 * 1024};

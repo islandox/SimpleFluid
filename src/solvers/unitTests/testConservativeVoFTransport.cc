@@ -156,11 +156,11 @@ TEST(ConservativeVoFTransportTest, ActiveGeometricFaceLimiterUsesFinalPhaseMassF
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, liquid;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto x = hierarchy->geometry(leaf)->centroid();
         const double g = x[0] < 1 && x[1] < 1 ? .125 : x[0] > 1 && x[1] > 1 ? 1 : .875;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(g);
         liquid.push_back(1 - g);
     }
@@ -466,8 +466,8 @@ TEST(ConservativeVoFTransportTest, HomogeneousSweptLedgerMatchesIndependentImpli
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
-    for (const auto& [key, leaf] : hierarchy->owned())
-        order.push_back(key);
+    for (const auto& leaf : hierarchy->owned_leaves())
+        order.push_back(leaf.key);
     int empty = order.empty(), global_empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &global_empty);
     EXPECT_EQ(global_empty, std::max(0, comm->getSize() - 2));

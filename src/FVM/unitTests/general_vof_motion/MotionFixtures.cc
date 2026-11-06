@@ -57,20 +57,20 @@ std::shared_ptr<const GeneralVoF> motion_fixture(GeneralVoFTransportBackend back
     auto raw = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveMark> marks;
-    for (const auto& [key, leaf] : raw->owned())
+    for (const auto& leaf : raw->owned_leaves())
     {
         const auto c = raw->geometry(leaf)->centroid();
         const auto x = c[0] - double(shear) * c[1];
         if (x > .5 && x < .75)
-            marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
+            marks.push_back({leaf.key, AMR::AdaptiveSplit::Isotropic});
     }
     const auto refined = raw->apply(raw->plan_adaptation(marks));
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
     {
         const auto reference = reference_cell(refined->geometry(leaf));
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(double(reference.phase(0, true)));
         carrier.push_back(double(reference.phase(0, false)));
     }

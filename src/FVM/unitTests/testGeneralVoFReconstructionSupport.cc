@@ -61,12 +61,12 @@ TEST(GeneralVoFReconstructionSupport, PublicCallerUsesAvailableMajorityAndRetain
     EXPECT_EQ(hierarchy->global_cells(), 216u);
     std::vector<AdaptiveCellKey> order;
     std::map<AdaptiveCellKey, PLIC::GeometryPoint> centers;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto metrics = hierarchy->metrics(leaf);
         EXPECT_EQ(metrics.volume, 1);
-        order.push_back(key);
-        centers.emplace(key, metrics.centroid);
+        order.push_back(leaf.key);
+        centers.emplace(leaf.key, metrics.centroid);
     }
     const int local_empty = order.empty();
     int empty = 0;

@@ -61,9 +61,9 @@ TEST(GeneralVoF, ScatteredInteriorOwnerRetainsTwoCompleteRingsAroundRemoteNodeFa
     const auto hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     std::vector<AdaptiveCellKey> order;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         EXPECT_DOUBLE_EQ(hierarchy->metrics(leaf).volume, 1);
     }
     GeneralVoF state(hierarchy, order, std::vector<double>(order.size(), 0), std::vector<double>(order.size(), 1));
@@ -142,9 +142,9 @@ TEST(GeneralVoF, GeometricFractionPreservesPhysicalInventoriesNativeConversionAn
     const auto hierarchy = make({.7, .8, .9});
     std::vector<AdaptiveCellKey> order;
     std::vector<double> amount, zero;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         amount.push_back(std::nextafter(hierarchy->metrics(leaf).volume, std::numeric_limits<double>::infinity()));
         zero.push_back(0);
     }
@@ -174,9 +174,9 @@ TEST(GeneralVoF, GeometricFractionPreservesPhysicalInventoriesNativeConversionAn
     order.clear();
     amount.clear();
     std::vector<double> bulk;
-    for (const auto& [key, leaf] : large->owned())
+    for (const auto& leaf : large->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         amount.push_back(std::numeric_limits<double>::denorm_min());
         bulk.push_back(2);
     }
@@ -210,19 +210,19 @@ TEST(GeneralVoF, InferredCoarseFineCirculationUsesActualFourSubfaceSeam)
     auto initial = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     std::vector<AdaptiveMark> marks;
-    if (initial->owned().contains(source.cell_key(0)))
+    if (initial->owned_leaves().contains(source.cell_key(0)))
         marks.push_back({source.cell_key(0), AdaptiveSplit::Isotropic});
     const auto hierarchy = initial->apply(initial->plan_adaptation(marks));
     EXPECT_EQ(hierarchy->global_cells(), 72);
     std::vector<AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = hierarchy->geometry(leaf);
         const auto center = geometry->centroid();
         const double volume = hierarchy->metrics(leaf).volume;
         const double amount = center[1] < .5 ? volume : (center[1] == .5 ? .5 * volume : 0);
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(amount);
         carrier.push_back(volume - amount);
     }
@@ -254,7 +254,7 @@ TEST(GeneralVoF, InferredCoarseFineCirculationUsesActualFourSubfaceSeam)
     for (std::size_t i = 0; i < candidate->owned_order().size(); ++i)
     {
         const auto& key = candidate->owned_order()[i];
-        const auto center = hierarchy->geometry(hierarchy->owned().at(key))->centroid();
+        const auto center = hierarchy->geometry(hierarchy->owned_leaves().at(key))->centroid();
         const auto source_index = std::find(order.begin(), order.end(), key) - order.begin();
         double expected = gas.at(source_index);
         if (center == SimpleFluid::PLIC::GeometryPoint{1.75, .25, .25})
@@ -262,7 +262,7 @@ TEST(GeneralVoF, InferredCoarseFineCirculationUsesActualFourSubfaceSeam)
         if (center == SimpleFluid::PLIC::GeometryPoint{2.5, .5, .5})
             expected += phi;
         EXPECT_EQ(candidate->gas_volumes()[i], expected);
-        EXPECT_EQ(candidate->carrier_volumes()[i], hierarchy->metrics(hierarchy->owned().at(key)).volume - expected);
+        EXPECT_EQ(candidate->carrier_volumes()[i], hierarchy->metrics(hierarchy->owned_leaves().at(key)).volume - expected);
     }
     if (comm->getRank() >= 2)
         EXPECT_TRUE(candidate->owned_order().empty());
@@ -383,9 +383,9 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
         std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     std::vector<AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(hierarchy->metrics(leaf).volume);
     }
@@ -434,7 +434,7 @@ TEST(GeneralVoF, CrossedFaceKeepsOppositeDonorStreamsWhenProjectedNetVolumeIsZer
     auto fixture = setup();
     for (std::size_t i = 0; i < fixture.order.size(); ++i)
     {
-        auto p = fixture.hierarchy->geometry(fixture.hierarchy->owned().at(fixture.order[i]))->centroid();
+        auto p = fixture.hierarchy->geometry(fixture.hierarchy->owned_leaves().at(fixture.order[i]))->centroid();
         fixture.gas[i] = p[1] < 1 ? .5 : 0;
         fixture.carrier[i] = 1 - fixture.gas[i];
     }
@@ -450,7 +450,7 @@ TEST(GeneralVoF, CrossedFaceKeepsOppositeDonorStreamsWhenProjectedNetVolumeIsZer
     auto result = source.apply(trial);
     for (std::size_t i = 0; i < source.owned_order().size(); ++i)
     {
-        auto p = fixture.hierarchy->geometry(fixture.hierarchy->owned().at(source.owned_order()[i]))->centroid();
+        auto p = fixture.hierarchy->geometry(fixture.hierarchy->owned_leaves().at(source.owned_order()[i]))->centroid();
         const double expected = p[1] < 1 ? .5 + (p[0] < 1 ? dt / 8 : -dt / 8) : 0;
         EXPECT_NEAR(result->gas_volumes()[i], expected, 3e-13);
         EXPECT_NEAR(result->carrier_volumes()[i], 1 - expected, 3e-13);

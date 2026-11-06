@@ -83,7 +83,7 @@ TEST(ExactGeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComple
     double gas = 0, carrier = 0;
     for (std::size_t i = 0; i < moved->owned_order().size(); ++i)
     {
-        const auto center = f.hierarchy->geometry(f.hierarchy->owned().at(moved->owned_order()[i]))->centroid();
+        const auto center = f.hierarchy->geometry(f.hierarchy->owned_leaves().at(moved->owned_order()[i]))->centroid();
         const double expected = center[2] < 1 && center[1] < 1 ? (center[0] < 1 ? 1 - 1. / 64 : 1. / 64) : 0;
         EXPECT_EQ(moved->gas_volumes()[i], expected);
         EXPECT_EQ(moved->carrier_volumes()[i], 1 - expected);
@@ -297,7 +297,7 @@ TEST(ExactGeneralVoF, ExactSubquantumStreamsRemainExplicitAndFiniteRejectsCrossP
     auto fixture = setup();
     for (std::size_t i = 0; i < fixture.order.size(); ++i)
     {
-        const auto center = fixture.hierarchy->geometry(fixture.hierarchy->owned().at(fixture.order[i]))->centroid();
+        const auto center = fixture.hierarchy->geometry(fixture.hierarchy->owned_leaves().at(fixture.order[i]))->centroid();
         fixture.gas[i] = center[2] < 1 ? .5 : 0;
         fixture.carrier[i] = 1 - fixture.gas[i];
     }
@@ -395,7 +395,7 @@ TEST(ExactGeneralVoF, DirectAdoptionWitnessRejectsLookAlikesAndDoesNotRetainOldP
         EXPECT_NE(source->accepted_control(), 0);
         EXPECT_EQ(source->accepted_identity(), source->accepted_identity());
         std::vector<int> destinations(
-            source->hierarchy()->owned().size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
+            source->hierarchy()->owned_leaves().size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
         const auto plan = source->hierarchy()->plan_migration(destinations);
         const auto raw = source->hierarchy()->apply(plan);
         const auto native = assemble_adaptive_native(*raw, raw->configuration_descriptor());

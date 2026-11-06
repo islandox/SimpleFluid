@@ -69,7 +69,7 @@ void single_interface_motion(GeneralVoFTransportBackend backend)
     EXPECT_GT(structure[1], 0);
     std::vector<ReferenceCell> cells;
     for (const auto& key : source->owned_order())
-        cells.push_back(reference_cell(source->hierarchy()->geometry(source->hierarchy()->owned().at(key))));
+        cells.push_back(reference_cell(source->hierarchy()->geometry(source->hierarchy()->owned_leaves().at(key))));
     // In the central plateau X'=U(1-2Y), Y'=0. The interface remains there
     // throughout T=1/8, so X+2UtY=.5+Ut is exact for prescribed transport.
     // This fixture does not claim an exact coupled pressure/flow solution.

@@ -29,7 +29,7 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
             for (const auto& tile : topology.draft.tiles)
                 for (auto node : tile.node_gids)
                     for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
-                        if (key && data.hierarchy->owned().contains(*key))
+                        if (key && data.hierarchy->owned_leaves().contains(*key))
                         {
                             budget.add(sizeof(Key) + AMR::encode_adaptive_key(*key).size() + 8 * sizeof(void*));
                             local[node].insert(*key);
@@ -47,7 +47,7 @@ void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topo
                     const auto bytes = AMR::encode_adaptive_key(key);
                     budget.add(16 + bytes.size());
                     w.bytes(bytes);
-                    w.word(data.hierarchy->owned().at(key).revision);
+                    w.word(data.hierarchy->owned_leaves().at(key).revision);
                 }
                 requests.push_back({int(node % std::uint64_t(comm->getSize())), std::move(w.data)});
                 budget.add(sizeof(decltype(topology.node_fans)::value_type) + 4 * sizeof(void*));

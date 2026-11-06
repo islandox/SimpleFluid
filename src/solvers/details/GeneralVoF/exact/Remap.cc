@@ -77,8 +77,8 @@ PreparedRemap Remap<ArithmeticMode::Exact>::prepare(const Resources& resources, 
                 std::map<VoF::GeneralVoF::Key, int> requested;
                 for (std::size_t i = 0; i < destinations.size(); ++i)
                     requested.emplace(old.phases->owned_order()[i], destinations[i]);
-                for (const auto& [key, leaf] : hierarchy->owned())
-                    ordered_destinations.push_back(requested.at(key));
+                for (const auto& leaf : hierarchy->owned_leaves())
+                    ordered_destinations.push_back(requested.at(leaf.key));
             });
     }
     const auto plan =

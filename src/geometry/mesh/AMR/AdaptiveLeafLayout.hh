@@ -2,11 +2,7 @@
  * @brief Immutable owner-local active leaves of a distributed AMR generation.
  */
 #pragma once
-#include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
-
-#include <map>
-#include <memory>
-#include <utility>
+#include "geometry/mesh/AMR/AdaptiveLeafPages.hh"
 
 namespace SimpleFluid::Meshes::AMR
 {
@@ -23,29 +19,32 @@ class ContactExternalResidencyLease;
 class AdaptiveLeafLayout
 {
 public:
-    using LeafMap = std::map<AdaptiveCellKey, AdaptiveLeaf>;
+    using const_iterator = adaptive_detail::AdaptiveLeafPages::const_iterator;
 
     AdaptiveLeafLayout(const AdaptiveLeafLayout&) = delete;
     AdaptiveLeafLayout& operator=(const AdaptiveLeafLayout&) = delete;
 
-    [[nodiscard]] const LeafMap& owned() const noexcept { return owned_; }
-    [[nodiscard]] bool contains(const AdaptiveCellKey& key) const { return owned_.contains(key); }
-    [[nodiscard]] const AdaptiveLeaf* find(const AdaptiveCellKey& key) const
-    {
-        const auto leaf = owned_.find(key);
-        return leaf == owned_.end() ? nullptr : &leaf->second;
-    }
+    [[nodiscard]] const_iterator begin() const noexcept { return pages_.begin(); }
+    [[nodiscard]] const_iterator end() const noexcept { return pages_.end(); }
+    [[nodiscard]] std::size_t size() const noexcept { return pages_.size(); }
+    [[nodiscard]] bool empty() const noexcept { return pages_.empty(); }
+    [[nodiscard]] bool contains(const AdaptiveCellKey& key) const { return pages_.contains(key); }
+    [[nodiscard]] const AdaptiveLeaf* find(const AdaptiveCellKey& key) const { return pages_.find(key); }
+    [[nodiscard]] const AdaptiveLeaf& at(const AdaptiveCellKey& key) const { return pages_.at(key); }
+    [[nodiscard]] std::optional<std::size_t> ordinal_of(const AdaptiveCellKey& key) const { return pages_.ordinal_of(key); }
+    [[nodiscard]] const AdaptiveLeaf& at_ordinal(std::size_t ordinal) const { return pages_.at_ordinal(ordinal); }
 
 private:
     friend class DistributedAdaptiveHierarchy;
 
-    AdaptiveLeafLayout(LeafMap&& owned, std::shared_ptr<const adaptive_detail::ContactExternalResidencyLease> admission)
-        : admission_(std::move(admission)), owned_(std::move(owned))
+    AdaptiveLeafLayout(adaptive_detail::AdaptiveLeafPages pages,
+        std::shared_ptr<const adaptive_detail::ContactExternalResidencyLease> admission)
+        : admission_(std::move(admission)), pages_(std::move(pages))
     {
     }
 
-    // Destroy the map before releasing its charge.
+    // Destroy page owners before releasing their hierarchy residency charge.
     const std::shared_ptr<const adaptive_detail::ContactExternalResidencyLease> admission_;
-    const LeafMap owned_;
+    const adaptive_detail::AdaptiveLeafPages pages_;
 };
 } // namespace SimpleFluid::Meshes::AMR

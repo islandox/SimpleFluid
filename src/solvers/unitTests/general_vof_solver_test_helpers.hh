@@ -173,7 +173,7 @@ std::shared_ptr<const VoF::GeneralVoF> phases(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = hierarchy->geometry(leaf);
         const auto volume = geometry->moments().volume.as_double();
@@ -190,7 +190,7 @@ std::shared_ptr<const VoF::GeneralVoF> phases(
             g = cut.inside ? cut.inside->moments().volume.as_double() : 0;
             c = cut.outside ? cut.outside->moments().volume.as_double() : 0;
         }
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(g);
         carrier.push_back(c);
     }
@@ -257,7 +257,7 @@ std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases(bool spatial_parti
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto shell = hierarchy->geometry(leaf);
         const auto center = shell->centroid();
@@ -278,7 +278,7 @@ std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases(bool spatial_parti
             gas_area = half_angle - radii[1] * radii[1] * chord_integral;
             carrier_area = radii[2] * radii[2] * chord_integral - half_angle;
         }
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(layer == 0 ? shell->moments().volume.as_double() : gas_area * height);
         carrier.push_back(layer == 2 ? shell->moments().volume.as_double() : carrier_area * height);
     }
@@ -306,9 +306,9 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(hierarchy->geometry(leaf)->moments().volume.as_double());
     }
@@ -356,9 +356,9 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(std::optional<bool
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> zero, full;
-    for (const auto& [key, leaf] : raw->owned())
+    for (const auto& leaf : raw->owned_leaves())
     {
-        order.push_back(key);
+        order.push_back(leaf.key);
         zero.push_back(0);
         full.push_back(PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(*raw->geometry(leaf), limits)
                 ->volume()
@@ -366,27 +366,27 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(std::optional<bool
     }
     auto bound = std::make_shared<const VoF::GeneralVoF>(raw, order, zero, full);
     std::vector<AMR::AdaptiveMark> marks;
-    for (const auto& [key, leaf] : bound->hierarchy()->owned())
+    for (const auto& leaf : bound->hierarchy()->owned_leaves())
     {
         const auto center = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(
             *bound->hierarchy()->geometry(leaf), limits)
                                 ->centroid();
         const double xi = center[0] - .2 * center[1];
         if (xi > .5 && xi < .75)
-            marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
+            marks.push_back({leaf.key, AMR::AdaptiveSplit::Isotropic});
     }
     const auto plan = bound->hierarchy()->plan_adaptation(marks);
     const auto refined = bound->hierarchy()->apply(plan);
     order.clear();
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
     {
         // Initialize both phases with ordinary FP geometry. Native authority
         // import supplies supports only; no rational reference clip or measure.
         const auto shell =
             PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(*refined->geometry(leaf), limits);
         const auto amounts = shell->phases({{1, .17, .11}, {0, 0, 0}, .65});
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(amounts.gas.as_double());
         carrier.push_back(amounts.carrier.as_double());
     }

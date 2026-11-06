@@ -116,8 +116,8 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
     const auto source_observation = source.hierarchy->observation();
     std::vector<int> destinations;
     std::size_t ordinal = 0;
-    for (const auto& [key, leaf] : source.hierarchy->owned())
-        destinations.push_back(int(ordinal++ % std::min(2, comm->getSize())));
+    for (; ordinal < source.hierarchy->owned_leaves().size(); ++ordinal)
+        destinations.push_back(int(ordinal % std::min(2, comm->getSize())));
     auto plan = source.hierarchy->plan_migration(destinations);
     auto candidate = source.hierarchy->apply(plan);
     auto moved = ::SimpleFluid::Meshes::AMR::assemble_adaptive_native(*candidate, source.descriptor);
@@ -127,8 +127,8 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
     if (refine)
     {
         std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks;
-        for (const auto& [key, leaf] : bound->owned())
-            marks.push_back({key, leaf.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product
+        for (const auto& leaf : bound->owned_leaves())
+            marks.push_back({leaf.key, leaf.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product
                                       ? ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Axial
                                       : ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
         auto adaptation = bound->plan_adaptation(marks);

@@ -234,7 +234,7 @@ PreparedRemap prepare_owned_migration(
                 {
                     const auto& key = phases->owned_order()[c];
                     const auto encoded = Meshes::AMR::encode_adaptive_key(key);
-                    if (owners[c].key != encoded || owners[c].revision != target_hierarchy->owned().at(key).revision)
+                    if (owners[c].key != encoded || owners[c].revision != target_hierarchy->owned_leaves().at(key).revision)
                         throw std::runtime_error("Ownership target key revision changed.");
                     // Requests, replies, their exchanges and decoded target coexist.
                     packet_admission.add(encoded.size(), 8);
@@ -289,7 +289,7 @@ PreparedRemap prepare_owned_migration(
                     const auto row = source_rows.find(key);
                     if (p != request.bytes.size() || row == source_rows.end() ||
                         target_owners[i].owner != request.peer || target_owners[i].revision != revision ||
-                        hierarchy->owned().at(key).revision != revision)
+                        hierarchy->owned_leaves().at(key).revision != revision)
                         throw std::runtime_error("Ownership state request has foreign owner/key/revision.");
                     packet_admission.add(encoded.size(), 8);
                     const auto c = row->second;

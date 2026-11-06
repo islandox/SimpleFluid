@@ -22,7 +22,7 @@ Fixture planar_fixture(unsigned nx = 4, unsigned ny = 2, bool diagonal = false)
     Fixture input;
     input.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(source.owned), std::move(source.families), source.kernel, comm);
-    for (const auto& [key, leaf] : input.hierarchy->owned())
+    for (const auto& leaf : input.hierarchy->owned_leaves())
     {
         const auto c = input.hierarchy->geometry(leaf)->centroid();
         const double t = diagonal ? 2.5 - int(c[0]) - int(c[1]) : 1.5 - int(c[0]);
@@ -31,7 +31,7 @@ Fixture planar_fixture(unsigned nx = 4, unsigned ny = 2, bool diagonal = false)
                                         : t <= 1 ? t * t / 2
                                                  : 1 - (2 - t) * (2 - t) / 2)
                                   : std::clamp(t, 0., 1.);
-        input.order.push_back(key);
+        input.order.push_back(leaf.key);
         input.gas.push_back(g);
         input.carrier.push_back(1 - g);
     }
@@ -105,7 +105,7 @@ TEST(GeneralVoFInterfaceTransport, AdmittedNumericalSupportMatchesAnalyticDonorC
         const auto gid = source.mesh()->owned_cell_map()->getGlobalElement(c);
         ASSERT_GE(gid, 0);
         ASSERT_LT(gid, 16);
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         for (unsigned axis = 0; axis < 3; ++axis)
             local[5 * gid + axis] = x[axis];
         local[5 * gid + 3] = input.gas[c];
@@ -216,7 +216,7 @@ TEST(GeneralVoFInterfaceTransport, PlanarCycleHasIndependentGeometricPhaseUpdate
     EXPECT_EQ(prepared->node_trajectories.size(), source.nodes().size());
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         // The left face of the half-filled column is wholly gas; its horizontal
         // face is half gas. These integrals are independent of the transport code.
         const double expected = int(x[0]) == 1 ? .5 + (x[1] < 1 ? q / 2 : -q / 2) : input.gas[c];
@@ -348,7 +348,7 @@ TEST(GeneralVoFInterfaceTransport, ZeroNetFaceRetainsOpposingPhaseStreamsAndCorr
     auto input = fixture();
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         input.gas[c] = x[1] < 1 ? .5 : 0;
         input.carrier[c] = 1 - input.gas[c];
     }
@@ -377,7 +377,7 @@ TEST(GeneralVoFInterfaceTransport, ZeroNetFaceRetainsOpposingPhaseStreamsAndCorr
     }
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         // Integrating the corrected departure fan gives dt/12 from its bottom
         // triangle and dt/48 from each side: a net gas transfer dt/8 at q=0.
         const double expected = x[1] < 1 ? .5 + (x[0] < 1 ? dt / 8 : -dt / 8) : 0;
@@ -455,7 +455,7 @@ TEST(GeneralVoFInterfaceTransport, RemotePureTraceRetainsInventoryAndCompensated
     std::vector<GeneralVoFPhaseGeometry> declarations;
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         if (x[0] >= 3)
             input.gas[c] = 1e-310;
         declarations.push_back(input.carrier[c] == 0              ? GeneralVoFPhaseGeometry::PureGas
@@ -466,7 +466,7 @@ TEST(GeneralVoFInterfaceTransport, RemotePureTraceRetainsInventoryAndCompensated
     const auto next = source.plan_transport(stationary(source), loops(source, 1. / 64), 1).candidate();
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         if (x[0] >= 3)
         {
             EXPECT_EQ(next->gas_volumes()[c], 1e-310);
@@ -489,7 +489,7 @@ TEST(GeneralVoFInterfaceTransport, SharedCorrectionLimitsCompetingOldPhaseExport
     EXPECT_GT(all_limited, 0);
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         if (int(x[0]) == 1 && int(x[1]) == 1)
         {
             // The gas wedge x+y<2.5 has volume1/8. Two outgoing q=1/4

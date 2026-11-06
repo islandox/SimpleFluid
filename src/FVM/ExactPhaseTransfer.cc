@@ -305,9 +305,9 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
     if (std::uint64_t(c.policy) > 1 ||
         (c.policy == PhaseInventoryPolicy::ExperimentalExact) != bool(c.experimental_exact))
         throw std::invalid_argument("Transfer capsule policy/payload mismatch.");
-    const auto found = h.owned().find(c.key);
-    if (found == h.owned().end() || found->second.revision != c.revision ||
-        c.phases.bulk != h.metrics(found->second).volume || !std::isfinite(c.phases.bulk) || c.phases.bulk <= 0 ||
+    const auto found = h.owned_leaves().find(c.key);
+    if (!found || found->revision != c.revision ||
+        c.phases.bulk != h.metrics(*found).volume || !std::isfinite(c.phases.bulk) || c.phases.bulk <= 0 ||
         !std::isfinite(c.phases.gas) || !std::isfinite(c.phases.carrier) || c.phases.gas < 0 || c.phases.carrier < 0)
         throw std::invalid_argument("Finite source capsule ownership/geometry/phase differs.");
     for (double bound : {c.roundoff.gas, c.roundoff.carrier, c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier,
@@ -318,7 +318,7 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
     for (double value : {c.error.difference, c.error.native_conversion, c.error.fit_residual})
         if (!std::isfinite(value))
             throw std::invalid_argument("Nonfinite source diagnostic.");
-    const auto bulk = M::volume(*h.geometry(found->second));
+    const auto bulk = M::volume(*h.geometry(*found));
     const auto difference = M::from_value(c.phases.gas) + M::from_value(c.phases.carrier) - bulk;
     if (detail::phase_signed_value(difference) != c.error.difference ||
         detail::phase_signed_value(M::from_value(c.phases.bulk) - bulk) != c.error.native_conversion ||
@@ -576,7 +576,7 @@ struct ExactPhaseTransferResult::Data
 ExactPhaseTransferSource::ExactPhaseTransferSource(std::shared_ptr<const Hierarchy> h, std::shared_ptr<const void> id,
     std::uint64_t control, std::vector<ExactPhaseTransferCapsule> owned, PhaseInventoryPolicy policy)
 {
-    if (!h || !id || !control || std::uint64_t(policy) > 1 || owned.size() != h->owned().size())
+    if (!h || !id || !control || std::uint64_t(policy) > 1 || owned.size() != h->owned_leaves().size())
         throw std::invalid_argument("Invalid accepted exact phase source.");
     auto d = std::make_shared<Data>();
     d->hierarchy = std::move(h);
@@ -712,10 +712,10 @@ std::vector<ExactPhaseTransferCapsule> migrate_capsules(
         [&]
         {
             wire::Budget budget{limit};
-            for (const auto& [key, leaf] : target.owned())
+            for (const auto& leaf : target.owned_leaves())
             {
-                budget.add(sizeof(Key) + AMR::encode_adaptive_key(key).size());
-                keys.push_back(key);
+                budget.add(sizeof(Key) + AMR::encode_adaptive_key(leaf.key).size());
+                keys.push_back(leaf.key);
             }
         });
     const auto locations = source.hierarchy->lookup_cells(keys);
@@ -782,10 +782,10 @@ std::vector<ExactPhaseTransferCapsule> migrate_capsules(
                     throw std::invalid_argument("Foreign or duplicate exact ownership capsule reply.");
                 auto c = decode(bytes, limit);
                 if (c.policy != source.policy || c.key != keys[i] || c.revision != locations[i].revision ||
-                    target.owned().at(c.key).revision != c.revision)
+                    target.owned_leaves().at(c.key).revision != c.revision)
                     throw std::invalid_argument("Exact ownership key/revision differs.");
                 validate_capsule(target, c, source.channels);
-                if (target.metrics(target.owned().at(c.key)).volume != c.phases.bulk)
+                if (target.metrics(target.owned_leaves().at(c.key)).volume != c.phases.bulk)
                     throw std::invalid_argument("Ownership-only native metric conversion changed.");
                 budget.capsule(c);
                 slots[i] = std::move(c);
@@ -839,7 +839,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
         {
             wire::Budget budget{limit};
             for (const auto& record : overlaps->records())
-                if (target.owned().contains(record.target_key))
+                if (target.owned_leaves().contains(record.target_key))
                 {
                     budget.add(sizeof(Key) + sizeof(void*) + AMR::encode_adaptive_key(record.source_key).size());
                     sources.push_back(record.source_key);
@@ -855,7 +855,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
             for (std::size_t i = 0; i < selected.size(); ++i)
             {
                 const auto& record = *selected[i];
-                const auto& leaf = target.owned().at(record.target_key);
+                const auto& leaf = target.owned_leaves().at(record.target_key);
                 auto sk = AMR::encode_adaptive_key(record.source_key), tk = AMR::encode_adaptive_key(record.target_key);
                 budget.packet(sk.size() + tk.size() + 56);
                 wire::Writer w;
@@ -887,7 +887,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 record.target_revision = r.word();
                 record.target_gid = r.word();
                 r.done();
-                const auto& leaf = source.hierarchy->owned().at(record.source);
+                const auto& leaf = source.hierarchy->owned_leaves().at(record.source);
                 if (leaf.revision != revision || !seen.emplace(record.source, record.target).second)
                     throw std::invalid_argument("Foreign or duplicate exact phase overlap request.");
                 budget.add(sizeof(ColumnRecord) + AMR::encode_adaptive_key(record.source).size() +
@@ -910,7 +910,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 auto& record = columns[i];
                 const auto& owner = target_owners[i];
                 const auto& leaf = target_leaves[i];
-                const auto& donor = source.hierarchy->owned().at(record.source);
+                const auto& donor = source.hierarchy->owned_leaves().at(record.source);
                 if (owner.owner != record.owner || owner.revision != record.target_revision ||
                     owner.address != record.target_gid || leaf.key != record.target ||
                     leaf.revision != record.target_revision || leaf.material != donor.material ||
@@ -925,9 +925,9 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
             for (const auto& finite_original : source.owned)
             {
                 const auto original = lift(finite_original,
-                    M::volume(*source.hierarchy->geometry(source.hierarchy->owned().at(finite_original.key))));
+                    M::volume(*source.hierarchy->geometry(source.hierarchy->owned_leaves().at(finite_original.key))));
                 const auto& records = grouped.at(original.key);
-                const auto donor_geometry = source.hierarchy->geometry(source.hierarchy->owned().at(original.key));
+                const auto donor_geometry = source.hierarchy->geometry(source.hierarchy->owned_leaves().at(original.key));
                 std::vector<OrdinaryGeometry> cover;
                 for (auto r : records)
                     cover.push_back(r->geometry);
@@ -1091,8 +1091,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 p.capsule = decode_work(r.bytes(), limit);
                 r.done();
                 p.owner = packet.peer;
-                if (p.capsule.policy != source.policy || !target.owned().contains(p.capsule.key) ||
-                    target.owned().at(p.capsule.key).revision != p.capsule.revision ||
+                if (p.capsule.policy != source.policy || !target.owned_leaves().contains(p.capsule.key) ||
+                    target.owned_leaves().at(p.capsule.key).revision != p.capsule.revision ||
                     !seen.emplace(p.source, p.capsule.key).second)
                     throw std::invalid_argument("Foreign or duplicate exact phase row reply.");
                 budget.capsule(p.capsule);
@@ -1150,9 +1150,9 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 all_gas[c.key] = all_gas[c.key] && PLIC::reconstruction_geometry(c.geometry).pure_gas;
                 all_carrier[c.key] = all_carrier[c.key] && PLIC::reconstruction_geometry(c.geometry).pure_carrier;
             }
-            for (const auto& [key, leaf] : target.owned())
+            for (const auto& leaf : target.owned_leaves())
             {
-                auto c = std::move(rows.at(key));
+                auto c = std::move(rows.at(leaf.key));
                 const auto bulk = M::volume(*target.geometry(leaf));
                 if (c.phases.bulk.compare(bulk) || c.phases.gas.sign() < 0 || c.phases.carrier.sign() < 0 ||
                     (c.phases.gas + c.phases.carrier - bulk).compare(c.error.difference) ||
@@ -1164,8 +1164,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 c.error.native_conversion = M::from_value(target.metrics(leaf).volume) - bulk;
                 c.error.phase_input_bound = c.error.admitted_bound + abs(c.error.native_conversion);
                 c.error.fit_bound = c.error.fit_allocation_bound;
-                PLIC::reconstruction_geometry(c.geometry).pure_gas = all_gas.at(key);
-                PLIC::reconstruction_geometry(c.geometry).pure_carrier = all_carrier.at(key);
+                PLIC::reconstruction_geometry(c.geometry).pure_gas = all_gas.at(leaf.key);
+                PLIC::reconstruction_geometry(c.geometry).pure_carrier = all_carrier.at(leaf.key);
                 c.geometry_ready = false;
                 validate_work_channels(c, source.channels);
                 budget.capsule(c);

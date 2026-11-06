@@ -217,12 +217,12 @@ Fixture real_fixture(bool planar, bool tails = false)
     Fixture result;
     result.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(native.owned), std::move(native.families), native.kernel, comm);
-    for (const auto& [key, leaf] : result.hierarchy->owned())
+    for (const auto& leaf : result.hierarchy->owned_leaves())
     {
         const auto x = result.hierarchy->geometry(leaf)->centroid();
         const auto gas = planar ? std::clamp(1.5 - int(x[0]), 0., 1.)
                                 : (x[0] < 1 && x[1] < 1 && x[2] < 1 ? 1. : (tails ? 0x1p-60 : 0.));
-        result.order.push_back(key);
+        result.order.push_back(leaf.key);
         result.gas.push_back(gas);
         result.carrier.push_back(planar ? 1 - gas : (gas == 1 ? 0 : 1));
     }
@@ -285,7 +285,7 @@ TEST(GeneralVoFBalanceCapture, MixedPlanarPilotPreservesPhysicalUpdateAndReconci
         const auto& row = sample.cells[i];
         EXPECT_EQ(row.key, input.order[i]);
         EXPECT_EQ(row.owner, Tpetra::getDefaultComm()->getRank());
-        EXPECT_EQ(row.revision, input.hierarchy->owned().at(row.key).revision);
+        EXPECT_EQ(row.revision, input.hierarchy->owned_leaves().at(row.key).revision);
         EXPECT_LE(row.calls, 1u);
         expect_metrics(row.reconstruction);
         if (row.calls == 0)
@@ -363,7 +363,7 @@ TEST(GeneralVoFBalanceCapture, MixedPlanarPilotPreservesPhysicalUpdateAndReconci
     EXPECT_EQ(actual->carrier_volumes(), expected->carrier_volumes());
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         const auto analytic = int(x[0]) == 1 ? .5 + (x[1] < 1 ? 1. / 128 : -1. / 128) : input.gas[i];
         EXPECT_NEAR(actual->gas_volumes()[i], analytic, 8e-14);
         EXPECT_NEAR(actual->carrier_volumes()[i], 1 - analytic, 8e-14);
@@ -528,8 +528,8 @@ TEST(GeneralVoFBalance, MissingForgedAndStaleSnapshotsRejectIncludingEmptyRanks)
     EXPECT_EQ(new_publication->hierarchy()->partition_generation(), source->hierarchy()->partition_generation());
     EXPECT_EQ(new_publication->owned_order(), source->owned_order());
     for (const auto& cell_key : source->owned_order())
-        EXPECT_EQ(new_publication->hierarchy()->owned().at(cell_key).revision,
-            source->hierarchy()->owned().at(cell_key).revision);
+        EXPECT_EQ(new_publication->hierarchy()->owned_leaves().at(cell_key).revision,
+            source->hierarchy()->owned_leaves().at(cell_key).revision);
     EXPECT_NE(new_publication->accepted_identity(), identity);
     EXPECT_THROW((void) plan_initial_partition(new_publication, *prepared), std::invalid_argument);
     for (unsigned fault = 0; fault < 7; ++fault)

@@ -50,7 +50,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                 self.data_->hierarchy->identity() != result.target_hierarchy()->identity() ||
                 self.data_->hierarchy->topology_generation() != result.target_hierarchy()->topology_generation() ||
                 self.data_->hierarchy->partition_generation() != result.target_hierarchy()->partition_generation() ||
-                result.owned().size() != self.data_->hierarchy->owned().size())
+                result.owned().size() != self.data_->hierarchy->owned_leaves().size())
                 throw std::invalid_argument("General VoF is not the actual adopted transfer publication.");
             // The immutable hierarchy token is preserved only by with_partition;
             // its checked binding authenticates geometry/provider/domain/native GIDs.
@@ -59,7 +59,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
             for (const auto& capsule : result.owned())
             {
                 const auto found = self.data_->cells.find(capsule.key);
-                if (found == self.data_->cells.end() || !self.data_->hierarchy->owned().contains(capsule.key))
+                if (found == self.data_->cells.end() || !self.data_->hierarchy->owned_leaves().contains(capsule.key))
                     throw std::invalid_argument("General VoF adopted transfer ownership differs.");
                 const auto& cell = found->second;
                 const auto* retained = retained_interface(*self.data_, cell);

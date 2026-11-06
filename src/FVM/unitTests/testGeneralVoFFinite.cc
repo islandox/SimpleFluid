@@ -401,7 +401,7 @@ TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReco
     auto input = fixture();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto geometry = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]));
+        const auto geometry = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]));
         const auto phases = geometry->phases({{1, 0, 0}, {}, .75});
         input.gas[i] = phases.gas.as_double();
         input.carrier[i] = phases.carrier.as_double();
@@ -473,7 +473,7 @@ TEST(GeneralVoFFinite, ProceduralOrdinaryCellsShareAuthenticatedGeometryAndBound
     {
         EXPECT_EQ(SimpleFluid::PLIC::test::identity(native[i]), SimpleFluid::PLIC::test::identity(finite[i]));
         EXPECT_NE(SimpleFluid::PLIC::test::identity(bounded_native[i]), SimpleFluid::PLIC::test::identity(bounded[i]));
-        const auto& leaf = input.hierarchy->owned().at(ordinary.owned_order()[i]);
+        const auto& leaf = input.hierarchy->owned_leaves().at(ordinary.owned_order()[i]);
         ASSERT_FALSE(leaf.geometry);
         const auto oracle = input.hierarchy->geometry(leaf);
         EXPECT_EQ(SimpleFluid::PLIC::test::shell(native[i])->encode_certificate(), oracle->encode_certificate());
@@ -895,7 +895,7 @@ TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAt
     options.phase_cleanup.relative_cutoff = 0;
     GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
     const auto comm = Tpetra::getDefaultComm();
-    std::vector<int> destinations(source.hierarchy()->owned().size(), (comm->getRank() + 1) % comm->getSize());
+    std::vector<int> destinations(source.hierarchy()->owned_leaves().size(), (comm->getRank() + 1) % comm->getSize());
     const auto plan = source.hierarchy()->plan_migration(destinations);
     const auto target = bound_candidate(source.hierarchy(), plan);
     const auto channels = initial_channels(source);
@@ -1200,7 +1200,7 @@ TEST(GeneralVoFFinite, SourceOccupancyFollowsGeometricDonorSharesAndRecordsSigne
     constexpr double input_defect = 4 * std::numeric_limits<double>::epsilon();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[0] < 1 ? .9 : 0;
         input.carrier[i] = 1 - input.gas[i] + (center[0] < 1 ? input_defect : 0);
     }
@@ -1254,7 +1254,7 @@ TEST(GeneralVoFFinite, IncomingTinyGeometryInvalidatesPureHintAndIdentityPreserv
     constexpr double cut = 1 - 3. / 64 + 1e-6;
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[0] < 1 ? cut : 0;
         input.carrier[i] = 1 - input.gas[i];
     }
@@ -1288,7 +1288,7 @@ TEST(GeneralVoFFinite, TinyReceiptArithmeticRejectionPreservesAcceptedIndependen
     constexpr double cut = 1 - 3. / 64 + 1e-6;
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[0] < 1 ? cut : 0;
         input.carrier[i] = 1 - input.gas[i];
     }

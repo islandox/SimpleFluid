@@ -32,7 +32,7 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 }
 std::uint64_t global_cells(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& h)
 {
-    std::uint64_t n = h.owned().size(), sum = 0;
+    std::uint64_t n = h.owned_leaves().size(), sum = 0;
     Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &n, &sum);
     return sum;
 }
@@ -41,12 +41,12 @@ std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks(
     bool refined_base, bool refined_z)
 {
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> result;
-    for (const auto& [key, leaf] : h.owned())
+    for (const auto& leaf : h.owned_leaves())
     {
-        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(leaf.key.ancestry);
         if (p.base.root == 1 && p.axial.root == 0 && p.base.path.empty() != refined_base &&
             p.axial.path.empty() != refined_z)
-            result.push_back({key, split});
+            result.push_back({leaf.key, split});
     }
     return result;
 }
@@ -217,7 +217,7 @@ TEST(DistributedProductKernel, CompactNativeDraftPreservesExactProductSupports)
         }
     auto publication = AMR::assemble_adaptive_native(
         std::move(compact), state->configuration_descriptor(), state->communicator(), state->options().byte_budget);
-    EXPECT_EQ(publication.owned_gids.size(), state->owned().size());
+    EXPECT_EQ(publication.owned_gids.size(), state->owned_leaves().size());
 }
 TEST(DistributedProductKernel, IndependentFactorParentsSurviveNewOtherFactorAndExactInverse)
 {
@@ -245,7 +245,7 @@ TEST(DistributedProductKernel, IndependentFactorParentsSurviveNewOtherFactorAndE
             ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Axial));
     auto restored = zonly->apply(zonly->plan_adaptation({}, collapse));
     EXPECT_EQ(global_cells(*restored), 16U);
-    for (const auto& [key, leaf] : restored->owned())
+    for (const auto& leaf : restored->owned_leaves())
     {
         EXPECT_FALSE(leaf.geometry);
         EXPECT_TRUE(leaf.surfaces.empty());
@@ -261,9 +261,9 @@ TEST(DistributedProductKernel, IndependentFactorParentsSurviveNewOtherFactorAndE
         zfirst->plan_adaptation(marks(*zfirst, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base, false, true)));
     EXPECT_EQ(global_cells(*reversed), 23U);
     double first = 0, second = 0;
-    for (const auto& [key, leaf] : both->owned())
+    for (const auto& leaf : both->owned_leaves())
         first += ::SimpleFluid::Meshes::AMR::product_adaptive_kernel()->geometry(leaf)->moments().volume.as_double();
-    for (const auto& [key, leaf] : reversed->owned())
+    for (const auto& leaf : reversed->owned_leaves())
         second += ::SimpleFluid::Meshes::AMR::product_adaptive_kernel()->geometry(leaf)->moments().volume.as_double();
     double a = 0, b = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &first, &a);
@@ -276,13 +276,13 @@ TEST(DistributedProductKernel, RootAndAxisCapsulesAreSharedWithoutRetainedCellSh
     auto state = source();
     const ::SimpleFluid::Meshes::AMR::AdaptiveBytes* root = nullptr;
     std::map<::SimpleFluid::Meshes::AMR::AxialIntervalKey, const ::SimpleFluid::Meshes::AMR::AdaptiveBytes*> axes;
-    for (const auto& [key, leaf] : state->owned())
+    for (const auto& leaf : state->owned_leaves())
     {
         ASSERT_TRUE(leaf.factor_recipe);
         if (!root)
             root = leaf.factor_recipe->root.get();
         EXPECT_EQ(root, leaf.factor_recipe->root.get());
-        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(leaf.key.ancestry);
         auto [it, inserted] = axes.emplace(p.axial, leaf.factor_recipe->axis.get());
         if (!inserted)
             EXPECT_EQ(it->second, leaf.factor_recipe->axis.get());
@@ -324,9 +324,9 @@ TEST(DistributedProductKernel, TwelveSidedFanSplitsTenChildrenAcrossOwnersAndRec
     auto fine = root.apply(root.plan_adaptation(refine));
     ASSERT_EQ(global_cells(*fine), 10U);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : fine->owned())
+    for (const auto& leaf : fine->owned_leaves())
         destinations.push_back(
-            int(std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry).base.path.back() %
+            int(std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(leaf.key.ancestry).base.path.back() %
                 comm->getSize()));
     auto distributed = fine->apply(fine->plan_migration(destinations));
     EXPECT_EQ(global_cells(*distributed), 10U);
@@ -339,9 +339,9 @@ TEST(DistributedProductKernel, TwelveSidedFanSplitsTenChildrenAcrossOwnersAndRec
         EXPECT_EQ(family.children.size(), 10U);
     auto restored = distributed->apply(distributed->plan_adaptation({}, families));
     EXPECT_EQ(global_cells(*restored), 1U);
-    for (const auto& [key, leaf] : restored->owned())
+    for (const auto& leaf : restored->owned_leaves())
     {
-        EXPECT_EQ(key, parent);
+        EXPECT_EQ(leaf.key, parent);
         EXPECT_TRUE(restored->geometry(leaf)->equivalent(*exact_parent));
     }
 }
@@ -350,21 +350,21 @@ TEST(DistributedProductKernel, CrossedNativeXYAndAxialTracesRejectWithoutChangin
     auto comm = Tpetra::getDefaultComm();
     auto root = source();
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> axial;
-    for (const auto& [key, leaf] : root->owned())
+    for (const auto& leaf : root->owned_leaves())
     {
-        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(leaf.key.ancestry);
         if (p.base.root == 0 && p.axial.root == 0)
-            axial.push_back({key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Axial});
+            axial.push_back({leaf.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Axial});
     }
     auto zfine = root->apply(root->plan_adaptation(axial));
     ASSERT_EQ(global_cells(*zfine), 17u);
     const auto accepted = zfine->observation();
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> crossed;
-    for (const auto& [key, leaf] : zfine->owned())
+    for (const auto& leaf : zfine->owned_leaves())
     {
-        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(leaf.key.ancestry);
         if (p.base.root == 1 && p.axial.root == 0)
-            crossed.push_back({key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base});
+            crossed.push_back({leaf.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base});
     }
     // At x=.1 the left native traces span full y and half z; right
     // native traces span half y and full z. Their quarters are neither
@@ -385,7 +385,7 @@ TEST(DistributedProductKernel, MeshSnapshotCannotReuseMalformedFactorCapsules)
     if (Tpetra::getDefaultComm()->getSize() != 1)
         GTEST_SKIP() << "Focused snapshot factor-authentication oracle is serial.";
     const auto warm = source(), cold = source();
-    const auto& valid = warm->owned().begin()->second;
+    const auto& valid = *warm->owned_leaves().begin();
     ASSERT_TRUE(valid.factor_recipe);
     const std::array<const AMR::AdaptiveLeaf*, 1> rows{&valid};
     std::size_t used = 0;

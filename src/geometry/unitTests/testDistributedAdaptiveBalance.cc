@@ -86,7 +86,7 @@ TEST(DistributedAdaptiveBalance, MeasuredOperationsDrivePinnedHierarchyMigration
     auto kernel = ::SimpleFluid::Meshes::AMR::cartesian_adaptive_kernel(config);
     ::SimpleFluid::Meshes::AMR::AdaptiveWorkRecorder recorder(::SimpleFluid::Meshes::AMR::AdaptiveWorkUnit::Operations);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBalanceCell> cells;
-    for (const auto& [cell, leaf] : state->owned())
+    for (const auto& leaf : state->owned_leaves())
     {
         auto shape = kernel->geometry(leaf);
         auto moments = shape->moments();
@@ -96,10 +96,10 @@ TEST(DistributedAdaptiveBalance, MeasuredOperationsDrivePinnedHierarchyMigration
             center[a] += moments.first_moment[a].as_double() / volume;
         auto clipped = shape->clip({{1, 0, 0}, center, 0});
         (void) clipped;
-        recorder.observe(cell, leaf.revision, 1, 0, 0);
+        recorder.observe(leaf.key, leaf.revision, 1, 0, 0);
         auto bytes = ::SimpleFluid::Meshes::AMR::encode_adaptive_leaf(leaf);
-        recorder.record_payload(cell, leaf.revision, bytes.size());
-        cells.push_back({cell, leaf.revision, recorder.snapshot(cell, leaf.revision)});
+        recorder.record_payload(leaf.key, leaf.revision, bytes.size());
+        cells.push_back({leaf.key, leaf.revision, recorder.snapshot(leaf.key, leaf.revision)});
     }
     auto plan = ::SimpleFluid::Meshes::AMR::balance_owned_cells(
         cells, {}, {state->identity(), state->topology_generation(), state->partition_generation()}, comm);
@@ -113,7 +113,7 @@ TEST(DistributedAdaptiveBalance, MeasuredOperationsDrivePinnedHierarchyMigration
     // peer headers, rather than summing standalone per-leaf recipe bytes.
     std::map<int, std::vector<::SimpleFluid::Meshes::AMR::AdaptiveLeaf>> batches;
     std::size_t index = 0;
-    for (const auto& [cell, leaf] : state->owned())
+    for (const auto& leaf : state->owned_leaves())
     {
         const int destination = plan.localdestinations[index++];
         if (destination != comm->getRank())
@@ -126,10 +126,10 @@ TEST(DistributedAdaptiveBalance, MeasuredOperationsDrivePinnedHierarchyMigration
     plan = ::SimpleFluid::Meshes::AMR::qualify_balance_wire_bytes(std::move(plan), wire, comm);
     auto migration = state->plan_migration(plan);
     auto moved = state->apply(migration);
-    int local = int(moved->owned().size()), global = 0;
+    int local = int(moved->owned_leaves().size()), global = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local, &global);
     EXPECT_EQ(global, 8);
-    EXPECT_EQ(state->owned().size(), comm->getRank() == 0 ? 8 : 0);
+    EXPECT_EQ(state->owned_leaves().size(), comm->getRank() == 0 ? 8 : 0);
     EXPECT_EQ(moved->topology_generation(), state->topology_generation());
     if (plan.accepted)
         EXPECT_THROW(moved->plan_migration(plan), std::invalid_argument);

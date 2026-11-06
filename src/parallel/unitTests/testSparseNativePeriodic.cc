@@ -234,10 +234,10 @@ TEST(SparseNativePeriodic, HierarchyRefineMigrationCoarsenPublishesNativeImagesA
     {
         auto publication = ::SimpleFluid::Meshes::AMR::assemble_adaptive_native(hierarchy, schema);
         auto geometry = publication.partition->geometry();
-        EXPECT_EQ(publication.mesh->num_owned_cells(), hierarchy.owned().size());
+        EXPECT_EQ(publication.mesh->num_owned_cells(), hierarchy.owned_leaves().size());
         for (const auto& [key, gid] : publication.owned_gids)
         {
-            const auto& leaf = hierarchy.owned().at(key);
+            const auto& leaf = hierarchy.owned_leaves().at(key);
             EXPECT_TRUE(geometry->certified_sparse_cell_geometry(gid)->equivalent(*kernel->geometry(leaf)));
             auto metric = kernel->metrics(leaf);
             auto center = geometry->cell_centroid(gid);
@@ -272,15 +272,15 @@ TEST(SparseNativePeriodic, HierarchyRefineMigrationCoarsenPublishesNativeImagesA
                     });
                 EXPECT_NEAR(sum.norm(), 0, 1e-14);
             });
-        EXPECT_EQ(visited, hierarchy.owned().size());
-        if (hierarchy.owned().empty())
+        EXPECT_EQ(visited, hierarchy.owned_leaves().size());
+        if (hierarchy.owned_leaves().empty())
         {
             EXPECT_EQ(publication.mesh->num_cells(), 0);
             EXPECT_TRUE(geometry->regions().empty());
         }
     };
     publish(*state);
-    EXPECT_EQ(state->owned().empty(), comm->getRank() != 0);
+    EXPECT_EQ(state->owned_leaves().empty(), comm->getRank() != 0);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks;
     if (comm->getRank() == 0)
         marks.push_back({root_key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
@@ -288,9 +288,9 @@ TEST(SparseNativePeriodic, HierarchyRefineMigrationCoarsenPublishesNativeImagesA
     auto refined = state->apply(refine);
     publish(*refined);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
     {
-        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry);
+        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(leaf.key.ancestry);
         destinations.push_back(int((cell.index[0] + 4 * (cell.index[1] + 4 * cell.index[2])) % comm->getSize()));
     }
     auto migration = refined->plan_migration(destinations);
@@ -303,10 +303,10 @@ TEST(SparseNativePeriodic, HierarchyRefineMigrationCoarsenPublishesNativeImagesA
     auto coarsen = moved->plan_adaptation({}, inverse);
     auto restored = moved->apply(coarsen);
     publish(*restored);
-    std::uint64_t count = restored->owned().size(), global = 0;
+    std::uint64_t count = restored->owned_leaves().size(), global = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &count, &global);
     EXPECT_EQ(global, 8);
-    EXPECT_EQ(state->owned().size(), comm->getRank() == 0 ? 8 : 0);
+    EXPECT_EQ(state->owned_leaves().size(), comm->getRank() == 0 ? 8 : 0);
 }
 TEST(SparseNativePeriodic, InconsistentDisplayImageRejectsCollectively)
 {

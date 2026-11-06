@@ -39,11 +39,11 @@ std::shared_ptr<const VoF::GeneralVoF> inventory_fixture(
         std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto x = hierarchy->geometry(leaf)->centroid();
         const double g = seed_remainder && x[0] < 1 && x[1] < 1 && x[2] < 1 ? 1 : 0;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(g);
         carrier.push_back(1 - g);
     }
@@ -170,7 +170,7 @@ TEST(ExactGeneralVoFSolverTest, ExperimentalInventorySamePolicyRegridRetainsCloc
     std::vector<AMR::AdaptiveMark> marks;
     for (const auto& key : source->owned_order())
     {
-        const auto x = source->hierarchy()->geometry(source->hierarchy()->owned().at(key))->centroid();
+        const auto x = source->hierarchy()->geometry(source->hierarchy()->owned_leaves().at(key))->centroid();
         if (x[0] < 1 && x[1] < 1 && x[2] < 1)
             marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
     }

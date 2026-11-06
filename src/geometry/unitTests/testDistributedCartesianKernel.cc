@@ -171,8 +171,8 @@ std::set<::SimpleFluid::Meshes::AMR::AdaptiveBytes> gathered_keys(
 {
     auto comm = Tpetra::getDefaultComm();
     ::SimpleFluid::Meshes::AMR::adaptive_detail::Writer wire;
-    for (const auto& [key, leaf] : state.owned())
-        wire.bytes(::SimpleFluid::Meshes::AMR::encode_adaptive_key(key));
+    for (const auto& leaf : state.owned_leaves())
+        wire.bytes(::SimpleFluid::Meshes::AMR::encode_adaptive_key(leaf.key));
     constexpr int bound = 32768;
     const int n = int(wire.data.size());
     if (n > bound)
@@ -216,7 +216,7 @@ void compare_oracle(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarc
     auto kernel = ::SimpleFluid::Meshes::AMR::cartesian_adaptive_kernel(oracle.config());
     std::array<double, 4> moments{};
     std::map<::SimpleFluid::Meshes::AMR::AdaptiveBytes, std::set<std::uint64_t>> blocks;
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
         EXPECT_EQ(leaf.provider, ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Cartesian);
         EXPECT_FALSE(leaf.geometry);
@@ -509,22 +509,22 @@ TEST(DistributedAdaptiveEncoding, RankLocalConstructionRejectionKeepsHierarchyAn
     }
     std::vector<AMR::AdaptiveCellKey> keys;
     std::vector<const NativeFragmentDescriptor*> recipes;
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         recipes.push_back(leaf.native_recipe.get());
     }
     const auto calls = probe->materializations;
     probe->reject_materialization = comm->getRank() == 0;
     EXPECT_THROW((void) AMR::adaptive_detail::compact_adaptive_native_draft(state), std::invalid_argument);
     EXPECT_EQ(state.identity(), identity);
-    EXPECT_EQ(state.owned().size(), ids.size());
+    EXPECT_EQ(state.owned_leaves().size(), ids.size());
     if (comm->getRank() == 0)
         EXPECT_EQ(probe->materializations, calls);
     std::size_t index = 0;
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
-        EXPECT_EQ(key, keys[index]);
+        EXPECT_EQ(leaf.key, keys[index]);
         EXPECT_EQ(leaf.native_recipe.get(), recipes[index++]);
         EXPECT_FALSE(leaf.geometry);
         EXPECT_TRUE(leaf.surfaces.empty());
@@ -600,9 +600,9 @@ TEST(DistributedCartesianKernel, DistributedBlockRefineSplitFamiliesCoarsenAndEm
     EXPECT_EQ(refined->topology_generation(), 1);
     // Deliberately split every immediate eight-child cell family across owners.
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
     {
-        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry);
+        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(leaf.key.ancestry);
         destinations.push_back(int((cell.index[0] + 4 * (cell.index[1] + 4 * cell.index[2])) % comm->getSize()));
     }
     auto migrate = refined->plan_migration(destinations);
@@ -614,24 +614,24 @@ TEST(DistributedCartesianKernel, DistributedBlockRefineSplitFamiliesCoarsenAndEm
         coarsen.push_back(::SimpleFluid::Meshes::AMR::adaptive_family_key(
             source.cell_key(0), ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic));
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> conflict;
-    for (const auto& [key, leaf] : scattered->owned())
-        if (std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry).index ==
+    for (const auto& leaf : scattered->owned_leaves())
+        if (std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(leaf.key.ancestry).index ==
             std::array<std::uint64_t, 3>{0, 0, 0})
-            conflict.push_back({key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
+            conflict.push_back({leaf.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
     EXPECT_THROW(scattered->plan_adaptation(conflict, coarsen), std::invalid_argument);
     compare_oracle(*scattered, *oracle);
     auto collapse = scattered->plan_adaptation({}, coarsen);
     auto restored = scattered->apply(collapse);
     compare_oracle(*restored, source);
-    std::vector<int> all_to_zero(restored->owned().size(), 0);
+    std::vector<int> all_to_zero(restored->owned_leaves().size(), 0);
     auto empty_plan = restored->plan_migration(all_to_zero);
     auto empty = restored->apply(empty_plan);
-    EXPECT_EQ(empty->owned().size(), comm->getRank() == 0 ? 8 : 0);
+    EXPECT_EQ(empty->owned_leaves().size(), comm->getRank() == 0 ? 8 : 0);
     compare_oracle(*empty, source);
     auto draft = empty->native_draft();
     auto compact_draft = ::SimpleFluid::Meshes::AMR::adaptive_detail::compact_adaptive_native_draft(*empty);
     test::compare_native_drafts(draft, compact_draft);
-    EXPECT_EQ(draft.owned.size(), empty->owned().size());
+    EXPECT_EQ(draft.owned.size(), empty->owned_leaves().size());
     if (comm->getRank() != 0)
         EXPECT_TRUE(draft.tiles.empty());
     auto no_op = empty->plan_adaptation({});
@@ -671,13 +671,13 @@ TEST(DistributedConvexHierarchy, SplitSiblingOwnersCoarsenExactParent)
     auto split = state.plan_adaptation(marks);
     auto refined = state.apply(split);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
         destinations.push_back(
-            int(std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(key.ancestry).path.back() % comm->getSize()));
+            int(std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(leaf.key.ancestry).path.back() % comm->getSize()));
     auto migration = refined->plan_migration(destinations);
     auto scattered = refined->apply(migration);
     auto draft = scattered->native_draft();
-    EXPECT_EQ(draft.owned.size(), scattered->owned().size());
+    EXPECT_EQ(draft.owned.size(), scattered->owned_leaves().size());
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> requests;
     if (comm->getRank() == 0)
         requests.push_back(::SimpleFluid::Meshes::AMR::adaptive_family_key(
@@ -688,8 +688,8 @@ TEST(DistributedConvexHierarchy, SplitSiblingOwnersCoarsenExactParent)
                                             ::SimpleFluid::Meshes::AMR::encode_adaptive_key(parent.key)});
     if (comm->getRank() == 0)
     {
-        ASSERT_EQ(restored->owned().size(), 1);
-        EXPECT_TRUE(restored->owned().begin()->second.geometry->equivalent(*parent.geometry));
+        ASSERT_EQ(restored->owned_leaves().size(), 1);
+        EXPECT_TRUE(restored->owned_leaves().begin()->geometry->equivalent(*parent.geometry));
     }
 }
 TEST(DistributedCartesianKernel, WrongBlockRecipeOrNativeOrdinalRejectsCollectively)
@@ -771,16 +771,16 @@ TEST(DistributedCartesianKernel, SimultaneousSubtreeInverseRetainsAncestorAnchor
     auto restored = state->apply(inverse);
     compare_oracle(*restored, *level_one);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : restored->owned())
+    for (const auto& leaf : restored->owned_leaves())
     {
-        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry);
+        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(leaf.key.ancestry);
         destinations.push_back(int((cell.index[0] + 4 * (cell.index[1] + 4 * cell.index[2]) + 1) % comm->getSize()));
     }
     auto migration = restored->plan_migration(destinations);
     auto moved = restored->apply(migration);
     compare_oracle(*moved, *level_one);
     for (const auto& [key, family] : moved->families())
-        EXPECT_TRUE(moved->owned().contains(::SimpleFluid::Meshes::AMR::decode_adaptive_key(family.anchor)));
+        EXPECT_TRUE(moved->owned_leaves().contains(::SimpleFluid::Meshes::AMR::decode_adaptive_key(family.anchor)));
     requests.clear();
     if (comm->getRank() == 0)
         requests.push_back(::SimpleFluid::Meshes::AMR::adaptive_family_key(
@@ -914,8 +914,8 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
     }
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_periodic, &global_periodic);
     EXPECT_EQ(global_periodic, 12);
-    for (const auto& [key, leaf] : state->owned())
-        EXPECT_TRUE(SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::cell_shell(shells[key])
+    for (const auto& leaf : state->owned_leaves())
+        EXPECT_TRUE(SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::cell_shell(shells[leaf.key])
                 ->equivalent(*kernel->geometry(leaf)));
     auto baseline = periodic_signature(draft);
     EXPECT_EQ(baseline.size(), 51);
@@ -947,16 +947,16 @@ TEST(DistributedCartesianKernel, PeriodicPartnerBlocksRefineMigrateAndCoarsenTog
     auto oracle = source.adapt({0});
     compare_oracle(*refined, *oracle);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : refined->owned())
+    for (const auto& leaf : refined->owned_leaves())
     {
-        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry);
+        const auto& cell = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(leaf.key.ancestry);
         destinations.push_back(int((cell.index[0] + 8 * (cell.index[1] + 4 * cell.index[2])) % comm->getSize()));
     }
     auto migration = refined->plan_migration(destinations);
     auto moved = refined->apply(migration);
     compare_oracle(*moved, *oracle);
     auto draft = moved->native_draft();
-    EXPECT_EQ(draft.owned.size(), moved->owned().size());
+    EXPECT_EQ(draft.owned.size(), moved->owned_leaves().size());
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> inverse;
     if (comm->getRank() == 0)
         inverse.push_back(::SimpleFluid::Meshes::AMR::adaptive_family_key(

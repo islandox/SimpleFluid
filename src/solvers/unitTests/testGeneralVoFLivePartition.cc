@@ -26,10 +26,10 @@ std::shared_ptr<const VoF::GeneralVoF> live_phases(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const double amount = hierarchy->geometry(leaf)->centroid()[0] < 1 ? 1 : 0;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(amount);
         carrier.push_back(1 - amount);
     }

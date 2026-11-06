@@ -140,7 +140,7 @@ TEST(GeneralVoFPhaseCleanup, GeometryBackendsDefaultToPinnedGlobalBudgets)
     auto input = fixture();
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
-        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[c]))->centroid();
         if (x[0] > 1 && x[1] < 1 && x[2] < 1)
         {
             input.gas[c] = small;
@@ -262,7 +262,7 @@ TEST(GeneralVoFPhaseCleanup, AbsoluteBudgetDoesNotCancelOppositeRepairs)
     constexpr double small = 0x1p-48;
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto c = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = c[0] < 1 ? small : 1 - small;
         input.carrier[i] = c[0] < 1 ? 1 - small : small;
     }
@@ -495,7 +495,7 @@ TEST(GeneralVoFPhaseCleanup, GeometricCanonicalTransportRetainsRawMassAndCumulat
         {
             const auto row = next->mesh()->owned_cell_map()->getLocalElement(delta.gid);
             ASSERT_GE(row, 0);
-            const auto center = source.hierarchy()->geometry(source.hierarchy()->owned().at(delta.key))->centroid();
+            const auto center = source.hierarchy()->geometry(source.hierarchy()->owned_leaves().at(delta.key))->centroid();
             // The closed square cycle exports q gas from the sole gas cell
             // into its +x neighbour; all other streams carry pure carrier.
             const bool gas_origin = center[0] < 1;

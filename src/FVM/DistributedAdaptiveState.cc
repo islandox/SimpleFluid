@@ -75,7 +75,7 @@ auto model_comm(const Data& data)
 }
 bool owns(const Data& data, const Key& key)
 {
-    return data.hierarchy ? data.hierarchy->owned().contains(key) : data.frozen->owned().contains(key);
+    return data.hierarchy ? data.hierarchy->owned_leaves().contains(key) : data.frozen->owned().contains(key);
 }
 bool native_valid(const Data& data)
 {
@@ -309,7 +309,7 @@ void certify_reconstructions(const Data& data)
             for (const auto& key : data.order)
             {
                 const auto gid = data.native.owned_gids.at(key);
-                const auto& leaf = data.hierarchy->owned().at(key);
+                const auto& leaf = data.hierarchy->owned_leaves().at(key);
                 auto geometry = data.hierarchy->geometry(leaf);
                 if (!geometry)
                     throw std::invalid_argument("Qualified reconstruction requires every owned cell certificate.");
@@ -499,7 +499,7 @@ DistributedAdaptiveState::DistributedAdaptiveState(std::shared_ptr<const Hierarc
             data->hierarchy = hierarchy;
             if (hierarchy->global_cells() == 0)
                 throw std::invalid_argument("Adaptive state requires a nonempty global native domain.");
-            if (input_keys.size() != hierarchy->owned().size() || histories.empty())
+            if (input_keys.size() != hierarchy->owned_leaves().size() || histories.empty())
                 throw std::invalid_argument("Adaptive state requires complete owned histories.");
             Data layout;
             layout.hierarchy = hierarchy;
@@ -523,7 +523,7 @@ DistributedAdaptiveState::DistributedAdaptiveState(std::shared_ptr<const Hierarc
         {
             std::map<Key, std::size_t> input;
             for (std::size_t i = 0; i < input_keys.size(); ++i)
-                if (!hierarchy->owned().contains(input_keys[i]) || !input.emplace(input_keys[i], i).second)
+                if (!hierarchy->owned_leaves().contains(input_keys[i]) || !input.emplace(input_keys[i], i).second)
                     throw std::invalid_argument("Adaptive history key order is foreign or duplicated.");
             Data source;
             source.hierarchy = hierarchy;
@@ -842,7 +842,7 @@ DistributedAdaptiveState::Plan DistributedAdaptiveState::migrate(
                 auto& group = groups[rank];
                 group.indices.push_back(i);
                 const auto& key = data_->order[i];
-                group.leaves.push_back(hierarchy.owned().at(key));
+                group.leaves.push_back(hierarchy.owned_leaves().at(key));
                 routes.emplace(::SimpleFluid::Meshes::AMR::encode_adaptive_key(key), rank);
             }
             for (const auto& [key, family] : hierarchy.families())

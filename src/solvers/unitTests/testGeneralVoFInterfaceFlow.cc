@@ -18,11 +18,11 @@ std::shared_ptr<const VoF::GeneralVoF> interface_phases(unsigned initial)
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, liquid;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto x = hierarchy->geometry(leaf)->centroid();
         const double g = x[0] < 1 ? (initial == 1 ? 1 : .75) : 0;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(g);
         liquid.push_back(1 - g);
     }

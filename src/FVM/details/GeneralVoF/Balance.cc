@@ -152,17 +152,17 @@ GeneralVoFBalanceProposal plan_partition_proposal(std::shared_ptr<const GeneralV
             charge(retained, sample.cells.size(),
                 2 * sizeof(AMR::AdaptiveBalanceCell) + sizeof(std::size_t) + sizeof(Key) + 6 * sizeof(void*));
             cells.reserve(sample.cells.size());
-            auto owned = hierarchy.owned().begin();
+            auto owned = hierarchy.owned_leaves().begin();
             for (std::size_t i = 0; i < sample.cells.size(); ++i, ++owned)
             {
                 const auto& row = sample.cells[i];
-                const auto& key = owned->first;
-                if (row.key != key || row.owner != rank || row.revision != hierarchy.owned().at(key).revision ||
+                const auto& key = owned->key;
+                if (row.key != key || row.owner != rank || row.revision != hierarchy.owned_leaves().at(key).revision ||
                     row.calls > 1 || (row.calls == 0 && row.reconstruction.seconds != 0))
                     throw std::invalid_argument("Initial VoF work capture owned ordering or deduplication differs.");
                 seconds(row.reconstruction.seconds);
                 const auto encoded = AMR::encode_adaptive_batch(
-                    std::span<const AMR::AdaptiveLeaf>(&hierarchy.owned().at(key), 1), {}, limit - retained.used);
+                    std::span<const AMR::AdaptiveLeaf>(&hierarchy.owned_leaves().at(key), 1), {}, limit - retained.used);
                 charge(retained, AMR::encode_adaptive_key(key).size(), 3);
                 AMR::AdaptiveBalanceCell cell;
                 cell.key = key;
@@ -194,7 +194,7 @@ GeneralVoFBalanceProposal plan_partition_proposal(std::shared_ptr<const GeneralV
                 const auto& tile = *found->second;
                 if (face.first.key != tile.first || face.second.key != *tile.second || face.first.owner != rank ||
                     face.second.owner != tile.second_owner ||
-                    face.first.revision != hierarchy.owned().at(face.first.key).revision)
+                    face.first.revision != hierarchy.owned_leaves().at(face.first.key).revision)
                     throw std::invalid_argument("Initial VoF work face provenance differs from current.");
                 seconds(face.setup.seconds);
                 seconds(face.aggregate.seconds);
@@ -312,7 +312,7 @@ GeneralVoFBalanceProposal plan_partition_proposal(std::shared_ptr<const GeneralV
                 // a conservative charge for those copied variable arrays.
                 charge(retained, cells[i].work.migration_bytes, 2);
                 routes.emplace(std::move(key), peer);
-                groups[peer].leaves.push_back(hierarchy.owned().at(cells[i].key));
+                groups[peer].leaves.push_back(hierarchy.owned_leaves().at(cells[i].key));
             }
             for (const auto& [key, family] : hierarchy.families())
             {

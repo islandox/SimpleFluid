@@ -22,9 +22,9 @@ Fixture fixture(bool dilute = false)
 {
     Fixture result;
     result.hierarchy = SimpleFluid::VoF::test::small_fixtures::eight_cell_hierarchy({'f', 'i', 'n', 'i', 't', 'e'});
-    for (const auto& [key, leaf] : result.hierarchy->owned())
+    for (const auto& leaf : result.hierarchy->owned_leaves())
     {
-        result.order.push_back(key);
+        result.order.push_back(leaf.key);
         const auto center = result.hierarchy->geometry(leaf)->centroid();
         const auto gas = dilute ? 1e-6 : (center[0] < 1 && center[1] < 1 && center[2] < 1 ? 1. : 0.);
         result.gas.push_back(gas);
@@ -48,13 +48,13 @@ Fixture coarse_fine_fixture()
     const auto initial = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(source.owned), std::move(source.families), source.kernel, comm);
     std::vector<AdaptiveMark> marks;
-    if (initial->owned().contains(mesh.cell_key(0)))
+    if (initial->owned_leaves().contains(mesh.cell_key(0)))
         marks.push_back({mesh.cell_key(0), AdaptiveSplit::Isotropic});
     Fixture result;
     result.hierarchy = initial->apply(initial->plan_adaptation(marks));
-    for (const auto& [key, leaf] : result.hierarchy->owned())
+    for (const auto& leaf : result.hierarchy->owned_leaves())
     {
-        result.order.push_back(key);
+        result.order.push_back(leaf.key);
         result.gas.push_back(0);
         result.carrier.push_back(result.hierarchy->metrics(leaf).volume);
     }

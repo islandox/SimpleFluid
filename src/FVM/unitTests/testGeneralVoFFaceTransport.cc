@@ -33,7 +33,7 @@ Fixture planar_patch(bool diagonal, double cell_height = 1)
     Fixture input;
     input.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(source.owned), std::move(source.families), source.kernel, comm);
-    for (const auto& [key, leaf] : input.hierarchy->owned())
+    for (const auto& leaf : input.hierarchy->owned_leaves())
     {
         const auto c = input.hierarchy->geometry(leaf)->centroid();
         const auto x = std::floor(c[0]), y = std::floor(c[1]);
@@ -43,7 +43,7 @@ Fixture planar_patch(bool diagonal, double cell_height = 1)
             const auto t = 5.2L - x - y;
             gas = t <= 0 ? 0 : t >= 2 ? 1 : t <= 1 ? t * t / 2 : 1 - (2 - t) * (2 - t) / 2;
         }
-        input.order.push_back(key);
+        input.order.push_back(leaf.key);
         input.gas.push_back(double(gas * cell_height));
         input.carrier.push_back(double((1 - gas) * cell_height));
     }
@@ -198,7 +198,7 @@ TEST(GeneralVoFFaceTransport, RepeatedCanonicalDiscrepancyUsesSignedHistoryAndRe
         for (std::size_t c = 0; c < state->phase_volumes().size(); ++c)
         {
             const auto center =
-                state->hierarchy()->geometry(state->hierarchy()->owned().at(state->owned_order()[c]))->centroid();
+                state->hierarchy()->geometry(state->hierarchy()->owned_leaves().at(state->owned_order()[c]))->centroid();
             const long double expected =
                 center[1] == .5 && center[2] == .5 ? (center[0] < 1 ? -1.L : 1.L) * increments * q : 0;
             const auto& phase = state->phase_volumes()[c];
@@ -490,7 +490,7 @@ TEST(GeneralVoFFaceTransport, LimiterSharesEndpointAndOldExportCapacities)
     auto input = fixture();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto c = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = c[0] < 1 && c[1] < 1 ? .125 : c[0] > 1 && c[1] > 1 ? 1 : .875;
         input.carrier[i] = 1 - input.gas[i];
     }
@@ -695,7 +695,7 @@ RadialFaceFixture radial_face_fixture()
     auto& input = result.phases;
     input.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
-    for (const auto& [key, leaf] : input.hierarchy->owned())
+    for (const auto& leaf : input.hierarchy->owned_leaves())
     {
         const auto geometry = input.hierarchy->geometry(leaf);
         const auto center = geometry->centroid();
@@ -713,7 +713,7 @@ RadialFaceFixture radial_face_fixture()
             gas = (.05 - radii[1] * radii[1] * chord) * height;
             carrier = (radii[2] * radii[2] * chord - .05) * height;
         }
-        input.order.push_back(key);
+        input.order.push_back(leaf.key);
         input.gas.push_back(gas);
         input.carrier.push_back(carrier);
     }
@@ -871,7 +871,7 @@ TEST(GeneralVoFFaceTransport, MixedDonorPureFaceDoesNotManufactureSurfaceFromRec
     std::vector<GeneralVoFPhaseGeometry> declarations;
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         const bool mixed = center[0] < 1;
         input.gas[i] = mixed ? .75 : 1e-25;
         input.carrier[i] = mixed ? .25 : 1;
@@ -896,7 +896,7 @@ TEST(GeneralVoFFaceTransport, NumericalFloorFallsBackButResourceExhaustionReject
     auto input = fixture();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[0] < 1 ? .75 : 0;
         input.carrier[i] = 1 - input.gas[i];
     }
@@ -941,7 +941,7 @@ TEST(GeneralVoFFaceTransport, ApproximationArithmeticFailureRejectsWithoutDonorF
     auto input = fixture();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[0] < 1 ? .75 : 0;
         input.carrier[i] = 1 - input.gas[i];
     }

@@ -50,9 +50,9 @@ std::shared_ptr<const GeneralVoF> setup(Teuchos::RCP<const Teuchos::Comm<int>> c
     auto hierarchy = std::make_shared<const H>(std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(cubic ? 1 : .5);
     }
@@ -98,7 +98,7 @@ TEST(ExactFaceTransfer, IndependentAcceptedRatesMigrateByActualFaceIdentityWitho
 {
     const auto source = setup();
     auto old = rates(*source);
-    std::vector<int> destinations(source->hierarchy()->owned().size(),
+    std::vector<int> destinations(source->hierarchy()->owned_leaves().size(),
         (Tpetra::getDefaultComm()->getRank() + 1) % std::min(2, Tpetra::getDefaultComm()->getSize()));
     const auto plan = source->hierarchy()->plan_migration(destinations);
     const auto h = bind(*source->hierarchy(), plan);
@@ -110,7 +110,7 @@ TEST(ExactFaceTransfer, IndependentAcceptedRatesMigrateByActualFaceIdentityWitho
         actual.emplace(tile.face_gid, &tile);
     for (const auto& item : result.owned_rates())
         EXPECT_EQ(item.rate.compare(cycle(*actual.at(item.face))), 0);
-    int localempty = target->hierarchy()->owned().empty(), empty = 0;
+    int localempty = target->hierarchy()->owned_leaves().empty(), empty = 0;
     Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &localempty, &empty);
     if (Tpetra::getDefaultComm()->getSize() == 4)
         EXPECT_GT(empty, 0);
@@ -155,8 +155,8 @@ TEST(ExactFaceTransfer, IndependentAcceptedRatesMigrateByActualFaceIdentityWitho
     const auto recovered = ExactFaceTransfer::prepare(*source, *target, phase, old);
     EXPECT_EQ(recovered.owned_rates().size(), result.owned_rates().size());
     std::vector<AdaptiveCellKey> needed;
-    for (const auto& [key, leaf] : source->hierarchy()->owned())
-        needed.push_back(key);
+    for (const auto& leaf : source->hierarchy()->owned_leaves())
+        needed.push_back(leaf.key);
     EXPECT_THROW((void) source->hierarchy()->lookup_cells(needed, true, 1), std::exception);
     EXPECT_THROW((void) source->hierarchy()->fetch_leaves(needed, 1), std::exception);
     const auto cap = std::min<std::size_t>(1024 * 1024, source->hierarchy()->options().byte_budget);
@@ -184,24 +184,24 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
     const auto old = rates(*source);
     std::vector<AdaptiveBytes> coarsen;
     std::vector<ExactOwnedCellVelocity> seed;
-    for (const auto& [key, leaf] : source->hierarchy()->owned())
+    for (const auto& leaf : source->hierarchy()->owned_leaves())
     {
-        const auto& p = std::get<ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<ProductCellAncestry>(leaf.key.ancestry);
         if (p.axial.path.back() == 0)
         {
-            auto parent = key;
+            auto parent = leaf.key;
             std::get<ProductCellAncestry>(parent.ancestry).axial.path.pop_back();
             coarsen.push_back(adaptive_family_key(parent, AdaptiveSplit::Axial));
         }
-        seed.push_back({key,
+        seed.push_back({leaf.key,
             p.base.root == 1 ? SimpleFluid::PLIC::GeometryPoint{1, 0, 0} : SimpleFluid::PLIC::GeometryPoint{0, 0, 0}});
     }
     const auto coarsening = source->hierarchy()->plan_adaptation({}, coarsen);
     const auto intermediate = bind(*source->hierarchy(), coarsening);
     std::vector<AdaptiveMark> marks;
-    for (const auto& [key, leaf] : intermediate->owned())
-        if (std::get<ProductCellAncestry>(key.ancestry).base.root == 1)
-            marks.push_back({key, AdaptiveSplit::Base});
+    for (const auto& leaf : intermediate->owned_leaves())
+        if (std::get<ProductCellAncestry>(leaf.key.ancestry).base.root == 1)
+            marks.push_back({leaf.key, AdaptiveSplit::Base});
     const auto refinement = intermediate->plan_adaptation(marks);
     const auto h = bind(*intermediate, refinement);
     const std::array<ExactTransferPlanStep, 2> chain{{{coarsening, intermediate}, {refinement, h}}};
@@ -209,9 +209,9 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
     const auto phase = ExactPhaseTransfer::prepare(original_source, chain);
     const auto target = source->adopt_transfer(phase);
     int crossed_local = 0, crossed = 0;
-    for (const auto& [key, leaf] : target->hierarchy()->owned())
+    for (const auto& leaf : target->hierarchy()->owned_leaves())
     {
-        const auto& p = std::get<ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<ProductCellAncestry>(leaf.key.ancestry);
         if (p.base.root == 1)
         {
             EXPECT_EQ(p.base.path.size(), 1u);
@@ -234,7 +234,7 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
     EXPECT_THROW((void) ExactPhaseTransfer::prepare(original_source, stale), std::invalid_argument);
     const auto foreign_source = setup();
     const auto foreign_plan = foreign_source->hierarchy()->plan_migration(
-        std::vector<int>(foreign_source->hierarchy()->owned().size(), Tpetra::getDefaultComm()->getRank()));
+        std::vector<int>(foreign_source->hierarchy()->owned_leaves().size(), Tpetra::getDefaultComm()->getRank()));
     auto foreign = chain;
     foreign[0] = {foreign_plan, bind(*foreign_source->hierarchy(), foreign_plan)};
     EXPECT_THROW((void) ExactPhaseTransfer::prepare(original_source, foreign), std::invalid_argument);
@@ -266,23 +266,23 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
     result.validate_observations(*source, *target);
     std::vector<AdaptiveBytes> reverse_coarsen;
     std::vector<ExactOwnedCellVelocity> reverse_seed;
-    for (const auto& [key, leaf] : target->hierarchy()->owned())
+    for (const auto& leaf : target->hierarchy()->owned_leaves())
     {
-        const auto& p = std::get<ProductCellAncestry>(key.ancestry);
+        const auto& p = std::get<ProductCellAncestry>(leaf.key.ancestry);
         if (!p.base.path.empty() && p.base.path.back() == 0)
         {
-            auto parent = key;
+            auto parent = leaf.key;
             std::get<ProductCellAncestry>(parent.ancestry).base.path.pop_back();
             reverse_coarsen.push_back(adaptive_family_key(parent, AdaptiveSplit::Base));
         }
-        reverse_seed.push_back({key,
+        reverse_seed.push_back({leaf.key,
             p.base.root == 1 ? SimpleFluid::PLIC::GeometryPoint{1, 0, 0} : SimpleFluid::PLIC::GeometryPoint{0, 0, 0}});
     }
     const auto inverse_base = target->hierarchy()->plan_adaptation({}, reverse_coarsen);
     const auto inverse_mid = bind(*target->hierarchy(), inverse_base);
     std::vector<AdaptiveMark> reverse_marks;
-    for (const auto& [key, leaf] : inverse_mid->owned())
-        reverse_marks.push_back({key, AdaptiveSplit::Axial});
+    for (const auto& leaf : inverse_mid->owned_leaves())
+        reverse_marks.push_back({leaf.key, AdaptiveSplit::Axial});
     const auto inverse_z = inverse_mid->plan_adaptation(reverse_marks);
     const auto inverse_h = bind(*inverse_mid, inverse_z);
     const std::array<ExactTransferPlanStep, 2> inverse_chain{{{inverse_base, inverse_mid}, {inverse_z, inverse_h}}};
@@ -304,12 +304,12 @@ TEST(ExactFaceTransfer, TwentySevenCellCentralRegridUsesPhaseLocalDecodeLease)
     const auto source = setup(Teuchos::null, true);
     std::vector<AdaptiveMark> marks;
     std::vector<ExactOwnedCellVelocity> seeds;
-    for (const auto& [key, leaf] : source->hierarchy()->owned())
+    for (const auto& leaf : source->hierarchy()->owned_leaves())
     {
         const auto center = source->hierarchy()->geometry(leaf)->centroid();
         if (center[0] == 1.5 && center[1] == 1.5 && center[2] == 1.5)
-            marks.push_back({key, AdaptiveSplit::Isotropic});
-        seeds.push_back({key, {0, 0, 0}});
+            marks.push_back({leaf.key, AdaptiveSplit::Isotropic});
+        seeds.push_back({leaf.key, {0, 0, 0}});
     }
     const auto plan = source->hierarchy()->plan_adaptation(marks);
     const auto h = bind(*source->hierarchy(), plan);

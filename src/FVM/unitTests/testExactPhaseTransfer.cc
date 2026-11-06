@@ -56,7 +56,7 @@ M global(const M& local)
 }
 void empty_owners(const H& h)
 {
-    int local = h.owned().empty(), total = 0;
+    int local = h.owned_leaves().empty(), total = 0;
     Teuchos::reduceAll(*h.communicator(), Teuchos::REDUCE_SUM, 1, &local, &total);
     if (h.communicator()->getSize() == 4)
         EXPECT_GT(total, 0);
@@ -177,9 +177,9 @@ TEST(ExactPhaseTransfer, RetainedExactInventoriesMigrateSplitAndCoarsenWithinPub
     auto h = bootstrap(root, 8);
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         gas.push_back(1e-200);
         carrier.push_back(h->metrics(leaf).volume);
     }
@@ -204,9 +204,9 @@ TEST(ExactPhaseTransfer, RetainedExactInventoriesMigrateSplitAndCoarsenWithinPub
     conservation(source, moved);
     auto state = initial.adopt_transfer(moved);
     std::vector<AdaptiveMark> marks;
-    for (const auto& [key, leaf] : state->hierarchy()->owned())
-        if (key == root.cell_key(0))
-            marks.push_back({key, AdaptiveSplit::Isotropic});
+    for (const auto& leaf : state->hierarchy()->owned_leaves())
+        if (leaf.key == root.cell_key(0))
+            marks.push_back({leaf.key, AdaptiveSplit::Isotropic});
     const auto plan = state->hierarchy()->plan_adaptation(marks);
     const auto fine_h = bind(*state->hierarchy(), plan);
     const auto retained_source = channels(*state);
@@ -216,7 +216,7 @@ TEST(ExactPhaseTransfer, RetainedExactInventoriesMigrateSplitAndCoarsenWithinPub
     for (const auto& c : refined.owned())
     {
         EXPECT_GT(c.phases.gas, 0);
-        EXPECT_EQ(c.phases.bulk, fine_h->metrics(fine_h->owned().at(c.key)).volume);
+        EXPECT_EQ(c.phases.bulk, fine_h->metrics(fine_h->owned_leaves().at(c.key)).volume);
         // Per-phase publication errors scale with the tiny phase, not cell V.
         EXPECT_LE(c.roundoff.gas, 16 * std::numeric_limits<double>::epsilon() * c.phases.gas);
     }
@@ -255,9 +255,9 @@ TEST(ExactPhaseTransfer, SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners)
     const auto comm = hierarchy->communicator();
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(hierarchy->metrics(leaf).volume);
     }
@@ -307,10 +307,10 @@ TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics
         SCOPED_TRACE(minority);
         std::vector<AdaptiveCellKey> keys;
         std::vector<double> gas, carrier;
-        for (const auto& [key, leaf] : hierarchy->owned())
+        for (const auto& leaf : hierarchy->owned_leaves())
         {
-            keys.push_back(key);
-            const auto x = std::get<CartesianCellAncestry>(key.ancestry).index[0];
+            keys.push_back(leaf.key);
+            const auto x = std::get<CartesianCellAncestry>(leaf.key.ancestry).index[0];
             gas.push_back(x == 0 ? 1 : minority);
             carrier.push_back(x == 0 ? 0 : 1 - minority);
         }
@@ -385,19 +385,19 @@ TEST(ExactPhaseTransfer, InheritedExactDefectAndPublicationRoundingAreNotResetBy
     const double defect = 6 * std::numeric_limits<double>::epsilon();
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
     {
-        keys.push_back(key);
-        const bool mixed = std::get<CartesianCellAncestry>(key.ancestry).index[0] == 0;
+        keys.push_back(leaf.key);
+        const bool mixed = std::get<CartesianCellAncestry>(leaf.key.ancestry).index[0] == 0;
         gas.push_back(mixed ? .5 : 0);
         carrier.push_back(mixed ? .5 + defect : 1);
     }
     GeneralVoF initial(h, keys, gas, carrier, exact_options());
     const auto source = initial.export_transfer_source(true);
     std::vector<AdaptiveMark> marks;
-    for (const auto& [key, leaf] : initial.hierarchy()->owned())
-        if (key == root.cell_key(0))
-            marks.push_back({key, AdaptiveSplit::Isotropic});
+    for (const auto& leaf : initial.hierarchy()->owned_leaves())
+        if (leaf.key == root.cell_key(0))
+            marks.push_back({leaf.key, AdaptiveSplit::Isotropic});
     const auto plan = initial.hierarchy()->plan_adaptation(marks);
     const auto target = bind(*initial.hierarchy(), plan);
     const auto result = ExactPhaseTransfer::prepare(source, plan, target);
@@ -411,7 +411,7 @@ TEST(ExactPhaseTransfer, InheritedExactDefectAndPublicationRoundingAreNotResetBy
         EXPECT_EQ(error.admitted_bound, c.error.admitted_bound);
         EXPECT_EQ(error.difference, c.error.difference);
         EXPECT_EQ(adopted->phase_roundoff_bounds()[i].gas, c.roundoff.gas);
-        const auto bulk = M::volume(*target->geometry(target->owned().at(c.key)));
+        const auto bulk = M::volume(*target->geometry(target->owned_leaves().at(c.key)));
         const auto actual = M::from_value(c.phases.gas) + M::from_value(c.phases.carrier) - bulk;
         EXPECT_LE(absolute(actual).compare(M::from_value(c.error.admitted_bound)), 0);
         if (absolute(actual).compare(bulk.scaled(8 * std::numeric_limits<double>::epsilon())) > 0)
@@ -438,9 +438,9 @@ TEST(ExactPhaseTransfer, TinyExactMomentumRemainsTransactionLocalUntilAggregatio
     const auto h = bootstrap(root, 8);
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         gas.push_back(h->metrics(leaf).volume);
         carrier.push_back(0);
     }
@@ -508,10 +508,10 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     };
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
     {
-        const auto& c = std::get<CartesianCellAncestry>(key.ancestry);
-        keys.push_back(key);
+        const auto& c = std::get<CartesianCellAncestry>(leaf.key.ancestry);
+        keys.push_back(leaf.key);
         gas.push_back(std::ldexp(1e-200, int(corner(c) + 4 * c.index[2])));
         carrier.push_back(h->metrics(leaf).volume);
     }
@@ -580,9 +580,9 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     EXPECT_THROW(finite.validate_transfer_target(moved), std::invalid_argument);
     EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
     std::vector<AdaptiveMark> marks;
-    for (const auto& [key, leaf] : state->hierarchy()->owned())
-        if (key == root.cell_key(0))
-            marks.push_back({key, AdaptiveSplit::Isotropic});
+    for (const auto& leaf : state->hierarchy()->owned_leaves())
+        if (leaf.key == root.cell_key(0))
+            marks.push_back({leaf.key, AdaptiveSplit::Isotropic});
     const auto plan = state->hierarchy()->plan_adaptation(marks);
     const auto target = bind(*state->hierarchy(), plan);
     const auto result = ExactPhaseTransfer::prepare(state->export_transfer_source(false), plan, target);
@@ -590,7 +590,7 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     {
         ASSERT_TRUE(c.experimental_exact);
         const auto& ancestry = std::get<CartesianCellAncestry>(c.key.ancestry);
-        const auto child = M::volume(*target->geometry(target->owned().at(c.key)));
+        const auto child = M::volume(*target->geometry(target->owned_leaves().at(c.key)));
         const auto wanted =
             expected(ancestry).divided_by(M::from_value(.35)).divided_by(M::from_value(1).divided_by(child));
         EXPECT_EQ(c.experimental_exact->phases.gas.compare(wanted), 0);
@@ -631,9 +631,9 @@ TEST(ExactPhaseTransfer, OwnershipMigrationRetainsMoreThan255IndependentChannels
     auto h = bootstrap(root, 8);
     std::vector<AdaptiveCellKey> keys;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
     {
-        keys.push_back(key);
+        keys.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(h->metrics(leaf).volume);
     }
@@ -662,7 +662,7 @@ TEST(ExactPhaseTransfer, OwnershipMigrationRetainsMoreThan255IndependentChannels
     for (const auto& capsule : moved.owned())
     {
         ASSERT_EQ(capsule.amounts.size(), 300u);
-        const auto bulk = M::from_value(target->metrics(target->owned().at(capsule.key)).volume);
+        const auto bulk = M::from_value(target->metrics(target->owned_leaves().at(capsule.key)).volume);
         for (unsigned channel = 0; channel < 300; ++channel)
             EXPECT_EQ(capsule.amounts[channel].compare(bulk.scaled(channel + 1)), 0);
     }

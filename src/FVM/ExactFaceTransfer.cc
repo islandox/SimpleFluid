@@ -280,7 +280,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                 auto key = A::decode_adaptive_key(r.bytes());
                 const auto revision = r.word();
                 r.done();
-                const auto& leaf = h.owned().at(key);
+                const auto& leaf = h.owned_leaves().at(key);
                 if (leaf.revision != revision || !seen.emplace(p.peer, key).second)
                     throw std::invalid_argument("Invalid target native tile request.");
                 W::Writer w;
@@ -759,7 +759,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 target.hierarchy()->topology_generation() != phase.target_hierarchy()->topology_generation() ||
                 target.hierarchy()->partition_generation() < phase.target_hierarchy()->partition_generation())
                 throw std::invalid_argument("Face transfer is not pinned to the accepted phase transaction.");
-            if (!phase.ownership_only() && velocity.size() != source.hierarchy()->owned().size())
+            if (!phase.ownership_only() && velocity.size() != source.hierarchy()->owned_leaves().size())
                 throw std::invalid_argument(
                     "Topology face transfer needs one physical velocity seed per source owner.");
             budget->records(
@@ -768,7 +768,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 budget->key(item.key);
             for (const auto& item : velocity)
             {
-                if (!source.hierarchy()->owned().contains(item.key) || !seeds.emplace(item.key, item.velocity).second)
+                if (!source.hierarchy()->owned_leaves().contains(item.key) || !seeds.emplace(item.key, item.velocity).second)
                     throw std::invalid_argument("Foreign or duplicate physical velocity seed.");
                 for (const auto x : item.velocity)
                     if (!std::isfinite(x))
@@ -808,7 +808,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
             }
             std::size_t count = 0;
             for (const auto& record : overlaps->records())
-                if (source.hierarchy()->owned().contains(record.source_key))
+                if (source.hierarchy()->owned_leaves().contains(record.source_key))
                 {
                     if (++count > options.maximum_common_cells)
                         throw std::invalid_argument("Common refinement cell budget exhausted.");
@@ -833,8 +833,8 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
             {
                 if (!tile.second_image_identity.is_zero())
                     throw std::invalid_argument("General face transfer periodic images remain unqualified.");
-                if (source.hierarchy()->owned().contains(tile.first) ||
-                    (tile.second && source.hierarchy()->owned().contains(*tile.second)))
+                if (source.hierarchy()->owned_leaves().contains(tile.first) ||
+                    (tile.second && source.hierarchy()->owned_leaves().contains(*tile.second)))
                 {
                     budget->records(1, sizeof(decltype(old_tiles)::value_type) + 4 * sizeof(void*));
                     budget->tile(tile);
@@ -851,17 +851,17 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
     W::collective(*comm,
         [&]
         {
-            for (const auto& [key, leaf] : source.hierarchy()->owned())
+            for (const auto& leaf : source.hierarchy()->owned_leaves())
             {
                 budget->records(old_tiles.size(), sizeof(const Tile*));
                 std::vector<const Tile*> boundary;
                 boundary.reserve(old_tiles.size());
                 for (const auto& [gid, tile] : old_tiles)
-                    if (tile.first == key || (tile.second && *tile.second == key))
+                    if (tile.first == leaf.key || (tile.second && *tile.second == leaf.key))
                         boundary.push_back(&tile);
                 const auto geometry = source.hierarchy()->geometry(leaf);
-                auto generated = extend(key, leaf, *geometry, std::move(groups.at(key)), boundary, old_rates,
-                    phase.ownership_only() ? SimpleFluid::PLIC::GeometryPoint{} : seeds.at(key), native_targets,
+                auto generated = extend(leaf.key, leaf, *geometry, std::move(groups.at(leaf.key)), boundary, old_rates,
+                    phase.ownership_only() ? SimpleFluid::PLIC::GeometryPoint{} : seeds.at(leaf.key), native_targets,
                     *budget);
                 for (auto& item : generated)
                 {
@@ -994,8 +994,8 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
         [&]
         {
             for (const auto& tile : target.tiles())
-                if (target.hierarchy()->owned().contains(tile.first) ||
-                    (tile.second && target.hierarchy()->owned().contains(*tile.second)))
+                if (target.hierarchy()->owned_leaves().contains(tile.first) ||
+                    (tile.second && target.hierarchy()->owned_leaves().contains(*tile.second)))
                 {
                     budget->records(1, sizeof(decltype(target_owned_incidence)::value_type) + 4 * sizeof(void*));
                     budget->tile(tile);
@@ -1008,11 +1008,11 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
         {
             std::map<Key, M> divergence;
             budget->records(
-                target.hierarchy()->owned().size(), sizeof(decltype(divergence)::value_type) + 4 * sizeof(void*));
-            for (const auto& [key, leaf] : target.hierarchy()->owned())
+                target.hierarchy()->owned_leaves().size(), sizeof(decltype(divergence)::value_type) + 4 * sizeof(void*));
+            for (const auto& leaf : target.hierarchy()->owned_leaves())
             {
-                budget->key(key);
-                divergence.emplace(key, M{});
+                budget->key(leaf.key);
+                divergence.emplace(leaf.key, M{});
             }
             for (const auto& [gid, tile] : target_owned_incidence)
             {

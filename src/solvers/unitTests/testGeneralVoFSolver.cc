@@ -216,7 +216,7 @@ TEST(GeneralVoFSolverTest, SymmetricNativeRegridRetainsAcceptedPhysicalMomentumA
     std::vector<AMR::AdaptiveMark> refine;
     for (const auto& key : source->owned_order())
     {
-        const auto center = source->hierarchy()->geometry(source->hierarchy()->owned().at(key))->centroid();
+        const auto center = source->hierarchy()->geometry(source->hierarchy()->owned_leaves().at(key))->centroid();
         if (std::abs(center[0] - 1.5) < 1e-12 && std::abs(center[1] - 1.5) < 1e-12 && std::abs(center[2] - 1.5) < 1e-12)
             refine.push_back({key, AMR::AdaptiveSplit::Isotropic});
     }
@@ -1004,14 +1004,14 @@ TEST(GeneralVoFSolverTest, TinyCellRepartitionRetainsIndependentZeroRatesAndSubn
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto exact_volume =
             SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*hierarchy->geometry(leaf));
         ASSERT_EQ(exact_volume.compare(
                       SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(eta)),
             0);
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(0);
         carrier.push_back(eta);
     }

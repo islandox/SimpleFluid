@@ -46,8 +46,8 @@ std::shared_ptr<const GeneralVoF> state(ArithmeticMode mode = ordinary)
     auto hierarchy = std::make_shared<const GeneralVoF::Hierarchy>(
         std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
     std::vector<GeneralVoF::Key> order;
-    for (const auto& [key, leaf] : hierarchy->owned())
-        order.push_back(key);
+    for (const auto& leaf : hierarchy->owned_leaves())
+        order.push_back(leaf.key);
     GeneralVoFOptions options;
     options.arithmetic_mode = mode;
     options.phase_cleanup.relative_cutoff = 0;

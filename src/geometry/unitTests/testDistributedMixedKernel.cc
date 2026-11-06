@@ -48,8 +48,8 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
 {
     std::vector<int> destination;
     std::size_t i = 0;
-    for (const auto& [key, leaf] : h.owned())
-        destination.push_back(int((i++ + h.communicator()->getRank() + 1) % h.communicator()->getSize()));
+    for (; i < h.owned_leaves().size(); ++i)
+        destination.push_back(int((i + h.communicator()->getRank() + 1) % h.communicator()->getSize()));
     return h.apply(h.plan_migration(destination));
 }
 TEST(DistributedMixedKernel, InteriorOnlyDescendantsKeepOriginalJoinAliasesAfterSourceReleaseAndSiblingInverse)
@@ -145,7 +145,7 @@ TEST(DistributedMixedKernel, InteriorOnlyDescendantsKeepOriginalJoinAliasesAfter
         h = scatter(*h);
     }
     EXPECT_EQ(h->global_cells(), 2u);
-    for (const auto& [key, leaf] : h->owned())
+    for (const auto& leaf : h->owned_leaves())
         EXPECT_TRUE(h->geometry(leaf)->equivalent(
             leaf.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product ? *original_product
                                                                                        : *original_poly));
@@ -245,9 +245,9 @@ TEST(DistributedMixedKernel, PartialNamedPatchOfWholeNativeFacesKeepsPhysicalRem
     };
     check_remainder(*h);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks;
-    for (const auto& [k, l] : h->owned())
+    for (const auto& l : h->owned_leaves())
         if (l.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product)
-            marks.push_back({k, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base});
+            marks.push_back({l.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base});
     auto refined = h->apply(h->plan_adaptation(marks));
     refined = scatter(*refined);
     closed(*refined);
@@ -415,10 +415,10 @@ TEST(DistributedMixedKernel, MeshSnapshotCannotReuseMissingOrMalformedJoinCapsul
             std::move(input.owned), std::move(input.families), input.kernel, Tpetra::getDefaultComm());
     };
     const auto warm = make_source(), cold = make_source();
-    const auto found = std::find_if(warm->owned().begin(), warm->owned().end(),
-        [](const auto& row) { return row.second.provider == AMR::AdaptiveProviderKind::Polyhedral; });
-    ASSERT_NE(found, warm->owned().end());
-    const auto& valid = found->second;
+    const auto found = std::find_if(warm->owned_leaves().begin(), warm->owned_leaves().end(),
+        [](const auto& row) { return row.provider == AMR::AdaptiveProviderKind::Polyhedral; });
+    ASSERT_NE(found, warm->owned_leaves().end());
+    const auto& valid = *found;
     ASSERT_TRUE(valid.geometry);
     ASSERT_TRUE(valid.join_recipe);
     ASSERT_FALSE(valid.surfaces.empty());

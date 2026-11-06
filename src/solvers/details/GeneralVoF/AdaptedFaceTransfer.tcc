@@ -485,7 +485,7 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                             if (piece.orientation != 1)
                                 throw std::runtime_error("Finite target boundary has inconsistent orientation.");
                             outputs.push_back({source_key, cell.target_key,
-                                source_input.phases.hierarchy()->owned().at(source_key).revision, tile->face_gid,
+                                source_input.phases.hierarchy()->owned_leaves().at(source_key).revision, tile->face_gid,
                                 proof++, tile->first_owner,
                                 A::multiply(rate, SimpleFluid::geometry::swept_volume::runtime_value<Mode>(piece.overlap_over_first)),
                                 SimpleFluid::geometry::swept_volume::runtime_value<Mode>(piece.overlap_over_second)});

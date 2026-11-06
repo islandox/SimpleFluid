@@ -39,7 +39,7 @@ struct Snapshot
 Snapshot snapshot(const Hierarchy& state)
 {
     Snapshot result{state.observation(), {}, {}};
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
         result.leaves.push_back(AMR::encode_adaptive_leaf(leaf));
     for (const auto& [key, family] : state.families())
         result.families.push_back(AMR::encode_adaptive_family(family));
@@ -77,7 +77,7 @@ std::uint64_t sum(std::uint64_t local)
 }
 std::vector<AMR::AdaptiveMark> mark_owned(const Hierarchy& state, const AMR::AdaptiveCellKey& key)
 {
-    return state.owned().contains(key) ? std::vector{AMR::AdaptiveMark{key, AMR::AdaptiveSplit::Isotropic}}
+    return state.owned_leaves().contains(key) ? std::vector{AMR::AdaptiveMark{key, AMR::AdaptiveSplit::Isotropic}}
                                        : std::vector<AMR::AdaptiveMark>{};
 }
 State adapt(const State& source, const std::vector<AMR::AdaptiveMark>& marks,
@@ -158,9 +158,9 @@ void expect_product(const Hierarchy& state, bool base_split, bool axial_split)
     std::vector<int> local_keys(expected_keys.size()), global_keys(expected_keys.size());
     std::vector<int> local_boxes(expected_boxes.size()), global_boxes(expected_boxes.size());
     double local_volume = 0, global_volume = 0;
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
-        const auto key_position = std::ranges::find(expected_keys, key);
+        const auto key_position = std::ranges::find(expected_keys, leaf.key);
         EXPECT_NE(key_position, expected_keys.end());
         if (key_position != expected_keys.end())
             ++local_keys[key_position - expected_keys.begin()];
@@ -184,11 +184,11 @@ void expect_product(const Hierarchy& state, bool base_split, bool axial_split)
 std::vector<AMR::AdaptiveMark> product_marks(const Hierarchy& state, AMR::AdaptiveSplit split)
 {
     std::vector<AMR::AdaptiveMark> result;
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
-        const auto& cell = std::get<AMR::ProductCellAncestry>(key.ancestry);
+        const auto& cell = std::get<AMR::ProductCellAncestry>(leaf.key.ancestry);
         if (cell.base.root == 1 && cell.axial.root == 0)
-            result.push_back({key, split});
+            result.push_back({leaf.key, split});
     }
     return result;
 }
@@ -213,8 +213,8 @@ State migrate_product(const State& source, bool base_split, bool axial_split, un
     for (std::size_t i = 0; i < std::min(old_owners.size(), keys.size()); ++i)
         ownership_changed |= old_owners[i].owner != product_owner(keys[i], shift);
     std::vector<int> destinations;
-    for (const auto& [key, leaf] : source->owned())
-        destinations.push_back(product_owner(key, shift));
+    for (const auto& leaf : source->owned_leaves())
+        destinations.push_back(product_owner(leaf.key, shift));
     auto result = source->apply(source->plan_migration(destinations));
     EXPECT_EQ(snapshot(*source), before);
     if (ownership_changed)
@@ -256,11 +256,11 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     auto source = product_source();
     const auto layout = source->leaf_layout();
     ASSERT_TRUE(layout);
-    EXPECT_EQ(&layout->owned(), &source->owned());
-    for (const auto& [key, leaf] : source->owned())
+    EXPECT_EQ(layout.get(), &source->owned_leaves());
+    for (const auto& leaf : source->owned_leaves())
     {
-        EXPECT_TRUE(layout->contains(key));
-        EXPECT_EQ(layout->find(key), &leaf);
+        EXPECT_TRUE(layout->contains(leaf.key));
+        EXPECT_EQ(layout->find(leaf.key), &leaf);
     }
     const auto absent = product_key(999, 0);
     EXPECT_FALSE(layout->contains(absent));
@@ -270,7 +270,7 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     auto draft = source->native_draft();
     EXPECT_EQ(draft.source_layout, layout);
     std::vector<const AMR::AdaptiveLeaf*> rows;
-    for (const auto& [key, leaf] : source->owned())
+    for (const auto& leaf : source->owned_leaves())
         rows.push_back(&leaf);
     std::size_t used = 0;
     auto geometry = source->geometry_snapshot(
@@ -305,7 +305,7 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     auto native = AMR::assemble_adaptive_native(*source, source->configuration_descriptor());
     auto bound = source->with_partition(native.partition, native.mesh->owned_cell_map());
     EXPECT_EQ(bound->leaf_layout(), layout);
-    EXPECT_EQ(&bound->owned(), &source->owned());
+    EXPECT_EQ(&bound->owned_leaves(), &source->owned_leaves());
     EXPECT_TRUE(geometry->matches_layout(bound->leaf_layout()));
     std::size_t rebound_used = 0;
     EXPECT_EQ(bound->geometry_snapshot(
@@ -319,7 +319,7 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     EXPECT_FALSE(geometry->matches_layout(refined->leaf_layout()));
     source.reset();
     independent.reset();
-    EXPECT_EQ(&layout->owned(), &unchanged->owned());
+    EXPECT_EQ(layout.get(), &unchanged->owned_leaves());
     EXPECT_EQ(snapshot(*unchanged), before);
     unchanged.reset();
     bound.reset();
@@ -328,9 +328,9 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     foreign_draft.source_layout.reset();
     EXPECT_TRUE(geometry->matches_layout(layout));
     std::vector<AMR::AdaptiveBytes> retained_leaves;
-    for (const auto& [key, leaf] : layout->owned())
+    for (const auto& leaf : *layout)
     {
-        EXPECT_EQ(layout->find(key), &leaf);
+        EXPECT_EQ(layout->find(leaf.key), &leaf);
         retained_leaves.push_back(AMR::encode_adaptive_leaf(leaf));
     }
     EXPECT_EQ(retained_leaves, before.leaves);
@@ -345,7 +345,7 @@ TEST(IncrementalAdaptiveHierarchy, GeometrySnapshotDoesNotRetainLeafLayout)
         const auto source = adapt(root, product_marks(*root, AMR::AdaptiveSplit::Base));
         weak_layout = source->leaf_layout();
         std::vector<const AMR::AdaptiveLeaf*> rows;
-        for (const auto& [key, leaf] : source->owned())
+        for (const auto& leaf : source->owned_leaves())
             rows.push_back(&leaf);
         std::size_t used = 0;
         geometry = source->geometry_snapshot(
@@ -361,7 +361,7 @@ TEST(IncrementalAdaptiveHierarchy, BothProductFactorOrdersMigrateAndCoarsenIndep
     const auto root = product_source();
     const auto original = snapshot(*root);
     expect_product(*root, false, false);
-    EXPECT_EQ(sum(root->owned().empty()), std::uint64_t(Tpetra::getDefaultComm()->getSize() - 1));
+    EXPECT_EQ(sum(root->owned_leaves().empty()), std::uint64_t(Tpetra::getDefaultComm()->getSize() - 1));
     for (const auto first : {AMR::AdaptiveSplit::Base, AMR::AdaptiveSplit::Axial})
     {
         SCOPED_TRACE(first == AMR::AdaptiveSplit::Base ? "Base then Axial" : "Axial then Base");
@@ -458,7 +458,7 @@ void own(std::vector<AMR::AdaptiveLeaf>& leaves, const AMR::AdaptiveLeaf& leaf, 
 void expect_intervals(const Hierarchy& state, const std::vector<std::array<long double, 2>>& expected)
 {
     std::vector<int> local(expected.size()), global(expected.size());
-    for (const auto& [key, leaf] : state.owned())
+    for (const auto& leaf : state.owned_leaves())
     {
         const auto bounds = state.geometry(leaf)->closed_contact_bounds();
         EXPECT_EQ(bounds[1], (std::array<long double, 2>{0, 1}));

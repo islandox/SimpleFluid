@@ -76,7 +76,7 @@ TEST(GeneralVoFHomogeneousTransport, VaryingIndependentTraceMatchesAnalyticCycle
             std::vector<double> minority;
             for (const auto& key : input.order)
             {
-                const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(key))->centroid();
+                const auto c = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(key))->centroid();
                 minority.push_back(trace_scale * (1 + int(c[0]) + 2 * int(c[1])));
             }
             GeneralVoF state(input.hierarchy, input.order, gas ? std::vector<double>(input.order.size(), 1) : minority,
@@ -89,7 +89,7 @@ TEST(GeneralVoFHomogeneousTransport, VaryingIndependentTraceMatchesAnalyticCycle
                 const auto next = trial.candidate();
                 for (std::size_t i = 0; i < input.order.size(); ++i)
                 {
-                    const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+                    const auto c = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
                     const int x = int(c[0]), y = int(c[1]);
                     const int previous_x = y, previous_y = 1 - x;
                     // BL <- TL <- TR <- BR <- BL in both z layers.
@@ -118,7 +118,7 @@ TEST(GeneralVoFHomogeneousTransport, AbsentNominalPhaseKeepsItsTransportedUncert
     std::fill(input.carrier.begin(), input.carrier.end(), 0);
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto c = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         if (c[0] < 1 && c[1] < 1)
             input.carrier[i] = 1e-25;
     }

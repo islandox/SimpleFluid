@@ -155,8 +155,8 @@ auto catalog(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& hie
                     complete.insert(key);
                 }
             };
-            for (const auto& [key, leaf] : hierarchy.owned())
-                add(key);
+            for (const auto& leaf : hierarchy.owned_leaves())
+                add(leaf.key);
             for (std::size_t i = 0; i < probes.size(); ++i)
                 if (located[i].owner >= 0)
                     add(probes[i]);
@@ -241,10 +241,10 @@ Catalog build_overlap_catalog(const Meshes::AMR::DistributedAdaptiveHierarchy& s
                 }
             };
             for (const auto* hierarchy : {&source, &target})
-                for (const auto& [key, leaf] : hierarchy->owned())
+                for (const auto& leaf : hierarchy->owned_leaves())
                 {
-                    add(key);
-                    for (const auto& parent : parents(key))
+                    add(leaf.key);
+                    for (const auto& parent : parents(leaf.key))
                         add(parent);
                 }
             probes.assign(roots.begin(), roots.end());

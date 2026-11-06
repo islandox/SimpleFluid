@@ -112,14 +112,14 @@ std::shared_ptr<const VoF::GeneralVoF> binary_box(std::array<unsigned, 3> counts
     std::vector<VoF::GeneralVoF::Key> order;
     std::vector<double> gas, carrier;
     std::vector<VoF::GeneralVoFPhaseGeometry> declarations;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto shell = hierarchy->geometry(leaf);
         const auto volume = shell->volume().as_double();
         const auto center = shell->centroid();
         const bool g = is_gas(center);
         const auto fraction = mixed_fraction ? mixed_fraction(center) : std::optional<double>{};
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(fraction ? *fraction * volume : g ? volume : traces ? 1e-25 : 0);
         carrier.push_back(fraction ? (1 - *fraction) * volume : g ? traces ? 1e-25 : 0 : volume);
         declarations.push_back(fraction ? VoF::GeneralVoFPhaseGeometry::Infer
@@ -494,12 +494,12 @@ TEST(GeneralVoFCapillarySurface, UnequalCellVolumesRetainVolumeWeightedFilteredC
     std::vector<VoF::GeneralVoFPhaseGeometry> declarations;
     long double local_geometric_volume = 0, geometric_volume = 0;
     double local_minimum = std::numeric_limits<double>::infinity(), local_maximum = 0;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = hierarchy->geometry(leaf);
         const double volume = geometry->volume().as_double();
         const bool is_gas = cube(geometry->centroid(), 1, 3);
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(is_gas ? volume : 1e-25);
         carrier.push_back(is_gas ? 1e-25 : volume);
         declarations.push_back(
@@ -602,7 +602,7 @@ TEST(GeneralVoFCapillarySurface, MixedAndAlignedPlanarSectionsShareOneImmutableS
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<VoF::GeneralVoF::Key> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto center = hierarchy->geometry(leaf)->centroid();
         const unsigned strip = static_cast<unsigned>(center[1]);
@@ -611,7 +611,7 @@ TEST(GeneralVoFCapillarySurface, MixedAndAlignedPlanarSectionsShareOneImmutableS
         const double shift = strip == 0 ? 0 : strip == 1 ? .125 : .25;
         const bool first_column = center[0] - shift < 1;
         const double g = first_column ? 1 - shift : 0;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(g);
         carrier.push_back(1 - g);
     }
@@ -730,14 +730,14 @@ TEST(GeneralVoFCapillarySurface, SpatialPartitionIncompleteHaloRejectsWithResolu
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<VoF::GeneralVoF::Key> order;
     std::vector<double> gas, carrier;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = hierarchy->geometry(leaf);
         const auto center = geometry->centroid();
         const bool is_gas =
             center[0] > 5 && center[0] < 7 && center[1] > 1 && center[1] < 3 && center[2] > 1 && center[2] < 3;
         const auto volume = geometry->volume().as_double();
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(is_gas ? volume : 0);
         carrier.push_back(is_gas ? 0 : volume);
     }
@@ -854,7 +854,7 @@ TEST(GeneralVoFCapillarySurface, MpiCapillaryFailureDuringRepartitionRetainsComp
     std::vector<int> destinations;
     for (const auto& key : source->owned_order())
         destinations.push_back(
-            source->hierarchy()->geometry(source->hierarchy()->owned().at(key))->centroid()[0] < 5 ? 0 : 1);
+            source->hierarchy()->geometry(source->hierarchy()->owned_leaves().at(key))->centroid()[0] < 5 ? 0 : 1);
     int rejected = 0;
     try
     {

@@ -11,7 +11,7 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     auto input = fixture();
     for (std::size_t i = 0; i < input.order.size(); ++i)
     {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        const auto center = input.hierarchy->geometry(input.hierarchy->owned_leaves().at(input.order[i]))->centroid();
         input.gas[i] = center[2] < 1 ? .9 : 0;
         input.carrier[i] = 1 - input.gas[i];
     }
@@ -101,7 +101,7 @@ TEST(ExactGeneralVoF, ExplicitExactGeometryInspectionPreservesFiniteMigrationHis
     // Ownership migration uses the accepted finite state directly. Exact
     // inspection cannot become its authority or replace its accumulated history.
     std::vector<int> destination(
-        moved->hierarchy()->owned().size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
+        moved->hierarchy()->owned_leaves().size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
     const auto plan = moved->hierarchy()->plan_migration(destination);
     const auto raw = moved->hierarchy()->apply(plan);
     const auto native = assemble_adaptive_native(*raw, raw->configuration_descriptor());

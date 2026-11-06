@@ -43,8 +43,8 @@ std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> keys(
     const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& h)
 {
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> result;
-    for (const auto& [key, leaf] : h.owned())
-        result.push_back(key);
+    for (const auto& leaf : h.owned_leaves())
+        result.push_back(leaf.key);
     return result;
 }
 std::vector<AdaptiveHistoryFrame> frames(const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy& h,
@@ -65,7 +65,7 @@ std::vector<AdaptiveHistoryFrame> frames(const ::SimpleFluid::Meshes::AMR::Distr
             {"linear_tracer", InventoryCarrier::BulkVolume, {}, false}};
         for (const auto& key : order)
         {
-            const auto& leaf = h.owned().at(key);
+            const auto& leaf = h.owned_leaves().at(key);
             auto geometry = h.geometry(leaf);
             SimpleFluid::PLIC::GeometryHalfspace plane{{1, .25, .125}, {0, 0, 0}, history ? .45 : .6};
             auto cut = geometry->clip(plane);
@@ -400,7 +400,7 @@ TEST(DistributedAdaptiveState, MeasuredClippingWorkUsesActualCombinedWireCostBef
         [&]
         {
             std::size_t row = 0;
-            for (const auto& [key, leaf] : h->owned())
+            for (const auto& leaf : h->owned_leaves())
             {
                 const auto geometry = h->geometry(leaf);
                 auto cut = geometry->clip({{1, .25, .125}, {0, 0, 0}, .6});
@@ -420,10 +420,10 @@ TEST(DistributedAdaptiveState, MeasuredClippingWorkUsesActualCombinedWireCostBef
                         ++population;
                     }
                 ++row;
-                recorder.observe(key, leaf.revision, 1, interface, population);
+                recorder.observe(leaf.key, leaf.revision, 1, interface, population);
                 recorder.record_payload(
-                    key, leaf.revision, ::SimpleFluid::Meshes::AMR::encode_adaptive_leaf(leaf).size());
-                cells.push_back({key, leaf.revision, recorder.snapshot(key, leaf.revision)});
+                    leaf.key, leaf.revision, ::SimpleFluid::Meshes::AMR::encode_adaptive_leaf(leaf).size());
+                cells.push_back({leaf.key, leaf.revision, recorder.snapshot(leaf.key, leaf.revision)});
             }
         });
     auto proposal = ::SimpleFluid::Meshes::AMR::balance_owned_cells(
@@ -537,9 +537,9 @@ TEST(DistributedAdaptiveState, MixedUnequalNativeSeamMigratesRemapsAndRestoresPo
     memory_record("mixed_source", *snapshot);
     memory_record("mixed_migrated", *moved, &migration);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveMark> marks;
-    for (const auto& [key, leaf] : moved->hierarchy()->owned())
+    for (const auto& leaf : moved->hierarchy()->owned_leaves())
         if (leaf.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Polyhedral)
-            marks.push_back({key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
+            marks.push_back({leaf.key, ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic});
     auto refined = moved->apply(moved->plan_adaptation(marks));
     operators(*refined);
     std::uint64_t count = refined->owned_order().size(), largest = 0;
@@ -848,14 +848,14 @@ TEST(DistributedAdaptiveState, OwnershipMigrationRetainsMoreThan255InventoryEntr
     frame.gas_density = 2;
     frame.phases.gas_volume.assign(order.size(), 0);
     for (const auto& key : order)
-        frame.phases.carrier_volume.push_back(h->metrics(h->owned().at(key)).volume);
+        frame.phases.carrier_volume.push_back(h->metrics(h->owned_leaves().at(key)).volume);
     for (unsigned channel = 0; channel < 300; ++channel)
     {
         ConservedQuantity quantity;
         quantity.name = "bulk_" + std::to_string(channel);
         quantity.carrier = InventoryCarrier::BulkVolume;
         for (const auto& key : order)
-            quantity.amount.push_back((channel + 1) * h->metrics(h->owned().at(key)).volume);
+            quantity.amount.push_back((channel + 1) * h->metrics(h->owned_leaves().at(key)).volume);
         frame.inventories.push_back(std::move(quantity));
     }
     DistributedAdaptiveState source(h, order, {std::move(frame)});
@@ -875,7 +875,7 @@ TEST(DistributedAdaptiveState, OwnershipMigrationRetainsMoreThan255InventoryEntr
         {
             const auto& key = moved->owned_order()[i];
             EXPECT_DOUBLE_EQ(quantity.amount[i],
-                (channel + 1) * moved->hierarchy()->metrics(moved->hierarchy()->owned().at(key)).volume);
+                (channel + 1) * moved->hierarchy()->metrics(moved->hierarchy()->owned_leaves().at(key)).volume);
         }
     }
     EXPECT_EQ(source.histories().front().inventories.size(), 300u);

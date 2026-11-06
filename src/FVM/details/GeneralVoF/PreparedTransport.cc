@@ -226,17 +226,17 @@ void GeneralVoF::validate_prepared_transport_candidate(const GeneralVoFPreparedT
                 predecessor->topology->order != data_->topology->order ||
                 predecessor->options.arithmetic_mode != data_->options.arithmetic_mode ||
                 predecessor->options.transport_backend != data_->options.transport_backend ||
-                predecessor->hierarchy->owned().size() != data_->hierarchy->owned().size() ||
+                predecessor->hierarchy->owned_leaves().size() != data_->hierarchy->owned_leaves().size() ||
                 !std::isfinite(prepared.timestep) || prepared.timestep <= 0)
                 throw std::invalid_argument("Prepared VoF candidate changed its predecessor's native layout.");
             current(*predecessor);
-            for (const auto& [key, leaf] : data_->hierarchy->owned())
+            for (const auto& leaf : data_->hierarchy->owned_leaves())
             {
-                const auto found = predecessor->hierarchy->owned().find(key);
-                if (found == predecessor->hierarchy->owned().end() || found->second.revision != leaf.revision)
+                const auto found = predecessor->hierarchy->owned_leaves().find(leaf.key);
+                if (!found || found->revision != leaf.revision)
                     throw std::invalid_argument("Prepared VoF candidate owned key or revision differs.");
-                const auto& old = predecessor->cells.at(key);
-                const auto& next = data_->cells.at(key);
+                const auto& old = predecessor->cells.at(leaf.key);
+                const auto& next = data_->cells.at(leaf.key);
                 if (old.owner != next.owner || old.revision != next.revision || old.revision != leaf.revision)
                     throw std::invalid_argument("Prepared VoF candidate cell ownership or revision differs.");
             }

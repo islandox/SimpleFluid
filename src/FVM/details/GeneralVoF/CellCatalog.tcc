@@ -55,10 +55,10 @@ std::vector<const Cell*> reusable_evaluations(const GeneralVoF::Hierarchy& hiera
         if (construction_controls() != controls)
             break;
         const auto& leaf = *leaves[slot];
-        const auto owned = hierarchy.owned().find(leaf.key);
-        if (owned == hierarchy.owned().end())
+        const auto owned = hierarchy.owned_leaves().find(leaf.key);
+        if (!owned)
             continue;
-        const auto& original = owned->second;
+        const auto& original = *owned;
         const auto found = reuse.cells.find(leaf.key);
         if (found == reuse.cells.end() || found->second.revision != leaf.revision ||
             found->second.owner != hierarchy.communicator()->getRank() ||

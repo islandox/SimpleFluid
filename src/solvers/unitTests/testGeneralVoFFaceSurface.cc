@@ -15,7 +15,7 @@ std::shared_ptr<const VoF::GeneralVoF> face_surface(bool stepped = false, bool t
         for (std::size_t c = 0; c < source->owned_order().size(); ++c)
         {
             const auto geometry =
-                source->hierarchy()->geometry(source->hierarchy()->owned().at(source->owned_order()[c]));
+                source->hierarchy()->geometry(source->hierarchy()->owned_leaves().at(source->owned_order()[c]));
             const auto center = geometry->centroid();
             const bool is_gas = center[0] + center[1] < 2;
             const auto volume = geometry->volume().as_double();
@@ -149,12 +149,12 @@ std::shared_ptr<const VoF::GeneralVoF> striped_surface(unsigned owners)
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
     std::vector<VoF::GeneralVoF::Key> order;
     std::vector<double> gas, liquid;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto geometry = hierarchy->geometry(leaf);
         const auto volume = geometry->volume().as_double();
         const bool is_gas = geometry->centroid()[0] < 1;
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(is_gas ? volume : 0);
         liquid.push_back(is_gas ? 0 : volume);
     }

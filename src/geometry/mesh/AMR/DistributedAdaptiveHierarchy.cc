@@ -54,13 +54,13 @@ struct AdaptiveGeometrySnapshotCache
 };
 struct DistributedAdaptiveHierarchy::Data
 {
-    using LeafMap = AdaptiveLeafLayout::LeafMap;
+    using LeafMap = std::map<AdaptiveCellKey, AdaptiveLeaf>;
 
     std::shared_ptr<AdaptiveGeometrySnapshotCache> geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
     // Only unpublished candidates hold an editable map. Copying published
     // Data shares the root, and adaptation explicitly forks its working map.
     std::variant<LeafMap, std::shared_ptr<const AdaptiveLeafLayout>> leaves;
-    std::size_t owned_layout_bytes = 0;
+    std::size_t owned_layout_bytes = 0, owned_builder_index_bytes = 0;
     std::map<AdaptiveBytes, AdaptiveFamily> families;
     std::shared_ptr<const AdaptiveProviderKernel> kernel;
     std::shared_ptr<const DistributedAdaptiveContactHalo> contact_halo;
@@ -75,21 +75,30 @@ struct DistributedAdaptiveHierarchy::Data
     std::shared_ptr<const void> map_token;
     std::uint64_t native_epoch = 0;
     std::uint64_t topology = 0, partition = 0, cell_begin = 0, global_cells = 0;
-    [[nodiscard]] const LeafMap& owned() const
-    {
-        if (const auto* working = std::get_if<LeafMap>(&leaves))
-            return *working;
-        return layout()->owned();
-    }
+    [[nodiscard]] const LeafMap& owned() const { return std::get<LeafMap>(leaves); }
     [[nodiscard]] LeafMap& edit_owned() { return std::get<LeafMap>(leaves); }
     [[nodiscard]] const std::shared_ptr<const AdaptiveLeafLayout>& layout() const
     {
         return std::get<std::shared_ptr<const AdaptiveLeafLayout>>(leaves);
     }
-    void publish_layout(std::shared_ptr<const ContactExternalResidencyLease> lease = {})
+    [[nodiscard]] std::size_t staged_buffer_bytes() const
     {
+        Budget total{std::numeric_limits<std::size_t>::max()};
+        for (const auto& [key, row] : owned())
+            total.add(AdaptiveLeafPages::buffer_bytes(row));
+        return total.used;
+    }
+    void publish_layout(const std::shared_ptr<Budget>& arena, std::size_t buffer_bytes,
+        std::shared_ptr<const ContactExternalResidencyLease> lease = {})
+    {
+        auto row = edit_owned().begin();
+        auto pages = AdaptiveLeafPages::build_moving(owned().size(),
+            [&]() -> AdaptiveLeaf&& { return std::move((row++)->second); }, arena, buffer_bytes);
         leaves = std::shared_ptr<const AdaptiveLeafLayout>(
-            new const AdaptiveLeafLayout(std::move(edit_owned()), std::move(lease)));
+            new const AdaptiveLeafLayout(std::move(pages), std::move(lease)));
+        owned_layout_bytes -= owned_builder_index_bytes + buffer_bytes;
+        owned_layout_bytes += arena->used;
+        owned_builder_index_bytes = 0;
     }
 
     ~Data()
@@ -105,7 +114,7 @@ struct DistributedAdaptiveHierarchy::Data
 };
 namespace
 {
-constexpr auto leaf_layout_header_bytes = sizeof(AdaptiveLeafLayout) + 4 * sizeof(void*);
+constexpr auto leaf_layout_header_bytes = sizeof(AdaptiveLeafLayout) + sizeof(Budget) + 8 * sizeof(void*);
 constexpr auto candidate_layout_header_bytes =
     leaf_layout_header_bytes + sizeof(ContactExternalResidencyLease) + 4 * sizeof(void*);
 
@@ -188,11 +197,15 @@ void intern_state_legacy(DistributedAdaptiveHierarchy::Data& state)
     auto packet = encode_adaptive_batch(leaves, families, state.options.byte_budget);
     auto shared = decode_adaptive_batch(packet, state.options.byte_budget);
     Budget layout{std::numeric_limits<std::size_t>::max(), leaf_layout_header_bytes};
+    state.owned_builder_index_bytes = shared.leaves.size() * sizeof(AdaptiveLeaf);
     state.edit_owned().clear();
     state.families.clear();
     for (auto& leaf : shared.leaves)
     {
-        layout.add(sizeof(AdaptiveLeafLayout::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key));
+        const auto entry = sizeof(DistributedAdaptiveHierarchy::Data::LeafMap::value_type) + 4 * sizeof(void*) +
+                           fetch_key_bytes(leaf.key);
+        state.owned_builder_index_bytes += entry;
+        layout.add(entry);
         fetch_copy_charge(layout, leaf);
         state.edit_owned().emplace(leaf.key, std::move(leaf));
     }
@@ -262,13 +275,15 @@ void intern_state(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* ret
     scratch.held -= measured.used;
     retained->held += measured.used;
     retained->add(candidate_layout_header_bytes);
+    state.owned_builder_index_bytes = shared.leaves.size() * sizeof(AdaptiveLeaf);
     state.edit_owned().clear();
     state.families.clear();
     for (auto& leaf : shared.leaves)
     {
         const auto entry =
-            sizeof(AdaptiveLeafLayout::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key);
+            sizeof(DistributedAdaptiveHierarchy::Data::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key);
         retained->add(entry);
+        state.owned_builder_index_bytes += entry;
         layout.add(entry);
         if (!state.edit_owned().emplace(leaf.key, std::move(leaf)).second)
             throw std::invalid_argument("Duplicate interned adaptive leaf.");
@@ -803,7 +818,7 @@ void register_state(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
 std::optional<AdaptiveCellKey> original_cover(
     const DistributedAdaptiveHierarchy::Data& source, const AdaptiveCellKey& key)
 {
-    if (source.owned().contains(key))
+    if (source.layout()->contains(key))
         return key;
     AdaptiveCellKey ancestor = key;
     if (auto* p = std::get_if<CartesianCellAncestry>(&ancestor.ancestry))
@@ -811,7 +826,7 @@ std::optional<AdaptiveCellKey> original_cover(
         while (p->level)
         {
             *p = p->parent();
-            if (source.owned().contains(ancestor))
+            if (source.layout()->contains(ancestor))
                 return ancestor;
         }
     }
@@ -820,7 +835,7 @@ std::optional<AdaptiveCellKey> original_cover(
         while (!p->path.empty())
         {
             p->path.pop_back();
-            if (source.owned().contains(ancestor))
+            if (source.layout()->contains(ancestor))
                 return ancestor;
         }
     }
@@ -832,7 +847,7 @@ std::optional<AdaptiveCellKey> original_cover(
             auto& axial = std::get<ProductCellAncestry>(probe.ancestry).axial;
             for (;;)
             {
-                if (source.owned().contains(probe))
+                if (source.layout()->contains(probe))
                     return probe;
                 if (axial.path.empty())
                     break;
@@ -1000,13 +1015,22 @@ void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy:
 void publish_candidate_layout(DistributedAdaptiveHierarchy::Data& candidate, ClosureScratch& memory,
     const DistributedAdaptiveContactHalo& halo)
 {
-    const auto bytes = candidate.owned_layout_bytes;
-    if (bytes > memory.held)
+    const auto index_bytes = candidate.owned_builder_index_bytes;
+    const auto buffer_bytes = candidate.staged_buffer_bytes();
+    if (candidate.owned_layout_bytes > memory.held || index_bytes > candidate.owned_layout_bytes ||
+        buffer_bytes > candidate.owned_layout_bytes - index_bytes)
         throw std::logic_error("Active leaf layout exceeds candidate residency admission.");
     auto lease = std::make_shared<ContactExternalResidencyLease>(halo.external_residency_lease());
-    lease->adopt_precharged(bytes);
-    memory.held -= bytes;
-    candidate.publish_layout(std::move(lease));
+    const auto cap = memory.budget.limit - memory.budget.used;
+    memory.add(cap);
+    auto arena = std::make_shared<Budget>(Budget{cap + buffer_bytes});
+    candidate.publish_layout(arena, buffer_bytes, lease);
+    // The staging map already owned the row buffers. Additional overlap
+    // pays for the new page slots, headers and scratch.
+    memory.drop(cap - (arena->used - buffer_bytes));
+    memory.drop(index_bytes);
+    lease->adopt_precharged(candidate.owned_layout_bytes);
+    memory.held -= candidate.owned_layout_bytes;
 }
 
 void close_candidate(DistributedAdaptiveHierarchy::Data& candidate, const DistributedAdaptiveHierarchy::Data& source,
@@ -1238,6 +1262,8 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
                     throw std::invalid_argument("Duplicate retained family capsule.");
             }
         });
+    std::vector<AdaptiveLeaf>().swap(owned);
+    std::vector<AdaptiveFamily>().swap(families);
     const std::array<std::uint64_t, 6> description{options.byte_budget, options.maximum_owned, options.maximum_tiles,
         options.maximum_closure_rounds, std::bit_cast<std::uint64_t>(options.maximum_span_ratio), 1};
     agree(*comm, description);
@@ -1267,6 +1293,20 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
                 throw std::invalid_argument("Kernel semantic descriptors differ.");
         });
     register_state(*state);
+    collective(*comm,
+        [&]
+        {
+            Budget overlap{options.byte_budget};
+            charge_source_base_residency(overlap, *state);
+            const auto buffer_bytes = state->staged_buffer_bytes();
+            if (buffer_bytes > state->owned_layout_bytes)
+                throw std::logic_error("Initial adaptive page buffers exceed staged residency.");
+            // The staged map keeps its nodes until publication. Moved row
+            // buffers are already included in the source residency charge.
+            const auto cap = overlap.limit - overlap.used + buffer_bytes;
+            state->publish_layout(std::make_shared<Budget>(Budget{cap}), buffer_bytes);
+        });
+    const auto& layout = *state->layout();
     AdaptiveClosureOptions closure_options;
     closure_options.byte_budget = options.byte_budget;
     closure_options.contact_budget = options.maximum_tiles;
@@ -1280,13 +1320,13 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
         collective(*comm,
             [&]
             {
-                if (state->owned().size() > memory.budget.limit / sizeof(AdaptiveLeaf))
+                if (layout.size() > memory.budget.limit / sizeof(AdaptiveLeaf))
                     throw std::invalid_argument("Initial contact records exceed budget.");
-                memory.add(state->owned().size() * sizeof(AdaptiveLeaf));
-                records.reserve(state->owned().size());
-                if (records.capacity() != state->owned().size())
+                memory.add(layout.size() * sizeof(AdaptiveLeaf));
+                records.reserve(layout.size());
+                if (records.capacity() != layout.size())
                     throw std::invalid_argument("Initial contact record capacity differs from admission.");
-                for (const auto& [key, leaf] : state->owned())
+                for (const auto& leaf : layout)
                 {
                     const auto before = memory.budget.used;
                     try
@@ -1303,7 +1343,7 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
                 }
             });
         ContactOwnedLeafLookup lookup = [&](const AdaptiveCellKey& key) -> const AdaptiveLeaf&
-        { return state->owned().at(key); };
+        { return layout.at(key); };
         halo->bootstrap_canonical(records, lookup);
     }
     const auto initial_requirements = halo->lease_required_refinements();
@@ -1312,7 +1352,6 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
         {
             if (!initial_requirements.marks().empty())
                 throw std::invalid_argument("Initial distributed hierarchy contact grading is inadmissible.");
-            state->publish_layout();
         });
     halo->bind_external_retained_bytes(0);
     state->contact_halo = std::shared_ptr<const DistributedAdaptiveContactHalo>(std::move(halo));
@@ -1322,9 +1361,9 @@ const std::shared_ptr<const AdaptiveLeafLayout>& DistributedAdaptiveHierarchy::l
 {
     return data_->layout();
 }
-const std::map<AdaptiveCellKey, AdaptiveLeaf>& DistributedAdaptiveHierarchy::owned() const noexcept
+const AdaptiveLeafLayout& DistributedAdaptiveHierarchy::owned_leaves() const noexcept
 {
-    return leaf_layout()->owned();
+    return *leaf_layout();
 }
 const std::map<AdaptiveBytes, AdaptiveFamily>& DistributedAdaptiveHierarchy::families() const noexcept
 {
@@ -1433,15 +1472,15 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             if (!geometry_unchanged() || !partition || !partition->geometry_unchanged() ||
                 partition->plan().communicator().getRawPtr() != data_->comm.getRawPtr() ||
                 !partition->geometry()->sparse_native() || partition->geometry()->num_cells() != data_->global_cells ||
-                partition->plan().owned_cells().size() != data_->owned().size())
+                partition->plan().owned_cells().size() != owned_leaves().size())
                 throw std::invalid_argument("Foreign, incomplete or moved distributed native binding.");
             if (map.is_null() || map->getComm().getRawPtr() != data_->comm.getRawPtr() ||
                 map->getGlobalNumElements() != data_->global_cells ||
-                map->getLocalNumElements() != data_->owned().size() || map->getIndexBase() != 0)
+                map->getLocalNumElements() != owned_leaves().size() || map->getIndexBase() != 0)
                 throw std::invalid_argument("Foreign or incomplete actual distributed owned map.");
             std::uint64_t id = data_->cell_begin;
             std::size_t ordinal = 0;
-            for (const auto& [key, leaf] : data_->owned())
+            for (const auto& leaf : owned_leaves())
             {
                 if (partition->plan().owned_cells()[ordinal] != id ||
                     map->getGlobalElement(ordinal) != DefaultTpetraTypes::global_ordinal_type(id) ||
@@ -1760,12 +1799,12 @@ AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std
                     else
                     {
                         auto typed = decode_adaptive_key(key);
-                        auto it = state.owned().find(typed);
-                        if (it == state.owned().end() || it->second.revision != revision)
+                        const auto* leaf = state.layout()->find(typed);
+                        if (!leaf || leaf->revision != revision)
                             throw std::invalid_argument("Missing or stale needed owned leaf.");
                         if (leased)
-                            fetch_copy_charge(budget, it->second);
-                        leaves.push_back(it->second);
+                            fetch_copy_charge(budget, *leaf);
+                        leaves.push_back(*leaf);
                     }
                 }
                 // Publication-only compact drafts must inspect the original
@@ -2178,7 +2217,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapsho
     const auto& layout = hierarchy.leaf_layout();
     if (draft.source_layout != layout || draft.source_layout.owner_before(layout) ||
         layout.owner_before(draft.source_layout) || draft.global_cells != state.global_cells ||
-        draft.owned.size() != layout->owned().size())
+        draft.owned.size() != layout->size())
         throw std::invalid_argument("Native geometry draft lacks complete current ownership.");
     const auto mode_slot = static_cast<unsigned>(mode);
     if (mode_slot > 2 ||
@@ -2308,7 +2347,7 @@ void DistributedAdaptiveHierarchy::visit_geometry_snapshots(
 DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() const
 {
     Storage result;
-    result.owned_leaves = data_->owned().size();
+    result.owned_leaves = owned_leaves().size();
     result.family_capsules = data_->families.size();
     result.directory_entries = data_->cells->local_entries() + data_->family_directory->local_entries();
     result.directory_bytes = data_->cells->storage_bytes() + data_->family_directory->storage_bytes();
@@ -2398,11 +2437,12 @@ DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() co
             bytes += face_bytes(face.native_whole_geometry);
         }
     };
-    for (const auto& [key, value] : data_->owned())
+    result.owned_bytes += leaf_layout()->pages_.storage().retained_bytes;
+    for (const auto& value : owned_leaves())
     {
-        result.owned_bytes +=
-            sizeof(std::pair<const AdaptiveCellKey, AdaptiveLeaf>) + 4 * sizeof(void*) + key_dynamic(key);
         leaf(value, result.owned_bytes);
+        // The page already counts the row's exclusively owned buffers.
+        result.owned_bytes -= AdaptiveLeafPages::buffer_bytes(value);
     }
     for (const auto& [key, value] : data_->families)
     {
@@ -2444,7 +2484,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
             for (const auto& mark : refine)
             {
                 budget.add(sizeof(mark) + encode_adaptive_key(mark.key).size());
-                if (!data_->owned().contains(mark.key) || !marks.emplace(mark.key, mark.split).second)
+                if (!owned_leaves().contains(mark.key) || !marks.emplace(mark.key, mark.split).second)
                     throw std::invalid_argument("Refinement mark is repeated or not locally owned.");
             }
             std::set<AdaptiveBytes> unique;
@@ -2497,8 +2537,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 auto key = decode_adaptive_key(r.bytes());
                 auto split = r.word(), revision = r.word();
                 r.done();
-                auto leaf = data_->owned().find(key);
-                if (split > 2 || leaf == data_->owned().end() || leaf->second.revision != revision)
+                const auto* leaf = owned_leaves().find(key);
+                if (split > 2 || !leaf || leaf->revision != revision)
                     throw std::invalid_argument("Invalid distributed native refinement group.");
                 auto [it, inserted] = marks.emplace(key, AdaptiveSplit(split));
                 if (!inserted && it->second != AdaptiveSplit(split))
@@ -2642,13 +2682,13 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 auto key = decode_adaptive_key(r.bytes());
                 auto revision = r.word();
                 r.done();
-                auto it = data_->owned().find(key);
-                if (it == data_->owned().end() || it->second.revision != revision || marks.contains(key) ||
+                const auto* leaf = owned_leaves().find(key);
+                if (!leaf || leaf->revision != revision || marks.contains(key) ||
                     !retiring.insert(key).second)
                     throw std::invalid_argument("Incomplete, conflicting or stale source sibling family.");
                 Writer w;
                 w.bytes(family);
-                w.bytes(encode_adaptive_leaf(it->second));
+                w.bytes(encode_adaptive_leaf(*leaf));
                 budget.packet(w.data.size());
                 replies.push_back({packet.peer, std::move(w.data)});
             }
@@ -2718,10 +2758,10 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
             }
             // The one-time candidate metadata fork is admitted before copying.
             candidate_memory.add(sizeof(Data));
-            for (const auto& [key, leaf] : data_->owned())
+            for (const auto& leaf : owned_leaves())
             {
                 candidate_memory.add(
-                    sizeof(AdaptiveLeafLayout::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(key));
+                    sizeof(Data::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key));
                 charge_candidate_copy(candidate_memory, leaf);
             }
             for (const auto& [key, family] : data_->families)
@@ -2731,7 +2771,9 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 charge_candidate_copy(candidate_memory, family);
             }
             next = std::make_shared<Data>(*data_);
-            next->leaves.emplace<AdaptiveLeafLayout::LeafMap>(data_->owned());
+            next->leaves.emplace<Data::LeafMap>();
+            for (const auto& leaf : owned_leaves())
+                next->edit_owned().emplace(leaf.key, leaf);
             next->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
             next->token = std::make_shared<const char>(0);
             next->topology_token = next->token;
@@ -2751,7 +2793,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 initial_memory.append(initially_retired);
                 charge_encoded_key(initial_memory, key);
                 initially_retired.push_back(
-                    {encode_adaptive_key(key), data_->comm->getRank(), data_->owned().at(key).revision});
+                    {encode_adaptive_key(key), data_->comm->getRank(), owned_leaves().at(key).revision});
                 next->edit_owned().erase(key);
             }
             for (const auto& key : requested)
@@ -2783,7 +2825,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 if (!cap)
                     throw std::invalid_argument("Initial refinement lease exhausted.");
                 initial_memory.add(cap);
-                auto result = data_->kernel->split(data_->owned().at(key), kind);
+                auto result = data_->kernel->split(owned_leaves().at(key), kind);
                 const auto retained =
                     fetch_retention(result.children, std::span<const AdaptiveFamily>(&result.family, 1), cap, false);
                 initial_memory.drop(cap - retained);
@@ -2792,7 +2834,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 initial_memory.append(initially_retired);
                 charge_encoded_key(initial_memory, key);
                 initially_retired.push_back(
-                    {encode_adaptive_key(key), data_->comm->getRank(), data_->owned().at(key).revision});
+                    {encode_adaptive_key(key), data_->comm->getRank(), owned_leaves().at(key).revision});
                 next->edit_owned().erase(key);
                 move_anchor(*next, anchored, encode_adaptive_key(key), result.family.anchor, closure_memory);
                 for (auto& leaf : result.children)
@@ -2903,7 +2945,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
     collective(*data_->comm,
         [&]
         {
-            if (destinations.size() != data_->owned().size() ||
+            if (destinations.size() != owned_leaves().size() ||
                 data_->partition == std::numeric_limits<std::uint64_t>::max())
                 throw std::invalid_argument("Invalid ownership migration layout or exhausted generation.");
             Budget budget{data_->options.byte_budget};
@@ -2915,8 +2957,9 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
             };
             std::map<int, Group> groups;
             std::size_t i = 0;
-            for (const auto& [key, leaf] : data_->owned())
+            for (const auto& leaf : owned_leaves())
             {
+                const auto& key = leaf.key;
                 const auto rank = destinations[i++];
                 if (rank < 0 || rank >= data_->comm->getSize())
                     throw std::invalid_argument("Invalid migration destination.");
@@ -3053,7 +3096,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
                         migrated_inserted.push_back(leaf.key);
                     }
                     candidate_memory.add(
-                        sizeof(AdaptiveLeafLayout::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key));
+                        sizeof(DistributedAdaptiveHierarchy::Data::LeafMap::value_type) + 4 * sizeof(void*) + fetch_key_bytes(leaf.key));
                     if (!next->edit_owned().emplace(leaf.key, std::move(leaf)).second)
                         throw std::invalid_argument("Duplicate migrated leaf owner.");
                 }
@@ -3147,16 +3190,16 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
         [&]
         {
             if (proposal.source.identity != data_->token || proposal.source.topology != data_->topology ||
-                proposal.source.partition != data_->partition || proposal.keys.size() != data_->owned().size() ||
-                proposal.revisions.size() != data_->owned().size() ||
-                proposal.localdestinations.size() != data_->owned().size())
+                proposal.source.partition != data_->partition || proposal.keys.size() != owned_leaves().size() ||
+                proposal.revisions.size() != owned_leaves().size() ||
+                proposal.localdestinations.size() != owned_leaves().size())
                 throw std::invalid_argument("Foreign, stale or incomplete measured ownership proposal.");
             if (proposal.accepted && !proposal.proposed.wire_bytes_exact)
                 throw std::invalid_argument("Measured ownership proposal lacks actual packed stream qualification.");
             std::size_t i = 0;
-            for (const auto& [key, leaf] : data_->owned())
+            for (const auto& leaf : owned_leaves())
             {
-                if (proposal.keys[i] != key || proposal.revisions[i] != leaf.revision)
+                if (proposal.keys[i] != leaf.key || proposal.revisions[i] != leaf.revision)
                     throw std::invalid_argument("Measured ownership proposal changed local key/revision order.");
                 ++i;
             }
@@ -3217,9 +3260,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             // the capacity contract. Any unsupported/supplied record preserves
             // the complete call's original cumulative expanded-size guard.
             const bool bounded =
-                compact_procedural && !data_->owned().empty() &&
-                std::all_of(data_->owned().begin(), data_->owned().end(), [&](const auto& entry)
-                    { return data_->kernel->compact_native_materialization_bound(entry.second) != 0; });
+                compact_procedural && !owned_leaves().empty() &&
+                std::all_of(owned_leaves().begin(), owned_leaves().end(), [&](const auto& leaf)
+                    { return data_->kernel->compact_native_materialization_bound(leaf) != 0; });
             if (bounded)
             {
                 adaptive_detail::CompactNativeOwnedBudget budget(data_->options.byte_budget);
@@ -3240,7 +3283,7 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
                 };
                 try
                 {
-                    for (const auto& [key, leaf] : data_->owned())
+                    for (const auto& leaf : owned_leaves())
                         if (!budget.append_bounded(result.owned, leaf, *data_->kernel))
                             throw std::invalid_argument("Native provider changed bounded materialization capability.");
                 }
@@ -3254,7 +3297,7 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             else
             {
                 Budget budget{data_->options.byte_budget};
-                for (const auto& [key, leaf] : data_->owned())
+                for (const auto& leaf : owned_leaves())
                 {
                     auto transient = leaf;
                     transient.geometry = data_->kernel->geometry(leaf);
@@ -3272,8 +3315,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
         {
             Budget budget{data_->options.byte_budget};
             std::uint64_t gid = data_->cell_begin;
-            for (const auto& [key, leaf] : data_->owned())
+            for (const auto& leaf : owned_leaves())
             {
+                const auto& key = leaf.key;
                 budget.add(sizeof(AdaptiveNativeCellBinding) + encode_adaptive_key(key).size());
                 const auto values = data_->kernel->metrics(leaf);
                 AdaptiveNativeCellBinding binding;
@@ -3314,7 +3358,7 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
                 // Regenerate from the original provider record, never from an
                 // expanded draft that could remap a procedural cell ordinal.
                 const auto geometry =
-                    leaf.geometry ? leaf.geometry : data_->kernel->geometry(data_->owned().at(leaf.key));
+                    leaf.geometry ? leaf.geometry : data_->kernel->geometry(owned_leaves().at(leaf.key));
                 if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(incidence.at(leaf.key))
                         ->equivalent(*geometry))
                     throw std::invalid_argument("Authority tiles do not form complete exact local shell.");

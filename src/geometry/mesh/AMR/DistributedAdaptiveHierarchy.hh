@@ -48,7 +48,8 @@ public:
         DistributedAdaptiveOptions options = {});
     /** Share the authoritative owner-local leaves independently of hierarchy lifetime. */
     [[nodiscard]] const std::shared_ptr<const AdaptiveLeafLayout>& leaf_layout() const noexcept;
-    [[nodiscard]] const std::map<AdaptiveCellKey, AdaptiveLeaf>& owned() const noexcept;
+    /** Borrow active leaves in the same typed-key order used by local GIDs. */
+    [[nodiscard]] const AdaptiveLeafLayout& owned_leaves() const noexcept;
     [[nodiscard]] const std::map<AdaptiveBytes, AdaptiveFamily>& families() const noexcept;
     /** Capacity-based retained allocation estimate, shared components counted
      * once; excludes allocator/control-block overhead and is distinct from RSS. */

@@ -280,8 +280,8 @@ CapillaryNodeFans import_capillary_node_fans(const GeneralVoF::Data& data, std::
                 const auto& cell = source_cell->second;
                 const auto& fan = source_fan->second;
                 if (packet.peer < 0 || packet.peer >= comm->getSize() || packet.peer == rank || cell.owner != rank ||
-                    cell.revision != revision || !data.hierarchy->owned().contains(key) ||
-                    data.hierarchy->owned().at(key).revision != revision || !fan.contains(key) ||
+                    cell.revision != revision || !data.hierarchy->owned_leaves().contains(key) ||
+                    data.hierarchy->owned_leaves().at(key).revision != revision || !fan.contains(key) ||
                     !same_identity(identity, source_identity->second) || !data.topology->finite_nodes.contains(node) ||
                     cell.gid > std::uint64_t(std::numeric_limits<GO>::max()) ||
                     !data.topology->native.mesh->owned_cell_map()->isNodeGlobalElement(GO(cell.gid)))

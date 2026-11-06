@@ -136,7 +136,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
         {
             if (!hierarchy || !options.byte_budget || !options.maximum_stencil_cells || !options.maximum_halo_cells ||
                 !options.support_rings || options.support_rings > 8 || order.size() != gas.size() ||
-                order.size() != carrier.size() || order.size() != hierarchy->owned().size() ||
+                order.size() != carrier.size() || order.size() != hierarchy->owned_leaves().size() ||
                 (!declarations.empty() && declarations.size() != order.size()) ||
                 (capsules && capsules->size() != order.size()))
                 throw std::invalid_argument("Invalid General VoF source arrays/options.");
@@ -162,9 +162,9 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             std::set<Key> seen;
             for (const auto& key : order)
             {
-                if (!hierarchy->owned().contains(key) || !seen.insert(key).second)
+                if (!hierarchy->owned_leaves().contains(key) || !seen.insert(key).second)
                     throw std::invalid_argument("General VoF input ownership differs.");
-                owned_leaves.push_back(&hierarchy->owned().at(key));
+                owned_leaves.push_back(&hierarchy->owned_leaves().at(key));
             }
             const auto initial_catalog = cell_catalog_detail::build<Mode>(*hierarchy, owned_leaves, budget, nullptr,
                 cell_catalog_detail::CatalogPurpose::State, nullptr, nullptr, &catalog_operation);
@@ -177,9 +177,9 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             seen.clear();
             for (std::size_t i = 0; i < order.size(); ++i)
             {
-                if (!hierarchy->owned().contains(order[i]) || !seen.insert(order[i]).second)
+                if (!hierarchy->owned_leaves().contains(order[i]) || !seen.insert(order[i]).second)
                     throw std::invalid_argument("General VoF input ownership differs.");
-                const auto& leaf = hierarchy->owned().at(order[i]);
+                const auto& leaf = hierarchy->owned_leaves().at(order[i]);
                 Cell cell;
                 const PLIC::DynamicPolyhedralReconstructionResult* retained = nullptr;
                 cell.key = order[i];
@@ -271,7 +271,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             std::set<Key> seeds;
             for (const auto& [node, fan] : topology->node_fans)
                 for (const auto& key : fan)
-                    if (!hierarchy->owned().contains(key) && !seeds.contains(key))
+                    if (!hierarchy->owned_leaves().contains(key) && !seeds.contains(key))
                     {
                         if (seeds.size() >= options.maximum_halo_cells)
                             throw std::invalid_argument("General VoF halo cell budget exhausted.");
@@ -299,10 +299,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         graph[*tile.second].insert(tile.first);
                     }
                 std::set<Key> seen, front;
-                for (const auto& [key, leaf] : hierarchy->owned())
+                for (const auto& leaf : hierarchy->owned_leaves())
                 {
-                    seen.insert(key);
-                    front.insert(key);
+                    seen.insert(leaf.key);
+                    front.insert(leaf.key);
                 }
                 for (const auto& [node, fan] : topology->node_fans)
                     for (const auto& key : fan)
@@ -317,7 +317,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         for (const auto& neighbor : graph[key])
                             if (seen.insert(neighbor).second)
                             {
-                                if (seen.size() - hierarchy->owned().size() > options.maximum_halo_cells)
+                                if (seen.size() - hierarchy->owned_leaves().size() > options.maximum_halo_cells)
                                     throw std::invalid_argument("General VoF halo cell budget exhausted.");
                                 budget.add(sizeof(Key) + AMR::encode_adaptive_key(neighbor).size());
                                 next.insert(neighbor);
@@ -325,7 +325,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     front = std::move(next);
                 }
                 for (const auto& key : seen)
-                    if (!hierarchy->owned().contains(key))
+                    if (!hierarchy->owned_leaves().contains(key))
                         additional.push_back(key);
             });
         topology->draft = AMR::adaptive_detail::fetch_compact_adaptive_native_draft(*hierarchy, additional);
@@ -428,8 +428,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             };
             std::size_t owned_count = 0, extra_count = 0;
             for (const auto& tile : topology->draft.tiles)
-                if (hierarchy->owned().contains(tile.first) ||
-                    (tile.second && hierarchy->owned().contains(*tile.second)))
+                if (hierarchy->owned_leaves().contains(tile.first) ||
+                    (tile.second && hierarchy->owned_leaves().contains(*tile.second)))
                     ++owned_count;
                 else if (retain_extra(tile))
                     ++extra_count;
@@ -486,8 +486,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                     graph_row(topology->adjacency, tile.first).insert(*tile.second, topology->graph_keys, &budget);
                     graph_row(topology->adjacency, *tile.second).insert(tile.first, topology->graph_keys, &budget);
                 }
-                const bool owned_incident = hierarchy->owned().contains(tile.first) ||
-                                            (tile.second && hierarchy->owned().contains(*tile.second));
+                const bool owned_incident = hierarchy->owned_leaves().contains(tile.first) ||
+                                            (tile.second && hierarchy->owned_leaves().contains(*tile.second));
                 if (!owned_incident && !retain_extra(tile))
                     continue;
                 auto& owner = owned_incident ? topology->tiles : topology->extra_surface_tiles;
@@ -559,10 +559,10 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 for (auto node : tile.node_gids)
                     append_index(topology->node_tiles, node, index);
             }
-            for (const auto& [key, leaf] : hierarchy->owned())
+            for (const auto& leaf : hierarchy->owned_leaves())
             {
-                auto& cell = data->cells.at(key);
-                cell.canonical_face_count = topology->cell_tiles.at(key).size();
+                auto& cell = data->cells.at(leaf.key);
+                cell.canonical_face_count = topology->cell_tiles.at(leaf.key).size();
                 if (!cell.canonical_face_count)
                     throw std::invalid_argument("General VoF owned cell has no canonical boundary tiles.");
                 if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -683,11 +683,11 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                             {wall_tile->face_gid, wall_tile->geometry, normal, geometry_slot, constraint_face});
                 }
             }
-            for (const auto& [key, leaf] : hierarchy->owned())
+            for (const auto& leaf : hierarchy->owned_leaves())
             {
-                topology->order.push_back(key);
-                data->gas.push_back(data->cells.at(key).phase.gas_volume);
-                data->carrier.push_back(data->cells.at(key).phase.carrier_volume);
+                topology->order.push_back(leaf.key);
+                data->gas.push_back(data->cells.at(leaf.key).phase.gas_volume);
+                data->carrier.push_back(data->cells.at(leaf.key).phase.carrier_volume);
             }
         });
     apply_phase_cleanup(*data);
@@ -1150,7 +1150,7 @@ std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
 std::vector<std::uint64_t> GeneralVoF::cell_support(std::uint64_t gid) const
 {
     const auto key = data_->topology->by_gid.at(gid);
-    if (!data_->hierarchy->owned().contains(key))
+    if (!data_->hierarchy->owned_leaves().contains(key))
         throw std::invalid_argument("General VoF cell support requires an owned seed.");
     std::set<Key> seen{key}, front{key};
     for (unsigned ring = 0; ring < data_->options.support_rings; ++ring)

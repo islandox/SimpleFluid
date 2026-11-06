@@ -65,12 +65,12 @@ std::shared_ptr<const VoF::GeneralVoF> spatial_mixed_phases(Backend backend, boo
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
     std::vector<AMR::AdaptiveCellKey> order;
     std::vector<double> gas, liquid;
-    for (const auto& [key, leaf] : hierarchy->owned())
+    for (const auto& leaf : hierarchy->owned_leaves())
     {
         const auto shell =
             PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(*hierarchy->geometry(leaf), limits);
         const auto phase = shell->phases({{1, -.2, 0}, {0, 0, 0}, 1.75});
-        order.push_back(key);
+        order.push_back(leaf.key);
         gas.push_back(phase.gas.as_double());
         liquid.push_back(phase.carrier.as_double());
     }
@@ -353,14 +353,14 @@ void moving_mixed_transactions(Backend backend, bool empty_owners)
             metric("pre_remap_gas_redistribution", change);
             expect_failure_preserves_publication(solver);
             std::vector<AMR::AdaptiveMark> marks;
-            for (const auto& [key, leaf] : solver.phases()->hierarchy()->owned())
+            for (const auto& leaf : solver.phases()->hierarchy()->owned_leaves())
             {
                 const auto x = solver.phases()->hierarchy()->geometry(leaf)->centroid();
                 const double xi = x[0] - .2 * x[1];
                 if (xi > 1 && xi < 2 && x[1] > 1 && x[1] < 2)
                 {
-                    marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
-                    refinement_parents.push_back(key);
+                    marks.push_back({leaf.key, AMR::AdaptiveSplit::Isotropic});
+                    refinement_parents.push_back(leaf.key);
                 }
             }
             const auto before = solver.diagnostics();
@@ -414,7 +414,7 @@ void moving_mixed_transactions(Backend backend, bool empty_owners)
             for (const auto& packet : received.packets)
             {
                 local_valid &= retiring.insert(packet.bytes).second;
-                local_valid &= hierarchy->owned().contains(AMR::decode_adaptive_key(packet.bytes));
+                local_valid &= hierarchy->owned_leaves().contains(AMR::decode_adaptive_key(packet.bytes));
             }
             int globally_valid = 0;
             Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_valid, &globally_valid);
