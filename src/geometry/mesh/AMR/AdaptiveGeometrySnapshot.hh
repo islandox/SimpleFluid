@@ -19,6 +19,7 @@ namespace geometry_snapshot_detail
 struct Builder;
 struct PublicationSource;
 class Bindings;
+struct PreparedCartesianPages;
 } // namespace geometry_snapshot_detail
 class DistributedAdaptiveHierarchy;
 class AdaptiveLeafLayout;
@@ -96,6 +97,7 @@ public:
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     /** Borrow actual metadata owners without changing reference counts. */
     void visit_external_owners(const std::function<void(const void*, std::size_t)>&) const;
+    void visit_prepared_cartesian_sources(const std::function<void(const PLIC::CartesianCellSource&)>&) const;
     void visit_authoritative_geometries(
         const std::function<void(const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&)>&) const;
     void visit_authoritative_surfaces(const std::function<void(const GeometrySnapshotSurface&)>&) const;
@@ -112,12 +114,16 @@ private:
     std::shared_ptr<const OrdinaryCatalog> ordinary_, finite_ordinary_;
     std::shared_ptr<const BoundedCatalog> bounded_;
     std::shared_ptr<const geometry_snapshot_detail::Bindings> bindings_;
+    std::shared_ptr<const geometry_snapshot_detail::PreparedCartesianPages> prepared_cartesian_;
     GeometryConstructionControls controls_;
     ArithmeticMode mode_ = ArithmeticMode::Ordinary;
     GeometrySnapshotPurpose purpose_ = GeometrySnapshotPurpose::State;
     bool stable_controls_ = false;
+    bool prepare_cartesian_page(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, std::size_t& used,
+        std::size_t operation_limit, std::size_t optional_headroom);
+    void retain_prepared_cartesian_sources(PLIC::GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     /** Internal construction. The result is published only after complete admission. */
-    [[nodiscard]] static std::shared_ptr<const AdaptiveGeometrySnapshot> build(const DistributedAdaptiveHierarchy&,
+    [[nodiscard]] static std::shared_ptr<AdaptiveGeometrySnapshot> build(const DistributedAdaptiveHierarchy&,
         std::span<const AdaptiveLeaf* const>, ArithmeticMode, GeometrySnapshotPurpose, std::size_t& used,
         std::size_t limit, PLIC::GeometryAllocationLedger&, PLIC::GeometryAllocationLedger&,
         std::shared_ptr<const AdaptiveGeometrySnapshot> previous = {},

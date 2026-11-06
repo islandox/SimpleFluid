@@ -126,6 +126,51 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 separate_ordinary = true;
             }
     };
+    const auto adopt_native = [&](std::size_t slot, const AdaptiveLeaf& leaf,
+                                  const PLIC::details::NativeCartesianCellReference& ref)
+    {
+        // Raw recipe contexts stay independent even when their immutable
+        // source body is shared with a State page.
+        const SourceBinding binding{ref.source.get(), state_purpose ? nullptr : leaf.native_recipe.get()};
+        auto found = reused_sources.find(binding);
+        if (found == reused_sources.end())
+        {
+            charge_items(budget, 1, sizeof(typename decltype(reused_sources)::value_type) + 4 * sizeof(void*));
+            auto source = state_purpose ? ref.source
+                                        : PLIC::CartesianCellSource::clone_deferred(
+                                              ref.source, geometry_limits(ordinary_mode, budget.limit - budget.used));
+            found = reused_sources.emplace(binding, ReusedSource{reused_sources.size(), std::move(source)}).first;
+        }
+        ordinary_owners.retain(found->second.second, budget.used, budget.limit);
+        entries[slot] = PLIC::NativeCellGeometrySlot{found->second.first, ref.cell_slot};
+        if (separate_ordinary)
+            finite_ordinary_entries[slot] = entries[slot];
+        native_slots[slot] = reused_slots[slot] = 1;
+    };
+    const auto prepared_source = [&](const AdaptiveLeaf& leaf, const AdaptiveCartesianGeometryBounds& bounds)
+        -> std::optional<PLIC::details::NativeCartesianCellReference>
+    {
+        if (!state_purpose || !reuse_bindings || !stable_controls || !reuse->prepared_cartesian_ ||
+            !reuse->matches_layout(hierarchy.leaf_layout()))
+            return std::nullopt;
+        const auto* owned = exact_owned_cartesian_source(hierarchy, leaf);
+        if (!owned)
+            return std::nullopt;
+        const auto first = leaf.native_cell / prepared_cartesian_page_size * prepared_cartesian_page_size;
+        const auto bit = std::uint64_t(1) << (leaf.native_cell - first);
+        const auto found = std::find_if(reuse->prepared_cartesian_->pages.begin(), reuse->prepared_cartesian_->pages.end(),
+            [&](const auto& page) { return page.recipe == owned->native_recipe && page.first == first && (page.rows & bit); });
+        if (found == reuse->prepared_cartesian_->pages.end())
+            return std::nullopt;
+        const PLIC::details::NativeCartesianCellReference ref{found->source, std::size_t(std::popcount(found->rows & (bit - 1)))};
+        const auto [lower, upper] = PLIC::details::NativeCellGeometrySourceAccess::raw_bounds(ref);
+        const auto equal = [](double a, double b)
+        { return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b); };
+        if (!std::equal(lower.begin(), lower.end(), bounds.lower.begin(), equal) ||
+            !std::equal(upper.begin(), upper.end(), bounds.upper.begin(), equal))
+            return std::nullopt;
+        return ref;
+    };
     for (std::size_t slot = 0; slot < leaves.size(); ++slot)
     {
         const auto& leaf = *leaves[slot];
@@ -145,6 +190,15 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             const PLIC::CellGeometryView<ordinary_mode> previous(reuse->ordinary_, *reused_slot);
             if (state_purpose || (!previous.is_procedural() && !leaf.geometry))
                 reused_slot.reset();
+            else if (previous.is_procedural() && reuse->prepared_cartesian_)
+            {
+                // State page preparation can contain unselected local cells.
+                // A fresh raw context builds only the catalog's selected rows.
+                const auto source = PLIC::details::NativeCellGeometrySourceAccess::source_cell(previous).source;
+                if (std::any_of(reuse->prepared_cartesian_->pages.begin(), reuse->prepared_cartesian_->pages.end(),
+                        [&](const auto& page) { return page.source == source; }))
+                    reused_slot.reset();
+            }
         }
         if (reused_slot)
         {
@@ -163,6 +217,13 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 throw std::logic_error("Trusted Cartesian geometry capability changed.");
             raw_bounds = *bounds;
             observe_controls();
+            if (const auto prepared = prepared_source(leaf, *bounds))
+            {
+                adopt_native(slot, leaf, *prepared);
+                facts.metrics[slot] = RecipeAxes(*leaf.native_recipe).metrics(leaf);
+                observe_controls();
+                continue;
+            }
             native_slots[slot] =
                 !state_purpose || PLIC::details::NativeCellGeometrySourceAccess::state_compatible(bounds->lower,
                                       bounds->upper, geometry_limits(ordinary_mode, budget.limit - budget.used));
@@ -178,28 +239,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 previous.is_procedural() == bool(native_slots[slot]))
             {
                 if (previous.is_procedural())
-                {
-                    const auto ref = PLIC::details::NativeCellGeometrySourceAccess::source_cell(previous);
-                    // Raw recipe contexts remain independent even when their
-                    // fully authenticated mesh binding shares an immutable base.
-                    const SourceBinding binding{ref.source.get(), state_purpose ? nullptr : leaf.native_recipe.get()};
-                    auto found = reused_sources.find(binding);
-                    if (found == reused_sources.end())
-                    {
-                        charge_items(
-                            budget, 1, sizeof(typename decltype(reused_sources)::value_type) + 4 * sizeof(void*));
-                        auto source = state_purpose ? ref.source
-                                                    : PLIC::CartesianCellSource::clone_deferred(ref.source,
-                                                          geometry_limits(ordinary_mode, budget.limit - budget.used));
-                        found = reused_sources.emplace(binding, ReusedSource{reused_sources.size(), std::move(source)})
-                                    .first;
-                    }
-                    ordinary_owners.retain(found->second.second, budget.used, budget.limit);
-                    reused_slots[slot] = 1;
-                    entries[slot] = PLIC::NativeCellGeometrySlot{found->second.first, ref.cell_slot};
-                    if (separate_ordinary)
-                        finite_ordinary_entries[slot] = entries[slot];
-                }
+                    adopt_native(slot, leaf, PLIC::details::NativeCellGeometrySourceAccess::source_cell(previous));
                 else
                 {
                     auto original = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(previous);

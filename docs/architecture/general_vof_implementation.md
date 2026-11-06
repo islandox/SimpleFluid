@@ -228,6 +228,21 @@ selection preserves request order, and an expanded cache can share prior
 binding and explicit shell pages. Reordered PLIC catalogs share shell pages
 and procedural sources directly.
 
+An Ordinary State cache expansion of up to four requested cells can prepare
+the remaining owned Cartesian cells in the same recipe-relative page of at
+most 64 ordinals. The requested snapshot and its overlap are admitted first.
+Preparation uses the remaining operation, hierarchy and residency capacity and
+shares the exact native recipe owner already pinned by its demand binding.
+Tight-cap requests, foreign rows and value-equal recipes with separate owners
+follow the demand path. A later selection authenticates the current owned row,
+the exact layout and construction controls, and the raw endpoint bits before
+reusing its prepared source slot. OriginalSources builds fresh raw contexts
+over the selected rows of prepared State pages. Expanded snapshots pack
+partial binding and shell pages while sharing full pages and the original
+geometry owners. A successor layout may reuse exact selected source bindings
+through a weak predecessor. Each successor authenticates its own layout
+identity.
+
 Provider-input acquisition and authenticated native-publication acquisition are
 distinct. The private publication seam checks its source observation, complete
 bindings and actual selected draft rows. A published explicit cell already owns

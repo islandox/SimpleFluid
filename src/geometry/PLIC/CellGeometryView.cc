@@ -1559,6 +1559,30 @@ details::NativeFramedBounds CartesianCellSource::framed_bounds(std::size_t slot)
     }
     return result;
 }
+std::size_t details::NativeCellGeometrySourceAccess::regular_page_byte_bound(
+    std::size_t cells, std::size_t axis_points)
+{
+    using Impl = CartesianCellSource::Impl;
+    if (!cells || cells > Impl::interval_page_size || axis_points > 6 * cells)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid regular Cartesian source page extent.");
+    using SupportLookup = std::map<PlaneSupportIdentity<ordinary>, std::uint32_t>;
+    const auto support_payload = ordinary_native::source_support_allocation_bound(4);
+    // Temporary source input and compact output may overlap. Account for
+    // geometric support-table growth and both construction and retained ledgers.
+    return sizeof(CartesianCellSource) + sizeof(Impl) + sizeof(Impl::Base) +
+           sizeof(std::array<Impl::IntervalColumn, 3>) +
+           cells * (2 * sizeof(CartesianSourceCellSlot) + sizeof(Impl::Facts) +
+                       2 * sizeof(Impl::InitialFacts) + 6 * sizeof(Impl::Interval)) +
+           axis_points * (2 * sizeof(double) + 2 * sizeof(std::uint32_t) +
+                             4 * sizeof(PlaneSupportIdentity<ordinary>) + sizeof(SupportLookup::value_type) +
+                             4 * sizeof(void*) + 2 * support_payload) +
+           2 * identity_ledger_bookkeeping_bound(axis_points + 2);
+}
+std::pair<GeometryPoint, GeometryPoint> details::NativeCellGeometrySourceAccess::raw_bounds(
+    const NativeCartesianCellReference& ref)
+{
+    return ref.source->impl_->corners(ref.cell_slot);
+}
 bool details::NativeCellGeometrySourceAccess::state_compatible(
     GeometryPoint lower, GeometryPoint upper, GeometryLimits requested)
 {

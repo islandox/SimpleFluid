@@ -243,6 +243,7 @@ struct BindingCertificate
 };
 struct BindingPage
 {
+    std::size_t row_count = 0;
     std::vector<std::shared_ptr<const BindingSource>> sources;
     BindingColumn<std::uint8_t> source, policy;
     BindingColumn<std::uint64_t> native_cell;
@@ -254,10 +255,8 @@ struct BindingPage
     [[nodiscard]] std::strong_ordering compare(std::size_t, const AdaptiveCellKey&) const;
     [[nodiscard]] bool matches(std::size_t, const AdaptiveLeaf&) const;
     [[nodiscard]] AdaptiveCellMetrics metric(std::size_t) const;
-    [[nodiscard]] std::size_t unselected(std::span<const AdaptiveLeaf* const>) const;
-    void append_unselected(
-        std::span<const AdaptiveLeaf* const>, std::vector<AdaptiveLeaf>&, adaptive_detail::Budget&) const;
-    [[nodiscard]] AdaptiveLeaf copy_leaf(std::size_t, adaptive_detail::Budget&) const;
+    [[nodiscard]] AdaptiveCellKey copy_key(std::size_t, adaptive_detail::Budget&) const;
+    [[nodiscard]] AdaptiveLeaf copy_leaf(std::size_t, AdaptiveCellKey, adaptive_detail::Budget&) const;
     template<class Visitor> void visit_children(const Visitor& visit) const
     {
         for (const auto& value : sources)
@@ -355,12 +354,30 @@ AdaptiveCellMetrics BindingPage::metric(std::size_t row) const
     const auto& columns = metrics.value();
     return {columns[0].at(row), {columns[1].at(row), columns[2].at(row), columns[3].at(row)}};
 }
-AdaptiveLeaf BindingPage::copy_leaf(std::size_t row, adaptive_detail::Budget& budget) const
+AdaptiveCellKey BindingPage::copy_key(std::size_t row, adaptive_detail::Budget& budget) const
+{
+    const auto region = sources[source.at(row)]->region;
+    if (const auto* cartesian = std::get_if<CartesianBindingKeys>(&keys))
+        return {region, cartesian->at(row)};
+    if (const auto* product = std::get_if<ProductBindingKeys>(&keys))
+    {
+        const auto& base = product->bases[product->base.at(row)].key;
+        const auto& axis = product->axes[product->axis.at(row)].key;
+        charge_items(budget, base.path.capacity() + axis.path.capacity(), sizeof(base.path[0]));
+        return {region, ProductCellAncestry{base, axis}};
+    }
+    if (const auto* stationary = std::get_if<StaticBindingKeys>(&keys))
+        return {region, stationary->at(row)};
+    const auto& key = std::get<ExplicitBindingKeys>(keys).keys[row];
+    charge_items(budget, key.path.capacity(), sizeof(key.path[0]));
+    return {region, key};
+}
+AdaptiveLeaf BindingPage::copy_leaf(std::size_t row, AdaptiveCellKey key, adaptive_detail::Budget& budget) const
 {
     AdaptiveLeaf leaf;
     const auto& descriptor = *sources[source.at(row)];
     budget.add(descriptor.domain.capacity());
-    leaf.key.region = descriptor.region;
+    leaf.key = std::move(key);
     leaf.domain = descriptor.domain;
     leaf.material = descriptor.material;
     leaf.revision = descriptor.revision;
@@ -369,28 +386,14 @@ AdaptiveLeaf BindingPage::copy_leaf(std::size_t row, adaptive_detail::Budget& bu
     leaf.native_cell = native_cell.at(row);
     leaf.join_recipe = descriptor.join;
     leaf.factor_recipe = descriptor.factor;
-    if (const auto* cartesian = std::get_if<CartesianBindingKeys>(&keys))
-        leaf.key.ancestry = cartesian->at(row);
-    else if (const auto* product = std::get_if<ProductBindingKeys>(&keys))
+    if (descriptor.product_factor)
     {
-        const auto& base = product->bases[product->base.at(row)];
-        const auto& axis = product->axes[product->axis.at(row)];
-        charge_items(budget, base.key.path.capacity() + axis.key.path.capacity(), sizeof(base.key.path[0]));
-        leaf.key.ancestry = ProductCellAncestry{base.key, axis.key};
-        if (descriptor.product_factor)
-        {
-            budget.add(sizeof(AdaptiveFactorRecipe));
-            leaf.factor_recipe = std::make_shared<const AdaptiveFactorRecipe>(
-                AdaptiveFactorRecipe{descriptor.product_root, base.capsule, axis.capsule});
-        }
-    }
-    else if (const auto* stationary = std::get_if<StaticBindingKeys>(&keys))
-        leaf.key.ancestry = stationary->at(row);
-    else
-    {
-        const auto& key = std::get<ExplicitBindingKeys>(keys).keys[row];
-        charge_items(budget, key.path.capacity(), sizeof(key.path[0]));
-        leaf.key.ancestry = key;
+        const auto& product = std::get<ProductBindingKeys>(keys);
+        const auto& base = product.bases[product.base.at(row)].capsule;
+        const auto& axis = product.axes[product.axis.at(row)].capsule;
+        budget.add(sizeof(AdaptiveFactorRecipe));
+        leaf.factor_recipe =
+            std::make_shared<const AdaptiveFactorRecipe>(AdaptiveFactorRecipe{descriptor.product_root, base, axis});
     }
     if (const auto* stored = certificate(row))
     {
@@ -441,6 +444,7 @@ std::shared_ptr<const BindingPage> make_binding_page(std::span<const AdaptiveLea
     auto page = std::make_shared<BindingPage>();
     const auto get = [&](auto row) -> const AdaptiveLeaf& { return *leaves[rows[row]]; };
     const auto count = rows.size();
+    page->row_count = count;
     std::array<std::shared_ptr<const BindingSource>, binding_page_size> sources;
     std::array<std::uint8_t, binding_page_size> selectors;
     std::size_t source_count = 0, cert_count = 0;
@@ -550,16 +554,16 @@ using namespace binding_detail;
 class Bindings
 {
 public:
-    static std::shared_ptr<const Bindings> build(
-        std::span<const AdaptiveLeaf* const>, const BuildFacts&, const Bindings*, adaptive_detail::Budget&);
+    static std::shared_ptr<const Bindings> build(std::span<const AdaptiveLeaf* const>, const BuildFacts&,
+        const Bindings*, bool compact_expansion, adaptive_detail::Budget&);
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] std::optional<std::size_t> find(const AdaptiveLeaf&) const;
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     [[nodiscard]] std::size_t exclusive_bytes() const noexcept;
     [[nodiscard]] AdaptiveCellMetrics metric(std::size_t) const;
     [[nodiscard]] std::size_t unselected(std::span<const AdaptiveLeaf* const>) const;
-    void append_unselected(
-        std::span<const AdaptiveLeaf* const>, std::vector<AdaptiveLeaf>&, adaptive_detail::Budget&) const;
+    void append_unselected(std::span<const AdaptiveLeaf* const>, const AdaptiveLeafLayout&,
+        std::vector<std::unique_ptr<AdaptiveLeaf>>&, std::vector<const AdaptiveLeaf*>&, adaptive_detail::Budget&) const;
     [[nodiscard]] GeometryEvaluationPolicy policy(std::size_t) const;
     template<class Visitor> void visit_children(const Visitor& visit) const
     {
@@ -585,13 +589,16 @@ private:
     struct Selection
     {
         Locator first;
-        std::vector<Locator> irregular;
+        std::variant<std::monostate, std::vector<std::uint32_t>, std::vector<Locator>> irregular;
+    };
+    struct ReverseOrder
+    {
     };
     [[nodiscard]] Locator locate(std::size_t) const;
     [[nodiscard]] bool has_key(Locator, std::span<const AdaptiveLeaf* const>) const;
     std::vector<std::shared_ptr<const BindingPage>> pages_;
     std::vector<Selection> selection_;
-    std::vector<std::size_t> ordered_;
+    std::variant<std::monostate, ReverseOrder, std::vector<std::uint16_t>, std::vector<std::size_t>> ordered_;
     std::size_t size_ = 0;
 };
 Bindings::Locator Bindings::locate(std::size_t slot) const
@@ -600,8 +607,14 @@ Bindings::Locator Bindings::locate(std::size_t slot) const
         throw std::out_of_range("Invalid geometry snapshot binding slot.");
     const auto& block = selection_[slot / binding_page_size];
     const auto local = slot % binding_page_size;
-    return block.irregular.empty() ? Locator{block.first.page, std::uint8_t(block.first.row + local)}
-                                   : block.irregular[local];
+    if (const auto* compact = std::get_if<std::vector<std::uint32_t>>(&block.irregular))
+    {
+        const auto value = (*compact)[local];
+        return {value / binding_page_size, std::uint8_t(value % binding_page_size)};
+    }
+    if (const auto* wide = std::get_if<std::vector<Locator>>(&block.irregular))
+        return (*wide)[local];
+    return {block.first.page, std::uint8_t(block.first.row + local)};
 }
 bool Bindings::has_key(Locator row, std::span<const AdaptiveLeaf* const> ordered) const
 {
@@ -617,14 +630,31 @@ std::size_t Bindings::unselected(std::span<const AdaptiveLeaf* const> ordered) c
         count += !has_key(locate(slot), ordered);
     return count;
 }
-void Bindings::append_unselected(std::span<const AdaptiveLeaf* const> ordered, std::vector<AdaptiveLeaf>& trailing,
+void Bindings::append_unselected(std::span<const AdaptiveLeaf* const> ordered, const AdaptiveLeafLayout& layout,
+    std::vector<std::unique_ptr<AdaptiveLeaf>>& detached, std::vector<const AdaptiveLeaf*>& selection,
     adaptive_detail::Budget& budget) const
 {
     for (std::size_t slot = 0; slot < size_; ++slot)
     {
         const auto row = locate(slot);
-        if (!has_key(row, ordered))
-            trailing.push_back(pages_[row.page]->copy_leaf(row.row, budget));
+        if (has_key(row, ordered))
+            continue;
+        const auto& page = *pages_[row.page];
+        auto key = page.copy_key(row.row, budget);
+        if (const auto* owned = layout.find(key); owned && page.matches(row.row, *owned))
+        {
+            selection.push_back(owned);
+            continue;
+        }
+        if (detached.size() == detached.capacity())
+        {
+            const auto old = detached.capacity();
+            const auto next = old + std::min(std::max(old, std::size_t(1)), size_ - old);
+            reserve_checked(detached, next, budget);
+        }
+        budget.add(sizeof(AdaptiveLeaf));
+        detached.push_back(std::make_unique<AdaptiveLeaf>(page.copy_leaf(row.row, std::move(key), budget)));
+        selection.push_back(detached.back().get());
     }
 }
 AdaptiveCellMetrics Bindings::metric(std::size_t slot) const
@@ -643,7 +673,17 @@ std::optional<std::size_t> Bindings::find(const AdaptiveLeaf& leaf) const
     while (lower < upper)
     {
         const auto middle = std::midpoint(lower, upper);
-        const auto slot = ordered_.empty() ? middle : ordered_[middle];
+        const auto slot = std::visit(
+            [&](const auto& order) -> std::size_t
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(order)>, ReverseOrder>)
+                    return size_ - 1 - middle;
+                else if constexpr (requires { order[middle]; })
+                    return order[middle];
+                else
+                    return middle;
+            },
+            ordered_);
         const auto locator = locate(slot);
         const auto& page = *pages_[locator.page];
         const auto compare = page.compare(locator.row, leaf.key);
@@ -658,10 +698,15 @@ std::optional<std::size_t> Bindings::find(const AdaptiveLeaf& leaf) const
 }
 std::size_t Bindings::exclusive_bytes() const noexcept
 {
-    auto bytes = sizeof(*this) + pages_.capacity() * sizeof(pages_[0]) + selection_.capacity() * sizeof(Selection) +
-                 ordered_.capacity() * sizeof(ordered_[0]);
+    auto bytes = sizeof(*this) + pages_.capacity() * sizeof(pages_[0]) + selection_.capacity() * sizeof(Selection);
+    const auto count = [&](const auto& value)
+    {
+        if constexpr (requires { value.capacity(); })
+            bytes += value.capacity() * sizeof(typename std::decay_t<decltype(value)>::value_type);
+    };
+    std::visit(count, ordered_);
     for (const auto& block : selection_)
-        bytes += block.irregular.capacity() * sizeof(Locator);
+        std::visit(count, block.irregular);
     return bytes;
 }
 std::size_t Bindings::metadata_bytes() const noexcept
@@ -672,7 +717,7 @@ std::size_t Bindings::metadata_bytes() const noexcept
     return bytes;
 }
 std::shared_ptr<const Bindings> Bindings::build(std::span<const AdaptiveLeaf* const> leaves, const BuildFacts& facts,
-    const Bindings* previous, adaptive_detail::Budget& budget)
+    const Bindings* previous, bool compact_expansion, adaptive_detail::Budget& budget)
 {
     budget.add(sizeof(Bindings));
     auto result = std::make_shared<Bindings>();
@@ -723,30 +768,64 @@ std::shared_ptr<const Bindings> Bindings::build(std::span<const AdaptiveLeaf* co
         }
         return previous->locate(*old);
     };
-    for (std::size_t index = 0; index < order.size();)
+    constexpr auto no_page = std::numeric_limits<std::size_t>::max();
+    constexpr auto ancestry_kinds = std::variant_size_v<decltype(AdaptiveCellKey::ancestry)>;
+    std::array<bool, ancestry_kinds> changed_kinds{};
+    for (const auto slot : order)
     {
-        if (const auto old = reused(order[index]))
+        if (const auto old = reused(slot))
+            locations[slot] = *old;
+        else
         {
-            const auto& page = previous->pages_[old->page];
-            auto found = reused_pages.find(page.get());
-            if (found == reused_pages.end())
-            {
-                budget.add(sizeof(decltype(reused_pages)::value_type) + 4 * sizeof(void*));
-                found = reused_pages.emplace(page.get(), append_page(page)).first;
-            }
-            locations[order[index++]] = {found->second, old->row};
-            continue;
+            locations[slot] = {no_page, 0};
+            changed_kinds[leaves[slot]->key.ancestry.index()] = true;
         }
-        std::size_t end = index + 1;
-        const auto kind = leaves[order[index]]->key.ancestry.index();
-        while (end < order.size() && end - index < binding_page_size &&
-               leaves[order[end]]->key.ancestry.index() == kind && !reused(order[end]))
-            ++end;
-        const auto page = append_page(
-            make_binding_page(leaves, std::span(order).subspan(index, end - index), facts, known_sources, budget));
-        for (std::size_t row = 0; index < end; ++index, ++row)
-            locations[order[index]] = {page, std::uint8_t(row)};
     }
+    std::array<std::array<std::size_t, binding_page_size>, ancestry_kinds> pending;
+    std::array<std::size_t, ancestry_kinds> pending_counts{};
+    const auto publish = [&](std::size_t kind)
+    {
+        const auto rows = std::span(pending[kind]).first(pending_counts[kind]);
+        for (const auto slot : rows)
+        {
+            const auto old = locations[slot];
+            if (old.page == no_page || known_sources.contains(leaves[slot]))
+                continue;
+            const auto& page = *previous->pages_[old.page];
+            budget.add(sizeof(SourceTable::value_type) + 4 * sizeof(void*));
+            known_sources.emplace(leaves[slot], page.sources[page.source.at(old.row)]);
+        }
+        const auto page = append_page(make_binding_page(leaves, rows, facts, known_sources, budget));
+        for (std::size_t row = 0; row < rows.size(); ++row)
+            locations[rows[row]] = {page, std::uint8_t(row)};
+        pending_counts[kind] = 0;
+    };
+    for (const auto slot : order)
+    {
+        const auto old = locations[slot];
+        const auto kind = leaves[slot]->key.ancestry.index();
+        if (old.page != no_page)
+        {
+            const auto& page = previous->pages_[old.page];
+            if (!compact_expansion || !changed_kinds[kind] || page->row_count == binding_page_size)
+            {
+                auto found = reused_pages.find(page.get());
+                if (found == reused_pages.end())
+                {
+                    budget.add(sizeof(decltype(reused_pages)::value_type) + 4 * sizeof(void*));
+                    found = reused_pages.emplace(page.get(), append_page(page)).first;
+                }
+                locations[slot] = {found->second, old.row};
+                continue;
+            }
+        }
+        pending[kind][pending_counts[kind]++] = slot;
+        if (pending_counts[kind] == binding_page_size)
+            publish(kind);
+    }
+    for (std::size_t kind = 0; kind < ancestry_kinds; ++kind)
+        if (pending_counts[kind])
+            publish(kind);
     const auto blocks = leaves.size() / binding_page_size + (leaves.size() % binding_page_size != 0);
     reserve_checked(result->selection_, blocks, budget);
     for (std::size_t begin = 0; begin < locations.size();)
@@ -757,15 +836,42 @@ std::shared_ptr<const Bindings> Bindings::build(std::span<const AdaptiveLeaf* co
         for (std::size_t row = 1; row < count; ++row)
             if (locations[begin + row].page != first.page || locations[begin + row].row != first.row + row)
             {
-                reserve_checked(block.irregular, count, budget);
                 const auto view = std::span(locations).subspan(begin, count);
-                block.irregular.assign(view.begin(), view.end());
+                const auto compact_page_limit = std::numeric_limits<std::uint32_t>::max() / binding_page_size;
+                if (std::all_of(
+                        view.begin(), view.end(), [&](const auto& item) { return item.page <= compact_page_limit; }))
+                {
+                    auto& compact = block.irregular.emplace<std::vector<std::uint32_t>>();
+                    reserve_checked(compact, count, budget);
+                    for (const auto& item : view)
+                        compact.push_back(std::uint32_t(item.page * binding_page_size + item.row));
+                }
+                else
+                {
+                    auto& wide = block.irregular.emplace<std::vector<Locator>>();
+                    reserve_checked(wide, count, budget);
+                    wide.assign(view.begin(), view.end());
+                }
                 break;
             }
         begin += count;
     }
-    if (!std::is_sorted(order.begin(), order.end()))
-        result->ordered_ = std::move(order);
+    if (std::is_sorted(order.begin(), order.end()))
+        return result;
+    if (std::is_sorted(order.rbegin(), order.rend()))
+        result->ordered_ = ReverseOrder{};
+    else
+    {
+        if (order.size() - 1 <= std::numeric_limits<std::uint16_t>::max())
+        {
+            auto& compact = result->ordered_.emplace<std::vector<std::uint16_t>>();
+            reserve_checked(compact, order.size(), budget);
+            for (const auto slot : order)
+                compact.push_back(std::uint16_t(slot));
+        }
+        else
+            result->ordered_ = std::move(order);
+    }
     return result;
 }
 } // namespace geometry_snapshot_detail

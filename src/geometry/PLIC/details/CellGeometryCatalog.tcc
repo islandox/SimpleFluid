@@ -74,6 +74,10 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::build(
     for (const auto& source : sources)
         if (!source)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Null Cartesian source table entry.");
+    const bool has_new_shells = std::any_of(entries.begin(), entries.end(),
+        [](const auto& entry) { return std::holds_alternative<ConvexGeometryPtr<M>>(entry); });
+    const auto repack = [&](const ExplicitEntry& entry)
+    { return has_new_shells && entry.page_->cells.size() < page_size; };
     std::map<const ExplicitPage*, std::size_t> shared_pages;
     std::size_t explicit_cells = 0;
     for (const auto& entry : entries)
@@ -87,7 +91,9 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::build(
         {
             if (!shared->page_ || shared->slot_ >= shared->page_->cells.size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid shared shell page slot.");
-            if (!shared_pages.contains(shared->page_.get()))
+            if (repack(*shared))
+                ++explicit_cells;
+            else if (!shared_pages.contains(shared->page_.get()))
             {
                 admission.charge(1, sizeof(typename decltype(shared_pages)::value_type) + 4 * sizeof(void*));
                 shared_pages.emplace(shared->page_.get(), Selector::explicit_page);
@@ -139,7 +145,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::build(
         const auto slot = i % page_size;
         if (const auto* native = std::get_if<NativeEntry>(&entry))
             selection[slot] = {native->source_slot, native->cell_slot};
-        else if (const auto* shared = std::get_if<ExplicitEntry>(&entry))
+        else if (const auto* shared = std::get_if<ExplicitEntry>(&entry); shared && !repack(*shared))
         {
             auto& index = shared_pages.at(shared->page_.get());
             if (index == Selector::explicit_page)
@@ -160,7 +166,10 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::build(
                 result->explicit_pages_.push_back(page);
             }
             selection[slot] = {Selector::explicit_page | page_index, page->cells.size()};
-            page->cells.push_back(std::move(std::get<ConvexGeometryPtr<M>>(entry)));
+            if (const auto* shared = std::get_if<ExplicitEntry>(&entry))
+                page->cells.push_back(shared->page_->cells[shared->slot_]);
+            else
+                page->cells.push_back(std::move(std::get<ConvexGeometryPtr<M>>(entry)));
             --explicit_cells;
         }
         if (slot + 1 == page_size || i + 1 == entries.size())

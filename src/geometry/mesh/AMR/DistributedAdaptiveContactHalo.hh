@@ -64,6 +64,10 @@ public:
     /** Transfer a charge already present in this arena from caller scratch. */
     void adopt_precharged(std::size_t);
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
+    [[nodiscard]] std::size_t available() const noexcept
+    {
+        return arena_ && arena_->used <= arena_->limit ? arena_->limit - arena_->used : 0;
+    }
 
 private:
     std::shared_ptr<Budget> arena_;

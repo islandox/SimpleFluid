@@ -82,6 +82,7 @@ public:
             {
                 roots.push_back(retention::external_root(owner, bytes, static_cast<std::uint32_t>(group)));
             });
+        value.visit_prepared_cartesian_sources([&](const auto& source) { add(source, group); });
         pointer(value.ordinary_catalog(), group);
         pointer(value.finite_ordinary_catalog(), group);
         pointer(value.bounded_catalog(), group);

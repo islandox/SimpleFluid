@@ -16,6 +16,17 @@ struct PublicationSource
     const AdaptiveLeaf* leaf = nullptr;
     const AdaptiveNativeCellBinding* binding = nullptr;
 };
+inline constexpr std::size_t prepared_cartesian_page_size = 64;
+struct PreparedCartesianPage
+{
+    std::shared_ptr<const NativeFragmentDescriptor> recipe;
+    std::shared_ptr<const PLIC::CartesianCellSource> source;
+    std::uint64_t first = 0, rows = 0;
+};
+struct PreparedCartesianPages
+{
+    std::vector<PreparedCartesianPage> pages;
+};
 struct BuildFacts
 {
     std::vector<AdaptiveCellMetrics> metrics;
@@ -32,6 +43,7 @@ GeometryConstructionControls construction_controls();
 std::size_t checked_product(std::size_t, std::size_t);
 void charge_items(adaptive_detail::Budget&, std::size_t, std::size_t);
 bool eligible(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, ArithmeticMode);
+const AdaptiveLeaf* exact_owned_cartesian_source(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&);
 PLIC::GeometryLimits geometry_limits(ArithmeticMode, std::size_t);
 struct RecipeAxes
 {
@@ -39,6 +51,7 @@ struct RecipeAxes
     std::array<std::span<const char>, 3> values;
     explicit RecipeAxes(const NativeFragmentDescriptor&);
     double value(unsigned, std::uint64_t) const;
+    std::array<std::uint64_t, 3> location(std::uint64_t ordinal) const;
     std::array<std::uint64_t, 3> location(const AdaptiveLeaf&) const;
     AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
 };

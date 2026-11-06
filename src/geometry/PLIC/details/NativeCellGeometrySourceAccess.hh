@@ -75,6 +75,10 @@ public:
     /** Sufficient State-only compatibility proof. A false result requests the
      * unchanged existing original/imported fallback, never a numerical rejection. */
     [[nodiscard]] static bool state_compatible(GeometryPoint lower, GeometryPoint upper, GeometryLimits limits = {});
+    /** Conservative admission for a bounded page with canonical box supports. */
+    [[nodiscard]] static std::size_t regular_page_byte_bound(std::size_t cells, std::size_t axis_points);
+    [[nodiscard]] static std::pair<GeometryPoint, GeometryPoint> raw_bounds(
+        const NativeCartesianCellReference&);
     [[nodiscard]] static GeometryLimits source_limits(const NativeCartesianCellReference& ref)
     {
         return ref.source->query_limits();

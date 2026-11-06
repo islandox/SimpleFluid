@@ -42,8 +42,9 @@ struct AdaptivePublishedAdmission
 };
 struct AdaptiveGeometrySnapshotCache
 {
-    std::mutex mutex;
+    mutable std::mutex mutex;
     std::array<std::shared_ptr<const AdaptiveGeometrySnapshot>, 6> roots;
+    std::array<std::weak_ptr<const AdaptiveGeometrySnapshot>, 6> predecessors;
     std::optional<ContactExternalResidencyLease> lease;
     std::size_t root_bytes() const
     {
@@ -1019,6 +1020,14 @@ void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy:
     charge_source_base_residency(budget, state);
 }
 
+void inherit_geometry_predecessors(
+    AdaptiveGeometrySnapshotCache& candidate, const AdaptiveGeometrySnapshotCache& source)
+{
+    std::lock_guard lock(source.mutex);
+    for (std::size_t slot = 0; slot < source.roots.size(); ++slot)
+        candidate.predecessors[slot] = source.roots[slot];
+}
+
 void normalize_candidate(DistributedAdaptiveHierarchy::Data& candidate, ClosureScratch& leaf_memory)
 {
     ClosureScratch scratch{leaf_memory.budget};
@@ -1743,6 +1752,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             {
                 std::lock_guard lock(data_->geometry_cache->mutex);
                 bound->geometry_cache->roots = data_->geometry_cache->roots;
+                bound->geometry_cache->predecessors = data_->geometry_cache->predecessors;
             }
             bound->native = std::move(partition);
             bound->owned_map = map;
@@ -2404,11 +2414,20 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
         std::size_t& pending;
         ~SpentCounter() { caller = std::max(caller, pending); }
     } spent{operation_used, pending_used};
+    auto predecessor = compatible ? current : nullptr;
+    bool historical = false;
+    if (!current && controls.supported && purpose == GeometrySnapshotPurpose::State)
+    {
+        predecessor = data_->geometry_cache->predecessors[slot].lock();
+        if (predecessor &&
+            (!predecessor->stable_controls() || predecessor->construction_controls() != controls))
+            predecessor.reset();
+        historical = bool(predecessor);
+    }
+    if (!predecessor && purpose == GeometrySnapshotPurpose::OriginalSources)
+        predecessor = data_->geometry_cache->roots[2 * mode_slot];
     auto candidate = AdaptiveGeometrySnapshot::build(*this, leaves, mode, purpose, pending_used, operation_limit,
-        operation_ordinary, operation_bounded,
-        compatible ? current
-                   : (purpose == GeometrySnapshotPurpose::OriginalSources ? data_->geometry_cache->roots[2 * mode_slot]
-                                                                          : nullptr));
+        operation_ordinary, operation_bounded, predecessor);
     Budget hierarchy_budget{data_->options.byte_budget};
     hierarchy_budget.add(sizeof(AdaptiveGeometrySnapshotCache));
     charge_source_base_residency(hierarchy_budget, *data_);
@@ -2419,13 +2438,34 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     for (const auto& root : data_->geometry_cache->roots)
         if (root)
             root->retain(ordinary_owners, bounded_owners, overlap_bytes, data_->options.byte_budget);
+    if (historical)
+        predecessor->retain(ordinary_owners, bounded_owners, overlap_bytes, data_->options.byte_budget);
     candidate->retain(ordinary_owners, bounded_owners, overlap_bytes, data_->options.byte_budget);
     hierarchy_budget.add(overlap_bytes);
-    if (!geometry_unchanged())
-        throw std::invalid_argument("Distributed geometry snapshot source moved before publication.");
     if (!data_->geometry_cache->lease)
         data_->geometry_cache->lease.emplace(data_->contact_halo->external_residency_lease());
     auto& lease = *data_->geometry_cache->lease;
+    constexpr std::size_t maximum_stream_batch = 4;
+    if (compatible && mode == ArithmeticMode::Ordinary && purpose == GeometrySnapshotPurpose::State &&
+        leaves.size() <= maximum_stream_batch)
+        for (const auto* leaf : leaves)
+        {
+            if (current->find(*leaf))
+                continue;
+            const auto demand_growth = overlap_bytes - std::min(overlap_bytes, lease.bytes());
+            const auto arena_available = lease.available();
+            const auto optional_headroom = std::min(hierarchy_budget.limit - hierarchy_budget.used,
+                arena_available - std::min(demand_growth, arena_available));
+            if (candidate->prepare_cartesian_page(*this, *leaf, pending_used, operation_limit, optional_headroom))
+            {
+                candidate->retain_prepared_cartesian_sources(operation_ordinary, pending_used, operation_limit);
+                const auto before = overlap_bytes;
+                candidate->retain_prepared_cartesian_sources(ordinary_owners, overlap_bytes, data_->options.byte_budget);
+                hierarchy_budget.add(overlap_bytes - before);
+            }
+        }
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Distributed geometry snapshot source moved before publication.");
     const auto previous_lease_bytes = lease.bytes();
     lease.resize(overlap_bytes);
     const auto previous = current;
@@ -2434,6 +2474,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
         current = candidate;
         const auto resident = data_->geometry_cache->root_bytes();
         lease.resize(resident);
+        data_->geometry_cache->predecessors[slot].reset();
     }
     catch (...)
     {
@@ -3003,6 +3044,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
             next->kernel = data_->kernel;
             next->comm = data_->comm;
             next->options = data_->options;
+            inherit_geometry_predecessors(*next->geometry_cache, *data_->geometry_cache);
             next->leaves.emplace<std::shared_ptr<AdaptiveLeafOverlay>>(
                 std::make_shared<AdaptiveLeafOverlay>(data_->pages(), candidate_memory.budget));
             if (data_->topology == std::numeric_limits<std::uint64_t>::max() ||
@@ -3302,6 +3344,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
             next->kernel = data_->kernel;
             next->comm = data_->comm;
             next->options = data_->options;
+            inherit_geometry_predecessors(*next->geometry_cache, *data_->geometry_cache);
             next->topology = data_->topology;
             next->partition = data_->partition + 1;
             next->topology_token = data_->topology_token;

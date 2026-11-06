@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cfenv>
 #include <gtest/gtest.h>
 #include <map>
 #include <numeric>
@@ -41,10 +42,14 @@ std::shared_ptr<const Hierarchy> hierarchy(AMR::AdaptiveBootstrap input)
     return std::make_shared<const Hierarchy>(
         std::move(input.owned), std::move(input.families), std::move(input.kernel), Tpetra::getDefaultComm());
 }
+std::shared_ptr<const Hierarchy> cartesian_grid_source(const AMR::AMRGrid& grid)
+{
+    const AMR::CartesianAMR source(grid);
+    return hierarchy(source.detach_owned(indices(source.geometry()->num_cells()), {'c', 'a', 'r', 't'}));
+}
 std::shared_ptr<const Hierarchy> cartesian_source()
 {
-    AMR::CartesianAMR source(AMR::AMRGrid{});
-    return hierarchy(source.detach_owned(indices(source.geometry()->num_cells()), {'c', 'a', 'r', 't'}));
+    return cartesian_grid_source(AMR::AMRGrid{});
 }
 std::shared_ptr<const Hierarchy> product_source()
 {
@@ -229,6 +234,22 @@ TEST(AdaptiveGeometryStorage, CatalogReorderSharesExplicitShellPagesAndIndepende
             { return std::string_view(owner.kind) == "cell_shell_page" && owner.root_groups == 0b11; });
         EXPECT_EQ(pages, 2);
     }
+    {
+        std::vector<Catalog::Entry> appended;
+        for (std::size_t slot = 0; slot < first->size(); ++slot)
+            appended.emplace_back(first->explicit_entry(slot));
+        appended.emplace_back(Geometry::box({0, 0, 0}, {81, 1, 1}));
+        const auto expanded = Catalog::make(Catalog::SourceTable{}, std::move(appended));
+        const std::array roots{R::root(*first, 0), R::root(*expanded, 1)};
+        std::vector<std::byte> buffer(16 * 1024 * 1024);
+        R::ProbeScratch scratch(buffer);
+        const auto census = R::inspect_retention(roots, {}, scratch);
+        ASSERT_TRUE(census.complete()) << census.detail;
+        const auto full_pages = std::count_if(census.owners.begin(), census.owners.end(), [](const auto& owner)
+            { return std::string_view(owner.kind) == "cell_shell_page" && owner.root_groups == 0b11; });
+        EXPECT_EQ(full_pages, 1);
+        EXPECT_EQ(Access::existing_geometry(View(expanded, 79)), Access::existing_geometry(View(first, 79)));
+    }
     const std::array<std::size_t, 3> subset{5, 5, 1};
     const auto selected = Catalog::selected(reordered, subset);
     EXPECT_EQ(selected->size(), subset.size());
@@ -334,4 +355,335 @@ TEST(AdaptiveGeometryStorage, MixedCatalogSelectsAcrossProceduralAndShellPageBou
     EXPECT_TRUE(old.expired());
     EXPECT_EQ(View(reordered, 0).volume().value, 164);
     EXPECT_TRUE(View(selected, 1).is_procedural());
+}
+
+TEST(AdaptiveGeometryStorage, CartesianSuccessorSharesUnchangedSourceWithWeakLayoutIdentity)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    AMR::AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    auto source = [&]
+    {
+        const AMR::CartesianAMR mesh(grid);
+        return hierarchy(mesh.detach_owned(indices(mesh.geometry()->num_cells()), {'s', 'u', 'c', 'c'}));
+    }();
+    std::vector<const AMR::AdaptiveLeaf*> rows;
+    for (const auto& leaf : source->owned_leaves())
+        rows.push_back(&leaf);
+    ASSERT_EQ(rows.size(), 16u);
+    const auto accepted = snapshot(*source, rows);
+    const auto owners_before = compact_owners(*accepted, *source);
+    const AMR::AdaptiveMark mark{rows.front()->key, AMR::AdaptiveSplit::Isotropic};
+    const auto candidate = source->apply(source->plan_adaptation(std::array{mark}));
+    EXPECT_FALSE(accepted->matches_layout(candidate->leaf_layout()));
+
+    std::vector<const AMR::AdaptiveLeaf*> candidate_rows;
+    for (const auto& leaf : candidate->owned_leaves())
+        candidate_rows.push_back(&leaf);
+    const auto successor = snapshot(*candidate, candidate_rows);
+    ASSERT_EQ(successor->ordinary_catalog()->size(), candidate_rows.size());
+    EXPECT_TRUE(successor->matches_layout(candidate->leaf_layout()));
+    EXPECT_FALSE(successor->find(*rows.front()));
+    std::size_t reused = 0;
+    for (const auto* leaf : candidate_rows)
+        if (const auto old_slot = accepted->find(*leaf))
+        {
+            const auto new_slot = successor->find(*leaf);
+            ASSERT_TRUE(new_slot);
+            const View before(accepted->ordinary_catalog(), *old_slot), after(successor->ordinary_catalog(), *new_slot);
+            ASSERT_TRUE(before.is_procedural());
+            ASSERT_TRUE(after.is_procedural());
+            const auto old = Access::source_cell(before), current = Access::source_cell(after);
+            EXPECT_EQ(current.source, old.source);
+            EXPECT_EQ(current.cell_slot, old.cell_slot);
+            ++reused;
+        }
+    EXPECT_EQ(reused, 8u);
+    const auto owners_after = compact_owners(*successor, *candidate);
+    EXPECT_TRUE(std::any_of(owners_before.begin(), owners_before.end(),
+        [&](const auto& owner) { return owners_after.contains(owner.first); }));
+    std::weak_ptr<const AMR::AdaptiveLeafLayout> weak_layout = source->leaf_layout();
+    source.reset();
+    EXPECT_TRUE(weak_layout.expired());
+}
+
+TEST(AdaptiveGeometryStorage, StreamingCartesianExpansionKeepsBoundedSourceOwnersAcrossPages)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    AMR::AMRGrid grid;
+    grid.block_cells = {8, 4, 4};
+    const auto batch_source = cartesian_grid_source(grid);
+    std::vector<const AMR::AdaptiveLeaf*> batch_rows;
+    for (const auto& leaf : batch_source->owned_leaves())
+        batch_rows.push_back(&leaf);
+    const auto batch = snapshot(*batch_source, batch_rows);
+    const auto batch_bytes = batch->retained_bytes();
+    const auto batch_metadata = compact_owners(*batch, *batch_source);
+    RecordProperty("BatchRetainedBytes", std::to_string(batch_bytes));
+    for (const std::size_t width : {1, 2, 4})
+        for (const auto direction : {"Forward", "Reverse", "Alternate"})
+        {
+            const auto label = std::string(direction) + std::to_string(width);
+            SCOPED_TRACE(label);
+            const auto source = cartesian_grid_source(grid);
+            std::vector<const AMR::AdaptiveLeaf*> rows;
+            for (const auto& leaf : source->owned_leaves())
+                rows.push_back(&leaf);
+            ASSERT_EQ(rows.size(), 128u);
+            if (std::string_view(direction) == "Reverse")
+                std::reverse(rows.begin(), rows.end());
+            if (std::string_view(direction) == "Alternate")
+                std::sort(rows.begin(), rows.end(),
+                    [](const auto* first, const auto* second)
+                    {
+                        const auto weave = [](auto ordinal) { return 2 * (ordinal % 64) + ordinal / 64; };
+                        return weave(first->native_cell) < weave(second->native_cell);
+                    });
+            // A native publication may supply equivalent copies of local rows.
+            std::vector<AMR::AdaptiveLeaf> copied;
+            if (width == 4 && std::string_view(direction) == "Alternate")
+            {
+                copied.reserve(rows.size());
+                for (auto& row : rows)
+                {
+                    copied.push_back(*row);
+                    row = &copied.back();
+                }
+            }
+            const auto selection = std::span(rows);
+            const auto first = snapshot(*source, selection.first(width));
+            const auto first_ref = Access::source_cell(View(first->ordinary_catalog(), 0));
+            auto active = first;
+            for (std::size_t offset = width; offset < rows.size(); offset += width)
+                active = snapshot(*source, selection.subspan(offset, width));
+            ASSERT_EQ(active->ordinary_catalog()->size(), rows.size());
+            const auto first_slot = active->find(*rows.front());
+            ASSERT_TRUE(first_slot);
+            const auto surviving = Access::source_cell(View(active->ordinary_catalog(), *first_slot));
+            EXPECT_EQ(surviving.source, first_ref.source);
+            EXPECT_EQ(surviving.cell_slot, first_ref.cell_slot);
+
+            std::vector<R::BorrowedRoot> roots{R::root(*active->ordinary_catalog())};
+            active->visit_prepared_cartesian_sources([&](const auto& value) { roots.push_back(R::root(value)); });
+            std::vector<std::byte> scratch_bytes(8 * 1024 * 1024);
+            R::ProbeScratch scratch(scratch_bytes);
+            const auto census = R::inspect_retention(roots, {}, scratch);
+            ASSERT_TRUE(census.complete()) << census.detail;
+            const auto source_owners = std::count_if(census.owners.begin(), census.owners.end(),
+                [](const auto& owner) { return std::string_view(owner.kind) == "cartesian_source"; });
+            EXPECT_EQ(source_owners, active->ordinary_catalog()->source_count());
+            EXPECT_LE(source_owners, 5);
+            const auto bytes = active->retained_bytes();
+            EXPECT_LE(bytes, batch_bytes + batch_bytes / 2);
+            // Partial pages can change identity during a merge. The resulting
+            // physical metadata owner count is bounded independently of request count.
+            const auto metadata = compact_owners(*active, *source);
+            EXPECT_LE(metadata.size(), batch_metadata.size() + 4);
+            RecordProperty(label + "SourceOwners", std::to_string(source_owners));
+            RecordProperty(label + "MetadataOwners", std::to_string(metadata.size()));
+            RecordProperty(label + "RetainedBytes", std::to_string(bytes));
+        }
+}
+
+TEST(AdaptiveGeometryStorage, TightStreamingCapAdmitsOnlyTheRequiredCandidate)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    std::size_t exact = 0;
+    for (const int attempt : {0, 1, 2})
+    {
+        const auto source = cartesian_source();
+        auto row = source->owned_leaves().begin();
+        const auto* first_row = &*row;
+        ++row;
+        const auto* next_row = &*row;
+        const auto initial = snapshot(*source, std::array{first_row});
+        std::size_t used = 0;
+        const auto acquire = [&](std::size_t cap)
+        {
+            return source->geometry_snapshot(
+                std::array{next_row}, ordinary, AMR::GeometrySnapshotPurpose::State, used, cap);
+        };
+        if (attempt == 2)
+        {
+            EXPECT_THROW((void) acquire(exact - 1), std::exception);
+            EXPECT_EQ(snapshot(*source, std::array{first_row}), initial);
+            continue;
+        }
+        const auto candidate = acquire(attempt == 0 ? initial->retained_bytes() + 12 * 1024 : exact);
+        if (attempt == 0)
+            exact = used;
+        EXPECT_EQ(used, exact);
+        std::size_t prepared = 0;
+        candidate->visit_prepared_cartesian_sources([&](const auto&) { ++prepared; });
+        EXPECT_EQ(prepared, 0u);
+        EXPECT_EQ(candidate->ordinary_catalog()->size(), 2u);
+    }
+}
+
+TEST(AdaptiveGeometryStorage, EqualRecipeWithDifferentOwnerStaysDemandOnly)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    std::size_t demand_cap = 0;
+    for (const bool retry : {false, true})
+    {
+        auto source = cartesian_source();
+        auto row = source->owned_leaves().begin();
+        auto first = *row++;
+        auto second = *row;
+        ASSERT_EQ(first.native_recipe, second.native_recipe);
+        const std::weak_ptr<const SimpleFluid::Meshes::NativeFragmentDescriptor> original = first.native_recipe;
+        auto copy = std::make_shared<SimpleFluid::Meshes::NativeFragmentDescriptor>(*first.native_recipe);
+        for (auto& part : copy->parts)
+            part = std::make_shared<const AMR::AdaptiveBytes>(*part);
+        first.native_recipe = copy;
+        second.native_recipe = copy;
+        const auto initial = snapshot(*source, std::array<const AMR::AdaptiveLeaf*, 1>{&first});
+        std::size_t used = 0;
+        const auto expanded = source->geometry_snapshot(std::array<const AMR::AdaptiveLeaf*, 1>{&second},
+            ordinary, AMR::GeometrySnapshotPurpose::State, used, retry ? demand_cap : limit);
+        if (!retry)
+            demand_cap = used;
+        EXPECT_EQ(used, demand_cap);
+        std::size_t prepared = 0;
+        expanded->visit_prepared_cartesian_sources([&](const auto&) { ++prepared; });
+        EXPECT_EQ(prepared, 0u);
+        EXPECT_EQ(expanded->ordinary_catalog()->size(), 2u);
+        EXPECT_TRUE(expanded->find(first));
+        EXPECT_TRUE(expanded->find(second));
+        source.reset();
+        EXPECT_TRUE(original.expired());
+        EXPECT_TRUE(initial->find(first));
+        EXPECT_TRUE(expanded->find(second));
+    }
+}
+
+TEST(AdaptiveGeometryStorage, PreparedCartesianPageExcludesStateFallbacksAndChangedControls)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    struct Environment
+    {
+        std::fenv_t saved{};
+        Environment() { (void) std::fegetenv(&saved); }
+        ~Environment() { (void) std::fesetenv(&saved); }
+    } environment;
+    AMR::AMRGrid grid;
+    grid.origin[0] = -0x1p-100;
+    grid.extent[0] = 4;
+    const auto source = cartesian_grid_source(grid);
+    std::array<const AMR::AdaptiveLeaf*, 4> row{};
+    for (const auto& leaf : source->owned_leaves())
+    {
+        const auto& key = std::get<AMR::CartesianCellAncestry>(leaf.key.ancestry);
+        if (key.index[1] == 0 && key.index[2] == 0)
+            row[key.index[0]] = &leaf;
+    }
+    ASSERT_TRUE(std::all_of(row.begin(), row.end(), [](const auto* leaf) { return leaf != nullptr; }));
+    const auto incompatible = source->native_cartesian_geometry_bounds(*row[0]);
+    ASSERT_TRUE(incompatible);
+    EXPECT_FALSE(Access::state_compatible(incompatible->lower, incompatible->upper));
+    const auto first = snapshot(*source, std::array{row[1]});
+    ASSERT_TRUE(View(first->ordinary_catalog(), 0).is_procedural());
+    const auto warmed = snapshot(*source, std::array{row[2]});
+    std::size_t prepared = 0;
+    warmed->visit_prepared_cartesian_sources([&](const auto& page) { prepared += page.size(); });
+    EXPECT_GT(prepared, 2u);
+    EXPECT_LT(prepared, 62u);
+    const auto fallback = snapshot(*source, std::array{row[0]});
+    const auto bad = fallback->find(*row[0]);
+    ASSERT_TRUE(bad);
+    EXPECT_FALSE(View(fallback->ordinary_catalog(), *bad).is_procedural());
+
+    ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
+    const auto changed = snapshot(*source, std::array{row[3]});
+    EXPECT_EQ(changed->construction_controls().rounding, FE_UPWARD);
+    EXPECT_EQ(changed->ordinary_catalog()->size(), 1u);
+    EXPECT_FALSE(View(changed->ordinary_catalog(), 0).is_procedural());
+    changed->visit_prepared_cartesian_sources(
+        [&](const auto&) { ADD_FAILURE() << "Inherited a foreign-control page."; });
+    EXPECT_TRUE(View(first->ordinary_catalog(), 0).is_procedural());
+}
+
+TEST(AdaptiveGeometryStorage, RawSelectionFitsBelowThePreparedStatePageFactCost)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    struct Sample
+    {
+        std::shared_ptr<const Hierarchy> source;
+        std::array<const AMR::AdaptiveLeaf*, 3> rows{};
+        std::shared_ptr<const Snapshot> state;
+    };
+    const auto make = [](bool prepare)
+    {
+        Sample sample;
+        sample.source = cartesian_source();
+        auto row = sample.source->owned_leaves().begin();
+        for (auto& selected : sample.rows)
+        {
+            selected = &*row;
+            ++row;
+            std::size_t used = 0;
+            const auto cap = !sample.state || prepare ? limit : sample.state->retained_bytes() + 12 * 1024;
+            sample.state = sample.source->geometry_snapshot(
+                std::array{selected}, ordinary, AMR::GeometrySnapshotPurpose::State, used, cap);
+        }
+        return sample;
+    };
+    const auto prepared = make(true);
+    const auto plain = make(false);
+    const auto state_slot = prepared.state->find(*prepared.rows.back());
+    ASSERT_TRUE(state_slot);
+    const auto page = Access::source_cell(View(prepared.state->ordinary_catalog(), *state_slot)).source;
+    ASSERT_GT(page->size(), prepared.rows.size());
+    plain.state->visit_prepared_cartesian_sources(
+        [&](const auto&) { ADD_FAILURE() << "The demand-only State baseline prepared a page."; });
+    const auto exclusive = Access::exclusive_bytes(*page);
+    const auto dense_payload = std::accumulate(exclusive.begin(), exclusive.end(), std::size_t(0));
+    ASSERT_GT(dense_payload, 0u);
+    // Old State ownership participates in both admission scopes. Each raw
+    // request has the same extra cap, one byte below a dense clone's payload.
+    for (const auto* sample : {&plain, &prepared})
+    {
+        PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
+        std::size_t used = 0;
+        sample->state->retain(ordinary_owners, bounded_owners, used, limit);
+        const auto cap = used + dense_payload - 1;
+        const auto raw = sample->source->geometry_snapshot(std::array{sample->rows.back()}, ordinary,
+            AMR::GeometrySnapshotPurpose::OriginalSources, used, cap, &ordinary_owners, &bounded_owners);
+        EXPECT_LE(used, cap);
+        EXPECT_TRUE(raw->native_metrics().empty());
+        ASSERT_EQ(raw->ordinary_catalog()->size(), sample->rows.size());
+        const auto selected = raw->find(*sample->rows.back());
+        ASSERT_TRUE(selected);
+        const View view(raw->ordinary_catalog(), *selected);
+        ASSERT_TRUE(view.is_procedural());
+        EXPECT_LE(Access::source_cell(view).source->size(), sample->rows.size());
+        const auto factory = sample->source->geometry(*sample->rows.back());
+        const auto reference = View::from_existing(factory);
+        EXPECT_EQ(view.volume().value, factory->volume().value);
+        for (std::size_t face = 0; face < 6; ++face)
+            EXPECT_EQ(view.source_support(face), reference.source_support(face));
+
+        struct Environment
+        {
+            std::fenv_t saved{};
+            Environment() { (void) std::fegetenv(&saved); }
+            ~Environment() { (void) std::fesetenv(&saved); }
+        } environment;
+        ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
+        const PLIC::GeometryPoint origin{-.1, .3, -.7};
+        const auto before = PLIC::geometry_statistics().moment_evaluations;
+        const auto actual = view.moments(origin);
+        EXPECT_EQ(PLIC::geometry_statistics().moment_evaluations, before + 1);
+        const auto expected = factory->moments(origin);
+        EXPECT_EQ(actual.volume.value, expected.volume.value);
+        for (unsigned axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
+    }
 }
