@@ -33,7 +33,7 @@ struct StoredPressureFaceGeometry
     bool interior = false;
     bool boundary = false;
     bool owned_owner = false;
-    vec_type normal{}, owner_normal{}, area_vector{};
+    vec_type normal{}, owner_normal{}, area_vector{}, center_delta{};
     scalar_type area{}, owner_weight{}, neighbor_weight{};
     // Keep numerator and denominator separate to preserve (dp * dot) / d2.
     scalar_type center_projection{}, distance_squared{}, boundary_diffusion{};
@@ -79,11 +79,14 @@ auto stored_pressure_face_geometry(const MeshType& mesh)
                 entry.neighbor_weight = weights.second;
                 const auto center_delta = metrics.cell_center_vector(
                     query_face_id(metrics, face_lid), query_cell_id(metrics, owner));
+                entry.center_delta = center_delta;
                 entry.distance_squared = center_delta.dot(center_delta);
-                entry.center_projection = entry.area_vector.dot(center_delta);
+                entry.center_projection = interior_diffusion_coefficient(metrics, face_lid, owner, neighbor, scalar_type{1}) * entry.distance_squared;
             }
             else if (entry.boundary && entry.owned_owner)
             {
+                entry.center_delta = metrics.face_centroid(query_face_id(metrics, face_lid)) -
+                    metrics.cell_centroid(query_cell_id(metrics, owner));
                 entry.boundary_diffusion = boundary_diffusion_coefficient(metrics, face_lid, owner, scalar_type{1});
             }
             result.push_back(entry);
@@ -162,11 +165,30 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
     const VelocityBoundaryCacheType& boundary_cache, const BoundaryConditionMap* pressure_boundary_conditions,
     Workspace& workspace, VectorCellFieldStored<Pack, MeshType>* precomputed_pressure_gradient,
     ScalarFaceFieldStored<Pack, MeshType>& fluxes,
-    CellGradientScheme gradient_scheme = CellGradientScheme::LeastSquares)
+    CellGradientScheme gradient_scheme = CellGradientScheme::LeastSquares,
+    ScalarFaceFieldStored<Pack, MeshType>* velocity_component = nullptr,
+    ScalarFaceFieldStored<Pack, MeshType>* pressure_component = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
 
+    const bool decompose = velocity_component != nullptr || pressure_component != nullptr;
+    std::vector<scalar_type> velocity_parts(decompose ? velocity.mesh().num_faces() : 0);
+    std::vector<scalar_type> pressure_parts(decompose ? velocity.mesh().num_faces() : 0);
+    const auto export_parts = [&]
+    {
+        const auto write_part = [&](auto* field, const auto& parts)
+        {
+            if (field == nullptr) return;
+            { auto view = field->owned_write_view();
+              for (size_t face = 0; face < velocity.mesh().num_faces(); ++face)
+                  if (velocity.mesh().is_owned_face(static_cast<typename Pack::local_ordinal_type>(face)))
+                      view(face, 0) = parts[face]; }
+            field->sync_ghosts();
+        };
+        write_part(velocity_component, velocity_parts);
+        write_part(pressure_component, pressure_parts);
+    };
     const auto validate_inputs = [&]
     {
         if (pressure.mesh_ptr().get() != velocity.mesh_ptr().get() || fluxes.mesh_ptr().get() != velocity.mesh_ptr().get())
@@ -176,22 +198,19 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
         if (precomputed_pressure_gradient != nullptr &&
             precomputed_pressure_gradient->mesh_ptr().get() != velocity.mesh_ptr().get())
             throw std::invalid_argument("pressure_weighted_face_fluxes received a pressure gradient for another mesh.");
-        if (pressure_coefficient < scalar_type{})
-            throw std::invalid_argument("pressure_weighted_face_fluxes requires a non-negative pressure coefficient.");
+        if ((velocity_component != nullptr && (velocity_component == &fluxes || velocity_component->mesh_ptr().get() != velocity.mesh_ptr().get())) ||
+            (pressure_component != nullptr && (pressure_component == &fluxes || pressure_component->mesh_ptr().get() != velocity.mesh_ptr().get())) ||
+            (velocity_component != nullptr && velocity_component == pressure_component))
+            throw std::invalid_argument("Flux component outputs require distinct fields on the velocity mesh.");
+        if (!std::isfinite(pressure_coefficient) || pressure_coefficient < scalar_type{})
+            throw std::invalid_argument("pressure_weighted_face_fluxes requires a finite non-negative pressure coefficient.");
         if (pressure_boundary_conditions != nullptr)
             validate_pressure_velocity_boundary_compatibility(boundary_cache, *pressure_boundary_conditions);
     };
 
-    if (pressure_coefficient == scalar_type{})
-    {
-        validate_inputs();
-        if (workspace.boundary_locations().size() != velocity.mesh().num_faces())
-            throw std::invalid_argument("pressure face-flux workspace has incompatible boundary locations.");
-        assemble_stored_normal_face_fluxes(velocity, &boundary_cache, fluxes);
-        fluxes.sync_ghosts();
-        return;
-    }
-
+    // Zero pressure weight uses this same interpolation/boundary traversal.
+    // Delegating to the normal-flux kernel would change open-outlet velocity
+    // extrapolation when the pressure boundary is Dirichlet.
     const auto& mesh = velocity.mesh();
     using execution_type = decltype(workspace.acquire_execution());
     struct ExecutionFactory
@@ -224,23 +243,26 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
 
     auto& pressure_gradient =
         precomputed_pressure_gradient == nullptr ? workspace.pressure_gradient() : *precomputed_pressure_gradient;
-    if (precomputed_pressure_gradient == nullptr && pressure_boundary_conditions == nullptr)
+    if (pressure_coefficient != scalar_type{})
     {
-        if (gradient_scheme == CellGradientScheme::GaussLinear)
+        if (precomputed_pressure_gradient == nullptr && pressure_boundary_conditions == nullptr)
         {
-            ::SimpleFluid::FVM::gauss_linear_cell_gradient(pressure, pressure_gradient);
+            if (gradient_scheme == CellGradientScheme::GaussLinear)
+            {
+                ::SimpleFluid::FVM::gauss_linear_cell_gradient(pressure, pressure_gradient);
+            }
+            else
+            {
+                ::SimpleFluid::FVM::cell_gradient(pressure, pressure_gradient, workspace.gradient_cache());
+            }
         }
-        else
+        else if (precomputed_pressure_gradient == nullptr)
         {
-            ::SimpleFluid::FVM::cell_gradient(pressure, pressure_gradient, workspace.gradient_cache());
+            ::SimpleFluid::FVM::cell_gradient(
+                pressure, *pressure_boundary_conditions, pressure_gradient, workspace.gradient_cache(), gradient_scheme);
         }
+        pressure_gradient.sync_ghosts();
     }
-    else if (precomputed_pressure_gradient == nullptr)
-    {
-        ::SimpleFluid::FVM::cell_gradient(
-            pressure, *pressure_boundary_conditions, pressure_gradient, workspace.gradient_cache(), gradient_scheme);
-    }
-    pressure_gradient.sync_ghosts();
 
     {
         // Release host views before importing the final owned fluxes below.
@@ -261,7 +283,8 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
             const auto face_velocity = owner_velocity * metrics.owner_weight + neighbor_velocity * metrics.neighbor_weight;
             // Preserve the normal-then-area order of the standalone kernel.
             flux_values(face_lid, 0) = face_velocity.dot(metrics.normal) * metrics.area;
-            if (!face.owned_owner || metrics.distance_squared <= scalar_type{}) return;
+            if (decompose) velocity_parts[face_lid] = flux_values(face_lid, 0);
+            if (pressure_coefficient == scalar_type{} || !face.owned_owner || metrics.distance_squared <= scalar_type{}) return;
 
             const auto direct_gradient_flux = (pressure_values(neighbor_lid, 0) - pressure_values(owner_lid, 0)) *
                                               metrics.center_projection / metrics.distance_squared;
@@ -271,7 +294,9 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                 gradient_values(neighbor_lid, 0), gradient_values(neighbor_lid, 1), gradient_values(neighbor_lid, 2)};
             const auto interpolated_gradient =
                 owner_gradient * metrics.owner_weight + neighbor_gradient * metrics.neighbor_weight;
-            const auto interpolated_gradient_flux = interpolated_gradient.dot(metrics.area_vector);
+            const auto interpolated_gradient_flux = interpolated_gradient.dot(metrics.center_delta) *
+                metrics.center_projection / metrics.distance_squared;
+            if (decompose) pressure_parts[face_lid] = -pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
             flux_values(face_lid, 0) =
                 flux_values(face_lid, 0) - pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
         });
@@ -320,11 +345,20 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                         face_velocity = boundary_velocity();
                     const scalar_type velocity_flux = face_velocity.dot(metrics.normal) * metrics.area;
 
+                    if (decompose) velocity_parts[face_lid] = velocity_flux;
                     if constexpr (CorrectPressure)
                     {
                         if (!face.owned_owner)
                         {
                             flux_values(face_lid, 0) = velocity_flux;
+                            return;
+                        }
+                        // Even at zero pressure weight, retain the weighted
+                        // kernel's owner-velocity extrapolation on open faces.
+                        if (pressure_coefficient == scalar_type{})
+                        {
+                            flux_values(face_lid, 0) = owner_velocity.dot(metrics.area_vector);
+                            if (decompose) velocity_parts[face_lid] = flux_values(face_lid, 0);
                             return;
                         }
                         // A pressure correction does not require a velocity
@@ -334,7 +368,12 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                         const auto direct_gradient_flux =
                             (static_cast<scalar_type>(pressure_condition.value) - pressure_values(owner_lid, 0)) *
                             metrics.boundary_diffusion;
-                        const auto interpolated_gradient_flux = owner_gradient.dot(metrics.area_vector);
+                        const auto interpolated_gradient_flux = owner_gradient.dot(metrics.center_delta) * metrics.boundary_diffusion;
+                        if (decompose)
+                        {
+                            velocity_parts[face_lid] = owner_velocity.dot(metrics.area_vector);
+                            pressure_parts[face_lid] = -pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
+                        }
                         flux_values(face_lid, 0) = owner_velocity.dot(metrics.area_vector) -
                             pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
                     }
@@ -357,6 +396,7 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
         }
     }
     fluxes.sync_ghosts();
+    if (decompose) export_parts();
 }
 
 } // namespace SimpleFluid::FVM::detail

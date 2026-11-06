@@ -702,6 +702,8 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
         wall_evaluation = std::move(publication.evaluation);
     }
 
+    PositivityClippingStatistics clipping;
+    ClippingStatistics clipping_by_field;
     std::unique_ptr<SASWorkspace> sas;
     std::shared_ptr<const int> configuration_identity = std::make_shared<const int>(0);
     bool epsilon_family;
@@ -758,6 +760,8 @@ struct TurbulenceModel<Pack, MeshType>::SnapshotData
     Arr<WallYPlusStatistics> wall_statistics;
     velocity_boundary_cache_type boundary;
     SSTSASStatistics sas;
+    PositivityClippingStatistics clipping;
+    ClippingStatistics clipping_by_field;
     explicit SnapshotData(const velocity_boundary_cache_type& cache) : boundary(cache) {}
 };
 
@@ -770,6 +774,8 @@ auto TurbulenceModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     auto& data = *result.data;
     data.identity = state.configuration_identity;
     data.epoch = mesh_geometry_epoch(*d_mesh);
+    data.clipping = state.clipping;
+    data.clipping_by_field = state.clipping_by_field;
     data.wall = state.wall_evaluation;
     data.wall_statistics = state.wall_statistics;
     if (state.sas) data.sas = state.sas->statistics;
@@ -808,6 +814,8 @@ void TurbulenceModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
         field.overlap_data().update(scalar_type{1}, *data.fields[i].second, scalar_type{});
         ++i;
     });
+    state.clipping = data.clipping;
+    state.clipping_by_field = data.clipping_by_field;
     state.wall_evaluation = std::move(wall);
     state.wall_statistics = std::move(wall_statistics);
     d_wall_velocity_boundary_cache = std::move(boundary);
@@ -1994,6 +2002,116 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
                                     const TurbulenceBuoyancyContext<Pack, mesh_type>*
                                         buoyancy_context, bool physical_time) -> LinearSolveSummary
 {
+    return advance_impl(velocity, projected_face_fluxes, velocity_boundary_cache, time_step,
+        material, reference_density, treatment, linear_options, buoyancy_context, physical_time,
+        nullptr, false);
+}
+
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceModel<Pack, MeshType>::evaluate_diagnostics(
+    const velocity_field_type& velocity, const face_flux_field_type& projected_face_fluxes,
+    const velocity_boundary_cache_type& velocity_boundary_cache, scalar_type time_step,
+    const material_type& material, scalar_type reference_density,
+    FVM::NonOrthogonalTreatment treatment,
+    const TurbulenceBuoyancyContext<Pack, mesh_type>* buoyancy_context,
+    bool physical_time, bool include_cells) const -> Diagnostics
+{
+    require_state();
+    BoundaryConditionSet boundaries;
+    boundaries.velocity = d_velocity_boundary_conditions;
+    boundaries.turbulence = d_boundary_conditions;
+    Diagnostics result;
+    result.model = std::make_unique<TurbulenceModel>(d_mesh, boundaries);
+    auto scratch_options = d_options;
+    if (require_state().menter_family) scratch_options.initial_wall_distance = 1;
+    result.model->configure(scratch_options, material, reference_density);
+    auto copy = snapshot();
+    copy.data->identity = result.model->require_state().configuration_identity;
+    result.model->restore(copy);
+    result.model->d_options = d_options;
+    collective_detail::collective_local_validation(*d_mesh, "Diagnostic turbulence input meshes", [&]
+    {
+        if (&velocity.mesh() != d_mesh.get())
+            throw std::invalid_argument("Diagnostic turbulence velocity mesh mismatch.");
+        if (buoyancy_context && buoyancy_context->temperature &&
+            &buoyancy_context->temperature->mesh() != d_mesh.get())
+            throw std::invalid_argument("Diagnostic turbulence temperature mesh mismatch.");
+    });
+    // Reconstruct from owned values without relying on, or touching, caller ghosts.
+    velocity_field_type diagnostic_velocity(d_mesh, "diagnostic_turbulence_velocity");
+    diagnostic_velocity.owned_data().update(scalar_type{1}, velocity.owned_data(), scalar_type{});
+    diagnostic_velocity.sync_ghosts();
+    material_type diagnostic_material(d_mesh, BoussinesqModelOptions{}, TimeStepperOptions{});
+    const field_type* inputs[] = {&material.density, &material.specific_heat_capacity,
+        &material.dynamic_viscosity, &material.thermal_conductivity};
+    field_type* outputs[] = {&diagnostic_material.density, &diagnostic_material.specific_heat_capacity,
+        &diagnostic_material.dynamic_viscosity, &diagnostic_material.thermal_conductivity};
+    for (size_t i = 0; i < 4; ++i)
+    {
+        outputs[i]->owned_data().update(scalar_type{1}, inputs[i]->owned_data(), scalar_type{});
+        outputs[i]->sync_ghosts();
+    }
+    collective_detail::require_uniform_value(*d_mesh, buoyancy_context ? 1 : 0,
+        "Diagnostic turbulence buoyancy context");
+    TurbulenceBuoyancyContext<Pack, mesh_type> diagnostic_buoyancy;
+    std::optional<field_type> diagnostic_temperature;
+    if (buoyancy_context)
+    {
+        diagnostic_buoyancy = *buoyancy_context;
+        collective_detail::require_uniform_value(*d_mesh, buoyancy_context->temperature ? 1 : 0,
+            "Diagnostic turbulence temperature presence");
+        if (buoyancy_context->temperature)
+        {
+            diagnostic_temperature.emplace(d_mesh, "diagnostic_turbulence_temperature");
+            diagnostic_temperature->owned_data().update(scalar_type{1},
+                buoyancy_context->temperature->owned_data(), scalar_type{});
+            diagnostic_temperature->sync_ghosts();
+            diagnostic_buoyancy.temperature = &*diagnostic_temperature;
+        }
+    }
+    result.model->advance_impl(diagnostic_velocity, projected_face_fluxes, velocity_boundary_cache,
+        time_step, diagnostic_material, reference_density, treatment, {},
+        buoyancy_context ? &diagnostic_buoyancy : nullptr, physical_time,
+        &result, include_cells);
+    return result;
+}
+
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceModel<Pack, MeshType>::clipping_statistics_by_field() const -> ClippingStatistics
+{
+    const auto& local = require_state().clipping_by_field;
+    real_t sums[] = {static_cast<real_t>(local.k.count), local.k.volume_integral,
+        static_cast<real_t>(local.secondary.count), local.secondary.volume_integral};
+    real_t global_sums[4]{};
+    real_t maxima[] = {local.k.max_correction, local.secondary.max_correction};
+    real_t global_maxima[2]{};
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, sums, global_sums);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 2, maxima, global_maxima);
+    return {{static_cast<std::size_t>(global_sums[0]), global_maxima[0], global_sums[1]},
+            {static_cast<std::size_t>(global_sums[2]), global_maxima[1], global_sums[3]}};
+}
+
+template <TpetraTypePack Pack, class MeshType>
+PositivityClippingStatistics TurbulenceModel<Pack, MeshType>::clipping_statistics() const
+{
+    const auto fields = clipping_statistics_by_field();
+    return {fields.k.count + fields.secondary.count,
+        std::max(fields.k.max_correction, fields.secondary.max_correction),
+        fields.k.volume_integral + fields.secondary.volume_integral};
+}
+
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceModel<Pack, MeshType>::advance_impl(const velocity_field_type& velocity,
+                                    const face_flux_field_type& projected_face_fluxes,
+                                    const velocity_boundary_cache_type& velocity_boundary_cache,
+                                    scalar_type time_step, const material_type& material,
+                                    scalar_type reference_density,
+                                    FVM::NonOrthogonalTreatment treatment,
+                                    const LinearSolverOptions& linear_options,
+                                    const TurbulenceBuoyancyContext<Pack, mesh_type>*
+                                        buoyancy_context, bool physical_time, Diagnostics* diagnostics, bool include_cells) -> LinearSolveSummary
+{
     collective_detail::require_uniform_value(*d_mesh, enabled() ? 1 : 0,
                                                 "Turbulence enabled state");
     auto& state = require_state();
@@ -2879,6 +2997,20 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
             State::boundary_scalar_diffusivity(
                 current_wall_evaluation);
 
+        if (diagnostics)
+        {
+            diagnostics->k = state.k_equation.evaluate_diagnostics(
+                state.k, projected_face_fluxes, state.k_diffusivity, k_source, k_sink,
+                static_cast<scalar_type>(d_options.min_turbulent_kinetic_energy), treatment,
+                &k_wall_overrides, d_options.coefficient_interpolation, include_cells);
+            diagnostics->secondary = state.secondary_equation.evaluate_diagnostics(
+                state.secondary, projected_face_fluxes, state.secondary_diffusivity,
+                secondary_source, secondary_sink,
+                static_cast<scalar_type>(state.epsilon_family ? d_options.min_dissipation_rate
+                    : d_options.min_specific_dissipation_rate), treatment,
+                &secondary_wall_overrides, d_options.coefficient_interpolation, include_cells);
+            return LinearSolveSummary{};
+        }
         LinearSolveSummary result;
         result.add(state.k_equation.advance(
             state.k, projected_face_fluxes, time_step,
@@ -2901,6 +3033,28 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
             d_options.coefficient_interpolation));
         return result;
     }();
+
+    if (diagnostics)
+    {
+        if (state.sas)
+        {
+            state.sas->statistics = state.sas->candidate_statistics;
+            for (size_t i = 0; i < state.sas->fields.size(); ++i)
+                if (state.sas->fields[i])
+                    State::publish_synced_field(*state.sas->fields[i], *state.sas->candidate_fields[i]);
+        }
+        State::publish_synced_field(state.nu_t, state.candidate_nu_t);
+        State::publish_synced_field(state.k_gradient, state.candidate_k_gradient);
+        State::publish_synced_field(state.secondary_gradient, state.candidate_secondary_gradient);
+        State::publish_synced_field(state.velocity_gradient, state.candidate_velocity_gradient);
+        State::publish_synced_field(state.buoyancy_production, state.candidate_buoyancy_production);
+        stage_effective_properties(state, state.nu_t, material, reference_density,
+            static_cast<scalar_type>(d_options.turbulent_prandtl_number));
+        commit_effective_properties(state);
+        auto wall = state.stage_wall_publication(std::move(current_wall_evaluation));
+        state.publish_wall_publication(std::move(wall));
+        return summary;
+    }
 
     auto candidate_wall_evaluation = state.evaluate_wall(
         state.candidate_k, velocity, velocity_boundary_cache, material,
@@ -2933,6 +3087,12 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
     state.candidate_wall_velocity.overlap_data().update(
         scalar_type{1}, derivative_velocity.overlap_data(), scalar_type{0});
 
+    const auto& k_clipping = state.k_equation.local_clipping_statistics();
+    const auto& secondary_clipping = state.secondary_equation.local_clipping_statistics();
+    state.clipping_by_field = {k_clipping, secondary_clipping};
+    state.clipping = {k_clipping.count + secondary_clipping.count,
+        std::max(k_clipping.max_correction, secondary_clipping.max_correction),
+        k_clipping.volume_integral + secondary_clipping.volume_integral};
     // Publish only after both solves and all derived-field validation pass.
     if (state.sas)
     {

@@ -513,4 +513,53 @@ TEST(TurbulenceScalarTransportEquationTest, EmptyOwnedRanksParticipateInImplicit
     }
 }
 
+
+TEST(TurbulenceScalarTransportEquationTest, SteadyDiagnosticsExcludeStorageAndPreserveSolveCache)
+{
+    auto mesh = make_single_cell_mesh();
+    FieldType state(mesh, 2.0, "state");
+    FieldType diffusivity(mesh, 0.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    Equation equation(mesh);
+    const Equation::scalar_provider_type source = [](auto) { return 8.0; };
+    const Equation::scalar_provider_type sink = [](auto) { return 4.0; };
+    equation.advance(state, flux, 0.1, diffusivity, state, source, sink, 1e-12);
+    const auto setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(equation);
+    auto report = equation.evaluate_diagnostics(state, flux, diffusivity, source, sink,
+        1e-12, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr,
+        SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic, true);
+    EXPECT_NEAR(report.pde.max_density, 0, 1e-11);
+    EXPECT_EQ(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(equation), setups);
+    EXPECT_DOUBLE_EQ(state.value(0), 2.0);
+    state.set_value(0, 3.0);
+    state.sync_ghosts();
+    report = equation.evaluate_diagnostics(state, flux, diffusivity, source, sink,
+        1e-12, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    EXPECT_NEAR(report.pde.max_density, 4, 1e-11);
+    Equation::boundary_overrides_type overrides;
+    overrides.fixed_cell_value = [](auto) { return std::optional<Pack::scalar_type>{2}; };
+    report = equation.evaluate_diagnostics(state, flux, diffusivity, source, sink,
+        1e-12, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &overrides);
+    EXPECT_EQ(report.pde.included_count, 0);
+    EXPECT_EQ(report.constraints.included_count, 1);
+    EXPECT_NEAR(report.constraints.max_density, 1.0, 1e-12);
+    EXPECT_NEAR(report.constraints.volume_rms, 1.0, 1e-12);
+    EXPECT_NEAR(report.constraints.scale, 5.0, 1e-12);
+}
+
+TEST(TurbulenceScalarTransportEquationTest, ReportsAcceptedPositivityCorrection)
+{
+    auto mesh = make_single_cell_mesh();
+    FieldType state(mesh, 1.0, "state");
+    FieldType diffusivity(mesh, 0.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    Equation equation(mesh);
+    equation.advance(state, flux, 1.0, diffusivity, state, zero_provider(),
+        [](auto) { return 9.0; }, 0.5);
+    EXPECT_DOUBLE_EQ(state.value(0), 0.5);
+    EXPECT_EQ(equation.clipping_statistics().count, 1);
+    EXPECT_NEAR(equation.clipping_statistics().max_correction, 0.4, 1e-12);
+    EXPECT_GT(equation.clipping_statistics().volume_integral, 0);
+}
+
 } // namespace

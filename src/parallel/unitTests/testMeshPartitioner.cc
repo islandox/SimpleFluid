@@ -15,6 +15,9 @@
 #include "parallel/MeshPartitioner.hh"
 
 #include "geometry/Mesh.hh"
+#include "geometry/STKMesh.hh"
+#include <stk_mesh/base/FEMHelpers.hpp>
+#include <stk_mesh/base/FieldBase.hpp>
 #include "geometry/MeshHandle.hh"
 #include "fields/CellField.hh"
 #include "fields/FieldStored.hh"
@@ -23,6 +26,8 @@
 #include "utils/testing_environment.hh"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -1487,4 +1492,51 @@ TEST(MeshPartitionerTest, OneCellPartitionWithEmptyRanksCompletesCollectively)
     value.sync_ghosts();
     for (size_t cell = 0; cell < distributed->num_local_cells(); ++cell)
         EXPECT_DOUBLE_EQ(value.value(static_cast<Pack::local_ordinal_type>(cell)), 7.0);
+}
+
+/** Graded planar quads must retain the serial area-centroid geometry after packet rebuild.
+ * Vertex averaging gives x=1.5 while each trapezoid's area centroid is x=14/9.
+ */
+TEST(MeshPartitionerGeometryTest, GradedQuadCentroidsMatchSerialRule)
+{
+    auto mesh = std::make_shared<SimpleFluid::STKMesh<Pack>>();
+    auto meta = mesh->meta();
+    auto bulk = mesh->bulk();
+    auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
+    stk::mesh::put_field_on_mesh(coordinates, meta->universal_part(), 3, nullptr);
+    meta->set_coordinate_field(&coordinates);
+    auto& block = meta->declare_part_with_topology("graded_hexes", stk::topology::HEX_8);
+    bulk->modification_begin();
+    for (unsigned layer = 0; layer < 4; ++layer)
+    {
+        stk::mesh::EntityIdVector nodes;
+        for (unsigned corner = 0; corner < 8; ++corner)
+            nodes.push_back(1 + 4 * layer + corner);
+        stk::mesh::declare_element(*bulk, block, layer + 1, nodes);
+    }
+    const std::array<std::array<double, 2>, 4> xy{{{1.,-1.},{2.,-2.},{2.,2.},{1.,1.}}};
+    for (unsigned layer = 0; layer <= 4; ++layer)
+        for (unsigned corner = 0; corner < 4; ++corner)
+        {
+            const auto node = bulk->get_entity(stk::topology::NODE_RANK, 1 + 4 * layer + corner);
+            auto* values = stk::mesh::field_data(coordinates, node);
+            values[0] = xy[corner][0]; values[1] = xy[corner][1]; values[2] = layer;
+        }
+    bulk->modification_end();
+    mesh->assemble();
+    std::size_t trapezoids = 0;
+    for (std::size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(face);
+        if (std::abs(mesh->face_normal(lid).z) < 0.5) continue;
+        ++trapezoids;
+        const auto center = mesh->face_centroid(lid);
+        EXPECT_NEAR(center.x, 14. / 9., 1e-14);
+        EXPECT_NEAR(center.y, 0., 1e-14);
+        EXPECT_NEAR(mesh->face_area(lid), 3., 1e-14);
+    }
+    const int local_count = static_cast<int>(trapezoids);
+    int global_count = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_count, &global_count);
+    EXPECT_GT(global_count, 0);
 }

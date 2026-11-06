@@ -7,31 +7,49 @@ inlet, `1e-5 m2/s` kinematic viscosity, standard k-epsilon closure, inlet
 `k=0.375 m2/s2`, and inlet `epsilon=14.855 m2/s3`. The checked-in OpenFOAM
 case adds vertical velocity samples at `x=0.05`, `0.10`, and `0.20 m`.
 
+Generated study inputs, outputs, captured source/configuration snapshots, and
+intermediate reviews are archived outside the implementation history. Restore a
+reviewed bundle locally when needed; `reference/qualification_*/` is ignored.
+The maintained acceptance manifest is an unqualified template with no measured
+limits or historical dataset bindings. Maintained case inputs and deterministic
+test fixtures remain in the repository.
+
 The SimpleFluid executable uses the same duct outline, boundary names, five
 connected blocks, and OpenFOAM `simpleGrading`/`edgeGrading` distributions.
 This includes wall-normal clustering through the upper duct and a graded shear
 layer downstream of the step. The mesh is coarsened from the tutorial by a
 factor of four in each in-plane direction by default. Set
 `SIMPLEFLUID_PITZ_MESH_DIVISOR=1` for the tutorial cell counts and grading.
+`SIMPLEFLUID_PITZ_MESH_MULTIPLIER=2` doubles the in-plane tutorial counts;
+supported multipliers are 1 and 2. Multi-grading section rounding matches
+OpenFOAM v2606 on the coarse meshes as well as the tutorial grid.
 
 ## Run
 
-`run_comparison.sh` is the acceptance launcher. It first requires a qualified
-physical tolerance manifest and then runs both cases on up to six ranks:
+`run_comparison.sh` is the acceptance launcher. It requires a qualified
+physical tolerance manifest, runs SimpleFluid with its authenticated settings,
+and compares against the exact retained OpenFOAM profiles bound by that manifest:
 
 ```sh
 source /opt/OpenFOAM/OpenFOAM-v2606/etc/bashrc
-verification/openfoam/pitzDaily/run_comparison.sh 6
+verification/openfoam/pitzDaily/run_comparison.sh 3
 ```
 
-The checked-in `reference/physical_acceptance.json` is intentionally marked
-`pending_external_qualification`, so this command currently stops before
-launching either solver. No matched, converged profile pair with sufficient
-provenance was available to justify numerical CFD tolerances. This fail-closed
-behavior prevents diagnostic differences from becoming accidental acceptance
-limits. After qualification, the launcher will enforce every station/component
-limit in that manifest. `SIMPLEFLUID_PITZ_ACCEPTANCE_FILE` may select another
-manifest, but it must be qualified with scope `physical_reference`.
+The status and review rationale are recorded in
+`reference/physical_acceptance.json`. An unqualified manifest stops the launcher
+before simulation. A qualified manifest authenticates every declared reference
+file and every executable setting before the run, then enforces every
+station/component limit. `SIMPLEFLUID_PITZ_ACCEPTANCE_FILE` may select another
+manifest with scope `physical_reference`. Acceptance uses the retained data;
+regenerating OpenFOAM is a separate evidence-collection operation. This prevents
+an unrelated fresh simulation from silently replacing the qualified reference.
+
+OpenFOAM v2606 remains necessary for the common `cellPoint` sampler. The
+SimpleFluid cell field is mapped bijectively to its own matching OpenFOAM mesh
+and sampled at all 129 identical points at each station. Values are preserved;
+the sampler checks coordinates, coverage and velocity boundary conditions.
+`--use-retained-reference` selects this authenticated reference path in the
+comparator CLI; it cannot be combined with a diagnostic `--openfoam-case`.
 
 A qualified manifest must authenticate its declared retained source files with
 SHA-256 digests. For physical scope it must also record qualified OpenFOAM and
@@ -73,6 +91,16 @@ SIMPLEFLUID_PITZ_STEPS=1000 \
 SIMPLEFLUID_PITZ_DT=1e-5 \
   verification/openfoam/pitzDaily/run_simplefluid.sh 6
 ```
+
+`SIMPLEFLUID_PITZ_TRANSPORT_PRECONDITIONER=ilut` selects the existing ILUT
+preconditioner for momentum and turbulence transport. The default is `none`;
+pressure retains its independent MueLu policy. This changes linear algebra,
+not the physical model or convergence tolerances. The physical run contract
+and evidence plan must explicitly record `transport_preconditioner` as `none`
+or `ilut`. The acceptance launcher locks that value against ambient settings,
+and evidence verification checks the executable's reported selection. Older
+diagnostic bundles retain their original collector for replay; new plans must
+include the explicit setting.
 
 Set `SIMPLEFLUID_PITZ_STEADY_STATE=1` to run the adaptive pseudo-transient
 steady-state search. During that search, momentum and turbulence transport
@@ -125,6 +153,124 @@ python3 verification/openfoam/pitzDaily/compare_profiles.py \
     'verification/openfoam/pitzDaily/profiles/simplefluid_cells_rank*.csv'
 ```
 
+## Reproducible evidence collection
+
+`collect_evidence.py` runs the existing `openfoam/Allrun` and
+`run_simplefluid.sh` launchers independently of the acceptance gate. It uses
+`compare_profiles.py` for sampling, interpolation and velocity error norms.
+It never modifies the checked-in physical manifest or assigns tolerances.
+
+Run on Linux (including WSL), in a separate worktree with the normal compiler,
+Trilinos and MPI prerequisites installed:
+
+```sh
+git worktree add -b evidence/pitzdaily ../pitzdaily-evidence feature/multiphase
+cd ../pitzdaily-evidence
+source /opt/OpenFOAM/OpenFOAM-v2606/etc/bashrc
+python3 verification/openfoam/pitzDaily/collect_evidence.py template \
+  --output ../pitzdaily-plan.json
+# Complete all null settings in ../pitzdaily-plan.json after reviewing
+# src/examples/pitz_daily.cc and the qualification contract below.
+python3 verification/openfoam/pitzDaily/collect_evidence.py collect \
+  --plan ../pitzdaily-plan.json --output ../pitzdaily-evidence-run001
+python3 verification/openfoam/pitzDaily/collect_evidence.py verify \
+  ../pitzdaily-evidence-run001 > ../pitzdaily-recomputed-measurements.json
+python3 -m unittest discover -s verification/openfoam/pitzDaily -p 'test_*.py'
+```
+
+The template deliberately leaves the step budget and MPI rank count unset.
+Other fields start from the retained run contract and require review. They are executable
+controls, not evidence that a particular runtime is sufficient. Supply every
+run-contract field explicitly; ambient `SIMPLEFLUID_*` settings are discarded.
+Builds use the repository GCC/LLVM presets in this worktree, so another
+checkout's cached executable cannot silently supply results. The collector
+requires `WM_PROJECT_VERSION=v2606`. Use a fresh output path for every attempt;
+it refuses to overwrite an existing directory or reuse old rank outputs.
+
+The four named runs are:
+
+| Role | Required relationship to baseline |
+| --- | --- |
+| `baseline` | Tutorial mesh divisor 1; explicitly chosen step budget and timestep |
+| `stationarity` | Same settings, larger step budget; for adaptive runs, minimum steps exceed the baseline budget |
+| `mesh` | Same settings and stopping rule, mesh divisor 2 |
+| `timestep` | Same settings except smaller timestep and corresponding budget/bounds; fixed runs end at the baseline physical time; adaptive runs also reduce the maximum timestep and may lower the Courant target |
+
+For a fixed-step study, double the timestep run's step budget when halving its
+timestep, and choose a later stationarity endpoint on the same mesh and
+timestep. For adaptive steady-state runs, all four must actually report
+`reached=yes`; a zero exit status alone is insufficient. Compare their steady
+endpoints rather than asserting equal pseudo-time. A reduced timestep cap can
+remain inactive when the Courant controller sets the actual timestep. Lower
+the timestep run's Courant target where needed; verification requires its
+observed final timestep to be smaller than the baseline's, and rejects an
+increased target. This is a numerical continuation control, not a physical
+acceptance tolerance. A longer independent run
+provides the stationarity comparison because the current executable retains
+only its final rank CSVs. This does not substitute for a time history when the
+physics requires averaging, nor does one coarse/fine delta prove asymptotic
+mesh convergence. Additional studies and repeatability runs should use separate
+bundles, with their rationale retained in the qualification review.
+
+The bundle retains the exact plan, Git revision/status/diff, workflow and solver
+source snapshots, compiler/MPI/OpenFOAM version probes and executable hashes,
+build cache and solver-binary hash, command arguments, timestamps and exit
+statuses. A copied OpenFOAM case contains its actual dictionaries, initial
+conditions, mesh, logs and final profiles. Each SimpleFluid run retains its raw
+rank CSVs and extracted station profiles. Solver logs include residual and
+adaptive diagnostics. `checksums.json` authenticates retained files against
+accidental changes; keep this index under version control or sign/archive it
+through your normal trusted process. SHA-256 alone does not establish authorship
+or physical accuracy. A dirty source tree is recorded and must be resolved or
+fully accounted for before qualification.
+
+`verify` checks checksums and required role bindings, rank completeness,
+OpenFOAM residual-control convergence and profile time, SimpleFluid endpoint
+summaries, and adaptive convergence diagnostics where enabled. It recomputes
+all measurements from retained raw files, including:
+
+* OpenFOAM versus baseline `ux`/`uy` RMS (`l2`) and maximum (`linf`) errors at
+  all three stations, sample count, actual station position and covered span.
+* Baseline versus later-time, divisor-2 and smaller-timestep profile deltas,
+  including station positions and common-domain coverage. Mesh deltas use only
+  the overlapping cell-centre range without extrapolation.
+
+These are candidate measurements in m/s, not acceptance results. Collection
+fails if OpenFOAM merely reaches its iteration limit, a solver command fails,
+required data is missing, or a refinement contract is inconsistent. Failed
+attempts keep logs, failure metadata and checksums for diagnosis and cannot
+produce a usable candidate acceptance manifest. Verification may be rerun after
+moving the entire bundle; it does not trust previously recorded error metrics.
+After a failed SimpleFluid launcher, an available build cache and executable
+hash are also retained. Their scope explicitly records availability after the
+attempt; the receipt and log establish whether failure occurred before or
+during solver execution.
+
+On success, `candidate_acceptance.json` populates the existing manifest's
+provenance, retained file roles and checksums, but remains
+`pending_external_qualification` with an empty `stations` object. To construct
+a qualified reference, archive the complete bundle outside Git and restore it
+under an ignored reference directory when reviewing or executing acceptance,
+review matching physics/configurations and all convergence diagnostics, repeat
+or extend studies as necessary, and document per-metric tolerance headroom from
+the observed refinement/repeatability envelope. Populate every station's
+sampling constraints and both component limits using the existing manifest
+schema, record the review rationale, and only then set `status` to `qualified`.
+Do not turn measured error values directly into acceptance limits. Finally run:
+
+```sh
+python3 verification/openfoam/pitzDaily/compare_profiles.py \
+  --tolerances /path/to/retained-bundle/candidate_acceptance.json \
+  --required-scope physical_reference --print-simplefluid-settings
+# This must fail until qualification is complete.
+SIMPLEFLUID_PITZ_ACCEPTANCE_FILE=/path/to/retained-bundle/candidate_acceptance.json \
+  verification/openfoam/pitzDaily/run_comparison.sh 6
+```
+
+Choose the MPI count recorded in the plan for the last command. Keep the bundle
+paths relative to its manifest when archiving it. The original acceptance
+launcher and its fail-closed pending physical manifest remain unchanged.
+
 ## Deterministic comparator gate
 
 `fixtures/` contains a checked-in synthetic OpenFOAM/SimpleFluid profile pair,
@@ -149,7 +295,8 @@ CLI behavior, and the fail-closed pending physical manifest.
 ## Physical-reference qualification contract
 
 Before changing `reference/physical_acceptance.json` to `qualified`, retain all
-of the following evidence in a checked-in reference directory:
+of the following evidence in a reviewed external bundle (or an ignored local
+reference directory restored from that archive):
 
 1. OpenFOAM.com v2606 source/case provenance, MPI rank count, solver log, and
    residual-control convergence for the three final raw profiles. List those
@@ -191,11 +338,98 @@ adjacent-cell epsilon and production constraints with the v2606 default
 `lowReCorrection false`. The front/back `empty` planes are
 represented as slip planes in the one-cell-thick SimpleFluid mesh.
 
-The wall model and block grading are now aligned, but the cases still differ in
+The nominal wall constants and block grading are aligned. Wall-production
+evaluation differs, and the cases also differ in
 mesh implementation, time integration versus a steady solve,
 pressure-velocity iteration, and discretization details. This remains an
 end-to-end comparison rather than a claim of identical numerical solutions.
-OpenFOAM pressure is kinematic;
-SimpleFluid uses a reference density of `1 kg/m3`, making pressure numerically
-comparable, while the automated profile comparison intentionally evaluates
-velocity only.
+The native default stores mechanical pressure and explicitly includes
+`-2/3 grad(k)`. Matched qualification uses
+`SIMPLEFLUID_PITZ_MODIFIED_PRESSURE=1`, which stores
+`p_mechanical + 2*rho*k/3` and absorbs that force in its gradient. At rho=1,
+the stored value and zero outlet match OpenFOAM modified kinematic pressure.
+`SIMPLEFLUID_PITZ_OPENFOAM_OUTLET_STRESS=1` separately selects zero normal
+velocity gradient with retained deviatoric transpose traction. The default
+traction-free Neumann treatment is preserved for existing callers. Both options
+are explicit authenticated run fields and are checked against executable logs.
+The high-Re wall treatments also have a documented production-gradient
+difference: SimpleFluid uses tangential velocity difference over its wall-model
+distance, while OpenFOAM uses the patch `snGrad(U)` magnitude. Neither difference
+has been isolated as the dominant contributor by the retained studies.
+
+## Independent reference field checks and replay
+
+An OpenFOAM residual-stop message is a convergence observation. Qualification
+also reviews raw field histories. `reference_field_gate.py` records a separate
+probe, detects scalar-only cycles even when velocity appears stationary, and
+can perform bounded continuations before rechecking the original residual
+criteria. Physical accuracy limits are never assigned by that protocol.
+
+Set `reference_field_controls` explicitly in a collection plan to request the
+protocol. Its fields are `schema_version`, `probe_steps`,
+`required_consecutive_steps`, `scaled_update_tolerance`, `burnin_steps` and
+`maximum_burnin_cycles`. The numerical studies used a 40-iteration probe,
+20 consecutive accepted changes, and a global-scaled field-change criterion of
+1e-7. At the 10 m/s scale this limits velocity changes to about 1e-6 m/s,
+orders below measured mesh sensitivity. It also rejects the observed epsilon
+cycles. A plan without these controls remains residual-only diagnostic evidence
+and needs independent reference review before qualification.
+
+Raw `k`/`epsilon` must be positive, eddy viscosity nonnegative, and every
+retained physical field finite. Common sampling requires all physical CSV
+columns. The source sampling dictionary is checked for exact station positions,
+span, interpolation scheme, field and 129-point grid.
+
+Use `collect_evidence.py verify BUNDLE --replay-sampling` with the recorded
+OpenFOAM tool loaded to independently regenerate the retained common profiles
+from raw cells. Replay checks the executable hash and rejects valid-shaped
+profile corruption independently of the stored profile checksum. Offline
+verification checks hashes, raw-field bindings, controls and recomputed norms.
+
+The retained reference is finer than the operational native grid. The native
+sampler constructs its own matched mesh from the tutorial geometry; the
+comparison reads the exact authenticated reference files declared by the
+manifest. No fresh unqualified OpenFOAM run can replace those files in acceptance.
+
+
+### 48,900-cell target studies
+
+`run_target_study.py` reuses `run_simplefluid.sh`, the physical-field checks,
+matched-mesh sampler and comparator. It retains source/configuration provenance,
+raw fields, actual loaded executable/library mappings, convergence diagnostics,
+profiles and SHA-256 checksums. `target_study.py DIRECTORY` verifies that evidence.
+The target uses mesh multiplier 2, divisor 1 and matched modified pressure/outlet
+stress. Transport can use `bicgstab`/ILUT and pressure `cg`/`MueLuSymmetric`, with
+unchanged residual tolerances. The symmetric preset uses symmetric smoothing,
+Galerkin transfer and a direct coarse solve. The usual GMRES choices remain
+available when those algorithms do not converge. Failed cases remain evidence,
+never successful qualification data.
+
+With OpenFOAM v2606 loaded and the previous authenticated parity campaign restored
+beside this worktree, a fresh, finite campaign is reproducible with:
+
+```sh
+source /opt/OpenFOAM/OpenFOAM-v2606/etc/bashrc
+python verification/openfoam/pitzDaily/run_target_campaign.py \
+  --previous ../qualification-parity-20261022 \
+  --root ../qualification-target48900-fresh
+```
+
+Run from a clean pinned checkout. The script uses two groups of three MPI ranks
+on CPU groups `0,2,4` and `6,8,10`; adjust these explicit allocations for another
+machine. Baseline/later-time budgets are 6000/8000 steps, with the latter prohibited
+from stopping before step 6100. Time-step caps are 1e-4, 5e-5 and 2.5e-5 s, with
+12000/26000-step budgets for the two smaller steps. Cases must converge rather
+than merely reach those budgets. `--resume-starts` is only for the two already
+running baseline/later-time cases. The script starts each smaller-step case only
+after the corresponding first case passes its audit.
+
+The campaign checks the actual endpoint time-step ratios, keeps unrelated controls
+and executable hashes fixed, rechecks the previously selected reference's hashes
+and independent full-field stationarity, and writes measured changes/errors.
+It assigns no physical limits and never changes `physical_acceptance.json`.
+A separate review is still required to justify spatial uncertainty and acceptance
+limits. The legacy acceptance launcher's 25-setting contract explicitly pins its
+original linear algorithms; ambient diagnostic overrides cannot change that run.
+Future acceptance of the new algorithms must explicitly extend that authenticated
+contract with the retained target settings.

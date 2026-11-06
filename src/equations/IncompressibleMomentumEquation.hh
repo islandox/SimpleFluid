@@ -201,6 +201,7 @@ public:
         const velocity_field_type* correction_field = nullptr,
         const boundary_cache_type* boundary_dynamic_viscosity = nullptr) const;
 
+    // Preserve the transient ALE entrypoint for existing binary clients.
     system_type assemble_physical_system(
         const velocity_field_type& old_velocity,
         const face_flux_field_type& face_fluxes,
@@ -212,6 +213,19 @@ public:
         const velocity_field_type* correction_field,
         const boundary_cache_type* boundary_dynamic_viscosity,
         const FVM::ALEControlVolumeState* ale) const;
+
+    system_type assemble_physical_system(
+        const velocity_field_type& old_velocity,
+        const face_flux_field_type& face_fluxes,
+        const velocity_boundary_cache_type& velocity_boundary_cache,
+        const TimeStepperOptions& options,
+        const field_type& dynamic_viscosity,
+        scalar_type reference_density,
+        const source_type& acceleration_source,
+        const velocity_field_type* correction_field,
+        const boundary_cache_type* boundary_dynamic_viscosity,
+        const FVM::ALEControlVolumeState* ale,
+        FVM::AssemblyMode mode) const;
 
 private:
     friend struct detail::TransportEquationTestAccess<Pack>;

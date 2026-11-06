@@ -223,7 +223,7 @@ template<TpetraTypePack Pack> struct InteriorPressureFaceMetrics
 {
     using scalar_type = typename Pack::scalar_type;
     using vec_type = vec3<scalar_type>;
-    vec_type normal{}, area_vector{};
+    vec_type normal{}, area_vector{}, center_delta{};
     scalar_type area{}, owner_weight{}, neighbor_weight{}, center_projection{}, distance_squared{};
 };
 
@@ -231,7 +231,7 @@ template<TpetraTypePack Pack> struct BoundaryPressureFaceMetrics
 {
     using scalar_type = typename Pack::scalar_type;
     using vec_type = vec3<scalar_type>;
-    vec_type normal{}, owner_normal{}, area_vector{};
+    vec_type normal{}, owner_normal{}, area_vector{}, center_delta{};
     scalar_type area{}, boundary_diffusion{};
 };
 
@@ -292,8 +292,9 @@ auto pressure_face_metrics(const MeshType& mesh, const PressureFaceTopology<Pack
             entry.owner_weight = weights.first;
             entry.neighbor_weight = weights.second;
             const auto center_delta = metrics.cell_center_vector(face_id, owner_id);
+            entry.center_delta = center_delta;
             entry.distance_squared = center_delta.dot(center_delta);
-            entry.center_projection = entry.area_vector.dot(center_delta);
+            entry.center_projection = interior_diffusion_coefficient(metrics, face.face, face.owner, face.neighbor, scalar_type{1}) * entry.distance_squared;
         });
     }
     for (size_t i = 0; i < topology.boundary.size(); ++i)
@@ -308,6 +309,7 @@ auto pressure_face_metrics(const MeshType& mesh, const PressureFaceTopology<Pack
             entry.owner_normal = metrics.face_normal_outward(face_id, owner_id);
             entry.area = static_cast<scalar_type>(metrics.face_area(face_id));
             entry.area_vector = metrics.face_area_vector_outward(face_id, owner_id);
+            entry.center_delta = metrics.face_centroid(face_id) - metrics.cell_centroid(owner_id);
             if (face.owned_owner)
                 entry.boundary_diffusion = boundary_diffusion_coefficient(metrics, face.face, face.owner, scalar_type{1});
         });

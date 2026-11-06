@@ -78,17 +78,17 @@ template TransportSystem<Pack> weighted_scalar_transport_system<Pack>(const Scal
 template TransportSystem<Pack> physical_temperature_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
     const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
     ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
-    Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation);
+    Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation, AssemblyMode);
 
 template TransportSystem<Pack> physical_temperature_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
     const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
     ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
-    Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation, bool);
+    Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation, bool, AssemblyMode);
 
 template VectorTransportSystem<Pack> physical_momentum_transport_system<Pack>(const VectorField&, const FluxField&,
     Scalar, const ScalarField&, Scalar, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>,
     NonOrthogonalTreatment, const VectorField*, Teuchos::RCP<Matrix>, BoundaryFaceSelector, const BoundaryCache<Pack>*,
-    const GeometryCache*, FaceCoefficientInterpolation);
+    const GeometryCache*, FaceCoefficientInterpolation, AssemblyMode);
 
 template VectorTransportSystem<Pack> transport_system<Pack>(
     const VectorField&, const FluxField&, Scalar, Scalar, VectorBoundaryValueProvider<Pack>, Teuchos::RCP<Matrix>);

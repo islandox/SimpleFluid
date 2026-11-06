@@ -54,6 +54,8 @@ target_link_libraries(
   SimpleFluid::Equations
   GTest::gtest_main)
 simplefluid_configure_test_executable(testPressureProjectionMultiRank)
+add_test(NAME PressureProjection_skew_flux_balance COMMAND testPressureProjectionMultiRank
+    --gtest_filter=PressureProjectionMultiRankTest.SkewProjectionMatchesReconstructedFluxAndContinuity)
 
 add_executable(
   testSolidHeatConductionMultiRank

@@ -68,6 +68,40 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     FVM::FaceCoefficientInterpolation coefficient_interpolation) const
     -> LinearSolveStatistics
 {
+    return run(old_state, face_fluxes, time_step, effective_diffusivity, state,
+               explicit_source, implicit_sink, positive_floor, treatment, linear_options,
+               boundary_overrides, coefficient_interpolation, nullptr, false);
+}
+
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceScalarTransportEquation<Pack, MeshType>::evaluate_diagnostics(
+    const field_type& values, const face_field_type& face_fluxes,
+    const field_type& effective_diffusivity, const scalar_provider_type& explicit_source,
+    const scalar_provider_type& implicit_sink, scalar_type positive_floor,
+    FVM::NonOrthogonalTreatment treatment, const boundary_overrides_type* boundary_overrides,
+    FVM::FaceCoefficientInterpolation coefficient_interpolation, bool include_cells) const
+    -> TurbulenceScalarDiagnostics<scalar_type>
+{
+    TurbulenceScalarTransportEquation scratch(d_mesh, d_boundary_conditions);
+    TurbulenceScalarDiagnostics<scalar_type> result;
+    scratch.run(values, face_fluxes, scalar_type{1}, effective_diffusivity, scratch.d_candidate,
+                explicit_source, implicit_sink, positive_floor, treatment, {}, boundary_overrides,
+                coefficient_interpolation, &result, include_cells);
+    return result;
+}
+
+template <TpetraTypePack Pack, class MeshType>
+auto TurbulenceScalarTransportEquation<Pack, MeshType>::run(
+    const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
+    const field_type& effective_diffusivity, field_type& state,
+    const scalar_provider_type& explicit_source, const scalar_provider_type& implicit_sink,
+    scalar_type positive_floor, FVM::NonOrthogonalTreatment treatment,
+    const LinearSolverOptions& linear_options,
+    const boundary_overrides_type* boundary_overrides,
+    FVM::FaceCoefficientInterpolation coefficient_interpolation,
+    TurbulenceScalarDiagnostics<scalar_type>* diagnostics, bool include_cells) const
+    -> LinearSolveStatistics
+{
     constexpr const char* class_name = "TurbulenceScalarTransportEquation";
     /** @brief Validated boundary condition prepared for transport assembly. */
     struct PreparedBoundaryData
@@ -358,6 +392,8 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
         d_cached_transport_matrix = Teuchos::null;
     }
 
+    FVM::ScalarTransportDiscretization discretization;
+    if (diagnostics) discretization.mode = FVM::AssemblyMode::Steady;
     auto system = [&]()
     {
         try
@@ -374,6 +410,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
                     .boundary_value = boundary_value,
                     .source = source,
                     .treatment = treatment,
+                    .discretization = discretization,
                     .correction_field = correction_field,
                     .cached_matrix = d_cached_transport_matrix,
                     .implicit_sink = std::move(sink),
@@ -392,6 +429,33 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
             throw;
         }
     }();
+    if (diagnostics)
+    {
+        std::vector<scalar_type> volumes;
+        const auto& geometry = d_transport_geometry_cache.assembly_geometry();
+        std::vector<unsigned char> excluded(d_mesh->num_owned_cells());
+        std::vector<unsigned char> inverse(d_mesh->num_owned_cells());
+        for (size_t i = 0; i < d_mesh->num_owned_cells(); ++i)
+        {
+            volumes.push_back(geometry.volumes[i]);
+            excluded[i] = fixed_cell_values[i].has_value();
+            inverse[i] = !excluded[i];
+        }
+        diagnostics->pde = FVM::steady_residual_report<Pack>(*system.matrix, *system.rhs,
+            old_state.owned_data(), volumes, excluded, include_cells);
+        // Wall constraints compare field values, rather than an identity row per volume.
+        std::vector<scalar_type> mismatch(volumes.size()), constraint_scale(volumes.size());
+        for (size_t i = 0; i < volumes.size(); ++i)
+            if (fixed_cell_values[i])
+            {
+                const auto value = old_state_values(static_cast<local_ordinal_type>(i), 0);
+                mismatch[i] = (value - *fixed_cell_values[i]) * volumes[i];
+                constraint_scale[i] = (std::abs(value) + std::abs(*fixed_cell_values[i])) * volumes[i];
+            }
+        diagnostics->constraints = FVM::integrated_residual_report<scalar_type>(mismatch,
+            constraint_scale, volumes, *d_mesh->owned_cell_map()->getComm(), include_cells, inverse);
+        return {};
+    }
     d_cached_transport_matrix = system.matrix;
     if (requires_non_orthogonal_graph && all_diffusivities_positive)
     {
@@ -405,6 +469,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto statistics = d_linear_solver.solve_with_statistics(
         matrix, *system.rhs, candidate.owned_data(), linear_options);
+    PositivityClippingStatistics clipping;
     {
         auto candidate_values = candidate.owned_write_view();
         collective_detail::collective_local_validation(
@@ -430,6 +495,10 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
                     }
                     if (value < positive_floor)
                     {
+                        const auto correction = positive_floor - value;
+                        ++clipping.count;
+                        clipping.max_correction = std::max(clipping.max_correction, static_cast<real_t>(correction));
+                        clipping.volume_integral += correction * d_transport_geometry_cache.assembly_geometry().volumes[owned];
                         candidate_values(cell_lid, 0) = positive_floor;
                     }
                 }
@@ -438,7 +507,20 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
 
     state.owned_data().update(scalar_type{1}, candidate.owned_data(), scalar_type{0});
     d_mesh->sync_periodic_boundaries(state);
+    d_clipping = clipping;
     return statistics;
+}
+
+template <TpetraTypePack Pack, class MeshType>
+PositivityClippingStatistics TurbulenceScalarTransportEquation<Pack, MeshType>::clipping_statistics() const
+{
+    real_t local[] = {static_cast<real_t>(d_clipping.count), d_clipping.volume_integral};
+    real_t global[2]{};
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
+    real_t maximum{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &d_clipping.max_correction, &maximum);
+    return {static_cast<std::size_t>(global[0]), maximum, global[1]};
 }
 
 } // namespace SimpleFluid

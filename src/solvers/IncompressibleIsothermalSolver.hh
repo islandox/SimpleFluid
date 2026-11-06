@@ -114,6 +114,7 @@ public:
      * @see BoussinesqSolver
      */
     void step() override;
+    SolverDiagnosticsResult<scalar_type> evaluate_diagnostics(const SolverDiagnosticsOptions& options = {}) const override;
 
     /** @brief Constant density used to normalize pressure and momentum. */
     scalar_type reference_density() const noexcept { return d_reference_density; }

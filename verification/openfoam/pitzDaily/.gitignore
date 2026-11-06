@@ -5,3 +5,6 @@
 /openfoam/postProcessing/
 /openfoam/constant/polyMesh/
 /openfoam/log.*
+
+# Generated studies and their captured inputs/reviews belong in external archives.
+/reference/qualification_*/

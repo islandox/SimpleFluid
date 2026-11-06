@@ -64,6 +64,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     const step_statistics_type accepted_statistics;
     const residual_type accepted_residuals;
     const continuity_residual_type accepted_volume_residuals;
+    const std::optional<typename solver_type::DiagnosticALEState> accepted_solver_diagnostics;
     const scalar_type accepted_time;
     const int accepted_step;
     const std::size_t accepted_history_size;
@@ -122,7 +123,8 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
           void_snapshot(capture_optional(coupler.d_scalar_void_fraction_model)),
           accepted_statistics(d_solver.d_last_step_statistics),
           accepted_residuals(d_solver.pressure_velocity_residuals()),
-          accepted_volume_residuals(d_solver.last_volume_continuity_residuals()), accepted_time(d_solver.d_time),
+          accepted_volume_residuals(d_solver.last_volume_continuity_residuals()),
+          accepted_solver_diagnostics(d_solver.d_accepted_diagnostic_ale), accepted_time(d_solver.d_time),
           accepted_step(d_solver.d_step_index), accepted_history_size(coupler.d_free_surface_history.size()),
           accepted_ale_diagnostics(coupler.d_planar_ale_diagnostics),
           accepted_occupancy_volume_error(coupler.d_pool_occupancy_volume_error)
@@ -483,6 +485,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         d_solver.d_last_step_statistics = accepted_statistics;
         d_solver.pressure_velocity_residuals() = accepted_residuals;
         d_solver.d_last_volume_continuity_residuals = accepted_volume_residuals;
+        d_solver.d_accepted_diagnostic_ale=accepted_solver_diagnostics;
         d_solver.d_time = accepted_time;
         d_solver.d_step_index = accepted_step;
         coupler.d_free_surface_history.resize(accepted_history_size);

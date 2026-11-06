@@ -687,6 +687,33 @@ TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWith
     EXPECT_NEAR(base_solver.maximum_courant_number(), absolute_courant, 1.0e-15);
 }
 
+TEST_P(BoussinesqPlanarALECouplingTest, FinalDiagnosticsRetainAcceptedAleGeometryStorageAndSources)
+{
+    auto state=make_case(GetParam(),1.0e-4,8);
+    state.solver->enable_diagnostic_history();
+    ASSERT_NO_THROW(state.coupling->step());
+    SimpleFluid::SolverDiagnosticsOptions options;options.include_cell_data=true;options.include_face_data=true;
+    const auto before_time=state.solver->time();const auto before_step=state.solver->step_index();
+    const auto report=state.solver->evaluate_diagnostics(options);
+    const auto repeated=state.solver->evaluate_diagnostics(options);
+    EXPECT_EQ(report.geometry_kind,"frozen_ALE_geometry");
+    ASSERT_TRUE(report.gcl_max.has_value());EXPECT_LT(*report.gcl_max,1e-10);
+    ASSERT_TRUE(report.temperature_storage.has_value());
+    ASSERT_TRUE(report.temperature_total.has_value());
+    EXPECT_GT(report.relative_face_flux.size(),0u);
+    for(size_t component=0;component<3;++component) {
+        ASSERT_TRUE(report.momentum_storage[component].has_value());
+        ASSERT_TRUE(report.momentum_total[component].has_value());
+        for(size_t i=0;i<report.cell_volume.size();++i)
+            EXPECT_NEAR(report.momentum_total[component]->integrated[i],
+                report.momentum[component].integrated[i]+report.momentum_storage[component]->integrated[i],1e-12);
+    }
+    for(size_t i=0;i<report.cell_volume.size();++i)
+        EXPECT_NEAR(report.temperature_total->integrated[i],report.temperature->integrated[i]+report.temperature_storage->integrated[i],1e-9);
+    EXPECT_DOUBLE_EQ(report.temperature_total->volume_rms,repeated.temperature_total->volume_rms);
+    EXPECT_EQ(state.solver->step_index(),before_step);EXPECT_DOUBLE_EQ(state.solver->time(),before_time);
+}
+
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
     testing::Values(Coupling::SIMPLE, Coupling::PISO, Coupling::PIMPLE, Coupling::CoupledKrylov), coupling_name);
 

@@ -3,12 +3,12 @@
   "qualification": {
     "status": "pending_external_qualification",
     "scope": "physical_reference",
-    "reason": "No checked-in pair of mesh- and time-converged OpenFOAM v2606 and SimpleFluid profiles exists. Numeric CFD tolerances would therefore be unsubstantiated.",
+    "reason": "Physical qualification requires an independently reviewed evidence bundle. Generated study inputs, outputs, and review records are archived outside this implementation branch; no physical tolerances are assigned.",
     "required_evidence": [
       "OpenFOAM residual-control convergence and final x050/x100/x200 velocity profiles",
       "SimpleFluid stationarity plus time-step and mesh-refinement evidence",
       "matched case settings, compiler, MPI rank count, and source revisions",
-      "checked-in raw profiles with SHA-256 checksums",
+      "retained raw profiles with SHA-256 checksums in a reviewed external evidence bundle",
       "observed per-station ux/uy L2 and Linf errors with documented tolerance headroom"
     ]
   },
@@ -41,7 +41,11 @@
       "steady_relaxed_linear_tolerance": null,
       "steady_full_accuracy_update_ratio": null,
       "steady_progress_interval": null,
-      "rank_csv_files": []
+      "rank_csv_files": [],
+      "transport_preconditioner": null,
+      "modified_pressure": null,
+      "openfoam_outlet_stress": null,
+      "mesh_multiplier": 1
     },
     "stations_m": {
       "x050": 0.05,

@@ -1188,6 +1188,7 @@ auto FluidSolver<Pack>::run_pressure_correction(
             projection.corrected_face_fluxes().data(),
             scalar_type{0});
         sync_primary_fields_from_legacy();
+        record_diagnostic_pressure_correction();
         return result;
     }
 
@@ -1212,6 +1213,7 @@ auto FluidSolver<Pack>::run_pressure_correction(
         scalar_type{0});
     projected_face_fluxes().sync_ghosts();
     d_last_volume_continuity_residuals = native_result.continuity_residuals;
+    record_diagnostic_pressure_correction();
     return {
         native_result.pressure_correction,
         native_result.continuity,
@@ -1447,6 +1449,13 @@ std::unique_ptr<CoupledNonlinearProblem> FluidSolver<Pack>::make_coupled_nonline
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::solve_coupled_nonlinear()
 {
+    if(d_diagnostic_history_enabled) {
+    d_pending_correction_norms.clear();
+    d_accepted_pressure_baseline.resize(d_mesh->num_owned_cells());
+    for(size_t i=0;i<d_accepted_pressure_baseline.size();++i)
+        d_accepted_pressure_baseline[i]=pressure().value(static_cast<local_ordinal_type>(i));
+    if(d_step_index==0) d_accumulated_pressure_update=d_accepted_pressure_baseline;
+    }
 #ifdef SIMPLEFLUID_ENABLE_NOX
     if constexpr (std::same_as<Pack, DefaultTpetraTypes>)
     {
@@ -1669,6 +1678,13 @@ auto FluidSolver<Pack>::refine_volume_continuity(int maximum_corrections,
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::begin_step()
 {
+    if(d_diagnostic_history_enabled) {
+    d_pending_correction_norms.clear();
+    d_accepted_pressure_baseline.resize(d_mesh->num_owned_cells());
+    for(size_t i=0;i<d_accepted_pressure_baseline.size();++i)
+        d_accepted_pressure_baseline[i]=pressure().value(static_cast<local_ordinal_type>(i));
+    if(d_step_index==0) d_accumulated_pressure_update=d_accepted_pressure_baseline;
+    }
     d_last_step_statistics = {};
     d_last_volume_continuity_residuals = {};
     if (uses_legacy_backend())
@@ -1729,6 +1745,19 @@ void FluidSolver<Pack>::finish_step()
     else
     {
         d_mesh->sync_periodic_boundaries(velocity());
+    }
+    if(d_diagnostic_history_enabled && d_accepted_pressure_baseline.size()==d_mesh->num_owned_cells()) {
+        scalar_type local{};
+        for(size_t i=0;i<d_accepted_pressure_baseline.size();++i) {
+            const auto update=pressure().value(static_cast<local_ordinal_type>(i))-d_accepted_pressure_baseline[i];
+            local+=update*update;
+        }
+        d_pressure_update_history.resize(static_cast<size_t>(d_step_index)+1);
+        d_pressure_update_history[static_cast<size_t>(d_step_index)]=std::sqrt(global_sum(local));
+    }
+    if(d_diagnostic_history_enabled) {
+        d_correction_norms_by_step.resize(static_cast<size_t>(d_step_index)+1);
+        d_correction_norms_by_step[static_cast<size_t>(d_step_index)]=d_pending_correction_norms;
     }
     d_time += d_problem.time_options().time_step;
     ++d_step_index;
@@ -1991,3 +2020,5 @@ void FluidSolver<Pack>::write_solution_vtu(
 }
 
 } // namespace SimpleFluid
+
+#include "solvers/FluidSolverDiagnostics.tcc"

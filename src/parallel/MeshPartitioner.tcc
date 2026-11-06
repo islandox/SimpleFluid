@@ -2185,7 +2185,9 @@ void MeshPartitioner<Pack>::rebuild(
             if (nit != mesh.d_node_gid_to_lid.end()) fcs.push_back(mesh.d_node_coords[static_cast<size_t>(nit->second)]);
         }
         if (fcs.size() < 3) continue;
-        fi.center = MeshUtils::average(fcs);
+        // Match STKMesh::compute_face_geometry: a graded quad centroid is
+        // area-weighted, not the mean of its vertices.
+        fi.center = MeshUtils::face_centroid(fcs);
         auto av = MeshUtils::face_area_vector(fcs);
         fi.area = av.norm();
         if (fi.area <= 0.0) continue;

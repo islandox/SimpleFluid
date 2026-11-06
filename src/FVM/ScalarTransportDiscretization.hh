@@ -16,6 +16,9 @@
 namespace SimpleFluid::FVM
 {
 
+/** @brief Storage selection; steady assembly omits storage before forming rows. */
+enum class AssemblyMode { Transient, Steady };
+
 /** @brief Temporal discretization used by an opt-in scalar transport step. */
 enum class ScalarTimeScheme
 {
@@ -42,6 +45,7 @@ struct ScalarTransportDiscretization
 {
     ScalarTimeScheme time = ScalarTimeScheme::BackwardEuler;
     ScalarConvectionScheme convection = ScalarConvectionScheme::Upwind;
+    AssemblyMode mode = AssemblyMode::Transient;
 };
 
 namespace detail
@@ -143,11 +147,24 @@ inline void report_scalar_transport_discretization_state(
     }
 }
 
+/** Collectively reject unknown or rank-inconsistent assembly modes. */
+template<class MeshType>
+void validate_assembly_mode(const MeshType& mesh, AssemblyMode mode)
+{
+    const int code = mode == AssemblyMode::Transient ? 0 : mode == AssemblyMode::Steady ? 1 : 2;
+    const std::array<int, 2> local{code, -code};
+    auto global = local;
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, local.data(), global.data());
+    if (global[0] > 1 || global[0] != -global[1])
+        throw std::invalid_argument("Assembly mode must be valid and identical on every rank.");
+}
+
 /** Collectively validate a policy and older-field selection. */
 template<class MeshType>
 void validate_scalar_transport_discretization(
     const MeshType& mesh, ScalarTransportDiscretization discretization, int older_field_state, std::string_view context)
 {
+    validate_assembly_mode(mesh, discretization.mode);
     const auto local_state = scalar_transport_discretization_state(discretization, older_field_state);
     auto global_state = local_state;
     const auto communicator = mesh.owned_cell_map()->getComm();

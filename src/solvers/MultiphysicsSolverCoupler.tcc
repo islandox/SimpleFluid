@@ -3141,6 +3141,9 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::CouplingSt
     std::optional<typename reacting_gas_model_type::StateSnapshot> gas;
     std::optional<typename scalar_void_fraction_model_type::StateSnapshot> void_state;
     std::optional<typename prescribed_heat_source_type::StateSnapshot> prescribed_heat;
+    std::optional<typename solver_type::DiagnosticALEState> solver_diagnostics;
+    std::vector<scalar_type> pressure_update_history;
+    std::vector<std::vector<scalar_type>> pressure_correction_history;
     scalar_type time = {}, time_step = {}, occupancy_error = {};
     int step_index = 0;
     bool primary_initialized = false, failed = false;
@@ -3284,6 +3287,9 @@ template<TpetraTypePack Pack> auto MultiphysicsSolverCoupler<Pack>::create_coupl
         saved->void_state.emplace(d_scalar_void_fraction_model->snapshot());
     if (d_prescribed_heat_source)
         saved->prescribed_heat.emplace(d_prescribed_heat_source->snapshot());
+    saved->solver_diagnostics=d_solver->d_accepted_diagnostic_ale;
+    saved->pressure_update_history=d_solver->d_pressure_update_history;
+    saved->pressure_correction_history=d_solver->d_correction_norms_by_step;
     saved->time = d_solver->d_time;
     saved->time_step = d_solver->time_step();
     saved->step_index = d_solver->d_step_index;
@@ -3361,6 +3367,9 @@ void MultiphysicsSolverCoupler<Pack>::restore_coupling_checkpoint(const Coupling
         d_thermal_participant->restore_state(*saved.thermal);
     if (d_thermal_participant)
         d_solver->temperature_equation().set_boundary_heat_flux_snapshot(saved.thermal_flux);
+    d_solver->d_accepted_diagnostic_ale=saved.solver_diagnostics;
+    d_solver->d_pressure_update_history=saved.pressure_update_history;
+    d_solver->d_correction_norms_by_step=saved.pressure_correction_history;
     d_solver->d_time = saved.time;
     d_solver->set_time_step(saved.time_step);
     d_solver->d_step_index = saved.step_index;

@@ -9,11 +9,14 @@
  *
  */
 
+#include "PitzDailyReplay.hh"
+#include "equations/CollectiveValidation.hh"
 #include "equations/MomentumSolveException.hh"
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "geometry/STKMesh.hh"
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/SolverProgress.hh"
+#include "solvers/SolverDiagnosticsOutput.hh"
 #include "solvers/SteadyStateSearch.hh"
 
 #include <Tpetra_Core.hpp>
@@ -243,53 +246,26 @@ std::vector<double> multi_graded_fractions(int cells, const std::vector<GradingS
         total_cell_fraction += section.cell_fraction;
     }
 
-    std::vector<double> target_counts;
+    // Match OpenFOAM v2606 lineDivide: round each section, then place
+    // the remainder in the first section with the largest cell fraction.
+    // Largest-remainder allocation differs on coarse multi-graded meshes.
     std::vector<int> section_counts;
-    target_counts.reserve(sections.size());
-    section_counts.reserve(sections.size());
     int allocated_cells = 0;
-    for (const auto& section : sections)
+    size_t largest_section = 0;
+    for (size_t section = 0; section < sections.size(); ++section)
     {
-        const double target = static_cast<double>(cells) * section.cell_fraction / total_cell_fraction;
-        target_counts.push_back(target);
-        section_counts.push_back(std::max(1, static_cast<int>(std::floor(target))));
+        const double target = static_cast<double>(cells) * sections[section].cell_fraction / total_cell_fraction;
+        section_counts.push_back(static_cast<int>(target + 0.5));
         allocated_cells += section_counts.back();
-    }
-    while (allocated_cells < cells)
-    {
-        size_t selected = 0;
-        double largest_deficit = -std::numeric_limits<double>::infinity();
-        for (size_t section = 0; section < sections.size(); ++section)
+        if (sections[section].cell_fraction > sections[largest_section].cell_fraction)
         {
-            const double deficit = target_counts[section] - section_counts[section];
-            if (deficit >= largest_deficit)
-            {
-                selected = section;
-                largest_deficit = deficit;
-            }
+            largest_section = section;
         }
-        ++section_counts[selected];
-        ++allocated_cells;
     }
-    while (allocated_cells > cells)
+    section_counts[largest_section] += cells - allocated_cells;
+    if (std::any_of(section_counts.begin(), section_counts.end(), [](int count) { return count <= 0; }))
     {
-        size_t selected = 0;
-        double largest_excess = -std::numeric_limits<double>::infinity();
-        for (size_t section = 0; section < sections.size(); ++section)
-        {
-            if (section_counts[section] == 1)
-            {
-                continue;
-            }
-            const double excess = section_counts[section] - target_counts[section];
-            if (excess > largest_excess)
-            {
-                selected = section;
-                largest_excess = excess;
-            }
-        }
-        --section_counts[selected];
-        --allocated_cells;
+        throw std::invalid_argument("Multi-grading section received no cells.");
     }
 
     std::vector<double> edges{0.0};
@@ -385,7 +361,7 @@ double interpolate(double left, double right, double fraction)
  * @return Assembled mesh with inlet, outlet, wall, and spanwise boundaries.
  * @throws std::runtime_error if node coordinates cannot be assigned.
  */
-SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
+SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor, int multiplier)
 {
     auto mesh = std::make_shared<Mesh>();
     auto meta = mesh->meta();
@@ -406,11 +382,11 @@ SimpleFluid::SP<Mesh> make_pitz_daily_mesh(int divisor)
         boundary_parts.emplace(name, &part);
     }
 
-    const int upstream_x = scaled_cells(18, divisor);
-    const int main_x = scaled_cells(180, divisor);
-    const int outlet_x = scaled_cells(25, divisor);
-    const int upper_y = scaled_cells(30, divisor);
-    const int lower_y = scaled_cells(27, divisor);
+    const int upstream_x = scaled_cells(18 * multiplier, divisor);
+    const int main_x = scaled_cells(180 * multiplier, divisor);
+    const int outlet_x = scaled_cells(25 * multiplier, divisor);
+    const int upper_y = scaled_cells(30 * multiplier, divisor);
+    const int lower_y = scaled_cells(27 * multiplier, divisor);
 
     const auto upstream_edges = graded_edges(-0.0206, 0.0, upstream_x, 0.5);
     const auto main_edges = graded_edges(0.0, 0.206, main_x, 4.0);
@@ -599,6 +575,52 @@ void write_cells(const Mesh& mesh, const Solver& solver, const Solver::turbulenc
     }
 }
 
+
+/** Load a complete retained native snapshot; never interpolate or floor its values. */
+void restore_cells(Solver& solver, Solver::turbulence_model_type& turbulence,
+    const std::string& prefix, int input_ranks)
+{
+    const auto mesh = solver.velocity().mesh_ptr();
+    SimpleFluid::pitz_replay::Rows rows;
+    std::vector<const SimpleFluid::pitz_replay::Row*> matched;
+    SimpleFluid::collective_detail::collective_local_validation(*mesh, "pitzDaily replay input", [&]
+    {
+        for (int rank = 0; rank < input_ranks; ++rank)
+        {
+            const auto filename = prefix + "_rank" + std::to_string(rank) + ".csv";
+            std::ifstream input(filename);
+            if (!input) throw std::runtime_error("Cannot open replay file " + filename);
+            SimpleFluid::pitz_replay::read(input, rows, filename);
+        }
+        if (rows.size() != mesh->owned_cell_map()->getGlobalNumElements())
+            throw std::invalid_argument("Replay cell count differs from the configured mesh.");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto lid = static_cast<Pack::local_ordinal_type>(owned);
+            const auto center = mesh->cell_centroid(lid);
+            const auto it = rows.find(SimpleFluid::pitz_replay::key(center.x, center.y, center.z));
+            if (it == rows.end()) throw std::invalid_argument("Replay does not cover a configured cell center.");
+            const auto& row = it->second;
+            if (std::abs(center.x - row[0]) > 1e-12 || std::abs(center.y - row[1]) > 1e-12 ||
+                std::abs(center.z - row[2]) > 1e-12)
+                throw std::invalid_argument("Replay cell geometry does not match.");
+            matched.push_back(&row);
+        }
+    });
+    Solver::field_type k(mesh, "replay_k"), epsilon(mesh, "replay_epsilon"), nut(mesh, "replay_nut");
+    for (size_t owned = 0; owned < matched.size(); ++owned)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(owned);
+        const auto& row = *matched[owned];
+        solver.velocity().set_owned_value(lid, {row[3], row[4], row[5]});
+        solver.pressure().set_owned_value(lid, row[6]);
+        k.set_owned_value(lid, row[7]); epsilon.set_owned_value(lid, row[8]); nut.set_owned_value(lid, row[9]);
+    }
+    solver.velocity().sync_ghosts(); solver.pressure().sync_ghosts();
+    turbulence.restore_transported_state(k, epsilon, nut, solver.velocity(), solver.material_properties(),
+        solver.reference_density());
+}
+
 } // namespace
 
 /**
@@ -613,25 +635,63 @@ int main(int argc, char** argv)
 {
     Tpetra::ScopeGuard tpetra_scope(&argc, &argv);
     const int mesh_divisor = positive_environment_integer("SIMPLEFLUID_PITZ_MESH_DIVISOR", 4);
+    const int mesh_multiplier = positive_environment_integer("SIMPLEFLUID_PITZ_MESH_MULTIPLIER", 1);
+    if (mesh_multiplier > 2)
+    {
+        throw std::invalid_argument("SIMPLEFLUID_PITZ_MESH_MULTIPLIER must be 1 or 2.");
+    }
     const int steps = positive_environment_integer("SIMPLEFLUID_PITZ_STEPS", 200);
     const double time_step = positive_environment_real("SIMPLEFLUID_PITZ_DT", 1.0e-5);
     const bool search_for_steady_state = environment_boolean("SIMPLEFLUID_PITZ_STEADY_STATE", false);
 
-    auto mesh = make_pitz_daily_mesh(mesh_divisor);
+    auto mesh = make_pitz_daily_mesh(mesh_divisor, mesh_multiplier);
     auto boundary_conditions = pitz_daily_boundary_conditions();
 
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = time_step;
     time_options.steps = steps;
     time_options.kinematic_viscosity = 1.0e-5;
+    time_options.velocity_neumann_zero_gradient_stress =
+        environment_boolean("SIMPLEFLUID_PITZ_OPENFOAM_OUTLET_STRESS", false);
+    time_options.isothermal_modified_pressure =
+        environment_boolean("SIMPLEFLUID_PITZ_MODIFIED_PRESSURE", false);
     time_options.pressure_velocity_coupling = SimpleFluid::PressureVelocityCoupling::SIMPLE;
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 500;
+    const char* configured_preconditioner = std::getenv("SIMPLEFLUID_PITZ_TRANSPORT_PRECONDITIONER");
+    const std::string_view transport_preconditioner =
+        configured_preconditioner == nullptr ? "none" : configured_preconditioner;
+    if (transport_preconditioner != "none" && transport_preconditioner != "ilut")
+    {
+        throw std::invalid_argument("SIMPLEFLUID_PITZ_TRANSPORT_PRECONDITIONER must be none or ilut.");
+    }
+    linear_options.preconditioner = SimpleFluid::parse_linear_preconditioner(transport_preconditioner);
+    const char* transport_backend = std::getenv("SIMPLEFLUID_PITZ_TRANSPORT_BACKEND");
+    if (transport_backend != nullptr)
+    {
+        const std::string_view value(transport_backend);
+        if (value != "gmres" && value != "bicgstab")
+            throw std::invalid_argument("SIMPLEFLUID_PITZ_TRANSPORT_BACKEND must be gmres or bicgstab.");
+        linear_options.backend = SimpleFluid::parse_linear_solver_backend(value);
+    }
+
     linear_options.tolerance =
         positive_environment_real("SIMPLEFLUID_PITZ_LINEAR_TOLERANCE", 1.0e-9);
 
     Solver solver(mesh, std::move(boundary_conditions), time_options, linear_options, 1.0);
+    const char* pressure_mode = std::getenv("SIMPLEFLUID_PITZ_PRESSURE_MODE");
+    const std::string_view selected_pressure_mode = pressure_mode == nullptr ? "gmres-muelu" : pressure_mode;
+    if (selected_pressure_mode == "cg-symmetric-muelu")
+    {
+        auto pressure = solver.pressure_linear_solver_options();
+        pressure.backend = SimpleFluid::LinearSolverBackend::Cg;
+        pressure.preconditioner = SimpleFluid::LinearPreconditioner::MueLuSymmetric;
+        solver.set_pressure_linear_solver_options(pressure);
+    }
+    else if (selected_pressure_mode != "gmres-muelu")
+        throw std::invalid_argument("SIMPLEFLUID_PITZ_PRESSURE_MODE must be gmres-muelu or cg-symmetric-muelu.");
+
 
     SimpleFluid::TurbulenceModelOptions turbulence_options;
     turbulence_options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
@@ -641,8 +701,50 @@ int main(int argc, char** argv)
     turbulence_options.wall_options.boundary_names = {"upperWall", "lowerWall"};
     auto& turbulence = solver.configure_turbulence(turbulence_options);
 
+    if (const char* replay_prefix = std::getenv("SIMPLEFLUID_PITZ_REPLAY_PREFIX"))
+        restore_cells(solver, turbulence, replay_prefix,
+            positive_environment_integer("SIMPLEFLUID_PITZ_REPLAY_RANKS", 3));
+
     const auto comm = Tpetra::getDefaultComm();
     const int rank = comm->getRank();
+    if (rank == 0)
+    {
+        std::cout << "velocity_neumann: "
+                  << (time_options.velocity_neumann_zero_gradient_stress ? "zeroGradient_stress" : "traction_free") << '\n';
+        std::cout << "pressure_convention: "
+                  << (time_options.isothermal_modified_pressure ? "modified" : "mechanical") << '\n';
+        const auto pressure = solver.pressure_linear_solver_options();
+        std::cout << "pressure_linear_solver: backend=" << SimpleFluid::to_string(pressure.backend)
+                  << " preconditioner=" << SimpleFluid::to_string(pressure.preconditioner)
+                  << " tolerance=" << pressure.tolerance << '\n';
+        std::cout << "transport_linear_solver: backend=" << SimpleFluid::to_string(linear_options.backend)
+                  << " preconditioner=" << SimpleFluid::to_string(linear_options.preconditioner) << '\n';
+    }
+    const char* diagnostics_prefix=std::getenv("SIMPLEFLUID_PITZ_DIAGNOSTICS_PREFIX");
+    solver.enable_diagnostic_history(diagnostics_prefix != nullptr);
+    const bool diagnostic_only=environment_boolean("SIMPLEFLUID_PITZ_DIAGNOSTIC_ONLY",false);
+    const int diagnostics_interval=positive_environment_integer("SIMPLEFLUID_PITZ_DIAGNOSTICS_INTERVAL",10);
+    SimpleFluid::SolverDiagnosticsOptions diagnostic_options;
+    diagnostic_options.include_cell_data=environment_boolean("SIMPLEFLUID_PITZ_DIAGNOSTIC_FIELDS",false);
+    diagnostic_options.include_face_data=diagnostic_options.include_cell_data;
+    if(const char* text=std::getenv("SIMPLEFLUID_PITZ_DIAGNOSTIC_COEFFICIENT_DT"))
+    {
+        size_t used=0;const double value=std::stod(text,&used);
+        if(used!=std::string(text).size() || !std::isfinite(value) || value<0)
+            throw std::invalid_argument("Diagnostic coefficient dt must be finite and nonnegative");
+        diagnostic_options.pressure_coefficient_time_step=value;
+    }
+    if(diagnostic_only && (!diagnostics_prefix || !std::getenv("SIMPLEFLUID_PITZ_REPLAY_PREFIX")))
+        throw std::invalid_argument("Diagnostic-only mode requires a replay and diagnostics output prefix");
+    auto write_diagnostics=[&]
+    {
+        if(!diagnostics_prefix)return;
+        const auto result=solver.evaluate_diagnostics(diagnostic_options);
+        SimpleFluid::diagnostic_output::write(solver.velocity().mesh(),result,
+            std::string(diagnostics_prefix)+"_step"+std::to_string(solver.step_index()));
+    };
+    write_diagnostics();
+    if(diagnostic_only)return EXIT_SUCCESS;
     bool steady_state_reached = false;
     std::optional<std::string> steady_state_failure;
     int rejected_steady_steps = 0;
@@ -651,7 +753,25 @@ int main(int argc, char** argv)
     if (!search_for_steady_state)
     {
         SimpleFluid::ProgressStream progress(std::cout);
-        solver.run(steps, progress);
+        if(!diagnostics_prefix)solver.run(steps, progress);
+        else
+        {
+            std::ofstream step_history;
+            if(rank==0)
+            {
+                step_history.open(std::string(diagnostics_prefix)+"_step_history.csv");
+                step_history<<std::setprecision(17)<<"step,time_since_replay_s,dt_s,k_clipped_cells,k_maximum_clip_m2_s2,k_integrated_clip_m5_s2,epsilon_clipped_cells,epsilon_maximum_clip_m2_s3,epsilon_integrated_clip_m5_s3\n";
+            }
+            for(int step=0;step<steps;++step)
+            {
+                solver.run(1,progress);
+                const auto clipping=turbulence.clipping_statistics_by_field();
+                if(rank==0)step_history<<solver.step_index()<<','<<solver.time()<<','<<solver.time_step()<<','
+                    <<clipping.k.count<<','<<clipping.k.max_correction<<','<<clipping.k.volume_integral<<','
+                    <<clipping.secondary.count<<','<<clipping.secondary.max_correction<<','<<clipping.secondary.volume_integral<<'\n';
+                if(solver.step_index()%diagnostics_interval==0 || step+1==steps)write_diagnostics();
+            }
+        }
     }
     else
     {
@@ -775,6 +895,7 @@ int main(int argc, char** argv)
                         static_cast<SimpleFluid::real_t>(update_rates.turbulence)},
                     solver_converged, steady_sample_eligible);
             final_steady_statistics = statistics;
+            if(solver.step_index()%diagnostics_interval==0)write_diagnostics();
             last_requested_transport_linear_tolerance = requested_transport_linear_tolerance;
             adaptive_transport_linear_options.tolerance =
                 next_requested_transport_linear_tolerance;
@@ -795,6 +916,7 @@ int main(int argc, char** argv)
         }
     }
 
+    if(search_for_steady_state)write_diagnostics();
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_turbulence_fields = true;
     solver.write_parallel_solution_vtu("pitz_daily.vtu", output_options);
@@ -803,7 +925,7 @@ int main(int argc, char** argv)
     if (rank == 0)
     {
         std::cout << "pitzDaily: " << mesh->num_owned_cells() << " rank-zero owned cells, divisor=" << mesh_divisor
-                  << ", steps=" << solver.step_index() << ", t=" << solver.time() << ", MPI ranks=" << comm->getSize()
+                  << ", steps=" << solver.step_index() << ", t=" << solver.time() << ", MPI ranks=" << comm->getSize() << ", mesh_multiplier=" << mesh_multiplier
                   << '\n';
         if (search_for_steady_state)
         {

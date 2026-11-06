@@ -71,6 +71,13 @@ public:
     TemperatureDiffusionEquation(SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions);
 
     void refresh_boundary_cache();
+    FVM::TransportSystem<Pack> assemble_steady_physical(const field_type& temperature,
+        const face_flux_field_type& flux, scalar_type time_step, const material_type& material,
+        const source_type& source, FVM::NonOrthogonalTreatment treatment,
+        const field_type* conductivity = nullptr, const boundary_cache_type* boundary_conductivity = nullptr,
+        FVM::FaceCoefficientInterpolation interpolation = FVM::FaceCoefficientInterpolation::Harmonic,
+        const field_type* transport_density = nullptr) const;
+
 
     /** Replace per-face outward heat fluxes [W/m^2] for physical advances.
      * Cached batches override their temperature/convection patch conditions;
@@ -201,6 +208,7 @@ private:
     ConvectionBoundaryMap d_convection_boundaries;
     SP<const boundary_cache_type> d_boundary_heat_flux;
     bool d_has_boundary_heat_flux = false;
+    bool d_diagnostic_steady = false;
     mutable scalar_type d_last_prescribed_boundary_power{};
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool d_cached_transport_graph_supports_non_orthogonal_correction = false;

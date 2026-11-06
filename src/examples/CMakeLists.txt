@@ -110,6 +110,12 @@ if(BUILD_TESTING)
       LABELS "verification;integration"
       TIMEOUT 30)
     add_test(
+      NAME pitz_daily_evidence_collection
+      COMMAND "${Python3_EXECUTABLE}"
+              "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_collect_evidence.py")
+    set_tests_properties(pitz_daily_evidence_collection PROPERTIES
+      LABELS "verification;integration" TIMEOUT 30)
+    add_test(
       NAME openfoam_verification_comparator
       COMMAND "${Python3_EXECUTABLE}"
               "${PROJECT_SOURCE_DIR}/verification/openfoam/test_compare_verification.py")
@@ -260,4 +266,24 @@ if(BUILD_TESTING)
     LABELS "verification;turbulence;sas;small_fixture" TIMEOUT 60)
   simplefluid_add_mpi_test(NAME SSTSASActivation_2procs TARGET sst_sas_activation
     PROCS 2 LABELS "mpi;turbulence;sas;small_fixture" TIMEOUT 60)
+endif()
+
+if(BUILD_TESTING)
+  add_executable(testPitzDailyReplay testPitzDailyReplay.cc)
+  add_test(NAME pitz_daily_replay_input COMMAND testPitzDailyReplay)
+  set_tests_properties(pitz_daily_replay_input PROPERTIES LABELS "verification;diagnostics" TIMEOUT 30)
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE)
+  add_test(NAME pitz_daily_diagnostic_authentication
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_native_diagnostics.py")
+  set_tests_properties(pitz_daily_diagnostic_authentication PROPERTIES LABELS "verification;diagnostics" TIMEOUT 30)
+endif()
+
+if(BUILD_TESTING AND Python3_EXECUTABLE AND MPIEXEC_EXECUTABLE)
+  add_test(NAME pitz_daily_native_replay_integration
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_native_replay.py"
+      --executable "$<TARGET_FILE:pitz_daily>" --mpiexec "${MPIEXEC_EXECUTABLE}")
+  set_tests_properties(pitz_daily_native_replay_integration PROPERTIES
+    LABELS "verification;diagnostics;mpi" TIMEOUT 180 PROCESSORS 3)
 endif()

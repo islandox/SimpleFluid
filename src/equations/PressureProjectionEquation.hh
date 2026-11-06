@@ -231,6 +231,13 @@ private:
     FVM::CellFluxBalanceCache<Pack, mesh_type> d_flux_balance_cache;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_pressure_matrix;
     mutable Teuchos::RCP<typename Pack::vector_type> d_cached_rhs;
+    Teuchos::RCP<typename Pack::vector_type> d_non_orthogonal_base_rhs;
+    Teuchos::RCP<typename Pack::vector_type> d_non_orthogonal_residual;
+    face_flux_field_type d_non_orthogonal_flux;
+    FVM::CellFluxBalanceCache<Pack, mesh_type> d_non_orthogonal_balance;
+    std::shared_ptr<const FVM::detail::PressureFaceTopology<Pack, mesh_type>> d_non_orthogonal_topology;
+    FVM::detail::PressureFaceMetrics<Pack> d_non_orthogonal_metrics;
+    bool d_non_orthogonal_geometry_stale = true;
     mutable bool d_matrix_values_stale = true;
     mutable std::vector<std::string> d_matrix_fixed_boundary_flux_names;
     real_t d_rhs_norm_reference = {};

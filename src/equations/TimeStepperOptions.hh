@@ -54,6 +54,19 @@ struct TimeStepperOptions
     /** False for pseudo-transient steady searches; active SAS requires true. */
     bool physical_time = true;
 
+    /** Isothermal RANS pressure is p_mechanical + 2*rho*k/3 when true.
+     * Boundary conditions and output pressure use this same variable. The
+     * explicit isotropic turbulent stress is then already in its gradient.
+     * The default preserves the existing mechanical-pressure convention.
+     */
+    bool isothermal_modified_pressure = false;
+
+    /** Mapped physical momentum: retain transpose stress on velocity Neumann
+     * faces, projecting the face gradient to zero normal derivative, as in
+     * OpenFOAM zeroGradient. False preserves traction-free legacy semantics.
+     */
+    bool velocity_neumann_zero_gradient_stress = false;
+
     vec3<real_t> gravity_vector() const noexcept
     {
         return {gravity_x, gravity_y, gravity_z};

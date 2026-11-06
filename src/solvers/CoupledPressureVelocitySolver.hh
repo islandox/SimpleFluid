@@ -703,6 +703,7 @@ private:
     mutable std::vector<Teuchos::RCP<const operator_type>> d_observed_operators;
     void observe_storage() const;
     mutable StaticGeometryCache d_static_geometry;
+    mutable std::array<Teuchos::RCP<matrix_type>, 3> d_projected_gradient_interpolation;
     mutable detail::CoupledSchurWorkspace<Pack> d_schur_workspace;
     mutable std::array<Teuchos::RCP<matrix_type>, 3> d_gradient_stabilization_products;
     mutable const graph_type* d_cached_momentum_graph = nullptr;

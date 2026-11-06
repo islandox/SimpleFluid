@@ -129,6 +129,7 @@ public:
      * An active external timestep controller must perform coupled advancement.
      */
     void step() override;
+    SolverDiagnosticsResult<scalar_type> evaluate_diagnostics(const SolverDiagnosticsOptions& options = {}) const override;
 
     const field_type& temperature() const noexcept;
     field_type& temperature() noexcept;
@@ -176,7 +177,7 @@ protected:
 private:
     friend class MultiphysicsSolverCoupler<Pack>;
 
-    using base_type::begin_step;
+    void begin_step();
     using base_type::clear_volume_continuity_target;
     using base_type::collect_scalar_field;
     using base_type::coupled_pressure_velocity_solver;
@@ -186,7 +187,18 @@ private:
     using base_type::d_problem;
     using base_type::d_step_index;
     using base_type::d_time;
-    using base_type::finish_step;
+    void finish_step();
+    struct DiagnosticALEState {
+        int accepted_step = -1;
+        std::optional<canonical_velocity_boundary_cache_type> velocity_boundary;
+        BoundaryConditionSet boundaries;
+        scalar_type time_step{};
+        std::vector<scalar_type> old_volume, new_volume, mesh_flux, continuity_target;
+        std::vector<std::array<scalar_type,3>> old_velocity;
+        std::vector<scalar_type> old_temperature, old_density, old_cp, new_density, total_power;
+    };
+    std::optional<DiagnosticALEState> d_pending_diagnostic_ale, d_accepted_diagnostic_ale;
+    DiagnosticALEState d_diagnostic_old_state;
     using base_type::fluid_solution_writer;
     using base_type::legacy_old_face_fluxes;
     using base_type::legacy_predictor_pressure_gradient;

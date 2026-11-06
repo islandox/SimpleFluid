@@ -325,7 +325,7 @@ simplefluid_add_mpi_test(
     NAME IncompressibleIsothermalSolver_2procs
     TARGET testIncompressibleIsothermalSolver
     PROCS 2
-    ARGS "--gtest_filter=IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonThroughPisoAndCoupledKrylov:IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonOnNativeMeshHandle"
+    ARGS "--gtest_filter=IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonThroughPisoAndCoupledKrylov:IncompressibleIsothermalSolverTest.AdvancesStandardKEpsilonOnNativeMeshHandle:IncompressibleIsothermalSolverTest.ModifiedPressureAbsorbsNonuniformK:IncompressibleIsothermalSolverTest.ZeroGradientOutletStressMatchesManufacturedShear"
     LABELS "mpi;turbulence;pressure_velocity;isothermal"
     TIMEOUT 120)
 
