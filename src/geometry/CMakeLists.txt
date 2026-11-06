@@ -47,6 +47,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/PooledCellPoints.cc
     mesh/AMR/ContactPointWire.cc
     mesh/AMR/ContactPointFacts.cc
+    mesh/AMR/ContactOwnerUsage.cc
     mesh/AMR/ContactPointFans.cc
     mesh/AMR/ContactPointGroups.cc
     mesh/AMR/IncidenceOwnerRows.cc
@@ -197,6 +198,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/PooledCellPoints.cc
         mesh/AMR/ContactPointWire.cc
         mesh/AMR/ContactPointFacts.cc
+        mesh/AMR/ContactOwnerUsage.cc
         mesh/AMR/ContactPointFans.cc
         mesh/AMR/ContactPointGroups.cc
         mesh/AMR/IncidenceOwnerRows.cc
@@ -304,6 +306,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/PooledCellPoints.cc
     mesh/AMR/ContactPointWire.cc
     mesh/AMR/ContactPointFacts.cc
+    mesh/AMR/ContactOwnerUsage.cc
     mesh/AMR/ContactPointFans.cc
     mesh/AMR/ContactPointGroups.cc
     mesh/AMR/IncidenceOwnerRows.cc
