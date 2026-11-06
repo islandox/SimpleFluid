@@ -257,6 +257,75 @@ TEST(CompleteSupportOverlay, FiniteTranslatedImageRejectsCollapsedAreaWithNonzer
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), original_flags);
 }
 
+TEST(CompleteSupportOverlay, SparseCoverageMetadataFollowsActualIntersections)
+{
+    std::size_t previous_bytes = 0;
+    for (const std::size_t pairs : {16u, 32u})
+    {
+        std::vector<D::SupportOccurrence> entries;
+        for (std::size_t pair = 0; pair < pairs; ++pair)
+        {
+            const auto face = rectangle(double(pair), 0, double(pair + 1), 1);
+            entries.push_back(occurrence(2 * pair, face, 1));
+            entries.push_back(occurrence(2 * pair + 1, face, -1));
+        }
+        D::Budget metadata{ample};
+        std::size_t emitted = 0;
+        auto emit = [&](std::size_t first, std::optional<std::size_t> second, D::SupportFace face)
+        {
+            EXPECT_EQ(first, 2 * emitted);
+            EXPECT_EQ(second, std::optional<std::size_t>(2 * emitted + 1));
+            EXPECT_DOUBLE_EQ(face->area().as_double(), 1);
+            ++emitted;
+        };
+        auto charge = [&](std::size_t bytes) { metadata.add(bytes); };
+        // This observation isolates coverage/lookup metadata. The existing
+        // production callback admits output geometry separately.
+        auto charge_face = [](const D::SupportFace&) {};
+        D::overlay_complete_support(entries, ample, emit, charge, charge_face);
+        EXPECT_EQ(emitted, pairs);
+        EXPECT_LT(metadata.used, entries.size() * entries.size() * sizeof(D::SupportFace));
+        if (previous_bytes)
+            EXPECT_LE(metadata.used, 2 * previous_bytes);
+        previous_bytes = metadata.used;
+    }
+}
+
+TEST(CompleteSupportOverlay, CoverageGrowthHasExactAdmissionAndReusableInputs)
+{
+    constexpr std::size_t pieces = 16;
+    std::vector<D::SupportOccurrence> entries{occurrence(0, rectangle(0, 0, 1, 1), 1)};
+    for (std::size_t piece = 0; piece < pieces; ++piece)
+        entries.push_back(occurrence(piece + 1,
+            rectangle(double(piece) / pieces, 0, double(piece + 1) / pieces, 1), -1));
+    const auto before = geometry_snapshot(entries);
+    auto run = [&](std::size_t remaining)
+    {
+        D::Budget metadata{remaining};
+        std::size_t emitted = 0;
+        auto emit = [&](std::size_t first, std::optional<std::size_t> second, D::SupportFace face)
+        {
+            EXPECT_EQ(first, 0u);
+            EXPECT_EQ(second, std::optional<std::size_t>(emitted + 1));
+            EXPECT_DOUBLE_EQ(face->area().as_double(), 1. / pieces);
+            ++emitted;
+        };
+        auto charge = [&](std::size_t bytes) { metadata.add(bytes); };
+        auto charge_face = [](const D::SupportFace&) {};
+        // Overall pair-work admission and remaining scratch residency are
+        // independent, as in a caller already retaining source geometry.
+        D::overlay_complete_support(entries, ample, emit, charge, charge_face);
+        EXPECT_EQ(emitted, pieces);
+        return metadata.used;
+    };
+    const auto required = run(ample);
+    ASSERT_GT(required, 0u);
+    EXPECT_EQ(run(required), required);
+    EXPECT_THROW((void) run(required - 1), std::invalid_argument);
+    EXPECT_EQ(geometry_snapshot(entries), before);
+    EXPECT_EQ(run(required), required);
+}
+
 TEST(CompleteSupportOverlay, ExteriorOrderAndAdmissionFailureLeaveInputsReusable)
 {
     std::vector entries{occurrence(9, rectangle(1, 0, 2, 1), 1), occurrence(2, rectangle(0, 0, 1, 1), 1)};

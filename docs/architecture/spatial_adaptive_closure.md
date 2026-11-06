@@ -118,6 +118,12 @@ the established invalidation order. Dirty line recipes are checked against the
 completed real-query results, and unchanged certificates require the same full
 dependency proof. Numerically exceptional neighborhoods keep explicit results.
 
+Complete-support coverage stores handles only for actual intersections. Each
+row grows under admission that includes simultaneous old and new allocations;
+exterior supports allocate no coverage rows. The unchanged pair enumeration
+retains its conservative cardinality/work ceiling independently of this sparse
+storage. Constructor-replay construction envelopes remain separately admitted;
+removing coverage reservation alone does not establish bounded candidate search.
 A changed support is reconstructed from its complete, authenticated owner
 membership. Dirty supports are fetched in byte-bounded pages and preserve member
 arrival order. During replay, each affected tile first retains compact line slots, physical

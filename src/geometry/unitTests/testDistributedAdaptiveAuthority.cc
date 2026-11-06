@@ -164,7 +164,7 @@ TEST(DistributedAdaptiveAuthority, CompleteParallelSupportGroupsPreserveGeometry
     EXPECT_EQ(permuted_nodes, baseline_nodes);
     EXPECT_EQ(plane_input_snapshot(leaves), reversed);
 }
-TEST(DistributedAdaptiveAuthority, IndependentSupportsFitButOneCompleteSupportExceedsOverlapBudget)
+TEST(DistributedAdaptiveAuthority, SparseCompleteSupportFitsWithoutQuadraticCoverageReservation)
 {
     namespace AMR = ::SimpleFluid::Meshes::AMR;
     const auto comm = Tpetra::getDefaultComm();
@@ -175,9 +175,12 @@ TEST(DistributedAdaptiveAuthority, IndependentSupportsFitButOneCompleteSupportEx
     EXPECT_EQ(stats.global_faces, 256);
     EXPECT_EQ(tiles.size(), independent.size() / 2);
     auto one_support = complete_planes(32, 8, true);
-    // The same 512 occurrences in one complete support require at least
-    // 512^2 shared-pointer slots, before its decoded geometry and replies.
-    EXPECT_THROW(AMR::decide_adaptive_tiles(one_support, comm, budget, 512), std::invalid_argument);
+    // The same 512 occurrences have only 256 actual overlaps. Their coverage
+    // storage follows those outputs instead of reserving 512^2 pointers.
+    const auto joined = AMR::decide_adaptive_tiles(one_support, comm, budget, 512, &stats);
+    EXPECT_EQ(stats.global_faces, 256);
+    EXPECT_EQ(joined.size(), one_support.size() / 2);
+    EXPECT_THROW(AMR::decide_adaptive_tiles(one_support, comm, 1024, 512), std::invalid_argument);
 }
 TEST(DistributedAdaptiveAuthority, TileLimitAccumulatesAcrossCompleteSupportGroups)
 {
