@@ -281,9 +281,27 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
 endif()
 
 if(BUILD_TESTING AND Python3_EXECUTABLE AND MPIEXEC_EXECUTABLE)
-  add_test(NAME pitz_daily_native_replay_integration
-    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_native_replay.py"
-      --executable "$<TARGET_FILE:pitz_daily>" --mpiexec "${MPIEXEC_EXECUTABLE}")
-  set_tests_properties(pitz_daily_native_replay_integration PROPERTIES
-    LABELS "verification;diagnostics;mpi" TIMEOUT 180 PROCESSORS 3)
+  set(_pitz_replay_procs 2)
+  foreach(_pitz_replay_cap IN ITEMS SIMPLEFLUID_MAX_TEST_PROCS MPIEXEC_MAX_NUMPROCS)
+    if(${_pitz_replay_cap} GREATER 0 AND ${_pitz_replay_cap} LESS _pitz_replay_procs)
+      set(_pitz_replay_procs "${${_pitz_replay_cap}}")
+    endif()
+  endforeach()
+  if(_pitz_replay_procs GREATER_EQUAL 2)
+    set(_pitz_replay_launcher_flags "--numproc-flag=${MPIEXEC_NUMPROC_FLAG}")
+    foreach(_pitz_replay_flag IN LISTS MPIEXEC_PREFLAGS)
+      list(APPEND _pitz_replay_launcher_flags "--preflag=${_pitz_replay_flag}")
+    endforeach()
+    foreach(_pitz_replay_flag IN LISTS MPIEXEC_POSTFLAGS)
+      list(APPEND _pitz_replay_launcher_flags "--postflag=${_pitz_replay_flag}")
+    endforeach()
+    add_test(NAME pitz_daily_native_replay_integration
+      COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_native_replay.py"
+        --executable "$<TARGET_FILE:pitz_daily>" --mpiexec "${MPIEXEC_EXECUTABLE}"
+        --parallel-procs "${_pitz_replay_procs}" ${_pitz_replay_launcher_flags})
+    set_tests_properties(pitz_daily_native_replay_integration PROPERTIES
+      LABELS "verification;diagnostics;mpi" TIMEOUT 180 PROCESSORS "${_pitz_replay_procs}")
+  else()
+    message(STATUS "Skipping pitz_daily_native_replay_integration: fewer than 2 MPI processes available")
+  endif()
 endif()

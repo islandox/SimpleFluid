@@ -117,7 +117,9 @@ auto FluidSolver<Pack>::evaluate_flow_diagnostics(const SolverDiagnosticsOptions
             const auto target=retained_target ? retained_target->at(i) : volume_continuity_target() ? volume_continuity_target()->integrated_rate(lid) : scalar_type{};
             residual[i]=FVM::detail::stored_cell_flux_balance(*d_mesh,flux,lid)-target;
             scale[i]=std::abs(target);
-            for (const auto face:d_mesh->faces(lid)) scale[i]+=std::abs(flux.value(face));
+            // An owned cell can include faces owned by another rank.
+            for (const auto face : d_mesh->faces(lid))
+                scale[i] += std::abs(flux.local_value(face));
         }
         return FVM::integrated_residual_report<scalar_type>(residual,scale,volumes,*comm,options.include_cell_data);
     };
