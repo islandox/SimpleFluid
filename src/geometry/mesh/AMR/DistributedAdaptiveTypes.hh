@@ -14,6 +14,7 @@
 
 namespace SimpleFluid::Meshes::AMR
 {
+class AdaptiveLeafLayout;
 using AdaptiveBytes = std::vector<char>;
 /** Canonical typed encoding. Hashes route messages; complete bytes prove identity. */
 [[nodiscard]] AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey&);
@@ -150,6 +151,9 @@ struct AdaptiveNativeDraft
     std::uint64_t global_cells = 0;
     std::uint64_t global_faces = 0, global_nodes = 0;
     std::vector<AdaptiveBytes> family_references;
+    /** Exact immutable owner-local source. Draft rows may be expanded or
+     * repacked; their numerical ordinals do not redefine active membership. */
+    std::shared_ptr<const AdaptiveLeafLayout> source_layout;
 };
 [[nodiscard]] AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf&);
 namespace adaptive_detail

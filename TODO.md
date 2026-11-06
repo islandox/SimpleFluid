@@ -658,6 +658,13 @@ See [scope and limits](docs/architecture/general_amr.md#qualification-status) an
 Bounded bootstrap/catalog and seam costs remain; scalable planner storage/RSS,
 sparse ALE and physical-flow qualification are separate gates.
 
+- [ ] Extend the shared owner-local `AdaptiveLeafLayout` with persistent
+      topology pages/candidate overlays and certified mixed-level contact and
+      subface queries. Native publication and geometry snapshots share its exact
+      identity; the existing contact incidence backend and per-cell geometry
+      binding metadata still need separate storage work. Preserve complete
+      contact proofs and budget/lifetime accounting while removing duplication.
+
 ### Stage 7 — General VoF and flow qualification
 
 `SweptPartition` remains the default; immediate work targets shared numerical

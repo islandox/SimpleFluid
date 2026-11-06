@@ -420,7 +420,8 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(
                 throw std::invalid_argument("Publication snapshot source is not its authenticated full row.");
     }
     const auto controls = geometry_construction_controls();
-    if (previous && (previous->mode_ != mode || !previous->stable_controls_ || !controls.supported ||
+    if (previous && (!previous->matches_layout(hierarchy.leaf_layout()) || previous->mode_ != mode ||
+                        !previous->stable_controls_ || !controls.supported ||
                         previous->controls_ != controls))
         previous.reset();
     // A replacement keeps every previously published binding. Catalog order of
@@ -487,6 +488,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(
         default:
             throw std::invalid_argument("Unknown geometry snapshot arithmetic mode.");
     }
+    result.source_layout_ = hierarchy.leaf_layout();
     geometry_snapshot_detail::reserve_checked(result.bindings_, expanded.size(), budget);
     for (const auto* leaf : expanded)
     {

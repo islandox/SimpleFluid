@@ -21,6 +21,7 @@ struct Builder;
 struct PublicationSource;
 } // namespace geometry_snapshot_detail
 class DistributedAdaptiveHierarchy;
+class AdaptiveLeafLayout;
 namespace adaptive_detail
 {
 class GeometrySnapshotAccess;
@@ -70,6 +71,13 @@ class AdaptiveGeometrySnapshot : public std::enable_shared_from_this<AdaptiveGeo
 public:
     using OrdinaryCatalog = PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>;
     using BoundedCatalog = PLIC::CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
+    /** Exact owner-local active layout, independent of catalog selection and
+     * numerical ordinals. A weak identity does not make geometry own topology. */
+    [[nodiscard]] bool matches_layout(const std::shared_ptr<const AdaptiveLeafLayout>& layout) const noexcept
+    {
+        return layout && source_layout_.lock() == layout && !source_layout_.owner_before(layout) &&
+               !layout.owner_before(source_layout_);
+    }
     [[nodiscard]] const auto& ordinary_catalog() const noexcept { return ordinary_; }
     [[nodiscard]] const auto& finite_ordinary_catalog() const noexcept { return finite_ordinary_; }
     [[nodiscard]] const auto& bounded_catalog() const noexcept { return bounded_; }
@@ -96,6 +104,7 @@ private:
     friend class adaptive_detail::GeometrySnapshotAccess;
     friend struct geometry_snapshot_detail::Builder;
     AdaptiveGeometrySnapshot() = default;
+    std::weak_ptr<const AdaptiveLeafLayout> source_layout_;
     std::shared_ptr<const OrdinaryCatalog> ordinary_, finite_ordinary_;
     std::shared_ptr<const BoundedCatalog> bounded_;
     std::vector<AdaptiveCellMetrics> native_metrics_;

@@ -1,5 +1,7 @@
 /** Hierarchy-level factor order, migration and rejected-closure source oracles. */
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -215,6 +217,10 @@ State migrate_product(const State& source, bool base_split, bool axial_split, un
         destinations.push_back(product_owner(key, shift));
     auto result = source->apply(source->plan_migration(destinations));
     EXPECT_EQ(snapshot(*source), before);
+    if (ownership_changed)
+        EXPECT_NE(result->leaf_layout(), source->leaf_layout());
+    else
+        EXPECT_EQ(result->leaf_layout(), source->leaf_layout());
     EXPECT_EQ(result->topology_generation(), source->topology_generation());
     EXPECT_EQ(result->partition_generation(), source->partition_generation() + std::uint64_t(ownership_changed));
     if (!ownership_changed)
@@ -243,6 +249,111 @@ std::vector<AMR::AdaptiveBytes> product_families(AMR::AdaptiveSplit split, bool 
             split == AMR::AdaptiveSplit::Base ? product_key(1, 0, {}, path) : product_key(1, 0, path, {}), split));
     }
     return result;
+}
+
+TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersion)
+{
+    auto source = product_source();
+    const auto layout = source->leaf_layout();
+    ASSERT_TRUE(layout);
+    EXPECT_EQ(&layout->owned(), &source->owned());
+    for (const auto& [key, leaf] : source->owned())
+    {
+        EXPECT_TRUE(layout->contains(key));
+        EXPECT_EQ(layout->find(key), &leaf);
+    }
+    const auto absent = product_key(999, 0);
+    EXPECT_FALSE(layout->contains(absent));
+    EXPECT_EQ(layout->find(absent), nullptr);
+
+    const auto before = snapshot(*source);
+    auto draft = source->native_draft();
+    EXPECT_EQ(draft.source_layout, layout);
+    std::vector<const AMR::AdaptiveLeaf*> rows;
+    for (const auto& [key, leaf] : source->owned())
+        rows.push_back(&leaf);
+    std::size_t used = 0;
+    auto geometry = source->geometry_snapshot(
+        rows, ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024);
+    EXPECT_TRUE(geometry->matches_layout(layout));
+    auto independent = product_source();
+    EXPECT_NE(independent->leaf_layout(), layout);
+    EXPECT_FALSE(geometry->matches_layout(independent->leaf_layout()));
+    {
+        const std::shared_ptr<const AMR::AdaptiveLeafLayout> alias(layout, independent->leaf_layout().get());
+        EXPECT_FALSE(geometry->matches_layout(alias));
+    }
+    auto foreign_draft = draft;
+    foreign_draft.source_layout = independent->leaf_layout();
+    P::GeometryAllocationLedger ordinary_owners, bounded_owners;
+    std::size_t rejected_used = 0;
+    EXPECT_THROW((void) AMR::adaptive_detail::GeometrySnapshotAccess::native_draft(*source, foreign_draft, {},
+                     source->observation(), ordinary, AMR::GeometrySnapshotPurpose::State, rejected_used,
+                     16 * 1024 * 1024, ordinary_owners, bounded_owners),
+        std::invalid_argument);
+    {
+        const std::shared_ptr<const AMR::AdaptiveLeafLayout> nonowning(layout.get(), [](const auto*) {});
+        EXPECT_FALSE(geometry->matches_layout(nonowning));
+        auto nonowning_draft = draft;
+        nonowning_draft.source_layout = nonowning;
+        rejected_used = 0;
+        EXPECT_THROW((void) AMR::adaptive_detail::GeometrySnapshotAccess::native_draft(*source, nonowning_draft, {},
+                         source->observation(), ordinary, AMR::GeometrySnapshotPurpose::State, rejected_used,
+                         16 * 1024 * 1024, ordinary_owners, bounded_owners),
+            std::invalid_argument);
+    }
+    auto native = AMR::assemble_adaptive_native(*source, source->configuration_descriptor());
+    auto bound = source->with_partition(native.partition, native.mesh->owned_cell_map());
+    EXPECT_EQ(bound->leaf_layout(), layout);
+    EXPECT_EQ(&bound->owned(), &source->owned());
+    EXPECT_TRUE(geometry->matches_layout(bound->leaf_layout()));
+    std::size_t rebound_used = 0;
+    EXPECT_EQ(bound->geometry_snapshot(
+                  rows, ordinary, AMR::GeometrySnapshotPurpose::State, rebound_used, 16 * 1024 * 1024),
+        geometry);
+
+    auto unchanged = source->apply(source->plan_adaptation({}));
+    EXPECT_EQ(unchanged->leaf_layout(), layout);
+    auto refined = adapt(source, product_marks(*source, AMR::AdaptiveSplit::Base));
+    EXPECT_NE(refined->leaf_layout(), layout);
+    EXPECT_FALSE(geometry->matches_layout(refined->leaf_layout()));
+    source.reset();
+    independent.reset();
+    EXPECT_EQ(&layout->owned(), &unchanged->owned());
+    EXPECT_EQ(snapshot(*unchanged), before);
+    unchanged.reset();
+    bound.reset();
+    native = {};
+    draft.source_layout.reset();
+    foreign_draft.source_layout.reset();
+    EXPECT_TRUE(geometry->matches_layout(layout));
+    std::vector<AMR::AdaptiveBytes> retained_leaves;
+    for (const auto& [key, leaf] : layout->owned())
+    {
+        EXPECT_EQ(layout->find(key), &leaf);
+        retained_leaves.push_back(AMR::encode_adaptive_leaf(leaf));
+    }
+    EXPECT_EQ(retained_leaves, before.leaves);
+}
+
+TEST(IncrementalAdaptiveHierarchy, GeometrySnapshotDoesNotRetainLeafLayout)
+{
+    std::weak_ptr<const AMR::AdaptiveLeafLayout> weak_layout;
+    std::shared_ptr<const AMR::AdaptiveGeometrySnapshot> geometry;
+    {
+        const auto root = product_source();
+        const auto source = adapt(root, product_marks(*root, AMR::AdaptiveSplit::Base));
+        weak_layout = source->leaf_layout();
+        std::vector<const AMR::AdaptiveLeaf*> rows;
+        for (const auto& [key, leaf] : source->owned())
+            rows.push_back(&leaf);
+        std::size_t used = 0;
+        geometry = source->geometry_snapshot(
+            rows, ordinary, AMR::GeometrySnapshotPurpose::State, used, 16 * 1024 * 1024);
+        EXPECT_FALSE(weak_layout.expired());
+    }
+    EXPECT_TRUE(weak_layout.expired());
+    EXPECT_GT(geometry->retained_bytes(), 0u);
 }
 
 TEST(IncrementalAdaptiveHierarchy, BothProductFactorOrdersMigrateAndCoarsenIndependently)

@@ -1150,6 +1150,35 @@ coarsening, closure, directory lookup, migration and native publication operate
 on detached owner-local records and explicit bounded messages. They do not call
 the legacy global `adapt` path. Existing Cartesian, extruded, local-product,
 polyhedral and Mixed APIs remain bounded bootstrap/reference implementations.
+
+The owner-local active leaf map is an immutable `AdaptiveLeafLayout`, exposed
+through `DistributedAdaptiveHierarchy::leaf_layout()`. The hierarchy's `owned()`
+view and layout membership queries refer to the same map and leaf objects;
+there is no second key, revision or lookup catalog. Leaves continue to carry
+typed ancestry, parent-family references and immutable native recipes. This
+layout identifies an owner-local selection, not a global forest or numerical
+GID ordering. Adaptation and ownership migration publish a new layout; binding
+a native partition or applying a no-op plan reuses the existing layout.
+
+`AdaptiveNativeDraft::source_layout` pins that exact source while publication
+prepares numerical cells, canonical tiles and ghost indexing. Geometry snapshot
+construction records the same layout as a weak identity: geometry roots retain
+their own immutable sources without retaining the hierarchy, contact session or
+active topology. `matches_layout()` checks exact shared ownership identity,
+not equal counts, keys or extents. Publication-derived geometry rejects a draft
+from another layout before inspecting its rows; the existing per-row recipe,
+revision, geometry epoch and arithmetic checks still apply. Historical layout
+pins remain usable after the hierarchy is released or a candidate is accepted.
+
+This reuses the typed topology/geometry separation above the existing native
+block providers. It does not turn a mixed-level forest into a rectilinear tensor
+product, change native metrics or represented PLIC geometry, or establish a
+new logical-contact capability. Complete support/edge incidence remains the
+contact authority. Persistent topology pages, candidate overlays, procedural
+mixed-level contact/subface traversal and compaction of regular geometry
+bindings remain separate extensions; current real edits still construct a new
+owner-local map. Canonical fine-face flux and signed restriction are unchanged.
+
 The hierarchy retains its accepted spatial contact session and forks a private
 candidate for adaptation or migration. Sparse owner/revision changes, dirty
 support reconstruction and layered line replay update contact rows before

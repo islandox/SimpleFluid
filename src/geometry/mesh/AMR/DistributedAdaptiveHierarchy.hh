@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
+#include "geometry/mesh/AMR/AdaptiveLeafLayout.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
@@ -45,6 +46,8 @@ public:
     DistributedAdaptiveHierarchy(std::vector<AdaptiveLeaf> owned, std::vector<AdaptiveFamily> families,
         std::shared_ptr<const AdaptiveProviderKernel> kernel, Teuchos::RCP<const Teuchos::Comm<int>> communicator,
         DistributedAdaptiveOptions options = {});
+    /** Share the authoritative owner-local leaves independently of hierarchy lifetime. */
+    [[nodiscard]] const std::shared_ptr<const AdaptiveLeafLayout>& leaf_layout() const noexcept;
     [[nodiscard]] const std::map<AdaptiveCellKey, AdaptiveLeaf>& owned() const noexcept;
     [[nodiscard]] const std::map<AdaptiveBytes, AdaptiveFamily>& families() const noexcept;
     /** Capacity-based retained allocation estimate, shared components counted
