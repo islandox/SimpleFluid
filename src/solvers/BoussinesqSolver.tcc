@@ -836,17 +836,43 @@ void BoussinesqSolver<Pack>::advance_temperature_transport(
 {
     const auto phase_timing = this->d_solver_timings.scope(SolverPhase::Temperature);
     LinearSolveStatistics temperature_statistics;
-    if(this->diagnostic_history_enabled() && transport.ale) {
-        const auto n=d_mesh->num_owned_cells();
+    if (this->diagnostic_history_enabled() && transport.ale)
+    {
+        const auto n = d_mesh->num_owned_cells();
         d_diagnostic_old_state.new_density.resize(n);
         d_diagnostic_old_state.total_power.resize(n);
-        for(size_t i=0;i<n;++i) {
-            const auto c=static_cast<local_ordinal_type>(i);
-            if(transport.liquid_mass_inventory) d_diagnostic_old_state.old_density[i]=transport.liquid_mass_inventory->value(c);
-            if(transport.old_heat_capacity) d_diagnostic_old_state.old_cp[i]=transport.old_heat_capacity->value(c);
-            d_diagnostic_old_state.total_power[i]=stored_temperature_sources().total_power_density(c);
-            if(transport.power_sink) d_diagnostic_old_state.total_power[i]+=-transport.power_sink->value(c)+transport.power_release->value(c);
-            d_diagnostic_old_state.new_density[i]=transport.temperature_density ? transport.temperature_density->value(c) : stored_material_properties().density.value(c);
+        const auto& density = transport.temperature_density
+            ? *transport.temperature_density : stored_material_properties().density;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const auto c = static_cast<local_ordinal_type>(i);
+            d_diagnostic_old_state.total_power[i] = stored_temperature_sources().total_power_density(c);
+            d_diagnostic_old_state.new_density[i] = density.value(c);
+        }
+        if (transport.liquid_mass_inventory)
+        {
+            for (size_t i = 0; i < n; ++i)
+                d_diagnostic_old_state.old_density[i] =
+                    transport.liquid_mass_inventory->value(static_cast<local_ordinal_type>(i));
+        }
+        if (transport.old_heat_capacity)
+        {
+            for (size_t i = 0; i < n; ++i)
+                d_diagnostic_old_state.old_cp[i] =
+                    transport.old_heat_capacity->value(static_cast<local_ordinal_type>(i));
+        }
+        // Sink and release are independent: reacting species can release heat without boiling.
+        if (transport.power_sink)
+        {
+            for (size_t i = 0; i < n; ++i)
+                d_diagnostic_old_state.total_power[i] -=
+                    transport.power_sink->value(static_cast<local_ordinal_type>(i));
+        }
+        if (transport.power_release)
+        {
+            for (size_t i = 0; i < n; ++i)
+                d_diagnostic_old_state.total_power[i] +=
+                    transport.power_release->value(static_cast<local_ordinal_type>(i));
         }
     }
     if (physical_transport_enabled())
