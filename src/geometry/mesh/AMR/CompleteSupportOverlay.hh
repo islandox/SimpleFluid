@@ -60,9 +60,14 @@ struct SupportConstructionAdmission
     SupportConstructionBegin begin;
     SupportConstructionEnd end;
 };
+/** Conservative construction envelope for the same represented planar kernel. */
+[[nodiscard]] SIMPLEFLUID_LOCAL std::size_t support_construction_capacity_bound(
+    SupportConstructionKind, const SupportFace&, std::span<const SupportFace>);
 /** Entries are a complete support in legacy arrival order. Geometry has already
  * been translated to its authority image and native containment validated.
- * The caller owns the scoped admission and duplicate canonical-face audit. */
+ * The caller owns the scoped admission and duplicate canonical-face audit.
+ * Admission callbacks preserve arithmetic controls; emit may change controls,
+ * in which case subsequent candidates use exhaustive original ordering. */
 SIMPLEFLUID_LOCAL void overlay_complete_support(std::span<const SupportOccurrence>, std::size_t budget,
     const SupportEmit&, const SupportCharge&, const SupportChargeFace&, const SupportConstructionAdmission* = nullptr);
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

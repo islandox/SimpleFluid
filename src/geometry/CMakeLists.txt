@@ -15,6 +15,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
     mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/SupportCandidateIndex.cc
     mesh/AMR/CompleteLineQuery.cc
     mesh/AMR/PooledLineQuery.cc
     mesh/AMR/PooledLineRegistry.cc
@@ -164,6 +165,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/DistributedAdaptiveContactHalo.cc
         mesh/AMR/DistributedAdaptiveIncidence.cc
         mesh/AMR/CompleteSupportOverlay.cc
+        mesh/AMR/SupportCandidateIndex.cc
         mesh/AMR/CompleteLineQuery.cc
         mesh/AMR/PooledLineQuery.cc
         mesh/AMR/PooledLineRegistry.cc
@@ -233,6 +235,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     # Compensated predicates isolate their rounding mode and restore the
     # caller's environment; prohibit motion across those fenv boundaries.
     set_property(SOURCE PLIC/details/ordinary/Predicates.cc swept_volume/OrdinaryAggregate.cc
+        mesh/AMR/SupportCandidateIndex.cc
         PLIC/CellGeometryView.cc
         mesh/AMR/AdaptiveGeometrySnapshot.cc
         mesh/AMR/CartesianIncidenceSource.cc
@@ -265,6 +268,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
     mesh/AMR/CompleteSupportOverlay.cc
+    mesh/AMR/SupportCandidateIndex.cc
     mesh/AMR/CompleteLineQuery.cc
     mesh/AMR/PooledLineQuery.cc
     mesh/AMR/PooledLineRegistry.cc

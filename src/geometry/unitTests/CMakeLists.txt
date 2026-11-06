@@ -42,6 +42,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testAdaptiveClosureRecords"
       OR TEST_NAME STREQUAL "testSpatialAdaptiveClosure"
       OR TEST_NAME STREQUAL "testCompleteSupportOverlay"
+      OR TEST_NAME STREQUAL "testSupportCandidateIndex"
       OR TEST_NAME STREQUAL "testCompactIncidenceMetadata"
       OR TEST_NAME STREQUAL "testDistributedAdaptiveOwnerOverlay"
       OR TEST_NAME STREQUAL "testIncrementalAdaptiveClosure"

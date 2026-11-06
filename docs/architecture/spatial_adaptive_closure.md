@@ -127,7 +127,16 @@ retains each actual output owner before releasing its construction envelope.
 Partition validation leases its conservative envelope for the actual covering
 pieces. Callback failure unwinds the same lease; it cannot publish a partial
 support. These bounds avoid reserving all potential pair constructions at once;
-certified candidate search remains a separate requirement.
+a conservative represented-rectangle index supplies candidate search where its
+arithmetic certificate applies. It uses the actual immutable four-corner faces,
+a common physical plane, a bounded dyadic coordinate lattice and captured
+round-to-nearest controls. Closed bounds retain edge/corner candidates, and
+geometry predicates retain their original occurrence order. The initial
+certificate uses binary 64-bit long-double precision, quantum exponents from
+-128 through 128, and scaled coordinates of magnitude at most 2^14; unsupported
+shapes, scales or controls use exhaustive enumeration. A control change during
+emission resumes exhaustive ordering before any subsequent pair can be skipped.
+The existing cardinality/work ceiling remains independent of this optimization.
 A changed support is reconstructed from its complete, authenticated owner
 membership. Dirty supports are fetched in byte-bounded pages and preserve member
 arrival order. During replay, each affected tile first retains compact line slots, physical
@@ -320,6 +329,29 @@ frame before modifying the destination and creates no temporary key or packet
 owner. Packet bytes and the caller's canonical scalar evaluation environment
 remain those of the owning encoder; only the eliminated heap scratch loses its
 prospective admission charge.
+
+Canonical subface queries share the final physical loop with incidence replay.
+Delivery captures both incident keys, revisions, owners and original source
+surface ordinals after the complete support receipt has been authenticated.
+The local surface supplies its native face locator and boundary name. A foreign
+incident keeps its source surface locator until native publication fetches that
+source. The piece keeps the authority's support, domain, generation, emission
+order, and periodic displacement.
+
+After line completion, a piece references its existing intrinsic tile page, an
+exact certified source loop, or the immutable buffer transferred from the final
+explicit replay output. A detached point namespace uses the certified source
+prefix and captured physical page ranges. This keeps the exact original point
+identities available after the incidence session or hierarchy is released.
+Candidates share unchanged piece and provenance pages. The face index selects
+pieces by owned persistent key and source surface ordinal and reports the sign
+of the requested incidence.
+
+Geometry materialization admits its work and output separately. The canonical
+identity uses the support-normalized intrinsic loop before edge enrichment.
+The returned face keeps the final first-cell physical loop. Node and face GIDs
+belong to native publication and are assigned through its existing authority
+rules.
 
 Ownership migration rebinds the candidate session by retiring moved memberships at
 old owners and inserting them at new owners, including when the key and revision

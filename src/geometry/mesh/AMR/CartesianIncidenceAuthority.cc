@@ -182,28 +182,6 @@ std::size_t decode_bound(const ExplicitFace& face)
             product(4, PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(face.whole_vertices)));
     return size;
 }
-/** Bound one live operation of the unchanged convex kernel. Partition checks
- * retain their conservative envelope over the actual covering pieces; unrelated
- * members of a complete support do not enlarge that construction lease. */
-std::size_t construction_bound(SupportConstructionKind kind, const SupportFace& source,
-    std::span<const SupportFace> others)
-{
-    auto vertices = source->points().size(), encoded = source->encoded_incidence_size();
-    for (const auto& face : others)
-    {
-        vertices = std::max(vertices, face->points().size());
-        encoded = std::max(encoded, face->encoded_incidence_size());
-    }
-    const auto polygon = product(2, vertices);
-    auto per_pair = product(8, PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(polygon));
-    per_pair = add(per_pair, product(add(vertices, 4), growth(polygon, 3 * sizeof(long double))));
-    per_pair = add(per_pair, product(16, encoded));
-    per_pair = add(per_pair, product(polygon, 256));
-    if (kind == SupportConstructionKind::Pair)
-        return per_pair;
-    const auto members = add(others.size(), 1);
-    return product(product(members, members), per_pair);
-}
 struct SupportInput
 {
     SupportOccurrence occurrence;
@@ -738,7 +716,7 @@ void AuthorityState::support_run(
     {
         if (construction.bytes)
             throw std::logic_error("Nested support construction lease.");
-        construction.retain(construction_bound(kind, source, others));
+        construction.retain(support_construction_capacity_bound(kind, source, others));
     };
     auto end_construction = [&]() noexcept
     {
