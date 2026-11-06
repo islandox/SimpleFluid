@@ -3,11 +3,12 @@
  */
 #pragma once
 #include "FVM/details/GeneralVoF/CellCatalogInternal.hh"
-#include <type_traits>
 #include "geometry/PLIC/details/CellGeometryEvaluation.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
+#include <algorithm>
 #include <map>
+#include <type_traits>
 namespace SimpleFluid::VoF::general_vof_detail::cell_catalog_detail
 {
 namespace
@@ -106,9 +107,18 @@ std::shared_ptr<const PLIC::CellGeometryCatalog<Mode>> evaluation_catalog(
     const CatalogConstructionControls& controls)
 {
     using Catalog = PLIC::CellGeometryCatalog<Mode>;
+    using Access = PLIC::details::NativeCellGeometrySourceAccess;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (std::all_of(slots.begin(), slots.end(),
+                [&](auto slot) { return PLIC::CellGeometryView<Mode>(source, slot).is_procedural(); }))
+        {
+            auto selected = Catalog::selected(source, slots, geometry_limits(Mode, budget.limit - budget.used));
+            owners.retain(selected, budget.used, budget.limit);
+            return selected;
+        }
     typename Catalog::SourceTable sources;
     std::vector<typename Catalog::Entry> entries;
-    reserve_checked(sources, slots.size(), budget);
+    reserve_checked(sources, std::min(slots.size(), source->source_count()), budget);
     reserve_checked(entries, slots.size(), budget);
     std::map<const PLIC::CartesianCellSource*, std::size_t> source_slots;
     for (std::size_t index = 0; index < slots.size(); ++index)
@@ -130,43 +140,46 @@ std::shared_ptr<const PLIC::CellGeometryCatalog<Mode>> evaluation_catalog(
             }
         if (!reused_cells.empty() && reused_cells[index] && construction_controls() == controls)
         {
-            PLIC::ConvexGeometryPtr<Mode> evaluation;
-            if constexpr (Mode == ArithmeticMode::Ordinary)
-                evaluation = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(
-                    original_policy ? native_cell_geometry(*reuse, *reused_cells[index])
-                                    : cell_geometry<Mode>(*reuse, *reused_cells[index]));
-            else
-                evaluation = existing_cell_geometry<Mode>(*reuse, *reused_cells[index]);
+            const auto previous = [&]() -> PLIC::CellGeometryView<Mode>
+            {
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                    if (original_policy)
+                        return native_cell_geometry(*reuse, *reused_cells[index]);
+                return cell_geometry<Mode>(*reuse, *reused_cells[index]);
+            }();
+            auto evaluation = Access::existing_geometry(previous);
             owners.retain(evaluation, budget.used, budget.limit);
-            entries.emplace_back(std::move(evaluation));
+            entries.emplace_back(Access::explicit_entry(previous));
             continue;
         }
         auto geometry = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(view);
         bool share_explicit_original = false;
         if constexpr (Mode == ArithmeticMode::Ordinary)
             share_explicit_original = original_policy && leaves[index]->geometry && geometry == leaves[index]->geometry;
-        if (!share_explicit_original)
+        if (share_explicit_original)
         {
-            const auto& policy = snapshot.evaluation_policy(slots[index]);
-            const bool copy_integrals = original_policy                    ? policy.original_integrals
-                                        : Mode == ArithmeticMode::Ordinary ? policy.ordinary_integrals
-                                                                           : policy.bounded_integrals;
-            auto found = evaluations.find(geometry.get());
-            if (found == evaluations.end())
-            {
-                charge_items(budget, 1,
-                    sizeof(typename std::remove_cvref_t<decltype(evaluations)>::value_type) + 4 * sizeof(void*));
-                found = evaluations.emplace(geometry.get(), std::array<PLIC::ConvexGeometryPtr<Mode>, 2>{}).first;
-            }
-            auto& evaluation = found->second[copy_integrals ? 1 : 0];
-            if (!evaluation)
-            {
-                evaluation = PLIC::details::clone_cell_evaluation<Mode>(
-                    geometry, copy_integrals, geometry_limits(Mode, budget.limit - budget.used));
-                owners.retain(evaluation, budget.used, budget.limit);
-            }
-            geometry = evaluation;
+            entries.emplace_back(Access::explicit_entry(view));
+            continue;
         }
+        const auto& policy = snapshot.evaluation_policy(slots[index]);
+        const bool copy_integrals = original_policy                    ? policy.original_integrals
+                                    : Mode == ArithmeticMode::Ordinary ? policy.ordinary_integrals
+                                                                       : policy.bounded_integrals;
+        auto found = evaluations.find(geometry.get());
+        if (found == evaluations.end())
+        {
+            charge_items(budget, 1,
+                sizeof(typename std::remove_cvref_t<decltype(evaluations)>::value_type) + 4 * sizeof(void*));
+            found = evaluations.emplace(geometry.get(), std::array<PLIC::ConvexGeometryPtr<Mode>, 2>{}).first;
+        }
+        auto& evaluation = found->second[copy_integrals ? 1 : 0];
+        if (!evaluation)
+        {
+            evaluation = PLIC::details::clone_cell_evaluation<Mode>(
+                geometry, copy_integrals, geometry_limits(Mode, budget.limit - budget.used));
+            owners.retain(evaluation, budget.used, budget.limit);
+        }
+        geometry = evaluation;
         entries.emplace_back(std::move(geometry));
     }
     auto result =

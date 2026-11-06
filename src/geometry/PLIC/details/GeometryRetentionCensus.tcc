@@ -96,7 +96,7 @@ const char* owner_label(unsigned kind)
 {
     static constexpr const char* labels[] = {"typed_wrapper", "dynamic_wrapper", "geometry", "topology", "export_cache",
         "dynamic_export", "typed_export", "compact_batch", "plane", "point_context", "native_facts", "moment",
-        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog", "native_source_body", "external_owner"};
+        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog", "native_source_body", "external_owner", "cell_shell_page"};
     if (kind < std::size(labels))
         return labels[kind];
     return kind == planar_wrapper ? "planar_wrapper" : "planar_payload";
@@ -631,14 +631,24 @@ public:
                 case K::CellCatalog: {
                     const auto& catalog = *static_cast<const CellGeometryCatalog<M>*>(p);
                     metadata = sizeof(catalog);
-                    table(RetentionAccess::catalog_entries(catalog), populated, unused);
+                    table(RetentionAccess::catalog_pages(catalog), populated, unused);
+                    table(RetentionAccess::catalog_selection(catalog), populated, unused);
+                    for (const auto& page : RetentionAccess::catalog_selection(catalog))
+                        table(page.irregular, populated, unused);
                     table(RetentionAccess::catalog_sources(catalog), populated, unused);
                     if constexpr (M == ArithmeticMode::Ordinary)
                         for (const auto& source : RetentionAccess::catalog_sources(catalog))
                             push(K::CartesianSource, source.get(), w);
-                    for (const auto& entry : RetentionAccess::catalog_entries(catalog))
-                        if (const auto* geometry = std::get_if<ConvexGeometryPtr<M>>(&entry))
-                            push(K::TypedWrapper, geometry->get(), w);
+                    for (const auto& page : RetentionAccess::catalog_pages(catalog))
+                        push(K::CellShellPage, page.get(), w);
+                    break;
+                }
+                case K::CellShellPage: {
+                    const auto& page = *static_cast<const typename CellGeometryCatalog<M>::ExplicitPage*>(p);
+                    metadata = sizeof(page);
+                    table(page.cells, populated, unused);
+                    for (const auto& geometry : page.cells)
+                        push(K::TypedWrapper, geometry.get(), w);
                     break;
                 }
                 case K::CartesianSource: {

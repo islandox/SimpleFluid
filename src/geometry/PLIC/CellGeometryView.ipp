@@ -29,23 +29,25 @@ template<ArithmeticMode M> void CellGeometryView<M>::require_valid() const
 template<ArithmeticMode M> bool CellGeometryView<M>::is_procedural() const
 {
     require_valid();
-    return std::holds_alternative<typename CellGeometryCatalog<M>::NativeEntry>(catalog_->entries_[slot_]);
+    return !catalog_->select(slot_).is_explicit();
 }
 template<ArithmeticMode M> const ConvexGeometryPtr<M>& CellGeometryView<M>::fallback() const
 {
     require_valid();
-    return std::get<ConvexGeometryPtr<M>>(catalog_->entries_[slot_]);
+    const auto entry = catalog_->select(slot_);
+    if (!entry.is_explicit())
+        throw std::bad_variant_access();
+    return catalog_->explicit_pages_[entry.index()]->cells[entry.slot];
 }
 template<ArithmeticMode M> const typename CellGeometryCatalog<M>::SourcePtr& CellGeometryView<M>::native_source() const
 {
     require_valid();
-    const auto& native = std::get<typename CellGeometryCatalog<M>::NativeEntry>(catalog_->entries_[slot_]);
-    return catalog_->sources_[native.source_slot];
+    return catalog_->sources_[catalog_->select(slot_).index()];
 }
 template<ArithmeticMode M> std::size_t CellGeometryView<M>::source_slot() const
 {
     require_valid();
-    return std::get<typename CellGeometryCatalog<M>::NativeEntry>(catalog_->entries_[slot_]).cell_slot;
+    return catalog_->select(slot_).slot;
 }
 template<ArithmeticMode M> GeometryValue<M> CellGeometryView<M>::volume() const
 {

@@ -47,6 +47,12 @@ public:
             throw GeometryError(GeometryErrorCode::InvalidInput, "Procedural view has no existing geometry owner.");
         return view.fallback();
     }
+    template<ArithmeticMode M>
+    [[nodiscard]] static typename CellGeometryCatalog<M>::ExplicitEntry explicit_entry(const CellGeometryView<M>& view)
+    {
+        view.require_valid();
+        return view.catalog_->explicit_entry(view.slot_);
+    }
     [[nodiscard]] static NativeCartesianCellReference source_cell(
         const CellGeometryView<ArithmeticMode::Ordinary>& view)
     {

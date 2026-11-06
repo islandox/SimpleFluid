@@ -212,11 +212,21 @@ conservative admission estimates; neither metric is process RSS.
 
 The hierarchy publishes immutable `AdaptiveGeometrySnapshot` roots. Cells and
 FVM catalogs select source entries from those roots; they do not construct a
-second authoritative geometry catalog. A snapshot owns detached source bindings,
-coordinates, original supports and represented geometry, with no backpointer to
-the hierarchy, partition or phase state. Retained views and PLIC construction
-records keep the required source version alive after a mesh handle is destroyed.
+second authoritative geometry catalog. A snapshot owns detached binding pages,
+coordinates, original supports and represented geometry. It holds the exact
+layout identity weakly. Retained views and PLIC construction records keep the
+required source version alive after a mesh handle is destroyed.
 Equal coordinates in independently constructed meshes do not identify one owner.
+
+Binding pages share provider and recipe descriptors across rows. Cartesian and
+static pages encode regular ancestry and ordinals as progressions. Product
+pages select separate base and axial records, and explicit convex cells retain
+their original keys and certificate owners. Captured native metric columns
+preserve binary64 values, including signed zero, across later query environments.
+Common evaluation policy flags are stored once per page. A separate ordered
+selection preserves request order, and an expanded cache can share prior
+binding and explicit shell pages. Reordered PLIC catalogs share shell pages
+and procedural sources directly.
 
 Provider-input acquisition and authenticated native-publication acquisition are
 distinct. The private publication seam checks its source observation, complete
@@ -227,8 +237,10 @@ provider's original construction path. Publication-derived representations do
 not replace provider-input cache entries.
 
 Ordinary procedural Cartesian cells retain a shared source context and a catalog
-slot. Its immutable base owns the evaluated source axes, cell intervals and
-original support facts. Numerical evaluation caches are separate from that base.
+slot. Its immutable base owns the evaluated source axes, compact interval
+selectors and original support facts. Canonical support slots are indexed by
+axis coordinate, with sparse entries for supplied per-face exceptions.
+Numerical evaluation caches are separate from that base.
 Snapshot reuse requires the actual source binding and supported named arithmetic
 controls; floating-point status flags and padding bytes are not cache keys.
 State publication primes moment data at the same boundary as its original import

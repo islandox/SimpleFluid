@@ -85,6 +85,7 @@ public:
         pointer(value.ordinary_catalog(), group);
         pointer(value.finite_ordinary_catalog(), group);
         pointer(value.bounded_catalog(), group);
+        value.visit_authoritative_geometries([&](const auto& geometry) { add(geometry, group); });
         value.visit_authoritative_surfaces(
             [&](const AMR::GeometrySnapshotSurface& binding)
             {

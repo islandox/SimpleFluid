@@ -180,7 +180,25 @@ public:
     using SourcePtr = std::shared_ptr<const CartesianCellSource>;
     using SourceTable = std::vector<SourcePtr>;
     using NativeEntry = NativeCellGeometrySlot;
-    using Entry = std::variant<NativeEntry, ConvexGeometryPtr<Mode>>;
+    struct ExplicitPage
+    {
+        std::vector<ConvexGeometryPtr<Mode>> cells;
+        [[nodiscard]] std::size_t storage_bytes() const noexcept
+        {
+            return sizeof(*this) + cells.capacity() * sizeof(ConvexGeometryPtr<Mode>);
+        }
+    };
+    /** A detached slot of an immutable shell page. No catalog parent is retained. */
+    class ExplicitEntry
+    {
+        friend class CellGeometryCatalog;
+        std::shared_ptr<const ExplicitPage> page_;
+        std::size_t slot_ = 0;
+        ExplicitEntry(std::shared_ptr<const ExplicitPage> page, std::size_t slot)
+            : page_(std::move(page)), slot_(slot)
+        {}
+    };
+    using Entry = std::variant<NativeEntry, ConvexGeometryPtr<Mode>, ExplicitEntry>;
     CellGeometryCatalog(const CellGeometryCatalog&) = delete;
     CellGeometryCatalog& operator=(const CellGeometryCatalog&) = delete;
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog> make(
@@ -194,26 +212,48 @@ public:
         std::vector<ConvexGeometryPtr<Mode>>, GeometryLimits = {});
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog> single_existing(
         ConvexGeometryPtr<Mode>, GeometryLimits = {});
+    /** Select existing source slots in caller order. The result pins only the
+     * selected source contexts and shell pages. Repeated slots are allowed. */
+    [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog> selected(
+        std::shared_ptr<const CellGeometryCatalog>, std::span<const std::size_t>, GeometryLimits = {});
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog> reordered(
         std::shared_ptr<const CellGeometryCatalog>, std::span<const std::size_t>, GeometryLimits = {});
-    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
-    [[nodiscard]] bool empty() const noexcept { return entries_.empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size() == 0; }
     [[nodiscard]] std::size_t source_count() const noexcept { return sources_.size(); }
-    [[nodiscard]] std::size_t storage_bytes() const noexcept
-    {
-        return sizeof(*this) + entries_.capacity() * sizeof(Entry) + sources_.capacity() * sizeof(SourcePtr);
-    }
+    [[nodiscard]] std::size_t storage_bytes() const noexcept;
+    [[nodiscard]] ExplicitEntry explicit_entry(std::size_t) const;
 
 private:
     friend class GeometryAllocationLedger;
     friend class details::RetentionAccess;
     friend class CellGeometryView<Mode>;
     friend class CellGeometryFace<Mode>;
+    struct Selector
+    {
+        // A high bit distinguishes shell pages from procedural source contexts.
+        static constexpr auto explicit_page = (std::numeric_limits<std::size_t>::max() / 2) + 1;
+        std::size_t owner = 0, slot = 0;
+        [[nodiscard]] bool is_explicit() const noexcept { return (owner & explicit_page) != 0; }
+        [[nodiscard]] std::size_t index() const noexcept { return owner & ~explicit_page; }
+    };
+    struct SelectionPage
+    {
+        // An empty list denotes consecutive slots in a single source or shell page.
+        Selector first;
+        std::vector<Selector> irregular;
+    };
+    static constexpr std::size_t page_size = 64;
     CellGeometryCatalog() = default;
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog> build(
         SourceTable, std::vector<Entry>, details::CellCatalogAdmission&, bool distinct_sources = false);
+    void reserve_selection(std::size_t, details::CellCatalogAdmission&);
+    void append_selection(std::span<const Selector>, details::CellCatalogAdmission&);
+    [[nodiscard]] Selector select(std::size_t) const noexcept;
     SourceTable sources_;
-    std::vector<Entry> entries_;
+    std::vector<std::shared_ptr<const ExplicitPage>> explicit_pages_;
+    std::vector<SelectionPage> selection_;
+    std::size_t size_ = 0;
 };
 /** One lifetime-safe geometry value, without implicit shell conversion. */
 template<ArithmeticMode Mode> class CellGeometryView

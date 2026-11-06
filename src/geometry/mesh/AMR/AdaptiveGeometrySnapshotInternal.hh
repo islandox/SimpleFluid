@@ -16,12 +16,17 @@ struct PublicationSource
     const AdaptiveLeaf* leaf = nullptr;
     const AdaptiveNativeCellBinding* binding = nullptr;
 };
+struct BuildFacts
+{
+    std::vector<AdaptiveCellMetrics> metrics;
+    std::vector<GeometryEvaluationPolicy> policy;
+};
 struct Builder
 {
     template<ArithmeticMode Mode>
     static CatalogBuild build(const DistributedAdaptiveHierarchy&, std::span<const AdaptiveLeaf* const>,
         adaptive_detail::Budget&, const AdaptiveGeometrySnapshot*, CatalogPurpose, PLIC::GeometryAllocationLedger&,
-        PLIC::GeometryAllocationLedger&, std::span<const PublicationSource>);
+        PLIC::GeometryAllocationLedger&, std::span<const PublicationSource>, BuildFacts&);
 };
 GeometryConstructionControls construction_controls();
 std::size_t checked_product(std::size_t, std::size_t);

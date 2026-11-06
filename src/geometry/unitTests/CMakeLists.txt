@@ -59,6 +59,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
       OR TEST_NAME STREQUAL "testIncidencePointDirectory"
       OR TEST_NAME STREQUAL "testFrozenTopology"
+      OR TEST_NAME STREQUAL "testAdaptiveGeometryStorage"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")

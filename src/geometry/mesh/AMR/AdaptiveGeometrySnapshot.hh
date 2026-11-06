@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <memory>
 #include <optional>
 #include <span>
@@ -19,6 +18,7 @@ namespace geometry_snapshot_detail
 {
 struct Builder;
 struct PublicationSource;
+class Bindings;
 } // namespace geometry_snapshot_detail
 class DistributedAdaptiveHierarchy;
 class AdaptiveLeafLayout;
@@ -45,19 +45,9 @@ struct GeometrySnapshotSurface
 {
     AdaptiveSurface surface;
 };
-/** A detached binding pins only the immutable recipe and original shell. */
+/** Exact recipe and surface comparisons at snapshot admission. */
 struct GeometrySnapshotBinding
 {
-    AdaptiveCellKey key;
-    AdaptiveBytes domain;
-    std::uint64_t material = 0, revision = 0, native_cell = 0;
-    AdaptiveProviderKind provider = AdaptiveProviderKind::Polyhedral;
-    std::shared_ptr<const NativeFragmentDescriptor> native_recipe;
-    std::shared_ptr<const AdaptiveBytes> join_recipe;
-    std::shared_ptr<const AdaptiveFactorRecipe> factor_recipe;
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
-    std::vector<GeometrySnapshotSurface> surfaces;
-    [[nodiscard]] bool matches(const AdaptiveLeaf&) const;
     [[nodiscard]] static bool same_auxiliary_recipes(const AdaptiveLeaf&, const AdaptiveLeaf&);
     [[nodiscard]] static bool same_auxiliary_capsules(const AdaptiveLeaf&, const AdaptiveLeaf&);
 };
@@ -81,19 +71,33 @@ public:
     [[nodiscard]] const auto& ordinary_catalog() const noexcept { return ordinary_; }
     [[nodiscard]] const auto& finite_ordinary_catalog() const noexcept { return finite_ordinary_; }
     [[nodiscard]] const auto& bounded_catalog() const noexcept { return bounded_; }
-    [[nodiscard]] const auto& native_metrics() const noexcept { return native_metrics_; }
+    class NativeMetrics
+    {
+    public:
+        [[nodiscard]] std::size_t size() const noexcept;
+        [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+        [[nodiscard]] AdaptiveCellMetrics at(std::size_t slot) const;
+        [[nodiscard]] AdaptiveCellMetrics operator[](std::size_t slot) const { return at(slot); }
+
+    private:
+        friend class AdaptiveGeometrySnapshot;
+        explicit NativeMetrics(const AdaptiveGeometrySnapshot& snapshot) : snapshot_(&snapshot) {}
+        const AdaptiveGeometrySnapshot* snapshot_;
+    };
+    [[nodiscard]] NativeMetrics native_metrics() const noexcept { return NativeMetrics(*this); }
     [[nodiscard]] const auto& construction_controls() const noexcept { return controls_; }
     [[nodiscard]] bool stable_controls() const noexcept { return stable_controls_; }
     [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept { return mode_; }
     [[nodiscard]] GeometrySnapshotPurpose purpose() const noexcept { return purpose_; }
-    [[nodiscard]] const GeometryEvaluationPolicy& evaluation_policy(std::size_t slot) const
-    {
-        return evaluation_policy_.at(slot);
-    }
+    [[nodiscard]] GeometryEvaluationPolicy evaluation_policy(std::size_t) const;
     [[nodiscard]] std::optional<std::size_t> find(const AdaptiveLeaf&) const;
+    /** Snapshot and binding-page bytes. Use retained_bytes() to deduplicate and
+     * include descriptors, certificates and catalog payload owners. */
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     /** Borrow actual metadata owners without changing reference counts. */
     void visit_external_owners(const std::function<void(const void*, std::size_t)>&) const;
+    void visit_authoritative_geometries(
+        const std::function<void(const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&)>&) const;
     void visit_authoritative_surfaces(const std::function<void(const GeometrySnapshotSurface&)>&) const;
     void retain(
         PLIC::GeometryAllocationLedger&, PLIC::GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
@@ -107,10 +111,7 @@ private:
     std::weak_ptr<const AdaptiveLeafLayout> source_layout_;
     std::shared_ptr<const OrdinaryCatalog> ordinary_, finite_ordinary_;
     std::shared_ptr<const BoundedCatalog> bounded_;
-    std::vector<AdaptiveCellMetrics> native_metrics_;
-    std::vector<GeometryEvaluationPolicy> evaluation_policy_;
-    std::vector<GeometrySnapshotBinding> bindings_;
-    std::map<AdaptiveCellKey, std::size_t> binding_slots_;
+    std::shared_ptr<const geometry_snapshot_detail::Bindings> bindings_;
     GeometryConstructionControls controls_;
     ArithmeticMode mode_ = ArithmeticMode::Ordinary;
     GeometrySnapshotPurpose purpose_ = GeometrySnapshotPurpose::State;

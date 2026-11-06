@@ -12,7 +12,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
-#include <set>
+#include <tuple>
 #include <type_traits>
 namespace SimpleFluid::Meshes::AMR::geometry_snapshot_detail
 {
@@ -237,152 +237,78 @@ bool GeometrySnapshotBinding::same_auxiliary_recipes(const AdaptiveLeaf& first, 
 {
     return same_auxiliary_capsules(first, second) && same_surface_binding(first, second);
 }
-bool GeometrySnapshotBinding::matches(const AdaptiveLeaf& leaf) const
+#include "geometry/mesh/AMR/AdaptiveGeometryBindings.tcc"
+
+std::size_t AdaptiveGeometrySnapshot::NativeMetrics::size() const noexcept
 {
-    if (key != leaf.key || revision != leaf.revision || material != leaf.material || domain != leaf.domain ||
-        provider != leaf.provider || native_cell != leaf.native_cell || geometry != leaf.geometry ||
-        !same_capsule(join_recipe, leaf.join_recipe) || !same_factor_recipe(factor_recipe, leaf.factor_recipe))
-        return false;
-    if (requires_surface_binding(leaf))
-    {
-        if (surfaces.size() != leaf.surfaces.size())
-            return false;
-        for (std::size_t face = 0; face < surfaces.size(); ++face)
-            if (!same_surface(surfaces[face].surface, leaf.surfaces[face]))
-                return false;
-    }
-    if (native_recipe == leaf.native_recipe)
-        return true;
-    if (!native_recipe || !leaf.native_recipe)
-        return false;
-    const auto& a = *native_recipe;
-    const auto& b = *leaf.native_recipe;
-    if (a.kind != b.kind || a.view != b.view || a.parts.size() != b.parts.size())
-        return false;
-    for (std::size_t i = 0; i < a.parts.size(); ++i)
-        if (!a.parts[i] || !b.parts[i] || *a.parts[i] != *b.parts[i])
-            return false;
-    return true;
+    return snapshot_->purpose() == GeometrySnapshotPurpose::State ? snapshot_->bindings_->size() : 0;
+}
+AdaptiveCellMetrics AdaptiveGeometrySnapshot::NativeMetrics::at(std::size_t slot) const
+{
+    if (slot >= size())
+        throw std::out_of_range("Invalid native geometry metric slot.");
+    return snapshot_->bindings_->metric(slot);
+}
+GeometryEvaluationPolicy AdaptiveGeometrySnapshot::evaluation_policy(std::size_t slot) const
+{
+    return bindings_->policy(slot);
 }
 std::optional<std::size_t> AdaptiveGeometrySnapshot::find(const AdaptiveLeaf& leaf) const
 {
-    const auto found = binding_slots_.find(leaf.key);
-    if (found != binding_slots_.end() && bindings_[found->second].matches(leaf))
-        return found->second;
-    return std::nullopt;
+    return bindings_->find(leaf);
 }
-namespace
-{
-std::size_t key_bytes(const AdaptiveCellKey& key)
-{
-    return std::visit(
-        [](const auto& ancestry) -> std::size_t
-        {
-            if constexpr (requires { ancestry.path; })
-                return ancestry.path.capacity() * sizeof(typename std::decay_t<decltype(ancestry.path)>::value_type);
-            else if constexpr (requires { ancestry.base.path; })
-                return ancestry.base.path.capacity() *
-                           sizeof(typename std::decay_t<decltype(ancestry.base.path)>::value_type) +
-                       ancestry.axial.path.capacity() *
-                           sizeof(typename std::decay_t<decltype(ancestry.axial.path)>::value_type);
-            else
-                return 0;
-        },
-        key.ancestry);
-}
-} // namespace
 std::size_t AdaptiveGeometrySnapshot::metadata_bytes() const noexcept
 {
-    std::size_t bytes = sizeof(*this) + bindings_.capacity() * sizeof(GeometrySnapshotBinding) +
-                        native_metrics_.capacity() * sizeof(AdaptiveCellMetrics) +
-                        evaluation_policy_.capacity() * sizeof(GeometryEvaluationPolicy) +
-                        binding_slots_.size() * (sizeof(decltype(binding_slots_)::value_type) + 4 * sizeof(void*));
-    for (const auto& [key, slot] : binding_slots_)
-        bytes += key_bytes(key);
-    for (std::size_t i = 0; i < bindings_.size(); ++i)
-    {
-        const auto& binding = bindings_[i];
-        bytes += key_bytes(binding.key) + binding.domain.capacity() +
-                 binding.surfaces.capacity() * sizeof(GeometrySnapshotSurface);
-        for (const auto& value : binding.surfaces)
-            bytes += value.surface.key.capacity() + value.surface.boundary.capacity();
-    }
-    return bytes;
+    return sizeof(*this) + bindings_->metadata_bytes();
 }
 void AdaptiveGeometrySnapshot::visit_external_owners(const std::function<void(const void*, std::size_t)>& visitor) const
 {
-    visitor(this, metadata_bytes());
-    for (const auto& binding : bindings_)
-    {
-        if (const auto& recipe = binding.native_recipe)
+    visitor(this, sizeof(*this));
+    visitor(bindings_.get(), bindings_->exclusive_bytes());
+    bindings_->visit_children([&](const auto& owner, std::size_t bytes) { visitor(owner.get(), bytes); });
+}
+void AdaptiveGeometrySnapshot::visit_authoritative_geometries(
+    const std::function<void(const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&)>& visitor) const
+{
+    bindings_->visit_certificates(
+        [&](const auto& certificate)
         {
-            visitor(recipe.get(),
-                sizeof(*recipe) + recipe->view.capacity() + recipe->parts.capacity() * sizeof(recipe->parts[0]));
-            for (const auto& part : recipe->parts)
-                if (part)
-                    visitor(part.get(), sizeof(*part) + part->capacity());
-        }
-        const auto bytes = [&](const auto& value)
-        {
-            if (value)
-                visitor(value.get(), sizeof(*value) + value->capacity());
-        };
-        bytes(binding.join_recipe);
-        if (const auto& factor = binding.factor_recipe)
-        {
-            visitor(factor.get(), sizeof(*factor));
-            bytes(factor->root);
-            bytes(factor->base);
-            bytes(factor->axis);
-        }
-    }
+            if (certificate.geometry)
+                visitor(*certificate.geometry);
+        });
 }
 void AdaptiveGeometrySnapshot::visit_authoritative_surfaces(
     const std::function<void(const GeometrySnapshotSurface&)>& visitor) const
 {
-    for (const auto& binding : bindings_)
-        for (const auto& value : binding.surfaces)
-            visitor(value);
+    bindings_->visit_certificates(
+        [&](const auto& certificate)
+        {
+            for (const auto& value : certificate.surfaces)
+                visitor(value);
+        });
 }
 void AdaptiveGeometrySnapshot::retain(PLIC::GeometryAllocationLedger& ordinary_owners,
     PLIC::GeometryAllocationLedger& bounded_owners, std::size_t& used, std::size_t limit) const
 {
-    ordinary_owners.retain_external_owner(shared_from_this(), metadata_bytes(), used, limit);
-    for (const auto& binding : bindings_)
-    {
-        if (const auto& recipe = binding.native_recipe)
+    ordinary_owners.retain_external_owner(shared_from_this(), sizeof(*this), used, limit);
+    ordinary_owners.retain_external_owner(bindings_, bindings_->exclusive_bytes(), used, limit);
+    bindings_->visit_children(
+        [&](const auto& owner, std::size_t bytes) { ordinary_owners.retain_external_owner(owner, bytes, used, limit); });
+    bindings_->visit_certificates(
+        [&](const auto& certificate)
         {
-            ordinary_owners.retain_external_owner(recipe,
-                sizeof(*recipe) + recipe->view.capacity() + recipe->parts.capacity() * sizeof(recipe->parts[0]), used,
-                limit);
-            for (const auto& part : recipe->parts)
-                if (part)
-                    ordinary_owners.retain_external_owner(part, sizeof(*part) + part->capacity(), used, limit);
-        }
-        const auto bytes = [&](const auto& value)
-        {
-            if (value)
-                ordinary_owners.retain_external_owner(value, sizeof(*value) + value->capacity(), used, limit);
-        };
-        for (const auto& value : binding.surfaces)
-        {
-            if (value.surface.geometry)
-                ordinary_owners.retain_planar_face(value.surface.geometry, used, limit);
-            if (value.surface.native_whole_geometry)
-                ordinary_owners.retain_planar_face(value.surface.native_whole_geometry, used, limit);
-            // Ordinary displacement identities are inline in AdaptiveSurface;
-            // the retained surface vector already accounts for those bytes.
-            static_assert(!PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>::shared_storage);
-        }
-        bytes(binding.join_recipe);
-        if (const auto& factor = binding.factor_recipe)
-        {
-            ordinary_owners.retain_external_owner(factor, sizeof(*factor), used, limit);
-            bytes(factor->root);
-            bytes(factor->base);
-            bytes(factor->axis);
-        }
-    }
+            if (certificate.geometry)
+                ordinary_owners.retain(certificate.geometry, used, limit);
+            for (const auto& value : certificate.surfaces)
+            {
+                if (value.surface.geometry)
+                    ordinary_owners.retain_planar_face(value.surface.geometry, used, limit);
+                if (value.surface.native_whole_geometry)
+                    ordinary_owners.retain_planar_face(value.surface.native_whole_geometry, used, limit);
+            }
+        });
+    // Ordinary displacement identities are inline in AdaptiveSurface.
+    static_assert(!PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>::shared_storage);
     ordinary_owners.retain(ordinary_, used, limit);
     if (finite_ordinary_)
         ordinary_owners.retain(finite_ordinary_, used, limit);
@@ -420,98 +346,58 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(
                 throw std::invalid_argument("Publication snapshot source is not its authenticated full row.");
     }
     const auto controls = geometry_construction_controls();
-    if (previous && (!previous->matches_layout(hierarchy.leaf_layout()) || previous->mode_ != mode ||
-                        !previous->stable_controls_ || !controls.supported ||
+    if (previous && (previous->mode_ != mode || !previous->stable_controls_ || !controls.supported ||
                         previous->controls_ != controls))
         previous.reset();
-    // A replacement keeps every previously published binding. Catalog order of
-    // the current request is unchanged; retained trailing rows make later
-    // subset/expanded acquisitions reuse the exact source owner and cell slot.
+    // Only the exact same layout can extend the selected set with older rows.
+    // Across layouts reuse is restricted to exact matches of requested cells.
+    const bool extend = previous && previous->matches_layout(hierarchy.leaf_layout());
     std::vector<AdaptiveLeaf> trailing;
     std::vector<const AdaptiveLeaf*> expanded;
-    geometry_snapshot_detail::reserve_checked(
-        expanded, leaves.size() + (previous ? previous->bindings_.size() : 0), budget);
+    geometry_snapshot_detail::reserve_checked(expanded, leaves.size(), budget);
     expanded.insert(expanded.end(), leaves.begin(), leaves.end());
-    std::set<AdaptiveCellKey> selected_keys;
-    for (const auto* leaf : leaves)
+    if (std::any_of(leaves.begin(), leaves.end(), [](const auto* leaf) { return !leaf; }))
+        throw std::invalid_argument("Geometry snapshot lacks an authenticated source leaf.");
+    if (extend)
     {
-        if (!leaf)
-            throw std::invalid_argument("Geometry snapshot lacks an authenticated source leaf.");
-        budget.add(sizeof(decltype(selected_keys)::value_type) + 4 * sizeof(void*) + key_bytes(leaf->key));
-        selected_keys.insert(leaf->key);
-    }
-    if (previous)
-    {
-        geometry_snapshot_detail::reserve_checked(trailing, previous->bindings_.size(), budget);
-        for (const auto& old : previous->bindings_)
+        std::vector<const AdaptiveLeaf*> ordered;
+        geometry_snapshot_detail::reserve_checked(ordered, leaves.size(), budget);
+        ordered.assign(leaves.begin(), leaves.end());
+        const auto less = [](const AdaptiveLeaf* first, const AdaptiveLeaf* second) { return first->key < second->key; };
+        std::sort(ordered.begin(), ordered.end(), less);
+        // Use the prior binding keys to count precisely without constructing a row.
+        const auto remaining = previous->bindings_->unselected(ordered);
+        if (remaining)
         {
-            if (selected_keys.contains(old.key))
-                continue;
-            budget.add(key_bytes(old.key) + old.domain.capacity());
-            AdaptiveLeaf leaf;
-            leaf.key = old.key;
-            leaf.domain = old.domain;
-            leaf.material = old.material;
-            leaf.revision = old.revision;
-            leaf.native_cell = old.native_cell;
-            leaf.provider = old.provider;
-            leaf.native_recipe = old.native_recipe;
-            leaf.join_recipe = old.join_recipe;
-            leaf.factor_recipe = old.factor_recipe;
-            leaf.geometry = old.geometry;
-            geometry_snapshot_detail::reserve_checked(leaf.surfaces, old.surfaces.size(), budget);
-            for (const auto& value : old.surfaces)
-            {
-                budget.add(value.surface.key.capacity() + value.surface.boundary.capacity());
-                leaf.surfaces.push_back(value.surface);
-            }
-            trailing.push_back(std::move(leaf));
+            geometry_snapshot_detail::reserve_checked(trailing, remaining, budget);
+            geometry_snapshot_detail::reserve_checked(expanded, leaves.size() + remaining, budget);
+            previous->bindings_->append_unselected(ordered, trailing, budget);
+            for (const auto& leaf : trailing)
+                expanded.push_back(&leaf);
         }
-        for (const auto& leaf : trailing)
-            expanded.push_back(&leaf);
     }
     AdaptiveGeometrySnapshot result;
+    geometry_snapshot_detail::BuildFacts facts;
     switch (mode)
     {
         case ArithmeticMode::Ordinary:
             result = geometry_snapshot_detail::Builder::build<ArithmeticMode::Ordinary>(
-                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication);
+                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication, facts);
             break;
         case ArithmeticMode::BoundedCertification:
             result = geometry_snapshot_detail::Builder::build<ArithmeticMode::BoundedCertification>(
-                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication);
+                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication, facts);
             break;
         case ArithmeticMode::Exact:
             result = geometry_snapshot_detail::Builder::build<ArithmeticMode::Exact>(
-                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication);
+                hierarchy, expanded, budget, previous.get(), purpose, ordinary_owners, bounded_owners, publication, facts);
             break;
         default:
             throw std::invalid_argument("Unknown geometry snapshot arithmetic mode.");
     }
     result.source_layout_ = hierarchy.leaf_layout();
-    geometry_snapshot_detail::reserve_checked(result.bindings_, expanded.size(), budget);
-    for (const auto* leaf : expanded)
-    {
-        if (!leaf)
-            throw std::invalid_argument("Geometry snapshot lacks an authenticated leaf.");
-        // Admit copied dynamic binding metadata before copying it.
-        budget.add(key_bytes(leaf->key) + leaf->domain.capacity());
-        budget.add(sizeof(decltype(result.binding_slots_)::value_type) + 4 * sizeof(void*) + key_bytes(leaf->key));
-        if (!result.binding_slots_.emplace(leaf->key, result.bindings_.size()).second)
-            throw std::invalid_argument("Geometry snapshot contains a duplicate persistent cell key.");
-        result.bindings_.push_back({leaf->key, leaf->domain, leaf->material, leaf->revision, leaf->native_cell,
-            leaf->provider, leaf->native_recipe, leaf->join_recipe, leaf->factor_recipe, leaf->geometry, {}});
-        if (requires_surface_binding(*leaf))
-        {
-            auto& retained = result.bindings_.back().surfaces;
-            geometry_snapshot_detail::reserve_checked(retained, leaf->surfaces.size(), budget);
-            for (const auto& surface : leaf->surfaces)
-            {
-                budget.add(surface.key.capacity() + surface.boundary.capacity());
-                retained.push_back({surface});
-            }
-        }
-    }
+    result.bindings_ = geometry_snapshot_detail::Bindings::build(expanded, facts,
+        previous && previous->purpose_ == purpose ? previous->bindings_.get() : nullptr, budget);
     budget.add(sizeof(AdaptiveGeometrySnapshot));
     auto snapshot = std::make_shared<const AdaptiveGeometrySnapshot>(std::move(result));
     // Bindings and source roots join the same caller ledger used throughout

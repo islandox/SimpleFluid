@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -35,7 +36,7 @@ template<ArithmeticMode Mode>
 CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveLeaf* const> leaves,
     adaptive_detail::Budget& budget, const AdaptiveGeometrySnapshot* reuse, CatalogPurpose purpose,
     PLIC::GeometryAllocationLedger& ordinary_owners, PLIC::GeometryAllocationLedger& bounded_owners,
-    std::span<const PublicationSource> publication)
+    std::span<const PublicationSource> publication, BuildFacts& facts)
 {
     constexpr auto ordinary_mode = ArithmeticMode::Ordinary;
     using Catalog = PLIC::CellGeometryCatalog<ordinary_mode>;
@@ -51,12 +52,12 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     std::vector<Catalog::Entry> entries;
     reserve_checked(entries, leaves.size(), budget);
     entries.resize(leaves.size());
-    reserve_checked(result.evaluation_policy_, leaves.size(), budget);
-    result.evaluation_policy_.resize(leaves.size());
+    reserve_checked(facts.policy, leaves.size(), budget);
+    facts.policy.resize(leaves.size());
     if (state_purpose)
     {
-        reserve_checked(result.native_metrics_, leaves.size(), budget);
-        result.native_metrics_.resize(leaves.size());
+        reserve_checked(facts.metrics, leaves.size(), budget);
+        facts.metrics.resize(leaves.size());
     }
     if (std::any_of(leaves.begin(), leaves.end(), [](const auto* leaf) { return leaf == nullptr; }))
         throw std::invalid_argument("Native geometry catalog lacks an authenticated source leaf.");
@@ -81,8 +82,17 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             bounded_entries.resize(leaves.size());
         }
     }
+    struct BoundCoordinate
+    {
+        double value = 0;
+        std::uint32_t slot = 0;
+    };
+    using BoundAxis = std::map<std::uint64_t, BoundCoordinate>;
     struct Group
     {
+        explicit Group(const NativeFragmentDescriptor& recipe) : axes(recipe) {}
+        RecipeAxes axes;
+        std::array<BoundAxis, 3> raw_coordinates;
         std::size_t count = 0, source_ordinal = 0;
         std::vector<std::size_t> slots;
     };
@@ -100,16 +110,6 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         }
     };
     std::map<SourceBinding, ReusedSource> reused_sources;
-    std::vector<AdaptiveCartesianGeometryBounds> raw_bounds;
-    if constexpr (Mode == ArithmeticMode::Ordinary)
-    {
-        if (std::any_of(
-                leaves.begin(), leaves.end(), [&](const auto* leaf) { return eligible(hierarchy, *leaf, Mode); }))
-        {
-            reserve_checked(raw_bounds, leaves.size(), budget);
-            raw_bounds.resize(leaves.size());
-        }
-    }
     std::vector<unsigned char> reused_slots;
     reserve_checked(reused_slots, leaves.size(), budget);
     reused_slots.resize(leaves.size(), 0);
@@ -129,6 +129,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     for (std::size_t slot = 0; slot < leaves.size(); ++slot)
     {
         const auto& leaf = *leaves[slot];
+        std::optional<AdaptiveCartesianGeometryBounds> raw_bounds;
         auto reused_slot =
             reuse_bindings && stable_controls && construction_controls() == controls ? reuse->find(leaf) : std::nullopt;
         const auto* published = slot < publication.size() ? &publication[slot] : nullptr;
@@ -160,7 +161,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             const auto bounds = hierarchy.native_cartesian_geometry_bounds(leaf);
             if (!bounds)
                 throw std::logic_error("Trusted Cartesian geometry capability changed.");
-            raw_bounds[slot] = *bounds;
+            raw_bounds = *bounds;
             observe_controls();
             native_slots[slot] =
                 !state_purpose || PLIC::details::NativeCellGeometrySourceAccess::state_compatible(bounds->lower,
@@ -203,7 +204,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 {
                     auto original = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(previous);
                     ordinary_owners.retain(original, budget.used, budget.limit);
-                    entries[slot] = std::move(original);
+                    entries[slot] = reuse->ordinary_->explicit_entry(*reused_slot);
                     if constexpr (Mode == ArithmeticMode::Ordinary)
                     {
                         if (state_purpose)
@@ -212,7 +213,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                             auto imported = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(
                                 PLIC::CellGeometryView<Mode>(selected, *reused_slot));
                             ordinary_owners.retain(imported, budget.used, budget.limit);
-                            finite_ordinary_entries[slot] = std::move(imported);
+                            finite_ordinary_entries[slot] = selected->explicit_entry(*reused_slot);
                         }
                     }
                     else if constexpr (Mode == ArithmeticMode::BoundedCertification)
@@ -222,33 +223,52 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                             auto imported = PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(
                                 PLIC::CellGeometryView<Mode>(reuse->bounded_, *reused_slot));
                             bounded_owners.retain(imported, budget.used, budget.limit);
-                            bounded_entries[slot] = std::move(imported);
+                            bounded_entries[slot] = reuse->bounded_->explicit_entry(*reused_slot);
                         }
                     }
                 }
-                result.evaluation_policy_[slot] = reuse->evaluation_policy_[*reused_slot];
+                facts.policy[slot] = reuse->evaluation_policy(*reused_slot);
                 reused_slots[slot] = 1;
                 if (state_purpose)
-                    result.native_metrics_[slot] =
+                    facts.metrics[slot] =
                         published && leaf.geometry
                             ? AdaptiveCellMetrics{published->binding->volume, published->binding->centroid}
-                            : reuse->native_metrics_[*reused_slot];
+                            : reuse->native_metrics()[*reused_slot];
                 continue;
             }
         }
         if (native_slots[slot])
         {
-            const auto found = groups.find(leaf.native_recipe.get());
+            auto found = groups.find(leaf.native_recipe.get());
             if (found == groups.end())
             {
                 budget.add(sizeof(typename decltype(groups)::value_type) + 4 * sizeof(void*));
                 const auto ordinal = groups.size();
-                auto& group = groups[leaf.native_recipe.get()];
-                group.source_ordinal = ordinal;
-                ++group.count;
+                found = groups.try_emplace(leaf.native_recipe.get(), *leaf.native_recipe).first;
+                found->second.source_ordinal = ordinal;
             }
-            else
-                ++found->second.count;
+            auto& group = found->second;
+            ++group.count;
+            const auto location = group.axes.location(leaf);
+            if (!raw_bounds)
+                throw std::logic_error("New Cartesian source lacks raw bounds.");
+            for (unsigned axis = 0; axis < 3; ++axis)
+                for (unsigned endpoint = 0; endpoint < 2; ++endpoint)
+                {
+                    auto& coordinates = group.raw_coordinates[axis];
+                    const auto index = location[axis] + endpoint;
+                    const auto value = endpoint ? raw_bounds->upper[axis] : raw_bounds->lower[axis];
+                    if (const auto old = coordinates.find(index); old != coordinates.end())
+                    {
+                        if (std::bit_cast<std::uint64_t>(old->second.value) != std::bit_cast<std::uint64_t>(value))
+                            throw std::invalid_argument("Cartesian shared raw coordinate construction differs.");
+                    }
+                    else
+                    {
+                        budget.add(sizeof(typename BoundAxis::value_type) + 4 * sizeof(void*));
+                        coordinates.emplace(index, BoundCoordinate{value});
+                    }
+                }
             continue;
         }
         // Only a private, authenticated publication row may supply the already
@@ -259,7 +279,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         ordinary_owners.retain(original, budget.used, budget.limit);
         if (state_purpose)
         {
-            result.native_metrics_[slot] = published && leaf.geometry ? AdaptiveCellMetrics{published->binding->volume,
+            facts.metrics[slot] = published && leaf.geometry ? AdaptiveCellMetrics{published->binding->volume,
                                                                             published->binding->centroid}
                                                                       : hierarchy.metrics(leaf);
             observe_controls();
@@ -309,44 +329,21 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         recipe_order.at(group.source_ordinal) = recipe;
     for (const auto* recipe : recipe_order)
     {
-        const auto& slots = groups.at(recipe).slots;
-        const RecipeAxes axes(*recipe);
-        struct BoundCoordinate
-        {
-            std::uint64_t index = 0;
-            double value = 0;
-        };
-        std::array<std::vector<BoundCoordinate>, 3> selected;
-        for (auto& indices : selected)
-        {
-            reserve_checked(indices, checked_product(slots.size(), 2), budget);
-        }
-        for (auto slot : slots)
-        {
-            const auto location = axes.location(*leaves[slot]);
-            for (unsigned axis = 0; axis < 3; ++axis)
-            {
-                selected[axis].push_back({location[axis], raw_bounds[slot].lower[axis]});
-                selected[axis].push_back({location[axis] + 1, raw_bounds[slot].upper[axis]});
-            }
-        }
+        auto& group = groups.at(recipe);
+        const auto& axes = group.axes;
+        const auto& slots = group.slots;
         PLIC::CartesianSourceDescription description;
         for (unsigned axis = 0; axis < 3; ++axis)
         {
-            auto& indices = selected[axis];
-            std::sort(indices.begin(), indices.end(), [](const auto& a, const auto& b) { return a.index < b.index; });
-            for (std::size_t i = 1; i < indices.size(); ++i)
-                if (indices[i - 1].index == indices[i].index && std::bit_cast<std::uint64_t>(indices[i - 1].value) !=
-                                                                    std::bit_cast<std::uint64_t>(indices[i].value))
-                    throw std::invalid_argument("Cartesian shared raw coordinate construction differs.");
-            indices.erase(std::unique(indices.begin(), indices.end(),
-                              [](const auto& a, const auto& b) { return a.index == b.index; }),
-                indices.end());
-            if (indices.size() > std::numeric_limits<std::uint32_t>::max())
+            auto& coordinates = group.raw_coordinates[axis];
+            if (coordinates.size() > std::numeric_limits<std::uint32_t>::max())
                 throw std::invalid_argument("Native Cartesian compact coordinate index overflows.");
-            reserve_checked(description.axes[axis], indices.size(), budget);
-            for (const auto& coordinate : indices)
+            reserve_checked(description.axes[axis], coordinates.size(), budget);
+            for (auto& [index, coordinate] : coordinates)
+            {
+                coordinate.slot = static_cast<std::uint32_t>(description.axes[axis].size());
                 description.axes[axis].push_back(coordinate.value);
+            }
         }
         reserve_checked(description.cells, slots.size(), budget);
         for (auto slot : slots)
@@ -356,15 +353,9 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             PLIC::GeometryPoint lower{}, upper{}, center{};
             for (unsigned axis = 0; axis < 3; ++axis)
             {
-                const auto& indices = selected[axis];
-                cell.lower[axis] = static_cast<std::uint32_t>(
-                    std::lower_bound(indices.begin(), indices.end(), location[axis],
-                        [](const auto& coordinate, std::uint64_t index) { return coordinate.index < index; }) -
-                    indices.begin());
-                cell.upper[axis] = static_cast<std::uint32_t>(
-                    std::lower_bound(indices.begin(), indices.end(), location[axis] + 1,
-                        [](const auto& coordinate, std::uint64_t index) { return coordinate.index < index; }) -
-                    indices.begin());
+                const auto& coordinates = group.raw_coordinates[axis];
+                cell.lower[axis] = coordinates.at(location[axis]).slot;
+                cell.upper[axis] = coordinates.at(location[axis] + 1).slot;
                 if (state_purpose)
                 {
                     lower[axis] = axes.value(axis, location[axis]);
@@ -376,7 +367,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             if (state_purpose)
             {
                 const double native_volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-                result.native_metrics_[slot] = {native_volume, center};
+                facts.metrics[slot] = {native_volume, center};
             }
             entries[slot] = PLIC::NativeCellGeometrySlot{sources.size(), description.cells.size()};
             if (separate_ordinary)
@@ -421,7 +412,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             continue;
         const PLIC::CellGeometryView<ordinary_mode> original(result.ordinary_, slot);
         if (!original.is_procedural())
-            result.evaluation_policy_[slot].original_integrals =
+            facts.policy[slot].original_integrals =
                 PLIC::details::cell_evaluation_cache_ready<ordinary_mode>(
                     PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(original));
         if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -431,14 +422,14 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 const auto& selected_catalog = result.finite_ordinary_ ? result.finite_ordinary_ : result.ordinary_;
                 const PLIC::CellGeometryView<ordinary_mode> selected(selected_catalog, slot);
                 if (!selected.is_procedural())
-                    result.evaluation_policy_[slot].ordinary_integrals =
+                    facts.policy[slot].ordinary_integrals =
                         PLIC::details::cell_evaluation_cache_ready<ordinary_mode>(
                             PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(selected));
             }
         }
         else if constexpr (Mode == ArithmeticMode::BoundedCertification)
             if (state_purpose)
-                result.evaluation_policy_[slot].bounded_integrals = PLIC::details::cell_evaluation_cache_ready<Mode>(
+                facts.policy[slot].bounded_integrals = PLIC::details::cell_evaluation_cache_ready<Mode>(
                     PLIC::details::NativeCellGeometrySourceAccess::existing_geometry(
                         PLIC::CellGeometryView<Mode>(result.bounded_, slot)));
     }

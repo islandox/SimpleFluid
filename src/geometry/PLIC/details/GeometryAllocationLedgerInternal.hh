@@ -46,6 +46,7 @@ enum class Kind
     CellCatalog,
     NativeSourceBody,
     ExternalOwner,
+    CellShellPage,
     PlanarWrapper = 100,
     PlanarPayload = 101
 };
@@ -412,6 +413,7 @@ struct GeometryAllocationLedger::Impl
                     break;
                 }
                 case Kind::CellCatalog:
+                case Kind::CellShellPage:
                 case Kind::IdentityPayload:
                 case Kind::AuthorityPayload:
                 case Kind::ExternalOwner:

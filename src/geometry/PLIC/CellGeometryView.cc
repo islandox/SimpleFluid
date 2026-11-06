@@ -72,10 +72,46 @@ struct CartesianCellSource::Impl
         bool custom_supports = false;
         kernel::StorageScalar constructor_volume;
     };
+    static constexpr std::size_t interval_page_size = 64;
+    struct Interval
+    {
+        std::uint32_t lower = 0, upper = 0;
+        bool operator==(const Interval&) const = default;
+    };
+    struct IntervalColumn
+    {
+        Interval first, step;
+        std::uint8_t repeat = 1, period = interval_page_size;
+        std::vector<Interval> explicit_intervals;
+
+        Interval at(std::size_t row) const noexcept
+        {
+            if (!explicit_intervals.empty())
+                return explicit_intervals[row];
+            const auto offset = std::uint32_t((row / repeat) % period);
+            return {first.lower + step.lower * offset, first.upper + step.upper * offset};
+        }
+    };
+    struct SupportOverride
+    {
+        std::size_t cell = 0;
+        std::uint32_t face = 0, support = 0;
+    };
     struct Base
     {
-        CartesianSourceDescription description;
+        std::array<std::vector<double>, 3> axes;
+        std::array<std::vector<std::uint32_t>, 3> canonical_support_slots;
+        std::vector<PlaneSupportIdentity<ordinary>> original_supports;
+        std::vector<std::array<IntervalColumn, 3>> intervals;
+        std::vector<SupportOverride> support_overrides;
         std::vector<InitialFacts> initial;
+
+        Interval interval(std::size_t cell, std::size_t axis) const
+        {
+            if (cell >= initial.size())
+                throw std::out_of_range("Cartesian source cell slot.");
+            return intervals[cell / interval_page_size][axis].at(cell % interval_page_size);
+        }
     };
     struct Facts
     {
@@ -143,12 +179,12 @@ struct CartesianCellSource::Impl
     mutable std::mutex representation_mutex;
     std::pair<GeometryPoint, GeometryPoint> corners(std::size_t slot) const
     {
-        const auto& cell = base->description.cells.at(slot);
         GeometryPoint lower, upper;
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            lower[axis] = base->description.axes[axis].at(cell.lower[axis]);
-            upper[axis] = base->description.axes[axis].at(cell.upper[axis]);
+            const auto interval = base->interval(slot, axis);
+            lower[axis] = base->axes[axis][interval.lower];
+            upper[axis] = base->axes[axis][interval.upper];
         }
         return {lower, upper};
     }
@@ -254,53 +290,68 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
     work.charge(description.cells.size(), sizeof(Impl::InitialFacts));
     auto impl = std::make_shared<Impl>();
     auto base = std::make_shared<Impl::Base>();
-    base->description = std::move(description);
-    base->initial.reserve(base->description.cells.size());
-    if (base->initial.capacity() > base->description.cells.size())
-        work.charge(base->initial.capacity() - base->description.cells.size(), sizeof(Impl::InitialFacts));
-    base->initial.resize(base->description.cells.size());
+    base->axes = std::move(description.axes);
+    base->original_supports = std::move(description.original_supports);
+    const auto cell_count = description.cells.size();
+    base->initial.reserve(cell_count);
+    if (base->initial.capacity() > cell_count)
+        work.charge(base->initial.capacity() - cell_count, sizeof(Impl::InitialFacts));
+    base->initial.resize(cell_count);
     impl->base = base;
     impl->limits = limits;
     impl->moment_policy = moment_policy;
-    impl->facts.allocate(base->description.cells.size());
+    impl->facts.allocate(cell_count);
+    std::size_t override_count = 0;
+    for (const auto& cell : description.cells)
+        override_count += std::count_if(cell.support_slots.begin(), cell.support_slots.end(),
+            [](auto slot) { return slot != CartesianSourceCellSlot::canonical_support; });
+    work.charge(override_count, sizeof(Impl::SupportOverride));
+    base->support_overrides.reserve(override_count);
+    if (base->support_overrides.capacity() > override_count)
+        work.charge(base->support_overrides.capacity() - override_count, sizeof(Impl::SupportOverride));
     using SupportLookup = std::map<PlaneSupportIdentity<ordinary>, std::uint32_t>;
     SupportLookup support_lookup;
-    for (std::size_t index = 0; index < base->description.original_supports.size(); ++index)
+    for (std::size_t index = 0; index < base->original_supports.size(); ++index)
     {
         if (index >= CartesianSourceCellSlot::canonical_support)
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Cartesian support catalog exceeds compact slots.");
-        if (!support_lookup.contains(base->description.original_supports[index]))
+        if (!support_lookup.contains(base->original_supports[index]))
         {
             work.charge(1, sizeof(SupportLookup::value_type) + 4 * sizeof(void*));
-            support_lookup.emplace(base->description.original_supports[index], static_cast<std::uint32_t>(index));
+            support_lookup.emplace(base->original_supports[index], static_cast<std::uint32_t>(index));
         }
     }
-    std::array<std::vector<std::uint32_t>, 3> canonical_support_slots;
+    auto& canonical_support_slots = base->canonical_support_slots;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        work.charge(base->description.axes[axis].size(), sizeof(std::uint32_t));
+        work.charge(base->axes[axis].size(), sizeof(std::uint32_t));
         canonical_support_slots[axis].assign(
-            base->description.axes[axis].size(), CartesianSourceCellSlot::canonical_support);
-        if (canonical_support_slots[axis].capacity() > base->description.axes[axis].size())
+            base->axes[axis].size(), CartesianSourceCellSlot::canonical_support);
+        if (canonical_support_slots[axis].capacity() > base->axes[axis].size())
             work.charge(
-                canonical_support_slots[axis].capacity() - base->description.axes[axis].size(), sizeof(std::uint32_t));
+                canonical_support_slots[axis].capacity() - base->axes[axis].size(), sizeof(std::uint32_t));
     }
-    for (std::size_t slot = 0; slot < base->description.cells.size(); ++slot)
+    for (std::size_t slot = 0; slot < cell_count; ++slot)
     {
         if (owned_default_guard)
             work.operation_limit =
                 per_cell_guard > aggregate_guard - work.operations ? aggregate_guard : work.operations + per_cell_guard;
-        auto& recipe = base->description.cells[slot];
+        const auto& recipe = description.cells[slot];
         for (std::size_t axis = 0; axis < 3; ++axis)
-            if (recipe.lower[axis] >= recipe.upper[axis] || recipe.upper[axis] >= base->description.axes[axis].size())
+            if (recipe.lower[axis] >= recipe.upper[axis] || recipe.upper[axis] >= base->axes[axis].size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian source interval.");
         for (const auto support : recipe.support_slots)
             if (support != CartesianSourceCellSlot::canonical_support &&
-                support >= base->description.original_supports.size())
+                support >= base->original_supports.size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian original-support slot.");
         const bool custom_supports = std::any_of(recipe.support_slots.begin(), recipe.support_slots.end(),
             [](const auto slot) { return slot != CartesianSourceCellSlot::canonical_support; });
-        const auto [lower, upper] = impl->corners(slot);
+        GeometryPoint lower{}, upper{};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            lower[axis] = base->axes[axis][recipe.lower[axis]];
+            upper[axis] = base->axes[axis][recipe.upper[axis]];
+        }
         kernel::FixedBoxEvaluation box(lower, upper);
         std::array<kernel::Point, 6> normals;
         for (std::size_t face = 0; face < 6; ++face)
@@ -330,15 +381,15 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
         for (std::size_t face = 0; face < 6; ++face)
         {
             if (recipe.support_slots[face] != CartesianSourceCellSlot::canonical_support)
+            {
+                base->support_overrides.push_back({slot, std::uint32_t(face), recipe.support_slots[face]});
                 continue;
+            }
             const auto axis = face / 2;
             const auto axis_slot = face % 2 ? recipe.upper[axis] : recipe.lower[axis];
             auto& cached_slot = canonical_support_slots[axis][axis_slot];
             if (cached_slot != CartesianSourceCellSlot::canonical_support)
-            {
-                recipe.support_slots[face] = cached_slot;
                 continue;
-            }
             // Original identity uses the raw source evidence, matching make/import.
             // Membership and face metrics separately reconstruct captured-frame coordinates.
             const auto native_corners = kernel::fixed_box_corners(lower, upper);
@@ -353,11 +404,10 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
             const auto found = support_lookup.find(support);
             if (found != support_lookup.end())
             {
-                recipe.support_slots[face] = found->second;
                 cached_slot = found->second;
                 continue;
             }
-            auto& supports = base->description.original_supports;
+            auto& supports = base->original_supports;
             if (supports.size() >= CartesianSourceCellSlot::canonical_support)
                 throw GeometryError(
                     GeometryErrorCode::ResourceLimit, "Cartesian support catalog exceeds compact slots.");
@@ -374,14 +424,59 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
                     work.charge(supports.capacity() - capacity, sizeof(PlaneSupportIdentity<ordinary>));
             }
             work.retain_identity(support);
-            recipe.support_slots[face] = static_cast<std::uint32_t>(supports.size());
+            cached_slot = static_cast<std::uint32_t>(supports.size());
             work.charge(1, sizeof(SupportLookup::value_type) + 4 * sizeof(void*));
-            support_lookup.emplace(support, recipe.support_slots[face]);
-            cached_slot = recipe.support_slots[face];
+            support_lookup.emplace(support, cached_slot);
             supports.push_back(std::move(support));
         }
         if (owned_default_guard)
             work.operation_limit = aggregate_guard;
+    }
+    const auto page_count = cell_count / Impl::interval_page_size + (cell_count % Impl::interval_page_size != 0);
+    work.charge(page_count, sizeof(base->intervals[0]));
+    base->intervals.reserve(page_count);
+    if (base->intervals.capacity() > page_count)
+        work.charge(base->intervals.capacity() - page_count, sizeof(base->intervals[0]));
+    for (std::size_t begin = 0; begin < cell_count;)
+    {
+        const auto count = std::min(Impl::interval_page_size, cell_count - begin);
+        auto& page = base->intervals.emplace_back();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            const auto value = [&](std::size_t row)
+            {
+                const auto& cell = description.cells[begin + row];
+                return Impl::Interval{cell.lower[axis], cell.upper[axis]};
+            };
+            auto& column = page[axis];
+            column.first = value(0);
+            std::size_t repeat = 1;
+            while (repeat < count && value(repeat) == column.first)
+                ++repeat;
+            if (repeat == count)
+                continue;
+            const auto second = value(repeat);
+            column.repeat = std::uint8_t(repeat);
+            column.step = {second.lower - column.first.lower, second.upper - column.first.upper};
+            for (std::size_t next = repeat * 2; next < count; next += repeat)
+                if (value(next) == column.first)
+                {
+                    column.period = std::uint8_t(next / repeat);
+                    break;
+                }
+            for (std::size_t row = 1; row < count; ++row)
+                if (column.at(row) != value(row))
+                {
+                    work.charge(count, sizeof(Impl::Interval));
+                    column.explicit_intervals.reserve(count);
+                    if (column.explicit_intervals.capacity() > count)
+                        work.charge(column.explicit_intervals.capacity() - count, sizeof(Impl::Interval));
+                    for (std::size_t item = 0; item < count; ++item)
+                        column.explicit_intervals.push_back(value(item));
+                    break;
+                }
+        }
+        begin += count;
     }
     if (std::fegetenv(&impl->environment) != 0)
         throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Cannot capture Cartesian source environment.");
@@ -389,7 +484,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
 }
 std::size_t CartesianCellSource::size() const noexcept
 {
-    return impl_->base->description.cells.size();
+    return impl_->base->initial.size();
 }
 std::size_t CartesianCellSource::storage_bytes() const
 {
@@ -412,18 +507,23 @@ const void* CartesianCellSource::base_identity() const noexcept
 std::array<std::size_t, 3> CartesianCellSource::base_retention_bytes() const
 {
     const auto& base = *impl_->base;
-    const auto& input = base.description;
-    std::size_t populated = input.cells.size() * sizeof(CartesianSourceCellSlot) +
-        input.original_supports.size() * sizeof(PlaneSupportIdentity<ordinary>) +
-        base.initial.size() * sizeof(Impl::InitialFacts);
-    std::size_t unused = (input.cells.capacity() - input.cells.size()) * sizeof(CartesianSourceCellSlot) +
-        (input.original_supports.capacity() - input.original_supports.size()) * sizeof(PlaneSupportIdentity<ordinary>) +
-        (base.initial.capacity() - base.initial.size()) * sizeof(Impl::InitialFacts);
-    for (const auto& axis : input.axes)
+    std::size_t populated = 0, unused = 0;
+    const auto count = [&]<class T>(const std::vector<T>& buffer)
     {
-        populated += axis.size() * sizeof(double);
-        unused += (axis.capacity() - axis.size()) * sizeof(double);
-    }
+        populated += buffer.size() * sizeof(T);
+        unused += (buffer.capacity() - buffer.size()) * sizeof(T);
+    };
+    count(base.original_supports);
+    count(base.initial);
+    count(base.intervals);
+    count(base.support_overrides);
+    for (const auto& axis : base.axes)
+        count(axis);
+    for (const auto& supports : base.canonical_support_slots)
+        count(supports);
+    for (const auto& page : base.intervals)
+        for (const auto& column : page)
+            count(column.explicit_intervals);
     return {sizeof(Impl::Base), populated, unused};
 }
 std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
@@ -448,7 +548,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
 }
 std::span<const PlaneSupportIdentity<ordinary>> CartesianCellSource::retained_supports() const
 {
-    return impl_->base->description.original_supports;
+    return impl_->base->original_supports;
 }
 void GeometryAllocationLedger::retain(
     const std::shared_ptr<const CartesianCellSource>& source, std::size_t& used, std::size_t limit)
@@ -497,9 +597,10 @@ void GeometryAllocationLedger::retain(
             if constexpr (M == ordinary)
                 for (const auto& source : catalog->sources_)
                     retain(source, used, limit);
-            for (const auto& entry : catalog->entries_)
-                if (const auto* geometry = std::get_if<ConvexGeometryPtr<M>>(&entry))
-                    retain(*geometry, used, limit);
+            for (const auto& page : catalog->explicit_pages_)
+                if (impl_->admit({allocation_detail::Kind::CellShellPage, page}, page->storage_bytes(), used, limit))
+                    for (const auto& geometry : page->cells)
+                        retain(geometry, used, limit);
         }
         impl_->last_counter = used;
     }
@@ -575,7 +676,21 @@ Support<ordinary> CartesianCellSource::support(std::size_t slot, GeometryPoint n
 }
 PlaneSupportIdentity<ordinary> CartesianCellSource::source_support(std::size_t slot, std::size_t face) const
 {
-    return impl_->base->description.original_supports.at(impl_->base->description.cells.at(slot).support_slots.at(face));
+    const auto& base = *impl_->base;
+    if (face >= 6)
+        throw std::out_of_range("Cartesian source face slot.");
+    const auto axis = face / 2;
+    const auto interval = base.interval(slot, axis);
+    auto support = base.canonical_support_slots[axis][face % 2 ? interval.upper : interval.lower];
+    if (base.initial[slot].custom_supports)
+    {
+        const auto key = std::pair(slot, std::uint32_t(face));
+        const auto found = std::lower_bound(base.support_overrides.begin(), base.support_overrides.end(), key,
+            [](const auto& item, const auto& wanted) { return std::pair(item.cell, item.face) < wanted; });
+        if (found != base.support_overrides.end() && std::pair(found->cell, found->face) == key)
+            support = found->support;
+    }
+    return base.original_supports.at(support);
 }
 namespace
 {

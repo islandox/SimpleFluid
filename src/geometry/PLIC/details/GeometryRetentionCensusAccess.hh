@@ -11,8 +11,10 @@ class RetentionAccess
 public:
     template<ArithmeticMode M> static const auto& catalog_sources(const CellGeometryCatalog<M>& catalog)
     { return catalog.sources_; }
-    template<ArithmeticMode M> static const auto& catalog_entries(const CellGeometryCatalog<M>& catalog)
-    { return catalog.entries_; }
+    template<ArithmeticMode M> static const auto& catalog_pages(const CellGeometryCatalog<M>& catalog)
+    { return catalog.explicit_pages_; }
+    template<ArithmeticMode M> static const auto& catalog_selection(const CellGeometryCatalog<M>& catalog)
+    { return catalog.selection_; }
     static std::array<std::size_t,3> cartesian_bytes(const CartesianCellSource& source)
     { return source.retention_bytes(); }
     static std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> cartesian_supports(const CartesianCellSource& source)
