@@ -126,6 +126,7 @@ public:
         if (!depth || depth > 64 || !std::isfinite(quality) || quality < 0)
             throw std::invalid_argument("Invalid convex kernel limits.");
     }
+    bool supports_leaf_local_repack() const noexcept override { return true; }
     AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
     {
         return {AdaptiveContactNormalization::PhysicalIdentity, false, false};

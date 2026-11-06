@@ -347,6 +347,10 @@ foreach(_incremental_ranks IN ITEMS 2 4)
     TARGET testIncrementalAdaptiveHierarchy PROCS ${_incremental_ranks}
     ARGS "--gtest_filter=IncrementalAdaptiveHierarchy.*"
     LABELS "mpi;amr;closure;incremental;empty_rank" TIMEOUT 240)
+  simplefluid_add_mpi_test(NAME AdaptiveLeafFamilyUsage_${_incremental_ranks}procs
+    TARGET testAdaptiveLeafBodyUsage PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=AdaptiveLeafBodyUsage.SavedCartesianParentSurvivesEditAndMigrationWithoutEscapingLeafLayout"
+    LABELS "mpi;amr")
 endforeach()
 
 # Actual native-source closure and control waves, including empty owners.

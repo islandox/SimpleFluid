@@ -138,6 +138,9 @@ public:
     /** Complete immediate source membership is verified by distributed family
      * authority before this exact local inverse is evaluated. */
     [[nodiscard]] AdaptiveLeaf coarsen(const AdaptiveFamily&, std::span<const AdaptiveLeaf>) const;
+    /** Opt in when repack preserves every selected leaf's persistent identity
+     * and certified shape without the rest of the active selection. */
+    [[nodiscard]] virtual bool supports_leaf_local_repack() const noexcept { return false; }
 };
 /** Allocation-free explicit provider capability. A provider label or custom
  * wrapper does not grant this opt-in contract. Virtual dispatch preserves the

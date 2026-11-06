@@ -9,6 +9,10 @@ namespace SimpleFluid::PLIC
 template<ArithmeticMode> struct PointSnapshotContext;
 class CartesianCellSource;
 template<ArithmeticMode> class CellGeometryCatalog;
+namespace details
+{
+class GeometryAllocationOwnerAccess;
+}
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
  * admission poisons the ledger; create a new ledger for a new transaction.
@@ -76,6 +80,7 @@ public:
 private:
     friend class DynamicGeometryAccess;
     friend class details::RetentionAccess;
+    friend class details::GeometryAllocationOwnerAccess;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;

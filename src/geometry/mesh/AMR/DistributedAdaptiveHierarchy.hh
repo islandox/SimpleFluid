@@ -106,7 +106,8 @@ public:
     {
         std::uint64_t remote_sent_payload_bytes = 0, remote_received_payload_bytes = 0;
         std::uint64_t remote_sent_packets = 0, remote_received_packets = 0;
-        std::uint64_t remote_sent_peers = 0, remote_received_peers = 0, self_payload_bytes = 0;
+        std::uint64_t remote_sent_peers = 0, remote_received_peers = 0;
+        std::uint64_t self_payload_bytes = 0; ///< Retained local records bypass packet exchange.
         /** Packet capacities plus transport application planning/framing scratch;
          * excludes provider decode/state/maps/halo/directory buffers and MPI. */
         std::size_t peak_native_packet_buffers = 0;

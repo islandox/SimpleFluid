@@ -38,9 +38,21 @@ public:
         std::optional<std::uint64_t> expected_revision; ///< Missing only for a new key.
         std::optional<AdaptiveLeaf> leaf;               ///< Missing only for a retirement.
     };
+    struct EditView
+    {
+        const AdaptiveCellKey& key;
+        std::optional<std::uint64_t> expected_revision;
+        const AdaptiveLeaf* leaf;
+    };
     struct EditStats
     {
         std::size_t new_nodes = 0, new_leaf_pages = 0, copied_rows = 0;
+    };
+
+    using LeafPageVisitor = std::function<void(std::span<const AdaptiveLeaf>)>;
+    struct PageChanges
+    {
+        LeafPageVisitor retire, insert;
     };
 
     class const_iterator
@@ -110,10 +122,18 @@ public:
      * leaves the source and its allocation charges intact. */
     [[nodiscard]] static AdaptiveLeafPages edit(const AdaptiveLeafPages&, std::span<const Edit>,
         std::shared_ptr<Budget> arena, EditStats* = nullptr);
+    /** Apply a borrowed edit selection. Keep every referenced row and key
+     * alive and quiescent until the private root has been constructed.
+     * Page-change callbacks require a fresh, empty arena so physical source
+     * and newly allocated pages have disjoint admission owners. */
+    [[nodiscard]] static AdaptiveLeafPages edit_borrowed(const AdaptiveLeafPages&, std::span<const EditView>,
+        std::shared_ptr<Budget> arena, EditStats* = nullptr, const PageChanges* = nullptr);
+    void visit_leaf_pages(const LeafPageVisitor&) const;
     /** Visit each page owner while this value is pinned. The charge covers the
      * page and exclusive buffers, and excludes shared provider bodies. */
     void visit_pages(const std::function<void(const void*, std::size_t)>&) const;
     [[nodiscard]] Storage storage() const;
+    [[nodiscard]] std::size_t retained_bytes() const noexcept;
     [[nodiscard]] const void* page_identity(const AdaptiveCellKey&) const;
 
 private:

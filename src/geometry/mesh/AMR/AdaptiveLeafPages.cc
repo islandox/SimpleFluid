@@ -39,6 +39,7 @@ public:
         destination.bytes_ += bytes;
     }
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
+    [[nodiscard]] const Budget* arena() const noexcept { return arena_.get(); }
 
 private:
     std::shared_ptr<Budget> arena_;
@@ -135,14 +136,13 @@ struct AdaptiveLeafPages::Node
     std::vector<AdaptiveLeaf> rows;
     std::vector<NodePtr> children;
     const AdaptiveCellKey* maximum = nullptr;
-    std::size_t size = 0;
+    std::size_t size = 0, subtree_bytes = 0;
 };
 
 struct AdaptiveLeafPageBuilder
 {
     using Node = AdaptiveLeafPages::Node;
     using NodePtr = AdaptiveLeafPages::NodePtr;
-    using Edit = AdaptiveLeafPages::Edit;
     using Nodes = ScratchVector<NodePtr>;
     using Rows = ScratchVector<const AdaptiveLeaf*>;
     using Stats = AdaptiveLeafPages::EditStats;
@@ -152,6 +152,24 @@ struct AdaptiveLeafPageBuilder
 
     std::shared_ptr<Budget> arena;
     Stats stats;
+    const AdaptiveLeafPages::PageChanges* changes = nullptr;
+
+    void retire(const Node& page) const
+    {
+        if (changes && page.charge.arena() != arena.get())
+            changes->retire(page.rows);
+    }
+
+    void visit_new(const Node& page) const
+    {
+        if (page.charge.arena() != arena.get())
+            return;
+        if (page.terminal())
+            changes->insert(page.rows);
+        else
+            for (const auto& child : page.children)
+                visit_new(*child);
+    }
 
     [[nodiscard]] Nodes nodes() const { return Nodes(ScratchAllocator<NodePtr>(*arena)); }
     [[nodiscard]] Rows rows() const { return Rows(ScratchAllocator<const AdaptiveLeaf*>(*arena)); }
@@ -193,6 +211,7 @@ struct AdaptiveLeafPageBuilder
         }
         node->maximum = &node->rows.back().key;
         node->size = count;
+        node->subtree_bytes = node->charge.bytes();
         ++stats.new_leaf_pages;
         stats.copied_rows += count;
         return node;
@@ -205,11 +224,14 @@ struct AdaptiveLeafPageBuilder
         node->children.reserve(children.size());
         if (node->children.capacity() != children.size())
             throw std::invalid_argument("Adaptive leaf branch capacity differs from admission.");
+        node->subtree_bytes = node->charge.bytes();
         for (const auto& child : children)
         {
-            if (child->size > std::numeric_limits<std::size_t>::max() - node->size)
-                throw std::overflow_error("Adaptive leaf count overflows.");
+            if (child->size > std::numeric_limits<std::size_t>::max() - node->size ||
+                child->subtree_bytes > std::numeric_limits<std::size_t>::max() - node->subtree_bytes)
+                throw std::overflow_error("Adaptive leaf page totals overflow.");
             node->size += child->size;
+            node->subtree_bytes += child->subtree_bytes;
             node->children.push_back(child);
         }
         node->maximum = node->children.back()->maximum;
@@ -268,6 +290,8 @@ struct AdaptiveLeafPageBuilder
     {
         if (left.terminal())
         {
+            retire(left);
+            retire(right);
             auto selected = rows();
             selected.reserve(left.rows.size() + right.rows.size());
             for (const auto* page : {&left, &right})
@@ -306,7 +330,8 @@ struct AdaptiveLeafPageBuilder
         }
     }
 
-    [[nodiscard]] Nodes edit_rows(std::span<const AdaptiveLeaf> original, std::span<const Edit> edits)
+    template<class Change>
+    [[nodiscard]] Nodes edit_rows(std::span<const AdaptiveLeaf> original, std::span<const Change> edits)
     {
         auto selected = rows();
         auto count = original.size();
@@ -333,10 +358,13 @@ struct AdaptiveLeafPageBuilder
         return pack_rows(selected);
     }
 
-    [[nodiscard]] Nodes edit_node(const Node& source, std::span<const Edit> edits)
+    template<class Change> [[nodiscard]] Nodes edit_node(const Node& source, std::span<const Change> edits)
     {
         if (source.terminal())
+        {
+            retire(source);
             return edit_rows(source.rows, edits);
+        }
         auto children = nodes();
         children.reserve(source.children.size());
         for (const auto& child : source.children)
@@ -344,7 +372,7 @@ struct AdaptiveLeafPageBuilder
             const auto boundary = child == source.children.back()
                 ? edits.end()
                 : std::upper_bound(edits.begin(), edits.end(), *child->maximum,
-                      [](const AdaptiveCellKey& key, const Edit& edit) { return key < edit.key; });
+                      [](const AdaptiveCellKey& key, const Change& edit) { return key < edit.key; });
             const auto count = std::size_t(boundary - edits.begin());
             if (count == 0)
                 children.push_back(child);
@@ -358,6 +386,38 @@ struct AdaptiveLeafPageBuilder
         }
         rebalance(children);
         return pack_branches(children);
+    }
+
+    template<class Change>
+    [[nodiscard]] static AdaptiveLeafPages edit(const AdaptiveLeafPages& source, std::span<const Change> edits,
+        std::shared_ptr<Budget> arena, Stats* stats, const AdaptiveLeafPages::PageChanges* changes = nullptr)
+    {
+        if (!arena || (changes && arena->used))
+            throw std::invalid_argument("Adaptive leaf page changes require a fresh budget arena.");
+        for (std::size_t index = 0; index < edits.size(); ++index)
+        {
+            const auto& edit = edits[index];
+            const auto* existing = source.find(edit.key);
+            if ((index && !(edits[index - 1].key < edit.key)) ||
+                (edit.leaf && edit.leaf->key != edit.key) ||
+                (edit.expected_revision ? !existing || existing->revision != *edit.expected_revision
+                                        : existing || !edit.leaf))
+                throw std::invalid_argument("Unordered, stale or invalid adaptive leaf page edit.");
+        }
+        if (edits.empty())
+        {
+            if (stats)
+                *stats = {};
+            return source;
+        }
+        AdaptiveLeafPageBuilder builder{std::move(arena), {}, changes};
+        auto pages = source.root_ ? builder.edit_node(*source.root_, edits) : builder.edit_rows({}, edits);
+        AdaptiveLeafPages result(builder.finish(std::move(pages)));
+        if (changes && result.root_)
+            builder.visit_new(*result.root_);
+        if (stats)
+            *stats = builder.stats;
+        return result;
     }
 };
 
@@ -501,30 +561,27 @@ AdaptiveLeafPages AdaptiveLeafPages::build_moving(std::size_t count, const std::
 AdaptiveLeafPages AdaptiveLeafPages::edit(const AdaptiveLeafPages& source, std::span<const Edit> edits,
     std::shared_ptr<Budget> arena, EditStats* stats)
 {
-    if (!arena)
-        throw std::invalid_argument("Adaptive leaf pages require a budget arena.");
-    for (std::size_t index = 0; index < edits.size(); ++index)
+    return AdaptiveLeafPageBuilder::edit(source, edits, std::move(arena), stats);
+}
+
+AdaptiveLeafPages AdaptiveLeafPages::edit_borrowed(const AdaptiveLeafPages& source, std::span<const EditView> edits,
+    std::shared_ptr<Budget> arena, EditStats* stats, const PageChanges* changes)
+{
+    return AdaptiveLeafPageBuilder::edit(source, edits, std::move(arena), stats, changes);
+}
+
+void AdaptiveLeafPages::visit_leaf_pages(const LeafPageVisitor& visitor) const
+{
+    const auto visit = [&](const auto& self, const Node& page) -> void
     {
-        const auto& edit = edits[index];
-        const auto* existing = source.find(edit.key);
-        if ((index && !(edits[index - 1].key < edit.key)) ||
-            (edit.leaf && edit.leaf->key != edit.key) ||
-            (edit.expected_revision ? !existing || existing->revision != *edit.expected_revision
-                                    : existing || !edit.leaf))
-            throw std::invalid_argument("Unordered, stale or invalid adaptive leaf page edit.");
-    }
-    if (edits.empty())
-    {
-        if (stats)
-            *stats = {};
-        return source;
-    }
-    AdaptiveLeafPageBuilder builder{std::move(arena), {}};
-    auto pages = source.root_ ? builder.edit_node(*source.root_, edits) : builder.edit_rows({}, edits);
-    AdaptiveLeafPages result(builder.finish(std::move(pages)));
-    if (stats)
-        *stats = builder.stats;
-    return result;
+        if (page.terminal())
+            visitor(page.rows);
+        else
+            for (const auto& child : page.children)
+                self(self, *child);
+    };
+    if (root_)
+        visit(visit, *root_);
 }
 
 void AdaptiveLeafPages::visit_pages(const std::function<void(const void*, std::size_t)>& visitor) const
@@ -559,6 +616,11 @@ AdaptiveLeafPages::Storage AdaptiveLeafPages::storage() const
                 result.maximum_fanout = std::max(result.maximum_fanout, page.children.size());
         });
     return result;
+}
+
+std::size_t AdaptiveLeafPages::retained_bytes() const noexcept
+{
+    return root_ ? root_->subtree_bytes : 0;
 }
 
 const void* AdaptiveLeafPages::page_identity(const AdaptiveCellKey& key) const

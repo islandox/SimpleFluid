@@ -2388,6 +2388,7 @@ public:
         }
         AdaptiveProviderKernel::validate(leaf);
     }
+    bool supports_leaf_local_repack() const noexcept override { return true; }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
     {
         if (leaves.empty())

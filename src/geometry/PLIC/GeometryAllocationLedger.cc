@@ -2,6 +2,7 @@
  * @brief Alias-aware immutable geometry ownership traversal and cumulative admission.
  */
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
@@ -50,6 +51,25 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
         impl_->bookkeeping = sizeof(Impl);
         impl_->last_counter = used;
     }
+}
+
+void details::GeometryAllocationOwnerAccess::begin(
+    GeometryAllocationLedger& ledger, std::size_t& cumulative, std::size_t bookkeeping_limit)
+{
+    if (ledger.impl_ || bookkeeping_limit < sizeof(GeometryAllocationLedger::Impl))
+        allocation_detail::exhausted("Geometry owner census bookkeeping budget is exhausted.");
+    ledger.begin_admission(cumulative, std::numeric_limits<std::size_t>::max());
+    ledger.impl_->scratch_limit = bookkeeping_limit;
+}
+
+void details::GeometryAllocationOwnerAccess::visit(const GeometryAllocationLedger& ledger,
+    const std::function<void(std::uint8_t, const void*, std::size_t)>& visitor)
+{
+    if (ledger.failed_)
+        allocation_detail::exhausted("Cannot inspect rejected geometry owner census.");
+    if (ledger.impl_)
+        for (const auto& [key, entry] : ledger.impl_->owners)
+            visitor(static_cast<std::uint8_t>(key.kind), entry.pin.get(), entry.payload_bytes);
 }
 
 void GeometryAllocationLedger::retain_external_owner(const std::shared_ptr<const void>& owner,

@@ -406,6 +406,7 @@ public:
         result.surfaces = surfaces_from_shape(leaf, result.geometry, true);
         return result;
     }
+    bool supports_leaf_local_repack() const noexcept override { return true; }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
     {
         NativeFragmentCache cache;

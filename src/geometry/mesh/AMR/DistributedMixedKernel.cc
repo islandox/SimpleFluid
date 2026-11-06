@@ -361,6 +361,7 @@ public:
     {
         throw std::invalid_argument("Stationary native participants do not admit topology adaptation.");
     }
+    bool supports_leaf_local_repack() const noexcept override { return true; }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
     {
         std::map<AdaptiveBytes, std::vector<const AdaptiveLeaf*>> groups;
@@ -702,6 +703,11 @@ public:
             family.anchor = encode_adaptive_key(leaf.key);
         }
         return families;
+    }
+    bool supports_leaf_local_repack() const noexcept override
+    {
+        return std::all_of(routes_.begin(), routes_.end(),
+            [](const auto& entry) { return entry.second.kernel->supports_leaf_local_repack(); });
     }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
     {
