@@ -2460,33 +2460,53 @@ public:
         }
         return families;
     }
-    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
+private:
+    static ExtrudedRegion native_region(const AdaptiveLeaf& leaf)
     {
         if (!leaf.native_recipe)
             throw std::invalid_argument("Missing native product descriptor.");
         NativeFragmentCache cache;
         auto region = materialize_native_fragment(*leaf.native_recipe, cache);
-        const auto* product = std::get_if<ExtrudedRegion>(&region);
+        auto* product = std::get_if<ExtrudedRegion>(&region);
         if (!product || leaf.native_cell >= product->layout().cells)
             throw std::invalid_argument("Product native descriptor/ordinal invalid.");
-        auto actual = product->geometry().certified_cell_geometry(leaf.native_cell);
+        return std::move(*product);
+    }
+
+    static PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> certified_cell(
+        const AdaptiveLeaf& leaf, const ExtrudedRegion& native)
+    {
+        auto actual = native.geometry().certified_cell_geometry(leaf.native_cell);
         auto state = local_state(leaf);
         build_local_runs(state);
-        if (state.runs.size() != 1 || !actual->equivalent(*state.runs[0].region.geometry().certified_cell_geometry(0)))
+        if (!actual || state.runs.size() != 1 ||
+            !actual->equivalent(*state.runs[0].region.geometry().certified_cell_geometry(0)))
             throw std::invalid_argument("Native product recipe differs from exact factor ancestry.");
         return actual;
     }
+
+public:
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
+    {
+        const auto native = native_region(leaf);
+        return certified_cell(leaf, native);
+    }
+    AdaptiveCellMetrics metrics(const AdaptiveLeaf& leaf) const override
+    {
+        const auto native = native_region(leaf);
+        (void) certified_cell(leaf, native);
+        const auto& geometry = native.geometry();
+        const auto center = geometry.cell_centroid(leaf.native_cell);
+        return {geometry.cell_volume(leaf.native_cell), {center.x, center.y, center.z}};
+    }
     std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override
     {
-        auto state = local_state(leaf);
-        build_local_runs(state);
-        if (state.runs.size() != 1)
-            throw std::invalid_argument("Single factor cell did not produce one native patch.");
-        const auto& run = state.runs[0];
+        const auto state = local_state(leaf);
+        const auto native = native_region(leaf);
+        const auto shape = certified_cell(leaf, native);
         const auto& key = std::get<ProductCellAncestry>(leaf.key.ancestry);
         const auto& base_node = state.pool.base.at(key.base);
         std::vector<AdaptiveSurface> result;
-        const auto shape = geometry(leaf);
         // Native construction emits side faces in base-loop order, followed by
         // lower and upper caps; authoritative native atomic shape is checked.
         for (std::size_t i = 0; i < base_node.edges.size(); ++i)
@@ -2533,23 +2553,29 @@ public:
         if (result.size() != shape->num_faces())
             throw std::invalid_argument("Product authoritative face mapping differs.");
         std::rotate(result.begin(), result.end() - 2, result.end());
-        NativeFragmentCache cache;
-        auto region = materialize_native_fragment(*leaf.native_recipe, cache);
-        const auto& native = std::get<ExtrudedRegion>(region);
         std::set<std::uint64_t> matched;
         for (std::size_t f = 0; f < result.size(); ++f)
         {
-            result[f].geometry = shape->face_geometry(f);
-            result[f].require_native_whole_tile=true;result[f].native_whole_geometry=result[f].geometry;
+            auto& surface = result[f];
+            surface.geometry = shape->face_geometry(f);
+            surface.require_native_whole_tile = true;
+            surface.native_whole_geometry = surface.geometry;
             for (auto face : native.topology().cell_faces(leaf.native_cell))
-                if (result[f].geometry->equivalent(*native.geometry().certified_face_geometry(face)))
-                {
-                    if (!matched.insert(face).second)
-                        throw std::invalid_argument("Repeated procedural native face binding.");
-                    result[f].native_face = face;
-                    break;
-                }
-            if (result[f].native_face == std::numeric_limits<std::uint64_t>::max())
+            {
+                const auto certificate = native.geometry().certified_face_geometry(face);
+                if (!certificate)
+                    continue;
+                // Identical finite vertices also prove equality of the two
+                // convex faces when separately constructed support differs.
+                if (!std::ranges::is_permutation(surface.geometry->points(), certificate->points()) &&
+                    !surface.geometry->equivalent(*certificate))
+                    continue;
+                if (!matched.insert(face).second)
+                    throw std::invalid_argument("Repeated procedural native face binding.");
+                surface.native_face = face;
+                break;
+            }
+            if (surface.native_face == std::numeric_limits<std::uint64_t>::max())
                 throw std::invalid_argument("Native product surface lacks native face binding.");
         }
         return result;

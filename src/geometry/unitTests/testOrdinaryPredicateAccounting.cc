@@ -2,6 +2,7 @@
  * @brief Scalar and allocation failure boundaries of private Ordinary predicates.
  */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <array>
@@ -12,9 +13,11 @@
 #include <iomanip>
 #include <latch>
 #include <limits>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -437,4 +440,60 @@ TEST_F(OrdinaryPredicateAccounting, SupportQuotientRecordsCopyPathAndTightCapaci
         record_work(limit_storage ? "support_byte_boundary" : "support_scalar_boundary", operation.work);
     }
 }
+TEST_F(OrdinaryPredicateAccounting, WorldInputFramePreservesExactSourceVertices)
+{
+    constexpr auto mode = SimpleFluid::ArithmeticMode::Ordinary;
+    using Cell = PLIC::ConvexCellGeometry<mode>;
+    using Face = PLIC::PlanarFace<mode>;
+    using WidePoint = Face::WidePoint;
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    // A binary64 source point whose low bits disappear at the preferred
+    // x anchor even in the wider Ordinary working precision.
+    const auto tiny = std::numeric_limits<long double>::digits <= 106
+        ? static_cast<long double>(0x1.0000000000001p-54)
+        : std::ldexp(1.L, -std::numeric_limits<long double>::digits - 1);
+    ASSERT_NE((tiny - 1.L) + 1.L, tiny);
+    const std::vector<std::vector<std::size_t>> loops{{3, 2, 1, 0}, {4, 5, 6, 7},
+        {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+    const auto world = [](long double lower)
+    {
+        return std::array<WidePoint, 8>{{{1, 2, 4}, {1, 3, 4}, {lower, 3, 4}, {lower, 2, 4},
+            {1, 2, 5}, {1, 3, 5}, {lower, 3, 5}, {lower, 2, 5}}};
+    };
+    const auto make = [&](const std::array<WidePoint, 8>& raw, PLIC::GeometryLimits budget)
+    {
+        std::vector<PLIC::Point<mode>> points;
+        points.reserve(raw.size());
+        for (const auto& point : raw)
+            points.emplace_back(point);
+        return Cell::make_points(points, loops, budget);
+    };
+    const auto raw = world(tiny);
+    expect_error([&] { (void) make(raw, limits(1)); }, PLIC::GeometryErrorCode::ResourceLimit);
+    const auto cell = make(raw, limits(100000));
+    EXPECT_EQ(cell->origin(), (PLIC::GeometryPoint{0, 2, 4}));
+    const auto exact = world(.5L);
+    const auto near = make(exact, limits(100000));
+    EXPECT_EQ(near->origin(), (PLIC::GeometryPoint{1, 2, 4}));
+    const std::array<WidePoint, 4> native_vertices{raw[2], raw[3], raw[7], raw[6]};
+    const auto native = Face::make_wide(native_vertices);
+    for (int rounding : {FE_TONEAREST, FE_UPWARD, FE_DOWNWARD, FE_TOWARDZERO})
+    {
+        ASSERT_EQ(std::fesetround(rounding), 0);
+        for (const auto& [geometry, original] :
+             {std::pair{cell, raw}, std::pair{near, exact}})
+        {
+            std::set<WidePoint> exported;
+            for (std::size_t f = 0; f < geometry->num_faces(); ++f)
+            {
+                const auto face = geometry->face_geometry(f);
+                exported.insert(face->points().begin(), face->points().end());
+            }
+            EXPECT_EQ(exported, (std::set<WidePoint>(original.begin(), original.end())));
+        }
+        EXPECT_TRUE(cell->face_geometry(4)->equivalent(*native));
+        EXPECT_EQ(std::fegetround(), rounding);
+    }
+}
+
 } // namespace

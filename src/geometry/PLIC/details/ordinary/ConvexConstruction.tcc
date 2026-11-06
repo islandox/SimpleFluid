@@ -429,6 +429,16 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::make_bounded(
         origin[axis] = static_cast<double>(vertices.front().value[axis]);
         if (!std::isfinite(origin[axis]))
             reject("input anchor outside binary64 source-coordinate range.");
+        const Scalar anchor(origin[axis]);
+        // Keep the nearby anchor where its local frame exports every source
+        // coordinate exactly. A coordinate near zero can otherwise lose bits
+        // during subtraction and fail exact native face identification.
+        if (std::ranges::any_of(vertices, [axis, anchor](const DynamicPoint& vertex)
+                {
+                    const Scalar coordinate(vertex.value[axis]);
+                    return ((coordinate - anchor) + anchor).value != coordinate.value;
+                }))
+            origin[axis] = 0;
     }
     std::vector<DynamicPoint> relative;
     active_work->charge(vertices.size(), sizeof(PointProvenanceView));
