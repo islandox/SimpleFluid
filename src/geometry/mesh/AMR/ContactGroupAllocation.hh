@@ -30,6 +30,13 @@ public:
         arena_->add(bytes);
         bytes_ += bytes;
     }
+    /** Take ownership of an allocation already charged to this arena. */
+    void adopt_precharged(std::size_t bytes)
+    {
+        if (bytes > arena_->used || bytes > std::numeric_limits<std::size_t>::max() - bytes_)
+            throw std::invalid_argument("Precharged contact allocation transfer overflows.");
+        bytes_ += bytes;
+    }
     void release(std::size_t bytes) noexcept { arena_->used -= bytes; bytes_ -= bytes; }
     void transfer_from(ContactGroupAllocation& source, std::size_t bytes)
     {

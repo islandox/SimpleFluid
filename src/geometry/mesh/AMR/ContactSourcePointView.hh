@@ -79,7 +79,8 @@ public:
         return {reference.value};
     }
     [[nodiscard]] CapturedSourcePointReference import_reference(
-        const ContactSourcePointView& source, CapturedSourcePointReference reference, const Pool* target = nullptr)
+        const ContactSourcePointView& source, CapturedSourcePointReference reference, const Pool* target = nullptr,
+        bool shared_physical_admission = false)
     {
         if (frozen_ || !source.frozen_ || source.source_ != source_ || (target && &target->allocation() != budget_))
             throw std::invalid_argument("Invalid immutable composite point import.");
@@ -89,7 +90,8 @@ public:
         ensure_stored();
         const auto old = source.stored_location(reference);
         return stored_reference(
-            stored_->import_reference(*old->view, old->reference, target ? &target->physical_pool() : nullptr));
+            stored_->import_reference(*old->view, old->reference, target ? &target->physical_pool() : nullptr,
+                shared_physical_admission));
     }
     void freeze()
     {

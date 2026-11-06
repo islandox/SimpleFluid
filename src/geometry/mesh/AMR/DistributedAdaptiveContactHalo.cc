@@ -9,11 +9,14 @@
 #include "ContactCoverIndex.hh"
 #include "ContactPairSet.hh"
 #include "ContactRecordIndex.hh"
+#include "PersistentContactGroups.hh"
+#include "PersistentContactTraces.hh"
 #include "ContactPointGroups.hh"
 #include "ContactTracePool.hh"
 #include "DeferredOwnerCharges.hh"
 #include "DistributedAdaptiveClosureRecords.hh"
 #include "DistributedAdaptiveIncidence.hh"
+#include "IncidencePhysicalOwners.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/ScalarPacket.hh"
@@ -138,6 +141,7 @@ class ContactRowGroups
 public:
     explicit ContactRowGroups(ContactGroupAllocation charge) : admission_(std::move(charge)) {}
     [[nodiscard]] bool full() const noexcept { return rows_ == 64; }
+    [[nodiscard]] std::size_t row_count() const noexcept { return rows_; }
     [[nodiscard]] std::size_t begin_row(std::size_t points)
     {
         const auto start = wide_.capacity() ? reserve_row(wide_, points) : reserve_row(compact_, points);
@@ -194,13 +198,15 @@ struct ContactRowSlot
     IncidenceRowHandle row;
     std::shared_ptr<const ContactRowGroups> groups;
     std::size_t group_start = 0;
+    std::size_t record = no_slot, next_free = no_slot;
+    std::uint64_t binding_generation = 1;
     const Budget* origin = nullptr;
 };
 struct ContactRecordSlot
 {
     const AdaptiveLeaf* local_leaf = nullptr;
     std::shared_ptr<const ContactOwnedIdentity> owned;
-    std::size_t row = no_slot;
+    std::size_t row = no_slot, next_free = no_slot;
     ContactBindingId binding{no_slot, 0};
     int owner = -1;
     [[nodiscard]] const AdaptiveCellKey& key() const { return local_leaf ? local_leaf->key : owned->key; }
@@ -211,7 +217,7 @@ struct ContactWorkSlot
 {
     std::shared_ptr<const ContactBody> contact;
     const Budget* origin = nullptr;
-    std::size_t bytes = 0, remote_refs = 0;
+    std::size_t bytes = 0, remote_refs = 0, trace_slot = no_slot;
 };
 } // namespace
 
@@ -223,7 +229,6 @@ struct AdaptiveContactSnapshot::Storage
     ContactSlotPages<ContactRowSlot> rows;
     ContactRecordIndex index;
     ContactSlotPages<FrozenContactGroup> groups;
-    ContactSlotPages<std::size_t> bindings;
     ContactSlotPages<PointFactDirectory::FrozenPoint> remote_points;
     int rank;
     struct Fan
@@ -234,21 +239,20 @@ struct AdaptiveContactSnapshot::Storage
         [[nodiscard]] std::size_t remote_count() const { return group.block->remote_count(group.slice); }
         struct Local
         {
-            std::size_t id;
+            ContactBindingId id;
+            std::size_t record_slot;
             const ContactPointArray& points;
             std::size_t point;
-            [[nodiscard]] std::size_t record() const noexcept { return id; }
+            [[nodiscard]] std::size_t record() const noexcept { return record_slot; }
             [[nodiscard]] ContactPointIdentity physical() const { return points.at(point).physical; }
         };
         [[nodiscard]] Local local(std::size_t i) const
         {
             const auto [binding, point] = group.block->local(group.slice, i);
-            const auto record_slot = storage.bindings[binding];
-            if (!record_slot)
-                throw std::invalid_argument("Frozen contact binding has no record.");
-            const auto id = record_slot - 1;
-            const auto& record = storage.records[id];
-            return {id, storage.rows[record.row].row->points, point};
+            const auto& row = storage.rows[binding];
+            if (!row.row)
+                throw std::invalid_argument("Frozen contact binding has no row.");
+            return {{binding, row.binding_generation}, row.record, row.row->points, point};
         }
         [[nodiscard]] std::size_t remote_record(std::size_t i) const
         {
@@ -270,12 +274,12 @@ struct AdaptiveContactSnapshot::Storage
     }
     Storage(ContactGroupAllocation charge, int rank_)
         : admission(std::move(charge)), records(admission.keeper()), rows(admission.keeper()),
-          index(admission.keeper()), groups(admission.keeper()), bindings(admission.keeper()),
+          index(admission.keeper()), groups(admission.keeper()),
           remote_points(admission.keeper()), rank(rank_) {}
     Storage(ContactGroupAllocation charge, const Storage& source)
         : admission(std::move(charge)), layout(source.layout), records(source.records, admission.keeper()),
           rows(source.rows, admission.keeper()), index(source.index, admission.keeper()),
-          groups(source.groups, admission.keeper()), bindings(source.bindings, admission.keeper()),
+          groups(source.groups, admission.keeper()),
           remote_points(source.remote_points, admission.keeper()), rank(source.rank) {}
     auto key_at() const { return [this](std::size_t id) -> const AdaptiveCellKey& { return records[id].key(); }; }
     [[nodiscard]] std::optional<std::size_t> find(const AdaptiveCellKey& key) const { return index.find(key, key_at()); }
@@ -285,7 +289,7 @@ struct AdaptiveContactSnapshot::Storage
     [[nodiscard]] std::size_t overlap_bytes() const noexcept
     {
         return records.overlap_bytes() + rows.overlap_bytes() + index.overlap_bytes() +
-               groups.overlap_bytes() + bindings.overlap_bytes() + remote_points.overlap_bytes();
+               groups.overlap_bytes() + remote_points.overlap_bytes();
     }
     void finish_overlap() noexcept
     {
@@ -293,7 +297,6 @@ struct AdaptiveContactSnapshot::Storage
         rows.finish_overlap();
         index.finish_overlap();
         groups.finish_overlap();
-        bindings.finish_overlap();
         remote_points.finish_overlap();
     }
 };
@@ -350,14 +353,28 @@ struct DistributedAdaptiveContactHalo::Impl
     std::set<std::size_t> possibly_unused_records;
     std::set<std::pair<int, std::size_t>> missing_records;
     std::map<std::pair<std::size_t, std::size_t>, ClosureRequirements> failing_pairs;
-    std::vector<std::size_t> free_records, retired_records, free_rows;
+    std::size_t free_record = no_slot, free_row = no_slot;
+    std::vector<std::size_t> retired_records;
     std::unique_ptr<Groups> groups;
+    std::shared_ptr<ContactPhysicalResidency> physical_owners;
+    std::optional<PersistentContactTraces> persistent_traces;
+    std::unique_ptr<PersistentContactGroups> persistent_groups;
+    std::vector<std::size_t> retired_row_slots;
+    std::map<GroupId, std::size_t, GroupIdLess> pending_group_positions;
     std::vector<PendingFanEdit> pending_edits;
     std::vector<std::size_t> pending_positions;
     std::unique_ptr<ContactCoverIndex> index;
     std::vector<ClosedContactCover> covers;
     std::map<int, DirectoryNode> directory;
-    std::map<int, std::vector<ClosedContactCover>> neighbors, previous_neighbors;
+    using CoverMap = std::map<int, std::vector<ClosedContactCover>>;
+    struct RankCovers
+    {
+        ContactGroupAllocation admission;
+        CoverMap covers;
+        explicit RankCovers(ContactGroupAllocation charge) : admission(std::move(charge)) {}
+    };
+    CoverMap neighbors, previous_neighbors;
+    std::shared_ptr<const RankCovers> frozen_neighbors, frozen_previous_neighbors;
     Bounds local_cover;
     int ranks, rank, tree_width = 1;
     [[nodiscard]] const ContactRecordSlot& record(std::size_t id) const { return query->records[id]; }
@@ -422,7 +439,7 @@ struct DistributedAdaptiveContactHalo::Impl
                 "ADAPTIVE_HALO rank=%d phase=%s ready=%d evaluated=%d owned=%zu remote=%zu points=%zu dirty_points=%zu "
                 "pairs=%zu pair_bytes=%zu records_bytes=%zu index_bytes=%zu used=%zu peak=%zu cumulative=%zu\n",
                 rank, diagnostic_phase, int(ready), int(evaluated), statistics.owned_records, statistics.remote_records,
-                groups ? groups->size() : 0, dirty_points.size(), affected_pairs.size(), affected_pairs.storage_bytes(),
+                group_count(), dirty_points.size(), affected_pairs.size(), affected_pairs.storage_bytes(),
                 (query ? query->records.storage_bytes() : 0), index ? index->storage_bytes() : 0, budget.used, budget.peak,
                 budget.cumulative);
         statistics.retained_bytes = budget.used;
@@ -577,10 +594,10 @@ struct DistributedAdaptiveContactHalo::Impl
                 throw std::invalid_argument("Conflicting spatial closure cell owner/revision/domain.");
             discard_record(*found);
         }
-        const auto id = free_records.empty() ? query->records.size() : free_records.back();
-        if (!free_records.empty())
-            free_records.pop_back();
+        const auto id = free_record == no_slot ? query->records.size() : free_record;
         auto& entry = edit_record(id);
+        free_record = entry.next_free;
+        entry.next_free = no_slot;
         (void) edit_body(id);
         if (owner == rank && query->layout)
         {
@@ -591,7 +608,11 @@ struct DistributedAdaptiveContactHalo::Impl
                 ++unbound_owned_records;
         }
         if (!entry.local_leaf)
+        {
             entry.owned = ContactOwnedIdentity::capture(arena, key, domain, revision);
+            if (physical_owners)
+                physical_owners->retain_unique(entry.owned->admission.bytes());
+        }
         entry.owner = owner;
         query->insert(id);
         if (owner != rank)
@@ -651,6 +672,7 @@ struct DistributedAdaptiveContactHalo::Impl
     }
     void discover_neighbors()
     {
+        std::shared_ptr<RankCovers> builder;
         // One requester's metadata envelope traverses the distributed tree at
         // a time. Only overlapping owner fragments return to that requester.
         for (int requester = 0; requester < ranks; ++requester)
@@ -804,11 +826,22 @@ struct DistributedAdaptiveContactHalo::Impl
                                 const auto frame = read(r, Kind::LeafCovers, owner);
                                 if (frame.page != expected_cover_page++)
                                     throw std::invalid_argument("Missing or duplicate owner-cover page.");
-                                auto found = neighbors.find(owner);
-                                if (found == neighbors.end())
+                                if (physical_owners && !builder)
                                 {
-                                    budget.add(sizeof(decltype(neighbors)::value_type) + map_links);
-                                    found = neighbors.try_emplace(owner).first;
+                                    ContactGroupAllocation charge(arena);
+                                    charge.add(sizeof(RankCovers) + 128);
+                                    builder = std::make_shared<RankCovers>(std::move(charge));
+                                }
+                                auto& tables = builder ? builder->covers : neighbors;
+                                auto found = tables.find(owner);
+                                if (found == tables.end())
+                                {
+                                    constexpr auto node = sizeof(CoverMap::value_type) + map_links;
+                                    if (builder)
+                                        builder->admission.add(node);
+                                    else
+                                        budget.add(node);
+                                    found = tables.try_emplace(owner).first;
                                 }
                                 auto n = r.word();
                                 if (frame.query != std::uint64_t(requester) || n > r.data.size() / 16)
@@ -819,8 +852,16 @@ struct DistributedAdaptiveContactHalo::Impl
                                     const auto bounds = read_bounds(r);
                                     if (domain.empty() || !bounds.present || !overlaps(local_cover, bounds))
                                         throw std::invalid_argument("Foreign owner-cover response.");
-                                    budget.add(domain.size());
-                                    budget.append_capacity(found->second);
+                                    if (builder)
+                                    {
+                                        builder->admission.add(domain.size());
+                                        builder->admission.append(found->second);
+                                    }
+                                    else
+                                    {
+                                        budget.add(domain.size());
+                                        budget.append_capacity(found->second);
+                                    }
                                     found->second.push_back(
                                         {AdaptiveBytes(domain.begin(), domain.end()), bounds.box, owner, 0});
                                 }
@@ -842,26 +883,156 @@ struct DistributedAdaptiveContactHalo::Impl
                 // queries. Completion of tree traversal is synchronous above.
             }
         }
+        collective(*comm,
+            [&]
+            {
+                if (builder)
+                {
+                    physical_owners->retain(ContactPhysicalResidency::Role::RankCovers, builder,
+                        builder->admission.bytes(), &budget);
+                    frozen_neighbors = std::move(builder);
+                }
+                if (physical_owners)
+                {
+                    auto bytes = covers.capacity() * sizeof(ClosedContactCover);
+                    for (const auto& cover : covers)
+                        bytes += cover.domain.capacity();
+                    std::vector<ClosedContactCover>().swap(covers);
+                    bytes += directory.size() * (sizeof(decltype(directory)::value_type) + map_links);
+                    directory.clear();
+                    budget.used -= bytes;
+                }
+            });
     }
     bool candidate(int owner, GroupId id) const
     {
-        const auto found = neighbors.find(owner);
-        if (found == neighbors.end())
+        const auto& current = frozen_neighbors ? frozen_neighbors->covers : neighbors;
+        const auto found = current.find(owner);
+        if (found == current.end())
             return false;
-        const auto normalized = groups->normalized(id);
+        const auto normalized = group_normalized(id);
         const auto& coordinate = PLIC::details::GeometryIdentityAccess::point(normalized);
         for (const auto& cover : found->second)
-            if (std::ranges::equal(groups->domain(id), cover.domain) && contains(cover.bounds, coordinate))
+            if (std::ranges::equal(group_domain(id), cover.domain) && contains(cover.bounds, coordinate))
                 return true;
         return false;
     }
-    [[nodiscard]] Groups::OrderedIds ordered_dirty() const
+    [[nodiscard]] std::size_t group_count() const noexcept
     {
-        ContactGroupAllocation scratch(arena);
-        std::vector<GroupId> ids;
-        scratch.reserve(ids, dirty_points.size());
-        ids.assign(dirty_points.begin(), dirty_points.end());
-        return groups->ordered_ids(ids);
+        return persistent_groups ? persistent_groups->size() : (groups ? groups->size() : 0);
+    }
+    [[nodiscard]] ContactPointKeyView group_key(GroupId id) const
+    {
+        return persistent_groups ? persistent_groups->key(id) : groups->key(id);
+    }
+    [[nodiscard]] const AdaptiveBytes& group_domain(GroupId id) const
+    {
+        return persistent_groups ? persistent_groups->domain(id) : groups->domain(id);
+    }
+    [[nodiscard]] ContactPointIdentity group_normalized(GroupId id) const
+    {
+        return persistent_groups ? persistent_groups->normalized(id) : groups->normalized(id);
+    }
+    [[nodiscard]] std::size_t group_cover(GroupId id) const
+    {
+        return persistent_groups ? persistent_groups->cover(id) : groups->cover(id);
+    }
+    void set_group_cover(GroupId id, std::size_t value)
+    {
+        if (persistent_groups)
+            persistent_groups->set_cover(id, value);
+        else
+            groups->set_cover(id, value);
+    }
+    [[nodiscard]] std::optional<GroupId> find_group(ContactPointKeyView value) const
+    {
+        return persistent_groups ? persistent_groups->find(value) : groups->find(value);
+    }
+    [[nodiscard]] std::optional<GroupId> find_encoded_group(std::span<const char> value) const
+    {
+        return persistent_groups ? persistent_groups->find_encoded(value) : groups->find_encoded(value);
+    }
+    void retire_group(GroupId id)
+    {
+        if (persistent_groups)
+            persistent_groups->retire(id);
+        else
+            groups->retire(id);
+    }
+    struct OrderedIds
+    {
+        ContactGroupAllocation charge;
+        std::vector<GroupId> values;
+        [[nodiscard]] std::span<const GroupId> ids() const noexcept { return values; }
+    };
+    [[nodiscard]] OrderedIds ordered_groups(bool dirty_only) const
+    {
+        OrderedIds result{ContactGroupAllocation(arena), {}};
+        result.charge.reserve(result.values, dirty_only ? dirty_points.size() : group_count());
+        if (dirty_only)
+            result.values.assign(dirty_points.begin(), dirty_points.end());
+        else if (persistent_groups)
+            persistent_groups->visit_ids([&](GroupId id) { result.values.push_back(id); });
+        else
+        {
+            const auto source = groups->ordered_ids();
+            result.values.assign(source.ids().begin(), source.ids().end());
+            return result;
+        }
+        std::ranges::sort(result.values,
+            [&](GroupId a, GroupId b) { return ContactPointWireLess{}(group_key(a), group_key(b)); });
+        return result;
+    }
+    [[nodiscard]] OrderedIds ordered_dirty() const { return ordered_groups(true); }
+
+    struct Fan
+    {
+        const ContactFanView* old = nullptr;
+        std::optional<AdaptiveContactSnapshot::Storage::Fan> current;
+        struct Local
+        {
+            ContactBindingId id;
+            std::size_t record_slot, point;
+            const ContactPointArray& points;
+            [[nodiscard]] std::size_t record() const noexcept { return record_slot; }
+            [[nodiscard]] ContactPointIdentity physical() const { return points.at(point).physical; }
+        };
+        [[nodiscard]] std::size_t local_count() const
+        { return current ? current->local_count() : (old ? old->local_count() : 0); }
+        [[nodiscard]] std::size_t remote_count() const
+        { return current ? current->remote_count() : (old ? old->remote_count() : 0); }
+        [[nodiscard]] Local local(std::size_t i) const
+        {
+            if (current)
+            {
+                const auto occurrence = current->local(i);
+                return {occurrence.id, occurrence.record(), occurrence.point, occurrence.points};
+            }
+            const auto occurrence = old->local(i);
+            return {occurrence.id, occurrence.record(), occurrence.point, occurrence.binding.row->points};
+        }
+        [[nodiscard]] ContactFanView::Remote remote(std::size_t i) const
+        { return current ? current->remote(i) : old->remote(i); }
+        [[nodiscard]] std::size_t remote_record(std::size_t i) const
+        { return current ? current->remote_record(i) : old->remote_record(i); }
+    };
+    [[nodiscard]] Fan group_fan(GroupId id) const
+    {
+        if (!persistent_groups)
+            return {&groups->borrowed_fan(id), {}};
+        if (const auto* group = query->groups.find(id.slot); group && group->block)
+            return {nullptr, AdaptiveContactSnapshot::Storage::Fan{*query, *group}};
+        return {};
+    }
+    void commit_persistent_edits();
+    void release_row(std::size_t slot);
+    void seal_row_groups(std::shared_ptr<ContactRowGroups>& selectors)
+    {
+        if (!selectors)
+            return;
+        for (std::size_t i = 0; i < selectors->row_count(); ++i)
+            physical_owners->retain(ContactPhysicalResidency::Role::RowGroups, selectors, selectors->bytes(), &budget);
+        selectors.reset();
     }
     PendingFanEdit& stage_edit(GroupId);
     void commit_edits();
@@ -878,8 +1049,8 @@ struct DistributedAdaptiveContactHalo::Impl
             [](const void* pointer, GroupId id) -> ContactCoverIndex::GroupObservation
             {
                 const auto& state = *static_cast<const Impl*>(pointer);
-                return {PLIC::details::GeometryIdentityAccess::point(state.groups->normalized(id)),
-                    &state.groups->domain(id)};
+                return {PLIC::details::GeometryIdentityAccess::point(state.group_normalized(id)),
+                    &state.group_domain(id)};
             }};
     }
     void make_cover_index()
@@ -892,15 +1063,14 @@ struct DistributedAdaptiveContactHalo::Impl
         return query->layout ? index->insert(id) :
             index->insert(groups->point_directory(), groups->normalized_reference(id), &groups->domain(id));
     }
-    void capture_fan(GroupId);
     template<class Visit>
     void with_fan(const ContactRecordSlot& local, std::size_t point, const ContactPointIdentity& normalized,
         Visit&& visit) const
     {
         if (query->layout)
             visit(query->fan(local.row, point));
-        else if (const auto group = groups->find({local.domain(), &normalized}))
-            visit(groups->borrowed_fan(*group));
+        else if (const auto group = find_group({local.domain(), &normalized}))
+            visit(group_fan(*group));
         else
             throw std::invalid_argument("Complete closed-contact row has no point group.");
     }
@@ -926,16 +1096,18 @@ std::size_t DistributedAdaptiveContactHalo::Impl::metadata_bytes() const
     std::size_t bytes =
         sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
         query->admission.bytes() + (sealed_contacts ? sizeof(AdaptiveContactSnapshot) + 128 : 0) +
-        (free_rows.capacity() + free_records.capacity() + retired_records.capacity()) * sizeof(std::size_t) +
+        retired_records.capacity() * sizeof(std::size_t) +
         identities.metadata_bytes() + deferred_owners.metadata_bytes();
-    const auto group_storage = groups->storage_breakdown();
-    bytes += sizeof(Groups) + group_storage.private_metadata_bytes() +
-             pending_positions.capacity() * sizeof(std::size_t) + pending_edits.capacity() * sizeof(PendingFanEdit);
+    if (persistent_groups)
+        bytes += sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128;
+    else
+        bytes += sizeof(Groups) + groups->storage_breakdown().private_metadata_bytes();
+    bytes += pending_positions.capacity() * sizeof(std::size_t) + pending_edits.capacity() * sizeof(PendingFanEdit);
     for (const auto& edit : pending_edits)
         bytes += edit.removed.capacity() * sizeof(ContactBindingId) +
                  edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
                  edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
-    if (incidence)
+    if (incidence && groups)
         groups->visit_admissions(
             [&](const ContactStorageAdmission& admission)
             {
@@ -970,10 +1142,11 @@ std::size_t DistributedAdaptiveContactHalo::Impl::metadata_bytes() const
 
 void DistributedAdaptiveContactHalo::Impl::attach_record(std::size_t id, ContactBody&& value, std::size_t bytes)
 {
-    const auto transferred = trace_pool->adopt(value);
-    if (transferred > bytes)
+    const auto trace = persistent_traces ? persistent_traces->adopt(value)
+        : PersistentContactTraces::Adoption{trace_pool->adopt(value), no_slot};
+    if (trace.transferred > bytes)
         throw std::invalid_argument("Contact trace transfer exceeds record admission.");
-    bytes -= transferred;
+    bytes -= trace.transferred;
     budget.add(128);
     bytes += 128;
     auto keeper = arena;
@@ -986,9 +1159,22 @@ void DistributedAdaptiveContactHalo::Impl::attach_record(std::size_t id, Contact
         });
     slot.origin = &budget;
     slot.bytes = bytes;
+    slot.trace_slot = trace.slot;
+    if (physical_owners)
+        physical_owners->retain_unique(bytes);
 }
 DistributedAdaptiveContactHalo::Impl::PendingFanEdit& DistributedAdaptiveContactHalo::Impl::stage_edit(GroupId id)
 {
+    if (persistent_groups)
+    {
+        if (const auto found = pending_group_positions.find(id); found != pending_group_positions.end())
+            return pending_edits[found->second];
+        budget.add(sizeof(decltype(pending_group_positions)::value_type) + map_links);
+        budget.append_capacity(pending_edits);
+        pending_group_positions.emplace(id, pending_edits.size());
+        pending_edits.push_back({id, {}, {}, {}, false});
+        return pending_edits.back();
+    }
     constexpr auto empty = std::numeric_limits<std::size_t>::max();
     while (pending_positions.size() <= id.slot)
     {
@@ -1008,6 +1194,11 @@ DistributedAdaptiveContactHalo::Impl::PendingFanEdit& DistributedAdaptiveContact
 }
 void DistributedAdaptiveContactHalo::Impl::commit_edits()
 {
+    if (persistent_groups)
+    {
+        commit_persistent_edits();
+        return;
+    }
     auto catalog = groups->catalog();
     for (const auto& edit : pending_edits)
     {
@@ -1056,18 +1247,132 @@ void DistributedAdaptiveContactHalo::Impl::commit_edits()
     std::vector<PendingFanEdit>().swap(pending_edits);
     budget.used -= bytes;
 }
+void DistributedAdaptiveContactHalo::Impl::commit_persistent_edits()
+{
+    struct Prepared
+    {
+        std::vector<ContactLocalOccurrence> local;
+        std::vector<ContactRemoteOccurrence> remote;
+    };
+    auto& facts = persistent_groups->facts;
+    facts.seal_fallback();
+    constexpr std::size_t groups_per_block = 64;
+    for (std::size_t offset = 0; offset < pending_edits.size();)
+    {
+        const auto count = std::min(groups_per_block, pending_edits.size() - offset);
+        ContactGroupAllocation scratch(arena);
+        std::vector<Prepared> prepared;
+        std::vector<ContactFanBlock::Input> inputs;
+        scratch.reserve(prepared, count);
+        scratch.reserve(inputs, count);
+        for (const auto& edit : std::span(pending_edits).subspan(offset, count))
+        {
+            const auto old = group_fan(edit.group);
+            prepared.emplace_back();
+            auto& next = prepared.back();
+            if (edit.appended.size() > no_slot - old.local_count())
+                throw std::invalid_argument("Contact local fan size overflows.");
+            scratch.reserve(next.local, old.local_count() + edit.appended.size());
+            for (std::size_t i = 0; i < old.local_count(); ++i)
+            {
+                const auto occurrence = old.local(i);
+                if (std::ranges::find(edit.removed, occurrence.id) == edit.removed.end())
+                    next.local.push_back({occurrence.id, occurrence.point});
+            }
+            const auto normalized = group_normalized(edit.group);
+            for (const auto& append : edit.appended)
+            {
+                const auto& row = query->rows[append.binding.slot];
+                if (!row.row || row.binding_generation != append.binding.generation ||
+                    record(row.record).domain() != group_domain(edit.group) ||
+                    row.row->points.at(append.point).normalized != normalized)
+                    throw std::invalid_argument("Contact occurrence does not belong to its typed group.");
+                if (std::ranges::any_of(next.local,
+                        [&](const ContactLocalOccurrence& old)
+                        { return query->rows[old.binding.slot].record == row.record; }))
+                    throw std::invalid_argument("Duplicate cell incidence at a normalized closure point.");
+                next.local.push_back(append);
+            }
+            if (!edit.replace_remote)
+            {
+                scratch.reserve(next.remote, old.remote_count());
+                for (std::size_t i = 0; i < old.remote_count(); ++i)
+                {
+                    const auto& group = old.current->group;
+                    const auto [id, point] = group.block->remote(group.slice, i);
+                    next.remote.push_back({id, facts.pinned_reference(point)});
+                }
+            }
+            inputs.push_back({next.local, edit.replace_remote ?
+                std::span<const ContactRemoteOccurrence>(edit.remote) : std::span<const ContactRemoteOccurrence>(next.remote)});
+        }
+        const auto block = ContactFanBlock::build(inputs, scratch, true);
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto& edit = pending_edits[offset + i];
+            const auto old = group_fan(edit.group);
+            for (const auto& remote : inputs[i].remote)
+            {
+                if (facts.pin_remote(remote.physical))
+                    query->remote_points.edit(remote.physical.slot) = facts.frozen(remote.physical);
+            }
+            for (std::size_t j = 0; j < old.remote_count(); ++j)
+            {
+                const auto& group = old.current->group;
+                const auto slot = group.block->remote(group.slice, j).second;
+                if (facts.release_remote(facts.pinned_reference(slot)))
+                    query->remote_points.edit(slot) = {};
+            }
+            if (old.current)
+                physical_owners->release(ContactPhysicalResidency::Role::FanBlock, old.current->group.block);
+            if (!inputs[i].local.empty() || !inputs[i].remote.empty())
+            {
+                physical_owners->retain(ContactPhysicalResidency::Role::FanBlock, block, block->storage_bytes(),
+                    block->origin());
+                query->groups.edit(edit.group.slot) = {block, i};
+            }
+            else if (const auto* group = query->groups.find(edit.group.slot); group && group->block)
+                query->groups.edit(edit.group.slot) = {};
+            const auto cover = group_cover(edit.group);
+            if (inputs[i].local.empty() && cover != no_slot)
+            {
+                if (!index)
+                    throw std::invalid_argument("Missing contact point cover index.");
+                index->erase(cover);
+                set_group_cover(edit.group, no_slot);
+            }
+            for (const auto& remote : edit.remote)
+                facts.release(remote.physical);
+            ++statistics.contact_frozen_groups;
+        }
+        offset += count;
+    }
+    for (const auto slot : retired_row_slots)
+        release_row(slot);
+    std::size_t bytes = retired_row_slots.capacity() * sizeof(std::size_t) +
+        pending_group_positions.size() * (sizeof(decltype(pending_group_positions)::value_type) + map_links) +
+        pending_edits.capacity() * sizeof(PendingFanEdit);
+    for (const auto& edit : pending_edits)
+        bytes += edit.removed.capacity() * sizeof(ContactBindingId) +
+                 edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
+                 edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
+    std::vector<std::size_t>().swap(retired_row_slots);
+    pending_group_positions.clear();
+    std::vector<PendingFanEdit>().swap(pending_edits);
+    budget.used -= bytes;
+}
 void DistributedAdaptiveContactHalo::Impl::touch_point(GroupId id)
 {
     if (dirty_points.contains(id))
         return;
-    (void) groups->key(id);
+    (void) group_key(id);
     budget.add(sizeof(GroupId) + map_links);
     dirty_points.insert(id);
     gather_pairs(id);
 }
 void DistributedAdaptiveContactHalo::Impl::gather_pairs(GroupId id)
 {
-    const auto fan = groups->fan(id);
+    const auto fan = group_fan(id);
     auto add = [&](std::size_t a, std::size_t b)
     {
         if (a == b)
@@ -1077,9 +1382,9 @@ void DistributedAdaptiveContactHalo::Impl::gather_pairs(GroupId id)
     };
     for (std::size_t i = 0; i < fan.local_count(); ++i)
     {
-        const auto record = fan.local(i).binding.record;
+        const auto record = fan.local(i).record();
         for (std::size_t j = 0; j < i; ++j)
-            add(record, fan.local(j).binding.record);
+            add(record, fan.local(j).record());
         for (std::size_t j = 0; j < fan.remote_count(); ++j)
             add(record, fan.remote(j).record);
     }
@@ -1089,7 +1394,7 @@ void DistributedAdaptiveContactHalo::Impl::remove_remote_points(GroupId id)
     auto& edit = stage_edit(id);
     if (edit.replace_remote)
         return;
-    const auto fan = groups->fan(id);
+    const auto fan = group_fan(id);
     for (std::size_t i = 0; i < fan.remote_count(); ++i)
     {
         const auto item = fan.remote(i);
@@ -1128,15 +1433,29 @@ void DistributedAdaptiveContactHalo::Impl::install_row(
     if (leaf.domain.empty() || row.points.empty() || row.revision != leaf.revision ||
         (query->layout ? !row.domain.empty() : (row.key != leaf.key || row.domain != leaf.domain)))
         throw std::invalid_argument("Spatial incidence row disagrees with its source owner.");
-    const auto row_index = free_rows.empty() ? query->rows.size() : free_rows.back();
-    if (!free_rows.empty())
-        free_rows.pop_back();
+    const auto row_index = free_row == no_slot ? query->rows.size() : free_row;
     auto& row_slot = query->rows.edit(row_index);
-    row_slot = {std::move(handle), {}, 0, &budget};
+    free_row = row_slot.next_free;
+    row_slot.next_free = no_slot;
+    row_slot.row = std::move(handle);
+    row_slot.origin = &budget;
+    if (physical_owners)
+    {
+        physical_owners->retain_unique(row_storage(row));
+        if (const auto view = row.points.page_view())
+            physical_owners->observe_point_view(view, true);
+        if (const auto view = row.points.source_page_view())
+        {
+            physical_owners->observe_point_view(view, true);
+            IncidencePhysicalOwners(*physical_owners, incidence->source_credit_arena(), budget, true)
+                .observe_snapshot(view->source());
+        }
+    }
     if (query->layout)
     {
         if (!selectors || selectors->full())
         {
+            seal_row_groups(selectors);
             ContactGroupAllocation charge(arena);
             charge.add(sizeof(ContactRowGroups) + 128);
             selectors = std::make_shared<ContactRowGroups>(std::move(charge));
@@ -1150,28 +1469,34 @@ void DistributedAdaptiveContactHalo::Impl::install_row(
     if (!body(id).contact)
     {
         const auto before = budget.used, identities_before = identities.admitted_bytes();
-        auto record = prepare_contact_body(
-            leaf, kernel, budget, identities, diagnostics.trace_records, diagnostics.transient_geometry_peak_bytes);
+        IdentityBudget local;
+        auto record = prepare_contact_body(leaf, kernel, budget, physical_owners ? local : identities,
+            diagnostics.trace_records, diagnostics.transient_geometry_peak_bytes);
+        const auto scratch = local.borrowed_geometry_ledger().bookkeeping_bytes();
+        local = IdentityBudget{};
+        budget.used -= scratch;
         attach_record(id, std::move(record), budget.used - before - (identities.admitted_bytes() - identities_before));
         ++statistics.owned_records;
         ++diagnostics.geometry_records;
     }
-    entry.binding = groups->catalog()->bind(row_slot.row, id);
-    if (query->layout)
-        query->bindings.edit(entry.binding.slot) = id + 1;
+    row_slot.record = id;
+    entry.binding = persistent_groups ? ContactBindingId{row_index, row_slot.binding_generation}
+                                      : groups->catalog()->bind(row_slot.row, id);
     for (std::size_t point_index = 0; point_index < row.points.size(); ++point_index)
     {
         const auto& point = row.points[point_index];
-        const auto group = groups->intern(leaf.domain, point.normalized, row.points.normalized_locator(point_index),
-            incidence ? &incidence->point_pool() : nullptr);
+        const auto locator = row.points.normalized_locator(point_index);
+        const auto* pool = incidence ? &incidence->point_pool() : nullptr;
+        const auto group = persistent_groups ? persistent_groups->intern(leaf.domain, point.normalized, locator, pool)
+            : groups->intern(leaf.domain, point.normalized, locator, pool);
         if (selectors)
             selectors->append(group.slot);
         touch_point(group);
-        if (ready && groups->cover(group) == std::numeric_limits<std::size_t>::max())
+        if (ready && group_cover(group) == std::numeric_limits<std::size_t>::max())
         {
             if (!index)
                 make_cover_index();
-            groups->set_cover(group, insert_cover(group));
+            set_group_cover(group, insert_cover(group));
         }
         auto& edit = stage_edit(group);
         budget.append_capacity(edit.appended);
@@ -1187,7 +1512,7 @@ void DistributedAdaptiveContactHalo::Impl::retire_row(std::size_t record)
     const auto binding = entry.binding;
     for (const auto& point : row.points)
     {
-        const auto group = groups->find({entry.domain(), &point.normalized});
+        const auto group = find_group({entry.domain(), &point.normalized});
         if (!group)
             throw std::invalid_argument("Retired contact point has no group.");
         touch_point(*group);
@@ -1195,39 +1520,50 @@ void DistributedAdaptiveContactHalo::Impl::retire_row(std::size_t record)
         budget.append_capacity(edit.removed);
         edit.removed.push_back(binding);
     }
-    groups->catalog()->release(binding);
-    if (query->layout)
-        query->bindings.edit(binding.slot) = 0;
     auto& changing = edit_record(record);
     changing.binding = {no_slot, 0};
     changing.row = no_slot;
-    auto& row_slot = query->rows.edit(row_index);
-    release_borrowed(row_slot.row, row_slot.origin != &budget ? row_storage(row) : 0);
-    row_slot.groups.reset();
-    row_slot.group_start = 0;
-    row_slot.origin = nullptr;
-    budget.append_capacity(free_rows);
-    free_rows.push_back(row_index);
+    if (persistent_groups)
+    {
+        budget.append_capacity(retired_row_slots);
+        retired_row_slots.push_back(row_index);
+    }
+    else
+    {
+        groups->catalog()->release(binding);
+        release_row(row_index);
+    }
 }
-void DistributedAdaptiveContactHalo::Impl::capture_fan(GroupId id)
+void DistributedAdaptiveContactHalo::Impl::release_row(std::size_t slot)
 {
-    const auto& fan = groups->borrowed_fan(id);
-    if (!fan.local_count())
+    auto& row = query->rows.edit(slot);
+    if (physical_owners)
     {
-        if (const auto* old = query->groups.find(id.slot); old && old->block)
-            query->groups.edit(id.slot) = {};
-        return;
+        if (const auto view = row.row->points.page_view())
+            physical_owners->observe_point_view(view, false);
+        if (const auto view = row.row->points.source_page_view())
+        {
+            IncidencePhysicalOwners(*physical_owners, incidence->source_credit_arena(), budget, false)
+                .observe_snapshot(view->source());
+            physical_owners->observe_point_view(view, false);
+        }
+        physical_owners->release_unique(row_storage(*row.row), row.origin);
+        if (row.groups)
+            physical_owners->release(ContactPhysicalResidency::Role::RowGroups, row.groups);
+        row.row.reset();
     }
-    const auto& block = fan.owner()->frozen_block();
-    query->groups.edit(id.slot) = {block, fan.group()};
-    const auto& facts = groups->point_directory();
-    for (std::size_t i = 0; i < fan.remote_count(); ++i)
+    else
+        release_borrowed(row.row, row.origin != &budget ? row_storage(*row.row) : 0);
+    row.groups.reset();
+    row.group_start = 0;
+    row.record = no_slot;
+    row.origin = nullptr;
+    if (row.binding_generation != std::numeric_limits<std::uint64_t>::max())
     {
-        const auto slot = block->remote(fan.group(), i).second;
-        if (const auto* point = query->remote_points.find(slot); !point || !*point)
-            query->remote_points.edit(slot) = facts.frozen(facts.pinned_reference(slot));
+        ++row.binding_generation;
+        row.next_free = free_row;
+        free_row = slot;
     }
-    ++statistics.contact_frozen_groups;
 }
 void DistributedAdaptiveContactHalo::Impl::refresh_covers()
 {
@@ -1237,18 +1573,18 @@ void DistributedAdaptiveContactHalo::Impl::refresh_covers()
     std::vector<ClosedContactCover>().swap(covers);
     budget.used -= bytes;
     local_cover = {};
-    if (!ready && groups->size())
+    if (!ready && group_count())
     {
         // Bootstrap visits the completed distinct point catalogue once. Later
         // updates maintain leaf handles at the changed point-group boundary.
         make_cover_index();
-        index->reserve(groups->size());
-        auto ordered = groups->ordered_ids();
+        index->reserve(group_count());
+        auto ordered = ordered_groups(false);
         for (const auto id : ordered.ids())
         {
-            if (!groups->fan(id).local_count())
+            if (!group_fan(id).local_count())
                 throw std::invalid_argument("Empty bootstrap point group.");
-            groups->set_cover(id, insert_cover(id));
+            set_group_cover(id, insert_cover(id));
         }
     }
     if (index && !index->point_count() && !query->layout)
@@ -1257,7 +1593,8 @@ void DistributedAdaptiveContactHalo::Impl::refresh_covers()
         return;
     if (const auto bounds = index->aggregate_bounds())
         local_cover = {*bounds, true};
-    covers = index->ownership_frontier_covers(8);
+    if (ranks > 1 || !physical_owners)
+        covers = index->ownership_frontier_covers(8);
 }
 
 void DistributedAdaptiveContactHalo::Impl::notify_dirty_points()
@@ -1266,16 +1603,17 @@ void DistributedAdaptiveContactHalo::Impl::notify_dirty_points()
     {
         if (candidate(owner, id))
             return true;
-        const auto previous = previous_neighbors.find(owner);
-        if (previous != previous_neighbors.end())
+        const auto& old = frozen_previous_neighbors ? frozen_previous_neighbors->covers : previous_neighbors;
+        const auto previous = old.find(owner);
+        if (previous != old.end())
             for (const auto& cover : previous->second)
-                if (std::ranges::equal(groups->domain(id), cover.domain) &&
-                    contains(cover.bounds, PLIC::details::GeometryIdentityAccess::point(groups->normalized(id))))
+                if (std::ranges::equal(group_domain(id), cover.domain) &&
+                    contains(cover.bounds, PLIC::details::GeometryIdentityAccess::point(group_normalized(id))))
                     return true;
         return false;
     };
     // Freeze canonical outgoing order; learned dirty IDs are not echoed.
-    std::optional<Groups::OrderedIds> outgoing_order;
+    std::optional<OrderedIds> outgoing_order;
     collective(*comm, [&] { outgoing_order.emplace(ordered_dirty()); });
     const auto& outgoing_keys = *outgoing_order;
     for (int offset = 1; offset < ranks; ++offset)
@@ -1305,7 +1643,7 @@ void DistributedAdaptiveContactHalo::Impl::notify_dirty_points()
                     while (cursor < outgoing_keys.ids().size())
                     {
                         const auto id = outgoing_keys.ids()[cursor];
-                        const auto key = groups->key(id);
+                        const auto key = group_key(id);
                         if (!relevant(destination, id))
                         {
                             ++cursor;
@@ -1343,7 +1681,7 @@ void DistributedAdaptiveContactHalo::Impl::notify_dirty_points()
                     for (std::uint64_t i = 0; i < count; ++i)
                     {
                         const auto field = r.bytes_view();
-                        if (const auto id = groups->find_encoded(field))
+                        if (const auto id = find_encoded_group(field))
                             touch_point(*id);
                     }
                     r.done();
@@ -1373,7 +1711,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
         std::uint64_t id;
         std::optional<GroupId> group;
     };
-    std::optional<Groups::OrderedIds> query_order;
+    std::optional<OrderedIds> query_order;
     collective(*comm, [&] { query_order.emplace(ordered_dirty()); });
     const auto& ordered = *query_order;
     for (int offset = 1; offset < ranks; ++offset)
@@ -1385,7 +1723,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
         while (true)
         {
             while (cursor != ordered.ids().end() &&
-                   (!groups->fan(*cursor).local_count() || !candidate(destination, *cursor)))
+                   (!group_fan(*cursor).local_count() || !candidate(destination, *cursor)))
                 ++cursor;
             if (!any(cursor != ordered.ids().end()))
                 break;
@@ -1409,12 +1747,12 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                         std::size_t count = 0;
                         while (cursor != ordered.ids().end())
                         {
-                            if (!groups->fan(*cursor).local_count() || !candidate(destination, *cursor))
+                            if (!group_fan(*cursor).local_count() || !candidate(destination, *cursor))
                             {
                                 ++cursor;
                                 continue;
                             }
-                            const auto need = 8 + framed_contact_point_key_size(groups->key(*cursor));
+                            const auto need = 8 + framed_contact_point_key_size(group_key(*cursor));
                             if (need > cap - outgoing.data.size())
                             {
                                 if (!count)
@@ -1422,7 +1760,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                                 break;
                             }
                             outgoing.word(next_query++);
-                            append_framed_contact_point_key(outgoing, groups->key(*cursor));
+                            append_framed_contact_point_key(outgoing, group_key(*cursor));
                             budget.append_capacity(pending);
                             pending.push_back({*cursor, 0, 0, false, false});
                             ++statistics.exact_point_queries;
@@ -1455,7 +1793,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                                 throw std::invalid_argument("Nonsequential exact point query identity.");
                             const auto bytes = r.bytes_view();
                             budget.append_capacity(queries);
-                            queries.push_back({id, groups->find_encoded(bytes)});
+                            queries.push_back({id, find_encoded_group(bytes)});
                         }
                         r.done();
                     }
@@ -1486,13 +1824,13 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                             while (query_cursor < queries.size())
                             {
                                 const auto& query = queries[query_cursor];
-                                const auto fan = query.group ? groups->fan(*query.group) : ContactFanView{};
+                                const auto fan = query.group ? group_fan(*query.group) : Fan{};
                                 const auto total = fan.local_count();
                                 std::size_t need = 32;
                                 if (total)
                                 {
                                     const auto occurrence = fan.local(occurrence_cursor);
-                                    const auto& record = this->record(occurrence.binding.record);
+                                    const auto& record = this->record(occurrence.record());
                                     need += 24 + key_wire_size(record.key()) +
                                             PLIC::encoded_identity_size(occurrence.physical());
                                 }
@@ -1509,7 +1847,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                                 if (total)
                                 {
                                     const auto occurrence = fan.local(occurrence_cursor);
-                                    const auto& record = this->record(occurrence.binding.record);
+                                    const auto& record = this->record(occurrence.record());
                                     const auto& physical = occurrence.physical();
                                     const auto key_size = key_wire_size(record.key());
                                     const auto point_size = PLIC::encoded_identity_size(physical);
@@ -1583,7 +1921,7 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                                 auto physical = PLIC::decode_identity<ContactPointIdentity>(
                                     encoded_point, budget.limit - budget.used);
                                 const auto record =
-                                    add_record(key, revision, destination, groups->domain(request.point));
+                                    add_record(key, revision, destination, group_domain(request.point));
                                 auto& edit = stage_edit(request.point);
                                 edit.replace_remote = true;
                                 for (const auto& existing : edit.remote)
@@ -1593,7 +1931,8 @@ void DistributedAdaptiveContactHalo::Impl::discover_points()
                                 if (this->record(record).owner == rank)
                                     throw std::invalid_argument("Remote contact fan claims a local cell.");
                                 budget.append_capacity(edit.remote);
-                                const auto reference = groups->catalog()->points.retain(physical);
+                                const auto reference = persistent_groups ? persistent_groups->facts.retain(physical)
+                                    : groups->catalog()->points.retain(physical);
                                 edit.remote.push_back({record, reference});
                                 ++edit_body(record).remote_refs;
                                 ++statistics.matched_occurrences;
@@ -1834,7 +2173,11 @@ void DistributedAdaptiveContactHalo::Impl::fetch_records()
                                         throw std::invalid_argument(
                                             "Duplicate or conflicting contact record completion.");
                                     const auto before = budget.used, identities_before = identities.admitted_bytes();
-                                    auto decoded = decode_contact(assembly, budget, identities);
+                                    IdentityBudget local;
+                                    auto decoded = decode_contact(assembly, budget, physical_owners ? local : identities);
+                                    const auto scratch = local.borrowed_geometry_ledger().bookkeeping_bytes();
+                                    local = IdentityBudget{};
+                                    budget.used -= scratch;
                                     if (decoded.key != record.key() || decoded.domain != record.domain())
                                         throw std::invalid_argument(
                                             "Contact record reply key/domain differs from exact match.");
@@ -1895,17 +2238,13 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
                     for (const auto id : ordered.ids())
                     {
                         gather_pairs(id);
-                        if (!groups->fan(id).local_count())
+                        if (!group_fan(id).local_count())
                             remove_remote_points(id);
                     }
                     commit_edits();
                     for (const auto id : ordered.ids())
-                    {
-                        if (query->layout)
-                            capture_fan(id);
-                        if (!groups->borrowed_fan(id).local_count())
-                            groups->retire(id);
-                    }
+                        if (!group_fan(id).local_count())
+                            retire_group(id);
                     const auto bytes = dirty_points.size() * (sizeof(GroupId) + map_links);
                     dirty_points.clear();
                     budget.used -= bytes;
@@ -2062,21 +2401,39 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
                 {
                     auto& entry = edit_record(id);
                     auto& cached = edit_body(id);
-                    release_borrowed(cached.contact, cached.origin != &budget ? cached.bytes : 0);
-                    const auto identity_credit = entry.owned && &entry.owned->admission.arena() != &budget
-                                                     ? entry.owned->admission.bytes() : 0;
-                    release_borrowed(entry.owned, identity_credit);
+                    if (physical_owners)
+                    {
+                        if (cached.contact)
+                        {
+                            persistent_traces->release(cached.trace_slot);
+                            physical_owners->release_unique(cached.bytes, cached.origin);
+                        }
+                        if (entry.owned)
+                            physical_owners->release_unique(entry.owned->admission.bytes(),
+                                &entry.owned->admission.arena());
+                    }
+                    else
+                    {
+                        release_borrowed(cached.contact, cached.origin != &budget ? cached.bytes : 0);
+                        const auto identity_credit = entry.owned && &entry.owned->admission.arena() != &budget
+                            ? entry.owned->admission.bytes() : 0;
+                        release_borrowed(entry.owned, identity_credit);
+                    }
                     entry = {};
                     cached = {};
-                    budget.append_capacity(free_records);
-                    free_records.push_back(id);
+                    entry.next_free = free_record;
+                    free_record = id;
                 }
                 retired_records.clear();
-                groups->reclaim([&](std::size_t slot)
-                    {
-                        if (const auto* point = query->remote_points.find(slot); point && *point)
-                            query->remote_points.edit(slot) = {};
-                    });
+                if (persistent_groups)
+                    persistent_groups->facts.reclaim(
+                        [&](std::size_t slot)
+                        {
+                            if (const auto* point = query->remote_points.find(slot); point && *point)
+                                query->remote_points.edit(slot) = {};
+                        });
+                else
+                    groups->reclaim();
                 deferred_owners.reap();
                 evaluated = true;
                 diagnostic_phase = "ready";
@@ -2240,7 +2597,14 @@ std::shared_ptr<const AdaptiveContactSnapshot> DistributedAdaptiveContactHalo::s
                 if (!record.local_leaf)
                 {
                     const auto credit = &record.owned->admission.arena() != &state.budget ? record.owned->admission.bytes() : 0;
-                    state.release_borrowed(record.owned, credit);
+                    if (state.physical_owners)
+                    {
+                        state.physical_owners->release_unique(record.owned->admission.bytes(),
+                            &record.owned->admission.arena());
+                        record.owned.reset();
+                    }
+                    else
+                        state.release_borrowed(record.owned, credit);
                     --state.unbound_owned_records;
                 }
                 record.local_leaf = &leaf;
@@ -2308,7 +2672,6 @@ void AdaptiveContactSnapshot::Storage::visit_borrowed_payload(
     rows.visit_pages(page);
     index.visit_pages(page);
     groups.visit_pages(page);
-    bindings.visit_pages(page);
     remote_points.visit_pages(page);
     for (std::size_t i = 0; i < records.size(); ++i)
         if (const auto& identity = records[i].owned)
@@ -2345,7 +2708,47 @@ void AdaptiveContactSnapshot::visit_borrowed_payload(
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    impl_->groups->visit_borrowed_payload(visitor, true);
+    if (impl_->physical_owners)
+        impl_->physical_owners->usage().visit_pages(
+            [&](ContactOwnerUsage::Page page)
+            {
+                contact_payload_object(visitor, page.identity, ContactPayloadRole::ContactOwnerUsageNode,
+                    page.object_bytes, true);
+            });
+    if (impl_->persistent_groups)
+    {
+        contact_payload_object(visitor, impl_->persistent_groups.get(), ContactPayloadRole::GroupObject,
+            sizeof(PersistentContactGroups));
+        impl_->persistent_groups->visit_pages([&](const void* page, bool branch, std::size_t bytes)
+            { visit_contact_page(visitor, page, branch, bytes); });
+        impl_->persistent_groups->visit_domain_owners(
+            [&](const auto& owner, const auto& domain, std::size_t)
+            {
+                contact_payload_object(visitor, owner.get(), ContactPayloadRole::ContactOwnedIdentityObject,
+                    sizeof(*owner), true);
+                contact_payload_buffer(visitor, owner.get(), ContactPayloadRole::ContactOwnedIdentityDomain, domain);
+            });
+        impl_->persistent_groups->facts.visit_point_pages(
+            [&](const auto& page)
+            {
+                if (page.view)
+                    page.view->visit_borrowed_payload(visitor);
+                else if (page.source_view)
+                    page.source_view->visit_borrowed_payload(visitor);
+                else
+                {
+                    const auto& credit = page.fallback;
+                    contact_payload_object(visitor, credit.get(), ContactPayloadRole::FallbackCreditObject,
+                        sizeof(*credit), true);
+                    contact_payload_object(visitor, credit->body.get(), ContactPayloadRole::FallbackBodyObject,
+                        sizeof(*credit->body), true);
+                    contact_payload_buffer(visitor, credit->body.get(), ContactPayloadRole::FallbackValues,
+                        credit->body->values);
+                }
+            });
+    }
+    else
+        impl_->groups->visit_borrowed_payload(visitor, true);
     if (impl_->incidence)
         impl_->incidence->for_each_borrowed_payload(visitor, true);
     if (impl_->sealed_contacts)
@@ -2354,6 +2757,29 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
         impl_->query->visit_borrowed_payload(visitor);
     impl_->work->visit_pages([&](const void* page, bool branch, std::size_t bytes)
         { visit_contact_page(visitor, page, branch, bytes); });
+    const auto trace_payload = [&](const void* owner, const auto& traces)
+    {
+        contact_payload_buffer(visitor, owner, ContactPayloadRole::ContactTraceFaceSlots, traces);
+        for (const auto& face : traces)
+            contact_payload_buffer(visitor, owner, ContactPayloadRole::ContactTraceStem, face.stem);
+    };
+    for (std::size_t slot = 0; slot < impl_->work->size(); ++slot)
+        if (const auto& body = impl_->body(slot).contact)
+        {
+            contact_payload_object(visitor, body.get(), ContactPayloadRole::ContactBodyObject, sizeof(*body), true);
+            trace_payload(body.get(), body->traces);
+        }
+    if (impl_->persistent_traces)
+    {
+        impl_->persistent_traces->visit_pages([&](const void* page, bool branch, std::size_t bytes)
+            { visit_contact_page(visitor, page, branch, bytes); });
+        impl_->persistent_traces->visit_inventories(
+            [&](const void* owner, std::size_t bytes, const auto& traces)
+            {
+                contact_payload_object(visitor, owner, ContactPayloadRole::ContactTraceInventoryObject, bytes, true);
+                trace_payload(owner, traces);
+            });
+    }
     if (impl_->index)
         impl_->index->visit_borrowed_pages([&](const void* page, bool branch, std::size_t bytes)
             { visit_contact_page(visitor, page, branch, bytes); });
@@ -2407,11 +2833,25 @@ std::size_t DistributedAdaptiveContactHalo::source_arena_overlap_metadata_bytes(
 std::size_t DistributedAdaptiveContactHalo::current_fork_overlap_bytes() const noexcept
 {
     return impl_->fork_overlap_bytes + impl_->query->overlap_bytes() + impl_->work->overlap_bytes() +
-           (impl_->index ? impl_->index->overlap_bytes() : 0);
+           (impl_->index ? impl_->index->overlap_bytes() : 0) +
+           (impl_->persistent_groups ? impl_->persistent_groups->overlap_bytes() : 0) +
+           (impl_->physical_owners ? impl_->physical_owners->overlap_bytes() : 0) +
+           (impl_->persistent_traces ? impl_->persistent_traces->overlap_bytes() : 0) +
+           (impl_->incidence ? impl_->incidence->inherited_overlap_metadata_bytes() : 0);
 }
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_group(
     const std::function<void(const ContactHaloBorrowedGroup&)>& visitor) const
 {
+    if (impl_->persistent_groups)
+    {
+        impl_->persistent_groups->visit_groups(
+            [&](const void* entry, ContactGroupId id, const AdaptiveBytes& domain, ContactPointRef point, std::size_t cover)
+            {
+                visitor({entry, id.slot, id.generation, &domain, impl_->persistent_groups->facts.get(point),
+                    point.slot, point.generation, nullptr, cover, true, false});
+            });
+        return;
+    }
     impl_->groups->visit_borrowed_groups(
         [&](const auto& group)
         {
@@ -2423,16 +2863,30 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_group(
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_fact(
     const std::function<void(const ContactHaloBorrowedFact&)>& visitor) const
 {
-    impl_->groups->borrowed_catalog().points.visit_borrowed_facts(
-        [&](const auto& fact)
-        {
-            visitor({fact.record, fact.reference.slot, fact.reference.generation, fact.pins, fact.retired,
-                fact.physical_page, fact.captured.value, fact.value, fact.source_snapshot, fact.source_captured.value});
-        });
+    const auto report = [&](const auto& fact)
+    {
+        visitor({fact.record, fact.reference.slot, fact.reference.generation, fact.pins, fact.retired,
+            fact.physical_page, fact.captured.value, fact.value, fact.source_snapshot, fact.source_captured.value});
+    };
+    if (impl_->persistent_groups)
+        impl_->persistent_groups->facts.visit_facts(report);
+    else
+        impl_->groups->borrowed_catalog().points.visit_borrowed_facts(report);
 }
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_binding(
     const std::function<void(const ContactHaloBorrowedBinding&)>& visitor) const
 {
+    if (impl_->persistent_groups)
+    {
+        for (std::size_t i = 0; i < impl_->query->rows.size(); ++i)
+        {
+            const auto& row = impl_->query->rows[i];
+            if (row.row)
+                visitor({&row, i, row.binding_generation, 1 + row.row->points.size(), false, row.row.get(),
+                    row.row->incidence_generation, row.record});
+        }
+        return;
+    }
     impl_->groups->borrowed_catalog().visit_borrowed_bindings(
         [&](const auto& binding)
         {
@@ -2548,8 +3002,19 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
             if (layout && layout->size() != owned.size())
                 throw std::invalid_argument("Canonical contact source extent disagrees with the owned selection.");
             state.query->layout = std::move(layout);
+            if (state.query->layout)
+            {
+                state.groups.reset();
+                state.budget.used -= sizeof(Impl::Groups);
+                state.budget.add(sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128);
+                state.physical_owners = std::make_shared<ContactPhysicalResidency>(state.arena);
+                state.trace_pool.reset();
+                state.persistent_traces.emplace(state.arena, *state.physical_owners);
+                state.persistent_groups = std::make_unique<PersistentContactGroups>(state.arena, *state.physical_owners);
+            }
             state.incidence = std::make_unique<DistributedAdaptiveIncidenceSession>(
-                state.kernel, state.comm, state.options, state.context, state.budget, state.identities, state.arena);
+                state.kernel, state.comm, state.options, state.context, state.budget, state.identities, state.arena,
+                state.physical_owners);
         });
     state.diagnostic_phase = "canonical_incidence";
     auto rows = state.incidence->bootstrap(owned, lookup, !state.query->layout);
@@ -2560,6 +3025,7 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
             std::shared_ptr<ContactRowGroups> selectors;
             for (auto& delivery : rows)
                 state.install_row(std::move(delivery.row), *delivery.leaf, selectors);
+            state.seal_row_groups(selectors);
             if (state.unbound_owned_records)
                 throw std::invalid_argument("Canonical contact bootstrap disagrees with the owned selection.");
             const auto bytes = rows.capacity() * sizeof(IncidenceRowDelivery);
@@ -2665,6 +3131,7 @@ void DistributedAdaptiveContactHalo::apply_delta(std::span<const ContactRetiredL
                 }
                 state.install_row(std::move(row), leaf, selectors);
             }
+            state.seal_row_groups(selectors);
             bytes = delta.retired.capacity() * sizeof(IncidenceCellVersion) +
                     delta.changed.capacity() * sizeof(IncidenceRowDelivery);
             for (const auto& item : delta.retired)
@@ -2672,7 +3139,10 @@ void DistributedAdaptiveContactHalo::apply_delta(std::span<const ContactRetiredL
             delta = {};
             state.budget.used -= bytes;
             state.statistics.delta_owned_visits += inserted.size();
-            state.previous_neighbors.swap(state.neighbors);
+            if (state.physical_owners)
+                state.frozen_previous_neighbors = std::move(state.frozen_neighbors);
+            else
+                state.previous_neighbors.swap(state.neighbors);
             const auto directory_bytes =
                 state.directory.size() * (sizeof(decltype(state.directory)::value_type) + map_links);
             state.directory.clear();
@@ -2704,6 +3174,11 @@ void DistributedAdaptiveContactHalo::apply_delta(std::span<const ContactRetiredL
             }
             state.previous_neighbors.clear();
             state.budget.used -= bytes;
+            if (state.frozen_previous_neighbors)
+            {
+                state.physical_owners->release(ContactPhysicalResidency::Role::RankCovers, state.frozen_previous_neighbors);
+                state.frozen_previous_neighbors.reset();
+            }
         });
     state.discover_points();
     state.fetch_records();
@@ -2756,6 +3231,11 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
             state.external_retained_bytes = caller_live_bytes;
             state.fork_overlap_bytes = source.metadata_bytes();
             state.budget.add(state.fork_overlap_bytes);
+            if (source.physical_owners)
+            {
+                state.budget.add(sizeof(ContactPhysicalResidency) + 128);
+                state.physical_owners = std::make_shared<ContactPhysicalResidency>(*source.physical_owners, state.arena);
+            }
         });
     // Every rank finishes the incidence fork before selective group imports can
     // reuse its independently admitted physical-page credits.
@@ -2763,12 +3243,19 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
         [&]
         {
             state.incidence =
-                source.incidence->fork(state.budget, state.identities, state.arena, &state.fork_overlap_bytes);
+                source.incidence->fork(state.budget, state.identities, state.arena, &state.fork_overlap_bytes,
+                    state.physical_owners);
         });
     collective(*source.comm,
         [&]
         {
-            state.trace_pool.emplace(*source.trace_pool, state.budget);
+            if (source.persistent_traces)
+            {
+                state.trace_pool.reset();
+                state.persistent_traces.emplace(*source.persistent_traces, state.arena, *state.physical_owners);
+            }
+            else
+                state.trace_pool.emplace(*source.trace_pool, state.budget);
             ContactGroupAllocation charge(state.arena);
             charge.add(sizeof(AdaptiveContactSnapshot::Storage) + 128);
             state.query = std::make_shared<AdaptiveContactSnapshot::Storage>(std::move(charge), *source.query);
@@ -2807,69 +3294,81 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
                 if (from_source_overlap)
                     state.fork_overlap_bytes -= bytes;
             };
-            for (std::size_t i = 0; i < source.query->rows.size(); ++i)
-                if (const auto& row = source.query->rows[i].row)
+            if (!source.physical_owners)
+            {
+                for (std::size_t i = 0; i < source.query->rows.size(); ++i)
+                    if (const auto& row = source.query->rows[i].row)
+                    {
+                        state.budget.add(row_storage(*row));
+                        if (const auto& selectors = source.query->rows[i].groups)
+                            borrow_owner(selectors, selectors->bytes());
+                        if (const auto view = row->points.page_view();
+                            view && !state.deferred_owners.contains(view))
+                        {
+                            // The forked incidence pool independently admits page
+                            // bodies. This credit covers the shared immutable
+                            // directory once, independently of per-row buffers.
+                            borrow_owner(view, view->metadata_bytes());
+                            view->visit_credit_owners(
+                                [&](const auto& owner, std::size_t bytes)
+                                {
+                                    // Transfer current-source credit objects out
+                                    // of source-only overlap. Ancestor credits are
+                                    // distinct owners even when they pin one page.
+                                    const bool current_source = view->origin_arena() == &source.budget &&
+                                                                source.incidence->owns_point_page_credit(owner.get());
+                                    borrow_owner(owner, bytes, current_source);
+                                });
+                        }
+                        if (const auto view = row->points.source_page_view();
+                            view && !state.deferred_owners.contains(view))
+                        {
+                            // Source bodies are admitted by the candidate point
+                            // directory; independently retain the exact immutable
+                            // source-view and ancestor credit metadata of this row.
+                            borrow_owner(view, view->metadata_bytes());
+                            view->visit_credit_owners(
+                                [&](const auto& owner, std::size_t bytes)
+                                {
+                                    const bool current_source = view->origin_arena() == &source.budget &&
+                                                                source.incidence->owns_point_page_credit(owner.get());
+                                    borrow_owner(owner, bytes, current_source);
+                                });
+                        }
+                    }
+                for (std::size_t id = 0; id < source.query->records.size(); ++id)
                 {
-                    state.budget.add(row_storage(*row));
-                    if (const auto& selectors = source.query->rows[i].groups)
-                        borrow_owner(selectors, selectors->bytes());
-                    if (const auto view = row->points.page_view();
-                        view && !state.deferred_owners.contains(view))
-                    {
-                        // The forked incidence pool independently admits page
-                        // bodies. This credit covers the shared immutable
-                        // directory once, independently of per-row buffers.
-                        borrow_owner(view, view->metadata_bytes());
-                        view->visit_credit_owners(
-                            [&](const auto& owner, std::size_t bytes)
-                            {
-                                // Transfer current-source credit objects out
-                                // of source-only overlap. Ancestor credits are
-                                // distinct owners even when they pin one page.
-                                const bool current_source = view->origin_arena() == &source.budget &&
-                                                            source.incidence->owns_point_page_credit(owner.get());
-                                borrow_owner(owner, bytes, current_source);
-                            });
-                    }
-                    if (const auto view = row->points.source_page_view();
-                        view && !state.deferred_owners.contains(view))
-                    {
-                        // Source bodies are admitted by the candidate point
-                        // directory; independently retain the exact immutable
-                        // source-view and ancestor credit metadata of this row.
-                        borrow_owner(view, view->metadata_bytes());
-                        view->visit_credit_owners(
-                            [&](const auto& owner, std::size_t bytes)
-                            {
-                                const bool current_source = view->origin_arena() == &source.budget &&
-                                                            source.incidence->owns_point_page_credit(owner.get());
-                                borrow_owner(owner, bytes, current_source);
-                            });
-                    }
+                    const auto& record = source.record(id);
+                    const auto& body = source.body(id);
+                    state.budget.add(body.bytes + (record.owned ? record.owned->admission.bytes() : 0));
+                    if (body.contact)
+                        for (const auto& trace : body.contact->trace_faces())
+                            if (trace.face)
+                                state.identities.retain(
+                                    state.budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*trace.face));
                 }
-            copy_vector(state.free_rows, source.free_rows);
-            copy_vector(state.free_records, source.free_records);
-            for (std::size_t id = 0; id < source.query->records.size(); ++id)
-            {
-                const auto& record = source.record(id);
-                const auto& body = source.body(id);
-                state.budget.add(body.bytes + (record.owned ? record.owned->admission.bytes() : 0));
-                if (body.contact)
-                    for (const auto& trace : body.contact->trace_faces())
-                        if (trace.face)
-                            state.identities.retain(
-                                state.budget, PLIC::planar_support<ArithmeticMode::Ordinary>(*trace.face));
             }
-            state.budget.add(sizeof(Impl::Groups));
-            auto copied_groups =
-                std::make_unique<Impl::Groups>(*source.groups, state.arena, &state.incidence->point_pool());
-            state.groups = std::move(copied_groups);
-            copy_vector(state.pending_positions, source.pending_positions);
-            for (std::size_t id = 0; id < source.query->records.size(); ++id)
+            state.free_row = source.free_row;
+            state.free_record = source.free_record;
+            if (source.persistent_groups)
             {
-                const auto binding = source.record(id).binding;
-                if (binding.slot != no_slot)
-                    state.groups->catalog()->pin(binding);
+                state.budget.add(sizeof(PersistentContactGroups));
+                state.persistent_groups = std::make_unique<PersistentContactGroups>(
+                    *source.persistent_groups, state.arena, *state.physical_owners);
+            }
+            else
+            {
+                state.budget.add(sizeof(Impl::Groups));
+                auto copied_groups =
+                    std::make_unique<Impl::Groups>(*source.groups, state.arena, &state.incidence->point_pool());
+                state.groups = std::move(copied_groups);
+                copy_vector(state.pending_positions, source.pending_positions);
+                for (std::size_t id = 0; id < source.query->records.size(); ++id)
+                {
+                    const auto binding = source.record(id).binding;
+                    if (binding.slot != no_slot)
+                        state.groups->catalog()->pin(binding);
+                }
             }
             for (const auto& [ids, request] : source.failing_pairs)
             {
@@ -2891,25 +3390,30 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
                         &state.groups->domain(id));
                 }
             }
-            state.budget.add(source.covers.size() * sizeof(ClosedContactCover));
-            state.covers.reserve(source.covers.size());
-            for (const auto& cover : source.covers)
+            if (source.physical_owners)
+                state.frozen_neighbors = source.frozen_neighbors;
+            else
             {
-                state.budget.add(cover.domain.size());
-                state.covers.push_back(cover);
-            }
-            for (const auto& [owner, covers] : source.neighbors)
-            {
-                state.budget.add(sizeof(decltype(state.neighbors)::value_type) + map_links +
-                                 covers.size() * sizeof(ClosedContactCover));
-                for (const auto& cover : covers)
+                state.budget.add(source.covers.size() * sizeof(ClosedContactCover));
+                state.covers.reserve(source.covers.size());
+                for (const auto& cover : source.covers)
+                {
                     state.budget.add(cover.domain.size());
-                state.neighbors.emplace(owner, covers);
-            }
-            for (const auto& [id, node] : source.directory)
-            {
-                state.budget.add(sizeof(decltype(state.directory)::value_type) + map_links);
-                state.directory.emplace(id, node);
+                    state.covers.push_back(cover);
+                }
+                for (const auto& [owner, covers] : source.neighbors)
+                {
+                    state.budget.add(sizeof(decltype(state.neighbors)::value_type) + map_links +
+                                     covers.size() * sizeof(ClosedContactCover));
+                    for (const auto& cover : covers)
+                        state.budget.add(cover.domain.size());
+                    state.neighbors.emplace(owner, covers);
+                }
+                for (const auto& [id, node] : source.directory)
+                {
+                    state.budget.add(sizeof(decltype(state.directory)::value_type) + map_links);
+                    state.directory.emplace(id, node);
+                }
             }
             state.local_cover = source.local_cover;
             state.statistics.owned_records = source.statistics.owned_records;
@@ -2989,6 +3493,12 @@ void DistributedAdaptiveContactHalo::bind_external_retained_bytes(std::size_t by
     impl_->fork_overlap_bytes = 0;
     impl_->query->finish_overlap();
     impl_->work->finish_overlap();
+    if (impl_->persistent_groups)
+        impl_->persistent_groups->finish_overlap();
+    if (impl_->persistent_traces)
+        impl_->persistent_traces->finish_overlap();
+    if (impl_->physical_owners)
+        impl_->physical_owners->finish_overlap();
     if (impl_->incidence)
         impl_->incidence->finish_inherited_overlap();
     if (impl_->index)
@@ -3078,42 +3588,58 @@ const ContactHaloStatistics& DistributedAdaptiveContactHalo::statistics() const 
         impl_->statistics.retained_expanded_completion_result_slots =
             incidence.retained_expanded_completion_result_slots;
     }
-    const auto storage = impl_->groups->storage_breakdown();
-    std::size_t reused_metadata = 0, reused_body = 0;
-    if (impl_->incidence)
-        impl_->groups->visit_admissions(
-            [&](const ContactStorageAdmission& admission)
-            {
-                if (admission.body_owner &&
-                    impl_->incidence->point_pool().owns_page_admission(admission.body_owner, admission.metadata_owner))
+    if (impl_->persistent_groups)
+    {
+        impl_->statistics.group_private_metadata_bytes = impl_->persistent_groups->storage_bytes();
+        impl_->statistics.contact_catalog_pages_copied = impl_->persistent_groups->copied_pages();
+    }
+    else
+    {
+        const auto storage = impl_->groups->storage_breakdown();
+        std::size_t reused_metadata = 0, reused_body = 0;
+        if (impl_->incidence)
+            impl_->groups->visit_admissions(
+                [&](const ContactStorageAdmission& admission)
                 {
-                    reused_metadata += admission.private_metadata;
-                    reused_body += admission.shared_body;
-                }
-            });
-    impl_->statistics.point_groups = impl_->groups->size();
-    impl_->statistics.group_private_metadata_bytes = sizeof(Impl::Groups) + storage.private_metadata_bytes() -
-                                                     reused_metadata +
-                                                     impl_->pending_positions.capacity() * sizeof(std::size_t) +
-                                                     impl_->pending_edits.capacity() * sizeof(Impl::PendingFanEdit);
-    for (const auto& edit : impl_->pending_edits)
-        impl_->statistics.group_private_metadata_bytes += edit.removed.capacity() * sizeof(ContactBindingId) +
-                                                          edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
-                                                          edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
-    impl_->statistics.group_shared_body_bytes = storage.shared_body_bytes() - reused_body;
-    impl_->statistics.reused_point_credit_metadata_bytes = reused_metadata;
-    impl_->statistics.reused_point_body_bytes = reused_body;
+                    if (admission.body_owner &&
+                        impl_->incidence->point_pool().owns_page_admission(admission.body_owner, admission.metadata_owner))
+                    {
+                        reused_metadata += admission.private_metadata;
+                        reused_body += admission.shared_body;
+                    }
+                });
+
+        impl_->statistics.group_private_metadata_bytes = sizeof(Impl::Groups) + storage.private_metadata_bytes() -
+                                                         reused_metadata +
+                                                         impl_->pending_positions.capacity() * sizeof(std::size_t) +
+                                                         impl_->pending_edits.capacity() * sizeof(Impl::PendingFanEdit);
+        for (const auto& edit : impl_->pending_edits)
+            impl_->statistics.group_private_metadata_bytes += edit.removed.capacity() * sizeof(ContactBindingId) +
+                                                              edit.appended.capacity() * sizeof(ContactLocalOccurrence) +
+                                                              edit.remote.capacity() * sizeof(ContactRemoteOccurrence);
+        impl_->statistics.group_shared_body_bytes = storage.shared_body_bytes() - reused_body;
+        impl_->statistics.reused_point_credit_metadata_bytes = reused_metadata;
+        impl_->statistics.reused_point_body_bytes = reused_body;
+    }
+    impl_->statistics.point_groups = impl_->group_count();
     const auto& query = *impl_->query;
     impl_->statistics.contact_record_pages_copied = query.records.copied_pages();
     impl_->statistics.contact_row_pages_copied = query.rows.copied_pages();
     impl_->statistics.contact_work_pages_copied = impl_->work->copied_pages();
     impl_->statistics.contact_index_pages_copied = query.index.copied_pages();
+    if (impl_->physical_owners)
+    {
+        impl_->statistics.contact_owner_admission_work = impl_->physical_owners->work();
+        impl_->statistics.contact_shared_owner_bytes = impl_->physical_owners->payload_bytes();
+        impl_->statistics.contact_owner_index_bytes = impl_->physical_owners->usage().storage_bytes();
+        impl_->statistics.contact_trace_pages_copied = impl_->persistent_traces->copied_pages();
+    }
     impl_->statistics.contact_index_split_records = query.index.split_records();
     impl_->statistics.contact_cover_pages_copied = impl_->index ? impl_->index->copied_pages() : 0;
     impl_->statistics.contact_cover_page_bytes = impl_->index
         ? impl_->index->storage_bytes() - impl_->index->private_metadata_bytes() : 0;
     impl_->statistics.contact_query_pages_copied =
-        query.groups.copied_pages() + query.bindings.copied_pages() + query.remote_points.copied_pages();
+        query.groups.copied_pages() + query.remote_points.copied_pages();
     impl_->statistics.retained_bytes = impl_->budget.used;
     impl_->statistics.peak_bytes = impl_->budget.peak;
     impl_->statistics.cumulative_bytes = impl_->budget.cumulative;

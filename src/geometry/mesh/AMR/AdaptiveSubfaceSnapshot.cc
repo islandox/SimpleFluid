@@ -1,6 +1,7 @@
 #include "AdaptiveSubfaceSnapshot.hh"
 #include "CertifiedIncidenceViews.hh"
 #include "ContactPointPageView.hh"
+#include "IncidencePhysicalOwners.hh"
 #include "IncidencePools.hh"
 #include "PersistentOrderedPages.hh"
 #include "TileBodyPages.hh"
@@ -137,6 +138,12 @@ struct SubfaceProvenancePage
     {
         return checked_sum(charge.bytes,
             checked_sum(keys->metadata_bytes(), checked_sum(supports->metadata_bytes(), domains->metadata_bytes())));
+    }
+    void observe_shared_owners(IncidencePhysicalOwners& owners) const
+    {
+        owners.observe_pool_credits(keys);
+        owners.observe_pool_credits(supports);
+        owners.observe_pool_credits(domains);
     }
     void visit_dependencies(const SubfaceOwnerVisit& visit, bool include_directory) const
     {
@@ -395,6 +402,28 @@ struct SubfacePiecePage
                 continue;
             seen[count++] = page.get();
             visit(page);
+        }
+    }
+    void observe_shared_owners(IncidencePhysicalOwners& owners) const
+    {
+        using Role = IncidencePhysicalOwners::Role;
+        owners.observe_pool_credits(planes);
+        owners.observe_pool_credits(normals);
+        owners.observe_pool_credits(images);
+        owners.observe_point_credits(physical);
+        owners.observe_snapshot(source);
+        for (const auto& record : records)
+        {
+            if (record.explicit_loop)
+                owners.observe(Role::SubfaceRing, record.explicit_loop, record.explicit_loop->charged_bytes(),
+                    record.explicit_loop->origin());
+            owners.observe(Role::TileBody, record.body.body_storage_owner(), record.body.body_bytes(),
+                record.body.credit_origin());
+            owners.observe(Role::CreditMetadata, record.body.credit_owner(),
+                record.body.credit_bytes() - record.body.body_bytes(), record.body.credit_origin(),
+                IncidencePhysicalOwners::tile_credit_scope);
+            if (record.certified)
+                owners.observe_proof(*record.certified);
         }
     }
     void visit_dependencies(const SubfaceOwnerVisit& visit, bool include_directory) const
@@ -844,7 +873,7 @@ AdaptiveSubfaceSnapshot::~AdaptiveSubfaceSnapshot()
 }
 std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(ContactHaloContext context,
     GeometryConstructionControls controls, int resident, std::span<const CanonicalSubfaceView> pieces, Budget& budget,
-    std::shared_ptr<Budget> arena)
+    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits)
 {
     using namespace subface_index_detail;
     if (!arena || arena.get() != &budget || resident < 0 || pieces.size() > std::numeric_limits<std::size_t>::max() / 2)
@@ -906,6 +935,11 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
             result->exclusive_payload_bytes_ = checked_sum(result->exclusive_payload_bytes_, bytes);
             if (page->charge.arena != arena)
                 result->foreign_exclusive_payload_bytes_ = checked_sum(result->foreign_exclusive_payload_bytes_, bytes);
+            if (residency)
+            {
+                IncidencePhysicalOwners owners(*residency, credits, budget, true);
+                page->observe_shared_owners(owners);
+            }
         };
         std::vector<ProvenanceOwner> provenance;
         for (const auto& owner : counted_pieces)
@@ -931,7 +965,7 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(Con
 std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
     const std::shared_ptr<const AdaptiveSubfaceSnapshot>& previous, ContactHaloContext context,
     GeometryConstructionControls controls, int resident, std::span<const CanonicalSubfaceChange> edits, Budget& budget,
-    std::shared_ptr<Budget> arena)
+    std::shared_ptr<Budget> arena, ContactPhysicalResidency* residency, cartesian_detail::ArenaCredits* credits)
 {
     using namespace subface_index_detail;
     if (!previous || !arena || arena.get() != &budget || resident != previous->resident_)
@@ -1005,6 +1039,11 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
         account(result->exclusive_payload_bytes_);
         if (page->charge.arena != arena)
             account(result->foreign_exclusive_payload_bytes_);
+        if (residency)
+        {
+            IncidencePhysicalOwners owners(*residency, credits, budget, insert);
+            page->observe_shared_owners(owners);
+        }
         return true;
     };
     const auto adjust_owner = [&](const auto& page, bool insert)
@@ -1047,10 +1086,10 @@ std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::derive(
             indexes->pieces = pieces.edit(indexes->pieces, after, &after, false);
         if (before.page_ != after.page_)
         {
-            if (before)
-                adjust_owner(before.page_, false);
             if (after)
                 adjust_owner(after.page_, true);
+            if (before)
+                adjust_owner(before.page_, false);
         }
         for (const bool side : {false, true})
         {

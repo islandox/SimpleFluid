@@ -79,4 +79,95 @@ TEST(CartesianAuthorityCredits, PrivateOverlapCensusIncludesHeaderNodesAndEachAl
     arena.reset();
     EXPECT_EQ(accepted->used, first_memory.bytes + second_memory.bytes);
 }
+TEST(CartesianAuthorityCredits, ObserverVisitsActualOwnersWithoutAllocatingTypedCredits)
+{
+    Budget budget{ample};
+    Allocation memory(budget);
+    std::vector<std::shared_ptr<AuthorityOwnerCredit>> leases;
+    const auto owner = std::make_shared<const Payload>();
+    struct Probe
+    {
+        const void* address;
+        const Budget* origin;
+        std::size_t visits = 0;
+    } probe{owner.get(), &budget};
+    CreditConstruction observe(budget, &probe,
+        [](void* context, const std::shared_ptr<const void>& actual, const Budget* origin, std::size_t bytes,
+            bool keeper, bool metadata)
+        {
+            auto& value = *static_cast<Probe*>(context);
+            EXPECT_EQ(actual.get(), value.address);
+            EXPECT_EQ(origin, value.origin);
+            EXPECT_EQ(bytes, sizeof(Payload));
+            EXPECT_TRUE(keeper);
+            EXPECT_FALSE(metadata);
+            return value.visits++ == 0;
+        });
+    EXPECT_TRUE(observe.descend(owner, &budget, sizeof(Payload), true, leases, memory));
+    EXPECT_FALSE(observe.descend(owner, &budget, sizeof(Payload), true, leases, memory));
+    EXPECT_EQ(probe.visits, 2u);
+    EXPECT_TRUE(leases.empty());
+    EXPECT_EQ(budget.used, 0u);
+}
+
+TEST(CartesianAuthorityCredits, PrepaidBodyPreservesCapacityAndRechargesAfterPolicyExpires)
+{
+    auto source = std::make_shared<Budget>(Budget{ample});
+    auto budget = std::make_shared<Budget>(Budget{ample});
+    constexpr auto bytes = sizeof(Payload) + 128;
+    const auto owner = std::make_shared<const Payload>();
+    auto arena = CartesianGroupAuthority::make_arena(*budget, budget);
+    Allocation memory(*budget);
+    std::vector<std::shared_ptr<AuthorityOwnerCredit>> leases;
+    struct Policy
+    {
+        const void* address;
+        const Budget* origin;
+    };
+    auto policy = std::make_shared<const Policy>(Policy{owner.get(), source.get()});
+    arena->set_prepaid_policy(policy,
+        [](const void* context, const std::shared_ptr<const void>& actual, const Budget* origin, std::size_t size,
+            bool metadata) noexcept
+        {
+            const auto& selected = *static_cast<const Policy*>(context);
+            return actual.get() == selected.address && origin == selected.origin && size == bytes && !metadata;
+        });
+    budget->add(bytes);
+    {
+        CreditConstruction construction(arena);
+        EXPECT_TRUE(construction.retain(owner, source.get(), bytes, true, leases, memory));
+        construction.committed = true;
+    }
+    ASSERT_EQ(leases.size(), 1u);
+    EXPECT_EQ(leases.front()->payload, bytes);
+    EXPECT_EQ(leases.front()->charged_payload, 0u);
+    EXPECT_TRUE(arena->admits_owner(owner, bytes));
+    EXPECT_FALSE(arena->find_paid_token(owner, source.get(), bytes));
+    policy.reset();
+    budget->used -= bytes;
+    const auto baseline = budget->used;
+    EXPECT_FALSE(arena->admits_owner(owner, bytes));
+    {
+        CreditConstruction rejected(arena);
+        EXPECT_TRUE(rejected.retain(owner, source.get(), bytes, true, leases, memory));
+        EXPECT_EQ(leases.front()->charged_payload, bytes);
+    }
+    EXPECT_EQ(budget->used, baseline);
+    EXPECT_EQ(leases.front()->charged_payload, 0u);
+    {
+        CreditConstruction retry(arena);
+        EXPECT_TRUE(retry.retain(owner, source.get(), bytes, true, leases, memory));
+        retry.committed = true;
+    }
+    EXPECT_EQ(budget->used, baseline + bytes);
+    auto paid = arena->find_paid_token(owner, source.get(), bytes);
+    ASSERT_TRUE(paid);
+    EXPECT_EQ(paid->take_payload_charge(), bytes);
+    EXPECT_EQ(budget->used, baseline + bytes);
+    paid.reset();
+    leases.clear();
+    arena.reset();
+    EXPECT_EQ(budget->used, memory.bytes + bytes);
+    budget->used -= bytes;
+}
 } // namespace

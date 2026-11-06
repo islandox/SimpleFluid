@@ -76,13 +76,22 @@ void retain_owner(cartesian_detail::CreditConstruction& credits, const std::shar
     const std::shared_ptr<const std::remove_const_t<T>> fixed = owner;
     credits.retain(fixed, origin, bytes, keeper, leases, memory);
 }
+template<class T>
+bool descend_owner(cartesian_detail::CreditConstruction& credits, const std::shared_ptr<T>& owner,
+    const Budget* origin, std::size_t bytes, bool keeper, Credits& leases, Allocation& memory)
+{
+    const std::shared_ptr<const std::remove_const_t<T>> fixed = owner;
+    return credits.descend(fixed, origin, bytes, keeper, leases, memory);
+}
+
 void retain_snapshot(cartesian_detail::CreditConstruction& credits,
     const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot, Credits& leases, Allocation& memory)
 {
-    credits.retain(snapshot, snapshot->allocation_budget(), snapshot->metadata_bytes(), snapshot->has_arena_keeper(),
-        leases, memory);
+    if (!credits.descend(snapshot, snapshot->allocation_budget(), snapshot->metadata_bytes(),
+            snapshot->has_arena_keeper(), leases, memory))
+        return;
     snapshot->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { retain_owner(credits, owner, origin, bytes, keeper, leases, memory); });
+        { return descend_owner(credits, owner, origin, bytes, keeper, leases, memory); });
 }
 /** Five actual global component IDs occupy 60 bits; the two axes occupy four.
  * This is a saved-value selector, with no coordinate calculation. */
@@ -405,12 +414,13 @@ void CertifiedIncidenceResultView::retain_dependencies(
 {
     if (recipe_)
     {
-        credits.retain(recipe_, recipe_->allocation_budget(), recipe_->metadata_bytes(), recipe_->has_arena_keeper(),
-            leases, memory);
-        recipe_->retain_dependencies(credits, leases, memory);
+        if (credits.descend(recipe_, recipe_->allocation_budget(), recipe_->metadata_bytes(),
+                recipe_->has_arena_keeper(), leases, memory))
+            recipe_->retain_dependencies(credits, leases, memory);
         return;
     }
-    credits.retain(remote_, remote_->budget, remote_->metadata_bytes(), bool(remote_->keeper), leases, memory);
+    if (!credits.descend(remote_, remote_->budget, remote_->metadata_bytes(), bool(remote_->keeper), leases, memory))
+        return;
     credits.retain(remote_->proof, remote_->proof->allocation_budget(), remote_->proof->metadata_bytes(),
         remote_->proof->has_arena_keeper(), leases, memory);
     retain_snapshot(credits, remote_->snapshot, leases, memory);
@@ -531,7 +541,8 @@ bool CertifiedIncidenceResultParts::imports_owner(const void* id) const noexcept
 void CertifiedIncidenceResultParts::retain_dependencies(
     cartesian_detail::CreditConstruction& credits, Credits& leases, Allocation& memory) const
 {
-    credits.retain(storage_, storage_->budget, metadata_bytes(), bool(storage_->keeper), leases, memory);
+    if (!credits.descend(storage_, storage_->budget, metadata_bytes(), bool(storage_->keeper), leases, memory))
+        return;
     for (const auto& part : storage_->parts)
         part.retain_dependencies(credits, leases, memory);
     for (const auto& lease : storage_->leases)
@@ -868,7 +879,8 @@ bool CertifiedIncidenceLoopView::imports_owner(const void* identity) const noexc
 void CertifiedIncidenceLoopView::retain_dependencies(
     cartesian_detail::CreditConstruction& credits, Credits& leases, Allocation& memory) const
 {
-    credits.retain(storage_, storage_->budget, metadata_bytes(), bool(storage_->keeper), leases, memory);
+    if (!credits.descend(storage_, storage_->budget, metadata_bytes(), bool(storage_->keeper), leases, memory))
+        return;
     if (storage_->snapshot)
         retain_snapshot(credits, storage_->snapshot, leases, memory);
     if (storage_->parts)

@@ -10,12 +10,13 @@ std::unique_ptr<typename IncidencePointDirectory<H, P>::Store> IncidencePointDir
 {
     memory.retain(sizeof(Store) + 128);
     return copy ? std::make_unique<Store>(*copy, *budget_, keeper_)
-                : std::make_unique<Store>(*budget_, keeper_, hasher_, payload_);
+                : std::make_unique<Store>(*budget_, keeper_, hasher_, payload_, storage_);
 }
 template<class H, class P>
 IncidencePointDirectory<H, P>::IncidencePointDirectory(
-    Budget& budget, std::shared_ptr<Budget> keeper, H hash, P payload)
-    : budget_(&budget), keeper_(std::move(keeper)), hasher_(std::move(hash)), payload_(std::move(payload))
+    Budget& budget, std::shared_ptr<Budget> keeper, H hash, P payload, IdentityPoolStorage storage)
+    : budget_(&budget), keeper_(std::move(keeper)), hasher_(std::move(hash)), payload_(std::move(payload)),
+      storage_(keeper_ ? storage : IdentityPoolStorage::Flat)
 {
     cartesian_detail::check_keeper(budget, keeper_);
     cartesian_detail::Allocation memory(budget);
@@ -42,7 +43,7 @@ template<class H, class P>
 IncidencePointDirectory<H, P>::IncidencePointDirectory(const IncidencePointDirectory& old, Budget& budget,
     std::shared_ptr<Budget> keeper, std::shared_ptr<CartesianAuthorityArena> arena)
     : budget_(&budget), keeper_(std::move(keeper)), hasher_(old.hasher_), payload_(old.payload_),
-      arena_(std::move(arena))
+      arena_(std::move(arena)), storage_(keeper_ ? old.storage_ : IdentityPoolStorage::Flat)
 {
     cartesian_detail::check_keeper(budget, keeper_);
     if (old.source_ && (!arena_ || arena_->budget != &budget))
@@ -82,7 +83,7 @@ template<class H, class P> IncidencePointDirectory<H, P>::~IncidencePointDirecto
     store_.reset();
     source_.reset();
     decltype(leases_){}.swap(leases_);
-    budget_->used -= charge_;
+    budget_->used -= charge_ + replaced_overlap_;
 }
 template<class H, class P> std::size_t IncidencePointDirectory<H, P>::size() const noexcept
 {
@@ -145,7 +146,9 @@ std::shared_ptr<const ContactSourcePointSnapshot> IncidencePointDirectory<H, P>:
     return snapshot;
 }
 template<class H, class P>
-bool IncidencePointDirectory<H, P>::publish_source(std::shared_ptr<const ContactSourcePointSnapshot> snapshot)
+template<class Retire>
+bool IncidencePointDirectory<H, P>::publish_source(
+    std::shared_ptr<const ContactSourcePointSnapshot> snapshot, Retire retire)
 {
     if (!snapshot || !arena_ || snapshot->size() != size() || snapshot->allocation_budget() != budget_ ||
         snapshot->hashing() != H::enabled)
@@ -155,6 +158,9 @@ bool IncidencePointDirectory<H, P>::publish_source(std::shared_ptr<const Contact
             return false;
     cartesian_detail::Allocation memory(*budget_);
     auto replacement = make_store(nullptr, memory);
+    if constexpr (!std::is_same_v<Retire, std::nullptr_t>)
+        retire(*store_);
+    replaced_overlap_ += store_->take_replaced_overlap();
     source_.swap(snapshot);
     store_.swap(replacement);
     replacement.reset();

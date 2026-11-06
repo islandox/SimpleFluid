@@ -36,6 +36,8 @@ public:
     {
         std::size_t references = 0, bytes = 0;
         const Budget* origin = nullptr;
+        std::weak_ptr<const void> control;
+        bool has_control = false;
     };
     struct Transition
     {
@@ -68,7 +70,13 @@ public:
         return ContactOwnerUsage(*this, std::move(arena));
     }
     [[nodiscard]] Transition retain(Key, std::size_t bytes, const Budget* origin);
+    /** Controlled entries also authenticate the exact shared control block.
+     * This weak token does not substitute for the caller's actual body pins. */
+    [[nodiscard]] Transition retain(
+        Key, std::size_t bytes, const Budget* origin, const std::shared_ptr<const void>& owner);
     [[nodiscard]] Transition release(Key);
+    [[nodiscard]] Transition release(Key, const std::shared_ptr<const void>& owner);
+    [[nodiscard]] bool authentic(Key, const std::shared_ptr<const void>& owner) const noexcept;
     [[nodiscard]] std::optional<Entry> find(Key) const noexcept;
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
@@ -85,6 +93,8 @@ public:
 private:
     friend struct ContactOwnerUsageEditor;
     [[nodiscard]] std::size_t inherited_bytes(const Pointer&) const noexcept;
+    [[nodiscard]] Transition retain_impl(Key, std::size_t, const Budget*, const std::shared_ptr<const void>*);
+    [[nodiscard]] Transition release_impl(Key, const std::shared_ptr<const void>*);
     void publish(Pointer, Work);
 
     ContactGroupAllocation imported_;

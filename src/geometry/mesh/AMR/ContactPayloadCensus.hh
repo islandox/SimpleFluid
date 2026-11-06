@@ -173,6 +173,11 @@ enum class ContactPayloadRole : std::uint8_t
     ContactRowGroupSlots,
     ContactOwnedIdentityObject,
     ContactOwnedIdentityDomain,
+    ContactOwnerUsageNode,
+    ContactBodyObject,
+    ContactTraceFaceSlots,
+    ContactTraceStem,
+    ContactTraceInventoryObject,
     CartesianExplicitCellHeaders,
     CartesianExplicitMemberHeaders,
     CartesianExplicitSupportKeys,
@@ -208,7 +213,9 @@ enum class ContactPayloadRole : std::uint8_t
     SubfaceBoundaryBytes,
     SubfaceShifts,
     SubfaceRingObject,
-    SubfaceRingSlots
+    SubfaceRingSlots,
+    IdentityPersistentRoot,
+    IdentityPersistentIndex
 };
 enum class ContactPayloadKind : std::uint8_t
 {

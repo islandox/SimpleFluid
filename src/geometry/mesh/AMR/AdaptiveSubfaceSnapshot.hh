@@ -27,9 +27,11 @@ struct SubfaceIndexRoot;
 class SubfaceProvenanceBuilder;
 class SubfacePieceBuilder;
 class AdaptiveSubfaceSnapshot;
+class ContactPhysicalResidency;
 namespace cartesian_detail
 {
 struct CreditConstruction;
+struct ArenaCredits;
 struct AuthorityOwnerCredit;
 struct Allocation;
 } // namespace cartesian_detail
@@ -147,10 +149,11 @@ public:
     AdaptiveSubfaceSnapshot& operator=(const AdaptiveSubfaceSnapshot&) = delete;
     [[nodiscard]] static std::shared_ptr<const AdaptiveSubfaceSnapshot> seal(ContactHaloContext,
         GeometryConstructionControls, int resident, std::span<const CanonicalSubfaceView>, Budget&,
-        std::shared_ptr<Budget>);
+        std::shared_ptr<Budget>, ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr);
     [[nodiscard]] static std::shared_ptr<const AdaptiveSubfaceSnapshot> derive(
         const std::shared_ptr<const AdaptiveSubfaceSnapshot>&, ContactHaloContext, GeometryConstructionControls,
-        int resident, std::span<const CanonicalSubfaceChange>, Budget&, std::shared_ptr<Budget>);
+        int resident, std::span<const CanonicalSubfaceChange>, Budget&, std::shared_ptr<Budget>,
+        ContactPhysicalResidency* = nullptr, cartesian_detail::ArenaCredits* = nullptr);
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] const ContactHaloContext& context() const noexcept { return context_; }
     [[nodiscard]] const GeometryConstructionControls& controls() const noexcept { return controls_; }

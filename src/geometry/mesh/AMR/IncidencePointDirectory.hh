@@ -19,7 +19,8 @@ public:
     using HashPolicy = Hasher;
     using PayloadPolicy = Payload;
     static constexpr bool uses_hashing = Hasher::enabled;
-    IncidencePointDirectory(Budget&, std::shared_ptr<Budget> = {}, Hasher = {}, Payload = {});
+    IncidencePointDirectory(Budget&, std::shared_ptr<Budget> = {}, Hasher = {}, Payload = {},
+        IdentityPoolStorage = IdentityPoolStorage::Flat);
     IncidencePointDirectory(const IncidencePointDirectory&, Budget&, std::shared_ptr<Budget> = {},
         std::shared_ptr<CartesianAuthorityArena> = {});
     ~IncidencePointDirectory();
@@ -59,9 +60,20 @@ public:
         const ContactSourcePointAdmission&, std::shared_ptr<CartesianAuthorityArena>);
     /** Only private, unexposed initial rows may be rebound by the caller. Old
      * escaped physical views remain attached to their original page owners. */
-    [[nodiscard]] bool publish_source(std::shared_ptr<const ContactSourcePointSnapshot>);
+    template<class Retire = std::nullptr_t>
+    [[nodiscard]] bool publish_source(std::shared_ptr<const ContactSourcePointSnapshot>, Retire retire = nullptr);
     [[nodiscard]] std::size_t retained_bytes() const;
     [[nodiscard]] std::size_t metadata_bytes() const;
+    [[nodiscard]] std::size_t source_only_metadata_bytes() const noexcept
+    {
+        return charge_ + store_->source_only_metadata_bytes();
+    }
+    [[nodiscard]] std::size_t overlap_bytes() const noexcept { return replaced_overlap_ + store_->overlap_bytes(); }
+    void finish_overlap() noexcept
+    {
+        budget_->used -= std::exchange(replaced_overlap_, 0);
+        store_->finish_overlap();
+    }
     [[nodiscard]] std::size_t page_credit_overhead_bytes() const noexcept
     {
         return store_->page_credit_overhead_bytes();
@@ -109,7 +121,8 @@ private:
     std::shared_ptr<const ContactSourcePointSnapshot> source_;
     std::shared_ptr<CartesianAuthorityArena> arena_;
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> leases_;
-    std::size_t charge_ = 0;
+    IdentityPoolStorage storage_;
+    std::size_t charge_ = 0, replaced_overlap_ = 0;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
 #include "IncidencePointDirectory.ipp"

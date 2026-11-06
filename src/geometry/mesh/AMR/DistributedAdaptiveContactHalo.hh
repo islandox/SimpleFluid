@@ -21,10 +21,15 @@ namespace SimpleFluid::Meshes::AMR
 {
 class AdaptiveLeafLayout;
 class AdaptiveLeafTransition;
+class DistributedAdaptiveHierarchy;
 }
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+class DistributedAdaptiveContactHalo;
+/** Borrow the accepted canonical cache for internal diagnostics. The caller
+ * must retain the hierarchy throughout use of the returned reference. */
+[[nodiscard]] const DistributedAdaptiveContactHalo& contact_cache(const DistributedAdaptiveHierarchy&);
 struct ContactIncidenceRow
 {
     AdaptiveCellKey key;
@@ -111,6 +116,8 @@ struct ContactHaloStatistics
     std::size_t contact_record_pages_copied = 0, contact_row_pages_copied = 0, contact_work_pages_copied = 0;
     std::size_t contact_index_pages_copied = 0, contact_index_split_records = 0;
     std::size_t contact_cover_pages_copied = 0, contact_cover_page_bytes = 0;
+    std::size_t contact_catalog_pages_copied = 0, contact_trace_pages_copied = 0;
+    std::size_t contact_owner_admission_work = 0, contact_shared_owner_bytes = 0, contact_owner_index_bytes = 0;
     std::size_t contact_query_pages_copied = 0, contact_identity_rebinds = 0, contact_frozen_groups = 0;
     std::size_t dirty_supports = 0, dirty_support_members = 0, dirty_lines = 0, dirty_subscriptions = 0;
     std::size_t recomputed_tiles = 0;

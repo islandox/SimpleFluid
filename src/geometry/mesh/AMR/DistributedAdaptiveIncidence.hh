@@ -19,6 +19,7 @@ class OwnedSupportMembership;
 class PooledLineCompletionSnapshotAdmission;
 struct IncidencePools;
 class AdaptiveSubfaceSnapshot;
+class ContactPhysicalResidency;
 using IncidenceRowHandle = std::shared_ptr<const ContactIncidenceRow>;
 /** A transient delivery borrows source identity from the collective lookup.
  * The independently owning row is safe to retain after that borrow expires. */
@@ -48,7 +49,8 @@ class SIMPLEFLUID_LOCAL DistributedAdaptiveIncidenceSession
 {
 public:
     DistributedAdaptiveIncidenceSession(const AdaptiveProviderKernel&, Teuchos::RCP<const Teuchos::Comm<int>>,
-        AdaptiveClosureOptions, ContactHaloContext, Budget&, IdentityBudget&, std::shared_ptr<Budget> = {});
+        AdaptiveClosureOptions, ContactHaloContext, Budget&, IdentityBudget&, std::shared_ptr<Budget> = {},
+        std::shared_ptr<ContactPhysicalResidency> = {});
     ~DistributedAdaptiveIncidenceSession();
     DistributedAdaptiveIncidenceSession(DistributedAdaptiveIncidenceSession&&) noexcept;
     DistributedAdaptiveIncidenceSession& operator=(DistributedAdaptiveIncidenceSession&&) noexcept;
@@ -58,7 +60,8 @@ public:
     /** Construct an isolated candidate, charging shared bodies in its own
      * arena. Mutation copies only dirty buckets and never changes this state. */
     [[nodiscard]] std::unique_ptr<DistributedAdaptiveIncidenceSession> fork(
-        Budget&, IdentityBudget&, std::shared_ptr<Budget> = {}, std::size_t* source_overlap = nullptr) const;
+        Budget&, IdentityBudget&, std::shared_ptr<Budget> = {}, std::size_t* source_overlap = nullptr,
+        std::shared_ptr<ContactPhysicalResidency> = {}) const;
     [[nodiscard]] std::vector<IncidenceRowDelivery> bootstrap(
         std::span<const AdaptiveLeaf>, const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] IncidenceDelta apply_delta(std::span<const IncidenceCellVersion> retired,
@@ -77,6 +80,7 @@ public:
     void for_each_borrowed_overlap_credit(const std::function<void(const void*, std::size_t, bool)>&) const;
     [[nodiscard]] std::size_t source_arena_overlap_metadata_bytes() const noexcept;
     [[nodiscard]] const IncidencePointDirectory<>& point_pool() const noexcept;
+    [[nodiscard]] cartesian_detail::ArenaCredits* source_credit_arena() const noexcept;
     void for_each_borrowed_payload(
         const std::function<void(const ContactPayloadAllocation&)>&, bool include_object = false) const;
     void for_each_borrowed_geometry_ledger(const std::function<void(const PLIC::GeometryAllocationLedger&)>&) const;

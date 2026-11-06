@@ -136,6 +136,7 @@ public:
     [[nodiscard]] std::pair<std::size_t, std::size_t> local(std::size_t group, std::size_t occurrence) const;
     [[nodiscard]] std::pair<std::size_t, std::size_t> remote(std::size_t group, std::size_t occurrence) const;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
+    [[nodiscard]] const Budget* origin() const noexcept { return &admission_.arena(); }
     [[nodiscard]] static bool needs_wide(std::uint64_t value) noexcept;
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {

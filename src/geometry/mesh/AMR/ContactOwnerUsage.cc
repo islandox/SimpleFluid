@@ -22,6 +22,15 @@ bool less(ContactOwnerUsage::Key first, ContactOwnerUsage::Key second) noexcept
         return first.role < second.role;
     return std::less<const void*>{}(first.allocation, second.allocation);
 }
+bool has_owner(const std::shared_ptr<const void>& owner) noexcept
+{
+    const std::shared_ptr<const void> empty;
+    return owner.owner_before(empty) || empty.owner_before(owner);
+}
+bool same_control(const std::weak_ptr<const void>& expected, const std::shared_ptr<const void>& owner) noexcept
+{
+    return !expected.owner_before(owner) && !owner.owner_before(expected);
+}
 std::uint64_t next_editor()
 {
     // A scalar construction identity avoids retaining a former editor and also
@@ -49,8 +58,8 @@ struct ContactOwnerUsage::Node
     unsigned height = 1;
 
     Node(ContactGroupAllocation charge, Key key_, Entry entry_, Pointer left_, Pointer right_, std::uint64_t editor_)
-        : admission(std::move(charge)), key(key_), entry(entry_), left(std::move(left_)), right(std::move(right_)),
-          editor(editor_), payload(entry.bytes), storage(admission.bytes())
+        : admission(std::move(charge)), key(key_), entry(std::move(entry_)), left(std::move(left_)),
+          right(std::move(right_)), editor(editor_), payload(entry.bytes), storage(admission.bytes())
     {
         for (const auto* child : {left.get(), right.get()})
             if (child)
@@ -94,7 +103,7 @@ struct ContactOwnerUsageEditor
     {
         ContactGroupAllocation charge(arena);
         charge.add(sizeof(Node) + 128);
-        auto result = std::make_shared<const Node>(std::move(charge), key, entry, left, right, editor);
+        auto result = std::make_shared<const Node>(std::move(charge), key, std::move(entry), left, right, editor);
         ++work.created_nodes;
         return result;
     }
@@ -167,30 +176,68 @@ ContactOwnerUsage::~ContactOwnerUsage() = default;
 
 ContactOwnerUsage::Transition ContactOwnerUsage::retain(Key key, std::size_t bytes, const Budget* origin)
 {
+    return retain_impl(key, bytes, origin, nullptr);
+}
+ContactOwnerUsage::Transition ContactOwnerUsage::retain(
+    Key key, std::size_t bytes, const Budget* origin, const std::shared_ptr<const void>& owner)
+{
+    return retain_impl(key, bytes, origin, &owner);
+}
+ContactOwnerUsage::Transition ContactOwnerUsage::retain_impl(
+    Key key, std::size_t bytes, const Budget* origin, const std::shared_ptr<const void>* owner)
+{
     if (!key.allocation)
         throw std::invalid_argument("Contact owner allocation identity is null.");
+    if (owner && !has_owner(*owner))
+        throw std::invalid_argument("Contact owner control is empty.");
     ContactOwnerUsageEditor edit{imported_.keeper(), editor_};
     const auto* old = edit.find(root_, key);
     if (old && (old->entry.bytes != bytes || old->entry.origin != origin))
         throw std::invalid_argument("Contact owner capacity or origin differs for the same allocation.");
+    if (old && (old->entry.has_control != bool(owner) || (owner && !same_control(old->entry.control, *owner))))
+        throw std::invalid_argument("Contact owner control differs for the same allocation.");
     const auto before = old ? old->entry.references : 0;
     const auto after = sum(before, 1);
-    auto next = edit.rewrite(root_, key, Entry{after, bytes, origin});
+    Entry entry{after, bytes, origin, {}, false};
+    if (owner)
+    {
+        entry.control = *owner;
+        entry.has_control = true;
+    }
+    auto next = edit.rewrite(root_, key, entry);
     publish(std::move(next), edit.work);
     return {before, after, bytes, origin};
 }
 ContactOwnerUsage::Transition ContactOwnerUsage::release(Key key)
 {
+    return release_impl(key, nullptr);
+}
+ContactOwnerUsage::Transition ContactOwnerUsage::release(Key key, const std::shared_ptr<const void>& owner)
+{
+    return release_impl(key, &owner);
+}
+ContactOwnerUsage::Transition ContactOwnerUsage::release_impl(Key key, const std::shared_ptr<const void>* owner)
+{
     ContactOwnerUsageEditor edit{imported_.keeper(), editor_};
     const auto* old = edit.find(root_, key);
     if (!old)
         throw std::invalid_argument("Cannot retire an unreferenced contact owner.");
+    if (old->entry.has_control != bool(owner) ||
+        (owner && (!has_owner(*owner) || !same_control(old->entry.control, *owner))))
+        throw std::invalid_argument("Cannot retire a foreign contact owner control.");
     const auto before = old->entry;
     auto entry = before;
     --entry.references;
     auto next = edit.rewrite(root_, key, entry);
     publish(std::move(next), edit.work);
     return {before.references, entry.references, before.bytes, before.origin};
+}
+bool ContactOwnerUsage::authentic(Key key, const std::shared_ptr<const void>& owner) const noexcept
+{
+    if (!has_owner(owner))
+        return false;
+    const auto entry = find(key);
+    return entry && entry->has_control && same_control(entry->control, owner);
 }
 std::optional<ContactOwnerUsage::Entry> ContactOwnerUsage::find(Key key) const noexcept
 {

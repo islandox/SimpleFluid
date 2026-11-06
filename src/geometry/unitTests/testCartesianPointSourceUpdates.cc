@@ -24,27 +24,22 @@ FullPointPairs keys(const ContactPointArray& points)
         result.emplace_back(PLIC::canonical_key(value.physical), PLIC::canonical_key(value.normalized));
     return result;
 }
-void consume(std::vector<IncidenceRowHandle>& output, RowMap& rows, Budget& budget)
+void consume(std::vector<IncidenceRowDelivery>& output, RowMap& rows, Budget& budget)
 {
-    for (const auto& row : output)
-        rows[row->key] = row;
-    const auto bytes = output.capacity() * sizeof(IncidenceRowHandle);
-    std::vector<IncidenceRowHandle> empty; // Actual return-vector storage retires before its caller credit.
-    empty.swap(output);
-    {
-        std::vector<IncidenceRowHandle> destroyed;
-        destroyed.swap(empty);
-    }
+    for (const auto& delivery : output)
+        rows[delivery.leaf->key] = delivery.row;
+    const auto bytes = output.capacity() * sizeof(IncidenceRowDelivery);
+    std::vector<IncidenceRowDelivery>().swap(output);
     budget.used -= bytes;
 }
 void consume(IncidenceDelta& output, RowMap& rows, Budget& budget)
 {
     for (const auto& old : output.retired)
         rows.erase(old.key);
-    for (const auto& row : output.changed)
-        rows[row->key] = row;
+    for (const auto& delivery : output.changed)
+        rows[delivery.leaf->key] = delivery.row;
     auto bytes = output.retired.capacity() * sizeof(IncidenceCellVersion) +
-                 output.changed.capacity() * sizeof(IncidenceRowHandle);
+                 output.changed.capacity() * sizeof(IncidenceRowDelivery);
     for (const auto& old : output.retired)
         bytes += key_capacity(old.key);
     output = {};
@@ -103,8 +98,8 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
         DistributedAdaptiveIncidenceSession session(*kernel, comm, {}, {}, *budget, identities, budget);
         RowMap rows;
         auto output = session.bootstrap(original, lookup);
-        for (const auto& row : output)
-            escaped.emplace_back(row, keys(row->points));
+        for (const auto& delivery : output)
+            escaped.emplace_back(delivery.row, keys(delivery.row->points));
         consume(output, rows, *budget);
         old_proof = session.point_pool().source();
         ASSERT_TRUE(session.point_pool().source());
@@ -294,9 +289,9 @@ TEST(CartesianPointSourceUpdates, SameControlTranslatedAndNonbinaryRefinementMat
         for (const auto& [key, leaf] : current)
             all.push_back(leaf);
         auto fresh_rows = fresh.bootstrap(all, lookup);
-        for (const auto& row : fresh_rows)
-            EXPECT_EQ(keys(row->points), keys(actual.at(row->key)->points));
-        const auto bytes = fresh_rows.capacity() * sizeof(IncidenceRowHandle);
+        for (const auto& delivery : fresh_rows)
+            EXPECT_EQ(keys(delivery.row->points), keys(actual.at(delivery.leaf->key)->points));
+        const auto bytes = fresh_rows.capacity() * sizeof(IncidenceRowDelivery);
         {
             decltype(fresh_rows) destroyed;
             destroyed.swap(fresh_rows);
@@ -356,9 +351,9 @@ TEST(CartesianPointSourceUpdates, SameControlTranslatedAndNonbinaryRefinementMat
         DistributedAdaptiveIncidenceSession fresh_restored(
             *kernel, comm, {}, context, *restored_budget, restored_ids, restored_budget);
         auto restored_rows = fresh_restored.bootstrap(original, lookup);
-        for (const auto& row : restored_rows)
-            EXPECT_EQ(keys(row->points), keys(actual.at(row->key)->points));
-        const auto restored_bytes = restored_rows.capacity() * sizeof(IncidenceRowHandle);
+        for (const auto& delivery : restored_rows)
+            EXPECT_EQ(keys(delivery.row->points), keys(actual.at(delivery.leaf->key)->points));
+        const auto restored_bytes = restored_rows.capacity() * sizeof(IncidenceRowDelivery);
         {
             decltype(restored_rows) destroyed;
             destroyed.swap(restored_rows);

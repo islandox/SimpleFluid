@@ -7,6 +7,7 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <type_traits>
 #include <vector>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
@@ -126,8 +127,20 @@ public:
     {
         if (local_)
         {
-            visitor(local_, local_->allocation_budget(), local_->metadata_bytes(), local_->has_arena_keeper());
-            local_->visit_dependencies(visitor);
+            const auto visit_inventory = [&]() -> decltype(auto)
+            {
+                return visitor(local_, local_->allocation_budget(), local_->metadata_bytes(), local_->has_arena_keeper());
+            };
+            if constexpr (std::is_same_v<decltype(visit_inventory()), bool>)
+            {
+                if (visit_inventory())
+                    local_->visit_dependencies(visitor);
+            }
+            else
+            {
+                visit_inventory();
+                local_->visit_dependencies(visitor);
+            }
         }
         for (const auto& lease : leases_)
             visitor(lease, lease->budget, lease->metadata, bool(lease->keeper));

@@ -1622,6 +1622,18 @@ std::shared_ptr<const adaptive_detail::AdaptiveSubfaceSnapshot> adaptive_detail:
         throw std::invalid_argument("Canonical subface snapshot source is stale or incomplete.");
     return hierarchy.data_->contact_halo->subface_snapshot();
 }
+const adaptive_detail::DistributedAdaptiveContactHalo& adaptive_detail::GeometrySnapshotAccess::contact_cache(
+    const DistributedAdaptiveHierarchy& hierarchy)
+{
+    if (!hierarchy.geometry_unchanged() || !hierarchy.data_->contact_halo)
+        throw std::invalid_argument("Canonical contact cache source is stale or incomplete.");
+    return *hierarchy.data_->contact_halo;
+}
+const adaptive_detail::DistributedAdaptiveContactHalo& adaptive_detail::contact_cache(
+    const DistributedAdaptiveHierarchy& hierarchy)
+{
+    return GeometrySnapshotAccess::contact_cache(hierarchy);
+}
 const AdaptiveLeafLayout& DistributedAdaptiveHierarchy::owned_leaves() const noexcept
 {
     return *leaf_layout();

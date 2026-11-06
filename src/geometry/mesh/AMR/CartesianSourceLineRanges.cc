@@ -1225,15 +1225,20 @@ void CartesianSourceLineRangeRecipe::retain_dependencies(cartesian_detail::Credi
 {
     const auto& catalog = impl_->catalog;
     const auto& c = *catalog->impl_;
-    credits.retain(catalog, c.budget, catalog->metadata_bytes(), bool(c.keeper), leases, memory);
-    credits.retain(c.points, c.points->allocation_budget(), c.points->metadata_bytes(), c.points->has_arena_keeper(),
-        leases, memory);
-    c.points->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { retain_owner(credits, owner, origin, bytes, keeper, leases, memory); });
-    credits.retain(c.manifests, c.manifests->allocation_budget(), c.manifests->metadata_bytes(),
-        c.manifests->has_arena_keeper(), leases, memory);
-    c.manifests->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { retain_owner(credits, owner, origin, bytes, keeper, leases, memory); });
+    if (!credits.descend(catalog, c.budget, catalog->metadata_bytes(), bool(c.keeper), leases, memory))
+        return;
+    const auto visit = [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
+    {
+        using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
+        const std::shared_ptr<const std::remove_const_t<Element>> stable = owner;
+        return credits.descend(stable, origin, bytes, keeper, leases, memory);
+    };
+    if (credits.descend(c.points, c.points->allocation_budget(), c.points->metadata_bytes(),
+            c.points->has_arena_keeper(), leases, memory))
+        c.points->visit_dependencies(visit);
+    if (credits.descend(c.manifests, c.manifests->allocation_budget(), c.manifests->metadata_bytes(),
+            c.manifests->has_arena_keeper(), leases, memory))
+        c.manifests->visit_dependencies(visit);
     for (const auto& lease : c.leases)
         retain_owner(credits, lease, lease->budget, lease->metadata, bool(lease->keeper), leases, memory);
 }

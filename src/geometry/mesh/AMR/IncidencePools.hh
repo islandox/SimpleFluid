@@ -51,28 +51,56 @@ struct IncidencePools
     Budget* budget;
     IdentityBudget* identities;
 
-    explicit IncidencePools(Budget& arena, IdentityBudget& ledger, std::shared_ptr<Budget> keeper = {})
-        : cells(arena, keeper), domains(arena, keeper), supports(arena, keeper), lines(arena),
-          points(arena, keeper), planes(arena, keeper), normals(arena, keeper), images(arena, std::move(keeper)),
-          budget(&arena), identities(&ledger)
+    explicit IncidencePools(Budget& arena, IdentityBudget& ledger, std::shared_ptr<Budget> keeper = {},
+        IdentityPoolStorage storage = IdentityPoolStorage::Flat)
+        : cells(arena, keeper, {}, {}, storage), domains(arena, keeper, {}, {}, storage),
+          supports(arena, keeper, {}, {}, storage), lines(arena, keeper, {}, {}, storage),
+          points(arena, keeper, {}, {}, storage), planes(arena, keeper, {}, {}, storage),
+          normals(arena, keeper, {}, {}, storage), images(arena, std::move(keeper), {}, {}, storage), budget(&arena),
+          identities(&ledger)
     {
     }
     IncidencePools(const IncidencePools& source, Budget& arena, IdentityBudget& ledger,
         std::shared_ptr<Budget> keeper = {}, std::shared_ptr<CartesianAuthorityArena> source_arena = {})
         : cells(source.cells, arena, keeper), domains(source.domains, arena, keeper),
-          supports(source.supports, arena, keeper), lines(source.lines, arena),
+          supports(source.supports, arena, keeper), lines(source.lines, arena, keeper),
           points(source.points, arena, keeper, std::move(source_arena)), planes(source.planes, arena, keeper),
           normals(source.normals, arena, keeper), images(source.images, arena, std::move(keeper)), budget(&arena),
           identities(&ledger)
     {
-        for (std::size_t slot = 0; slot < planes.size(); ++slot)
-            identities->retain(arena, planes.get(slot));
+        if (!planes.persistent())
+            for (std::size_t slot = 0; slot < planes.size(); ++slot)
+                identities->retain(arena, planes.get(slot));
     }
     [[nodiscard]] std::size_t intern_plane(const Plane& plane)
     {
         const auto slot = planes.intern(plane);
-        identities->retain(*budget, planes.get(slot));
+        if (!planes.persistent())
+            identities->retain(*budget, planes.get(slot));
         return slot;
+    }
+    [[nodiscard]] std::size_t source_only_metadata_bytes() const noexcept
+    {
+        return cells.source_only_metadata_bytes() + domains.source_only_metadata_bytes() +
+               supports.source_only_metadata_bytes() + lines.source_only_metadata_bytes() +
+               points.source_only_metadata_bytes() + planes.source_only_metadata_bytes() +
+               normals.source_only_metadata_bytes() + images.source_only_metadata_bytes();
+    }
+    [[nodiscard]] std::size_t overlap_bytes() const noexcept
+    {
+        return cells.overlap_bytes() + domains.overlap_bytes() + supports.overlap_bytes() + lines.overlap_bytes() +
+               points.overlap_bytes() + planes.overlap_bytes() + normals.overlap_bytes() + images.overlap_bytes();
+    }
+    void finish_overlap() noexcept
+    {
+        cells.finish_overlap();
+        domains.finish_overlap();
+        supports.finish_overlap();
+        lines.finish_overlap();
+        points.finish_overlap();
+        planes.finish_overlap();
+        normals.finish_overlap();
+        images.finish_overlap();
     }
     [[nodiscard]] std::size_t page_credit_overhead_bytes() const noexcept
     {

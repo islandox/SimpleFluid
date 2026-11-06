@@ -1,4 +1,6 @@
 /** Full-value identity, shared-page lifetime and measured admission oracles. */
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/mesh/AMR/ContactPhysicalResidency.hh"
 #include "geometry/mesh/AMR/IdentityPool.hh"
 #include <array>
 #include <cstddef>
@@ -664,5 +666,212 @@ TEST_F(AdaptiveIdentityPool, FlatLookupMeasuresFewerAllocationsThanTreeMetadata)
     RecordProperty("tree_lookup_heap_requested_bytes", std::to_string(tree_heap.requested_bytes));
     RecordProperty("flat_lookup_metadata_bytes", std::to_string(flat.metadata_bytes()));
     RecordProperty("tree_lookup_metadata_bytes", std::to_string(tree.metadata_bytes()));
+}
+
+TEST_F(AdaptiveIdentityPool, PersistentForkSharesIdentityPagesAndCopiesOnlyAppendPaths)
+{
+    const auto measure = [&](std::size_t count)
+    {
+        const auto values = inputs(count);
+        auto original_budget = std::make_shared<D::Budget>(D::Budget{8 * ample});
+        auto candidate_budget = std::make_shared<D::Budget>(D::Budget{8 * ample});
+        auto original = std::make_unique<Pool>(*original_budget, original_budget, D::IdentityPoolHasher<Identity>{},
+            D::IdentityPoolPayload<Identity>{}, D::IdentityPoolStorage::Persistent);
+        fill(*original, values);
+        const auto prefix = addresses(*original);
+        const auto copies = Identity::copies;
+        HeapActivity fork;
+        std::unique_ptr<Pool> candidate;
+        {
+            HeapProbe probe(fork);
+            candidate = std::make_unique<Pool>(*original, *candidate_budget, candidate_budget);
+        }
+        EXPECT_EQ(Identity::copies, copies);
+        EXPECT_EQ(candidate->scope_id(), original->scope_id());
+        EXPECT_EQ(candidate->retained_bytes(), candidate_budget->used);
+        EXPECT_EQ(candidate->metadata_bytes(), original->metadata_bytes());
+        EXPECT_EQ(candidate->owner_pages(), original->owner_pages());
+        const auto admitted = candidate->inherited_page_bytes();
+        EXPECT_EQ(admitted, original->shared_body_bytes() + original->page_credit_overhead_bytes());
+
+        auto captured = candidate->page_view();
+        const auto ref = captured->capture(*candidate, count / 2);
+        captured->freeze();
+        EXPECT_TRUE(candidate->owns_page_credit(captured->page_credit_identity(ref)));
+        EXPECT_TRUE(original->owns_page_credit(captured->page_credit_identity(ref)));
+        const auto before = candidate_budget->cumulative;
+        const Identity new_value({7000, 1, 0}), source_only({7001, 1, 0});
+        EXPECT_EQ(candidate->intern(new_value), count);
+        EXPECT_EQ(candidate->inherited_page_bytes(), admitted);
+        EXPECT_EQ(candidate_budget->used,
+            candidate->retained_bytes() + captured->metadata_bytes() + candidate->overlap_bytes());
+        EXPECT_GT(candidate->overlap_bytes(), 0u);
+        const auto append_work = candidate_budget->cumulative - before;
+        EXPECT_EQ(original->intern(source_only), count);
+        EXPECT_FALSE(original->find(new_value));
+        EXPECT_FALSE(candidate->find(source_only));
+        original.reset();
+        candidate->finish_overlap();
+        expect_prefix(*candidate, values, prefix);
+        EXPECT_EQ(candidate_budget->used, candidate->retained_bytes() + captured->metadata_bytes());
+        EXPECT_EQ(&captured->get(ref), prefix[count / 2]);
+        candidate.reset();
+        EXPECT_EQ(candidate_budget->used, captured->metadata_bytes());
+        EXPECT_GT(original_budget->used, 0u);
+        EXPECT_EQ(&captured->get(ref), prefix[count / 2]);
+        captured.reset();
+        EXPECT_EQ(original_budget->used, 0u);
+        EXPECT_EQ(candidate_budget->used, 0u);
+        return std::pair(fork, append_work);
+    };
+    const auto [small_fork, small_append] = measure(1025);
+    const auto [large_fork, large_append] = measure(2049);
+    EXPECT_EQ(large_fork.calls, small_fork.calls);
+    EXPECT_EQ(large_fork.requested_bytes, small_fork.requested_bytes);
+    EXPECT_LT(large_append, 2 * small_append);
+}
+
+TEST_F(AdaptiveIdentityPool, PersistentAppendRejectsOneByteShortWithoutPublishing)
+{
+    const auto values = inputs(34);
+    auto original_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    Pool original(*original_budget, original_budget, D::IdentityPoolHasher<Identity>{},
+        D::IdentityPoolPayload<Identity>{}, D::IdentityPoolStorage::Persistent);
+    fill(original, values);
+    auto measure = std::make_shared<D::Budget>(D::Budget{ample});
+    Pool accepted(original, *measure, measure);
+    const Identity edit({9001, 0, 4});
+    EXPECT_EQ(accepted.intern(edit), values.size());
+    const auto limit = measure->peak;
+    auto short_budget = std::make_shared<D::Budget>(D::Budget{limit - 1});
+    Pool rejected(original, *short_budget, short_budget);
+    const auto before = short_budget->used;
+    EXPECT_THROW((void) rejected.intern(edit), std::invalid_argument);
+    EXPECT_EQ(short_budget->used, before);
+    EXPECT_EQ(rejected.size(), values.size());
+    EXPECT_FALSE(rejected.find(edit));
+    EXPECT_FALSE(original.find(edit));
+    short_budget->limit = limit;
+    EXPECT_EQ(rejected.intern(edit), values.size());
+    EXPECT_EQ(rejected.find(edit), values.size());
+}
+
+TEST(AdaptiveIdentityPoolBytes, PersistentBorrowedLookupUsesCompleteByteOrdering)
+{
+    using Bytes = SimpleFluid::Meshes::AMR::AdaptiveBytes;
+    using BytesPool = D::IdentityPool<Bytes, D::NoIdentityPoolHash>;
+    auto budget = std::make_shared<D::Budget>(D::Budget{ample});
+    BytesPool pool(*budget, budget, {}, {}, D::IdentityPoolStorage::Persistent);
+    const std::array<Bytes, 6> values{
+        Bytes{}, Bytes{char(0xff)}, Bytes{char(0x80)}, Bytes{0}, Bytes{0, char(0x80)}, Bytes{char(0x7f)}};
+    for (std::size_t i = 0; i < values.size(); ++i)
+        ASSERT_EQ(pool.intern(values[i]), i);
+    for (std::size_t i = 0; i < values.size(); ++i)
+        EXPECT_EQ(pool.find_borrowed(std::span(values[i])), pool.find(values[i]));
+    const Bytes absent{0, char(0xff)};
+    EXPECT_FALSE(pool.find_borrowed(std::span(absent)));
+}
+
+TEST(AdaptiveIdentityPoolPlanes, CapturedPlanePageKeepsOnlyItsBackingAndAncestryAdmitted)
+{
+    using Plane = SimpleFluid::PLIC::PlaneSupportIdentity<SimpleFluid::ArithmeticMode::Ordinary>;
+    using Access = SimpleFluid::PLIC::details::GeometryIdentityAccess;
+    using Planes = D::IdentityPool<Plane>;
+    auto original = std::make_shared<D::Budget>(D::Budget{ample});
+    auto successor = std::make_shared<D::Budget>(D::Budget{ample});
+    auto pool = std::make_unique<Planes>(*original, original, D::IdentityPoolHasher<Plane>{},
+        D::IdentityPoolPayload<Plane>{}, D::IdentityPoolStorage::Persistent);
+
+    std::weak_ptr<const void> ancestor_owner, child_owner, unrelated_owner;
+    const void* child_address = nullptr;
+    std::size_t child_slot;
+    {
+        const auto ancestor = Access::support_axis(0, 1);
+        const auto first = Access::translated_support(ancestor, {1, 0, 0});
+        const auto second = Access::translated_support(ancestor, {2, 0, 0});
+        child_slot = pool->intern(first);
+        const auto body_before = pool->shared_body_bytes();
+        ASSERT_EQ(pool->intern(second), 1u);
+        EXPECT_EQ(pool->shared_body_bytes() - body_before, second.payload_bytes() +
+                                                               sizeof(D::PersistentPlaneOwnerIndex::Owner) +
+                                                               D::persistent_ordered_detail::control_bytes);
+        ancestor_owner = ancestor.storage_owner();
+        child_owner = first.storage_owner();
+        child_address = first.storage_identity();
+        // Occupy a different physical page with an unrelated owner.
+        for (int offset = 4; offset < 18; ++offset)
+            (void) pool->intern(Access::support_axis(1, offset));
+        const auto unrelated = Access::support_axis(2, 19);
+        ASSERT_EQ(pool->intern(unrelated), 16u);
+        unrelated_owner = unrelated.storage_owner();
+    }
+    auto candidate = std::make_unique<Planes>(*pool, *successor, successor);
+    auto captured = candidate->page_view();
+    const auto ref = captured->capture(*candidate, child_slot);
+    captured->freeze();
+    pool.reset();
+    EXPECT_FALSE(ancestor_owner.expired());
+    EXPECT_FALSE(unrelated_owner.expired());
+    candidate.reset();
+    EXPECT_FALSE(ancestor_owner.expired());
+    EXPECT_FALSE(child_owner.expired());
+    EXPECT_TRUE(unrelated_owner.expired());
+    EXPECT_EQ(captured->get(ref).storage_identity(), child_address);
+    EXPECT_GT(original->used, 0u);
+    EXPECT_EQ(successor->used, captured->metadata_bytes());
+    captured.reset();
+    EXPECT_TRUE(ancestor_owner.expired());
+    EXPECT_TRUE(child_owner.expired());
+    EXPECT_EQ(original->used, 0u);
+    EXPECT_EQ(successor->used, 0u);
+}
+
+TEST(AdaptiveIdentityPoolPoints, RetiredPersistentPointScopeKeepsOnlyCapturedPhysicalPages)
+{
+    using Point = SimpleFluid::PLIC::PointIdentity<SimpleFluid::ArithmeticMode::Ordinary>;
+    using Access = SimpleFluid::PLIC::details::GeometryIdentityAccess;
+    using Points = D::IdentityPool<Point>;
+    auto original = std::make_shared<D::Budget>(D::Budget{ample});
+    auto next = std::make_shared<D::Budget>(D::Budget{ample});
+    auto pool = std::make_unique<Points>(*original, original, D::IdentityPoolHasher<Point>{},
+        D::IdentityPoolPayload<Point>{}, D::IdentityPoolStorage::Persistent);
+    const auto scope = pool->scope_id();
+    for (int i = 0; i < 17; ++i)
+        ASSERT_EQ(pool->intern(Access::point({static_cast<long double>(i), 0, 0})), std::size_t(i));
+    auto capture = pool->page_view();
+    const auto ref = capture->capture(*pool, 0);
+    capture->freeze();
+    D::ContactPhysicalResidency accepted(original);
+    accepted.bind_funded_point_scope(scope);
+    accepted.observe_point_view(capture, true);
+    auto raw_view_bytes = std::size_t{};
+    capture->visit_page_admissions(
+        [&](const void*, const void*, std::size_t credit, std::size_t body) { raw_view_bytes += credit + body; });
+    ASSERT_GT(raw_view_bytes, 0u);
+
+    D::ContactPhysicalResidency candidate(accepted, next);
+    auto candidate_pool = std::make_unique<Points>(*pool, *next, next);
+    EXPECT_EQ(candidate.funded_point_scope(), candidate_pool->scope_id());
+    const auto expected_pool = candidate_pool->retained_bytes();
+    EXPECT_EQ(next->used, expected_pool + candidate.usage().storage_bytes() + capture->metadata_bytes());
+    const auto detached = candidate.detach_funded_point_scope(scope);
+    EXPECT_EQ(detached, raw_view_bytes);
+    candidate_pool->transfer_inherited_page_bytes(detached);
+    const auto retired = candidate_pool->take_replaced_overlap();
+    ASSERT_GT(retired, 0u); // Uncaptured physical page and all old directory metadata.
+    candidate_pool.reset();
+    pool.reset();
+    EXPECT_EQ(capture->get(ref), Access::point({0, 0, 0}));
+    next->used -= retired;
+    candidate.finish_overlap();
+    EXPECT_EQ(next->used, candidate.payload_bytes() + candidate.usage().storage_bytes());
+
+    const auto final = std::make_shared<D::Budget>(D::Budget{next->used});
+    D::ContactPhysicalResidency successor(candidate, final);
+    EXPECT_EQ(final->used, next->used);
+    successor.finish_overlap();
+    final->limit = ample; // A later edit needs its own path-copy scratch.
+    successor.observe_point_view(capture, false);
+    EXPECT_EQ(final->used, 0u);
 }
 } // namespace

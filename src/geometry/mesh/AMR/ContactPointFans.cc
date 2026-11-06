@@ -330,7 +330,7 @@ std::shared_ptr<const ContactFanOwner> ContactFanOwner::build(
         for (const auto& remote : group.remote)
             (void) result->catalog_->points.get(remote.physical);
     }
-    result->block_ = ContactFanBlock::build(input, result->body_admission_, true);
+    result->block_ = ContactFanBlock::build(input, result->body_admission_);
     result->allocation_.reserve(result->views_, input.size());
     result->views_.assign(input.size(), 0);
     for (std::size_t g = 0; g < input.size(); ++g)

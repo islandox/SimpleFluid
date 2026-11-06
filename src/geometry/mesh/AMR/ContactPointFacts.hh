@@ -22,6 +22,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
  * immutable fan owners. release() retires; reclaim() is the evaluation barrier. */
 class PointFactDirectory
 {
+    friend class PersistentContactFacts;
     struct FallbackCredit;
 
 public:
@@ -34,6 +35,7 @@ public:
 
     private:
         friend class PointFactDirectory;
+        friend class PersistentContactFacts;
         struct Stored
         {
             std::shared_ptr<const ContactPointPageView> view;

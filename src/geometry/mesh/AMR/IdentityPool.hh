@@ -3,10 +3,15 @@
 #include "IdentityPoolBorrowedPayload.hh"
 #include "IdentityPoolHash.hh"
 #include "IdentityPoolPayload.hh"
+#include "PersistentAppendSlots.hh"
+#include "PersistentPlaneOwnerIndex.hh"
 #include "PhysicalOwnerIndex.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
+#include <atomic>
+#include <compare>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -17,26 +22,71 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-/** Full identities reside in immutable shared pages. A fork copies only its
- * lookup metadata; neither branch appends into a shared page. Slots never
- * participate in numerical ordering and retired identities remain admitted
- * until session destruction. This storage is independent of PLIC snapshots. */
+enum class IdentityPoolStorage
+{
+    Flat,
+    Persistent
+};
+
+namespace identity_pool_detail
+{
+inline std::uint64_t next_scope()
+{
+    // Shared across point and typed metadata pools. The maximum value is
+    // reserved for the incidence tile-body credit family.
+    static std::atomic<std::uint64_t> next{1};
+    auto value = next.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (value == std::numeric_limits<std::uint64_t>::max())
+            throw std::invalid_argument("Identity pool scope exhausted.");
+        if (next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed))
+            return value;
+    }
+}
+} // namespace identity_pool_detail
+/** Full identities reside in immutable shared pages. Persistent forks share
+ * the ordinal directory and lookup roots, path-copying only appended records.
+ * Flat storage supports standalone pools with a borrowed allocation arena.
+ * Slots never participate in numerical ordering. */
 template<class T, class Hasher = IdentityPoolHasher<T>, class Payload = IdentityPoolPayload<T>> class IdentityPool
 {
+public:
+    class PageView;
+
+private:
     static constexpr std::size_t records_per_page = 16;
+    static constexpr bool owns_plane_backing =
+        std::is_same_v<T, PersistentPlaneOwnerIndex::Plane> && std::is_same_v<Payload, IdentityPoolPayload<T>>;
+    struct Empty
+    {
+    };
+    using PlaneOwner = std::shared_ptr<const PersistentPlaneOwnerIndex::Owner>;
     struct Page
     {
+        [[no_unique_address]] std::conditional_t<owns_plane_backing, std::vector<PlaneOwner>, Empty> plane_owners;
         std::vector<T> values;
-        bool frozen = false;
+        const Budget* body_origin = nullptr;
+        std::uint64_t body_scope = 0;
+        std::atomic<bool> frozen{false};
     };
     struct PageCredit
     {
         Budget* budget;
         std::shared_ptr<Budget> keeper;
+
+    private:
+        friend class IdentityPool;
+        friend class PageView;
         std::shared_ptr<Page> page;
+
+    public:
         std::size_t bytes = 0;
-        PageCredit(Budget& b, std::shared_ptr<Budget> k, std::shared_ptr<Page> p)
-            : budget(&b), keeper(std::move(k)), page(std::move(p))
+        std::uint64_t pool_scope;
+        bool persistent_owner;
+        PageCredit(Budget& b, std::shared_ptr<Budget> k, std::shared_ptr<Page> p, std::uint64_t scope = 0,
+            bool persistent = false)
+            : budget(&b), keeper(std::move(k)), page(std::move(p)), pool_scope(scope), persistent_owner(persistent)
         {
         }
         ~PageCredit()
@@ -51,12 +101,68 @@ template<class T, class Hasher = IdentityPoolHasher<T>, class Payload = Identity
             budget->add(n);
             bytes += n;
         }
+        [[nodiscard]] std::shared_ptr<const void> body_owner() const noexcept { return page; }
+        [[nodiscard]] const Budget* body_origin() const noexcept { return page->body_origin; }
+        [[nodiscard]] std::uint64_t body_scope() const noexcept { return page->body_scope; }
+        [[nodiscard]] std::size_t body_bytes() const noexcept { return bytes - sizeof(PageCredit) - 128; }
+        void release(std::size_t n) noexcept
+        {
+            bytes -= n;
+            budget->used -= n;
+        }
     };
     struct PageEntry
     {
         std::shared_ptr<PageCredit> credit;
         std::size_t first_slot;
     };
+
+    struct ValueSelector
+    {
+        std::uint64_t hash;
+        const T* value;
+        std::size_t slot;
+    };
+    struct ValueLess
+    {
+        bool operator()(const ValueSelector& a, const ValueSelector& b) const
+        {
+            return a.hash != b.hash ? a.hash < b.hash : *a.value < *b.value;
+        }
+    };
+    struct PageSelector
+    {
+        const void* address;
+        bool credit;
+        std::size_t ordinal;
+    };
+    struct PageLess
+    {
+        bool operator()(const PageSelector& a, const PageSelector& b) const noexcept
+        {
+            return a.credit != b.credit ? a.credit < b.credit : std::less<const void*>{}(a.address, b.address);
+        }
+    };
+    using PageDirectory = PersistentAppendSlots<PageEntry>;
+    using ValueIndex = persistent_ordered_detail::OrderedPages<ValueSelector, ValueLess>;
+    using PageIndex = persistent_ordered_detail::OrderedPages<PageSelector, PageLess>;
+    struct PlaneStorage
+    {
+        PersistentPlaneOwnerIndex::Root index;
+        std::size_t bytes = 0;
+    };
+    struct PersistentStorage
+    {
+        typename PageDirectory::Root pages;
+        typename ValueIndex::Ptr values;
+        typename PageIndex::Ptr owners;
+        [[no_unique_address]] std::conditional_t<owns_plane_backing, PlaneStorage, Empty> plane;
+        std::size_t records = 0, body_bytes = 0;
+        std::size_t foreign_page_bytes = 0, foreign_index_bytes = 0, retired_overlap = 0;
+        bool overlapping = false;
+    };
+    static constexpr auto persistent_storage_bytes = sizeof(PersistentStorage) + 128;
+    static constexpr auto credit_overhead = sizeof(PageCredit) + 128;
 
     template<class Visitor> static void visit_credit_payload(const PageCredit& credit, Visitor& visitor)
     {
@@ -66,6 +172,8 @@ template<class T, class Hasher = IdentityPoolHasher<T>, class Payload = Identity
         contact_payload_object(visitor, &page, ContactPayloadRole::IdentityPageObject, sizeof(Page), true);
         contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPageValues, page.values, page.values.size(),
             !IdentityPoolBorrowedPayload<T>::complete);
+        if constexpr (owns_plane_backing)
+            contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPersistentIndex, page.plane_owners);
         for (const auto& value : page.values)
             IdentityPoolBorrowedPayload<T>::visit(value, visitor);
     }
@@ -82,18 +190,53 @@ public:
         bool operator()(const T* a, const T& b) const { return *a < b; }
         bool operator()(const T& a, const T* b) const { return a < *b; }
     };
-    IdentityPool(Budget& budget, std::shared_ptr<Budget> keeper = {}, Hasher hasher = {}, Payload payload = {})
+    IdentityPool(Budget& budget, std::shared_ptr<Budget> keeper = {}, Hasher hasher = {}, Payload payload = {},
+        IdentityPoolStorage storage = IdentityPoolStorage::Flat)
         : budget_(&budget), keeper_(std::move(keeper)), payload_(std::move(payload)), hasher_(std::move(hasher)),
           page_index_(budget)
     {
         if (keeper_ && keeper_.get() != &budget)
             throw std::invalid_argument("Identity pool budget keeper mismatch.");
+        if (storage == IdentityPoolStorage::Persistent && keeper_)
+        {
+            admit(persistent_storage_bytes);
+            try
+            {
+                persistent_ = std::make_unique<PersistentStorage>();
+            }
+            catch (...)
+            {
+                release(persistent_storage_bytes);
+                throw;
+            }
+        }
     }
     IdentityPool(const IdentityPool& source, Budget& budget, std::shared_ptr<Budget> keeper = {})
-        : IdentityPool(budget, std::move(keeper), source.hasher_, source.payload_)
+        : IdentityPool(budget, std::move(keeper), source.hasher_, source.payload_,
+              source.persistent_ && source.budget_ != &budget ? IdentityPoolStorage::Persistent
+                                                              : IdentityPoolStorage::Flat)
     {
         try
         {
+            if (persistent_)
+            {
+                auto next = *source.persistent_;
+                next.foreign_page_bytes = checked_sum(source.shared_body_bytes(), source.page_credit_overhead_bytes());
+                next.foreign_index_bytes = source.persistent_index_bytes();
+                next.retired_overlap = 0;
+                next.overlapping = true;
+                scope_id_ = source.scope_id_;
+                admit(checked_sum(next.foreign_page_bytes, next.foreign_index_bytes));
+                *persistent_ = std::move(next);
+                if (source.owner_pages())
+                    source.page_at(source.owner_pages() - 1).credit->page->frozen = true;
+                return;
+            }
+            if (source.persistent_)
+            {
+                copy_flat_metadata(source);
+                return;
+            }
             admit(product(source.by_value_.size(), node_bytes()));
             reserve_exact(by_slot_, source.by_slot_.size());
             reserve_exact(pages_, source.pages_.size());
@@ -122,12 +265,24 @@ public:
     [[nodiscard]] Slot intern(T&& value) { return intern_value(std::move(value)); }
     [[nodiscard]] const T& get(Slot slot) const
     {
-        if (slot >= by_slot_.size())
+        if (slot >= size())
             throw std::invalid_argument("Invalid identity pool slot.");
+        if (persistent_)
+        {
+            const auto& entry = page_for(slot);
+            return entry.credit->page->values[slot - entry.first_slot];
+        }
         return *by_slot_[slot];
     }
     [[nodiscard]] std::optional<Slot> find(const T& value) const
     {
+        if (persistent_)
+        {
+            const ValueSelector key{hash_value(value), &value, 0};
+            const auto* found =
+                ValueIndex::lower_bound(persistent_->values, [&](const auto& row) { return ValueLess{}(row, key); });
+            return found && !ValueLess{}(key, *found) ? std::optional(found->slot) : std::nullopt;
+        }
         if constexpr (Hasher::enabled)
         {
             if (buckets_.empty())
@@ -146,9 +301,31 @@ public:
         requires(std::is_same_v<T, AdaptiveBytes>)
     [[nodiscard]] std::optional<Slot> find_borrowed(const View& value) const
     {
+        if (persistent_)
+        {
+            if constexpr (!Hasher::enabled || requires(const Hasher& hash) { hash(value); })
+            {
+                std::uint64_t hash = 0;
+                if constexpr (Hasher::enabled)
+                    hash = hasher_(value);
+                const auto compare = [&](const auto& row)
+                {
+                    if (row.hash != hash)
+                        return row.hash < hash ? std::strong_ordering::less : std::strong_ordering::greater;
+                    const auto& stored = *row.value;
+                    for (std::size_t i = 0; i < std::min(stored.size(), value.size()); ++i)
+                        if (const auto ordering = stored[i] <=> static_cast<char>(value[i]); ordering != 0)
+                            return ordering;
+                    return stored.size() <=> value.size();
+                };
+                const auto* found =
+                    ValueIndex::lower_bound(persistent_->values, [&](const auto& row) { return compare(row) < 0; });
+                return found && compare(*found) == 0 ? std::optional(found->slot) : std::nullopt;
+            }
+        }
         const auto equal = [&](Slot slot)
         {
-            const auto& stored = *by_slot_[slot];
+            const auto& stored = get(slot);
             if (stored.size() != value.size())
                 return false;
             for (std::size_t i = 0; i < stored.size(); ++i)
@@ -173,14 +350,17 @@ public:
             }
             throw std::invalid_argument("Borrowed identity lookup lacks an empty slot.");
         }
-        for (Slot slot = 0; slot < by_slot_.size(); ++slot)
+        for (Slot slot = 0; slot < size(); ++slot)
             if (equal(slot))
                 return slot;
         return {};
     }
-    [[nodiscard]] std::size_t size() const noexcept { return by_slot_.size(); }
+    [[nodiscard]] std::size_t size() const noexcept { return persistent_ ? persistent_->records : by_slot_.size(); }
+    [[nodiscard]] bool persistent() const noexcept { return bool(persistent_); }
     [[nodiscard]] std::size_t retained_bytes() const noexcept
     {
+        if (persistent_)
+            return metadata_bytes() + page_credit_overhead_bytes() + shared_body_bytes();
         auto total = charged_ + page_index_.metadata_bytes();
         for (const auto& entry : pages_)
             total += entry.credit->bytes;
@@ -188,16 +368,18 @@ public:
     }
     [[nodiscard]] std::size_t metadata_bytes() const noexcept
     {
+        if (persistent_)
+            return persistent_storage_bytes + persistent_index_bytes();
         return by_value_.size() * node_bytes() + by_slot_.capacity() * sizeof(const T*) +
                pages_.capacity() * sizeof(PageEntry) + buckets_.capacity() * sizeof(Slot) +
                page_index_.metadata_bytes();
     }
-    [[nodiscard]] std::size_t page_credit_overhead_bytes() const noexcept
-    {
-        return pages_.size() * (sizeof(PageCredit) + 128);
-    }
+    [[nodiscard]] std::uint64_t scope_id() const noexcept { return scope_id_; }
+    [[nodiscard]] std::size_t page_credit_overhead_bytes() const noexcept { return owner_pages() * credit_overhead; }
     [[nodiscard]] bool owns_page_credit(const void* identity) const noexcept
     {
+        if (persistent_)
+            return find_page(identity, true);
         return std::any_of(
             pages_.begin(), pages_.end(), [identity](const auto& entry) { return entry.credit.get() == identity; });
     }
@@ -207,6 +389,12 @@ public:
     }
     [[nodiscard]] std::size_t shared_body_bytes() const noexcept
     {
+        if (persistent_)
+        {
+            if constexpr (owns_plane_backing)
+                return persistent_->body_bytes + persistent_->plane.bytes;
+            return persistent_->body_bytes;
+        }
         std::size_t bytes = 0;
         for (const auto& entry : pages_)
             bytes += entry.credit->bytes - sizeof(PageCredit) - 128;
@@ -216,20 +404,26 @@ public:
     [[nodiscard]] const void* metadata_identity() const noexcept { return &charged_; }
     [[nodiscard]] bool owns_page_admission(const void* body, const void* metadata) const noexcept
     {
-        const auto found = page_index_.find(body);
-        return found && &pages_[*found].credit->bytes == metadata;
+        const auto* found = find_page(body);
+        return found && &found->credit->bytes == metadata;
     }
     template<class Visitor> void visit_page_admissions(Visitor&& visitor) const
     {
-        for (const auto& entry : pages_)
-            visitor(&entry.credit->bytes, entry.credit->page.get(), sizeof(PageCredit) + 128,
-                entry.credit->bytes - sizeof(PageCredit) - 128);
+        for_each_page(
+            [&](const auto& entry)
+            {
+                visitor(&entry.credit->bytes, entry.credit->page.get(), credit_overhead,
+                    entry.credit->bytes - credit_overhead);
+            });
     }
     template<class Visitor> void visit_borrowed_pages(Visitor&& visitor) const
     {
-        for (const auto& entry : pages_)
-            visitor(ContactBorrowedPage<T>{entry.credit.get(), entry.credit->page.get(), sizeof(PageCredit),
-                sizeof(Page), entry.credit->page->values, entry.credit->page->values.capacity()});
+        for_each_page(
+            [&](const auto& entry)
+            {
+                visitor(ContactBorrowedPage<T>{entry.credit.get(), entry.credit->page.get(), sizeof(PageCredit),
+                    sizeof(Page), entry.credit->page->values, entry.credit->page->values.capacity()});
+            });
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
@@ -241,12 +435,81 @@ public:
         for (const auto& value : by_value_)
             contact_payload_node_value(visitor, this, ContactPayloadRole::IdentityOrderedValues, value);
         page_index_.visit_borrowed_payload(visitor, ContactPayloadRole::IdentityPageOwnerBuckets);
-        for (const auto& entry : pages_)
-            visit_credit_payload(*entry.credit, visitor);
+        if (persistent_)
+        {
+            contact_payload_object(
+                visitor, persistent_.get(), ContactPayloadRole::IdentityPersistentRoot, sizeof(PersistentStorage));
+            const auto visit_index = [&](const auto& node)
+            {
+                contact_payload_object(visitor, node.get(), ContactPayloadRole::IdentityPersistentIndex,
+                    node->charge.bytes - persistent_ordered_detail::control_bytes, true);
+            };
+            PageDirectory::visit_pages(persistent_->pages,
+                [&](const auto* address, std::size_t bytes)
+                {
+                    contact_payload_object(visitor, address, ContactPayloadRole::IdentityPersistentIndex,
+                        bytes - persistent_ordered_detail::control_bytes, true);
+                });
+            ValueIndex::visit_pages(persistent_->values, visit_index);
+            PageIndex::visit_pages(persistent_->owners, visit_index);
+            if constexpr (owns_plane_backing)
+            {
+                PersistentPlaneOwnerIndex::visit_pages(persistent_->plane.index, visit_index);
+                PersistentPlaneOwnerIndex::visit_pages(persistent_->plane.index,
+                    [&](const auto& node)
+                    {
+                        for (const auto& row : node->rows)
+                            contact_payload_object(visitor, row.owner.get(), ContactPayloadRole::IdentityPersistentRoot,
+                                sizeof(PersistentPlaneOwnerIndex::Owner), true);
+                    });
+            }
+        }
+        for_each_page([&](const auto& entry) { visit_credit_payload(*entry.credit, visitor); });
     }
     [[nodiscard]] std::size_t lookup_bucket_capacity() const noexcept { return buckets_.capacity(); }
-    [[nodiscard]] std::size_t owner_pages() const noexcept { return pages_.size(); }
-    [[nodiscard]] std::size_t record_capacity() const noexcept { return pages_.size() * records_per_page; }
+    [[nodiscard]] std::size_t owner_pages() const noexcept
+    {
+        return persistent_ ? PageDirectory::size(persistent_->pages) : pages_.size();
+    }
+    [[nodiscard]] std::size_t record_capacity() const noexcept { return owner_pages() * records_per_page; }
+    [[nodiscard]] std::size_t source_only_metadata_bytes() const noexcept
+    {
+        return persistent_ ? persistent_storage_bytes : private_metadata_bytes();
+    }
+    [[nodiscard]] std::size_t overlap_bytes() const noexcept { return persistent_ ? persistent_->retired_overlap : 0; }
+    [[nodiscard]] std::size_t inherited_page_bytes() const noexcept
+    {
+        return persistent_ ? persistent_->foreign_page_bytes : 0;
+    }
+    /** Transfer imported backing ownership without releasing live arena bytes. */
+    void transfer_inherited_page_bytes(std::size_t bytes)
+    {
+        if (!bytes)
+            return;
+        if (!persistent_ || bytes > persistent_->foreign_page_bytes)
+            throw std::logic_error("Identity backing transfer exceeds the imported page credit.");
+        persistent_->foreign_page_bytes -= bytes;
+        charged_ -= bytes;
+    }
+    /** A whole directory replacement still overlaps its accepted source. */
+    [[nodiscard]] std::size_t take_replaced_overlap() noexcept
+    {
+        if (!persistent_ || !persistent_->overlapping)
+            return 0;
+        const auto bytes = std::exchange(persistent_->foreign_page_bytes, 0) +
+                           std::exchange(persistent_->foreign_index_bytes, 0) +
+                           std::exchange(persistent_->retired_overlap, 0);
+        charged_ -= bytes;
+        return bytes;
+    }
+    void finish_overlap() noexcept
+    {
+        if (persistent_)
+        {
+            release(std::exchange(persistent_->retired_overlap, 0));
+            persistent_->overlapping = false;
+        }
+    }
 
     /** A captured reference addresses a directory page and a record within it;
      * it is deliberately a separate type from a logical insertion slot. */
@@ -271,10 +534,8 @@ public:
             if (frozen_ || pool.budget_ != budget_)
                 throw std::invalid_argument("Invalid frozen identity page capture.");
             (void) pool.get(slot);
-            auto entry = std::upper_bound(pool.pages_.begin(), pool.pages_.end(), slot,
-                [](Slot value, const PageEntry& page) { return value < page.first_slot; });
-            --entry;
-            const auto offset = static_cast<std::size_t>(pool.by_slot_[slot] - entry->credit->page->values.data());
+            const auto* entry = &pool.page_for(slot);
+            const auto offset = slot - entry->first_slot;
             if (offset >= entry->credit->page->values.size())
                 throw std::invalid_argument("Invalid identity page locator.");
             auto found = index_.find(entry->credit.get());
@@ -343,8 +604,8 @@ public:
         /** Import one immutable physical page, never the originating directory.
          * The optional pool is consulted synchronously for an existing credit
          * in this arena and is not retained by the frozen result. */
-        [[nodiscard]] CapturedReference import_reference(
-            const PageView& source, CapturedReference reference, const IdentityPool* target_pool = nullptr)
+        [[nodiscard]] CapturedReference import_reference(const PageView& source, CapturedReference reference,
+            const IdentityPool* target_pool = nullptr, bool shared_physical_admission = false)
         {
             if (frozen_ || !source.frozen_ || (target_pool && target_pool->budget_ != budget_))
                 throw std::invalid_argument("Invalid selective identity-page import.");
@@ -355,12 +616,12 @@ public:
                 if (directory_[i]->page.get() == source_credit->page.get())
                     return {static_cast<std::uint64_t>(i) * records_per_page + offset};
             std::shared_ptr<PageCredit> credit;
-            if (source_credit->budget == budget_)
+            if (source_credit->budget == budget_ || (shared_physical_admission && source_credit->persistent_owner))
                 credit = source_credit;
             else if (target_pool)
             {
-                if (const auto found = target_pool->page_index_.find(source_credit->page.get()))
-                    credit = target_pool->pages_[*found].credit;
+                if (const auto* found = target_pool->find_page(source_credit->page.get()))
+                    credit = found->credit;
             }
             if (!credit)
             {
@@ -450,7 +711,7 @@ public:
         template<class Visitor> void visit_credit_owners(Visitor&& visitor) const
         {
             for (const auto& credit : directory_)
-                visitor(credit, sizeof(PageCredit) + 128);
+                visitor(std::shared_ptr<const PageCredit>(credit), sizeof(PageCredit) + 128);
         }
 
     private:
@@ -498,6 +759,188 @@ public:
 
 private:
     static constexpr Slot empty_slot = std::numeric_limits<Slot>::max();
+    std::uint64_t scope_id_ = identity_pool_detail::next_scope();
+    static std::size_t checked_sum(std::size_t a, std::size_t b)
+    {
+        return persistent_ordered_detail::checked_sum(a, b);
+    }
+    [[nodiscard]] std::uint64_t hash_value(const T& value) const
+    {
+        if constexpr (Hasher::enabled)
+            return hasher_(value);
+        return 0;
+    }
+    [[nodiscard]] const PageEntry& page_at(std::size_t ordinal) const
+    {
+        return persistent_ ? PageDirectory::at(persistent_->pages, ordinal) : pages_[ordinal];
+    }
+    [[nodiscard]] const PageEntry& page_for(Slot slot) const
+    {
+        if (persistent_)
+        {
+            const auto* found = PageDirectory::lower_bound(persistent_->pages, [&](const PageEntry& page)
+                { return slot >= page.first_slot && slot - page.first_slot >= page.credit->page->values.size(); });
+            if (!found || slot < found->first_slot)
+                throw std::logic_error("Identity slot directory is inconsistent.");
+            return *found;
+        }
+        const auto found = std::upper_bound(pages_.begin(), pages_.end(), slot,
+            [](Slot value, const PageEntry& page) { return value < page.first_slot; });
+        return *std::prev(found);
+    }
+    [[nodiscard]] const PageEntry* find_page(const void* address, bool credit = false) const noexcept
+    {
+        if (persistent_)
+        {
+            const PageSelector key{address, credit, 0};
+            const auto* found =
+                PageIndex::lower_bound(persistent_->owners, [&](const auto& row) { return PageLess{}(row, key); });
+            return found && !PageLess{}(key, *found) ? &page_at(found->ordinal) : nullptr;
+        }
+        const auto found = page_index_.find(address);
+        return found ? &pages_[*found] : nullptr;
+    }
+    template<class Visitor> void for_each_page(const Visitor& visit) const
+    {
+        if (persistent_)
+        {
+            for (std::size_t ordinal = 0; ordinal < owner_pages(); ++ordinal)
+                visit(page_at(ordinal));
+        }
+        else
+        {
+            for (const auto& entry : pages_)
+                visit(entry);
+        }
+    }
+    [[nodiscard]] std::size_t persistent_index_bytes() const noexcept
+    {
+        auto bytes = PageDirectory::storage_bytes(persistent_->pages) +
+                     (persistent_->values ? persistent_->values->subtree_bytes : 0) +
+                     (persistent_->owners ? persistent_->owners->subtree_bytes : 0);
+        if constexpr (owns_plane_backing)
+            if (persistent_->plane.index)
+                bytes += persistent_->plane.index->subtree_bytes;
+        return bytes;
+    }
+    template<class Node> [[nodiscard]] std::size_t foreign_ordered_bytes(const std::shared_ptr<const Node>& node) const
+    {
+        return node ? node->subtree_bytes - (node->charge.arena == keeper_ ? node->same_arena_bytes : 0) : 0;
+    }
+    template<class U> [[nodiscard]] Slot intern_persistent(U&& value)
+    {
+        auto& current = *persistent_;
+        const auto slot = current.records;
+        if (slot == empty_slot)
+            throw std::invalid_argument("Identity pool slot capacity exhausted.");
+        const auto payload = payload_(value);
+        const auto hash = hash_value(value);
+        const auto count = owner_pages();
+        const auto* last = count ? &page_at(count - 1) : nullptr;
+        const bool new_page = !last || last->credit->budget != budget_ || last->credit->page.use_count() != 1 ||
+                              last->credit->page->frozen || last->credit->page->values.size() == records_per_page;
+        auto next = current;
+        auto credit = last ? last->credit : nullptr;
+        if (new_page)
+        {
+            auto body = sizeof(Page) + 128 + product(records_per_page, sizeof(T));
+            if constexpr (owns_plane_backing)
+                body = checked_sum(body, product(records_per_page, sizeof(PlaneOwner)));
+            next.body_bytes = checked_sum(next.body_bytes, body);
+            credit = make_credit({}, body);
+            auto page = std::make_shared<Page>();
+            page->body_origin = budget_;
+            page->body_scope = scope_id_;
+            if constexpr (owns_plane_backing)
+            {
+                page->plane_owners.reserve(records_per_page);
+                if (page->plane_owners.capacity() != records_per_page)
+                    throw std::invalid_argument("Identity page owner capacity differs from admission.");
+            }
+            page->values.reserve(records_per_page);
+            if (page->values.capacity() != records_per_page)
+                throw std::invalid_argument("Identity page capacity differs from admission.");
+            credit->page = std::move(page);
+            next.pages = PageDirectory(keeper_).append(next.pages, PageEntry{credit, slot});
+            const PageIndex index(keeper_);
+            const PageSelector body_key{credit->page.get(), false, count};
+            const PageSelector credit_key{credit.get(), true, count};
+            auto with_body = index.edit(next.owners, body_key, &body_key, false);
+            next.owners = index.edit(with_body, credit_key, &credit_key, false);
+        }
+        next.body_bytes = checked_sum(next.body_bytes, payload);
+        credit->admit(payload);
+        auto& values = credit->page->values;
+        const auto old_size = values.size();
+        try
+        {
+            values.push_back(std::forward<U>(value));
+            if (payload_(values.back()) > payload)
+                throw std::invalid_argument("Identity owner payload exceeds its admission.");
+            PlaneOwner plane_owner;
+            if constexpr (owns_plane_backing)
+            {
+                auto retained = PersistentPlaneOwnerIndex(keeper_).retain(next.plane.index, values.back());
+                next.plane.index = std::move(retained.index);
+                next.plane.bytes = checked_sum(next.plane.bytes, retained.new_payload);
+                plane_owner = std::move(retained.owner);
+            }
+            const ValueSelector selector{hash, &values.back(), slot};
+            next.values = ValueIndex(keeper_).edit(next.values, selector, &selector, false);
+            ++next.records;
+            next.foreign_index_bytes = checked_sum(PageDirectory(keeper_).inherited_bytes(next.pages),
+                checked_sum(foreign_ordered_bytes(next.values), foreign_ordered_bytes(next.owners)));
+            if constexpr (owns_plane_backing)
+                next.foreign_index_bytes =
+                    checked_sum(next.foreign_index_bytes, foreign_ordered_bytes(next.plane.index));
+            if (next.foreign_index_bytes > current.foreign_index_bytes)
+                throw std::logic_error("Identity pool append introduced foreign metadata.");
+            const auto retired = current.foreign_index_bytes - next.foreign_index_bytes;
+            if (current.overlapping)
+                next.retired_overlap = checked_sum(next.retired_overlap, retired);
+            else
+                release(retired);
+            if constexpr (owns_plane_backing)
+                credit->page->plane_owners.push_back(std::move(plane_owner));
+            current = std::move(next);
+        }
+        catch (...)
+        {
+            if (values.size() != old_size)
+                values.pop_back();
+            credit->release(payload);
+            throw;
+        }
+        return slot;
+    }
+    void copy_flat_metadata(const IdentityPool& source)
+    {
+        reserve_exact(by_slot_, source.size());
+        reserve_exact(pages_, source.owner_pages());
+        page_index_.reserve(source.owner_pages());
+        if constexpr (!Hasher::enabled)
+            admit(product(source.size(), node_bytes()));
+        source.for_each_page(
+            [&](const PageEntry& entry)
+            {
+                auto credit = make_credit(entry.credit->page, entry.credit->bytes - credit_overhead);
+                const auto ordinal = pages_.size();
+                pages_.push_back({std::move(credit), entry.first_slot});
+                page_index_.insert(entry.credit->page.get(), ordinal);
+                for (const auto& value : entry.credit->page->values)
+                {
+                    const auto slot = by_slot_.size();
+                    if constexpr (Hasher::enabled)
+                    {
+                        ensure_lookup_capacity();
+                        buckets_[find_bucket(value, hasher_(value))] = slot;
+                    }
+                    else
+                        by_value_.emplace(&value, slot);
+                    by_slot_.push_back(&value);
+                }
+            });
+    }
     [[nodiscard]] std::shared_ptr<PageCredit> make_credit(std::shared_ptr<Page> page, std::size_t bytes)
     {
         // Admit the control object before constructing it. Its destructor owns
@@ -507,7 +950,7 @@ private:
         std::shared_ptr<PageCredit> result;
         try
         {
-            result = std::make_shared<PageCredit>(*budget_, keeper_, std::move(page));
+            result = std::make_shared<PageCredit>(*budget_, keeper_, std::move(page), scope_id_, bool(persistent_));
         }
         catch (...)
         {
@@ -522,6 +965,8 @@ private:
     {
         if (const auto found = find(value))
             return *found;
+        if (persistent_)
+            return intern_persistent(std::forward<U>(value));
         if (by_slot_.size() == std::numeric_limits<Slot>::max())
             throw std::invalid_argument("Identity pool slot capacity exhausted.");
         grow(by_slot_);
@@ -541,6 +986,8 @@ private:
             const auto bytes = sizeof(Page) + 128 + product(records_per_page, sizeof(T));
             auto credit = make_credit({}, bytes);
             auto page = std::make_shared<Page>();
+            page->body_origin = budget_;
+            page->body_scope = scope_id_;
             page->values.reserve(records_per_page);
             if (page->values.capacity() != records_per_page)
                 throw std::invalid_argument("Identity page capacity differs from admission.");
@@ -668,6 +1115,7 @@ private:
     }
     void clear() noexcept
     {
+        persistent_.reset();
         decltype(by_value_)().swap(by_value_);
         decltype(by_slot_)().swap(by_slot_);
         decltype(pages_)().swap(pages_);
@@ -685,5 +1133,6 @@ private:
     std::vector<Slot> buckets_;
     std::vector<PageEntry> pages_;
     PhysicalOwnerIndex<Slot> page_index_;
+    std::unique_ptr<PersistentStorage> persistent_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

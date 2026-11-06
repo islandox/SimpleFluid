@@ -11,6 +11,7 @@
 #include <optional>
 #include <utility>
 #include <variant>
+#include <type_traits>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
@@ -129,9 +130,21 @@ public:
             visitor(source_, source_->allocation_budget(), source_->metadata_bytes(), source_->has_arena_keeper());
         if (manifests_)
         {
-            visitor(manifests_, manifests_->allocation_budget(), manifests_->metadata_bytes(),
-                manifests_->has_arena_keeper());
-            manifests_->visit_dependencies(visitor);
+            const auto visit_manifest = [&]() -> decltype(auto)
+            {
+                return visitor(manifests_, manifests_->allocation_budget(), manifests_->metadata_bytes(),
+                    manifests_->has_arena_keeper());
+            };
+            if constexpr (std::is_same_v<decltype(visit_manifest()), bool>)
+            {
+                if (visit_manifest())
+                    manifests_->visit_dependencies(visitor);
+            }
+            else
+            {
+                visit_manifest();
+                manifests_->visit_dependencies(visitor);
+            }
         }
         for (const auto& lease : leases_)
             visitor(lease, lease->budget, lease->metadata, bool(lease->keeper));

@@ -220,4 +220,74 @@ TEST(ContactOwnerUsage, ThirdGenerationReleasesUnneededAncestorMetadataExactly)
     EXPECT_TRUE(first_weak.expired());
     EXPECT_TRUE(second_weak.expired());
 }
+
+TEST(ContactOwnerUsage, ActiveOwnerAuthenticationRejectsForeignControlWithoutAdmission)
+{
+    const auto memory = arena();
+    Usage usage(memory);
+    const auto actual = std::make_shared<int>(19);
+    const std::shared_ptr<const void> owner = actual;
+    const std::shared_ptr<const void> alias(actual, actual.get());
+    const std::shared_ptr<const void> foreign(actual.get(), [](const void*) {});
+    const std::shared_ptr<const void> unowned(std::shared_ptr<const void>{}, actual.get());
+    const Usage::Key key{actual.get(), 7};
+    EXPECT_TRUE(usage.retain(key, sizeof(int), nullptr, owner).inserted());
+    EXPECT_TRUE(usage.authentic(key, alias));
+    EXPECT_FALSE(usage.authentic(key, foreign));
+    EXPECT_FALSE(usage.authentic(key, unowned));
+    const auto used = memory->used, cumulative = memory->cumulative;
+    EXPECT_THROW((void) usage.retain(key, sizeof(int), nullptr, foreign), std::invalid_argument);
+    EXPECT_THROW((void) usage.retain(key, sizeof(int), nullptr, unowned), std::invalid_argument);
+    EXPECT_THROW((void) usage.release(key, foreign), std::invalid_argument);
+    EXPECT_THROW((void) usage.retain(key, sizeof(int), nullptr), std::invalid_argument);
+    EXPECT_THROW((void) usage.release(key), std::invalid_argument);
+    EXPECT_EQ(memory->used, used);
+    EXPECT_EQ(memory->cumulative, cumulative);
+    ASSERT_TRUE(usage.find(key));
+    EXPECT_EQ(usage.find(key)->references, 1u);
+    EXPECT_EQ(usage.retain(key, sizeof(int), nullptr, alias).after, 2u);
+    EXPECT_EQ(usage.release(key, alias).after, 1u);
+    EXPECT_TRUE(usage.release(key, owner).retired());
+    EXPECT_EQ(memory->used, 0u);
+}
+
+TEST(ContactOwnerUsage, ControlledForkRetainsExactAuthenticationAcrossBudgetRejection)
+{
+    std::vector<std::shared_ptr<const int>> owners;
+    const auto source_memory = arena();
+    Usage source(source_memory);
+    for (std::size_t i = 0; i < 65; ++i)
+    {
+        owners.push_back(std::make_shared<const int>(int(i)));
+        (void) source.retain({owners.back().get(), 1}, sizeof(int), nullptr, owners.back());
+    }
+    const Usage::Key key{owners[32].get(), 1};
+    const auto measured_memory = arena();
+    {
+        auto measured = source.fork(measured_memory);
+        EXPECT_TRUE(measured.authentic(key, owners[32]));
+        (void) measured.retain(key, sizeof(int), nullptr, owners[32]);
+        measured.finish_overlap();
+    }
+    EXPECT_EQ(measured_memory->used, 0u);
+    const auto short_memory = arena(measured_memory->peak - 1);
+    {
+        auto rejected = source.fork(short_memory);
+        const auto before = short_memory->used;
+        EXPECT_THROW((void) rejected.retain(key, sizeof(int), nullptr, owners[32]), std::invalid_argument);
+        EXPECT_EQ(short_memory->used, before);
+        EXPECT_EQ(rejected.find(key)->references, 1u);
+        EXPECT_TRUE(rejected.authentic(key, owners[32]));
+    }
+    const auto exact_memory = arena(measured_memory->peak);
+    {
+        auto exact = source.fork(exact_memory);
+        EXPECT_EQ(exact.retain(key, sizeof(int), nullptr, owners[32]).after, 2u);
+        exact.finish_overlap();
+        EXPECT_EQ(exact_memory->used, census(exact));
+    }
+    EXPECT_EQ(short_memory->used, 0u);
+    EXPECT_EQ(exact_memory->used, 0u);
+    EXPECT_EQ(source.find(key)->references, 1u);
+}
 } // namespace
