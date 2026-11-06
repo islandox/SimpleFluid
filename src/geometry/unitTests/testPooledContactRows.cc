@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -614,5 +615,318 @@ TEST(PooledContactRows, SecondRowLookupFailureReleasesStagedRowsAndPreservesAcce
     expect_point(accepted->get(accepted_reference), point(1));
     EXPECT_EQ(P::encode_identity(accepted->get(accepted_reference)), accepted_packet);
     EXPECT_EQ(budget->used, caller_live);
+}
+
+TEST(PooledContactRows, MultiplicityOnlyEditsPersistAcrossForksWithoutPublishingOrBumpingGeneration)
+{
+    auto source_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget source_identities;
+    D::IncidencePools source_pools(*source_budget, source_identities, source_budget);
+    Kernel kernel;
+    D::IncidenceOwnerRows source(*source_budget, source_identities, source_pools, kernel, 0, source_budget);
+    const auto cell = leaf();
+    D::PooledTile tile;
+    tile.first_cell = source_pools.cells.intern(cell.key);
+    const auto first = source_pools.points.intern(point(2));
+    const auto second = source_pools.points.intern(point(5));
+    const std::array loop{first, second};
+    const std::array first_only{first};
+    const auto lookup = [&](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf& { return cell; };
+    const auto forbidden = [](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf&
+    { throw std::logic_error("Multiplicity-only edit must not look up the leaf."); };
+    source.insert(tile.first_cell, 10);
+    source.add(tile, loop);
+    {
+        PatchOwner patches(source_budget, source.finish(lookup));
+        ASSERT_EQ(patches.value.size(), 1u);
+        EXPECT_EQ(patches.value.front().row->incidence_generation, 11u);
+    }
+
+    auto second_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget second_identities;
+    D::IncidencePools second_pools(source_pools, *second_budget, second_identities, second_budget);
+    D::IncidenceOwnerRows candidate(source, *second_budget, second_identities, second_pools, second_budget);
+    candidate.begin_delta();
+    candidate.add(tile, first_only);
+    {
+        PatchOwner patches(second_budget, candidate.finish(forbidden));
+        EXPECT_TRUE(patches.value.empty());
+    }
+    EXPECT_GT(candidate.inherited_overlap_metadata_bytes(), 0u);
+    const auto before = second_budget->used;
+    const auto retired = candidate.inherited_overlap_metadata_bytes();
+    candidate.finish_inherited_overlap();
+    EXPECT_EQ(second_budget->used, before - retired);
+
+    auto third_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget third_identities;
+    D::IncidencePools third_pools(second_pools, *third_budget, third_identities, third_budget);
+    D::IncidenceOwnerRows third(candidate, *third_budget, third_identities, third_pools, third_budget);
+    third.begin_delta();
+    third.remove(tile, first_only);
+    {
+        PatchOwner patches(third_budget, third.finish(forbidden));
+        EXPECT_TRUE(patches.value.empty());
+    }
+    third.begin_delta();
+    third.remove(tile, first_only);
+    {
+        PatchOwner patches(third_budget, third.finish(lookup));
+        ASSERT_EQ(patches.value.size(), 1u);
+        EXPECT_EQ(patches.value.front().row->incidence_generation, 12u);
+        ASSERT_EQ(patches.value.front().row->points.size(), 1u);
+        expect_point(patches.value.front().row->points[0].physical, point(5));
+    }
+    source.begin_delta();
+    source.remove(tile, first_only);
+    PatchOwner original(source_budget, source.finish(lookup));
+    ASSERT_EQ(original.value.size(), 1u);
+    EXPECT_EQ(original.value.front().row->incidence_generation, 12u);
+}
+
+TEST(PooledContactRows, OwnerRowsForkSharesActualPagesAndCountsAndCopiesOneBoundedPath)
+{
+    struct Measure
+    {
+        std::size_t new_payload, cumulative, copied_pages, copied_bytes;
+    };
+    const auto run = [](std::size_t count, Measure& measure)
+    {
+        constexpr auto cap = 16 * ample;
+        auto source_budget = std::make_shared<D::Budget>(D::Budget{cap});
+        D::IdentityBudget identities;
+        D::IncidencePools pools(*source_budget, identities, source_budget, D::IdentityPoolStorage::Persistent);
+        Kernel kernel;
+        D::IncidenceOwnerRows source(*source_budget, identities, pools, kernel, 0, source_budget);
+        auto cell = leaf();
+        const std::array loop{pools.points.intern(point(2)), pools.points.intern(point(5))};
+        D::PooledTile edited;
+        for (std::size_t n = 0; n != count; ++n)
+        {
+            cell.key = {7, A::CartesianCellAncestry{0, {n, 0, 0}}};
+            D::PooledTile tile;
+            tile.first_cell = pools.cells.intern(cell.key);
+            source.insert(tile.first_cell);
+            source.add(tile, loop);
+            if (n == 2)
+                edited = tile;
+        }
+        const auto lookup = [&](const A::AdaptiveCellKey& key) -> const A::AdaptiveLeaf&
+        {
+            cell.key = key;
+            return cell;
+        };
+        {
+            PatchOwner initial(source_budget, source.finish(lookup));
+            ASSERT_EQ(initial.value.size(), count);
+        }
+        using Identity = std::pair<D::ContactPayloadRole, std::uintptr_t>;
+        const auto identity = [](const D::ContactPayloadAllocation& allocation)
+        { return Identity{allocation.identity.role, reinterpret_cast<std::uintptr_t>(allocation.identity.address)}; };
+        std::set<Identity> accepted;
+        std::size_t counts = 0;
+        source.visit_borrowed_payload(
+            [&](const D::ContactPayloadAllocation& allocation)
+            {
+                accepted.insert(identity(allocation));
+                if (allocation.identity.role == D::ContactPayloadRole::CellPointCounts)
+                    ++counts;
+            });
+        ASSERT_EQ(counts, count);
+
+        auto budget = std::make_shared<D::Budget>(D::Budget{cap});
+        D::IdentityBudget candidate_identities;
+        D::IncidencePools candidate_pools(pools, *budget, candidate_identities, budget);
+        const auto base = budget->cumulative;
+        D::IncidenceOwnerRows candidate(source, *budget, candidate_identities, candidate_pools, budget);
+        EXPECT_EQ(candidate.persistence_work().copied_cells, 0u);
+        EXPECT_EQ(candidate.persistence_work().copied_pages, 0u);
+        EXPECT_EQ(candidate.persistence_work().legacy_fork_visits, 0u);
+        EXPECT_EQ(budget->cumulative - base, source.metadata_bytes());
+        std::size_t fork_private = 0;
+        candidate.visit_borrowed_payload(
+            [&](const D::ContactPayloadAllocation& allocation)
+            {
+                if (!accepted.contains(identity(allocation)))
+                    fork_private += allocation.payload_bytes;
+            });
+        EXPECT_EQ(fork_private, source.source_overlap_metadata_bytes());
+
+        const auto edit_base = budget->cumulative;
+        candidate.begin_delta();
+        candidate.add(edited, std::array{loop[0]});
+        const auto forbidden = [](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf&
+        { throw std::logic_error("Multiplicity-only edit must not look up the leaf."); };
+        {
+            PatchOwner patches(budget, candidate.finish(forbidden));
+            EXPECT_TRUE(patches.value.empty());
+        }
+        candidate.finish_inherited_overlap();
+        EXPECT_EQ(candidate.persistence_work().copied_cells, 1u);
+        EXPECT_EQ(candidate.persistence_work().legacy_fork_visits, 0u);
+        std::size_t new_payload = 0;
+        std::size_t new_counts = 0;
+        candidate.visit_borrowed_payload(
+            [&](const D::ContactPayloadAllocation& allocation)
+            {
+                if (accepted.contains(identity(allocation)))
+                    return;
+                new_payload += allocation.payload_bytes;
+                if (allocation.identity.role == D::ContactPayloadRole::CellPointCounts)
+                    ++new_counts;
+            });
+        EXPECT_EQ(new_counts, 1u);
+        const auto work = candidate.persistence_work();
+        measure = {new_payload, budget->cumulative - edit_base, work.copied_pages, work.copied_bytes};
+    };
+    Measure small{}, large{};
+    ASSERT_NO_FATAL_FAILURE(run(4096, small));
+    ASSERT_NO_FATAL_FAILURE(run(8192, large));
+    EXPECT_GT(small.copied_pages, 0u);
+    EXPECT_EQ(large.copied_pages, small.copied_pages);
+    EXPECT_LE(large.copied_bytes, small.copied_bytes + 64 * sizeof(void*));
+    EXPECT_LE(large.new_payload, small.new_payload + 64 * sizeof(void*));
+    EXPECT_LE(large.cumulative, small.cumulative + 64 * sizeof(void*));
+}
+
+TEST(PooledContactRows, OwnerRowsOverlapPeakRejectsOneByteLessAndLeavesAcceptedCountsIntact)
+{
+    auto source_budget = std::make_shared<D::Budget>(D::Budget{ample});
+    D::IdentityBudget identities;
+    D::IncidencePools pools(*source_budget, identities, source_budget);
+    Kernel kernel;
+    D::IncidenceOwnerRows source(*source_budget, identities, pools, kernel, 0, source_budget);
+    const auto cell = leaf();
+    D::PooledTile tile;
+    tile.first_cell = pools.cells.intern(cell.key);
+    const std::array loop{pools.points.intern(point(2)), pools.points.intern(point(5))};
+    const auto lookup = [&](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf& { return cell; };
+    source.insert(tile.first_cell);
+    source.add(tile, loop);
+    {
+        PatchOwner accepted(source_budget, source.finish(lookup));
+        ASSERT_EQ(accepted.value.size(), 1u);
+    }
+    const auto source_live = source_budget->used;
+    const auto run = [&](std::size_t limit, bool reject)
+    {
+        auto budget = std::make_shared<D::Budget>(D::Budget{ample});
+        D::IdentityBudget candidate_identities;
+        D::IncidencePools candidate_pools(pools, *budget, candidate_identities, budget);
+        const auto baseline = budget->used;
+        budget->peak = baseline;
+        budget->limit = limit;
+        const auto edit = [&]
+        {
+            D::IncidenceOwnerRows candidate(source, *budget, candidate_identities, candidate_pools, budget);
+            candidate.begin_delta();
+            candidate.add(tile, std::array{loop[0]});
+            PatchOwner patches(budget, candidate.finish(lookup));
+            EXPECT_TRUE(patches.value.empty());
+            EXPECT_GT(candidate.inherited_overlap_metadata_bytes(), 0u);
+            candidate.finish_inherited_overlap();
+        };
+        if (reject)
+            EXPECT_THROW(edit(), std::invalid_argument);
+        else
+            EXPECT_NO_THROW(edit());
+        EXPECT_EQ(budget->used, baseline);
+        EXPECT_EQ(source_budget->used, source_live);
+        return budget->peak;
+    };
+    const auto peak = run(ample, false);
+    ASSERT_GT(peak, 0u);
+    EXPECT_EQ(run(peak, false), peak);
+    (void) run(peak - 1, true);
+    source.begin_delta();
+    source.remove(tile, std::array{loop[0]});
+    PatchOwner original(source_budget, source.finish(lookup));
+    ASSERT_EQ(original.value.size(), 1u);
+    EXPECT_EQ(original.value.front().row->incidence_generation, 2u);
+    ASSERT_EQ(original.value.front().row->points.size(), 1u);
+    expect_point(original.value.front().row->points[0].physical, point(5));
+}
+
+TEST(PooledContactRows, OwnerRowsReleaseSourceArenasWhenTheirLastSharedPathIsRetired)
+{
+    // Keep the point/cell registry separate to isolate the row-root arena
+    // lifetime from other pool pages and external row handles.
+    D::Budget pool_budget{ample};
+    D::IdentityBudget identities;
+    D::IncidencePools pools(pool_budget, identities);
+    Kernel kernel;
+    const auto cell = leaf();
+    const auto slot = pools.cells.intern(cell.key);
+    const auto forbidden = [](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf&
+    { throw std::logic_error("Empty row must not look up the leaf."); };
+    auto first = std::make_shared<D::Budget>(D::Budget{ample});
+    std::weak_ptr<D::Budget> first_weak = first;
+    auto source = std::make_unique<D::IncidenceOwnerRows>(*first, identities, pools, kernel, 0, first);
+    source->insert(slot, 19);
+    EXPECT_TRUE(source->finish(forbidden).empty());
+
+    auto second = std::make_shared<D::Budget>(D::Budget{ample});
+    std::weak_ptr<D::Budget> second_weak = second;
+    auto candidate = std::make_unique<D::IncidenceOwnerRows>(*source, *second, identities, pools, second);
+    source.reset();
+    first.reset();
+    ASSERT_FALSE(first_weak.expired());
+    EXPECT_TRUE(candidate->finish(forbidden).empty());
+    candidate->finish_inherited_overlap();
+
+    auto third = std::make_shared<D::Budget>(D::Budget{ample});
+    {
+        D::IncidenceOwnerRows next(*candidate, *third, identities, pools, third);
+        candidate.reset();
+        second.reset();
+        EXPECT_TRUE(second_weak.expired());
+        ASSERT_FALSE(first_weak.expired());
+        next.erase(slot);
+        EXPECT_TRUE(first_weak.expired());
+        EXPECT_GT(next.inherited_overlap_metadata_bytes(), 0u);
+        EXPECT_TRUE(next.finish(forbidden).empty());
+        next.finish_inherited_overlap();
+        EXPECT_EQ(third->used, next.source_overlap_metadata_bytes());
+    }
+    EXPECT_EQ(third->used, 0u);
+}
+
+TEST(PooledContactRows, BorrowedArenaOwnerRowsForkCopiesCountsBeforeSourceLifetimeEnds)
+{
+    D::Budget budget{ample};
+    D::IdentityBudget identities;
+    D::IncidencePools pools(budget, identities);
+    Kernel kernel;
+    const auto cell = leaf();
+    D::PooledTile tile;
+    tile.first_cell = pools.cells.intern(cell.key);
+    const std::array loop{pools.points.intern(point(2)), pools.points.intern(point(5))};
+    const auto lookup = [&](const A::AdaptiveCellKey&) -> const A::AdaptiveLeaf& { return cell; };
+    std::unique_ptr<D::IncidenceOwnerRows> candidate;
+    {
+        auto source_budget = std::make_shared<D::Budget>(D::Budget{ample});
+        D::IdentityBudget source_identities;
+        D::IncidencePools source_pools(*source_budget, source_identities);
+        ASSERT_EQ(source_pools.cells.intern(cell.key), tile.first_cell);
+        ASSERT_EQ(source_pools.points.intern(point(2)), loop[0]);
+        ASSERT_EQ(source_pools.points.intern(point(5)), loop[1]);
+        D::IncidenceOwnerRows source(*source_budget, source_identities, source_pools, kernel, 0);
+        source.insert(tile.first_cell, 7);
+        source.add(tile, loop);
+        {
+            PatchOwner patches(source_budget, source.finish(lookup));
+            ASSERT_EQ(patches.value.size(), 1u);
+        }
+        candidate = std::make_unique<D::IncidenceOwnerRows>(source, budget, identities, pools);
+        EXPECT_EQ(candidate->persistence_work().legacy_fork_visits, 1u);
+    }
+    candidate->finish_inherited_overlap();
+    candidate->remove(tile, std::array{loop[0]});
+    auto keep = std::shared_ptr<D::Budget>(std::shared_ptr<D::Budget>{}, &budget);
+    PatchOwner patches(keep, candidate->finish(lookup));
+    ASSERT_EQ(patches.value.size(), 1u);
+    EXPECT_EQ(patches.value.front().row->incidence_generation, 9u);
+    ASSERT_EQ(patches.value.front().row->points.size(), 1u);
+    expect_point(patches.value.front().row->points[0].physical, point(5));
 }
 } // namespace

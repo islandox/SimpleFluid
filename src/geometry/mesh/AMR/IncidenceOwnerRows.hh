@@ -2,22 +2,23 @@
  * @brief Candidate-local physical tile contribution accounting.
  */
 #pragma once
+#include "CartesianIncidenceSource.hh"
 #include "ContactPayloadCensus.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "PooledCellPoints.hh"
 #include "PooledTile.hh"
 #include "TileBodyPages.hh"
-#include <map>
 #include <memory>
-#include <set>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-/** All operations mutate only this candidate. The arena and pools must outlive
- * it. Without an arena keeper, it must also outlive every returned row.
- * With a keeper, row handles retain the arena independently. Start a delta before retiring or adding tiles;
- * finish only after all old contributions have been removed and all new ones
- * added. Slots are local typed pool handles, never wire or ordering keys. */
+/** Accepted count snapshots and cell-index pages are immutable. Only touched
+ * cells acquire controllers bound to this candidate's pools. The arena and
+ * pools must outlive the controller; keeper-backed snapshots retain their
+ * arenas independently. Borrowed-arena forks copy their counts instead, and
+ * returned row handles must be destroyed before their borrowed arena.
+ * Begin a delta before changing contributions and finish after both old and new
+ * contributions are complete. Slots remain exact pool handles, not wire keys. */
 class IncidenceOwnerRows
 {
 public:
@@ -26,6 +27,10 @@ public:
     {
         IncidenceRowHandle row;
         const AdaptiveLeaf* leaf;
+    };
+    struct PersistenceWork
+    {
+        std::size_t copied_cells = 0, copied_pages = 0, copied_bytes = 0, legacy_fork_visits = 0;
     };
     IncidenceOwnerRows(Budget&, IdentityBudget&, IncidencePools&, const AdaptiveProviderKernel&, int rank,
         std::shared_ptr<Budget> keeper = {});
@@ -50,50 +55,27 @@ public:
     /** Returned vector capacity is charged to the caller; release that charge
      * after destroying its allocation. Row handles release their own charge. */
     [[nodiscard]] std::vector<Patch> finish(const OwnedLeafLookup&, bool keep_identity = true);
-    [[nodiscard]] std::size_t metadata_bytes() const noexcept
-    {
-        std::size_t bytes = charge_;
-        for (const auto& [slot, entry] : cells_)
-            bytes += entry.points->metadata_bytes();
-        return bytes;
-    }
-
+    [[nodiscard]] std::size_t metadata_bytes() const noexcept;
+    /** Source-only mutable owner; shared roots/counts import their own union. */
+    [[nodiscard]] std::size_t source_overlap_metadata_bytes() const noexcept;
+    [[nodiscard]] std::size_t inherited_overlap_metadata_bytes() const noexcept;
+    void finish_inherited_overlap() noexcept;
+    [[nodiscard]] PersistenceWork persistence_work() const noexcept;
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
-        if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::OwnerRowsObject, sizeof(*this));
-        for (const auto& value : cells_)
-        {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnerRowsCellNodes, value);
-            const auto& points = value.second.points;
-            if (points)
-                points->visit_borrowed_payload(visitor, true);
-        }
-        for (const auto& value : dirty_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnerRowsDirtyNodes, value);
+        visit_payload(PayloadVisit(visitor), include_object);
     }
 
 private:
-    struct Entry
-    {
-        std::unique_ptr<PooledCellPoints> points;
-        std::uint64_t generation = 0;
-    };
-    using CellIndex = std::map<Slot, Entry>;
-    using DirtySet = std::set<Slot>;
-    static constexpr std::size_t cell_charge =
-        sizeof(CellIndex::value_type) + 4 * sizeof(void*) + sizeof(PooledCellPoints);
-    static constexpr std::size_t dirty_charge = sizeof(DirtySet::value_type) + 4 * sizeof(void*);
-    void touch(Slot);
+    using PayloadVisit = CartesianBorrowedCallback<const ContactPayloadAllocation&>;
+    struct Storage;
+    void visit_payload(const PayloadVisit&, bool) const;
     std::shared_ptr<Budget> keeper_;
     Budget* budget_;
-    IdentityBudget* identities_;
     IncidencePools* pools_;
     const AdaptiveProviderKernel* kernel_;
     int rank_;
     bool active_ = true;
-    CellIndex cells_;
-    DirtySet dirty_;
-    std::size_t charge_ = 0;
+    std::unique_ptr<Storage> storage_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

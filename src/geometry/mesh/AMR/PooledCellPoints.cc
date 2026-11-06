@@ -11,28 +11,44 @@ namespace
 constexpr std::size_t node_bytes = sizeof(IncidencePools::Point) + 4 * sizeof(void*);
 }
 PooledCellPoints::PooledCellPoints(Budget& budget, IncidencePools& pools) : budget_(&budget), pools_(&pools) {}
-PooledCellPoints::PooledCellPoints(const PooledCellPoints& source, Budget& budget, IncidencePools& pools)
+PooledCellPoints::PooledCellPoints(const Snapshot& source, Budget& budget, IncidencePools& pools)
     : budget_(&budget), pools_(&pools)
 {
     try
     {
         admit(source.counts_.size() * sizeof(decltype(counts_)::value_type));
-        admit(source.before_.size() * sizeof(Slot));
         counts_.reserve(source.counts_.size());
-        before_.reserve(source.before_.size());
-        if (counts_.capacity() != source.counts_.size() || before_.capacity() != source.before_.size())
-            throw std::invalid_argument("Cell point fork capacity differs from admission.");
+        if (counts_.capacity() != source.counts_.size())
+            throw std::invalid_argument("Cell count snapshot capacity differs from admission.");
         counts_.assign(source.counts_.begin(), source.counts_.end());
-        before_.assign(source.before_.begin(), source.before_.end());
     }
     catch (...)
     {
         decltype(counts_)().swap(counts_);
-        decltype(before_)().swap(before_);
         budget_->used -= charged_;
         charged_ = 0;
         throw;
     }
+}
+bool PooledCellPoints::matches(const Snapshot& source) const noexcept
+{
+    return counts_ == source.counts_;
+}
+PooledCellPoints::SnapshotPtr PooledCellPoints::freeze(std::shared_ptr<Budget> keeper)
+{
+    if (before_.capacity() || (keeper && keeper.get() != budget_))
+        throw std::invalid_argument("Cell count freeze needs a completed delta and its actual arena.");
+    const auto body = counts_.capacity() * sizeof(decltype(counts_)::value_type);
+    if (body > charged_)
+        throw std::logic_error("Cell count snapshot lost its existing buffer admission.");
+    ContactGroupAllocation admission(
+        keeper ? std::move(keeper) : std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, budget_));
+    admission.add(sizeof(Snapshot) + 4 * sizeof(void*));
+    auto result = std::make_shared<Snapshot>(std::move(admission));
+    result->admission_.adopt_precharged(body);
+    result->counts_.swap(counts_);
+    charged_ -= body;
+    return result;
 }
 PooledCellPoints::~PooledCellPoints()
 {

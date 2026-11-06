@@ -72,7 +72,19 @@ struct OrderedPageWork
 
 inline constexpr std::size_t leaf_capacity = 64, branch_capacity = 32;
 
-template<class Row, class Less, bool FixedLeafCapacity = false, class Work = OrderedPageWork> class OrderedPages
+struct NoRowWeights
+{
+    struct Summary {};
+    static constexpr bool enabled = false;
+};
+
+/** Optional weights summarize row-exclusive immutable payloads. Implementations
+ * must allocate nothing in add_row/add_child, check aggregate overflow, and
+ * distinguish bodies created in the current node arena from inherited bodies.
+ * Shared payloads appearing in several rows require a separate owner union. */
+template<class Row, class Less, bool FixedLeafCapacity = false, class Work = OrderedPageWork,
+    class Weights = NoRowWeights>
+class OrderedPages
 {
 public:
     struct Node;
@@ -84,6 +96,7 @@ public:
         std::vector<Ptr> children;
         const Row* maximum = nullptr;
         std::size_t size = 0, subtree_bytes = 0, same_arena_bytes = 0;
+        [[no_unique_address]] typename Weights::Summary weights{};
         explicit Node(const std::shared_ptr<Budget>& arena) : charge(arena) {}
         [[nodiscard]] bool leaf() const noexcept { return children.empty(); }
         [[nodiscard]] std::size_t occupancy() const noexcept { return leaf() ? rows.size() : children.size(); }
@@ -246,6 +259,9 @@ private:
         node->size = values.size();
         node->subtree_bytes = node->charge.bytes;
         node->same_arena_bytes = node->charge.bytes;
+        if constexpr (Weights::enabled)
+            for (const auto& row : node->rows)
+                Weights::add_row(node->weights, row, arena_.get());
         record(*node);
         return node;
     }
@@ -262,6 +278,8 @@ private:
             node->subtree_bytes = checked_sum(node->subtree_bytes, child->subtree_bytes);
             if (child->charge.arena == arena_)
                 node->same_arena_bytes = checked_sum(node->same_arena_bytes, child->same_arena_bytes);
+            if constexpr (Weights::enabled)
+                Weights::add_child(node->weights, child->weights, child->charge.arena == arena_);
         }
         node->maximum = values.back()->maximum;
         record(*node);

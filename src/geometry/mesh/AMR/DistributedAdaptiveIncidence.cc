@@ -575,6 +575,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         inherited_overlap_active = false;
         authority_tile_counts.finish_overlap();
         resident_generations.finish_overlap();
+        owner_rows.finish_inherited_overlap();
         pools.finish_overlap();
         if (physical_residency && !external_physical_residency)
             physical_residency->finish_overlap();
@@ -3127,7 +3128,8 @@ std::size_t DistributedAdaptiveIncidenceSession::inherited_overlap_metadata_byte
     const auto owned_registry = state.physical_residency && !state.external_physical_residency
                                     ? state.physical_residency->overlap_bytes() : 0;
     return state.retired_inherited_metadata_bytes + state.authority_tile_counts.overlap_bytes() +
-           state.resident_generations.overlap_bytes() + state.pools.overlap_bytes() + owned_registry;
+           state.resident_generations.overlap_bytes() + state.owner_rows.inherited_overlap_metadata_bytes() +
+           state.pools.overlap_bytes() + owned_registry;
 }
 void DistributedAdaptiveIncidenceSession::finish_inherited_overlap() noexcept
 {
@@ -3160,14 +3162,14 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
 {
     const auto& state = *impl_;
     impl_->reap_deferred();
-    // Persistent pool roots and LayerHistory owners import their cached
+    // Persistent pool and owner-row roots and LayerHistory owners import their cached
     // allowance on fork, including the source paths held through overlap.
     // TileBodyPages still has separate per-arena credit objects.
     const auto source_page_credits = state.tile_bodies.statistics().page_credit_overhead_bytes;
     const auto source_arena_metadata = state.source_arena_overlap_metadata();
     return sizeof(Impl) + state.pools.source_only_metadata_bytes() +
            state.owned.metadata_bytes() + state.supports.metadata_bytes() + state.lines.metadata_bytes() +
-           state.owner_rows.metadata_bytes() +
+           state.owner_rows.source_overlap_metadata_bytes() +
            state.borrowed.metadata_bytes() +
            state.tile_bodies.metadata_bytes() + source_page_credits + source_arena_metadata +
            state.layer_source_leases.capacity() * sizeof(decltype(state.layer_source_leases)::value_type);
