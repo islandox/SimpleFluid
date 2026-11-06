@@ -294,7 +294,7 @@ auto pressure_face_metrics(const MeshType& mesh, const PressureFaceTopology<Pack
             const auto center_delta = metrics.cell_center_vector(face_id, owner_id);
             entry.center_delta = center_delta;
             entry.distance_squared = center_delta.dot(center_delta);
-            entry.center_projection = interior_diffusion_coefficient(metrics, face.face, face.owner, face.neighbor, scalar_type{1}) * entry.distance_squared;
+            entry.center_projection = interior_pressure_coefficient(metrics, face.face, face.owner, face.neighbor) * entry.distance_squared;
         });
     }
     for (size_t i = 0; i < topology.boundary.size(); ++i)
@@ -311,7 +311,7 @@ auto pressure_face_metrics(const MeshType& mesh, const PressureFaceTopology<Pack
             entry.area_vector = metrics.face_area_vector_outward(face_id, owner_id);
             entry.center_delta = metrics.face_centroid(face_id) - metrics.cell_centroid(owner_id);
             if (face.owned_owner)
-                entry.boundary_diffusion = boundary_diffusion_coefficient(metrics, face.face, face.owner, scalar_type{1});
+                entry.boundary_diffusion = boundary_pressure_coefficient(metrics, face.face, face.owner);
         });
     }
     for (size_t i = 0; i < topology.zero_flux_faces.size(); ++i)

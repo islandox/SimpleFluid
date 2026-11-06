@@ -709,7 +709,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     const LinearResidualScaling residual_scaling{reuse_cached_predictor_flux ? d_rhs_norm_reference : real_t{}};
     // Retain the compact symmetric two-point matrix, and converge its lagged
     // non-orthogonal face term with the same gradients and weights as Rhie--Chow.
-    // A p = b + div(grad(p) dot (S - alpha*d)), alpha = S dot d / |d|^2.
+    // A p = b + div(grad(p) dot (S - alpha*d)), alpha = (S dot S) / (S dot d).
     if (d_non_orthogonal_base_rhs.is_null() || !d_non_orthogonal_base_rhs->getMap()->isSameAs(*owned_map))
     {
         d_non_orthogonal_base_rhs = Teuchos::rcp(new typename Pack::vector_type(owned_map, false));
@@ -742,15 +742,27 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
     const auto base_norm = base_rhs.norm2();
     const auto correction_scale = std::max(base_norm, residual_scaling.rhs_norm_floor);
     auto correction_linear_options = d_linear_options;
+    typename Pack::vector_type fixed_point_residual(owned_map, false);
+    typename Pack::vector_type previous_fixed_point_rhs(owned_map, false);
+    typename Pack::vector_type previous_fixed_point_residual(owned_map, false);
+    scalar_type previous_fixed_point_norm_squared{};
+    bool have_fixed_point_history = false;
+    // Accumulated pressure is reconstructed with the physical boundary map.
+    // Use its homogeneous increment for both velocity and deferred correction.
+    // The matrix map still handles prescribed correction fluxes separately.
+    auto gradient_boundary_conditions = accumulated_pressure != nullptr
+        ? d_pressure_boundary_conditions : d_pressure_correction_boundary_conditions;
+    for (auto& [name, condition] : gradient_boundary_conditions) condition.value = scalar_type{};
     for (int corrector = 0; corrector < 100; ++corrector)
     {
-        linear_statistics = d_linear_solver.solve_from_zero_with_statistics(
+        fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
+        linear_statistics = d_linear_solver.solve_with_statistics(
             const_matrix, *d_cached_rhs, pressure_correction.owned_data(), correction_linear_options, residual_scaling);
         total_iterations += linear_statistics.iterations;
         if (!linear_statistics.converged)
             throw std::runtime_error("PressureProjectionEquation projection solve did not converge.");
         d_mesh->sync_periodic_boundaries(pressure_correction);
-        FVM::cell_gradient(pressure_correction, d_pressure_correction_boundary_conditions,
+        FVM::cell_gradient(pressure_correction, gradient_boundary_conditions,
             d_face_flux_workspace.pressure_gradient(), d_face_flux_workspace.gradient_cache(), d_gradient_scheme);
         d_face_flux_workspace.pressure_gradient().sync_ghosts();
         {
@@ -809,6 +821,35 @@ auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressu
             correction_converged = true;
             break;
         }
+        // Anderson(1) accelerates only the next RHS. The accepted pressure and
+        // gradient above must satisfy the full corrected equation before mixing.
+        fixed_point_residual.update(scalar_type{1}, *d_cached_rhs, -scalar_type{1});
+        const auto fixed_point_norm_squared = fixed_point_residual.dot(fixed_point_residual);
+        scalar_type mixing{};
+        if (have_fixed_point_history)
+        {
+            rhs_change.update(scalar_type{1}, fixed_point_residual,
+                -scalar_type{1}, previous_fixed_point_residual, scalar_type{});
+            const auto difference_norm_squared = rhs_change.dot(rhs_change);
+            const auto residual_product = rhs_change.dot(fixed_point_residual);
+            const auto history_scale = std::max(fixed_point_norm_squared, previous_fixed_point_norm_squared);
+            if (std::isfinite(fixed_point_norm_squared) && std::isfinite(previous_fixed_point_norm_squared) &&
+                std::isfinite(difference_norm_squared) && std::isfinite(residual_product) &&
+                difference_norm_squared > scalar_type{64} * std::numeric_limits<scalar_type>::epsilon() * history_scale &&
+                fixed_point_norm_squared <= scalar_type{4} * previous_fixed_point_norm_squared)
+            {
+                const auto candidate = residual_product / difference_norm_squared;
+                // Bound the mixture when the one-step history is nearly singular.
+                if (std::isfinite(candidate)) mixing = std::clamp(candidate, -scalar_type{1}, scalar_type{1});
+            }
+            rhs_change.update(scalar_type{1}, *d_cached_rhs,
+                -scalar_type{1}, previous_fixed_point_rhs, scalar_type{});
+        }
+        previous_fixed_point_rhs.update(scalar_type{1}, *d_cached_rhs, scalar_type{});
+        previous_fixed_point_residual.update(scalar_type{1}, fixed_point_residual, scalar_type{});
+        previous_fixed_point_norm_squared = fixed_point_norm_squared;
+        have_fixed_point_history = true;
+        if (mixing != scalar_type{}) d_cached_rhs->update(-mixing, rhs_change, scalar_type{1});
         correction_linear_options.tolerance = d_linear_options.tolerance * real_t{0.1};
     }
     if (!correction_converged)

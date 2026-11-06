@@ -621,6 +621,86 @@ inline auto boundary_diffusion_coefficient(
          : scalar_type{};
 }
 
+/**
+ * @brief Pressure implicit coefficient for a positive face-area projection.
+ *
+ * Pair this coefficient with the explicit area vector S - alpha*d.
+ * The caller must check that S dot d is positive.
+ */
+template<class VectorType>
+inline auto over_relaxed_pressure_coefficient(
+    const VectorType& area_vector, const VectorType& center_delta)
+{
+    return area_vector.dot(area_vector) / area_vector.dot(center_delta);
+}
+
+/** @brief Pressure implicit coefficient across an interior or periodic face. */
+template<class MeshType>
+inline auto interior_pressure_coefficient(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid,
+    typename MeshType::local_ordinal_type other_lid)
+    -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_id = query_cell_id(mesh, cell_lid);
+    const auto d = mesh.cell_center_vector(face_id, cell_id);
+    const auto d2 = d.dot(d);
+    if (d2 <= scalar_type{0})
+    {
+        throw std::runtime_error(
+            "Cannot assemble diffusion across coincident cells "
+            + std::to_string(cell_lid)
+            + " and "
+            + std::to_string(other_lid)
+            + ".");
+    }
+
+    const auto area_vector = mesh.face_area_vector_outward(face_id, cell_id);
+    if (area_vector.dot(d) > scalar_type{0})
+    {
+        return over_relaxed_pressure_coefficient(area_vector, d);
+    }
+
+    const auto stored_distance = mesh.face_cell_center_distance(face_id);
+    const auto distance =
+        stored_distance > scalar_type{0} ? stored_distance : std::sqrt(d2);
+    return mesh.face_area(face_id) / distance;
+}
+
+/** @brief Pressure implicit coefficient between a cell and a boundary face. */
+template<class MeshType>
+inline auto boundary_pressure_coefficient(
+    const MeshType& mesh,
+    typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid)
+    -> typename MeshType::scalar_type
+{
+    using scalar_type = typename MeshType::scalar_type;
+
+    const auto face_id = query_face_id(mesh, face_lid);
+    const auto cell_id = query_cell_id(mesh, cell_lid);
+    const auto d = mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+    if (d.dot(d) <= scalar_type{0})
+    {
+        return scalar_type{};
+    }
+
+    const auto area_vector = mesh.face_area_vector_outward(face_id, cell_id);
+    if (area_vector.dot(d) > scalar_type{0})
+    {
+        return over_relaxed_pressure_coefficient(area_vector, d);
+    }
+
+    const auto distance = mesh.cell_to_face_distance(face_id, cell_id);
+    return distance > scalar_type{0}
+         ? mesh.face_area(face_id) / distance
+         : scalar_type{};
+}
+
 /** @brief Fraction of the Dirichlet conductance retained by a normalized Robin condition. */
 template<class MeshType>
 inline auto robin_boundary_weight(const MeshType& mesh, typename MeshType::local_ordinal_type face_lid,

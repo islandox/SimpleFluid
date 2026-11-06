@@ -35,7 +35,7 @@ struct StoredPressureFaceGeometry
     bool owned_owner = false;
     vec_type normal{}, owner_normal{}, area_vector{}, center_delta{};
     scalar_type area{}, owner_weight{}, neighbor_weight{};
-    // Keep numerator and denominator separate to preserve (dp * dot) / d2.
+    // Store alpha*d2 so all consumers recover the same pressure coefficient.
     scalar_type center_projection{}, distance_squared{}, boundary_diffusion{};
 };
 
@@ -81,13 +81,13 @@ auto stored_pressure_face_geometry(const MeshType& mesh)
                     query_face_id(metrics, face_lid), query_cell_id(metrics, owner));
                 entry.center_delta = center_delta;
                 entry.distance_squared = center_delta.dot(center_delta);
-                entry.center_projection = interior_diffusion_coefficient(metrics, face_lid, owner, neighbor, scalar_type{1}) * entry.distance_squared;
+                entry.center_projection = interior_pressure_coefficient(metrics, face_lid, owner, neighbor) * entry.distance_squared;
             }
             else if (entry.boundary && entry.owned_owner)
             {
                 entry.center_delta = metrics.face_centroid(query_face_id(metrics, face_lid)) -
                     metrics.cell_centroid(query_cell_id(metrics, owner));
-                entry.boundary_diffusion = boundary_diffusion_coefficient(metrics, face_lid, owner, scalar_type{1});
+                entry.boundary_diffusion = boundary_pressure_coefficient(metrics, face_lid, owner);
             }
             result.push_back(entry);
         };

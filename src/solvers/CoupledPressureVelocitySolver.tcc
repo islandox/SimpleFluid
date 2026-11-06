@@ -2006,8 +2006,8 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 const auto distance_squared = center_delta.dot(center_delta);
                 if (distance_squared > scalar_type{})
                 {
-                    const auto direct_weight = FVM::detail::interior_diffusion_coefficient(
-                        *d_mesh, face_lid, cell_lid, other, scalar_type{1});
+                    const auto direct_weight = FVM::detail::interior_pressure_coefficient(
+                        *d_mesh, face_lid, cell_lid, other);
                     const auto projected = center_delta * direct_weight;
                     const std::array<scalar_type, 3> projected_components{projected.x, projected.y, projected.z};
                     for (size_t component = 0; component < 3; ++component)
@@ -2051,13 +2051,13 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 else
                 {
                     // Adjustable pressure outlets use the Rhie--Chow flux:
-                    // u_P.A + dt*k*q_P + dt*grad(q)_P.A - dt*k*q_D.
+                    // u_P.S + dt*alpha*q_P + dt*grad(q)_P.(alpha*d) - dt*alpha*q_D.
                     for (size_t component = 0; component < 3; ++component)
                     {
                         add_coefficient(0, component + 3, area_components[component]);
                     }
                     const auto boundary_coefficient =
-                        FVM::detail::boundary_diffusion_coefficient(*d_mesh, face_lid, cell_lid, scalar_type{1});
+                        FVM::detail::boundary_pressure_coefficient(*d_mesh, face_lid, cell_lid);
                     const auto delta = d_mesh->face_centroid(face_lid) - d_mesh->cell_centroid(cell_lid);
                     const std::array<scalar_type, 3> projected{delta.x * boundary_coefficient, delta.y * boundary_coefficient, delta.z * boundary_coefficient};
                     for (size_t component = 0; component < 3; ++component)

@@ -432,6 +432,86 @@ TEST(BoussinesqSolverTest, OneCellBuoyancyStepMatchesAnalyticalVelocityIncrement
     EXPECT_NEAR(velocity.z, 6.0, 1.0e-10);
 }
 
+/** @brief Preserve hydrostatic rest with physical pressure and buoyancy in balance. */
+TEST(BoussinesqSolverTest, PreservesHydrostaticPressureBuoyancyBalance)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+    {
+        GTEST_SKIP() << "The hydrostatic box regression uses a serial mesh fixture.";
+    }
+
+    constexpr double reference_density = 7.0;
+    for (const auto gradient_scheme :
+        {SimpleFluid::FVM::CellGradientScheme::LeastSquares, SimpleFluid::FVM::CellGradientScheme::GaussLinear})
+    {
+        SCOPED_TRACE(static_cast<int>(gradient_scheme));
+        auto mesh = make_box_mesh();
+        SimpleFluid::BoundaryConditionSet boundaries;
+        for (const auto* name : {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
+        {
+            boundaries.velocity[name] = {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+            boundaries.temperature[name] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+            boundaries.pressure[name] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+        }
+        boundaries.pressure["zmin"] = {SimpleFluid::BoundaryConditionType::Neumann, -reference_density};
+        boundaries.pressure["zmax"] = {SimpleFluid::BoundaryConditionType::Neumann, reference_density};
+
+        SimpleFluid::TimeStepperOptions time_options;
+        time_options.time_step = 0.01;
+        time_options.steps = 1;
+        time_options.kinematic_viscosity = 0.0;
+        time_options.thermal_diffusivity = 0.0;
+        time_options.thermal_expansion = 1.0;
+        time_options.reference_temperature = 0.0;
+        time_options.gravity_x = 0.0;
+        time_options.gravity_y = 0.0;
+        time_options.gravity_z = -1.0;
+        time_options.pressure_gradient_scheme = gradient_scheme;
+
+        SimpleFluid::BoussinesqModelOptions model_options;
+        model_options.reference_density = reference_density;
+        model_options.density = reference_density;
+        model_options.dynamic_viscosity = 0.0;
+        model_options.thermal_conductivity = 0.0;
+        model_options.density_feedback_enabled = false;
+
+        SimpleFluid::LinearSolverOptions linear_options;
+        linear_options.tolerance = 1.0e-13;
+        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+            mesh, boundaries, time_options, linear_options, model_options);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, 1.0, 1.0);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+            solver.pressure().set_owned_value(cell_lid, reference_density * mesh->cell_centroid(cell_lid).z);
+        }
+        solver.pressure().sync_ghosts();
+
+        ASSERT_NO_THROW(solver_coupling.step());
+
+        EXPECT_EQ(solver.step_index(), 1);
+        EXPECT_NEAR(solver.time(), time_options.time_step, 1.0e-14);
+        expect_finite_solution(*mesh, solver);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+            const auto velocity = solver.velocity().value(cell_lid);
+            EXPECT_NEAR(velocity.x, 0.0, 1.0e-11);
+            EXPECT_NEAR(velocity.y, 0.0, 1.0e-11);
+            EXPECT_NEAR(velocity.z, 0.0, 1.0e-11);
+            EXPECT_NEAR(solver.temperature().value(cell_lid), 1.0, 1.0e-12);
+        }
+        const auto& fluxes = solver.pressure_corrected_face_fluxes();
+        for (const auto face_lid : fluxes.owned_face_ids())
+        {
+            EXPECT_TRUE(std::isfinite(fluxes.value(face_lid)));
+            EXPECT_NEAR(fluxes.value(face_lid), 0.0, 1.0e-11);
+        }
+    }
+}
+
 /**
  * @brief Runs a small heated-box simulation for 2 steps and checks finite temperature and velocity values.
  */

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/FaceFlux.hh"
+#include "FVM/MatrixOperators.hh"
 #include "geometry/DirectBatchRange.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
@@ -914,8 +915,37 @@ TEST(StoredPressureFaceFluxCacheTest, SkewAffinePressureVanishesButCellJumpRemai
     auto geometry = std::make_shared<Geometry>(points,
         SimpleFluid::Arr<Geometry::CellDefinition>{
             {Geometry::CellType::HEXAHEDRON,{0,1,2,3,4,5,6,7}},
-            {Geometry::CellType::HEXAHEDRON,{1,8,9,2,5,10,11,6}}});
+            {Geometry::CellType::HEXAHEDRON,{1,8,9,2,5,10,11,6}}},
+        SimpleFluid::Arr<Geometry::BoundaryFaceDefinition>{
+            {{0,3,7,4},1,"xmin"}, {{8,10,11,9},2,"xmax"},
+            {{0,4,5,1},3,"ymin"}, {{1,5,10,8},3,"ymin"},
+            {{3,2,6,7},4,"ymax"}, {{2,9,11,6},4,"ymax"},
+            {{0,1,2,3},5,"zmin"}, {{1,8,9,2},5,"zmin"},
+            {{4,7,6,5},6,"zmax"}, {{5,6,11,10},6,"zmax"}});
     auto mesh = std::make_shared<Mesh>(geometry);
+    const auto expect_matrix = [&](BoundaryType type, double expected_diagonal)
+    {
+        const auto matrix = SimpleFluid::FVM::pressure_poisson_matrix<Pack>(
+            *mesh, std::optional<Pack::global_ordinal_type>{},
+            [=](int, size_t) { return SimpleFluid::BoundaryCondition{type, 0.0}; });
+        for (Pack::local_ordinal_type row = 0; row < 2; ++row)
+        {
+            typename Pack::matrix_type::local_inds_host_view_type columns;
+            typename Pack::matrix_type::values_host_view_type coefficients;
+            matrix->getLocalRowView(row, columns, coefficients);
+            ASSERT_EQ(columns.extent(0), 2U);
+            const auto row_gid = matrix->getRowMap()->getGlobalElement(row);
+            for (size_t entry = 0; entry < columns.extent(0); ++entry)
+            {
+                const auto column_gid = matrix->getColMap()->getGlobalElement(columns(entry));
+                EXPECT_NEAR(coefficients(entry), column_gid == row_gid ? expected_diagonal : -1.2, 2e-13);
+            }
+        }
+    };
+    // The shared face has S=(1,-0.4,-0.2), d=(1,0,0), hence alpha=1.2.
+    // Exterior x/y/z conductances are 2.4/2/2, giving diagonal 11.6.
+    expect_matrix(BoundaryType::Neumann, 1.2);
+    expect_matrix(BoundaryType::Dirichlet, 11.6);
     Workspace workspace(mesh);
     VectorField velocity(mesh,"skew_velocity");
     ScalarField pressure(mesh,"skew_pressure");
@@ -963,9 +993,16 @@ TEST(StoredPressureFaceFluxCacheTest, SkewAffinePressureVanishesButCellJumpRemai
         const auto owner=mesh->owner_cell(face);
         const auto neighbor=mesh->opposite_or_periodic_neighbor_cell(face,owner);
         const auto delta=mesh->cell_centroid(neighbor)-mesh->cell_centroid(owner);
-        const auto expected=-0.13*(pressure.local_value(neighbor)-pressure.local_value(owner))
-            *mesh->face_area_vector(face).dot(delta)/delta.dot(delta);
-        EXPECT_GT(std::abs(expected),0.1);
-        EXPECT_NEAR(flux.local_value(face),expected,2e-14);
+        // The non-affine jump distinguishes the over-relaxed factor from
+        // minimum correction. The ordinary transport coefficient stays 1.
+        EXPECT_NEAR(SimpleFluid::FVM::detail::interior_diffusion_coefficient(
+            *mesh, face, owner, neighbor, 1.0), 1.0, 2e-14);
+        const auto area = mesh->face_area_vector(face);
+        const auto remainder = area - delta * 1.2;
+        EXPECT_NEAR(remainder.x, -0.2, 2e-14);
+        EXPECT_NEAR(remainder.y, -0.4, 2e-14);
+        EXPECT_NEAR(remainder.z, -0.2, 2e-14);
+        EXPECT_NEAR(remainder.dot(area), 0.0, 2e-14);
+        EXPECT_NEAR(flux.local_value(face), 0.312, 2e-14);
     }
 }

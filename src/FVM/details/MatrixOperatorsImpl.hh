@@ -153,7 +153,7 @@ void visit_pressure_poisson_rows(const MeshType& mesh,
                 const auto other_lid =
                     packed_cell_local_id(mesh, mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id));
                 const auto coefficient =
-                    interior_diffusion_coefficient(mesh, face_lid, cell_lid, other_lid, scalar_type{1});
+                    interior_pressure_coefficient(mesh, face_lid, cell_lid, other_lid);
                 diagonal += coefficient;
                 columns.push_back(other_lid);
                 values.push_back(-coefficient);
@@ -171,7 +171,7 @@ void visit_pressure_poisson_rows(const MeshType& mesh,
             const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
-                diagonal += boundary_diffusion_coefficient(mesh, face_lid, cell_lid, scalar_type{1});
+                diagonal += boundary_pressure_coefficient(mesh, face_lid, cell_lid);
             }
             else if (condition.type != BoundaryConditionType::Neumann)
             {

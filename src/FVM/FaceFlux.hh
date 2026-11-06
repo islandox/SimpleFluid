@@ -1263,8 +1263,8 @@ void pressure_weighted_face_fluxes_impl(
             const auto direct_gradient_flux =
                 (condition.value
                  - pressure_values(owner, 0))
-              * boundary_diffusion_coefficient(
-                    mesh, face_lid, owner, scalar_type{1});
+              * boundary_pressure_coefficient(
+                    mesh, face_lid, owner);
             const typename VectorCellField<Pack>::vec_type
                 owner_gradient{
                     pressure_gradient_values(owner, 0),
@@ -1272,7 +1272,7 @@ void pressure_weighted_face_fluxes_impl(
                     pressure_gradient_values(owner, 2)};
             const auto interpolated_gradient_flux =
                 owner_gradient.dot(mesh.face_centroid(face_lid) - mesh.cell_centroid(owner))
-                * boundary_diffusion_coefficient(mesh, face_lid, owner, scalar_type{1});
+                * boundary_pressure_coefficient(mesh, face_lid, owner);
             flux_values(face_lid, 0) +=
                 -pressure_coefficient
                 * (direct_gradient_flux
@@ -1288,7 +1288,7 @@ void pressure_weighted_face_fluxes_impl(
             continue;
         }
 
-        const auto pressure_projection = interior_diffusion_coefficient(mesh, face_lid, owner, neighbor, scalar_type{1});
+        const auto pressure_projection = interior_pressure_coefficient(mesh, face_lid, owner, neighbor);
         const auto direct_gradient_flux =
             (pressure_values(neighbor, 0)
              - pressure_values(owner, 0))

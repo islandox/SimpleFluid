@@ -42,6 +42,15 @@ struct PressureProjectionEquationTestAccess
     {
         return equation.d_cached_pressure_matrix;
     }
+
+    static auto reuse_predictor(PressureProjectionEquation<Pack>& equation,
+        CellField<Pack>& pressure, CellField<Pack>& correction,
+        typename Pack::scalar_type time_step, typename Pack::scalar_type density,
+        const FVM::VelocityBoundaryCache<Pack>& boundaries, VectorCellField<Pack>& velocity)
+    {
+        return equation.project_reusing_cached_predictor(
+            pressure, correction, time_step, density, boundaries, velocity);
+    }
 };
 
 } // namespace SimpleFluid::detail
@@ -763,4 +772,202 @@ TEST(PressureProjectionMultiRankTest, NativeSkewOutletProjectionIsConservativeAc
     expect_replicated(*comm,result.continuity);
     for(const auto face:independent.owned_face_ids())
         EXPECT_NEAR(equation.corrected_face_fluxes().local_value(face),independent.local_value(face),1e-12);
+}
+
+
+/** Check the pressure/flux identity away from a converged solution. */
+TEST(PressureProjectionMultiRankTest, NonAffineCorrectionMatchesFluxAndFullPressureDefect)
+{
+    using namespace SimpleFluid;
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "Serial manufactured non-affine correction.";
+    const auto mesh = test::make_skewed_prism_mesh<Pack>();
+    BoundaryConditionSet physical;
+    for (const auto& [batch, faces] : mesh->boundary_batches())
+    {
+        const auto name = mesh->boundary_batch_name(batch);
+        physical.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+        physical.pressure[name] = {BoundaryConditionType::Neumann, 2.0};
+    }
+    physical.velocity["xmax"] = {BoundaryConditionType::Neumann, {}};
+    physical.pressure["xmax"] = {BoundaryConditionType::Dirichlet, 17.0};
+    auto correction_boundaries = physical.pressure;
+    for (auto& [name, condition] : correction_boundaries) condition.value = 0.0;
+    const auto boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, physical);
+    constexpr double dt = 0.13, rho = 13.0;
+    for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
+    {
+        FieldType pressure(mesh, "identity_p"), correction(mesh, "identity_q"), updated_pressure(mesh, "identity_p1");
+        VectorFieldType velocity(mesh, "identity_u"), updated_velocity(mesh, "identity_u1"), gradient(mesh, "identity_gq");
+        FaceField<Pack> initial_flux(mesh, "identity_phi0"), final_flux(mesh, "identity_phi1"), explicit_flux(mesh, "identity_C");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto x = mesh->cell_centroid(cell);
+            pressure.set_value(cell, 0.2*x.x*x.x - 0.1*x.y*x.y + 0.3*x.x*x.z);
+            correction.set_value(cell, std::sin(0.8*x.x + 0.4*x.y - 0.3*x.z));
+            velocity.set_value(cell, {0.7 + 0.2*x.y, -0.1*x.x, 0.05*x.z});
+        }
+        pressure.sync_ghosts(); correction.sync_ghosts(); velocity.sync_ghosts();
+        FVM::PressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
+        FVM::CellGradientCache<Pack> gradient_cache(mesh);
+        FVM::cell_gradient(correction, correction_boundaries, gradient, gradient_cache, scheme);
+        gradient.sync_ghosts();
+        FVM::pressure_weighted_face_fluxes(velocity, pressure, dt/rho,
+            boundaries, physical.pressure, workspace, initial_flux, scheme);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            updated_velocity.set_value(cell, velocity.value(cell) - gradient.value(cell)*dt);
+            updated_pressure.set_value(cell, pressure.value(cell) + rho*correction.value(cell));
+        }
+        updated_velocity.sync_ghosts(); updated_pressure.sync_ghosts();
+        FVM::pressure_weighted_face_fluxes(updated_velocity, updated_pressure, dt/rho,
+            boundaries, physical.pressure, workspace, final_flux, scheme);
+        const auto locations = FVM::detail::boundary_face_locations(*mesh);
+        size_t non_affine_faces = 0;
+        for (size_t local = 0; local < mesh->num_faces(); ++local)
+        {
+            const auto face = static_cast<Pack::local_ordinal_type>(local);
+            if (!mesh->is_owned_face(face)) continue;
+            const auto owner = mesh->owner_cell(face);
+            vec3<double> d{}, interpolated{};
+            double jump = 0.0;
+            bool active = mesh->is_interior_face(face);
+            if (active)
+            {
+                const auto neighbor = mesh->opposite_or_periodic_neighbor_cell(face, owner);
+                d = mesh->cell_center_vector(face, owner);
+                const auto weights = FVM::detail::interior_face_linear_weights(*mesh, face, owner, neighbor);
+                interpolated = gradient.local_value(owner)*weights.first + gradient.local_value(neighbor)*weights.second;
+                jump = correction.local_value(neighbor) - correction.local_value(owner);
+            }
+            else if (mesh->is_boundary_face(face) && locations.at(local).active)
+            {
+                const auto& location = locations.at(local);
+                const auto name = mesh->boundary_batch_name(location.batch_id);
+                active = correction_boundaries.at(name).type == BoundaryConditionType::Dirichlet;
+                d = mesh->face_centroid(face) - mesh->cell_centroid(owner);
+                interpolated = gradient.local_value(owner);
+                jump = -correction.local_value(owner);
+            }
+            double correction_flux = 0.0, full_flux = 0.0;
+            if (active)
+            {
+                const auto area = mesh->face_area_vector_outward(face, owner);
+                ASSERT_GT(area.dot(d), 0.0);
+                const auto alpha = area.dot(area)/area.dot(d);
+                correction_flux = (area - d*alpha).dot(interpolated);
+                full_flux = alpha*jump + correction_flux;
+                if (std::abs(jump - interpolated.dot(d)) > 1e-3) ++non_affine_faces;
+            }
+            explicit_flux.set_value(face, correction_flux);
+            EXPECT_NEAR(final_flux.value(face) - initial_flux.value(face), -dt*full_flux, 2e-12);
+        }
+        ASSERT_GT(non_affine_faces, 0U);
+        const auto matrix = FVM::pressure_poisson_matrix<Pack>(*mesh,
+            std::optional<Pack::global_ordinal_type>{}, [&](int batch, size_t)
+            { return correction_boundaries.at(mesh->boundary_batch_name(batch)); });
+        Pack::vector_type action(mesh->owned_cell_map(), false);
+        matrix->apply(correction.vector(), action);
+        double maximum_defect = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto target = 0.01*(1.0 + mesh->owned_cell_map()->getGlobalElement(cell));
+            const auto before = FVM::cell_flux_balance<Pack>(*mesh, initial_flux, cell);
+            const auto after = FVM::cell_flux_balance<Pack>(*mesh, final_flux, cell);
+            const auto explicit_balance = FVM::cell_flux_balance<Pack>(*mesh, explicit_flux, cell);
+            const auto defect = action.getData(0)[cell] - (-before + target)/dt - explicit_balance;
+            maximum_defect = std::max(maximum_defect, std::abs(defect));
+            EXPECT_NEAR(after - target, dt*defect, 5e-12);
+        }
+        EXPECT_GT(maximum_defect, 1e-3);
+    }
+}
+
+
+/** A fixed pressure outlet keeps its physical gradient map during projection. */
+TEST(PressureProjectionMultiRankTest, AccumulatedPressureFixedFluxMatchesPhysicalReconstruction)
+{
+    using namespace SimpleFluid;
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "Serial accumulated-pressure boundary regression.";
+    const auto mesh = test::make_skewed_prism_mesh<Pack>();
+    BoundaryConditionSet conditions;
+    for (const auto& [batch, faces] : mesh->boundary_batches())
+    {
+        const auto name = mesh->boundary_batch_name(batch);
+        conditions.velocity[name] = {BoundaryConditionType::NoSlip, {}};
+        conditions.pressure[name] = {BoundaryConditionType::Neumann, 0.0};
+    }
+    conditions.velocity["xmax"] = {BoundaryConditionType::Neumann, {}};
+    conditions.pressure["xmax"] = {BoundaryConditionType::Dirichlet, 0.0};
+    const auto boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);
+    for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
+    {
+        FieldType pressure(mesh, "fixed_physical_p"), correction(mesh, "fixed_q");
+        VectorFieldType velocity(mesh, "fixed_u");
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            const auto x = mesh->cell_centroid(cell);
+            pressure.set_value(cell, 0.04*std::sin(x.x + 0.3*x.y));
+            velocity.set_value(cell, {0.1*x.x*x.x, -0.03*x.y, 0.02*x.z});
+        }
+        pressure.sync_ghosts(); velocity.sync_ghosts();
+        LinearSolverOptions linear;
+        linear.tolerance = 1e-11;
+        linear.max_iterations = 500;
+        linear.preconditioner = LinearPreconditioner::None;
+        PressureProjectionEquation<Pack> equation(mesh, linear, conditions.pressure, scheme);
+        equation.set_fixed_boundary_flux_provider({"xmax"},
+            [](int, size_t, Pack::local_ordinal_type) { return 0.0; }, 1);
+        const auto override_outlet = [&](FaceField<Pack>& flux)
+        {
+            for (const auto& [batch, faces] : mesh->boundary_batches())
+                if (mesh->boundary_batch_name(batch) == "xmax")
+                    for (const auto face : faces.face_lids)
+                        if (mesh->is_owned_face(face)) flux.set_value(face, 0.0);
+        };
+        FVM::PressureWeightedFaceFluxWorkspace<Pack> workspace(mesh);
+        FaceField<Pack> independent(mesh, "fixed_independent_phi");
+        FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
+            boundaries, conditions.pressure, workspace, independent, scheme);
+        override_outlet(independent);
+        double initial_square = 0.0;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto balance = FVM::cell_flux_balance<Pack>(*mesh, independent,
+                static_cast<Pack::local_ordinal_type>(owned));
+            initial_square += balance*balance;
+        }
+        ASSERT_GT(initial_square, 1e-6);
+        const auto projected = equation.project(pressure, correction, 0.13, 7.0, boundaries, velocity);
+        ASSERT_TRUE(projected.linear_solve.converged);
+        EXPECT_GT(projected.pressure_correction, 1e-7);
+        const auto check = [&]
+        {
+            FVM::pressure_weighted_face_fluxes(velocity, pressure, 0.13/7.0,
+                boundaries, conditions.pressure, workspace, independent, scheme);
+            override_outlet(independent);
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                EXPECT_NEAR(FVM::cell_flux_balance<Pack>(*mesh, independent, cell), 0.0, 1e-9);
+            }
+            for (size_t local = 0; local < mesh->num_faces(); ++local)
+            {
+                const auto face = static_cast<Pack::local_ordinal_type>(local);
+                if (mesh->is_owned_face(face))
+                    EXPECT_NEAR(equation.corrected_face_fluxes().value(face), independent.value(face), 2e-12);
+            }
+            EXPECT_NEAR(correction.value(0), 0.0, 1e-14);
+        };
+        check();
+        const auto reused = detail::PressureProjectionEquationTestAccess<Pack>::reuse_predictor(
+            equation, pressure, correction, 0.13, 7.0, boundaries, velocity);
+        EXPECT_TRUE(reused.linear_solve.converged);
+        check();
+    }
 }
