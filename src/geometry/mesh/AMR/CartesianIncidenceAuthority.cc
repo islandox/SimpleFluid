@@ -182,23 +182,27 @@ std::size_t decode_bound(const ExplicitFace& face)
             product(4, PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(face.whole_vertices)));
     return size;
 }
-/** Pairwise convex clipping keeps at most n+m vertices at every clipping stage.
- * Admit every vector growth history, pair output, validation set, reversed/
- * translated face and duplicate-audit encoding before entering legacy code. */
-std::size_t overlay_bound(std::span<const SupportOccurrence> occurrences)
+/** Bound one live operation of the unchanged convex kernel. Partition checks
+ * retain their conservative envelope over the actual covering pieces; unrelated
+ * members of a complete support do not enlarge that construction lease. */
+std::size_t construction_bound(SupportConstructionKind kind, const SupportFace& source,
+    std::span<const SupportFace> others)
 {
-    std::size_t vertices = 0, encoded = 0;
-    for (const auto& entry : occurrences)
+    auto vertices = source->points().size(), encoded = source->encoded_incidence_size();
+    for (const auto& face : others)
     {
-        vertices = std::max(vertices, entry.face->points().size());
-        encoded = std::max(encoded, entry.face->encoded_incidence_size());
+        vertices = std::max(vertices, face->points().size());
+        encoded = std::max(encoded, face->encoded_incidence_size());
     }
     const auto polygon = product(2, vertices);
     auto per_pair = product(8, PLIC::PlanarFace<ArithmeticMode::Ordinary>::construction_capacity_bound(polygon));
     per_pair = add(per_pair, product(add(vertices, 4), growth(polygon, 3 * sizeof(long double))));
     per_pair = add(per_pair, product(16, encoded));
     per_pair = add(per_pair, product(polygon, 256));
-    return product(product(occurrences.size(), occurrences.size()), per_pair);
+    if (kind == SupportConstructionKind::Pair)
+        return per_pair;
+    const auto members = add(others.size(), 1);
+    return product(product(members, members), per_pair);
 }
 struct SupportInput
 {
@@ -727,16 +731,41 @@ void AuthorityState::support_run(
     input_memory.reserve(occurrences, input.size());
     for (auto& entry : input)
         occurrences.push_back(std::move(entry.occurrence));
-    work.retain(overlay_bound(occurrences));
+    Allocation construction(budget);
+    IdentityBudget output_owners;
+    auto begin_construction = [&](SupportConstructionKind kind, const SupportFace& source,
+                                  std::span<const SupportFace> others)
+    {
+        if (construction.bytes)
+            throw std::logic_error("Nested support construction lease.");
+        construction.retain(construction_bound(kind, source, others));
+    };
+    auto end_construction = [&]() noexcept
+    {
+        budget.used -= construction.bytes;
+        construction.bytes = 0;
+    };
+    const SupportConstructionAdmission admission{begin_construction, end_construction};
     auto charge = [&](std::size_t bytes) { work.retain(bytes); };
     auto charge_face = [&](const SupportFace& face)
     {
-        // Pairwise output/validation allocations were preflighted above; the
-        // legacy callback still receives its separate retained accounting.
-        (void) face;
+        // Coverage outlives the pair's construction scope. Admit the actual
+        // output owners before releasing that scope, sharing each owner once.
+        const auto before = budget.used;
+        try
+        {
+            output_owners.face(budget, *face);
+        }
+        catch (...)
+        {
+            work.bytes = add(work.bytes, budget.used - before);
+            throw;
+        }
+        work.bytes = add(work.bytes, budget.used - before);
     };
     auto publish = [&](const PrivateTileRecipe& value) { emit(value); };
-    make_support_recipes(seal.group, occurrences, budget.limit, seal.tile_budget, charge, charge_face, publish);
+    make_support_recipes(
+        seal.group, occurrences, budget.limit, seal.tile_budget, charge, charge_face, publish, &admission);
 }
 void AuthorityState::tile_run(const CartesianSealedTile& tile, Budget& budget,
     const CartesianBorrowedCallback<const PrivateTileRecipe&>& emit) const

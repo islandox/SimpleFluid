@@ -19,5 +19,5 @@ using RecipeEmit = BorrowedSupportCallback<PrivateTileRecipe>;
  * checked here and then destroyed; output does not retain identity bytes. */
 void make_support_recipes(std::span<const char> support, std::span<const SupportOccurrence> occurrences,
     std::size_t byte_budget, std::size_t tile_budget, const SupportCharge&, const SupportChargeFace&,
-    const RecipeEmit&);
+    const RecipeEmit&, const SupportConstructionAdmission* = nullptr);
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

@@ -122,8 +122,12 @@ Complete-support coverage stores handles only for actual intersections. Each
 row grows under admission that includes simultaneous old and new allocations;
 exterior supports allocate no coverage rows. The unchanged pair enumeration
 retains its conservative cardinality/work ceiling independently of this sparse
-storage. Constructor-replay construction envelopes remain separately admitted;
-removing coverage reservation alone does not establish bounded candidate search.
+storage. Constructor replay leases one live pair operation at a time, then
+retains each actual output owner before releasing its construction envelope.
+Partition validation leases its conservative envelope for the actual covering
+pieces. Callback failure unwinds the same lease; it cannot publish a partial
+support. These bounds avoid reserving all potential pair constructions at once;
+certified candidate search remains a separate requirement.
 A changed support is reconstructed from its complete, authenticated owner
 membership. Dirty supports are fetched in byte-bounded pages and preserve member
 arrival order. During replay, each affected tile first retains compact line slots, physical

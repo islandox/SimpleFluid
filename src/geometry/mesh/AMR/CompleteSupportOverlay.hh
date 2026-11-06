@@ -43,9 +43,26 @@ using SupportEmit = BorrowedSupportCallback<std::size_t, std::optional<std::size
 using SupportCharge = BorrowedSupportCallback<std::size_t>;
 using SupportChargeFace = BorrowedSupportCallback<const SupportFace&>;
 
+/** Optional live construction envelope around the unchanged geometry kernel.
+ * begin must admit before construction and leave no lease on failure;
+ * end releases the same scoped lease and
+ * must not throw. Surviving output faces are admitted through charge_face. */
+enum class SupportConstructionKind
+{
+    Pair,
+    Partition
+};
+using SupportConstructionBegin =
+    BorrowedSupportCallback<SupportConstructionKind, const SupportFace&, std::span<const SupportFace>>;
+using SupportConstructionEnd = BorrowedSupportCallback<>;
+struct SupportConstructionAdmission
+{
+    SupportConstructionBegin begin;
+    SupportConstructionEnd end;
+};
 /** Entries are a complete support in legacy arrival order. Geometry has already
  * been translated to its authority image and native containment validated.
  * The caller owns the scoped admission and duplicate canonical-face audit. */
 SIMPLEFLUID_LOCAL void overlay_complete_support(std::span<const SupportOccurrence>, std::size_t budget,
-    const SupportEmit&, const SupportCharge&, const SupportChargeFace&);
+    const SupportEmit&, const SupportCharge&, const SupportChargeFace&, const SupportConstructionAdmission* = nullptr);
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

@@ -257,6 +257,59 @@ TEST(CompleteSupportOverlay, FiniteTranslatedImageRejectsCollapsedAreaWithNonzer
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), original_flags);
 }
 
+TEST(CompleteSupportOverlay, ConstructionScopesReleaseOnSuccessAndCallbackFailure)
+{
+    const auto entries = crossed();
+    const auto before = geometry_snapshot(entries);
+    bool active = false;
+    std::size_t begins = 0, ends = 0, pairs = 0, partitions = 0;
+    auto begin = [&](D::SupportConstructionKind kind, const D::SupportFace& source,
+                     std::span<const D::SupportFace> others)
+    {
+        EXPECT_FALSE(active);
+        EXPECT_TRUE(source);
+        active = true;
+        ++begins;
+        if (kind == D::SupportConstructionKind::Pair)
+        {
+            EXPECT_EQ(others.size(), 1u);
+            ++pairs;
+        }
+        else
+        {
+            EXPECT_FALSE(others.empty());
+            ++partitions;
+        }
+    };
+    auto end = [&]() noexcept
+    {
+        EXPECT_TRUE(active);
+        active = false;
+        ++ends;
+    };
+    const D::SupportConstructionAdmission admission{begin, end};
+    auto charge = [](std::size_t) {};
+    auto charge_face = [&](const D::SupportFace&) { EXPECT_TRUE(active); };
+    auto emit = [&](std::size_t, std::optional<std::size_t>, D::SupportFace) { EXPECT_TRUE(active); };
+    D::overlay_complete_support(entries, ample, emit, charge, charge_face, &admission);
+    EXPECT_FALSE(active);
+    EXPECT_EQ(pairs, 6u);
+    EXPECT_EQ(partitions, 4u);
+    EXPECT_EQ(begins, ends);
+    auto fail = [&](std::size_t, std::optional<std::size_t>, D::SupportFace)
+    {
+        EXPECT_TRUE(active);
+        throw std::runtime_error("test callback failure");
+    };
+    EXPECT_THROW(D::overlay_complete_support(entries, ample, fail, charge, charge_face, &admission), std::runtime_error);
+    EXPECT_FALSE(active);
+    EXPECT_EQ(begins, ends);
+    EXPECT_EQ(geometry_snapshot(entries), before);
+    D::overlay_complete_support(entries, ample, emit, charge, charge_face, &admission);
+    EXPECT_FALSE(active);
+    EXPECT_EQ(begins, ends);
+}
+
 TEST(CompleteSupportOverlay, SparseCoverageMetadataFollowsActualIntersections)
 {
     std::size_t previous_bytes = 0;

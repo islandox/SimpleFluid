@@ -9,6 +9,25 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 namespace
 {
+class ConstructionScope
+{
+public:
+    ConstructionScope(const SupportConstructionAdmission* admission, SupportConstructionKind kind,
+        const SupportFace& source, std::span<const SupportFace> others)
+        : admission_(admission)
+    {
+        if (admission_)
+            admission_->begin(kind, source, others);
+    }
+    ~ConstructionScope()
+    {
+        if (admission_)
+            admission_->end();
+    }
+
+private:
+    const SupportConstructionAdmission* admission_;
+};
 void append_coverage(std::vector<SupportFace>& row, const SupportFace& face, std::size_t budget,
     const SupportCharge& charge)
 {
@@ -32,7 +51,7 @@ void append_coverage(std::vector<SupportFace>& row, const SupportFace& face, std
 }
 } // namespace
 void overlay_complete_support(std::span<const SupportOccurrence> entries, std::size_t budget, const SupportEmit& emit,
-    const SupportCharge& charge, const SupportChargeFace& charge_face)
+    const SupportCharge& charge, const SupportChargeFace& charge_face, const SupportConstructionAdmission* construction)
 {
     if (entries.empty())
         throw std::invalid_argument("Empty complete support.");
@@ -53,8 +72,13 @@ void overlay_complete_support(std::span<const SupportOccurrence> entries, std::s
         charge(sizeof(AdaptiveCellKey) + 4 * sizeof(void*) + key_capacity(a.cell));
         unique.insert(a.cell);
         for (std::size_t j = 0; j < i; ++j)
-            if (a.orientation == entries[j].orientation && a.face->intersection(*entries[j].face))
-                throw std::invalid_argument("Same-side support overlap.");
+            if (a.orientation == entries[j].orientation)
+            {
+                ConstructionScope scope(construction, SupportConstructionKind::Pair, a.face,
+                    std::span<const SupportFace>(&entries[j].face, 1));
+                if (a.face->intersection(*entries[j].face))
+                    throw std::invalid_argument("Same-side support overlap.");
+            }
     }
     if (exterior)
     {
@@ -76,6 +100,8 @@ void overlay_complete_support(std::span<const SupportOccurrence> entries, std::s
             for (std::size_t j = 0; j < entries.size(); ++j)
                 if (entries[j].orientation < 0)
                 {
+                    ConstructionScope scope(construction, SupportConstructionKind::Pair, entries[i].face,
+                        std::span<const SupportFace>(&entries[j].face, 1));
                     auto face = entries[i].face->intersection(*entries[j].face);
                     if (!face)
                         continue;
@@ -91,6 +117,9 @@ void overlay_complete_support(std::span<const SupportOccurrence> entries, std::s
                     emit(i, j, std::move(face));
                 }
     for (std::size_t i = 0; i < entries.size(); ++i)
+    {
+        ConstructionScope scope(construction, SupportConstructionKind::Partition, entries[i].face, coverage[i]);
         entries[i].face->certify_partition(coverage[i]);
+    }
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

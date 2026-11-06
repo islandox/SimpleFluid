@@ -191,6 +191,65 @@ TEST(CartesianIncidenceAuthority, InvalidLayerAndMissingRegistryRejectBeforeInde
     EXPECT_THROW(authority->support_completions(group, *budget, budget), std::exception);
     EXPECT_THROW(authority->complete_line(group, 64, {}, *budget, budget), std::exception);
 }
+TEST(CartesianIncidenceAuthority, SparseSupportReplayAdmitsActualLiveConstruction)
+{
+    const AdaptiveBytes group{'s', 'p', 'a', 'r', 's', 'e'};
+    auto budget = std::make_shared<Budget>(Budget{8 * 1024 * 1024});
+    {
+        std::vector<std::shared_ptr<const CartesianExplicitSupportSource>> sources;
+        std::vector<AdaptiveBytes> identities;
+        for (unsigned z = 0; z < 4; ++z)
+            for (unsigned y = 0; y < 4; ++y)
+            {
+                const std::array<PLIC::GeometryPoint, 4> points{{{.5, y / 4., z / 4.},
+                    {.5, (y + 1) / 4., z / 4.}, {.5, (y + 1) / 4., (z + 1) / 4.}, {.5, y / 4., (z + 1) / 4.}}};
+                const auto face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::make(points);
+                for (const int orientation : {1, -1})
+                {
+                    AdaptiveLeaf leaf;
+                    leaf.key = {0, ConvexCellAncestry{sources.size(), {}}};
+                    leaf.domain = {'d'};
+                    leaf.surfaces.push_back({group, orientation > 0 ? face : face->reversed(), orientation, false, ""});
+                    auto source = CartesianExplicitSupportSource::make(leaf, 0, 1, 1, *budget, budget, {});
+                    identities.push_back(source->identity());
+                    sources.push_back(std::move(source));
+                }
+            }
+        auto arena = CartesianGroupAuthority::make_arena(*budget, budget);
+        auto authority = CartesianGroupAuthority::make({}, *budget, budget, 262144, arena);
+        authority->replace_support_contributors({}, sources);
+        auto receipts = authority->support_completions(group, *budget, budget);
+        std::size_t members = 0;
+        for (const auto& receipt : receipts->receipts())
+            members += receipt->member_count();
+        ASSERT_EQ(members, 32u);
+        const auto floor = budget->used;
+        {
+            auto complete = authority->complete_support(group, receipts->receipts(), *budget, budget);
+            ASSERT_EQ(complete->tile_count(), 16u);
+            std::size_t tiles = 0;
+            double area = 0;
+            complete->visit_tiles(*budget,
+                [&](const auto&, const auto& tile)
+                {
+                    EXPECT_TRUE(tile.second_member);
+                    EXPECT_TRUE(tile.second_image.is_zero());
+                    EXPECT_DOUBLE_EQ(tile.face->area().as_double(), 1. / 16);
+                    area += tile.face->area().as_double();
+                    ++tiles;
+                });
+            EXPECT_EQ(tiles, 16u);
+            EXPECT_DOUBLE_EQ(area, 1);
+        }
+        EXPECT_EQ(budget->used, floor);
+        for (std::size_t i = 0; i < sources.size(); ++i)
+            EXPECT_EQ(sources[i]->identity(), identities[i]);
+        RecordProperty("sparse_support_live_peak", budget->peak);
+        EXPECT_LE(budget->peak, budget->limit);
+    }
+    EXPECT_EQ(budget->used, 0u);
+}
+
 TEST(CartesianIncidenceAuthority, FailedCompleteSupportUnwindsPartialGeometryAndLedgerAdmission)
 {
     const auto value = grid();

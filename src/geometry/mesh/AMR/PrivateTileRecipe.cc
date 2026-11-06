@@ -8,7 +8,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 void make_support_recipes(std::span<const char> support, std::span<const SupportOccurrence> entries,
     std::size_t byte_budget, std::size_t tile_budget, const SupportCharge& charge, const SupportChargeFace& charge_face,
-    const RecipeEmit& publish)
+    const RecipeEmit& publish, const SupportConstructionAdmission* construction)
 {
     using Displacement = PLIC::DisplacementIdentity<ArithmeticMode::Ordinary>;
     std::set<AdaptiveBytes> identities;
@@ -58,6 +58,6 @@ void make_support_recipes(std::span<const char> support, std::span<const Support
         auto physical = face->translated(PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, first_image));
         publish({first, second, std::move(physical), std::move(difference)});
     };
-    overlay_complete_support(entries, byte_budget, emit, charge, charge_face);
+    overlay_complete_support(entries, byte_budget, emit, charge, charge_face, construction);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
