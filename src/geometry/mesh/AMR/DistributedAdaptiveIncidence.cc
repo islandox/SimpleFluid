@@ -1,8 +1,9 @@
 /** @file DistributedAdaptiveIncidence.cc
  * @brief Incremental complete-support and layered exact-line incidence. */
 #include "DistributedAdaptiveIncidence.hh"
+#include "AdaptiveSubfaceSnapshot.hh"
 #include "CertifiedIncidenceViews.hh"
-#include "CompactTileIndex.hh"
+#include "PersistentTileIndex.hh"
 #include "DeferredOwnerCharges.hh"
 #include "IncidenceOwnerRows.hh"
 #include "IncidencePools.hh"
@@ -79,19 +80,19 @@ struct Lease
 struct ReturnedRowsCredit
 {
     Budget& budget;
-    std::vector<IncidenceRowHandle>* rows;
+    std::vector<IncidenceRowDelivery>* rows;
     ~ReturnedRowsCredit()
     {
         if (rows)
         {
-            const auto bytes = rows->capacity() * sizeof(IncidenceRowHandle);
-            std::vector<IncidenceRowHandle>().swap(*rows);
+            const auto bytes = rows->capacity() * sizeof(IncidenceRowDelivery);
+            std::vector<IncidenceRowDelivery>().swap(*rows);
             budget.used -= bytes;
         }
     }
     void transfer() noexcept { rows = nullptr; }
 };
-static_assert(std::is_nothrow_move_constructible_v<std::vector<IncidenceRowHandle>>);
+static_assert(std::is_nothrow_move_constructible_v<std::vector<IncidenceRowDelivery>>);
 static_assert(std::is_nothrow_move_constructible_v<IncidenceDelta>);
 struct EdgeState
 {
@@ -104,6 +105,7 @@ struct Layer
     std::shared_ptr<Budget> keeper;
     std::size_t charge = 0;
     std::vector<Slot> input, output;
+    std::shared_ptr<const SharedSubfaceRing> final_output;
     std::vector<EdgeState> edges;
     ~Layer()
     {
@@ -169,7 +171,7 @@ TileBodyLoopView output_loop(const Layer& layer, bool source)
 {
     if (source && static_cast<const SavedLayer&>(layer).saved_output)
         return saved_loop(*static_cast<const SavedLayer&>(layer).saved_output);
-    return layer.output;
+    return layer.final_output ? TileBodyLoopView(layer.final_output->slots()) : TileBodyLoopView(layer.output);
 }
 TileBodyLoopView edge_result(const Layer& layer, std::size_t edge, bool source)
 {
@@ -208,6 +210,8 @@ struct TileEntry
     bool initialized = false;
     std::uint64_t support_generation = 0;
     bool native_source = false;
+    SubfaceProvenanceRef provenance;
+    CanonicalSubfaceView final_piece;
     [[nodiscard]] TileBodyScalars tile() const { return body.scalars(); }
     [[nodiscard]] const auto& layers() const
     {
@@ -229,7 +233,7 @@ struct LayerWork
     std::shared_ptr<Layer> body;
     bool require_all = false;
 };
-using TileMap = CompactTileIndex<TileEntry>;
+using TileMap = PersistentTileIndex<TileEntry>;
 using ChangedTileMap = std::map<TileId, std::optional<TileEntry>>;
 using LayerMap = std::map<TileId, LayerWork>;
 using ExpectedSupportMap = std::map<Slot, std::vector<RegistryMember>>;
@@ -385,17 +389,21 @@ struct DistributedAdaptiveIncidenceSession::Impl
     PooledLineRegistry lines;
     IncidenceOwnerRows owner_rows;
     TileMap tiles;
+    std::shared_ptr<const AdaptiveSubfaceSnapshot> subfaces;
+    std::size_t subface_foreign_bytes = 0, tile_index_foreign_bytes = 0;
+    std::size_t retired_inherited_metadata_bytes = 0;
     std::map<Slot, std::size_t> authority_tile_counts;
     std::map<Slot, std::uint64_t> resident_generations;
     ContactHaloStatistics statistics;
     unsigned last_layer = 0;
     std::uint64_t point_generation = 0;
-    std::size_t periodic_tiles = 0;
+    std::size_t periodic_tiles = 0, active_tile_histories = 0;
     std::size_t authority_tiles = 0;
     std::size_t observed_work_capacity_peak = 0, observed_layer_capacity_peak = 0;
     bool ready = false;
     bool native_source_protocol = false;
     bool native_inventory_complete = false;
+    bool inherited_overlap_active = false;
     const char* diagnostic_phase = "construction";
 
     Impl(const AdaptiveProviderKernel& k, Teuchos::RCP<const Teuchos::Comm<int>> c, AdaptiveClosureOptions o,
@@ -407,42 +415,52 @@ struct DistributedAdaptiveIncidenceSession::Impl
     {
         lease.add(sizeof(Impl));
     }
-    Impl(const Impl& source, Budget& b, IdentityBudget& i, std::shared_ptr<Budget> arena)
+    Impl(const Impl& source, Budget& b, IdentityBudget& i, std::shared_ptr<Budget> arena,
+        std::size_t* source_overlap)
         : lease(b), borrowed(b), kernel(source.kernel), comm(source.comm), options(source.options),
           context(source.context), budget(&b), identities(&i), keeper(std::move(arena)),
           point_arena((source.native_source_protocol || source.pools.points.source() || source.owned.source())
                           ? CartesianGroupAuthority::make_arena(b, keeper)
                           : nullptr),
           source_manifests(source.source_manifests), pools(source.pools, b, i, keeper, point_arena),
-          tile_bodies(source.tile_bodies, b, keeper, point_arena), owned(source.owned, b, pools, point_arena),
+          tile_bodies(b, keeper), owned(source.owned, b, pools, point_arena),
           supports(source.supports, b, pools.supports, pools.cells), lines(source.lines, b, pools),
-          owner_rows(source.owner_rows, b, i, pools, keeper), tiles(b, keeper), statistics(source.statistics),
+          owner_rows(source.owner_rows, b, i, pools, keeper), tiles(b, keeper), subfaces(source.subfaces),
+          statistics(source.statistics),
           last_layer(source.last_layer), point_generation(source.point_generation),
-          periodic_tiles(source.periodic_tiles), authority_tiles(source.authority_tiles), ready(source.ready),
+          periodic_tiles(source.periodic_tiles), active_tile_histories(source.active_tile_histories),
+          authority_tiles(source.authority_tiles), ready(source.ready),
           native_source_protocol(source.native_source_protocol),
-          native_inventory_complete(source.native_inventory_complete)
+          native_inventory_complete(source.native_inventory_complete), inherited_overlap_active(true)
     {
         lease.add(sizeof(Impl));
         Lease scratch(b);
         std::set<const Layer*> layers;
         std::set<const LayerHistory*> histories;
-        if (native_source_protocol)
+        if (point_arena)
         {
             cartesian_detail::CreditConstruction credits(point_arena);
             cartesian_detail::Allocation imported(b);
-            // Import even recipes absent from the current line index before
-            // allocating the candidate tile index or shared history entries.
-            for (std::size_t n = 0; n < source.tiles.size(); ++n)
-                for (const auto& [ordinal, body] : source.tiles.value_at(n).layers())
-                    if (body)
-                        static_cast<const SavedLayer&>(*body).retain_dependencies(
-                            credits, layer_source_leases, imported);
+            // Live layers and detached subfaces enter one physical-owner
+            // admission, even if either side is the sole remaining holder.
+            if (native_source_protocol && active_tile_histories)
+                for (std::size_t n = 0; n < source.tiles.size(); ++n)
+                    for (const auto& [ordinal, body] : source.tiles.value_at(n).layers())
+                        if (body)
+                            static_cast<const SavedLayer&>(*body).retain_dependencies(
+                                credits, layer_source_leases, imported);
+            if (subfaces)
+                subfaces->retain_source_dependencies(credits, layer_source_leases, imported);
             lease.bytes += std::exchange(imported.bytes, 0);
             credits.committed = true;
         }
-        tiles.clone_from(source.tiles,
-            [&](const TileEntry& tile)
+        tiles.fork_from(source.tiles);
+        tile_index_foreign_bytes = tiles.inherited_metadata_bytes();
+        lease.add(tile_index_foreign_bytes);
+        if (active_tile_histories || !subfaces)
+            for (std::size_t n = 0; n < source.tiles.size(); ++n)
             {
+                const auto& tile = source.tiles.value_at(n);
                 if (tile.history && !histories.contains(tile.history.get()))
                 {
                     scratch.add(pointer_set_node);
@@ -455,14 +473,94 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         scratch.add(pointer_set_node);
                         layers.insert(body.get());
                         lease.add(layer_bytes(*body, native_source_protocol));
+                        if (body->final_output)
+                            admit_subface_owner(body->final_output, body->final_output->origin(),
+                                body->final_output->charged_bytes());
                     }
-                return TileEntry{tile_bodies.adopt(tile.body), tile.history, tile.initialized, tile.support_generation,
-                    tile.native_source};
-            });
+                if (!subfaces)
+                {
+                    admit_subface_owner(tile.body.body_storage_owner(), tile.body.credit_origin(), tile.body.body_bytes());
+                    admit_subface_owner(tile.body.credit_owner(), tile.body.credit_origin(),
+                        tile.body.credit_bytes() - tile.body.body_bytes());
+                }
+            }
         lease.add(source.authority_tile_counts.size() * slot_count_node +
                   source.resident_generations.size() * slot_generation_node);
         authority_tile_counts = source.authority_tile_counts;
         resident_generations = source.resident_generations;
+        if (subfaces)
+        {
+            admit_subface_owner(subfaces, subfaces->origin(), subfaces->charged_bytes());
+            lease.add(subfaces->index_bytes());
+            lease.add(subfaces->exclusive_payload_bytes());
+            subface_foreign_bytes = subfaces->index_bytes() + subfaces->exclusive_payload_bytes();
+            subfaces->visit_payload_owners(
+                [&](const auto& owner, const Budget* origin, std::size_t bytes)
+                {
+                    const bool current_pool_credit =
+                        origin == source.budget && source.pools.points.physical_pool().owns_page_credit(owner.get());
+                    admit_subface_owner(owner, origin, bytes, current_pool_credit ? source_overlap : nullptr);
+                });
+        }
+    }
+    void retire_inherited_metadata(std::size_t bytes) noexcept
+    {
+        // Retired candidate paths are still pinned by the accepted source.
+        // Their imported charge lasts until the enclosing operation finishes.
+        if (inherited_overlap_active)
+            retired_inherited_metadata_bytes += bytes;
+        else
+        {
+            lease.bytes -= bytes;
+            budget->used -= bytes;
+        }
+    }
+    void finish_inherited_overlap() noexcept
+    {
+        lease.bytes -= retired_inherited_metadata_bytes;
+        budget->used -= retired_inherited_metadata_bytes;
+        retired_inherited_metadata_bytes = 0;
+        inherited_overlap_active = false;
+    }
+    void sync_tile_index_charge()
+    {
+        const auto inherited = tiles.inherited_metadata_bytes();
+        if (inherited > tile_index_foreign_bytes)
+            throw std::logic_error("Incidence tile edit introduced foreign metadata pages.");
+        const auto retired = tile_index_foreign_bytes - inherited;
+        retire_inherited_metadata(retired);
+        tile_index_foreign_bytes = inherited;
+    }
+    template<class Edit> void update_tile(TileId id, const Edit& edit)
+    {
+        const bool before = bool(tiles.at(id).history);
+        bool after = before;
+        tiles.update(id, [&](TileEntry& tile)
+            {
+                edit(tile);
+                after = bool(tile.history);
+            });
+        if (after && !before)
+            ++active_tile_histories;
+        else if (before && !after)
+            --active_tile_histories;
+        sync_tile_index_charge();
+    }
+    void admit_subface_owner(const std::shared_ptr<const void>& owner, const Budget* origin, std::size_t bytes,
+        std::size_t* source_overlap = nullptr)
+    {
+        if (origin == budget || borrowed.contains(owner))
+            return;
+        if (source_overlap)
+        {
+            if (bytes > *source_overlap || !borrowed.adopt(owner, bytes))
+                throw std::invalid_argument("Subface point-page credit exceeds source overlap admission.");
+            *source_overlap -= bytes;
+            return;
+        }
+        lease.add(bytes);
+        if (borrowed.adopt(owner, bytes))
+            lease.bytes -= bytes;
     }
     bool exports_source_credit(const void* identity) const noexcept
     {
@@ -491,7 +589,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
         // Session-private import tokens are not themselves re-imported by a
         // no-edit descendant. Their current-arena metadata stays in accepted
         // overlap unless an immutable SavedLayer/descriptor actually exports it.
-        return found || lines.imports_source_owner(identity) || tile_bodies.imports_source_owner(identity);
+        return found || lines.imports_source_owner(identity) || tile_bodies.imports_source_owner(identity) ||
+               (subfaces && subfaces->imports_source_owner(identity));
     }
     std::size_t source_arena_overlap_metadata() const noexcept
     {
@@ -526,7 +625,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     if (seen)
                         continue;
                     statistics.retained_explicit_layer_input_slots += body->input.capacity();
-                    statistics.retained_explicit_layer_output_slots += body->output.capacity();
+                    statistics.retained_explicit_layer_output_slots += body->final_output ? body->final_output->capacity() : body->output.capacity();
                     for (const auto& edge : body->edges)
                         statistics.retained_explicit_layer_edge_result_slots += edge.result.capacity();
                 }
@@ -577,7 +676,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     continue;
                 const auto& layer = *body;
                 result.retained_explicit_layer_input_slots += layer.input.capacity();
-                result.retained_explicit_layer_output_slots += layer.output.capacity();
+                result.retained_explicit_layer_output_slots += layer.final_output ? layer.final_output->capacity() : layer.output.capacity();
                 for (const auto& edge : layer.edges)
                     result.retained_explicit_layer_edge_result_slots += edge.result.capacity();
                 if (!native_source_protocol)
@@ -736,7 +835,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &available, &common);
         return std::min<std::size_t>(256 * 1024, common / 16);
     }
-    TileEntry new_tile(const ReceivedTileRecipe& recipe)
+    TileEntry new_tile(const ReceivedTileRecipe& recipe, SubfaceProvenanceBuilder* provenance,
+        const OwnedLeafLookup& lookup)
     {
         // The transient vector remains admitted during page insertion. Destroy
         // it before its scoped charge retires; published pages own no vectors
@@ -751,7 +851,9 @@ struct DistributedAdaptiveIncidenceSession::Impl
                             !source_manifests->has_explicit_support(recipe.support) &&
                             source_manifests->native_member(recipe.first, recipe.domain) &&
                             (!recipe.second || source_manifests->native_member(*recipe.second, recipe.domain));
-        return {tile_bodies.append(draft), {}, false, resident_generations.at(draft.support), native};
+        const auto generation = resident_generations.at(draft.support);
+        auto captured = provenance ? provenance->append(recipe, generation, lookup) : SubfaceProvenanceRef{};
+        return {tile_bodies.append(draft), {}, false, generation, native, std::move(captured), {}};
     }
     LayerHistory& edit_history(TileEntry& entry)
     {
@@ -856,6 +958,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         auto layer = allocate_layer(layer_bytes(source, native_source_protocol));
         layer->input = source.input;
         layer->output = source.output;
+        layer->final_output = source.final_output;
         layer->edges = source.edges;
         if (native_source_protocol)
         {
@@ -1175,6 +1278,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         const auto vertices = enriched->vertex_identities();
         if (native_source_protocol)
             static_cast<SavedLayer&>(layer).saved_output.reset();
+        layer.final_output.reset();
         reserve_owned(layer.output, vertices.size(), layer.charge);
         layer.output.clear();
         for (const auto& vertex : vertices)
@@ -1222,7 +1326,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         before.emplace(id, found ? std::optional<TileEntry>(*found) : std::optional<TileEntry>{});
     }
     void replace_group(Slot support, std::span<const ReceivedTileRecipe> recipes, ChangedTiles& before, Lease& scratch,
-        TileMap::Batch& batch)
+        TileMap::Batch& batch, SubfaceProvenanceBuilder* provenance, const OwnedLeafLookup& lookup)
     {
         batch.replace_support(support);
         for (auto i = tiles.lower_bound({support, 0}); i < tiles.size() && tiles.key_at(i).first == support; ++i)
@@ -1231,11 +1335,12 @@ struct DistributedAdaptiveIncidenceSession::Impl
             const auto& tile = tiles.value_at(i);
             remember(before, id, scratch);
             defer_history(tile.history);
+            active_tile_histories -= bool(tile.history);
             periodic_tiles -= !tile_image(tile.tile()).is_zero();
         }
         for (const auto& recipe : recipes)
         {
-            auto state = new_tile(recipe);
+            auto state = new_tile(recipe, provenance, lookup);
             periodic_tiles += !recipe.second_image.is_zero();
             const TileId id{support, recipe.emission};
             remember(before, id, scratch);
@@ -1245,6 +1350,13 @@ struct DistributedAdaptiveIncidenceSession::Impl
     void fetch_supports(
         const OwnedLeafLookup& lookup, ChangedTiles& changed, Lease& scratch, TileMap::Batch& tile_batch)
     {
+        std::optional<SubfaceProvenanceBuilder> provenance;
+        collective(*comm,
+            [&]
+            {
+                if (keeper)
+                    provenance.emplace(pools, keeper, comm->getRank());
+            });
         struct Source
         {
             Slot support;
@@ -1370,7 +1482,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         if (!resident_generations.contains(*support))
                             lease.add(slot_generation_node);
                         resident_generations[*support] = generation;
-                        replace_group(*support, recipes, changed, scratch, tile_batch);
+                        replace_group(*support, recipes, changed, scratch, tile_batch,
+                            provenance ? &*provenance : nullptr, lookup);
                     });
                 collective(*comm,
                     [&]
@@ -1383,7 +1496,14 @@ struct DistributedAdaptiveIncidenceSession::Impl
                         page_identities = std::make_unique<IdentityBudget>();
                     });
             });
-        collective(*comm, [&] { tile_batch.publish(options.tile_budget); });
+        collective(*comm,
+            [&]
+            {
+                if (provenance)
+                    provenance->freeze();
+                tile_batch.publish(options.tile_budget);
+                sync_tile_index_charge();
+            });
         supports.clear_dirty();
     }
 
@@ -1827,7 +1947,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 {
                     for (auto& [id, work] : working)
                     {
-                        auto& current = tiles.at(id);
+                        const auto& current = tiles.at(id);
                         certify_receipts(current.tile(), work);
                         if (work.body)
                         {
@@ -1871,9 +1991,13 @@ struct DistributedAdaptiveIncidenceSession::Impl
                             previous ? output != output_loop(*previous, native_source_protocol)
                                      : (!current.initialized || output != current.body.intrinsic_loop());
                         remember(changed, id, scratch);
-                        if (work.body || !current.layers().empty())
-                            put_layer(current, layer, work.body, !bootstrap);
-                        current.initialized = true;
+                        update_tile(id,
+                            [&](TileEntry& candidate)
+                            {
+                                if (work.body || !candidate.layers().empty())
+                                    put_layer(candidate, layer, work.body, !bootstrap);
+                                candidate.initialized = true;
+                            });
                         if (changed_output)
                         {
                             iteration.add(tile_set_node);
@@ -1902,7 +2026,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
                             const auto found = tiles.find(id);
                             if (found == nullptr)
                                 continue;
-                            auto& entry = (*found);
+                            const auto& entry = *found;
                             if (!entry.history)
                                 continue;
                             const auto& previous = entry.layers();
@@ -1910,20 +2034,25 @@ struct DistributedAdaptiveIncidenceSession::Impl
                                 [](unsigned n, const auto& value) { return n < value.first; });
                             const bool intrinsic = std::all_of(previous.begin(), retained_end, [&](const auto& value)
                                 { return !value.second || intrinsic_fixed_layer(entry, *value.second); });
-                            if (intrinsic)
-                            {
-                                defer_history(entry.history);
-                                entry.history.reset();
-                            }
-                            else if (retained_end != previous.end())
-                            {
-                                auto& history = edit_history(entry).layers;
-                                const auto future = std::upper_bound(history.begin(), history.end(), layer,
-                                    [](unsigned n, const auto& value) { return n < value.first; });
-                                for (auto old = future; old != history.end(); ++old)
-                                    defer_layer(old->second);
-                                history.erase(future, history.end());
-                            }
+                            if (!intrinsic && retained_end == previous.end())
+                                continue;
+                            update_tile(id, [&](TileEntry& candidate)
+                                {
+                                    if (intrinsic)
+                                    {
+                                        defer_history(candidate.history);
+                                        candidate.history.reset();
+                                    }
+                                    else
+                                    {
+                                        auto& history = edit_history(candidate).layers;
+                                        const auto future = std::upper_bound(history.begin(), history.end(), layer,
+                                            [](unsigned n, const auto& value) { return n < value.first; });
+                                        for (auto old = future; old != history.end(); ++old)
+                                            defer_layer(old->second);
+                                        history.erase(future, history.end());
+                                    }
+                                });
                         }
                         lines.finish_replay(layer);
                         statistics.dirty_lines = lines.processed_lines();
@@ -2038,7 +2167,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 release_saved_vector(saved.output, saved);
         }
     }
-    void seal_saved_layers(const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot)
+    void seal_saved_layers(const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot,
+        std::optional<std::span<const TileId>> touched)
     {
         if (!native_source_protocol || !snapshot)
             return;
@@ -2082,42 +2212,52 @@ struct DistributedAdaptiveIncidenceSession::Impl
             // Integer hashes route only; reuse_loop always replays FULL facts.
             known_loops.emplace(loop_key(saved_loop(*view)), *view);
         };
-        for (std::size_t n = 0; n < tiles.size(); ++n)
+        const auto seal = [&](TileId id)
         {
-            auto& tile = tiles.value_at(n);
-            if (!tile.history)
-                continue;
-            // Work only on candidate-owned histories. Old escaped sessions and
-            // undo histories keep their original vectors and descriptors.
-            auto& history = edit_history(tile);
-            for (auto& [ordinal, body] : history.layers)
-            {
-                if (!body)
-                    continue;
-                if (auto at = rewritten.find(body.get()); at != rewritten.end())
+            const auto* current = tiles.find(id);
+            if (!current || !current->history)
+                return;
+            update_tile(id, [&](TileEntry& tile)
                 {
-                    body = at->second;
-                    continue;
-                }
-                const auto* original = body.get();
-                if (body->budget != budget || body.use_count() > 1)
-                {
-                    auto replacement = clone_layer(*body);
-                    defer_layer(body);
-                    body = std::move(replacement);
-                }
-                auto& saved = static_cast<SavedLayer&>(*body);
-                reuse_loop(saved, saved.input, saved.saved_input);
-                reuse_loop(saved, saved.output, saved.saved_output);
-                seal_saved_layer(tile, saved, snapshot);
-                remember_loop(saved.saved_input);
-                remember_loop(saved.saved_output);
-                scratch.add(sizeof(decltype(rewritten)::value_type) + 4 * sizeof(void*));
-                rewritten.emplace(original, body);
-            }
-        }
+                    // Work only on candidate-owned histories. Old escaped sessions and
+                    // undo histories keep their original vectors and descriptors.
+                    auto& history = edit_history(tile);
+                    for (auto& [ordinal, body] : history.layers)
+                    {
+                        if (!body)
+                            continue;
+                        if (auto at = rewritten.find(body.get()); at != rewritten.end())
+                        {
+                            body = at->second;
+                            continue;
+                        }
+                        const auto* original = body.get();
+                        if (body->budget != budget || body.use_count() > 1)
+                        {
+                            auto replacement = clone_layer(*body);
+                            defer_layer(body);
+                            body = std::move(replacement);
+                        }
+                        auto& saved = static_cast<SavedLayer&>(*body);
+                        reuse_loop(saved, saved.input, saved.saved_input);
+                        reuse_loop(saved, saved.output, saved.saved_output);
+                        seal_saved_layer(tile, saved, snapshot);
+                        remember_loop(saved.saved_input);
+                        remember_loop(saved.saved_output);
+                        scratch.add(sizeof(decltype(rewritten)::value_type) + 4 * sizeof(void*));
+                        rewritten.emplace(original, body);
+                    }
+                });
+        };
+        if (touched)
+            for (const auto id : *touched)
+                seal(id);
+        else
+            for (std::size_t n = 0; n < tiles.size(); ++n)
+                seal(tiles.key_at(n));
     }
-    void compact_point_values(std::vector<IncidenceRowHandle>& rows)
+    void compact_point_values(std::vector<IncidenceRowDelivery>& rows,
+        std::optional<std::span<const TileId>> touched = std::nullopt)
     {
         census_saved_layers();
         if (!native_source_protocol || !keeper)
@@ -2127,7 +2267,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             const auto storage = lines.active_storage();
             if (!storage.retained_explicit_records && !storage.retained_run_records)
             {
-                seal_saved_layers(pools.points.source());
+                seal_saved_layers(pools.points.source(), touched);
                 census_saved_layers();
                 return;
             }
@@ -2161,7 +2301,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             auto view = ContactSourcePointView::create(snapshot, *budget, keeper, point_arena);
             for (const auto& original : rows)
             {
-                auto& row = *const_cast<ContactIncidenceRow*>(original.get());
+                auto& row = *const_cast<ContactIncidenceRow*>(original.row.get());
                 if (!row.points.bind_private_initial_source(pools.points, view))
                     throw std::invalid_argument("Unexpected initial source-row construction kind.");
             }
@@ -2171,17 +2311,18 @@ struct DistributedAdaptiveIncidenceSession::Impl
             lines.certify_source_ranges(DistributedAdaptiveIncidenceSession::source_line_admission(
                                             source_manifests, snapshot, context, next_generation, last_layer),
                 point_arena);
-            seal_saved_layers(snapshot);
+            seal_saved_layers(snapshot, touched);
             census_saved_layers();
             point_generation = next_generation;
             return;
         }
         cartesian_detail::Allocation vector_memory(*budget);
-        std::vector<IncidenceRowHandle> replacement;
+        std::vector<IncidenceRowDelivery> replacement;
         vector_memory.reserve(replacement, rows.size());
         ContactPointBatch batch(pools.points);
-        for (const auto& original : rows)
+        for (const auto& delivery : rows)
         {
+            const auto& original = delivery.row;
             cartesian_detail::Allocation memory(*budget);
             memory.retain(
                 sizeof(ContactIncidenceRow) + owner_bytes + key_capacity(original->key) + original->domain.size());
@@ -2219,7 +2360,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
             std::unique_ptr<const ContactIncidenceRow, decltype(destroy)> pending(
                 new ContactIncidenceRow(std::move(row)), std::move(destroy));
             memory.bytes = 0;
-            replacement.emplace_back(std::move(pending));
+            replacement.push_back({IncidenceRowHandle(std::move(pending)), delivery.leaf});
         }
         batch.freeze();
         if (native_inventory_complete)
@@ -2227,20 +2368,118 @@ struct DistributedAdaptiveIncidenceSession::Impl
         lines.certify_source_ranges(DistributedAdaptiveIncidenceSession::source_line_admission(
                                         source_manifests, snapshot, context, next_generation, last_layer),
             point_arena);
-        const auto previous = rows.capacity() * sizeof(IncidenceRowHandle);
+        const auto previous = rows.capacity() * sizeof(IncidenceRowDelivery);
         rows.swap(replacement);
         {
-            std::vector<IncidenceRowHandle> retired;
+            std::vector<IncidenceRowDelivery> retired;
             retired.swap(replacement);
         }
         budget->used -= previous;
         vector_memory.bytes = 0;
-        seal_saved_layers(snapshot);
+        seal_saved_layers(snapshot, touched);
         census_saved_layers();
         point_generation = next_generation;
     }
-    std::vector<IncidenceRowHandle> finish_rows(ChangedTiles& changed, std::span<const IncidenceCellVersion> retired,
-        std::span<const AdaptiveCellKey> inserted, const OwnedLeafLookup& lookup, unsigned old_last, Lease& scratch)
+    struct DirtySubface
+    {
+        TileId id;
+        CanonicalSubfaceView before;
+    };
+    void seal_subface(TileEntry& tile, SubfacePieceBuilder& builder)
+    {
+        if (tile.final_piece)
+            return;
+        auto layer = at_layer_owner(tile, last_layer);
+        if (layer && !layer->output.empty())
+        {
+            if (layer->budget != budget || layer.use_count() > 2 || tile.history.use_count() > 1)
+            {
+                auto& history = edit_history(tile);
+                const auto found = std::upper_bound(history.layers.begin(), history.layers.end(), last_layer,
+                    [](unsigned value, const auto& entry) { return value < entry.first; });
+                auto& target = std::prev(found)->second;
+                auto replacement = clone_layer(*layer);
+                defer_layer(target);
+                target = replacement;
+                layer = std::move(replacement);
+            }
+            layer->final_output = SharedSubfaceRing::transfer(layer->output, *budget, keeper, layer->charge);
+        }
+        const CertifiedIncidenceLoopView* certified = nullptr;
+        if (layer && native_source_protocol)
+        {
+            const auto& saved = static_cast<const SavedLayer&>(*layer);
+            if (saved.saved_output)
+                certified = &*saved.saved_output;
+        }
+        tile.final_piece = builder.append(tile.provenance, tile.body, layer ? layer->final_output : nullptr, certified);
+    }
+    void publish_subfaces(std::shared_ptr<const AdaptiveSubfaceSnapshot> next)
+    {
+        const auto foreign = next->foreign_index_bytes() + next->foreign_exclusive_payload_bytes();
+        if (foreign > subface_foreign_bytes)
+            throw std::logic_error("Canonical subface update added unadmitted foreign pages.");
+        const auto released = subface_foreign_bytes - foreign;
+        subfaces = std::move(next);
+        subface_foreign_bytes = foreign;
+        retire_inherited_metadata(released);
+    }
+    void finish_subfaces(std::span<const DirtySubface> dirty = {})
+    {
+        if (!keeper)
+            return;
+        const auto controls = geometry_construction_controls();
+        if (subfaces && dirty.empty())
+        {
+            publish_subfaces(AdaptiveSubfaceSnapshot::derive(
+                subfaces, context, controls, comm->getRank(), {}, *budget, keeper));
+            return;
+        }
+        SubfacePieceBuilder builder(pools, keeper);
+        Lease scratch(*budget);
+        if (subfaces)
+        {
+            std::vector<CanonicalSubfaceChange> changes;
+            scratch.add(dirty.size() * sizeof(CanonicalSubfaceChange));
+            changes.reserve(dirty.size());
+            if (changes.capacity() != dirty.size())
+                throw std::invalid_argument("Canonical subface change capacity differs from admission.");
+            for (const auto& item : dirty)
+            {
+                CanonicalSubfaceView after;
+                if (tiles.find(item.id))
+                    update_tile(item.id, [&](TileEntry& tile)
+                        {
+                            seal_subface(tile, builder);
+                            after = tile.final_piece;
+                        });
+                changes.push_back({item.before, std::move(after)});
+            }
+            builder.freeze();
+            publish_subfaces(AdaptiveSubfaceSnapshot::derive(
+                subfaces, context, controls, comm->getRank(), changes, *budget, keeper));
+            return;
+        }
+        std::vector<CanonicalSubfaceView> views;
+        scratch.add(tiles.size() * sizeof(CanonicalSubfaceView));
+        views.reserve(tiles.size());
+        if (views.capacity() != tiles.size())
+            throw std::invalid_argument("Canonical subface scratch capacity differs from admission.");
+        for (std::size_t index = 0; index < tiles.size(); ++index)
+        {
+            const auto id = tiles.key_at(index);
+            update_tile(id, [&](TileEntry& tile)
+                {
+                    seal_subface(tile, builder);
+                    views.push_back(tile.final_piece);
+                });
+        }
+        builder.freeze();
+        publish_subfaces(AdaptiveSubfaceSnapshot::seal(context, controls, comm->getRank(), views, *budget, keeper));
+    }
+    std::vector<IncidenceRowDelivery> finish_rows(ChangedTiles& changed, std::span<const IncidenceCellVersion> retired,
+        std::span<const AdaptiveCellKey> inserted, const OwnedLeafLookup& lookup, unsigned old_last, Lease& scratch,
+        bool keep_identity, std::vector<DirtySubface>* dirty = nullptr, std::vector<TileId>* touched = nullptr)
     {
         collective(*comm,
             [&]
@@ -2259,8 +2498,28 @@ struct DistributedAdaptiveIncidenceSession::Impl
                     owner_rows.insert(*pools.cells.find(key), generation);
                 }
                 for (const auto& [id, old] : changed)
-                    if (const auto current = tiles.find(id); current != nullptr)
+                {
+                    auto current = tiles.find(id);
+                    if (current)
+                    {
+                        if (current->final_piece && old && at_layer(*old, old_last) != at_layer(*current, last_layer))
+                        {
+                            update_tile(id, [](TileEntry& entry) { entry.final_piece = {}; });
+                            current = tiles.find(id);
+                        }
                         owner_rows.add(current->tile(), final_loop(*current, last_layer, native_source_protocol));
+                        if (touched && native_source_protocol)
+                        {
+                            scratch.append(*touched);
+                            touched->push_back(id);
+                        }
+                    }
+                    if (keeper && dirty && (current ? !current->final_piece : old && old->final_piece))
+                    {
+                        scratch.append(*dirty);
+                        dirty->push_back({id, old ? old->final_piece : CanonicalSubfaceView{}});
+                    }
+                }
             });
         collective(*comm,
             [&]
@@ -2278,17 +2537,17 @@ struct DistributedAdaptiveIncidenceSession::Impl
                 reap_deferred();
             });
         Lease result_memory(*budget);
-        std::vector<IncidenceRowHandle> result;
+        std::vector<IncidenceRowDelivery> result;
         collective(*comm,
             [&]
             {
                 Lease patch_memory(*budget);
-                auto patches = owner_rows.finish(lookup);
+                auto patches = owner_rows.finish(lookup, keep_identity);
                 patch_memory.bytes = patches.capacity() * sizeof(IncidenceOwnerRows::Patch);
-                result_memory.add(patches.size() * sizeof(IncidenceRowHandle));
+                result_memory.add(patches.size() * sizeof(IncidenceRowDelivery));
                 result.reserve(patches.size());
                 for (auto& patch : patches)
-                    result.push_back(std::move(patch.row));
+                    result.push_back({std::move(patch.row), patch.leaf});
             });
         result_memory.bytes = 0;
         return result;
@@ -2345,7 +2604,7 @@ DistributedAdaptiveIncidenceSession::DistributedAdaptiveIncidenceSession(
 DistributedAdaptiveIncidenceSession& DistributedAdaptiveIncidenceSession::operator=(
     DistributedAdaptiveIncidenceSession&&) noexcept = default;
 std::unique_ptr<DistributedAdaptiveIncidenceSession> DistributedAdaptiveIncidenceSession::fork(
-    Budget& budget, IdentityBudget& identities, std::shared_ptr<Budget> keeper) const
+    Budget& budget, IdentityBudget& identities, std::shared_ptr<Budget> keeper, std::size_t* source_overlap) const
 {
     if (keeper && keeper.get() != &budget)
         throw std::invalid_argument("Foreign incidence fork arena keeper.");
@@ -2359,13 +2618,13 @@ std::unique_ptr<DistributedAdaptiveIncidenceSession> DistributedAdaptiveIncidenc
                 throw std::invalid_argument("Incidence fork requires a distinct arena.");
             (void) impl_->tile_bodies.reap();
             impl_->reap_deferred();
-            candidate = std::make_unique<Impl>(*impl_, budget, identities, std::move(keeper));
+            candidate = std::make_unique<Impl>(*impl_, budget, identities, std::move(keeper), source_overlap);
         });
     return std::unique_ptr<DistributedAdaptiveIncidenceSession>(
         new DistributedAdaptiveIncidenceSession(std::move(candidate)));
 }
-std::vector<IncidenceRowHandle> DistributedAdaptiveIncidenceSession::bootstrap(
-    std::span<const AdaptiveLeaf> leaves, const OwnedLeafLookup& raw_lookup)
+std::vector<IncidenceRowDelivery> DistributedAdaptiveIncidenceSession::bootstrap(
+    std::span<const AdaptiveLeaf> leaves, const OwnedLeafLookup& raw_lookup, bool keep_identity)
 {
     auto& state = *impl_;
     struct Observation
@@ -2510,7 +2769,7 @@ std::vector<IncidenceRowHandle> DistributedAdaptiveIncidenceSession::bootstrap(
     state.phase("line_replay");
     state.replay(changed, scratch, true);
     state.phase("owner_rows");
-    auto rows = state.finish_rows(changed, {}, {}, raw_lookup, 0, scratch);
+    auto rows = state.finish_rows(changed, {}, {}, raw_lookup, 0, scratch, keep_identity);
     ReturnedRowsCredit rows_credit{*state.budget, &rows};
     state.phase("source_membership_certification");
     collective(*state.comm,
@@ -2522,14 +2781,19 @@ std::vector<IncidenceRowHandle> DistributedAdaptiveIncidenceSession::bootstrap(
                 (void) state.owned.publish_constructed_source();
         });
     state.phase("point_source_certification");
-    collective(*state.comm, [&] { state.compact_point_values(rows); });
+    collective(*state.comm,
+        [&]
+        {
+            state.compact_point_values(rows);
+            state.finish_subfaces();
+        });
     state.ready = true;
     state.phase("ready");
     rows_credit.transfer();
     return rows;
 }
 IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const IncidenceCellVersion> retired,
-    std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup& raw_lookup)
+    std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup& raw_lookup, bool keep_identity)
 {
     auto& state = *impl_;
     struct Observation
@@ -2671,7 +2935,7 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
             }
             for (const auto support : retired_supports)
                 if (!state.owned.has_support(support))
-                    state.replace_group(support, {}, changed, scratch, tile_batch);
+                    state.replace_group(support, {}, changed, scratch, tile_batch, nullptr, lookup);
         });
     materialized.clear();
     cell = surface = 0;
@@ -2726,14 +2990,18 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
     // are physically destroyed before any failed return admission is released.
     Lease retired_memory(*state.budget);
     IncidenceDelta result;
-    result.changed = state.finish_rows(changed, retired, inserted, raw_lookup, old_last, scratch);
+    std::vector<Impl::DirtySubface> dirty_subfaces;
+    std::vector<TileId> touched;
+    result.changed = state.finish_rows(
+        changed, retired, inserted, raw_lookup, old_last, scratch, keep_identity, &dirty_subfaces, &touched);
     ReturnedRowsCredit changed_credit{*state.budget, &result.changed};
     collective(*state.comm,
         [&]
         {
             if (next_inventory)
                 state.owned.publish_inventory(next_inventory, state.point_arena);
-            state.compact_point_values(result.changed);
+            state.compact_point_values(result.changed, std::span<const TileId>(touched));
+            state.finish_subfaces(dirty_subfaces);
         });
     collective(*state.comm,
         [&]
@@ -2749,6 +3017,18 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
     changed_credit.transfer();
     retired_memory.bytes = 0;
     return result;
+}
+const std::shared_ptr<const AdaptiveSubfaceSnapshot>& DistributedAdaptiveIncidenceSession::subface_snapshot() const noexcept
+{
+    return impl_->subfaces;
+}
+std::size_t DistributedAdaptiveIncidenceSession::inherited_overlap_metadata_bytes() const noexcept
+{
+    return impl_->retired_inherited_metadata_bytes;
+}
+void DistributedAdaptiveIncidenceSession::finish_inherited_overlap() noexcept
+{
+    impl_->finish_inherited_overlap();
 }
 const ContactHaloStatistics& DistributedAdaptiveIncidenceSession::statistics() const noexcept
 {
@@ -2784,7 +3064,7 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
     const auto source_arena_metadata = state.source_arena_overlap_metadata();
     return sizeof(Impl) + state.pools.metadata_bytes() + state.pools.page_credit_overhead_bytes() +
            state.owned.metadata_bytes() + state.supports.metadata_bytes() + state.lines.metadata_bytes() +
-           state.owner_rows.metadata_bytes() + state.tiles.metadata_bytes() +
+           state.owner_rows.metadata_bytes() +
            state.authority_tile_counts.size() * slot_count_node +
            state.resident_generations.size() * slot_generation_node + state.borrowed.metadata_bytes() +
            state.tile_bodies.metadata_bytes() + source_page_credits + source_arena_metadata +
@@ -2796,13 +3076,15 @@ bool DistributedAdaptiveIncidenceSession::owns_point_page_credit(const void* ide
            (impl_->point_arena && impl_->point_arena->owns_credit(identity) && !impl_->exports_source_credit(identity));
 }
 bool DistributedAdaptiveIncidenceSession::admits_source_metadata_owner(
-    const void* identity, std::size_t bytes) const noexcept
+    const std::shared_ptr<const void>& owner, std::size_t bytes) const noexcept
 {
-    return impl_->point_arena && impl_->point_arena->admits_owner(identity, bytes);
+    return impl_->borrowed.admits(owner, bytes) ||
+           (impl_->point_arena && impl_->point_arena->admits_owner(owner, bytes));
 }
 void DistributedAdaptiveIncidenceSession::for_each_borrowed_source_admission(
     const std::function<void(const void*, std::size_t)>& visitor) const
 {
+    impl_->borrowed.visit_live_owners(visitor);
     if (impl_->point_arena)
         for (const auto& [owner, credit] : impl_->point_arena->entries)
             if (!owner.expired())
@@ -2838,6 +3120,8 @@ void DistributedAdaptiveIncidenceSession::for_each_borrowed_payload(
     state.supports.visit_borrowed_payload(visitor);
     state.owner_rows.visit_borrowed_payload(visitor);
     state.tiles.visit_borrowed_payload(visitor);
+    if (state.subfaces)
+        state.subfaces->visit_borrowed_payload(visitor);
     state.borrowed.visit_borrowed_payload(visitor);
     contact_payload_buffer(
         visitor, impl_.get(), ContactPayloadRole::IncidenceSessionLayerSourceLeases, state.layer_source_leases);
@@ -2864,6 +3148,8 @@ void DistributedAdaptiveIncidenceSession::for_each_borrowed_payload(
                     state.native_source_protocol ? sizeof(SavedLayer) : sizeof(Layer), true);
                 contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerInput, layer.input);
                 contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerOutput, layer.output);
+                if (layer.final_output)
+                    layer.final_output->visit_borrowed_payload(visitor);
                 contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerEdges, layer.edges);
                 for (const auto& edge : layer.edges)
                     contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerEdgeResults, edge.result);

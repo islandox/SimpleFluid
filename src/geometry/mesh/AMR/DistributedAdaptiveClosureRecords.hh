@@ -14,11 +14,8 @@
 #include <vector>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-struct SIMPLEFLUID_LOCAL ContactRecord
+struct SIMPLEFLUID_LOCAL ContactBody
 {
-    AdaptiveCellKey key;
-    std::size_t identity = 0;
-    AdaptiveBytes domain;
     std::array<long double, 3> spans{};
     std::array<std::uint64_t, 3> factors{};
     std::vector<AdaptiveTraceFace> traces;
@@ -29,6 +26,14 @@ struct SIMPLEFLUID_LOCAL ContactRecord
         return shared_traces ? std::span<const AdaptiveTraceFace>(*shared_traces) :
                                std::span<const AdaptiveTraceFace>(traces);
     }
+};
+/** Owning wire and compatibility record. The spatial cache uses only its
+ * physical body and resolves identity through the authenticated occurrence. */
+struct SIMPLEFLUID_LOCAL ContactRecord : ContactBody
+{
+    AdaptiveCellKey key;
+    std::size_t identity = 0;
+    AdaptiveBytes domain;
 };
 struct SIMPLEFLUID_LOCAL ClosureRequirements
 {
@@ -41,6 +46,8 @@ struct SIMPLEFLUID_LOCAL ClosureRequirements
 [[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveBytes encode_contact(const AdaptiveLeaf&, const AdaptiveProviderKernel&,
     Budget&, std::size_t& trace_records, std::size_t& transient_geometry_peak);
 [[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveBytes encode_contact(const ContactRecord&, Budget&);
+[[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveBytes encode_contact(
+    const AdaptiveCellKey&, std::span<const char> domain, const ContactBody&, Budget&);
 [[nodiscard]] SIMPLEFLUID_LOCAL ContactRecord decode_contact(std::span<const char>, std::size_t limit);
 /** Owning decode with preallocation admission against the caller's simultaneous
  * live state. Encoded input remains charged by the caller until return. */
@@ -51,9 +58,11 @@ struct SIMPLEFLUID_LOCAL ClosureRequirements
  * trace capacities and optional face owners; callers admit outer containers. */
 [[nodiscard]] SIMPLEFLUID_LOCAL ContactRecord prepare_contact(const AdaptiveLeaf&, const AdaptiveProviderKernel&,
     Budget&, IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak);
+[[nodiscard]] SIMPLEFLUID_LOCAL ContactBody prepare_contact_body(const AdaptiveLeaf&, const AdaptiveProviderKernel&,
+    Budget&, IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak);
 [[nodiscard]] SIMPLEFLUID_LOCAL bool span_exceeds_ratio(long double first, long double second, double ratio);
 SIMPLEFLUID_LOCAL void join_closure_requirement(
-    const ContactRecord&, std::optional<AdaptiveSplit>& required, std::uint64_t split);
+    const ContactBody&, std::optional<AdaptiveSplit>& required, std::uint64_t split);
 [[nodiscard]] SIMPLEFLUID_LOCAL ClosureRequirements trace_pair_requirements(const AdaptiveTraceFace& first,
     const AdaptiveTraceFace& second, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& first_point,
     const PLIC::PointIdentity<ArithmeticMode::Ordinary>& second_point, unsigned maximum_trace_jump);

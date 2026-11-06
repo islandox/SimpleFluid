@@ -50,7 +50,7 @@ public:
     [[nodiscard]] const ContactRowBinding& binding(ContactBindingId) const;
     [[nodiscard]] ContactBindingId pinned_binding(std::size_t) const;
     [[nodiscard]] ContactBindingId staging_binding(std::size_t) const;
-    void reclaim();
+    void reclaim(const std::function<void(std::size_t)>& retire_fact = {});
     PointFactDirectory points;
     [[nodiscard]] const std::shared_ptr<Budget>& arena() const noexcept { return allocation_.keeper(); }
     [[nodiscard]] std::size_t private_metadata_bytes() const noexcept { return allocation_.bytes(); }
@@ -127,7 +127,8 @@ public:
         std::span<const ContactLocalOccurrence> local;
         std::span<const ContactRemoteOccurrence> remote;
     };
-    [[nodiscard]] static std::shared_ptr<const ContactFanBlock> build(std::span<const Input>, ContactGroupAllocation&);
+    [[nodiscard]] static std::shared_ptr<const ContactFanBlock> build(
+        std::span<const Input>, ContactGroupAllocation&, bool detached_charge = false);
     [[nodiscard]] bool wide() const noexcept;
     [[nodiscard]] std::size_t groups() const noexcept;
     [[nodiscard]] std::size_t local_count(std::size_t group) const;
@@ -166,6 +167,8 @@ private:
         std::vector<Remote<UInt>> remote;
         std::vector<Slice<UInt>> slices;
     };
+    explicit ContactFanBlock(std::shared_ptr<Budget> arena) : admission_(std::move(arena)) {}
+    ContactGroupAllocation admission_;
     std::variant<Arrays<std::uint32_t>, Arrays<std::uint64_t>> data_;
 };
 /** One arena's block credit and all occurrence pins. An escaped owner retains
@@ -179,6 +182,7 @@ public:
         const ContactFanOwner&, std::shared_ptr<ContactFanCatalog>);
     ~ContactFanOwner();
     [[nodiscard]] const ContactFanBlock& block() const noexcept { return *block_; }
+    [[nodiscard]] const std::shared_ptr<const ContactFanBlock>& frozen_block() const noexcept { return block_; }
     [[nodiscard]] const ContactFanCatalog* catalog_identity() const noexcept { return catalog_.get(); }
     /** End the construction/fork barrier after every selected slice has a
      * view. Unselected slices become permanently unavailable in this owner. */
@@ -186,7 +190,7 @@ public:
     [[nodiscard]] bool has_live_slices() const noexcept;
     [[nodiscard]] std::size_t private_metadata_bytes() const noexcept { return allocation_.bytes(); }
     [[nodiscard]] const void* metadata_identity() const noexcept { return allocation_.identity(); }
-    [[nodiscard]] std::size_t shared_body_bytes() const noexcept { return body_admission_.bytes(); }
+    [[nodiscard]] std::size_t shared_body_bytes() const noexcept { return block_ ? block_->storage_bytes() : 0; }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
         contact_payload_object(visitor, this, ContactPayloadRole::FanOwnerObject, sizeof(*this), true);
@@ -238,6 +242,7 @@ public:
         ContactBindingId id;
         const ContactRowBinding& binding;
         std::size_t point;
+        [[nodiscard]] std::size_t record() const noexcept { return binding.record; }
         [[nodiscard]] ContactPointIdentity physical() const { return binding.row->points.at(point).physical; }
     };
     struct Remote
@@ -247,6 +252,7 @@ public:
     };
     [[nodiscard]] Local local(std::size_t i) const;
     [[nodiscard]] Remote remote(std::size_t i) const;
+    [[nodiscard]] std::size_t remote_record(std::size_t i) const { return owner_->block().remote(group_, i).first; }
 };
 static_assert(sizeof(ContactFanBlock::Local<std::uint32_t>) == 8);
 static_assert(sizeof(ContactFanBlock::Remote<std::uint32_t>) == 8);

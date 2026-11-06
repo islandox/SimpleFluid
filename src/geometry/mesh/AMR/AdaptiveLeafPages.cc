@@ -584,6 +584,21 @@ void AdaptiveLeafPages::visit_leaf_pages(const LeafPageVisitor& visitor) const
         visit(visit, *root_);
 }
 
+void AdaptiveLeafPages::visit_created_leaf_pages(const Budget& arena, const LeafPageVisitor& visitor) const
+{
+    const auto visit = [&](const auto& self, const Node& page) -> void
+    {
+        if (page.charge.arena() != &arena)
+            return;
+        if (page.terminal())
+            visitor(page.rows);
+        else
+            for (const auto& child : page.children)
+                self(self, *child);
+    };
+    if (root_)
+        visit(visit, *root_);
+}
 void AdaptiveLeafPages::visit_pages(const std::function<void(const void*, std::size_t)>& visitor) const
 {
     const auto visit = [&](const auto& self, const Node& node) -> void

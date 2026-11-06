@@ -24,8 +24,8 @@ public:
     using Slot = std::size_t;
     struct Patch
     {
-        Slot cell;
         IncidenceRowHandle row;
+        const AdaptiveLeaf* leaf;
     };
     IncidenceOwnerRows(Budget&, IdentityBudget&, IncidencePools&, const AdaptiveProviderKernel&, int rank,
         std::shared_ptr<Budget> keeper = {});
@@ -49,7 +49,7 @@ public:
     }
     /** Returned vector capacity is charged to the caller; release that charge
      * after destroying its allocation. Row handles release their own charge. */
-    [[nodiscard]] std::vector<Patch> finish(const OwnedLeafLookup&);
+    [[nodiscard]] std::vector<Patch> finish(const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] std::size_t metadata_bytes() const noexcept
     {
         std::size_t bytes = charge_;

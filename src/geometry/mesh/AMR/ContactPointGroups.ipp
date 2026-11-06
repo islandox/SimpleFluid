@@ -307,7 +307,7 @@ void ContactPointGroups<H>::replace_fans_generated(std::size_t count, EditAt&& e
         for (const auto& local : local_values)
         {
             const auto& binding = catalog_->binding(local.binding);
-            if (binding.row->domain != domains_.get(group.domain) ||
+            if ((!binding.row->domain.empty() && binding.row->domain != domains_.get(group.domain)) ||
                 binding.row->points.at(local.point).normalized != catalog_->points.get(group.normalized))
                 throw std::invalid_argument("Contact occurrence does not belong to its typed group.");
         }
@@ -348,7 +348,7 @@ template<class H> void ContactPointGroups<H>::retire(ContactGroupId id)
     group.retired = true;
     --live_;
 }
-template<class H> void ContactPointGroups<H>::reclaim()
+template<class H> void ContactPointGroups<H>::reclaim(const std::function<void(std::size_t)>& retire_fact)
 {
     if (readers_->active)
         return;
@@ -384,7 +384,7 @@ template<class H> void ContactPointGroups<H>::reclaim()
         });
     for (const auto identity : dead)
         (void) fan_owners_.erase(identity);
-    catalog_->reclaim();
+    catalog_->reclaim(retire_fact);
 }
 template<class H>
 typename ContactPointGroups<H>::OrderedIds ContactPointGroups<H>::ordered_ids(bool include_retired) const

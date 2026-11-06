@@ -96,6 +96,7 @@ public:
     [[nodiscard]] ContactPointRef normalized_reference(ContactGroupId) const;
     [[nodiscard]] const PointFactDirectory& point_directory() const noexcept { return catalog_->points; }
     [[nodiscard]] ContactFanView fan(ContactGroupId) const;
+    [[nodiscard]] const ContactFanView& borrowed_fan(ContactGroupId id) const { return checked(id).fan; }
     [[nodiscard]] std::size_t cover(ContactGroupId) const;
     void set_cover(ContactGroupId, std::size_t);
     void replace_fans(std::span<const Edit>);
@@ -103,7 +104,7 @@ public:
     void retire(ContactGroupId);
     /** Call only after old-pair obligations and dirty/query/evaluation readers
      * have completed. Owning fan snapshots continue pinning their catalogs. */
-    void reclaim();
+    void reclaim(const std::function<void(std::size_t)>& retire_fact = {});
     [[nodiscard]] OrderedIds ordered_ids(bool include_retired = false) const;
     [[nodiscard]] OrderedIds ordered_ids(std::span<const ContactGroupId> selected) const;
     [[nodiscard]] std::size_t size() const noexcept { return live_; }

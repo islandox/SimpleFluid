@@ -1,4 +1,5 @@
 #include "geometry/mesh/AMR/ContactCoverIndex.hh"
+#include "geometry/mesh/AMR/ContactPointGroups.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>
 #include <cfenv>
@@ -178,3 +179,67 @@ TEST(ContactCoverIndex, FiniteExtremeBoundsRestoreRoundingAndExceptionFlags)
     retire(covers, budget);
 }
 } // namespace
+
+
+TEST(ContactCoverIndex, LogicalBindingsForkPagesAndResolveOnlyInTheCandidate)
+{
+    struct Facts
+    {
+        std::vector<Point> coordinates;
+        std::array<A::AdaptiveBytes, 2> domains{{{'a'}, {'b'}}};
+        D::ContactCoverIndex::GroupResolver resolver() const
+        {
+            return {this,
+                [](const void* pointer, D::ContactGroupId id) -> D::ContactCoverIndex::GroupObservation
+                {
+                    const auto& facts = *static_cast<const Facts*>(pointer);
+                    if (id.generation != 1)
+                        throw std::invalid_argument("Unexpected cover binding generation.");
+                    return {facts.coordinates.at(id.slot), &facts.domains[id.slot % 2]};
+                }};
+        }
+    };
+    for (const std::size_t count : {256u, 512u})
+    {
+        SCOPED_TRACE(count);
+        Facts candidate_facts;
+        for (std::size_t i = 0; i < count; ++i)
+            candidate_facts.coordinates.push_back({static_cast<long double>(i), 0, 0});
+        auto source_budget = std::make_shared<D::Budget>(D::Budget{ample});
+        auto candidate_budget = std::make_shared<D::Budget>(D::Budget{ample});
+        std::unique_ptr<D::ContactCoverIndex> candidate;
+        {
+            const Facts original = candidate_facts;
+            D::ContactCoverIndex source(source_budget, 0, original.resolver());
+            std::size_t first = 0;
+            for (std::size_t i = 0; i < count; ++i)
+            {
+                const auto handle = source.insert(D::ContactGroupId{i, 1});
+                if (!i)
+                    first = handle;
+            }
+            const auto source_used = source_budget->used;
+            candidate = std::make_unique<D::ContactCoverIndex>(source, candidate_budget, candidate_facts.resolver());
+            EXPECT_EQ(candidate->copied_pages(), 0u);
+            candidate->erase(first);
+            EXPECT_EQ(candidate->point_count(), count - 1);
+            EXPECT_EQ(source.point_count(), count);
+            EXPECT_LT(candidate->copied_pages(), 24u);
+            EXPECT_EQ(source_budget->used, source_used);
+            EXPECT_EQ(source.aggregate_bounds()->lower[0], 0);
+            EXPECT_EQ(candidate->aggregate_bounds()->lower[0], 1);
+            candidate->finish_overlap();
+        }
+        auto covers = candidate->ownership_frontier_covers(8);
+        std::size_t total = 0;
+        for (const auto& cover : covers)
+            total += cover.images;
+        EXPECT_EQ(total, count - 1);
+        EXPECT_EQ(candidate->aggregate_bounds()->upper[0], count - 1);
+        retire(covers, *candidate_budget);
+        EXPECT_EQ(candidate_budget->used, candidate->storage_bytes());
+        candidate.reset();
+        EXPECT_EQ(candidate_budget->used, 0u);
+        EXPECT_EQ(source_budget->used, 0u);
+    }
+}

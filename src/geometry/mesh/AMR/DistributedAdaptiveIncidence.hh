@@ -18,7 +18,15 @@ class CartesianLineRangeAdmission;
 class OwnedSupportMembership;
 class PooledLineCompletionSnapshotAdmission;
 struct IncidencePools;
+class AdaptiveSubfaceSnapshot;
 using IncidenceRowHandle = std::shared_ptr<const ContactIncidenceRow>;
+/** A transient delivery borrows source identity from the collective lookup.
+ * The independently owning row is safe to retain after that borrow expires. */
+struct IncidenceRowDelivery
+{
+    IncidenceRowHandle row;
+    const AdaptiveLeaf* leaf;
+};
 using OwnedLeafLookup = std::function<const AdaptiveLeaf&(const AdaptiveCellKey&)>;
 
 struct IncidenceCellVersion
@@ -30,7 +38,7 @@ struct IncidenceCellVersion
 struct IncidenceDelta
 {
     std::vector<IncidenceCellVersion> retired;
-    std::vector<IncidenceRowHandle> changed;
+    std::vector<IncidenceRowDelivery> changed;
 };
 
 /** All methods are collective. The arena and identity ledger outlive this
@@ -50,14 +58,21 @@ public:
     /** Construct an isolated candidate, charging shared bodies in its own
      * arena. Mutation copies only dirty buckets and never changes this state. */
     [[nodiscard]] std::unique_ptr<DistributedAdaptiveIncidenceSession> fork(
-        Budget&, IdentityBudget&, std::shared_ptr<Budget> = {}) const;
-    [[nodiscard]] std::vector<IncidenceRowHandle> bootstrap(std::span<const AdaptiveLeaf>, const OwnedLeafLookup&);
+        Budget&, IdentityBudget&, std::shared_ptr<Budget> = {}, std::size_t* source_overlap = nullptr) const;
+    [[nodiscard]] std::vector<IncidenceRowDelivery> bootstrap(
+        std::span<const AdaptiveLeaf>, const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] IncidenceDelta apply_delta(std::span<const IncidenceCellVersion> retired,
-        std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup&);
+        std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subface_snapshot() const noexcept;
+    /** Replaced inherited metadata remains charged while the accepted source
+     * participates in candidate construction. End that operation explicitly;
+     * escaped historical views retain their own physical owners and charges. */
+    [[nodiscard]] std::size_t inherited_overlap_metadata_bytes() const noexcept;
+    void finish_inherited_overlap() noexcept;
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     [[nodiscard]] bool owns_point_page_credit(const void*) const noexcept;
-    [[nodiscard]] bool admits_source_metadata_owner(const void*, std::size_t) const noexcept;
+    [[nodiscard]] bool admits_source_metadata_owner(const std::shared_ptr<const void>&, std::size_t) const noexcept;
     void for_each_borrowed_source_admission(const std::function<void(const void*, std::size_t)>&) const;
     void for_each_borrowed_overlap_credit(const std::function<void(const void*, std::size_t, bool)>&) const;
     [[nodiscard]] std::size_t source_arena_overlap_metadata_bytes() const noexcept;

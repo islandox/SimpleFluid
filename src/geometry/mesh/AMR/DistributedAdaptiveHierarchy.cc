@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
+#include "geometry/mesh/AMR/AdaptiveContactSnapshot.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafOverlay.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafBodyUsage.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
@@ -71,6 +72,7 @@ struct DistributedAdaptiveHierarchy::Data
     std::map<AdaptiveBytes, AdaptiveFamily> families;
     std::shared_ptr<const AdaptiveProviderKernel> kernel;
     std::shared_ptr<const DistributedAdaptiveContactHalo> contact_halo;
+    std::shared_ptr<const AdaptiveContactSnapshot> contacts;
     std::shared_ptr<const AdaptivePublishedAdmission> admission;
     std::shared_ptr<const DistributedAncestryDirectory> cells, family_directory;
     Teuchos::RCP<const Teuchos::Comm<int>> comm;
@@ -90,6 +92,10 @@ struct DistributedAdaptiveHierarchy::Data
         return std::get<std::shared_ptr<const AdaptiveLeafLayout>>(leaves);
     }
     [[nodiscard]] const AdaptiveLeafPages& pages() const { return layout()->pages_; }
+    [[nodiscard]] AdaptiveLeafTransition transition_from(const Data& source, std::shared_ptr<Budget> arena) const
+    {
+        return AdaptiveLeafTransition(source.layout(), layout(), std::move(arena));
+    }
     [[nodiscard]] std::size_t family_body_residency() const
     {
         return body_usage.storage_bytes() + (body_usage.payload_bytes() - body_usage.leaf_payload_bytes());
@@ -167,6 +173,7 @@ struct DistributedAdaptiveHierarchy::Data
 
     ~Data()
     {
+        contacts.reset();
         // Release owner storage before the accounting token can release its lease.
         leaves.emplace<std::shared_ptr<const AdaptiveLeafLayout>>();
         families.clear();
@@ -1164,6 +1171,7 @@ SealedLeafStorage seal_candidate_layout(DistributedAdaptiveHierarchy::Data& cand
     candidate_memory.held += new_index;
     page_memory.held -= new_storage;
     leaf_memory.held -= bodies.new_payload_bytes;
+    candidate.contacts = halo.seal_contacts(candidate.transition_from(source, arena));
     // A decoder or split may have charged an owner first through a leaf that
     // repacking replaced. Saved parents can still pin it until family seal.
     return {std::move(arena), new_pages, new_index};
@@ -1582,7 +1590,7 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
             });
         ContactOwnedLeafLookup lookup = [&](const AdaptiveCellKey& key) -> const AdaptiveLeaf&
         { return layout.at(key); };
-        halo->bootstrap_canonical(records, lookup);
+        halo->bootstrap_canonical(records, lookup, state->layout());
     }
     const auto initial_requirements = halo->lease_required_refinements();
     collective(*comm,
@@ -1591,6 +1599,7 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
             if (!initial_requirements.marks().empty())
                 throw std::invalid_argument("Initial distributed hierarchy contact grading is inadmissible.");
         });
+    collective(*comm, [&] { state->contacts = halo->seal_contacts(state->layout()); });
     halo->bind_external_retained_bytes(0);
     state->contact_halo = std::shared_ptr<const DistributedAdaptiveContactHalo>(std::move(halo));
     data_ = std::move(state);
@@ -1598,6 +1607,20 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
 const std::shared_ptr<const AdaptiveLeafLayout>& DistributedAdaptiveHierarchy::leaf_layout() const noexcept
 {
     return data_->layout();
+}
+std::shared_ptr<const adaptive_detail::AdaptiveContactSnapshot> adaptive_detail::contact_snapshot(
+    const DistributedAdaptiveHierarchy& hierarchy)
+{
+    if (!hierarchy.geometry_unchanged() || !hierarchy.data_->contacts)
+        throw std::invalid_argument("Closed-contact snapshot source is stale or incomplete.");
+    return hierarchy.data_->contacts;
+}
+std::shared_ptr<const adaptive_detail::AdaptiveSubfaceSnapshot> adaptive_detail::subface_snapshot(
+    const DistributedAdaptiveHierarchy& hierarchy)
+{
+    if (!hierarchy.geometry_unchanged() || !hierarchy.data_->contact_halo)
+        throw std::invalid_argument("Canonical subface snapshot source is stale or incomplete.");
+    return hierarchy.data_->contact_halo->subface_snapshot();
 }
 const AdaptiveLeafLayout& DistributedAdaptiveHierarchy::owned_leaves() const noexcept
 {
@@ -1785,6 +1808,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 bound->native->geometry()->geometry_epoch() != bound->native_epoch)
                 throw std::invalid_argument("Native binding geometry changed while rebinding contact cache.");
             keepalive = std::shared_ptr<DistributedAdaptiveContactHalo>(std::move(rebound));
+            bound->contacts = keepalive->seal_contacts(bound->layout());
             admission = std::make_shared<AdaptivePublishedAdmission>();
             // Shared layout and geometry roots already belong to source
             // overlap. Carry those charges into the bound arena without
@@ -3606,7 +3630,21 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             }
         });
     AdaptiveAuthorityStats authority_stats;
-    result.tiles = decide_adaptive_tiles(result.owned, data_->comm, data_->options.byte_budget,
+    const auto& subfaces = data_->contact_halo->subface_snapshot();
+    collective(*data_->comm,
+        [&]
+        {
+            if (!subfaces)
+                throw std::invalid_argument("Native publication lacks its completed subface source.");
+        });
+    const auto source_leaf = [&](const AdaptiveCellKey& key) -> const AdaptiveLeaf&
+    {
+        const auto ordinal = owned_leaves().ordinal_of(key);
+        if (!ordinal || *ordinal >= result.owned.size() || result.owned[*ordinal].key != key)
+            throw std::invalid_argument("Native subface source is not in the current owned selection.");
+        return result.owned[*ordinal];
+    };
+    result.tiles = publish_adaptive_subfaces(*subfaces, source_leaf, data_->comm, data_->options.byte_budget,
         data_->options.maximum_tiles, &authority_stats, &result.nodes);
     result.global_faces = authority_stats.global_faces;
     result.global_nodes = authority_stats.global_nodes;

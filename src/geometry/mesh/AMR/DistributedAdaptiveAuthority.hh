@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "parallel/SparseOwnerExchange.hh"
+#include <functional>
 namespace SimpleFluid::Meshes::AMR
 {
 /** Payload counters for the exact edge phase, excluding transport framing. */
@@ -23,6 +24,12 @@ struct AdaptiveAuthorityStats
 namespace adaptive_detail
 {
 struct Budget;
+class AdaptiveSubfaceSnapshot;
+/** Number completed proof-bearing subfaces without rerunning support/line geometry. */
+[[nodiscard]] std::vector<AdaptiveTile> publish_adaptive_subfaces(const AdaptiveSubfaceSnapshot&,
+    const std::function<const AdaptiveLeaf&(const AdaptiveCellKey&)>&,
+    Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget, std::size_t tile_budget,
+    AdaptiveAuthorityStats* = nullptr, std::vector<AdaptiveNode>* = nullptr);
 /** Decode new immutable owners against the caller's still-live admission arena. */
 [[nodiscard]] AdaptiveTile decode_adaptive_tile(std::span<const char>, std::size_t codec_limit, Budget&);
 } // namespace adaptive_detail

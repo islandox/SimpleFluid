@@ -21,7 +21,7 @@ public:
      * Returns the charge to subtract from that body's credit. Restricted face
      * inventories remain owned, and the record's point-independent flag is
      * unchanged. A record must not have been adopted previously. */
-    [[nodiscard]] std::size_t adopt(ContactRecord&);
+    [[nodiscard]] std::size_t adopt(ContactBody&);
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
     [[nodiscard]] std::size_t retained_bytes() const noexcept { return charged_; }
 

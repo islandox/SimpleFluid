@@ -304,6 +304,21 @@ public:
                 page_index = found->second;
             return {static_cast<std::uint64_t>(page_index) * records_per_page + offset};
         }
+        struct CapturedPage
+        {
+            Slot first_slot;
+            std::size_t count;
+            CapturedReference first_reference;
+        };
+        /** The captured physical page keeps these logical source slots
+         * contiguous. Store one range per page when a whole loop uses slots. */
+        [[nodiscard]] CapturedPage capture_page(const IdentityPool& pool, Slot slot)
+        {
+            const auto ref = capture(pool, slot);
+            const auto offset = ref.value % records_per_page;
+            const auto& page = directory_[ref.value / records_per_page]->page;
+            return {slot - static_cast<Slot>(offset), page->values.size(), {ref.value - offset}};
+        }
         void freeze()
         {
             if (frozen_)

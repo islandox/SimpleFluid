@@ -97,6 +97,11 @@ struct ArenaCredits
                 return true;
         return false;
     }
+    [[nodiscard]] bool admits_owner(const std::shared_ptr<const void>& owner, std::size_t bytes) const noexcept
+    {
+        const auto at = entries.find(Owner(owner));
+        return at != entries.end() && at->second->owner_identity == owner.get() && at->second->payload == bytes;
+    }
     [[nodiscard]] bool admits_owner(const void* identity, std::size_t bytes) const noexcept
     {
         for (const auto& [owner, credit] : entries)

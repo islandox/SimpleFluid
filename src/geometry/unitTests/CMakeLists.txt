@@ -61,6 +61,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
       OR TEST_NAME STREQUAL "testIncidencePointDirectory"
       OR TEST_NAME STREQUAL "testFrozenTopology"
+      OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
+      OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryStorage"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
@@ -355,6 +357,11 @@ endforeach()
 
 # Actual native-source closure and control waves, including empty owners.
 foreach(_source_ranks 2 4)
+  simplefluid_add_mpi_test(NAME AdaptiveSubfaceSnapshot_${_source_ranks}procs
+    TARGET testAdaptiveSubfaceSnapshot PROCS ${_source_ranks}
+    ARGS "--gtest_filter=AdaptiveSubfaceSnapshot.AuthenticatedPiecesMatchLegacyAuthorityForEveryProvider:AdaptiveSubfaceSnapshot.RepackedProductUsesCurrentNativeFaceAddressesAfterMigration"
+    LABELS "mpi;geometry;amr;incidence"
+    TIMEOUT 180)
   simplefluid_add_mpi_test(NAME CartesianIncidenceSession_${_source_ranks}procs
     TARGET testCartesianIncidenceSession PROCS ${_source_ranks}
     ARGS "--gtest_filter=CartesianIncidenceSession.*"
@@ -375,4 +382,13 @@ foreach(_layout_ranks IN ITEMS 2 4)
     TARGET testDistributedCartesianKernel PROCS ${_layout_ranks}
     ARGS "--gtest_filter=DistributedCartesianKernel.DistributedBlockRefineSplitFamiliesCoarsenAndEmptyOwners:DistributedCartesianKernel.PeriodicPartnerBlocksRefineMigrateAndCoarsenTogether:DistributedCartesianKernel.PeriodicPhysicalShellsRetainDistinctNodeImages:DistributedCartesianKernel.WrongBlockRecipeOrNativeOrdinalRejectsCollectively:DistributedConvexHierarchy.SplitSiblingOwnersCoarsenExactParent:DistributedStaticHierarchy.CompactNativeDraftRetainsStaticCertificates"
     LABELS "mpi;amr;layout;geometry" TIMEOUT 600)
+endforeach()
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+      NAME AdaptiveContactSnapshot_${PROCS}procs
+      TARGET testAdaptiveContactSnapshot
+      PROCS ${PROCS}
+      ARGS "--gtest_filter=AdaptiveContactSnapshot.*"
+      LABELS "mpi;amr;geometry;collective"
+      TIMEOUT 180)
 endforeach()

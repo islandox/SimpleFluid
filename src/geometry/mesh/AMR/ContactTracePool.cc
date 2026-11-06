@@ -95,7 +95,7 @@ std::size_t ContactTracePool::metadata_bytes() const noexcept
 {
     return inventories_.size() * node_bytes();
 }
-std::size_t ContactTracePool::adopt(ContactRecord& record)
+std::size_t ContactTracePool::adopt(ContactBody& record)
 {
     if (record.shared_traces)
         throw std::invalid_argument("Contact trace inventory was already adopted.");

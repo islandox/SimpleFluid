@@ -109,7 +109,7 @@ void IncidenceOwnerRows::remove(const TileBodyScalars& tile, TileBodyLoopView lo
             cells_.at(cell).points->remove(point);
         });
 }
-std::vector<IncidenceOwnerRows::Patch> IncidenceOwnerRows::finish(const OwnedLeafLookup& lookup)
+std::vector<IncidenceOwnerRows::Patch> IncidenceOwnerRows::finish(const OwnedLeafLookup& lookup, bool keep_identity)
 {
     if (!active_)
         throw std::invalid_argument("Incidence delta is not active.");
@@ -169,7 +169,7 @@ std::vector<IncidenceOwnerRows::Patch> IncidenceOwnerRows::finish(const OwnedLea
             throw std::invalid_argument("Incorrect incidence owner lookup.");
         if (keeper_ && !batch)
             batch.emplace(pools_->points);
-        auto row = batch ? entry.points->row(leaf, *kernel_, *batch) : entry.points->row(leaf, *kernel_);
+        auto row = batch ? entry.points->row(leaf, *kernel_, *batch, keep_identity) : entry.points->row(leaf, *kernel_);
         // Page credits and the frozen directory release their own admission.
         // Only the row-exclusive buffers transfer to the row's deleter.
         const auto row_body_charge = key_capacity(row.key) + row.domain.capacity() + row.points.storage_bytes();
@@ -207,7 +207,7 @@ std::vector<IncidenceOwnerRows::Patch> IncidenceOwnerRows::finish(const OwnedLea
         row_credit.transferred = true;
         IncidenceRowHandle owned(std::move(pending));
         result_credit.grow();
-        result.push_back({slot, std::move(owned)});
+        result.push_back({std::move(owned), &leaf});
         ++entry.generation;
         entry.points->finish_delta();
     }

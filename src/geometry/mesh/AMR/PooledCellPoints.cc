@@ -121,15 +121,15 @@ bool PooledCellPoints::changed() const
 }
 ContactIncidenceRow PooledCellPoints::row(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel)
 {
-    return make_row(leaf, kernel, nullptr);
+    return make_row(leaf, kernel, nullptr, true);
 }
 ContactIncidenceRow PooledCellPoints::row(
-    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch& batch)
+    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch& batch, bool keep_identity)
 {
-    return make_row(leaf, kernel, &batch);
+    return make_row(leaf, kernel, &batch, keep_identity);
 }
 ContactIncidenceRow PooledCellPoints::make_row(
-    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch* batch)
+    const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, ContactPointBatch* batch, bool keep_identity)
 {
     if (leaf.domain.empty() || counts_.empty())
         throw std::invalid_argument("Incomplete spatial contact incidence row.");
@@ -151,15 +151,24 @@ ContactIncidenceRow PooledCellPoints::make_row(
             bytes += n;
         }
     } admission{*budget_};
-    admission.add(key_capacity(leaf.key));
-    admission.add(leaf.domain.size());
+    if (keep_identity)
+    {
+        admission.add(key_capacity(leaf.key));
+        admission.add(leaf.domain.size());
+    }
     auto base_admission = admission.bytes;
     const auto row_element_bound = batch ? 2 * sizeof(std::uint64_t) : sizeof(ContactPointIncidence);
     if (counts_.size() > budget_->limit / row_element_bound)
         throw std::invalid_argument("Contact incidence row exceeds budget.");
     if (!batch)
         admission.add(counts_.size() * sizeof(ContactPointIncidence));
-    ContactIncidenceRow result{leaf.key, leaf.revision, leaf.domain, {}};
+    ContactIncidenceRow result;
+    result.revision = leaf.revision;
+    if (keep_identity)
+    {
+        result.key = leaf.key;
+        result.domain = leaf.domain;
+    }
     const auto copied_base = key_capacity(result.key) + result.domain.capacity();
     if (copied_base > base_admission)
         throw std::invalid_argument("Contact row key capacity exceeds its construction admission.");

@@ -427,7 +427,11 @@ const void* TileBodyHandle::page_identity() const noexcept
 }
 std::weak_ptr<const void> TileBodyHandle::body_owner() const noexcept
 {
-    return credit_ ? std::weak_ptr<const void>(credit_->page) : std::weak_ptr<const void>{};
+    return body_storage_owner();
+}
+std::shared_ptr<const void> TileBodyHandle::body_storage_owner() const noexcept
+{
+    return credit_ ? std::shared_ptr<const void>(credit_->page) : nullptr;
 }
 std::size_t TileBodyHandle::body_bytes() const noexcept
 {
@@ -847,42 +851,55 @@ TileBodyPageStatistics TileBodyPages::statistics() const noexcept
         }
     return result;
 }
+namespace
+{
+void visit_tile_source(const std::shared_ptr<TileSourceCredit>& source,
+    const std::function<void(const ContactPayloadAllocation&)>& visitor)
+{
+    if (!source)
+        return;
+    contact_payload_object(
+        visitor, source.get(), ContactPayloadRole::TileSourceCreditObject, sizeof(TileSourceCredit), true);
+    contact_payload_buffer(visitor, source.get(), ContactPayloadRole::TileSourceLeaseValues, source->leases);
+    for (const auto& lease : source->leases)
+        lease->visit_borrowed_payload(visitor);
+    if (source->source)
+        source->source->visit_borrowed_payload(visitor);
+}
+void visit_tile_credit(const std::shared_ptr<TileBodyPageCredit>& credit,
+    const std::function<void(const ContactPayloadAllocation&)>& visitor)
+{
+    if (!credit)
+        return;
+    contact_payload_object(
+        visitor, credit.get(), ContactPayloadRole::TilePageCreditObject, sizeof(TileBodyPageCredit), true);
+    const auto& page = *credit->page;
+    contact_payload_object(visitor, &page, ContactPayloadRole::TilePageObject, sizeof(BodyPage), true);
+    std::visit(
+        [&](const auto& data)
+        {
+            contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRecords, data.records);
+            contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRings, data.rings);
+        },
+        page.data);
+    if (page.source)
+        page.source->visit_borrowed_payload(visitor);
+    visit_tile_source(credit->source, visitor);
+}
+} // namespace
+const Budget* TileBodyHandle::credit_origin() const noexcept { return credit_ ? credit_->budget : nullptr; }
+void TileBodyHandle::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
+{
+    visit_tile_credit(credit_, visitor);
+}
 void TileBodyPages::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
     contact_payload_buffer(visitor, this, ContactPayloadRole::TilePageDirectory, pages_);
     for (const auto& entry : deferred_)
         contact_payload_node_value(visitor, this, ContactPayloadRole::DeferredOwnerChargeNodes, entry);
-    const auto visit_source = [&](const std::shared_ptr<TileSourceCredit>& source)
-    {
-        if (!source)
-            return;
-        contact_payload_object(
-            visitor, source.get(), ContactPayloadRole::TileSourceCreditObject, sizeof(TileSourceCredit), true);
-        contact_payload_buffer(visitor, source.get(), ContactPayloadRole::TileSourceLeaseValues, source->leases);
-        for (const auto& lease : source->leases)
-            lease->visit_borrowed_payload(visitor);
-        if (source->source)
-            source->source->visit_borrowed_payload(visitor);
-    };
-    visit_source(source_credit_);
+    visit_tile_source(source_credit_, visitor);
     for (const auto& credit : pages_)
-        if (credit)
-        {
-            contact_payload_object(
-                visitor, credit.get(), ContactPayloadRole::TilePageCreditObject, sizeof(TileBodyPageCredit), true);
-            const auto& page = *credit->page;
-            contact_payload_object(visitor, &page, ContactPayloadRole::TilePageObject, sizeof(BodyPage), true);
-            std::visit(
-                [&](const auto& data)
-                {
-                    contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRecords, data.records);
-                    contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRings, data.rings);
-                },
-                page.data);
-            if (page.source)
-                page.source->visit_borrowed_payload(visitor);
-            visit_source(credit->source);
-        }
+        visit_tile_credit(credit, visitor);
 }
 bool TileBodyPages::imports_source_owner(const void* identity) const noexcept
 {

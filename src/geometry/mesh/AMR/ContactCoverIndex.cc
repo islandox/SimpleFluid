@@ -3,6 +3,8 @@
  */
 #include "ContactCoverIndex.hh"
 #include "ContactPointFacts.hh"
+#include "ContactPointGroups.hh"
+#include "ContactSlotPages.hh"
 #include "DistributedAdaptiveWire.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
@@ -119,15 +121,12 @@ struct ContactCoverIndex::Impl
     {
         const std::array<long double, 3>* point = nullptr;
         const PointFactDirectory* directory = nullptr;
-        ContactPointRef reference{};
-        const AdaptiveBytes* domain = nullptr;
-        [[nodiscard]] std::array<long double, 3> coordinates() const
+        union
         {
-            if (!directory)
-                return *point;
-            const auto value = directory->get(reference);
-            return PLIC::details::GeometryIdentityAccess::point(value);
-        }
+            ContactPointRef reference{};
+            ContactGroupId group;
+        };
+        const AdaptiveBytes* domain = nullptr;
         std::size_t parent = absent;
     };
     struct Branch
@@ -140,14 +139,25 @@ struct ContactCoverIndex::Impl
     int owner;
     std::unique_ptr<Leaf[]> leaves;
     std::unique_ptr<Branch[]> branches;
+    std::optional<ContactSlotPages<Leaf>> leaf_pages;
+    std::optional<ContactSlotPages<Branch>> branch_pages;
+    GroupResolver groups{};
     std::size_t capacity = 0, leaf_slots = 0, branch_slots = 0;
     std::size_t free_leaf = absent, free_branch = absent, root = absent, count = 0;
     static std::size_t base_bytes() noexcept { return sizeof(ContactCoverIndex) + sizeof(Impl); }
 
     Impl(Budget& budget_, int owner_) : budget(budget_), owner(owner_) {}
+    Impl(std::shared_ptr<Budget> arena, int owner_, GroupResolver resolver)
+        : budget(*arena), owner(owner_), leaf_pages(std::in_place, arena), branch_pages(std::in_place, arena),
+          groups(resolver) {}
+    Impl(const Impl& source, std::shared_ptr<Budget> arena, GroupResolver resolver)
+        : budget(*arena), owner(source.owner), leaf_pages(std::in_place, *source.leaf_pages, arena),
+          branch_pages(std::in_place, *source.branch_pages, arena), groups(resolver), capacity(source.capacity),
+          leaf_slots(source.leaf_slots), branch_slots(source.branch_slots), free_leaf(source.free_leaf),
+          free_branch(source.free_branch), root(source.root), count(source.count) {}
     ~Impl()
     {
-        const auto bytes = storage_bytes();
+        const auto bytes = private_metadata_bytes();
         leaves.reset();
         branches.reset();
         budget.used -= bytes;
@@ -155,11 +165,43 @@ struct ContactCoverIndex::Impl
     static bool is_leaf(std::size_t tag) noexcept { return !(tag & 1); }
     static std::size_t leaf_tag(std::size_t slot) noexcept { return slot * 2; }
     static std::size_t branch_tag(std::size_t slot) noexcept { return slot * 2 + 1; }
-    Leaf& leaf(std::size_t tag) noexcept { return leaves[tag / 2]; }
-    const Leaf& leaf(std::size_t tag) const noexcept { return leaves[tag / 2]; }
-    Branch& branch(std::size_t tag) noexcept { return branches[tag / 2]; }
-    const Branch& branch(std::size_t tag) const noexcept { return branches[tag / 2]; }
-    std::size_t& parent(std::size_t tag) noexcept { return is_leaf(tag) ? leaf(tag).parent : branch(tag).parent; }
+    Leaf& edit_leaf(std::size_t tag)
+    {
+        return leaf_pages ? leaf_pages->edit(tag / 2) : leaves[tag / 2];
+    }
+    const Leaf& leaf(std::size_t tag) const
+    {
+        return leaf_pages ? (*leaf_pages)[tag / 2] : leaves[tag / 2];
+    }
+    Branch& edit_branch(std::size_t tag)
+    {
+        return branch_pages ? branch_pages->edit(tag / 2) : branches[tag / 2];
+    }
+    const Branch& branch(std::size_t tag) const
+    {
+        return branch_pages ? (*branch_pages)[tag / 2] : branches[tag / 2];
+    }
+    std::size_t& edit_parent(std::size_t tag)
+    {
+        return is_leaf(tag) ? edit_leaf(tag).parent : edit_branch(tag).parent;
+    }
+    std::size_t parent(std::size_t tag) const
+    {
+        return is_leaf(tag) ? leaf(tag).parent : branch(tag).parent;
+    }
+    [[nodiscard]] GroupObservation observe(const Leaf& value) const
+    {
+        if (groups.get)
+            return groups.get(groups.state, value.group);
+        if (!value.directory)
+            return {*value.point, value.domain};
+        return {PLIC::details::GeometryIdentityAccess::point(value.directory->get(value.reference)), value.domain};
+    }
+    [[nodiscard]] const AdaptiveBytes& domain(std::size_t slot) const
+    {
+        const auto& value = leaf(leaf_tag(slot));
+        return groups.get ? *groups.get(groups.state, value.group).domain : *value.domain;
+    }
     std::size_t height(std::size_t tag) const noexcept { return is_leaf(tag) ? 1 : branch(tag).height; }
     std::size_t points(std::size_t tag) const noexcept { return is_leaf(tag) ? 1 : branch(tag).count; }
     std::size_t homogeneous(std::size_t tag) const noexcept { return is_leaf(tag) ? tag / 2 : branch(tag).homogeneous; }
@@ -167,12 +209,17 @@ struct ContactCoverIndex::Impl
     {
         if (!is_leaf(tag))
             return branch(tag).bounds;
-        const auto point = leaf(tag).coordinates();
+        const auto point = observe(leaf(tag)).coordinates;
         return {point, point};
+    }
+    std::size_t private_metadata_bytes() const noexcept
+    {
+        return leaf_pages ? base_bytes() :
+            base_bytes() + capacity * sizeof(Leaf) + (capacity ? capacity - 1 : 0) * sizeof(Branch);
     }
     std::size_t storage_bytes() const noexcept
     {
-        return base_bytes() + capacity * sizeof(Leaf) + (capacity ? capacity - 1 : 0) * sizeof(Branch);
+        return private_metadata_bytes() + (leaf_pages ? leaf_pages->storage_bytes() + branch_pages->storage_bytes() : 0);
     }
     void reserve(std::size_t requested)
     {
@@ -181,6 +228,11 @@ struct ContactCoverIndex::Impl
         // This also guarantees that no encoded child can equal absent.
         if (requested > absent / 2)
             throw std::invalid_argument("Contact-cover handle capacity overflows.");
+        if (leaf_pages)
+        {
+            capacity = requested;
+            return;
+        }
         const auto leaf_bytes = product(requested, sizeof(Leaf));
         const auto branch_bytes = product(requested - 1, sizeof(Branch));
         const auto next_bytes = sum(leaf_bytes, branch_bytes);
@@ -209,55 +261,55 @@ struct ContactCoverIndex::Impl
             throw;
         }
     }
-    void update(std::size_t tag) noexcept
+    void update(std::size_t tag)
     {
-        auto& node = branch(tag);
+        auto& node = edit_branch(tag);
         node.bounds = united(bounds(node.left), bounds(node.right));
         node.count = points(node.left) + points(node.right);
         node.height = 1 + std::max(height(node.left), height(node.right));
         const auto a = homogeneous(node.left), b = homogeneous(node.right);
-        node.homogeneous = a != absent && b != absent && *leaves[a].domain == *leaves[b].domain ? a : absent;
+        node.homogeneous = a != absent && b != absent && domain(a) == domain(b) ? a : absent;
     }
-    void replace_link(std::size_t parent_tag, std::size_t old_tag, std::size_t new_tag) noexcept
+    void replace_link(std::size_t parent_tag, std::size_t old_tag, std::size_t new_tag)
     {
         if (parent_tag == absent)
             root = new_tag;
         else
         {
-            auto& node = branch(parent_tag);
+            auto& node = edit_branch(parent_tag);
             (node.left == old_tag ? node.left : node.right) = new_tag;
         }
-        parent(new_tag) = parent_tag;
+        edit_parent(new_tag) = parent_tag;
     }
-    std::size_t rotate_left(std::size_t tag) noexcept
+    std::size_t rotate_left(std::size_t tag)
     {
-        auto& old = branch(tag);
+        auto& old = edit_branch(tag);
         const auto next_tag = old.right;
-        auto& next = branch(next_tag);
+        auto& next = edit_branch(next_tag);
         replace_link(old.parent, tag, next_tag);
         old.right = next.left;
-        parent(old.right) = tag;
+        edit_parent(old.right) = tag;
         next.left = tag;
         old.parent = next_tag;
         update(tag);
         update(next_tag);
         return next_tag;
     }
-    std::size_t rotate_right(std::size_t tag) noexcept
+    std::size_t rotate_right(std::size_t tag)
     {
-        auto& old = branch(tag);
+        auto& old = edit_branch(tag);
         const auto next_tag = old.left;
-        auto& next = branch(next_tag);
+        auto& next = edit_branch(next_tag);
         replace_link(old.parent, tag, next_tag);
         old.left = next.right;
-        parent(old.left) = tag;
+        edit_parent(old.left) = tag;
         next.right = tag;
         old.parent = next_tag;
         update(tag);
         update(next_tag);
         return next_tag;
     }
-    void balance(std::size_t tag) noexcept
+    void balance(std::size_t tag)
     {
         while (tag != absent)
         {
@@ -281,11 +333,16 @@ struct ContactCoverIndex::Impl
             tag = branch(tag).parent;
         }
     }
+    Handle insert(Leaf binding);
     Leaf& checked_leaf(std::size_t handle)
     {
-        if (handle >= leaf_slots || (!leaves[handle].point && !leaves[handle].directory))
+        if (handle >= leaf_slots)
             throw std::invalid_argument("Contact-cover handle is not live.");
-        return leaves[handle];
+        const auto tag = leaf_tag(handle);
+        const auto& value = leaf(tag);
+        if (groups.get ? !value.group.generation : (!value.point && !value.directory))
+            throw std::invalid_argument("Contact-cover handle is not live.");
+        return edit_leaf(tag);
     }
 };
 
@@ -304,12 +361,33 @@ ContactCoverIndex::ContactCoverIndex(Budget& budget, int owner)
         throw;
     }
 }
+ContactCoverIndex::ContactCoverIndex(std::shared_ptr<Budget> arena, int owner, GroupResolver groups)
+{
+    if (!arena || owner < 0 || !groups.state || !groups.get)
+        throw std::invalid_argument("Contact-cover group source is invalid.");
+    Scratch charge(*arena);
+    charge.add(Impl::base_bytes());
+    impl_ = std::make_unique<Impl>(arena, owner, groups);
+    charge.transfer(Impl::base_bytes());
+}
+ContactCoverIndex::ContactCoverIndex(
+    const ContactCoverIndex& source, std::shared_ptr<Budget> arena, GroupResolver groups)
+{
+    if (!arena || !source.impl_->groups.get || !groups.state || !groups.get)
+        throw std::invalid_argument("Contact-cover group fork is invalid.");
+    Scratch charge(*arena);
+    charge.add(Impl::base_bytes());
+    impl_ = std::make_unique<Impl>(*source.impl_, arena, groups);
+    charge.transfer(Impl::base_bytes());
+}
 ContactCoverIndex::~ContactCoverIndex() = default;
 ContactCoverIndex::ContactCoverIndex(const ContactCoverIndex& source, Budget& budget)
     : ContactCoverIndex(budget, source.impl_->owner)
 {
     auto& target = *impl_;
     const auto& original = *source.impl_;
+    if (original.groups.get)
+        throw std::invalid_argument("Group cover fork requires the candidate resolver.");
     target.reserve(original.capacity);
     if (original.leaf_slots)
         std::copy_n(original.leaves.get(), original.leaf_slots, target.leaves.get());
@@ -339,49 +417,65 @@ ContactCoverIndex::Handle ContactCoverIndex::insert(
 ContactCoverIndex::Handle ContactCoverIndex::insert_binding(const std::array<long double, 3>* point,
     const PointFactDirectory* directory, ContactPointRef reference, const AdaptiveBytes* domain)
 {
+    if (impl_->groups.get || (!point && !directory) || !domain)
+        throw std::invalid_argument("Invalid borrowed contact-cover binding.");
+    Impl::Leaf binding;
+    binding.point = point;
+    binding.directory = directory;
+    binding.reference = reference;
+    binding.domain = domain;
+    return impl_->insert(binding);
+}
+ContactCoverIndex::Handle ContactCoverIndex::insert(ContactGroupId id)
+{
+    if (!impl_->groups.get || !id.generation)
+        throw std::invalid_argument("Invalid contact-cover group binding.");
+    Impl::Leaf binding;
+    binding.group = id;
+    return impl_->insert(binding);
+}
+ContactCoverIndex::Handle ContactCoverIndex::Impl::insert(Leaf binding)
+{
     const MetadataEnvironment environment;
-    Impl::Leaf binding{point, directory, reference, domain, absent};
-    // Resolve only into operation-local storage; leaves never borrow an assembled value.
-    const auto coordinates = directory ? binding.coordinates() : std::array<long double, 3>{};
-    validate(directory ? &coordinates : point, domain);
-    auto& tree = *impl_;
+    const auto observation = observe(binding);
+    validate(&observation.coordinates, observation.domain);
     // Both needed slots exist before any membership or topology changes.
-    if (tree.free_leaf == absent && tree.leaf_slots == tree.capacity)
-        tree.reserve(tree.capacity ? product(tree.capacity, 2) : 1);
-    const auto slot = tree.free_leaf != absent ? tree.free_leaf : tree.leaf_slots++;
-    if (tree.free_leaf != absent)
-        tree.free_leaf = tree.leaves[slot].parent;
-    auto& leaf = tree.leaves[slot];
+    if (free_leaf == absent && leaf_slots == capacity)
+        reserve(capacity ? product(capacity, 2) : 1);
+    const auto slot = free_leaf != absent ? free_leaf : leaf_slots++;
+    if (free_leaf != absent)
+        free_leaf = leaf(leaf_tag(slot)).parent;
+    auto& leaf = edit_leaf(leaf_tag(slot));
     leaf = binding;
     const auto tag = Impl::leaf_tag(slot);
-    if (tree.root == absent)
-        tree.root = tag;
+    if (root == absent)
+        root = tag;
     else
     {
-        const auto branch_slot = tree.free_branch != absent ? tree.free_branch : tree.branch_slots++;
-        if (tree.free_branch != absent)
-            tree.free_branch = tree.branches[branch_slot].parent;
-        auto sibling = tree.root;
-        const auto value = directory ? coordinates : *point;
+        const auto branch_slot = free_branch != absent ? free_branch : branch_slots++;
+        if (free_branch != absent)
+            free_branch = branch(branch_tag(branch_slot)).parent;
+        auto sibling = root;
+        const auto& value = observation.coordinates;
         const AdaptiveContactBounds point_bounds{value, value};
         while (!Impl::is_leaf(sibling))
         {
-            const auto& node = tree.branch(sibling);
-            const auto a = extent(united(tree.bounds(node.left), point_bounds));
-            const auto b = extent(united(tree.bounds(node.right), point_bounds));
-            sibling = a < b || (a == b && tree.height(node.left) <= tree.height(node.right)) ? node.left : node.right;
+            const auto& node = branch(sibling);
+            const auto a = extent(united(bounds(node.left), point_bounds));
+            const auto b = extent(united(bounds(node.right), point_bounds));
+            sibling = a < b || (a == b && height(node.left) <= height(node.right)) ? node.left : node.right;
         }
-        const auto branch_tag = Impl::branch_tag(branch_slot);
-        auto& branch = tree.branches[branch_slot];
+        const auto joining = branch_tag(branch_slot);
+        auto& branch = edit_branch(joining);
         branch = {};
         branch.left = sibling;
         branch.right = tag;
-        tree.replace_link(tree.parent(sibling), sibling, branch_tag);
-        tree.parent(sibling) = branch_tag;
-        leaf.parent = branch_tag;
-        tree.balance(branch_tag);
+        replace_link(parent(sibling), sibling, joining);
+        edit_parent(sibling) = joining;
+        leaf.parent = joining;
+        balance(joining);
     }
-    ++tree.count;
+    ++count;
     return slot;
 }
 void ContactCoverIndex::erase(Handle handle)
@@ -395,7 +489,7 @@ void ContactCoverIndex::erase(Handle handle)
         tree.root = absent;
     else
     {
-        auto& parent = tree.branch(parent_tag);
+        auto& parent = tree.edit_branch(parent_tag);
         const auto sibling = parent.left == tag ? parent.right : parent.left;
         const auto grandparent = parent.parent;
         tree.replace_link(grandparent, parent_tag, sibling);
@@ -405,7 +499,10 @@ void ContactCoverIndex::erase(Handle handle)
     }
     leaf.point = nullptr;
     leaf.directory = nullptr;
-    leaf.reference = {};
+    if (tree.groups.get)
+        leaf.group = {};
+    else
+        leaf.reference = {};
     leaf.domain = nullptr;
     leaf.parent = tree.free_leaf;
     tree.free_leaf = handle;
@@ -414,6 +511,8 @@ void ContactCoverIndex::erase(Handle handle)
 void ContactCoverIndex::rebind(Handle handle, const std::array<long double, 3>* point, const AdaptiveBytes* domain)
 {
     const MetadataEnvironment environment;
+    if (impl_->groups.get)
+        throw std::invalid_argument("Group cover entries retain logical bindings.");
     validate(point, domain);
     auto& leaf = impl_->checked_leaf(handle);
     leaf.point = point;
@@ -425,6 +524,8 @@ void ContactCoverIndex::rebind(
     Handle handle, const PointFactDirectory& directory, ContactPointRef reference, const AdaptiveBytes* domain)
 {
     const MetadataEnvironment environment;
+    if (impl_->groups.get)
+        throw std::invalid_argument("Group cover entries retain logical bindings.");
     const auto value = directory.get(reference);
     validate(&PLIC::details::GeometryIdentityAccess::point(value), domain);
     auto& leaf = impl_->checked_leaf(handle);
@@ -484,7 +585,7 @@ std::vector<ClosedContactCover> ContactCoverIndex::ownership_frontier_covers(std
     {
         if (tag == absent)
             continue;
-        const auto& domain = *tree.leaves[tree.homogeneous(tag)].domain;
+        const auto& domain = tree.domain(tree.homogeneous(tag));
         scratch.add(domain.size());
         ClosedContactCover cover{domain, tree.bounds(tag), tree.owner, tree.points(tag)};
         if (cover.domain.capacity() != domain.size())
@@ -498,6 +599,31 @@ std::vector<ClosedContactCover> ContactCoverIndex::ownership_frontier_covers(std
 std::size_t ContactCoverIndex::storage_bytes() const noexcept
 {
     return impl_->storage_bytes();
+}
+std::size_t ContactCoverIndex::private_metadata_bytes() const noexcept { return impl_->private_metadata_bytes(); }
+std::size_t ContactCoverIndex::overlap_bytes() const noexcept
+{
+    return impl_->leaf_pages ? impl_->leaf_pages->overlap_bytes() + impl_->branch_pages->overlap_bytes() : 0;
+}
+std::size_t ContactCoverIndex::copied_pages() const noexcept
+{
+    return impl_->leaf_pages ? impl_->leaf_pages->copied_pages() + impl_->branch_pages->copied_pages() : 0;
+}
+void ContactCoverIndex::finish_overlap() noexcept
+{
+    if (impl_->leaf_pages)
+    {
+        impl_->leaf_pages->finish_overlap();
+        impl_->branch_pages->finish_overlap();
+    }
+}
+void ContactCoverIndex::visit_borrowed_pages(const std::function<void(const void*, bool, std::size_t)>& visit) const
+{
+    if (impl_->leaf_pages)
+    {
+        impl_->leaf_pages->visit_pages(visit);
+        impl_->branch_pages->visit_pages(visit);
+    }
 }
 std::size_t ContactCoverIndex::point_count() const noexcept
 {

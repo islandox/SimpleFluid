@@ -4,6 +4,7 @@
 #pragma once
 #include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/mesh/AMR/AdaptiveContactQuery.hh"
 #include "geometry/mesh/AMR/ContactHaloContext.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/ContactPointArray.hh"
@@ -15,6 +16,12 @@
 #include <memory>
 #include <span>
 #include <vector>
+
+namespace SimpleFluid::Meshes::AMR
+{
+class AdaptiveLeafLayout;
+class AdaptiveLeafTransition;
+}
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
@@ -101,6 +108,10 @@ struct ContactHaloStatistics
     std::size_t record_fetches = 0, decoded_record_replies = 0, point_query_pages = 0, record_pages = 0;
     std::size_t pages = 0, work = 0, retained_bytes = 0, peak_bytes = 0, cumulative_bytes = 0;
     std::size_t bootstrap_owned_visits = 0, delta_owned_visits = 0, full_owned_scans_after_bootstrap = 0;
+    std::size_t contact_record_pages_copied = 0, contact_row_pages_copied = 0, contact_work_pages_copied = 0;
+    std::size_t contact_index_pages_copied = 0, contact_index_split_records = 0;
+    std::size_t contact_cover_pages_copied = 0, contact_cover_page_bytes = 0;
+    std::size_t contact_query_pages_copied = 0, contact_identity_rebinds = 0, contact_frozen_groups = 0;
     std::size_t dirty_supports = 0, dirty_support_members = 0, dirty_lines = 0, dirty_subscriptions = 0;
     std::size_t recomputed_tiles = 0;
     std::size_t point_groups = 0, group_private_metadata_bytes = 0, group_shared_body_bytes = 0;
@@ -126,6 +137,8 @@ struct ContactHaloStatistics
     std::size_t retained_expanded_completion_result_slots = 0;
 };
 struct ContactFanView;
+class AdaptiveSubfaceSnapshot;
+class AdaptiveContactSnapshot;
 struct ContactHaloBorrowedGroup
 {
     const void* record;
@@ -182,7 +195,8 @@ public:
     [[nodiscard]] std::unique_ptr<DistributedAdaptiveContactHalo> fork_candidate(
         ContactHaloContext, std::size_t caller_live_bytes = 0) const;
     void bootstrap(std::span<const AdaptiveLeaf>, std::vector<ContactIncidenceRow>);
-    void bootstrap_canonical(std::span<const AdaptiveLeaf>, const ContactOwnedLeafLookup&);
+    void bootstrap_canonical(std::span<const AdaptiveLeaf>, const ContactOwnedLeafLookup&,
+        std::shared_ptr<const AdaptiveLeafLayout> = {});
     void apply_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>, ContactHaloContext,
         const ContactOwnedLeafLookup&);
     [[nodiscard]] Budget& allocation() noexcept;
@@ -191,6 +205,15 @@ public:
     [[nodiscard]] std::size_t cache_storage_bytes() const noexcept;
     [[nodiscard]] std::vector<AdaptiveMark> required_refinements();
     [[nodiscard]] ContactMarkLease lease_required_refinements();
+    /** Visit the complete canonical contact witnesses of one owned leaf.
+     * Synchronous and local. The callback must keep the halo quiescent. */
+    void visit_closed_contacts(const AdaptiveCellKey&, const ContactWitnessVisitor&) const;
+    [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subface_snapshot() const;
+    /** Freeze after closure with the pinned layout or a hierarchy-issued
+     * transition that supplies all replacement leaf pages. */
+    [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts(
+        std::shared_ptr<const AdaptiveLeafLayout>, std::span<const AdaptiveLeaf* const> changed_leaf_pages = {});
+    [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts(const AdaptiveLeafTransition&);
     void for_each_incidence_row(const std::function<void(const ContactIncidenceRow&)>&) const;
     /** Synchronous borrowed census. The caller keeps this controller alive and
      * prevents mutation; callbacks must not retain references or copy owners. */
@@ -212,6 +235,8 @@ public:
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
 
 private:
+    [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts_impl(
+        const std::shared_ptr<const AdaptiveLeafLayout>&, const AdaptiveLeafTransition*);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

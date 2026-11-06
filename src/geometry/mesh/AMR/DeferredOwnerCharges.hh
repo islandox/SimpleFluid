@@ -21,7 +21,12 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 class DeferredOwnerCharges
 {
     using Owner = std::weak_ptr<const void>;
-    using Entries = std::map<Owner, std::size_t, std::owner_less<>>;
+    struct Admission
+    {
+        const void* identity;
+        std::size_t bytes;
+    };
+    using Entries = std::map<Owner, Admission, std::owner_less<>>;
     static constexpr std::size_t node_bytes = sizeof(Entries::value_type) + 4 * sizeof(void*);
 
 public:
@@ -40,6 +45,18 @@ public:
     {
         return entries_.find(Owner(owner)) != entries_.end();
     }
+    template<class T>
+    [[nodiscard]] bool admits(const std::shared_ptr<T>& owner, std::size_t bytes) const noexcept
+    {
+        const auto found = entries_.find(Owner(owner));
+        return found != entries_.end() && found->second.identity == owner.get() && found->second.bytes == bytes;
+    }
+    template<class Visitor> void visit_live_owners(const Visitor& visit) const
+    {
+        for (const auto& [owner, admission] : entries_)
+            if (!owner.expired())
+                visit(admission.identity, admission.bytes);
+    }
     template<class T> bool adopt(const std::shared_ptr<T>& owner, std::size_t bytes)
     {
         if (!owner || !bytes || bytes > budget_->used)
@@ -47,7 +64,7 @@ public:
         const Owner weak(owner);
         if (const auto found = entries_.find(weak); found != entries_.end())
         {
-            if (found->second != bytes)
+            if (found->second.bytes != bytes)
                 throw std::invalid_argument("Conflicting deferred immutable-owner credit.");
             return false;
         }
@@ -57,7 +74,7 @@ public:
         budget_->add(node_bytes);
         try
         {
-            entries_.emplace(weak, bytes);
+            entries_.emplace(weak, Admission{owner.get(), bytes});
         }
         catch (...)
         {
@@ -77,7 +94,7 @@ public:
                 ++position;
                 continue;
             }
-            const auto bytes = position->second;
+            const auto bytes = position->second.bytes;
             // Destroy the final weak reference before returning its credit:
             // allocate_shared may keep inline storage in the control block.
             position = entries_.erase(position);

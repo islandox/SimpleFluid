@@ -35,9 +35,13 @@ public:
     [[nodiscard]] TileBodyLoopView intrinsic_loop() const;
     [[nodiscard]] std::shared_ptr<const void> credit_owner() const noexcept;
     [[nodiscard]] std::size_t credit_bytes() const noexcept;
+    [[nodiscard]] const Budget* credit_origin() const noexcept;
+    void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
     [[nodiscard]] const void* page_identity() const noexcept;
     /** Weak physical-body observation does not pin a page or an arena credit. */
     [[nodiscard]] std::weak_ptr<const void> body_owner() const noexcept;
+    /** Physical payload pin for exact owner accounting across arena credits. */
+    [[nodiscard]] std::shared_ptr<const void> body_storage_owner() const noexcept;
     [[nodiscard]] std::size_t body_bytes() const noexcept;
 
 private:

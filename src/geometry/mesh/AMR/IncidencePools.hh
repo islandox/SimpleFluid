@@ -52,15 +52,17 @@ struct IncidencePools
     IdentityBudget* identities;
 
     explicit IncidencePools(Budget& arena, IdentityBudget& ledger, std::shared_ptr<Budget> keeper = {})
-        : cells(arena), domains(arena), supports(arena), lines(arena), points(arena, std::move(keeper)), planes(arena),
-          normals(arena), images(arena), budget(&arena), identities(&ledger)
+        : cells(arena, keeper), domains(arena, keeper), supports(arena, keeper), lines(arena),
+          points(arena, keeper), planes(arena, keeper), normals(arena, keeper), images(arena, std::move(keeper)),
+          budget(&arena), identities(&ledger)
     {
     }
     IncidencePools(const IncidencePools& source, Budget& arena, IdentityBudget& ledger,
         std::shared_ptr<Budget> keeper = {}, std::shared_ptr<CartesianAuthorityArena> source_arena = {})
-        : cells(source.cells, arena), domains(source.domains, arena), supports(source.supports, arena),
-          lines(source.lines, arena), points(source.points, arena, std::move(keeper), std::move(source_arena)),
-          planes(source.planes, arena), normals(source.normals, arena), images(source.images, arena), budget(&arena),
+        : cells(source.cells, arena, keeper), domains(source.domains, arena, keeper),
+          supports(source.supports, arena, keeper), lines(source.lines, arena),
+          points(source.points, arena, keeper, std::move(source_arena)), planes(source.planes, arena, keeper),
+          normals(source.normals, arena, keeper), images(source.images, arena, std::move(keeper)), budget(&arena),
           identities(&ledger)
     {
         for (std::size_t slot = 0; slot < planes.size(); ++slot)

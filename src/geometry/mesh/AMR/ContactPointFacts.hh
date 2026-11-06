@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
@@ -21,7 +22,35 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
  * immutable fan owners. release() retires; reclaim() is the evaluation barrier. */
 class PointFactDirectory
 {
+    struct FallbackCredit;
+
 public:
+    class FrozenPoint
+    {
+    public:
+        [[nodiscard]] explicit operator bool() const noexcept { return storage_.index() != 0; }
+        [[nodiscard]] ContactPointIdentity value() const;
+        void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
+
+    private:
+        friend class PointFactDirectory;
+        struct Stored
+        {
+            std::shared_ptr<const ContactPointPageView> view;
+            CapturedPointReference reference;
+        };
+        struct Source
+        {
+            std::shared_ptr<const ContactSourcePointView> view;
+            CapturedSourcePointReference reference;
+        };
+        struct Fallback
+        {
+            std::shared_ptr<const FallbackCredit> credit;
+            std::size_t slot;
+        };
+        std::variant<std::monostate, Stored, Source, Fallback> storage_;
+    };
     using PointPool = IncidencePointDirectory<>;
     explicit PointFactDirectory(std::shared_ptr<Budget>);
     PointFactDirectory(const PointFactDirectory&, std::shared_ptr<Budget>, const PointPool* target_pool = nullptr,
@@ -34,11 +63,12 @@ public:
     void pin(ContactPointRef);
     void release(ContactPointRef);
     [[nodiscard]] ContactPointIdentity get(ContactPointRef) const;
+    [[nodiscard]] FrozenPoint frozen(ContactPointRef) const;
     /** Synchronous readers may resolve a slot only while their immutable fan
      * owns a pin. Escaped snapshots retain this entire directory/catalog. */
     [[nodiscard]] ContactPointRef pinned_reference(std::size_t slot) const;
     [[nodiscard]] ContactPointRef staging_reference(std::size_t slot) const;
-    void reclaim();
+    void reclaim(const std::function<void(std::size_t)>& retire_fact = {});
     void seal_fallback() noexcept;
     [[nodiscard]] std::size_t fallback_pages() const noexcept;
     [[nodiscard]] std::size_t live_points() const noexcept;

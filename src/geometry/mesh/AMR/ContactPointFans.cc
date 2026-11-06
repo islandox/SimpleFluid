@@ -176,7 +176,7 @@ ContactBindingId ContactFanCatalog::staging_binding(std::size_t slot) const
         throw std::out_of_range("Unavailable contact binding staging slot.");
     return {slot, bindings_[slot].generation};
 }
-void ContactFanCatalog::reclaim()
+void ContactFanCatalog::reclaim(const std::function<void(std::size_t)>& retire_fact)
 {
     std::size_t n = 0;
     for (const auto& entry : bindings_)
@@ -205,14 +205,14 @@ void ContactFanCatalog::reclaim()
             free_.push_back(i);
         }
     }
-    points.reclaim();
+    points.reclaim(retire_fact);
 }
 bool ContactFanBlock::needs_wide(std::uint64_t value) noexcept
 {
     return value > std::numeric_limits<std::uint32_t>::max();
 }
 std::shared_ptr<const ContactFanBlock> ContactFanBlock::build(
-    std::span<const Input> input, ContactGroupAllocation& allocation)
+    std::span<const Input> input, ContactGroupAllocation& allocation, bool detached_charge)
 {
     ContactGroupAllocation staged(allocation.keeper());
     std::size_t locals = 0, remotes = 0;
@@ -231,7 +231,7 @@ std::shared_ptr<const ContactFanBlock> ContactFanBlock::build(
     }
     wide = wide || needs_wide(locals) || needs_wide(remotes);
     staged.add(sizeof(ContactFanBlock) + 128);
-    auto result = std::make_shared<ContactFanBlock>();
+    auto result = std::shared_ptr<ContactFanBlock>(new ContactFanBlock(allocation.keeper()));
     if (wide)
         result->data_.emplace<Arrays<std::uint64_t>>();
     std::visit(
@@ -252,7 +252,7 @@ std::shared_ptr<const ContactFanBlock> ContactFanBlock::build(
             }
         },
         result->data_);
-    allocation.transfer_from(staged, staged.bytes());
+    (detached_charge ? result->admission_ : allocation).transfer_from(staged, staged.bytes());
     return result;
 }
 bool ContactFanBlock::wide() const noexcept
@@ -330,7 +330,7 @@ std::shared_ptr<const ContactFanOwner> ContactFanOwner::build(
         for (const auto& remote : group.remote)
             (void) result->catalog_->points.get(remote.physical);
     }
-    result->block_ = ContactFanBlock::build(input, result->body_admission_);
+    result->block_ = ContactFanBlock::build(input, result->body_admission_, true);
     result->allocation_.reserve(result->views_, input.size());
     result->views_.assign(input.size(), 0);
     for (std::size_t g = 0; g < input.size(); ++g)

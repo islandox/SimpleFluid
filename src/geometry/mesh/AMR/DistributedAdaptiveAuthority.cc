@@ -2,8 +2,12 @@
  * @brief Complete support authority overlays and canonical edge-point routing.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
+#include "geometry/mesh/AMR/AdaptiveSubfaceSnapshot.hh"
+#include "geometry/mesh/AMR/CartesianIncidenceBudget.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include "geometry/mesh/AMR/CompleteSupportOverlay.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -244,6 +248,513 @@ AdaptiveTile adaptive_detail::decode_adaptive_tile(
     std::span<const char> bytes, std::size_t byte_budget, Budget& allocation)
 {
     return decode_tile(bytes, byte_budget, allocation);
+}
+static void number_completed_adaptive_nodes(std::vector<AdaptiveTile>& result,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, AdaptiveAuthorityStats* statistics,
+    std::vector<AdaptiveNode>* node_catalog, AuthorityDiagnostics& diagnostics)
+{
+    // Numeric node addresses are assigned by full (domain, exact point) keys.
+    // Face incidence ordering is retained; display coordinates never weld nodes.
+    std::vector<OwnerPacket> requests, replies;
+    struct NeededNode
+    {
+        AdaptiveBytes key;
+        PointIdentity point;
+        std::uint64_t gid = std::numeric_limits<std::uint64_t>::max();
+    };
+    std::vector<NeededNode> needed;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            std::map<AdaptiveBytes, std::uint64_t> indices;
+            for (auto& tile : result)
+            {
+                auto assign =
+                    [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry,
+                        adaptive_detail::ImmutableSequence<std::uint64_t>& incidence)
+                {
+                    auto points = geometry->vertex_identities();
+                    allocation.add(points.size() * sizeof(std::uint64_t));
+                    std::vector<std::uint64_t> gids;
+                    gids.reserve(points.size());
+                    if (gids.capacity() != points.size())
+                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
+                    for (const auto& point : points)
+                    {
+                        Writer key_writer;
+                        key_writer.bytes(tile.domain);
+                        key_writer.bytes(PLIC::canonical_key(point));
+                        auto key = std::move(key_writer.data);
+                        auto found = indices.find(key);
+                        if (found == indices.end())
+                        {
+                            allocation.add(3 * key.size() + point.payload_bytes() + sizeof(NeededNode) +
+                                           sizeof(AdaptiveBytes) + 3 * sizeof(void*));
+                            const auto ordinal = needed.size();
+                            allocation.packet(
+                                24 + geometry_record_header_bytes + key.size() + PLIC::encoded_identity_size(point));
+                            Writer request;
+                            write_geometry_record_header(request, GeometryRecordKind::NodeRequest);
+                            request.word(ordinal);
+                            request.bytes(key);
+                            request.bytes(PLIC::encode_identity(point));
+                            requests.push_back({authority(key, comm->getSize()), std::move(request.data)});
+                            found = indices.emplace(key, ordinal).first;
+                            needed.push_back({std::move(key), point});
+                        }
+                        gids.push_back(found->second);
+                    }
+                    incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
+                };
+                assign(tile.geometry, tile.node_gids);
+                if (tile.second)
+                    assign(tile.geometry->translated(
+                               PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)),
+                        tile.second_node_gids);
+            }
+        });
+    diagnostics.stage = "node_exchange";
+    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    diagnostics.stage = "node_decode";
+    struct NodeAuthority
+    {
+        PLIC::GeometryPoint coordinate;
+        std::vector<std::pair<int, std::uint64_t>> subscribers;
+    };
+    std::map<AdaptiveBytes, NodeAuthority> nodes;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            std::set<std::pair<int, std::uint64_t>> unique;
+            for (const auto& packet : incoming.packets)
+            {
+                allocation.add(2 * packet.bytes.size() + sizeof(NodeAuthority) + 6 * sizeof(void*));
+                Reader r{packet.bytes};
+                read_geometry_record_header(r, GeometryRecordKind::NodeRequest);
+                auto ordinal = r.word();
+                auto key = r.bytes();
+                auto point = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget);
+                r.done();
+                Reader identity{key};
+                auto domain = identity.bytes(), certified_point = identity.bytes();
+                identity.done();
+                if (domain.empty() || certified_point != PLIC::canonical_key(point) ||
+                    authority(key, comm->getSize()) != comm->getRank() || !unique.emplace(packet.peer, ordinal).second)
+                    throw std::invalid_argument("Invalid canonical node request.");
+                auto found = nodes.find(key);
+                if (found == nodes.end())
+                    found = nodes
+                                .emplace(std::move(key),
+                                    NodeAuthority{PLIC::point_display<ArithmeticMode::Ordinary>(point), {}})
+                                .first;
+                found->second.subscribers.emplace_back(packet.peer, ordinal);
+            }
+        });
+    const auto [node_offset, global_nodes] = entity_range(nodes.size(), *comm);
+    if (statistics)
+        statistics->global_nodes = global_nodes;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            std::uint64_t ordinal = 0;
+            for (const auto& [key, node] : nodes)
+            {
+                const auto gid = node_offset + ordinal++;
+                for (const auto& [rank, request] : node.subscribers)
+                {
+                    allocation.packet(48 + geometry_record_header_bytes + key.size());
+                    Writer w;
+                    write_geometry_record_header(w, GeometryRecordKind::NodeReply);
+                    w.word(request);
+                    w.bytes(key);
+                    w.word(gid);
+                    for (double coordinate : node.coordinate)
+                        w.word(std::bit_cast<std::uint64_t>(coordinate));
+                    replies.push_back({rank, std::move(w.data)});
+                }
+            }
+        });
+    diagnostics.stage = "node_reply_exchange";
+    auto returned = consume_owner_packets(std::move(replies), comm, budget);
+    diagnostics.stage = "node_reply_decode";
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            allocation.add(needed.size() * (sizeof(AdaptiveNode) + 1));
+            std::vector<bool> seen(needed.size());
+            for (const auto& packet : returned.packets)
+            {
+                allocation.add(packet.bytes.size());
+                Reader r{packet.bytes};
+                read_geometry_record_header(r, GeometryRecordKind::NodeReply);
+                auto ordinal = r.word();
+                auto key = r.bytes();
+                auto gid = r.word();
+                PLIC::GeometryPoint coordinate;
+                for (auto& value : coordinate)
+                    value = std::bit_cast<double>(r.word());
+                r.done();
+                if (ordinal >= needed.size() || seen[ordinal] || key != needed[ordinal].key ||
+                    packet.peer != authority(key, comm->getSize()) || gid >= global_nodes ||
+                    coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(needed[ordinal].point))
+                    throw std::invalid_argument("Foreign, duplicate or malformed canonical node reply.");
+                seen[ordinal] = true;
+                needed[ordinal].gid = gid;
+            }
+            for (bool value : seen)
+                if (!value)
+                    throw std::invalid_argument("Missing canonical node reply.");
+            std::vector<AdaptiveNode> catalog;
+            catalog.reserve(needed.size());
+            for (auto& node : needed)
+            {
+                const auto coordinate = PLIC::point_display<ArithmeticMode::Ordinary>(node.point);
+                catalog.push_back({node.gid, std::move(node.key), coordinate, std::move(node.point)});
+            }
+            for (auto& tile : result)
+                for (auto* incidence : {&tile.node_gids, &tile.second_node_gids})
+                {
+                    allocation.add(incidence->size() * sizeof(std::uint64_t));
+                    std::vector<std::uint64_t> gids(incidence->begin(), incidence->end());
+                    if (gids.capacity() != incidence->size())
+                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
+                    for (auto& node : gids)
+                    {
+                        if (node >= catalog.size())
+                            throw std::invalid_argument("Invalid canonical face incidence node.");
+                        node = catalog[node].gid;
+                    }
+                    *incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
+                }
+            if (node_catalog)
+                *node_catalog = std::move(catalog);
+        });
+}
+
+std::vector<AdaptiveTile> adaptive_detail::publish_adaptive_subfaces(const AdaptiveSubfaceSnapshot& snapshot,
+    const std::function<const AdaptiveLeaf&(const AdaptiveCellKey&)>& lookup,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t tile_budget,
+    AdaptiveAuthorityStats* statistics, std::vector<AdaptiveNode>* node_catalog)
+{
+    if (comm.is_null())
+        throw std::invalid_argument("Completed subface publication needs a communicator.");
+    AuthorityDiagnostics diagnostics{comm->getRank(), "completed_subface_requests"};
+    std::vector<AdaptiveTile> result;
+    std::vector<OwnerPacket> requests, replies;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            IdentityBudget identities;
+            if (snapshot.size() > tile_budget || snapshot.size() > budget / sizeof(AdaptiveTile) ||
+                snapshot.size() > budget / sizeof(OwnerPacket))
+                throw std::invalid_argument("Completed subface publication count exceeds admission.");
+            allocation.add(snapshot.size() * sizeof(AdaptiveTile));
+            allocation.add(snapshot.size() * sizeof(OwnerPacket));
+            result.reserve(snapshot.size());
+            requests.reserve(snapshot.size());
+            if (result.capacity() != snapshot.size() || requests.capacity() != snapshot.size())
+                throw std::invalid_argument("Completed subface publication capacity differs from admission.");
+            snapshot.visit_pieces([&](const CanonicalSubfaceView& view)
+                {
+                    if (result.size() >= tile_budget || result.size() >= snapshot.size())
+                        throw std::invalid_argument("Completed subface tile budget exhausted.");
+                    const auto first = view.first();
+                    const auto second = view.second();
+                    const int first_owner = first.owner(), second_owner = second ? second->owner() : -1;
+                    if (first_owner < 0 || first_owner >= comm->getSize() || second_owner >= comm->getSize() ||
+                        (first_owner != comm->getRank() && second_owner != comm->getRank()))
+                        throw std::invalid_argument("Completed subface has foreign incidence ownership.");
+                    const auto check_local = [&](const CanonicalSubfaceIncident& incident)
+                    {
+                        if (incident.owner() != comm->getRank())
+                            return;
+                        const auto& leaf = lookup(incident.key());
+                        if (leaf.key != incident.key() || leaf.revision != incident.revision() ||
+                            !std::ranges::equal(leaf.domain, view.domain()))
+                            throw std::invalid_argument("Completed subface source binding is stale.");
+                    };
+                    check_local(first);
+                    if (second)
+                        check_local(*second);
+                    auto materialized = view.materialize(allocation, identities);
+                    cartesian_detail::Allocation image_memory(allocation);
+                    SupportFace second_physical;
+                    if (second_owner == comm->getRank())
+                    {
+                        image_memory.retain(support_construction_capacity_bound(
+                            SupportConstructionKind::Pair, materialized.geometry, {}));
+                        second_physical = materialized.geometry->reversed()->translated(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, view.second_image()));
+                    }
+                    const auto native_locator = [&](const CanonicalSubfaceIncident& incident,
+                                                    const SupportFace& physical)
+                    {
+                        if (incident.owner() != comm->getRank())
+                            return std::uint64_t(UINT64_MAX);
+                        const auto& leaf = lookup(incident.key());
+                        std::optional<std::uint64_t> result;
+                        for (const auto& surface : leaf.surfaces)
+                        {
+                            if (!std::ranges::equal(surface.key, view.support()))
+                                continue;
+                            cartesian_detail::Allocation proof(allocation);
+                            proof.retain(support_construction_capacity_bound(
+                                SupportConstructionKind::Pair, surface.geometry, std::span<const SupportFace>(&physical, 1)));
+                            if (surface.geometry->oppositely_oriented(*physical) ||
+                                !std::ranges::all_of(physical->points(), [&](const auto& point)
+                                    {
+                                        return surface.geometry->contains_point(
+                                            PLIC::details::GeometryIdentityAccess::point(point));
+                                    }))
+                                continue;
+                            if (result)
+                                throw std::invalid_argument("Completed subface has ambiguous current native incidence.");
+                            result = surface.native_face;
+                        }
+                        if (!result || (*result == UINT64_MAX && leaf.provider != AdaptiveProviderKind::Polyhedral))
+                            throw std::invalid_argument("Completed subface lost its current native source surface.");
+                        return *result;
+                    };
+                    allocation.append_capacity(result);
+                    AdaptiveTile tile;
+                    tile.identity = std::move(materialized.identity);
+                    tile.geometry = std::move(materialized.geometry);
+                    const auto copy_bytes = [&](std::span<const char> value)
+                    {
+                        allocation.add(value.size());
+                        std::vector<char> bytes(value.begin(), value.end());
+                        if (bytes.capacity() != value.size())
+                            throw std::invalid_argument("Completed subface byte capacity differs from admission.");
+                        return ImmutableSequence<char>::freeze_builder(std::move(bytes), allocation);
+                    };
+                    tile.surface = copy_bytes(view.support());
+                    tile.domain = copy_bytes(view.domain());
+                    allocation.add(key_capacity(first.key()));
+                    tile.first = first.key();
+                    tile.first_owner = first_owner;
+                    tile.first_native_face = native_locator(first, tile.geometry);
+                    if (second)
+                    {
+                        allocation.add(key_capacity(second->key()));
+                        tile.second = second->key();
+                        tile.second_owner = second_owner;
+                        tile.second_native_face = native_locator(*second, second_physical);
+                    }
+                    tile.exterior = !second;
+                    const auto name = view.boundary();
+                    const auto name_bytes = name.size() > tile.boundary.capacity()
+                        ? cartesian_detail::insertion_growth(cartesian_detail::add(name.size(), 1)) : 0;
+                    allocation.add(name_bytes);
+                    tile.boundary = name;
+                    if (name_bytes && tile.boundary.capacity() >= name_bytes)
+                        throw std::invalid_argument("Completed subface boundary name exceeds admission.");
+                    if (!tile.exterior && !tile.boundary.empty())
+                        throw std::invalid_argument("Interior completed subface carries a boundary name.");
+                    tile.second_image_identity = view.second_image();
+                    static_assert(!decltype(tile.second_image_identity)::shared_storage);
+                    tile.second_image = PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
+                    const unsigned mask = (first_owner == comm->getRank() ? 1u : 0u) |
+                                          (second_owner == comm->getRank() ? 2u : 0u);
+                    auto payload = 20 * sizeof(std::uint64_t) + geometry_record_header_bytes;
+                    const auto first_key_size = key_wire_size(first.key());
+                    const auto second_key_size = second ? key_wire_size(second->key()) : 0;
+                    const auto image_size = PLIC::encoded_identity_size(tile.second_image_identity);
+                    for (const auto bytes : {view.support().size(), tile.identity.size(), view.domain().size(),
+                             first_key_size, second_key_size, image_size, tile.boundary.size()})
+                        payload = cartesian_detail::add(payload, bytes);
+                    allocation.add(payload);
+                    cartesian_detail::Allocation encoding(allocation);
+                    encoding.retain(cartesian_detail::insertion_growth(first_key_size));
+                    encoding.retain(cartesian_detail::insertion_growth(second_key_size));
+                    encoding.retain(cartesian_detail::insertion_growth(image_size));
+                    Writer request;
+                    request.data.reserve(payload);
+                    write_geometry_record_header(request, GeometryRecordKind::FaceAddressRequest);
+                    request.word(result.size());
+                    request.word(first_owner);
+                    request.word(std::uint64_t(second_owner + 1));
+                    request.word(mask);
+                    request.word(tile.first_native_face);
+                    request.word(tile.second_native_face);
+                    request.bytes(view.support());
+                    request.bytes(tile.identity);
+                    request.bytes(view.domain());
+                    request.bytes(encode_adaptive_key(first.key()));
+                    request.word(first.revision());
+                    request.word(first.source_surface());
+                    request.word(second ? 1 : 0);
+                    if (second)
+                    {
+                        request.bytes(encode_adaptive_key(second->key()));
+                        request.word(second->revision());
+                        request.word(second->source_surface());
+                    }
+                    request.bytes(PLIC::encode_identity(tile.second_image_identity));
+                    request.bytes(std::span(tile.boundary));
+                    request.word(view.generation());
+                    request.word(view.emission());
+                    if (request.data.size() > payload || request.data.capacity() > payload)
+                        throw std::invalid_argument("Completed subface address packet exceeds admission.");
+                    requests.push_back({authority(tile.surface, comm->getSize()), std::move(request.data)});
+                    result.push_back(std::move(tile));
+                });
+        });
+    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    struct FaceAddress
+    {
+        AdaptiveBytes definition;
+        int first_owner = -1, second_owner = -1;
+        std::uint64_t first_native = UINT64_MAX, second_native = UINT64_MAX;
+        unsigned mask = 0;
+        std::map<int, std::uint64_t> subscribers;
+    };
+    std::map<AdaptiveBytes, FaceAddress> faces;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            for (const auto& packet : incoming.packets)
+            {
+                allocation.add(packet.bytes.size());
+                allocation.add(packet.bytes.size());
+                allocation.add(sizeof(FaceAddress) + 12 * sizeof(void*));
+                Reader reader{packet.bytes};
+                read_geometry_record_header(reader, GeometryRecordKind::FaceAddressRequest);
+                const auto ordinal = reader.word();
+                const auto first = reader.word(), second = reader.word(), mask = reader.word();
+                const auto first_native = reader.word(), second_native = reader.word();
+                const auto support = reader.bytes_view();
+                auto identity = reader.bytes();
+                if (first >= std::uint64_t(comm->getSize()) || second > std::uint64_t(comm->getSize()) ||
+                    !mask || mask > 3 || support.empty() || identity.empty() ||
+                    authority(support, comm->getSize()) != comm->getRank())
+                    throw std::invalid_argument("Invalid completed subface address request.");
+                const int first_owner = int(first), second_owner = int(second) - 1;
+                const unsigned expected = (first_owner == packet.peer ? 1u : 0u) |
+                                          (second_owner == packet.peer ? 2u : 0u);
+                if (mask != expected || (!(mask & 1) && first_native != UINT64_MAX) ||
+                    (!(mask & 2) && second_native != UINT64_MAX))
+                    throw std::invalid_argument("Completed subface locator lacks its actual owner.");
+                const auto begin = reader.offset;
+                if (reader.bytes_view().empty())
+                    throw std::invalid_argument("Completed subface address lacks domain provenance.");
+                (void) decode_bounded_key(reader.bytes_view(), allocation);
+                (void) reader.word();
+                (void) reader.word();
+                if (reader.word() != std::uint64_t(second_owner >= 0))
+                    throw std::invalid_argument("Completed subface peer presence differs.");
+                if (second_owner >= 0)
+                {
+                    (void) decode_bounded_key(reader.bytes_view(), allocation);
+                    (void) reader.word();
+                    (void) reader.word();
+                }
+                (void) PLIC::decode_identity<DisplacementIdentity>(reader.bytes_view(), budget);
+                if (second_owner >= 0 && !reader.bytes_view().empty())
+                    throw std::invalid_argument("Interior completed subface has a boundary.");
+                else if (second_owner < 0)
+                    (void) reader.bytes_view();
+                (void) reader.word();
+                (void) reader.word();
+                reader.done();
+                const auto definition = reader.data.subspan(begin);
+                auto [at, inserted] = faces.try_emplace(std::move(identity));
+                auto& face = at->second;
+                if (inserted)
+                {
+                    face.definition.assign(definition.begin(), definition.end());
+                    face.first_owner = first_owner;
+                    face.second_owner = second_owner;
+                }
+                else if (face.first_owner != first_owner || face.second_owner != second_owner ||
+                         !std::ranges::equal(face.definition, definition))
+                    throw std::invalid_argument("Completed subface replicas disagree on their exact source facts.");
+                if (!face.subscribers.emplace(packet.peer, ordinal).second || (face.mask & mask))
+                    throw std::invalid_argument("Duplicate completed subface subscription.");
+                face.mask |= unsigned(mask);
+                if (mask & 1)
+                    face.first_native = first_native;
+                if (mask & 2)
+                    face.second_native = second_native;
+            }
+            for (const auto& [identity, face] : faces)
+                if (face.mask != (face.second_owner < 0 ? 1u : 3u))
+                    throw std::invalid_argument("Incomplete completed subface owner inventory.");
+        });
+    const auto [offset, global_faces] = entity_range(faces.size(), *comm);
+    if (statistics)
+        statistics->global_faces = global_faces;
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            std::uint64_t ordinal = 0;
+            for (const auto& [identity, face] : faces)
+            {
+                const auto gid = offset + ordinal++;
+                for (const auto& [subscriber, request] : face.subscribers)
+                {
+                    allocation.append_capacity(replies);
+                    const auto capacity = cartesian_detail::add(
+                        5 * sizeof(std::uint64_t) + geometry_record_header_bytes, identity.size());
+                    allocation.add(capacity);
+                    Writer reply;
+                    reply.data.reserve(capacity);
+                    if (reply.data.capacity() != capacity)
+                        throw std::invalid_argument("Completed subface reply capacity differs from admission.");
+                    write_geometry_record_header(reply, GeometryRecordKind::FaceAddressReply);
+                    reply.word(request);
+                    reply.bytes(identity);
+                    reply.word(gid);
+                    reply.word(face.first_native);
+                    reply.word(face.second_native);
+                    replies.push_back({subscriber, std::move(reply.data)});
+                }
+            }
+        });
+    incoming = {};
+    auto returned = consume_owner_packets(std::move(replies), comm, budget);
+    collective(*comm,
+        [&]
+        {
+            Budget allocation{budget};
+            allocation.add(result.size());
+            std::vector<bool> seen(result.size());
+            for (const auto& packet : returned.packets)
+            {
+                allocation.add(packet.bytes.size());
+                Reader reader{packet.bytes};
+                read_geometry_record_header(reader, GeometryRecordKind::FaceAddressReply);
+                const auto slot = reader.word();
+                const auto identity = reader.bytes_view();
+                const auto gid = reader.word(), first_native = reader.word(), second_native = reader.word();
+                reader.done();
+                if (slot >= result.size() || seen[slot] || gid >= global_faces ||
+                    packet.peer != authority(result[slot].surface, comm->getSize()) ||
+                    !std::ranges::equal(identity, result[slot].identity))
+                    throw std::invalid_argument("Foreign or repeated completed subface address reply.");
+                auto& tile = result[slot];
+                if ((tile.first_owner == comm->getRank() && tile.first_native_face != first_native) ||
+                    (tile.second_owner == comm->getRank() && tile.second_native_face != second_native))
+                    throw std::invalid_argument("Completed subface reply changed an owned native locator.");
+                tile.face_gid = gid;
+                tile.first_native_face = first_native;
+                tile.second_native_face = second_native;
+                seen[slot] = true;
+            }
+            if (std::find(seen.begin(), seen.end(), false) != seen.end())
+                throw std::invalid_argument("Missing completed subface address reply.");
+        });
+    returned = {};
+    faces.clear();
+    number_completed_adaptive_nodes(result, comm, budget, statistics, node_catalog, diagnostics);
+    diagnostics.stage = "completed_snapshot";
+    return result;
 }
 std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> owned,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t tile_budget,
@@ -1041,187 +1552,11 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     throw std::invalid_argument("Periodic edge-incidence propagation exhausted its bounded rounds.");
             });
     }
-    // Numeric node addresses are assigned by full (domain, exact point) keys.
-    // Face incidence ordering is retained; display coordinates never weld nodes.
-    requests.clear();
-    replies.clear();
-    struct NeededNode
-    {
-        AdaptiveBytes key;
-        PointIdentity point;
-        std::uint64_t gid = std::numeric_limits<std::uint64_t>::max();
-    };
-    std::vector<NeededNode> needed;
-    collective(*comm,
-        [&]
-        {
-            Budget allocation{budget};
-            std::map<AdaptiveBytes, std::uint64_t> indices;
-            for (auto& tile : result)
-            {
-                auto assign =
-                    [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry,
-                        adaptive_detail::ImmutableSequence<std::uint64_t>& incidence)
-                {
-                    auto points = geometry->vertex_identities();
-                    allocation.add(points.size() * sizeof(std::uint64_t));
-                    std::vector<std::uint64_t> gids;
-                    gids.reserve(points.size());
-                    if (gids.capacity() != points.size())
-                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
-                    for (const auto& point : points)
-                    {
-                        Writer key_writer;
-                        key_writer.bytes(tile.domain);
-                        key_writer.bytes(PLIC::canonical_key(point));
-                        auto key = std::move(key_writer.data);
-                        auto found = indices.find(key);
-                        if (found == indices.end())
-                        {
-                            allocation.add(3 * key.size() + point.payload_bytes() + sizeof(NeededNode) +
-                                           sizeof(AdaptiveBytes) + 3 * sizeof(void*));
-                            const auto ordinal = needed.size();
-                            allocation.packet(
-                                24 + geometry_record_header_bytes + key.size() + PLIC::encoded_identity_size(point));
-                            Writer request;
-                            write_geometry_record_header(request, GeometryRecordKind::NodeRequest);
-                            request.word(ordinal);
-                            request.bytes(key);
-                            request.bytes(PLIC::encode_identity(point));
-                            requests.push_back({authority(key, comm->getSize()), std::move(request.data)});
-                            found = indices.emplace(key, ordinal).first;
-                            needed.push_back({std::move(key), point});
-                        }
-                        gids.push_back(found->second);
-                    }
-                    incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
-                };
-                assign(tile.geometry, tile.node_gids);
-                if (tile.second)
-                    assign(tile.geometry->translated(
-                               PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)),
-                        tile.second_node_gids);
-            }
-        });
-    diagnostics.stage = "node_exchange";
-    incoming = consume_owner_packets(std::move(requests), comm, budget);
-    diagnostics.stage = "node_decode";
-    struct NodeAuthority
-    {
-        PLIC::GeometryPoint coordinate;
-        std::vector<std::pair<int, std::uint64_t>> subscribers;
-    };
-    std::map<AdaptiveBytes, NodeAuthority> nodes;
-    collective(*comm,
-        [&]
-        {
-            Budget allocation{budget};
-            std::set<std::pair<int, std::uint64_t>> unique;
-            for (const auto& packet : incoming.packets)
-            {
-                allocation.add(2 * packet.bytes.size() + sizeof(NodeAuthority) + 6 * sizeof(void*));
-                Reader r{packet.bytes};
-                read_geometry_record_header(r, GeometryRecordKind::NodeRequest);
-                auto ordinal = r.word();
-                auto key = r.bytes();
-                auto point = PLIC::decode_identity<PointIdentity>(r.bytes_view(), budget);
-                r.done();
-                Reader identity{key};
-                auto domain = identity.bytes(), certified_point = identity.bytes();
-                identity.done();
-                if (domain.empty() || certified_point != PLIC::canonical_key(point) ||
-                    authority(key, comm->getSize()) != comm->getRank() || !unique.emplace(packet.peer, ordinal).second)
-                    throw std::invalid_argument("Invalid canonical node request.");
-                auto found = nodes.find(key);
-                if (found == nodes.end())
-                    found = nodes
-                                .emplace(std::move(key),
-                                    NodeAuthority{PLIC::point_display<ArithmeticMode::Ordinary>(point), {}})
-                                .first;
-                found->second.subscribers.emplace_back(packet.peer, ordinal);
-            }
-        });
-    const auto [node_offset, global_nodes] = entity_range(nodes.size(), *comm);
-    if (statistics)
-        statistics->global_nodes = global_nodes;
-    collective(*comm,
-        [&]
-        {
-            Budget allocation{budget};
-            std::uint64_t ordinal = 0;
-            for (const auto& [key, node] : nodes)
-            {
-                const auto gid = node_offset + ordinal++;
-                for (const auto& [rank, request] : node.subscribers)
-                {
-                    allocation.packet(48 + geometry_record_header_bytes + key.size());
-                    Writer w;
-                    write_geometry_record_header(w, GeometryRecordKind::NodeReply);
-                    w.word(request);
-                    w.bytes(key);
-                    w.word(gid);
-                    for (double coordinate : node.coordinate)
-                        w.word(std::bit_cast<std::uint64_t>(coordinate));
-                    replies.push_back({rank, std::move(w.data)});
-                }
-            }
-        });
-    diagnostics.stage = "node_reply_exchange";
-    returned = consume_owner_packets(std::move(replies), comm, budget);
-    diagnostics.stage = "node_reply_decode";
-    collective(*comm,
-        [&]
-        {
-            Budget allocation{budget};
-            allocation.add(needed.size() * (sizeof(AdaptiveNode) + 1));
-            std::vector<bool> seen(needed.size());
-            for (const auto& packet : returned.packets)
-            {
-                allocation.add(packet.bytes.size());
-                Reader r{packet.bytes};
-                read_geometry_record_header(r, GeometryRecordKind::NodeReply);
-                auto ordinal = r.word();
-                auto key = r.bytes();
-                auto gid = r.word();
-                PLIC::GeometryPoint coordinate;
-                for (auto& value : coordinate)
-                    value = std::bit_cast<double>(r.word());
-                r.done();
-                if (ordinal >= needed.size() || seen[ordinal] || key != needed[ordinal].key ||
-                    packet.peer != authority(key, comm->getSize()) || gid >= global_nodes ||
-                    coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(needed[ordinal].point))
-                    throw std::invalid_argument("Foreign, duplicate or malformed canonical node reply.");
-                seen[ordinal] = true;
-                needed[ordinal].gid = gid;
-            }
-            for (bool value : seen)
-                if (!value)
-                    throw std::invalid_argument("Missing canonical node reply.");
-            std::vector<AdaptiveNode> catalog;
-            catalog.reserve(needed.size());
-            for (auto& node : needed)
-            {
-                const auto coordinate = PLIC::point_display<ArithmeticMode::Ordinary>(node.point);
-                catalog.push_back({node.gid, std::move(node.key), coordinate, std::move(node.point)});
-            }
-            for (auto& tile : result)
-                for (auto* incidence : {&tile.node_gids, &tile.second_node_gids})
-                {
-                    allocation.add(incidence->size() * sizeof(std::uint64_t));
-                    std::vector<std::uint64_t> gids(incidence->begin(), incidence->end());
-                    if (gids.capacity() != incidence->size())
-                        throw std::invalid_argument("Adaptive incidence capacity differs from admission.");
-                    for (auto& node : gids)
-                    {
-                        if (node >= catalog.size())
-                            throw std::invalid_argument("Invalid canonical face incidence node.");
-                        node = catalog[node].gid;
-                    }
-                    *incidence = ImmutableSequence<std::uint64_t>::freeze_builder(std::move(gids), allocation);
-                }
-            if (node_catalog)
-                *node_catalog = std::move(catalog);
-        });
+    std::vector<OwnerPacket>().swap(requests);
+    std::vector<OwnerPacket>().swap(replies);
+    incoming = {};
+    returned = {};
+    number_completed_adaptive_nodes(result, comm, budget, statistics, node_catalog, diagnostics);
     diagnostics.stage = "complete";
     return result;
 }

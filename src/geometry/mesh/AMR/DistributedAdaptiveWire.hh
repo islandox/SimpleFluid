@@ -135,7 +135,9 @@ enum class GeometryRecordKind : uint8_t
     FrozenPart,
     FrozenBatch,
     ClosureSpanContact, ///< Lossless axis spans replace the original full contact shell.
-    ClosureSpanRequests ///< Framed batches carrying ClosureSpanContact records.
+    ClosureSpanRequests, ///< Framed batches carrying ClosureSpanContact records.
+    FaceAddressRequest,
+    FaceAddressReply
 };
 struct GeometryRecordHeader
 {

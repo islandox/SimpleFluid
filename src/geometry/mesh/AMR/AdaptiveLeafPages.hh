@@ -129,6 +129,8 @@ public:
     [[nodiscard]] static AdaptiveLeafPages edit_borrowed(const AdaptiveLeafPages&, std::span<const EditView>,
         std::shared_ptr<Budget> arena, EditStats* = nullptr, const PageChanges* = nullptr);
     void visit_leaf_pages(const LeafPageVisitor&) const;
+    /** Only the fresh arena of this tree construction/edit; unchanged subtrees are skipped. */
+    void visit_created_leaf_pages(const Budget&, const LeafPageVisitor&) const;
     /** Visit each page owner while this value is pinned. The charge covers the
      * page and exclusive buffers, and excludes shared provider bodies. */
     void visit_pages(const std::function<void(const void*, std::size_t)>&) const;

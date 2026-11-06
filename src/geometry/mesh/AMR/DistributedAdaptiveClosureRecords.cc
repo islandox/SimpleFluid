@@ -226,9 +226,14 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
 }
 AdaptiveBytes encode_contact(const ContactRecord& contact, Budget& budget)
 {
+    return encode_contact(contact.key, contact.domain, contact, budget);
+}
+AdaptiveBytes encode_contact(
+    const AdaptiveCellKey& key, std::span<const char> domain, const ContactBody& contact, Budget& budget)
+{
     const auto before = budget.used;
     auto result = write_contact(
-        contact.key, contact.domain, contact.trace_faces(), contact.spans,
+        key, domain, contact.trace_faces(), contact.spans,
         [&](std::size_t axis) { return contact.factors[axis]; }, budget, [&](std::size_t bytes) { budget.add(bytes); }, true);
     budget.used -= budget.used - before - result.capacity();
     return result;
@@ -337,43 +342,33 @@ ContactRecord decode_contact(std::span<const char> bytes, Budget& budget, Identi
 {
     return read_contact(bytes, budget.limit - budget.used, &budget, &identities);
 }
-ContactRecord prepare_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
+namespace
+{
+template<class Result>
+Result prepare_contact_impl(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
     IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak)
 {
-    return prepare_contact_scope<ContactRecord>(leaf, kernel, budget, trace_records, transient_geometry_peak,
+    return prepare_contact_scope<Result>(leaf, kernel, budget, trace_records, transient_geometry_peak,
         [&](const AdaptiveTrace& trace, const std::array<long double, 3>& spans, auto&& add_transient,
             std::size_t& retained)
         {
             const auto before = budget.used;
-            budget.add(sizeof(ContactRecord));
-            ContactRecord result;
-            const auto key_before = budget.used;
-            std::visit(
-                [&](const auto& ancestry)
-                {
-                    if constexpr (requires { ancestry.path; })
-                        budget.add(ancestry.path.size() * sizeof(std::uint64_t));
-                    else if constexpr (requires {
-                                           ancestry.base;
-                                           ancestry.axial;
-                                       })
-                    {
-                        budget.add(ancestry.base.path.size() * sizeof(std::uint64_t));
-                        budget.add(ancestry.axial.path.size() * sizeof(std::uint64_t));
-                    }
-                },
-                leaf.key.ancestry);
-            const auto admitted_key = budget.used - key_before;
-            result.key = leaf.key;
-            if (key_capacity(result.key) > admitted_key)
-                budget.add(key_capacity(result.key) - admitted_key);
-            budget.add(leaf.domain.size());
-            result.domain = leaf.domain;
-            if (result.domain.capacity() > leaf.domain.size())
-                budget.add(result.domain.capacity() - leaf.domain.size());
-            result.spans = spans;
-            if (result.domain.empty())
+            budget.add(sizeof(Result));
+            Result result;
+            if (leaf.domain.empty())
                 throw std::invalid_argument("Closure contact requires connected-domain provenance.");
+            if constexpr (std::is_same_v<Result, ContactRecord>)
+            {
+                const auto bytes = key_capacity(leaf.key);
+                budget.add(bytes);
+                result.key = leaf.key;
+                budget.used -= bytes - key_capacity(result.key);
+                budget.add(leaf.domain.size());
+                result.domain = leaf.domain;
+                if (result.domain.capacity() > leaf.domain.size())
+                    budget.add(result.domain.capacity() - leaf.domain.size());
+            }
+            result.spans = spans;
             for (const auto span : result.spans)
                 if (!(span > 0))
                     throw std::invalid_argument("Invalid closure physical axis span.");
@@ -425,11 +420,24 @@ ContactRecord prepare_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKe
             return result;
         });
 }
+} // namespace
+ContactRecord prepare_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
+    IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak)
+{
+    return prepare_contact_impl<ContactRecord>(
+        leaf, kernel, budget, retained_identities, trace_records, transient_geometry_peak);
+}
+ContactBody prepare_contact_body(const AdaptiveLeaf& leaf, const AdaptiveProviderKernel& kernel, Budget& budget,
+    IdentityBudget& retained_identities, std::size_t& trace_records, std::size_t& transient_geometry_peak)
+{
+    return prepare_contact_impl<ContactBody>(
+        leaf, kernel, budget, retained_identities, trace_records, transient_geometry_peak);
+}
 bool span_exceeds_ratio(long double first, long double second, double ratio)
 {
     return first > ratio * second;
 }
-void join_closure_requirement(const ContactRecord& contact, std::optional<AdaptiveSplit>& required, std::uint64_t split)
+void join_closure_requirement(const ContactBody& contact, std::optional<AdaptiveSplit>& required, std::uint64_t split)
 {
     if (split > 2 ||
         std::all_of(contact.factors.begin(), contact.factors.end(), [](auto factor) { return factor == 3; }))

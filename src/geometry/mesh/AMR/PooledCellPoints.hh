@@ -26,7 +26,7 @@ public:
     /** The returned row is charged to the arena and charge ownership transfers
      * to the caller. Temporary normalization/audit storage is scoped here. */
     [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&);
-    [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch&);
+    [[nodiscard]] ContactIncidenceRow row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch&, bool keep_identity = true);
 
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
@@ -37,7 +37,7 @@ public:
     }
 
 private:
-    [[nodiscard]] ContactIncidenceRow make_row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch*);
+    [[nodiscard]] ContactIncidenceRow make_row(const AdaptiveLeaf&, const AdaptiveProviderKernel&, ContactPointBatch*, bool keep_identity);
     void admit(std::size_t);
     void release(std::size_t);
     Budget* budget_;

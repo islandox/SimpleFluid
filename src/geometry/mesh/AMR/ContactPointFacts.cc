@@ -342,6 +342,48 @@ ContactPointIdentity PointFactDirectory::get(ContactPointRef ref) const
     const auto& entry = checked(ref);
     return pages_[entry.page].get(entry.reference);
 }
+ContactPointIdentity PointFactDirectory::FrozenPoint::value() const
+{
+    if (const auto* stored = std::get_if<Stored>(&storage_))
+        return stored->view->get(stored->reference);
+    if (const auto* source = std::get_if<Source>(&storage_))
+        return source->view->get(source->reference);
+    if (const auto* fallback = std::get_if<Fallback>(&storage_))
+        return fallback->credit->body->values.at(fallback->slot);
+    throw std::out_of_range("Missing immutable contact point.");
+}
+void PointFactDirectory::FrozenPoint::visit_borrowed_payload(
+    const std::function<void(const ContactPayloadAllocation&)>& visitor) const
+{
+    if (const auto* stored = std::get_if<Stored>(&storage_))
+        stored->view->visit_borrowed_payload(visitor);
+    else if (const auto* source = std::get_if<Source>(&storage_))
+        source->view->visit_borrowed_payload(visitor);
+    else if (const auto* fallback = std::get_if<Fallback>(&storage_))
+    {
+        const auto& credit = fallback->credit;
+        contact_payload_object(visitor, credit.get(), ContactPayloadRole::FallbackCreditObject,
+            sizeof(FallbackCredit), true);
+        contact_payload_object(visitor, credit->body.get(), ContactPayloadRole::FallbackBodyObject,
+            sizeof(FallbackBody), true);
+        contact_payload_buffer(visitor, credit->body.get(), ContactPayloadRole::FallbackValues, credit->body->values);
+    }
+}
+PointFactDirectory::FrozenPoint PointFactDirectory::frozen(ContactPointRef reference) const
+{
+    const auto& entry = checked(reference);
+    const auto& page = pages_[entry.page];
+    FrozenPoint result;
+    if (page.view)
+        result.storage_ = FrozenPoint::Stored{page.view, entry.reference.stored};
+    else if (page.source_view)
+        result.storage_ = FrozenPoint::Source{page.source_view, entry.reference.source};
+    else if (page.fallback && page.fallback->body->sealed)
+        result.storage_ = FrozenPoint::Fallback{page.fallback, std::size_t(entry.reference.stored.value)};
+    else
+        throw std::invalid_argument("Contact point capture needs a complete frozen page.");
+    return result;
+}
 ContactPointRef PointFactDirectory::pinned_reference(std::size_t slot) const
 {
     if (slot >= entries_.size() || !entries_[slot].refs)
@@ -354,7 +396,7 @@ ContactPointRef PointFactDirectory::staging_reference(std::size_t slot) const
         throw std::out_of_range("Unavailable contact-point staging slot.");
     return {slot, entries_[slot].generation};
 }
-void PointFactDirectory::reclaim()
+void PointFactDirectory::reclaim(const std::function<void(std::size_t)>& retire_fact)
 {
     std::size_t retiring = 0;
     for (const auto& entry : entries_)
@@ -369,6 +411,8 @@ void PointFactDirectory::reclaim()
         auto& entry = entries_[i];
         if (!entry.retired)
             continue;
+        if (retire_fact)
+            retire_fact(i);
         // Exhausted generations are quarantined permanently, never wrapped.
         if (entry.generation != std::numeric_limits<std::uint64_t>::max())
         {
