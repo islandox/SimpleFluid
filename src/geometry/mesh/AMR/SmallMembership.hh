@@ -22,6 +22,11 @@ public:
 
     template<class Get> static SmallMembership make(std::size_t count, Get get)
     {
+        return make(count, get, [] { return std::make_shared<Spill>(); });
+    }
+    template<class Get, class CreateSpill>
+    static SmallMembership make(std::size_t count, Get get, CreateSpill create_spill)
+    {
         SmallMembership result;
         result.size_ = count;
         if (count <= result.inline_.size())
@@ -31,7 +36,7 @@ public:
         }
         else
         {
-            auto values = std::make_shared<Spill>();
+            auto values = create_spill();
             values->reserve(count);
             if (values->capacity() != count)
                 throw std::invalid_argument("Membership capacity differs from admission.");
@@ -41,6 +46,7 @@ public:
         }
         return result;
     }
+
 private:
     std::array<T, 2> inline_{};
     std::shared_ptr<const Spill> spill_;

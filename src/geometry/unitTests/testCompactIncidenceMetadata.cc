@@ -4,6 +4,7 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/IncidencePools.hh"
 #include "geometry/mesh/AMR/OwnedSupportMembership.hh"
@@ -483,5 +484,181 @@ TEST(CompactIncidenceMetadata, NormalImageAndTileSlotsRetainPrecisionAfterPoolFo
     EXPECT_EQ(restored->points(), (std::vector<Wide>(vertices.begin(), vertices.end())));
     EXPECT_EQ(restored->encode_incidence(), original_bytes);
     EXPECT_EQ(candidate->pools.normals.get(tile.normal_slot).values, (Wide{0, precise, 0}));
+}
+
+TEST(CompactIncidenceMetadata, PersistentSupportGroupsShareCleanSpillsAcrossSparseEdits)
+{
+    const auto measure = [](std::size_t count)
+    {
+        auto source_budget = std::make_shared<D::Budget>(D::Budget{ample});
+        auto next_budget = std::make_shared<D::Budget>(D::Budget{ample});
+        D::IdentityBudget original_ids, next_ids;
+        auto original_pools = std::make_unique<D::IncidencePools>(
+            *source_budget, original_ids, source_budget, D::IdentityPoolStorage::Persistent);
+        auto original = std::make_unique<D::PooledSupportRegistry>(
+            *source_budget, original_pools->supports, original_pools->cells, source_budget);
+        const auto support_key = [](std::size_t i) { return AMR::AdaptiveBytes{char(i >> 8), char(i & 0xff)}; };
+        const auto make_member = [](std::size_t i, std::size_t side)
+        { return D::RegistryMember{key(i, side), 9, 6 + side, 210, int(side)}; };
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const std::array<D::RegistryChange, 3> changes{{{support_key(i), make_member(i, 0), false},
+                {support_key(i), make_member(i, 1), false}, {support_key(i), make_member(i, 2), false}}};
+            original->apply(changes);
+        }
+        original->clear_dirty();
+        D::IncidencePools candidate_pools(*original_pools, *next_budget, next_ids, next_budget);
+        const auto before_fork = next_budget->used;
+        D::PooledSupportRegistry candidate(
+            *original, *next_budget, candidate_pools.supports, candidate_pools.cells, next_budget);
+        EXPECT_EQ(next_budget->used - before_fork, original->retained_bytes());
+        const auto pages = [](const auto& registry)
+        {
+            std::vector<const void*> result;
+            registry.visit_borrowed_payload(
+                [&](const D::ContactPayloadAllocation& item)
+                {
+                    if (item.identity.role == D::ContactPayloadRole::SupportRegistryGroupNodes &&
+                        item.kind == D::ContactPayloadKind::Object)
+                        result.push_back(item.identity.address);
+                });
+            return result;
+        };
+        const auto shared_pages = pages(*original);
+        EXPECT_GT(shared_pages.size(), 1u);
+        EXPECT_EQ(pages(candidate), shared_pages);
+        const auto changed = *candidate_pools.supports.find(support_key(0));
+        const auto clean = *candidate_pools.supports.find(support_key(count - 1));
+        const auto old_spill = std::weak_ptr(original->find(changed)->spill());
+        const auto clean_owner = original->find(clean)->spill().get();
+        EXPECT_EQ(candidate.find(clean)->spill().get(), clean_owner);
+        EXPECT_EQ(candidate.dirty_count(), 0u);
+
+        const D::RegistryChange remove{support_key(0), make_member(0, 2), true};
+        const auto before = next_budget->cumulative;
+        candidate.apply(std::span(&remove, 1));
+        const auto dirty_work = next_budget->cumulative - before;
+        EXPECT_EQ(candidate.dirty_count(), 1u);
+        EXPECT_EQ(candidate.generation(changed), 4u);
+        EXPECT_EQ(original->generation(changed), 3u);
+        EXPECT_EQ(candidate.find(changed)->size(), 2u);
+        EXPECT_FALSE(candidate.find(changed)->spill());
+        EXPECT_FALSE(old_spill.expired());
+        EXPECT_EQ(candidate.find(clean)->spill().get(), clean_owner);
+        const auto exact = next_budget->peak;
+        {
+            auto short_budget = std::make_shared<D::Budget>(D::Budget{exact - 1});
+            D::IdentityBudget short_ids;
+            D::IncidencePools short_pools(*original_pools, *short_budget, short_ids, short_budget);
+            D::PooledSupportRegistry rejected(
+                *original, *short_budget, short_pools.supports, short_pools.cells, short_budget);
+            const auto used = short_budget->used;
+            EXPECT_THROW(rejected.apply(std::span(&remove, 1)), std::invalid_argument);
+            EXPECT_EQ(short_budget->used, used);
+            EXPECT_EQ(rejected.dirty_count(), 0u);
+            EXPECT_EQ(rejected.generation(changed), 3u);
+            EXPECT_EQ(rejected.find(changed)->spill().get(), original->find(changed)->spill().get());
+            short_budget->limit = exact;
+            EXPECT_NO_THROW(rejected.apply(std::span(&remove, 1)));
+            EXPECT_EQ(rejected.generation(changed), 4u);
+        }
+        const auto old_overlap = candidate.overlap_bytes();
+        EXPECT_GT(old_overlap, 0u);
+        const auto retained = next_budget->used;
+        candidate.finish_overlap();
+        EXPECT_EQ(next_budget->used + old_overlap, retained);
+        original.reset();
+        original_pools.reset();
+        EXPECT_TRUE(old_spill.expired());
+        EXPECT_EQ(candidate.find(clean)->spill().get(), clean_owner);
+        EXPECT_EQ(candidate.generation(clean), 3u);
+        return dirty_work;
+    };
+    const auto small = measure(256);
+    const auto large = measure(512);
+    EXPECT_LT(large, 2 * small);
+}
+
+TEST(CompactIncidenceMetadata, PersistentSupportRegistryKeepsItsOwnBudgetThroughDestruction)
+{
+    Arena independent_pools;
+    for (bool populated : {false, true})
+    {
+        SCOPED_TRACE(populated);
+        std::optional<std::size_t> final_usage;
+        auto keeper = std::shared_ptr<D::Budget>(new D::Budget{ample},
+            [&](D::Budget* budget)
+            {
+                final_usage = budget->used;
+                delete budget;
+            });
+        const std::weak_ptr<D::Budget> arena = keeper;
+        auto registry = std::make_unique<D::PooledSupportRegistry>(
+            *keeper, independent_pools.pools.supports, independent_pools.pools.cells, keeper);
+        if (populated)
+        {
+            const D::RegistryChange add{support, members().front(), false};
+            registry->apply(std::span(&add, 1));
+        }
+        keeper.reset();
+        EXPECT_FALSE(arena.expired());
+        EXPECT_FALSE(final_usage);
+        registry.reset();
+        EXPECT_TRUE(arena.expired());
+        EXPECT_EQ(final_usage, std::optional<std::size_t>{0});
+    }
+}
+
+TEST(CompactIncidenceMetadata, SupportSpillCensusReportsTheOwningObjectAndItsBuffer)
+{
+    Arena pools;
+    for (bool persistent : {false, true})
+    {
+        SCOPED_TRACE(persistent);
+        auto budget = std::make_shared<D::Budget>(D::Budget{ample});
+        D::PooledSupportRegistry registry(
+            *budget, pools.pools.supports, pools.pools.cells, persistent ? budget : nullptr);
+        const auto input = members();
+        for (std::size_t i = 0; i < 3; ++i)
+        {
+            const D::RegistryChange add{support, input[i], false};
+            registry.apply(std::span(&add, 1));
+        }
+        const auto slot = pools.pools.supports.find(support);
+        ASSERT_TRUE(slot);
+        const auto* group = registry.find(*slot);
+        ASSERT_NE(group, nullptr);
+        const auto& spill = group->spill();
+        ASSERT_TRUE(spill);
+
+        std::optional<D::ContactPayloadAllocation> object, buffer;
+        registry.visit_borrowed_payload(
+            [&](const D::ContactPayloadAllocation& item)
+            {
+                if (item.identity.role == D::ContactPayloadRole::SupportMembershipSpill)
+                    object = item;
+                if (item.identity.role == D::ContactPayloadRole::SupportMembershipValues)
+                    buffer = item;
+            });
+        ASSERT_TRUE(object);
+        ASSERT_TRUE(buffer);
+        EXPECT_EQ(object->owner, object->identity.address);
+        EXPECT_EQ(buffer->owner, object->identity.address);
+        EXPECT_EQ(buffer->identity.address, spill->data());
+        EXPECT_EQ(buffer->payload_bytes, spill->capacity() * sizeof(D::PooledSupportMember));
+        if (persistent)
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(object->identity.address);
+            const auto vector = reinterpret_cast<std::uintptr_t>(spill.get());
+            ASSERT_GT(vector, base);
+            ASSERT_LE(vector - base, object->payload_bytes);
+            EXPECT_LE(sizeof(*spill), object->payload_bytes - (vector - base));
+        }
+        else
+        {
+            EXPECT_EQ(object->identity.address, spill.get());
+            EXPECT_EQ(object->payload_bytes, sizeof(*spill));
+        }
+    }
 }
 } // namespace
