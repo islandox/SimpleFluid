@@ -2,6 +2,7 @@
  * @brief Source-pinned owner-local adaptation with split-family authority.
  */
 #pragma once
+#include "geometry/mesh/AMR/AdaptiveFamilyLayout.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafLayout.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
@@ -55,7 +56,8 @@ public:
     [[nodiscard]] const std::shared_ptr<const AdaptiveLeafLayout>& leaf_layout() const noexcept;
     /** Borrow active leaves in the same typed-key order used by local GIDs. */
     [[nodiscard]] const AdaptiveLeafLayout& owned_leaves() const noexcept;
-    [[nodiscard]] const std::map<AdaptiveBytes, AdaptiveFamily>& families() const noexcept;
+    /** Borrow saved owner-local families in canonical family-key order. */
+    [[nodiscard]] const AdaptiveFamilyLayout& owned_families() const noexcept;
     /** Capacity-based retained allocation estimate, shared components counted
      * once; excludes allocator/control-block overhead and is distinct from RSS. */
     [[nodiscard]] Storage storage() const;

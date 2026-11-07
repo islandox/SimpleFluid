@@ -103,7 +103,7 @@ public:
             { geometry_snapshot(value, group); });
         for (const auto& value : h->owned_leaves())
             leaf(value, group);
-        for (const auto& [key, value] : h->families())
+        for (const auto value : h->owned_families())
             leaf(value.parent, group);
     }
     void tile(const AMR::AdaptiveTile& value, RetentionGroup group)

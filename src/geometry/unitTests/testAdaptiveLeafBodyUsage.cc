@@ -281,8 +281,9 @@ TEST(AdaptiveLeafBodyUsage, SavedCartesianParentSurvivesEditAndMigrationWithoutE
     };
     const auto saved = [&](const Hierarchy& state)
     {
-        const auto parent = state.families().find(family_key);
-        return parent == state.families().end() ? std::weak_ptr<const Descriptor>{} : parent->second.parent.native_recipe;
+        const auto parent = state.owned_families().find(family_key);
+        return parent ? std::weak_ptr<const Descriptor>(parent->parent.native_recipe)
+                      : std::weak_ptr<const Descriptor>{};
     };
 
     auto first = refine(source, left);
@@ -291,6 +292,18 @@ TEST(AdaptiveLeafBodyUsage, SavedCartesianParentSurvivesEditAndMigrationWithoutE
     if (comm->getRank() == 0)
         EXPECT_FALSE(first_parent.expired());
     auto second = refine(first, right);
+    EXPECT_EQ(first->owned_families().size(), comm->getRank() == 0 ? 8u : 0u);
+    for (const auto accepted : first->owned_families())
+    {
+        const auto successor = second->owned_families().find(accepted.key);
+        EXPECT_TRUE(successor);
+        if (!successor)
+            continue;
+        EXPECT_EQ(&successor->parent, &accepted.parent);
+        EXPECT_EQ(&successor->children, &accepted.children);
+        EXPECT_EQ(successor->anchor, accepted.anchor);
+        EXPECT_EQ(successor->revision, accepted.revision);
+    }
     first.reset();
     if (comm->getRank() == 0)
     {
@@ -303,18 +316,20 @@ TEST(AdaptiveLeafBodyUsage, SavedCartesianParentSurvivesEditAndMigrationWithoutE
     auto migration = second->plan_migration(destinations);
     EXPECT_EQ(migration.native_migration().self_payload_bytes, 0);
     auto moved = second->apply(migration);
+    if (comm->getSize() == 1)
+        EXPECT_EQ(&moved->owned_families(), &second->owned_families());
     second.reset();
     const auto escaped = moved->leaf_layout();
     const auto final_parent = saved(*moved);
     if (comm->getRank() == destination)
     {
-        const auto family = moved->families().find(family_key);
-        EXPECT_NE(family, moved->families().end());
-        if (family != moved->families().end())
+        const auto family = moved->owned_families().find(family_key);
+        EXPECT_TRUE(family);
+        if (family)
         {
-            EXPECT_DOUBLE_EQ(moved->metrics(family->second.parent).volume, 0.125);
+            EXPECT_DOUBLE_EQ(moved->metrics(family->parent).volume, 0.125);
             for (const auto& row : *escaped)
-                EXPECT_NE(row.native_recipe, family->second.parent.native_recipe);
+                EXPECT_NE(row.native_recipe, family->parent.native_recipe);
         }
         EXPECT_FALSE(final_parent.expired());
     }

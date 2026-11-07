@@ -190,7 +190,7 @@ TEST(AdaptiveContactSnapshot, ThreeGenerationsEscapeWithoutRetainingAnAncestorLa
     const auto during = all_contacts(*second, *middle);
     std::weak_ptr second_layout(second->leaf_layout());
     const std::array families{adaptive_family_key(low, AdaptiveSplit::Isotropic)};
-    const auto requested = std::span(families).first(second->families().contains(families.front()) ? 1 : 0);
+    const auto requested = std::span(families).first(second->owned_families().contains(families.front()) ? 1 : 0);
     auto third = second->apply(second->plan_adaptation({}, requested));
     EXPECT_NE(second->leaf_layout(), third->leaf_layout());
     EXPECT_EQ(third->topology_generation(), second->topology_generation() + 1);

@@ -2,6 +2,7 @@
  * @brief Independent plane, conservation, history and owner-pin remap oracles.
  */
 #include "FVM/GeneralVoF.hh"
+#include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "utils/testing_environment.hh"
@@ -10,9 +11,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <gtest/gtest.h>
 #include <map>
 #include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -376,8 +379,8 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
         for (unsigned phase = 0; phase < 2; ++phase)
             EXPECT_GT(exact_global_sum(history_values(*fine, phase)).sign(), 0);
         std::vector<AdaptiveBytes> families;
-        for (const auto& [key, family] : fine->hierarchy()->families())
-            families.push_back(key);
+        for (const auto family : fine->hierarchy()->owned_families())
+            families.push_back(family.key);
         const auto coarsen = fine->hierarchy()->plan_adaptation({}, families);
         const auto coarse_trial =
             fine->plan_remap(coarsen, bound_target(fine->hierarchy(), coarsen), trial.owned_channels(), schema);
@@ -444,27 +447,60 @@ TEST(FiniteVoFRemap, TangentFittingArtifactRejectsWithoutSpendingAnotherPhaseBud
     const auto values = channels(*source, true);
     const auto before = publication(*source, values);
     const auto plan = refine(*source);
+    const auto comm = Tpetra::getDefaultComm();
+    EXPECT_EQ(source->owned_order().size(), comm->getRank() == 0 ? 8u : 0u);
     bool rejected = false;
+    SimpleFluid::detail::vof_failure::Record diagnostic;
     int local_phase_gate = 0;
     try
     {
         (void) source->plan_remap(plan, bound_target(source->hierarchy(), plan), values, options());
     }
-    catch (const std::invalid_argument& error)
+    catch (const SimpleFluid::detail::vof_failure::CollectiveFailure<std::invalid_argument>& error)
     {
         rejected = true;
-        // This fixture's geometric fit produces a positive carrier receipt of
+        // This fixture's tangent remap produces a positive carrier receipt of
         // about 4.63e-45 with radius 2.99e-49 at the tangent child. Its own
         // unchanged relative budget is about 3.71e-59. No bulk/other-phase
         // or historical allowance may qualify that arithmetic uncertainty.
-        local_phase_gate = std::string(error.what()).find("independent phase budget") != std::string::npos;
+        diagnostic = error.record();
+        EXPECT_EQ(diagnostic.origin_rank, 0);
+        EXPECT_NE(std::string(diagnostic.message.data()).find("independent phase budget"), std::string::npos);
+        // The selected record is broadcast to every rank. Only the cell
+        // owner evaluates phase admission and retains its local exception.
+        EXPECT_EQ(bool(error.local_cause()), comm->getRank() == 0);
+        if (error.local_cause())
+        {
+            try
+            {
+                std::rethrow_exception(error.local_cause());
+            }
+            catch (const std::invalid_argument& original)
+            {
+                EXPECT_STREQ(original.what(), diagnostic.message.data());
+                local_phase_gate = std::string(original.what()).find("independent phase budget") != std::string::npos;
+            }
+            catch (...)
+            {
+                ADD_FAILURE() << "The original independent phase-budget rejection was not retained.";
+            }
+        }
+    }
+    catch (const std::invalid_argument& error)
+    {
+        ADD_FAILURE() << "Expected a structured collective phase-budget rejection: " << error.what();
     }
     EXPECT_TRUE(rejected);
-    // Only the rejecting owner retains its local diagnostic. Empty ranks
-    // correctly receive the collective's generic remote-rejection message.
-    int phase_gate_reports = 0;
-    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_phase_gate, &phase_gate_reports);
-    EXPECT_EQ(phase_gate_reports, 1);
+    auto selected = diagnostic;
+    Teuchos::broadcast(*comm, 0, int(sizeof(selected)), reinterpret_cast<char*>(&selected));
+    EXPECT_EQ(diagnostic.origin_rank, selected.origin_rank);
+    EXPECT_EQ(diagnostic.stage, selected.stage);
+    EXPECT_EQ(diagnostic.category, selected.category);
+    EXPECT_EQ(diagnostic.present, selected.present);
+    EXPECT_EQ(diagnostic.message, selected.message);
+    int phase_gate_owners = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_phase_gate, &phase_gate_owners);
+    EXPECT_EQ(phase_gate_owners, 1);
     EXPECT_EQ(source->accepted_control(), control);
     EXPECT_EQ(source->accepted_identity(), identity);
     EXPECT_EQ(publication(*source, values), before);
@@ -549,8 +585,8 @@ TEST(FiniteVoFRemap, WholeCellMigrationCannotGiveAChannelAnAbsentPhysicalCarrier
     const auto fine_identity = fine->accepted_identity();
     const auto fine_control = fine->accepted_control();
     std::vector<AdaptiveBytes> families;
-    for (const auto& [key, family] : fine->hierarchy()->families())
-        families.push_back(key);
+    for (const auto family : fine->hierarchy()->owned_families())
+        families.push_back(family.key);
     const auto coarsen = fine->hierarchy()->plan_adaptation({}, families);
     const auto coarse_target = bound_target(fine->hierarchy(), coarsen);
     std::vector<GeneralVoFFiniteOwnedChannels> invalid_fine;

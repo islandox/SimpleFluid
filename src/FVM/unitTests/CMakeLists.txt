@@ -465,9 +465,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # Independent finite AMR remap oracles include explicitly empty owners.
-foreach(PROCS IN ITEMS 2 4)
-  simplefluid_add_mpi_test(NAME FiniteVoFRemap_${PROCS}procs TARGET testFiniteVoFRemap PROCS ${PROCS}
-    LABELS "vof;amr;finite;history;conservation;collective;empty_rank" TIMEOUT 300)
+# Give each case its own timeout so a completed case cannot consume the time
+# available to later cases in the same MPI launch.
+foreach(_finite_vof_remap_case IN ITEMS
+    ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges
+    MigrationCopiesNonbinaryInventoriesAndInheritedBoundsExactly
+    TangentFittingArtifactRejectsWithoutSpendingAnotherPhaseBudget
+    ForeignStalePlansSchemasAndCapsRejectWithoutPublicationChanges
+    WholeCellMigrationCannotGiveAChannelAnAbsentPhysicalCarrier)
+  foreach(PROCS IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME FiniteVoFRemap_${_finite_vof_remap_case}_${PROCS}procs
+      TARGET testFiniteVoFRemap PROCS ${PROCS} ARGS "--gtest_filter=FiniteVoFRemap.${_finite_vof_remap_case}"
+      LABELS "vof;amr;finite;history;conservation;collective;empty_rank" TIMEOUT 300)
+  endforeach()
 endforeach()
 
 foreach(_semi_ranks IN ITEMS 2 4)

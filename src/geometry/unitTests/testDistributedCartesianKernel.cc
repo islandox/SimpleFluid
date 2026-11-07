@@ -782,7 +782,7 @@ TEST(DistributedCartesianKernel, SimultaneousSubtreeInverseRetainsAncestorAnchor
     auto migration = restored->plan_migration(destinations);
     auto moved = restored->apply(migration);
     compare_oracle(*moved, *level_one);
-    for (const auto& [key, family] : moved->families())
+    for (const auto family : moved->owned_families())
         EXPECT_TRUE(moved->owned_leaves().contains(::SimpleFluid::Meshes::AMR::decode_adaptive_key(family.anchor)));
     requests.clear();
     if (comm->getRank() == 0)
@@ -791,7 +791,7 @@ TEST(DistributedCartesianKernel, SimultaneousSubtreeInverseRetainsAncestorAnchor
     auto final_inverse = moved->plan_adaptation({}, requests);
     auto final = moved->apply(final_inverse);
     compare_oracle(*final, root);
-    EXPECT_TRUE(final->families().empty());
+    EXPECT_TRUE(final->owned_families().empty());
 }
 TEST(DistributedCartesianKernel, RankDivergentKernelSemanticsRejectCollectively)
 {

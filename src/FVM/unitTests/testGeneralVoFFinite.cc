@@ -879,8 +879,8 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
     EXPECT_EQ(source->carrier_volumes(), input.carrier);
     const auto refined = trial.candidate();
     std::vector<AdaptiveBytes> families;
-    for (const auto& [key, family] : refined->hierarchy()->families())
-        families.push_back(key);
+    for (const auto family : refined->hierarchy()->owned_families())
+        families.push_back(family.key);
     const auto coarsen = refined->hierarchy()->plan_adaptation({}, families);
     const auto coarse_target = bound_candidate(refined->hierarchy(), coarsen);
     reset_dispatch_statistics();

@@ -845,10 +845,16 @@ DistributedAdaptiveState::Plan DistributedAdaptiveState::migrate(
                 group.leaves.push_back(hierarchy.owned_leaves().at(key));
                 routes.emplace(::SimpleFluid::Meshes::AMR::encode_adaptive_key(key), rank);
             }
-            for (const auto& [key, family] : hierarchy.families())
+            for (const auto family : hierarchy.owned_families())
             {
-                budget.add(sizeof(::SimpleFluid::Meshes::AMR::AdaptiveFamily));
-                groups.at(routes.at(family.anchor)).families.push_back(family);
+                const auto rank = routes.at(family.anchor);
+                if (rank == comm->getRank())
+                    continue;
+                auto& capsules = groups.at(rank).families;
+                budget.append_capacity(capsules);
+                budget.add(
+                    ::SimpleFluid::Meshes::AMR::adaptive_detail::AdaptiveFamilyStorage::copy_buffer_bytes(family));
+                capsules.push_back(family.materialize());
             }
             for (const auto& [rank, group] : groups)
             {

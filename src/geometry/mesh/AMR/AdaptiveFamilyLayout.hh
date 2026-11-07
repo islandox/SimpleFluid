@@ -240,15 +240,24 @@ public:
     [[nodiscard]] static Layout build(
         std::span<const AdaptiveFamily> families, std::shared_ptr<Budget> arena, std::uint64_t topology)
     {
+        auto row = families.begin();
+        return build_from(
+            families.size(), [&]() -> const AdaptiveFamily& { return *row++; }, std::move(arena), topology);
+    }
+
+    template<class Next>
+    [[nodiscard]] static Layout build_from(
+        std::size_t count, Next&& family, std::shared_ptr<Budget> arena, std::uint64_t topology)
+    {
         Layout next(std::move(arena), topology);
         Charge scratch(next.inherited_.keeper());
         std::vector<Row> rows;
-        scratch.add(persistent_ordered_detail::checked_product(families.size(), sizeof(Row)));
-        rows.reserve(families.size());
-        if (rows.capacity() != families.size())
+        scratch.add(persistent_ordered_detail::checked_product(count, sizeof(Row)));
+        rows.reserve(count);
+        if (rows.capacity() != count)
             throw std::invalid_argument("Family bootstrap capacity differs from admission.");
-        for (const auto& family : families)
-            rows.push_back(make_record(family, next.inherited_.keeper()));
+        for (std::size_t i = 0; i < count; ++i)
+            rows.push_back(make_record(family(), next.inherited_.keeper()));
         std::sort(rows.begin(), rows.end(), Layout::FamilyLess{});
         next.primary_ = Primary(next.inherited_.keeper()).build(rows);
         std::sort(rows.begin(), rows.end(), Layout::AnchorLess{});
@@ -323,6 +332,10 @@ public:
         return next;
     }
 
+    /** Deep buffers copied by materialize(). A retaining container admits
+     * its object slots separately. */
+    [[nodiscard]] static std::size_t copy_buffer_bytes(const AdaptiveFamilyView& family) { return buffers(family); }
+
     [[nodiscard]] static std::size_t storage_bytes(const Layout& layout) noexcept
     {
         return (layout.primary_ ? layout.primary_->subtree_bytes + layout.primary_->weights.total : 0) +
@@ -359,7 +372,7 @@ public:
     }
 
 private:
-    static std::size_t buffers(const AdaptiveFamily& family)
+    template<class Family> static std::size_t buffers(const Family& family)
     {
         using persistent_ordered_detail::checked_product;
         Budget bytes{std::numeric_limits<std::size_t>::max()};

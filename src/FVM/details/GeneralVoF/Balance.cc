@@ -314,11 +314,17 @@ GeneralVoFBalanceProposal plan_partition_proposal(std::shared_ptr<const GeneralV
                 routes.emplace(std::move(key), peer);
                 groups[peer].leaves.push_back(hierarchy.owned_leaves().at(cells[i].key));
             }
-            for (const auto& [key, family] : hierarchy.families())
+            for (const auto family : hierarchy.owned_families())
             {
-                retained.add(2 * sizeof(AMR::AdaptiveFamily));
-                charge(retained, AMR::encode_adaptive_family(family).size(), 2);
-                groups.at(routes.at(family.anchor)).families.push_back(family);
+                const auto peer = routes.at(family.anchor);
+                if (peer == rank)
+                    continue;
+                auto& capsules = groups.at(peer).families;
+                retained.append_capacity(capsules);
+                retained.add(AMR::adaptive_detail::AdaptiveFamilyStorage::copy_buffer_bytes(family));
+                auto capsule = family.materialize();
+                charge(retained, AMR::encode_adaptive_family(capsule).size(), 2);
+                capsules.push_back(std::move(capsule));
             }
             for (const auto& [peer, group] : groups)
                 if (peer != rank)

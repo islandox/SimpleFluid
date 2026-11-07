@@ -121,7 +121,7 @@ TEST(DistributedMixedKernel, InteriorOnlyDescendantsKeepOriginalJoinAliasesAfter
     for (int depth = 1; depth >= 0; --depth)
     {
         std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> families;
-        for (const auto& [key, f] : h->families())
+        for (const auto f : h->owned_families())
         {
             if (f.split != ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic)
                 continue;
@@ -138,7 +138,7 @@ TEST(DistributedMixedKernel, InteriorOnlyDescendantsKeepOriginalJoinAliasesAfter
                 },
                 f.parent.key.ancestry);
             if (wanted)
-                families.push_back(key);
+                families.push_back(f.key);
         }
         h = h->apply(h->plan_adaptation({}, families));
         closed(*h);
@@ -253,10 +253,10 @@ TEST(DistributedMixedKernel, PartialNamedPatchOfWholeNativeFacesKeepsPhysicalRem
     closed(*refined);
     check_remainder(*refined);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> inverse;
-    for (const auto& [k, f] : refined->families())
+    for (const auto f : refined->owned_families())
         if (f.parent.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product &&
             f.split == ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Base)
-            inverse.push_back(k);
+            inverse.push_back(f.key);
     auto restored = refined->apply(refined->plan_adaptation({}, inverse));
     EXPECT_EQ(restored->global_cells(), h->global_cells());
     closed(*restored);
@@ -304,7 +304,7 @@ TEST(DistributedMixedKernel, RefinedCartesianSourceKeepsDistinctAcceptedDestinat
     for (int level = 1; level >= 0; --level)
     {
         std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> restore;
-        for (const auto& [key, family] : h->families())
+        for (const auto family : h->owned_families())
             if (const auto* key =
                     std::get_if<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(&family.parent.key.ancestry);
                 key && key->level == unsigned(level))

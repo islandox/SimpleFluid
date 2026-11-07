@@ -2,6 +2,7 @@
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -14,6 +15,7 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -41,8 +43,8 @@ Snapshot snapshot(const Hierarchy& state)
     Snapshot result{state.observation(), {}, {}};
     for (const auto& leaf : state.owned_leaves())
         result.leaves.push_back(AMR::encode_adaptive_leaf(leaf));
-    for (const auto& [key, family] : state.families())
-        result.families.push_back(AMR::encode_adaptive_family(family));
+    for (const auto family : state.owned_families())
+        result.families.push_back(AMR::encode_adaptive_family(family.materialize()));
     return result;
 }
 template<class Operation> void reject_closure_collectively(Operation&& operation)
@@ -306,6 +308,7 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     auto bound = source->with_partition(native.partition, native.mesh->owned_cell_map());
     EXPECT_EQ(bound->leaf_layout(), layout);
     EXPECT_EQ(&bound->owned_leaves(), &source->owned_leaves());
+    EXPECT_EQ(&bound->owned_families(), &source->owned_families());
     EXPECT_TRUE(geometry->matches_layout(bound->leaf_layout()));
     std::size_t rebound_used = 0;
     EXPECT_EQ(bound->geometry_snapshot(
@@ -315,6 +318,15 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
     auto unchanged = source->apply(source->plan_adaptation({}));
     EXPECT_EQ(unchanged->leaf_layout(), layout);
     auto refined = adapt(source, product_marks(*source, AMR::AdaptiveSplit::Base));
+    const auto family_key = AMR::adaptive_family_key(product_key(1, 0), AMR::AdaptiveSplit::Base);
+    const auto fetched = refined->fetch_families(std::span(&family_key, 1));
+    EXPECT_EQ(fetched.size(), 1u);
+    if (!fetched.empty())
+    {
+        EXPECT_EQ(fetched.front().revision, refined->topology_generation());
+        if (const auto local = refined->owned_families().find(family_key))
+            EXPECT_EQ(AMR::encode_adaptive_family(local->materialize()), AMR::encode_adaptive_family(fetched.front()));
+    }
     EXPECT_NE(refined->leaf_layout(), layout);
     EXPECT_FALSE(geometry->matches_layout(refined->leaf_layout()));
     source.reset();
@@ -334,6 +346,103 @@ TEST(IncrementalAdaptiveHierarchy, LeafLayoutSharesMapAndRetainsHistoricalVersio
         retained_leaves.push_back(AMR::encode_adaptive_leaf(leaf));
     }
     EXPECT_EQ(retained_leaves, before.leaves);
+}
+
+TEST(IncrementalAdaptiveHierarchy, NonemptyFamilyBindingAndRankLocalPublicationRejection)
+{
+    namespace detail = AMR::adaptive_detail;
+    using Storage = detail::AdaptiveFamilyStorage;
+    const auto source = product_source();
+    const auto refined = adapt(source, product_marks(*source, AMR::AdaptiveSplit::Base));
+    const auto comm = refined->communicator();
+    const bool tight_rank = comm->getRank() == 0;
+    auto native = AMR::assemble_adaptive_native(*refined, refined->configuration_descriptor());
+    const auto bound = refined->with_partition(native.partition, native.mesh->owned_cell_map());
+    const auto& layout = bound->owned_families();
+    EXPECT_EQ(&layout, &refined->owned_families());
+    EXPECT_EQ(layout.empty(), !tight_rank);
+    for (const auto family : layout)
+    {
+        const auto old = refined->owned_families().at(family.key);
+        EXPECT_EQ(&family.parent, &old.parent);
+        EXPECT_EQ(&family.children, &old.children);
+        EXPECT_EQ(&family.anchor, &old.anchor);
+        EXPECT_EQ(family.revision, old.revision);
+    }
+
+    const auto before = snapshot(*bound);
+    const auto leaf_root = bound->leaf_layout();
+    const auto layout_bytes = Storage::storage_bytes(layout);
+    const auto full_cap = bound->options().byte_budget;
+    std::vector<AMR::AdaptiveOwner> registrations;
+    for (const auto family : layout)
+        registrations.push_back({family.key, comm->getRank(), family.revision});
+
+    // Use the real private family seal and leased directory registration on
+    // this accepted hierarchy. The fixture chooses its rank-local admission
+    // limits without adding a production failure injection hook.
+    std::optional<AMR::AdaptiveFamily> replacement;
+    std::vector<Storage::Edit> edits;
+    auto seal_cap = full_cap;
+    detail::collective(*comm,
+        [&]
+        {
+            if (!tight_rank)
+                return;
+            if (layout.empty())
+                throw std::logic_error("Budget fixture requires a saved family on rank zero.");
+            const auto saved = *layout.begin();
+            replacement.emplace(saved.materialize());
+            replacement->anchor = AMR::encode_adaptive_key(replacement->children.back());
+            edits.push_back({replacement->key, saved.revision, &*replacement});
+            auto probe = std::make_shared<detail::Budget>(detail::Budget{full_cap});
+            Storage::Work work;
+            const auto accepted = Storage::edited(
+                layout, edits, probe, bound->topology_generation(), work, [](const auto*, const auto*) {});
+            seal_cap = probe->peak - 1;
+        });
+
+    auto seal_memory = std::make_shared<detail::Budget>(detail::Budget{seal_cap});
+    std::unique_ptr<AMR::AdaptiveFamilyLayout> uncommitted;
+    bool local_seal_rejected = false;
+    Storage::Work work;
+    EXPECT_THROW(detail::collective(*comm,
+                     [&]
+                     {
+                         try
+                         {
+                             uncommitted = std::make_unique<AMR::AdaptiveFamilyLayout>(Storage::edited(layout, edits,
+                                 seal_memory, bound->topology_generation(), work, [](const auto*, const auto*) {}));
+                         }
+                         catch (const std::invalid_argument&)
+                         {
+                             local_seal_rejected = true;
+                             throw;
+                         }
+                     }),
+        std::invalid_argument);
+    EXPECT_EQ(local_seal_rejected, tight_rank);
+    EXPECT_EQ(bool(uncommitted), !tight_rank);
+    uncommitted.reset();
+    EXPECT_EQ(seal_memory->used, 0u);
+    EXPECT_EQ(&bound->owned_families(), &layout);
+    EXPECT_EQ(Storage::storage_bytes(layout), layout_bytes);
+    EXPECT_EQ(snapshot(*bound), before);
+
+    const auto directory_cap = tight_rank ? std::size_t{1} : full_cap;
+    EXPECT_THROW(
+        (void) AMR::DistributedAncestryDirectory(registrations, comm, full_cap, directory_cap), std::invalid_argument);
+    EXPECT_EQ(&bound->owned_families(), &layout);
+    EXPECT_EQ(bound->leaf_layout(), leaf_root);
+    EXPECT_EQ(snapshot(*bound), before);
+    const auto key = AMR::adaptive_family_key(product_key(1, 0), AMR::AdaptiveSplit::Base);
+    const auto owner = bound->lookup_families(std::span(&key, 1));
+    EXPECT_EQ(owner.size(), 1u);
+    if (!owner.empty())
+    {
+        EXPECT_EQ(owner.front().owner, 0);
+        EXPECT_EQ(owner.front().revision, bound->topology_generation());
+    }
 }
 
 TEST(IncrementalAdaptiveHierarchy, GeometrySnapshotDoesNotRetainLeafLayout)

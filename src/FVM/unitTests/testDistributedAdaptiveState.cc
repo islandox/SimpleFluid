@@ -346,8 +346,8 @@ TEST(DistributedAdaptiveState, RemapNoOpMigrationAndQualifiedReconstructionKeepS
     EXPECT_EQ(qualified->field("accepted", "mass"), moved->field("accepted", "mass"));
     operators(*qualified);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> families;
-    for (const auto& [key, family] : qualified->hierarchy()->families())
-        families.push_back(key);
+    for (const auto family : qualified->hierarchy()->owned_families())
+        families.push_back(family.key);
     auto coarsened = qualified->apply(qualified->plan_adaptation({}, families));
     EXPECT_EQ(coarsened->hierarchy()->global_cells(), 8u);
     EXPECT_EQ(source->hierarchy()->global_cells(), 8u);
@@ -567,9 +567,9 @@ TEST(DistributedAdaptiveState, MixedUnequalNativeSeamMigratesRemapsAndRestoresPo
     }
     auto qualified = refined->with_reconstruction(reconstruction);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> restore;
-    for (const auto& [key, family] : qualified->hierarchy()->families())
+    for (const auto family : qualified->hierarchy()->owned_families())
         if (family.parent.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Polyhedral)
-            restore.push_back(key);
+            restore.push_back(family.key);
     auto restored = qualified->apply(qualified->plan_adaptation({}, restore));
     EXPECT_EQ(restored->hierarchy()->global_cells(), moved->hierarchy()->global_cells());
     operators(*restored);
@@ -832,8 +832,8 @@ TEST(DistributedAdaptiveState, PeriodicPhysicalImageHistoriesRemapMigrateAndCoar
     }
     auto ready = moved->with_reconstruction(reconstruction);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> restore;
-    for (const auto& [key, family] : ready->hierarchy()->families())
-        restore.push_back(key);
+    for (const auto family : ready->hierarchy()->owned_families())
+        restore.push_back(family.key);
     auto coarse = ready->apply(ready->plan_adaptation({}, restore));
     EXPECT_EQ(coarse->hierarchy()->global_cells(), 8u);
     check(*coarse);
