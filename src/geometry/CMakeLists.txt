@@ -83,6 +83,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
+    PLIC/details/GeometryOwnerManifest.cc
+    PLIC/details/GeometryDemandOrder.cc
     PLIC/ConvexConstruction.cc
     PLIC/CellGeometryView.cc
     PLIC/CellGeometryConstraints.cc
@@ -213,6 +215,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         PLIC/GeometryIdentityCodec.cc PLIC/PlaneMeasure.cc swept_volume/OrdinaryAggregate.cc PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
         PLIC/ConstructionRegistry.cc
         PLIC/GeometryAllocationLedger.cc
+        PLIC/details/GeometryOwnerManifest.cc
+        PLIC/details/GeometryDemandOrder.cc
         PLIC/ScalarPacket.cc
         PLIC/CertifiedGeometryProperties.cc
         PLIC/details/ordinary/GeometryMeasure.cc
@@ -345,6 +349,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
+    PLIC/details/GeometryOwnerManifest.cc
+    PLIC/details/GeometryDemandOrder.cc
     PLIC/ConvexConstruction.cc
     PLIC/CellGeometryView.cc
     PLIC/CellGeometryConstraints.cc
