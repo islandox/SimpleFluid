@@ -74,13 +74,25 @@ void write_context(Writer& writer, ContactHaloContext context)
         writer.word(value);
 }
 } // namespace
+CartesianSourceManifestSet::ReceiptBytes::ReceiptBytes(ContactGroupAllocation charge, std::span<const char> input)
+    : admission(std::move(charge)), bytes(input.begin(), input.end())
+{
+    if (bytes.capacity() != input.size())
+        throw std::invalid_argument("Remote manifest body capacity differs from admission.");
+}
+bool CartesianSourceManifestSet::RangeLess::operator()(
+    const CartesianIncidenceRange& a, const CartesianIncidenceRange& b) const noexcept
+{
+    return std::tie(a.level, a.lower, a.upper) < std::tie(b.level, b.lower, b.upper);
+}
 CartesianIncidenceRange CartesianSourceManifestSet::Source::range(std::size_t index) const
 {
-    if (!active_ranges_.empty())
-        return active_ranges_.at(index);
-    if (index >= ranges_)
+    if (index >= range_count())
         throw std::out_of_range("Invalid source manifest range index.");
-    Reader reader{std::span<const char>(identity_).subspan(ranges_offset_ + 56 * index, 56)};
+    if (active_ranges_)
+        return CartesianInventoryRows<CartesianIncidenceRange, RangeTree::Node>(active_ranges_.get())[index];
+    const auto encoded = active_count_ ? raw_active_ranges() : identity().subspan(ranges_offset_);
+    Reader reader{encoded.subspan(56 * index, 56)};
     CartesianIncidenceRange value;
     value.level = unsigned(reader.word());
     for (auto& n : value.lower)
@@ -100,7 +112,7 @@ CartesianSourceManifestSet::Source::Axis CartesianSourceManifestSet::Source::axi
 {
     if (index >= axes_)
         throw std::out_of_range("Invalid source manifest axis selector.");
-    Reader reader{std::span<const char>(identity_).subspan(axes_offset_)};
+    Reader reader{identity().subspan(axes_offset_)};
     for (std::size_t i = 0;; ++i)
     {
         const auto level = reader.word(), direction = reader.word(), first = reader.word(),
@@ -129,7 +141,7 @@ std::uint64_t CartesianSourceManifestSet::Source::revision(const CartesianCellAn
     while (lower < upper)
     {
         const auto middle = lower + (upper - lower) / 2;
-        Reader reader{std::span<const char>(identity_).subspan(revisions_offset_ + 40 * middle, 40)};
+        Reader reader{identity().subspan(revisions_offset_ + 40 * middle, 40)};
         CartesianCellAncestry key;
         key.level = unsigned(reader.word());
         for (auto& v : key.index)
@@ -141,7 +153,7 @@ std::uint64_t CartesianSourceManifestSet::Source::revision(const CartesianCellAn
     }
     if (lower < revisions_)
     {
-        Reader reader{std::span<const char>(identity_).subspan(revisions_offset_ + 40 * lower, 40)};
+        Reader reader{identity().subspan(revisions_offset_ + 40 * lower, 40)};
         CartesianCellAncestry key;
         key.level = unsigned(reader.word());
         for (auto& v : key.index)
@@ -159,13 +171,13 @@ void CartesianSourceManifestSet::Source::authenticate(
     cells_ = cells;
     version_ = version;
     const MetadataEnvironment environment;
-    if (identity_.empty())
+    if (identity().empty())
     {
         if (cells || version)
             throw std::invalid_argument("Nonempty source inventory has no immutable identity.");
         return;
     }
-    Reader reader{identity_};
+    Reader reader{identity()};
     if (reader.word() != 0x5346434953524331ULL)
         throw std::invalid_argument("Invalid source identity family.");
     evaluation_ = {reader.word(), reader.word(), reader.word(), reader.word()};
@@ -173,7 +185,7 @@ void CartesianSourceManifestSet::Source::authenticate(
     if (!std::ranges::equal(reader.bytes_view(), expected))
         throw std::invalid_argument("Source manifest differs from trusted grid contract.");
     const auto domain = reader.bytes_view();
-    domain_offset_ = std::size_t(domain.data() - identity_.data());
+    domain_offset_ = std::size_t(domain.data() - identity().data());
     domain_size_ = domain.size();
     if (domain.empty() || reader.word() != std::uint64_t(owner) || reader.word() != version ||
         read_context(reader) != context)
@@ -205,7 +217,7 @@ void CartesianSourceManifestSet::Source::authenticate(
         }
         for (std::size_t old = 0; old < i; ++old)
         {
-            Reader previous{std::span<const char>(identity_).subspan(ranges_offset_ + 56 * old, 56)};
+            Reader previous{identity().subspan(ranges_offset_ + 56 * old, 56)};
             const auto old_level = unsigned(previous.word());
             std::array<std::uint64_t, 3> old_lower{}, old_upper{};
             for (auto& n : old_lower)
@@ -282,12 +294,57 @@ void CartesianSourceManifestSet::Source::authenticate(
     }
     reader.done();
 }
+void CartesianSourceManifestSet::PeerWeights::add_row(Summary& total, const Peer& row, const Budget*)
+{
+    total.sources = add(total.sources, row.sources ? row.sources->size : 0);
+}
+void CartesianSourceManifestSet::PeerWeights::add_child(Summary& total, const Summary& child, bool)
+{
+    total.sources = add(total.sources, child.sources);
+}
+std::size_t CartesianSourceManifestSet::source_count() const noexcept
+{
+    return peers_ ? peers_->weights.sources : 0;
+}
+const CartesianSourceManifestSet::Source& CartesianSourceManifestSet::source(std::size_t ordinal) const
+{
+    if (ordinal >= source_count())
+        throw std::out_of_range("Invalid source manifest ordinal.");
+    const auto* node = peers_.get();
+    while (!node->leaf())
+    {
+        for (const auto& child : node->children)
+        {
+            if (ordinal < child->weights.sources)
+            {
+                node = child.get();
+                break;
+            }
+            ordinal -= child->weights.sources;
+        }
+    }
+    for (const auto& peer : node->rows)
+    {
+        const SourceRows rows(peer.sources.get());
+        if (ordinal < rows.size())
+            return rows[ordinal];
+        ordinal -= rows.size();
+    }
+    throw std::logic_error("Source manifest ordinal differs from its cached counts.");
+}
 bool CartesianSourceManifestSet::has_explicit_support(std::span<const char> key) const noexcept
 {
-    for (const auto& cell : explicit_cells_)
-        for (const auto& member : cell.members)
-            if (std::ranges::equal(member.support, key))
-                return true;
+    for (const auto& peer : peers())
+        for (const auto& cell : ExplicitRows(peer.explicit_cells.get()))
+        {
+            Reader reader{cell.member_bytes()};
+            for (unsigned ordinal = 0; ordinal != 6; ++ordinal)
+            {
+                if (std::ranges::equal(reader.bytes_view(), key))
+                    return true;
+                (void) reader.word();
+            }
+        }
     return false;
 }
 bool CartesianSourceManifestSet::native_member(const RegistryMember& member, std::span<const char> domain) const
@@ -295,23 +352,35 @@ bool CartesianSourceManifestSet::native_member(const RegistryMember& member, std
     const auto* ancestry = std::get_if<CartesianCellAncestry>(&member.cell.ancestry);
     if (!ancestry || member.cell.region != grid_.region_id || member.surface >= 6)
         return false;
-    for (const auto& source : sources_)
-        if (source.owner() == member.owner && source.cell_count() && std::ranges::equal(source.domain(), domain))
-            for (std::size_t i = 0; i != source.range_count(); ++i)
-            {
-                const auto range = source.range(i);
-                bool inside = range.level == ancestry->level;
-                for (unsigned a = 0; a != 3; ++a)
-                    inside = inside && range.lower[a] <= ancestry->index[a] && ancestry->index[a] < range.upper[a];
-                if (inside)
-                    return source.revision(*ancestry) == member.revision;
-            }
+    for (const auto& peer : peers())
+        if (peer.owner == member.owner)
+            for (const auto& source : SourceRows(peer.sources.get()))
+                if (source.cell_count() && std::ranges::equal(source.domain(), domain))
+                    for (std::size_t i = 0; i != source.range_count(); ++i)
+                    {
+                        const auto range = source.range(i);
+                        bool inside = range.level == ancestry->level;
+                        for (unsigned a = 0; a != 3; ++a)
+                            inside =
+                                inside && range.lower[a] <= ancestry->index[a] && ancestry->index[a] < range.upper[a];
+                        if (inside)
+                            return source.revision(*ancestry) == member.revision;
+                    }
     return false;
+}
+bool CartesianSourceManifestSet::receipts_admitted_in(const CartesianAuthorityArena& arena) const noexcept
+{
+    if (!shared_receipts_)
+        return true;
+    if (const auto current = weak_from_this().lock();
+        current && arena.prepaid(current, allocation_budget(), metadata_bytes(), false))
+        return true;
+    const auto previous = predecessor_.lock();
+    return previous && arena.prepaid(previous, previous->allocation_budget(), previous->metadata_bytes(), false);
 }
 CartesianSourceManifestSet::~CartesianSourceManifestSet()
 {
-    decltype(sources_){}.swap(sources_);
-    decltype(explicit_cells_){}.swap(explicit_cells_);
+    peers_.reset();
     local_.reset();
     decltype(leases_){}.swap(leases_);
     if (budget_)
@@ -352,9 +421,9 @@ void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, 
         const auto original_cells = host_size(original.word());
         sources.emplace_back();
         auto& source = sources.back();
-        memory.copy(source.identity_, identity);
+        source.borrowed_identity_ = identity;
         source.authenticate(grid, source_context, owner, original_cells, source_version);
-        memory.reserve(source.active_ranges_, range_count);
+        source.borrowed_ranges_ = reader.data.subspan(reader.offset, 56 * range_count);
         std::size_t batch_cells = 0;
         for (std::size_t range_index = 0; range_index < range_count; ++range_index)
         {
@@ -378,8 +447,7 @@ void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, 
             // adjacent original boxes; no geometry or neighbor inference occurs.
             for (std::size_t old = 0; old < source.ranges_; ++old)
             {
-                Reader old_reader{
-                    std::span<const char>(source.identity_).subspan(source.ranges_offset_ + 56 * old, 56)};
+                Reader old_reader{source.identity().subspan(source.ranges_offset_ + 56 * old, 56)};
                 CartesianIncidenceRange prior;
                 prior.level = unsigned(old_reader.word());
                 for (auto& value : prior.lower)
@@ -399,9 +467,10 @@ void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, 
             }
             if (covered != volume)
                 throw std::invalid_argument("Active selector exceeds authenticated original source membership.");
-            for (std::size_t prior_source = 0; prior_source < sources.size(); ++prior_source)
-                for (const auto& prior : sources[prior_source].active_ranges_)
+            for (const auto& previous : sources)
+                for (std::size_t i = 0; i < previous.active_count_; ++i)
                 {
+                    const auto prior = previous.range(i);
                     const auto& coarse = prior.level <= range.level ? prior : range;
                     const auto& fine = prior.level <= range.level ? range : prior;
                     const auto shift = fine.level - coarse.level;
@@ -412,7 +481,7 @@ void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, 
                     if (overlap)
                         throw std::invalid_argument("Duplicate complete active source membership.");
                 }
-            source.active_ranges_.push_back(range);
+            ++source.active_count_;
             batch_cells = add(batch_cells, volume);
         }
         if (batch_cells != active_cells)
@@ -431,7 +500,7 @@ void CartesianSourceManifestSet::decode_inventory(std::vector<Source>& sources, 
 }
 void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloContext context, std::uint64_t generation,
     std::span<const OwnerPacket> records, int ranks, std::vector<Source>& sources,
-    std::vector<ExplicitCell>& explicit_cells, Allocation& memory)
+    std::vector<ExplicitCell>& explicit_cells, std::vector<WirePeer>& peers, Allocation& memory)
 {
     if (ranks <= 0 || records.size() != std::size_t(ranks) || !sources.empty())
         throw std::invalid_argument("Missing complete source owner receipt, including empty owners.");
@@ -439,10 +508,12 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
     std::vector<unsigned char> seen;
     scratch.reserve(seen, std::size_t(ranks));
     seen.resize(ranks, 0);
+    memory.reserve(peers, std::size_t(ranks));
     for (const auto& packet : records)
     {
         if (packet.peer < 0 || packet.peer >= ranks || seen[packet.peer]++)
             throw std::invalid_argument("Duplicate or foreign source owner receipt.");
+        WirePeer peer{packet.peer, sources.size(), 0, explicit_cells.size(), 0};
         Reader reader{packet.bytes};
         if (reader.word() != manifest_magic)
             throw std::invalid_argument("Invalid source manifest family.");
@@ -468,7 +539,7 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
         {
             memory.append(sources);
             sources.emplace_back();
-            memory.copy(sources.back().identity_, identity);
+            sources.back().borrowed_identity_ = identity;
             sources.back().authenticate(grid, context, packet.peer, cells, version);
         }
         if (schema == 3)
@@ -493,7 +564,6 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                     throw;
                 }
                 memory.bytes = add(memory.bytes, memory.budget.used - before);
-                cell.owner = packet.peer;
                 cell.revision = reader.word();
                 const auto members = host_size(reader.word());
                 if (members != 6 || members > (reader.data.size() - reader.offset) / 16)
@@ -542,7 +612,8 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                             if (overlap)
                                 throw std::invalid_argument("Explicit/native source inventories overlap.");
                         }
-                memory.reserve(cell.members, members);
+                const auto member_begin = reader.offset;
+                std::array<std::span<const char>, 6> previous_keys;
                 std::span<const char> domain;
                 for (std::size_t ordinal = 0; ordinal != members; ++ordinal)
                 {
@@ -579,16 +650,18 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                         if (a != axis && key.word() != (ancestry->index[a] >> (ancestry->level - unsigned(level))))
                             throw std::invalid_argument("Explicit support transverse identity differs.");
                     key.done();
-                    for (const auto& previous : cell.members)
-                        if (std::ranges::equal(previous.support, support))
+                    for (const auto& previous : std::span(previous_keys).first(ordinal))
+                        if (std::ranges::equal(previous, support))
                             throw std::invalid_argument("Duplicate explicit face ordinal/key.");
-                    cell.members.emplace_back();
-                    memory.copy(cell.members.back().support, support);
-                    cell.members.back().encoded_size = encoded_size;
+                    previous_keys[ordinal] = support;
                 }
+                cell.borrowed_members = reader.data.subspan(member_begin, reader.offset - member_begin);
             }
         }
         reader.done();
+        peer.source_end = sources.size();
+        peer.explicit_end = explicit_cells.size();
+        peers.push_back(peer);
     }
     for (const auto& cell : explicit_cells)
     {
@@ -613,17 +686,285 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                 }
     }
 }
+struct CartesianSourceManifestSet::Builder
+{
+    CartesianSourceManifestSet& result;
+    std::shared_ptr<Budget> arena;
+    persistent_ordered_detail::OrderedPageWork work;
+    RangeTree ranges;
+    SourceTree sources;
+    ExplicitTree explicit_cells;
+    PeerTree peers;
+
+    Builder(CartesianSourceManifestSet& output, std::shared_ptr<Budget> owner)
+        : result(output), arena(std::move(owner)), ranges(arena, &work), sources(arena, &work),
+          explicit_cells(arena, &work), peers(arena, &work)
+    {
+    }
+
+    std::shared_ptr<const ReceiptBytes> copy(std::span<const char> bytes)
+    {
+        if (bytes.empty())
+            return {};
+        ContactGroupAllocation memory(arena);
+        memory.add(add(sizeof(ReceiptBytes) + 128, bytes.size()));
+        result.receipt_work_.copied_body_bytes = add(result.receipt_work_.copied_body_bytes, memory.bytes());
+        return std::make_shared<ReceiptBytes>(std::move(memory), bytes);
+    }
+    static bool same_range(const CartesianIncidenceRange& a, const CartesianIncidenceRange& b) noexcept
+    {
+        return !RangeLess{}(a, b) && !RangeLess{}(b, a);
+    }
+    static bool same_active(const Source& a, const Source& b)
+    {
+        if (a.active_count_ != b.active_count_ || a.cells_ != b.cells_)
+            return false;
+        for (std::size_t i = 0; i < a.active_count_; ++i)
+            if (!same_range(a.range(i), b.range(i)))
+                return false;
+        return true;
+    }
+    static bool same_identity(const Source& a, const Source& b)
+    {
+        return a.owner_ == b.owner_ && std::ranges::equal(a.identity(), b.identity());
+    }
+    Source freeze_source(const Source& incoming, const Source* previous, std::size_t slot)
+    {
+        auto result = incoming;
+        result.slot_ = slot;
+        result.identity_ = previous ? previous->identity_ : copy(incoming.identity());
+        if (previous && same_active(incoming, *previous))
+        {
+            result.active_ranges_ = previous->active_ranges_;
+            result.irregular_ranges_ = previous->irregular_ranges_;
+        }
+        else if (incoming.active_count_)
+        {
+            bool sorted = true;
+            for (std::size_t i = 1; i < incoming.active_count_ && sorted; ++i)
+                sorted = RangeLess{}(incoming.range(i - 1), incoming.range(i));
+            if (!sorted)
+            {
+                // The legacy parser accepts legal unsorted selector proofs.
+                // Preserve their exact wire order in one independently owned body.
+                result.irregular_ranges_ = copy(incoming.raw_active_ranges());
+            }
+            else if (previous && previous->active_ranges_)
+            {
+                result.active_ranges_ = previous->active_ranges_;
+                const auto old =
+                    CartesianInventoryRows<CartesianIncidenceRange, RangeTree::Node>(previous->active_ranges_.get());
+                std::size_t i = 0, j = 0;
+                while (i < old.size() || j < incoming.active_count_)
+                {
+                    if (j == incoming.active_count_ || (i < old.size() && RangeLess{}(old[i], incoming.range(j))))
+                    {
+                        result.active_ranges_ = ranges.edit(result.active_ranges_, old[i++], nullptr, true);
+                    }
+                    else if (i == old.size() || RangeLess{}(incoming.range(j), old[i]))
+                    {
+                        const auto range = incoming.range(j++);
+                        result.active_ranges_ = ranges.edit(result.active_ranges_, range, &range, false);
+                    }
+                    else
+                    {
+                        ++i;
+                        ++j;
+                    }
+                }
+            }
+            else
+            {
+                Allocation scratch(*arena);
+                std::vector<CartesianIncidenceRange> selected;
+                scratch.reserve(selected, incoming.active_count_);
+                for (std::size_t i = 0; i < incoming.active_count_; ++i)
+                    selected.push_back(incoming.range(i));
+                result.active_ranges_ = ranges.build(selected);
+            }
+        }
+        result.borrowed_identity_ = {};
+        result.borrowed_ranges_ = {};
+        return result;
+    }
+    void update_sources(Peer& peer, std::span<const Source> wire)
+    {
+        const SourceRows before(peer.sources.get());
+        // Keep the old root pinned throughout this rewrite. An updated Peer
+        // may stop holding it before the next borrowed row is matched.
+        const auto accepted = peer.sources;
+        std::size_t cursor = 0;
+        bool appended = false;
+        for (const auto& incoming : wire)
+        {
+            auto match = before.size();
+            const Source* reuse = nullptr;
+            // Native inventories preserve survivor order and append new
+            // sources. Full-byte equality also handles legal generic repeats.
+            if (!appended)
+                for (std::size_t i = cursor; i < before.size(); ++i)
+                    if (same_identity(before[i], incoming))
+                    {
+                        if (match == before.size())
+                            match = i;
+                        if (same_active(before[i], incoming))
+                        {
+                            match = i;
+                            break;
+                        }
+                    }
+            if (match != before.size())
+            {
+                while (cursor < match)
+                    peer.sources = sources.edit(peer.sources, before[cursor++], nullptr, true);
+                const auto& prior = before[cursor++];
+                if (!same_active(prior, incoming))
+                {
+                    const auto next = freeze_source(incoming, &prior, prior.slot_);
+                    peer.sources = sources.edit(peer.sources, prior, &next, true);
+                }
+                continue;
+            }
+            // A generic insertion before an old source may require new
+            // sequence slots, while its exact source/selector bodies still share.
+            appended = true;
+            for (const auto& prior : before)
+                if (same_identity(prior, incoming))
+                {
+                    reuse = &prior;
+                    if (same_active(prior, incoming))
+                        break;
+                }
+            if (peer.next_slot == std::numeric_limits<std::size_t>::max())
+                throw std::invalid_argument("Remote source receipt slots exhausted.");
+            const auto next = freeze_source(incoming, reuse, peer.next_slot++);
+            peer.sources = sources.edit(peer.sources, next, &next, false);
+        }
+        while (cursor < before.size())
+            peer.sources = sources.edit(peer.sources, before[cursor++], nullptr, true);
+    }
+    void update_explicit(Peer& peer, std::span<ExplicitCell> wire)
+    {
+        std::ranges::sort(wire, ExplicitLess{});
+        const auto accepted = peer.explicit_cells;
+        const ExplicitRows before(accepted.get());
+        std::size_t i = 0, j = 0;
+        auto freeze = [&](const ExplicitCell& input)
+        {
+            auto cell = input;
+            cell.owner = copy(input.member_bytes());
+            cell.borrowed_members = {};
+            return cell;
+        };
+        while (i < before.size() || j < wire.size())
+        {
+            if (j == wire.size() || (i < before.size() && ExplicitLess{}(before[i], wire[j])))
+                peer.explicit_cells = explicit_cells.edit(peer.explicit_cells, before[i++], nullptr, true);
+            else if (i == before.size() || ExplicitLess{}(wire[j], before[i]))
+            {
+                const auto cell = freeze(wire[j++]);
+                peer.explicit_cells = explicit_cells.edit(peer.explicit_cells, cell, &cell, false);
+            }
+            else
+            {
+                const auto& old = before[i++];
+                const auto& input = wire[j++];
+                if (old.revision != input.revision || !std::ranges::equal(old.member_bytes(), input.member_bytes()))
+                {
+                    auto cell = input;
+                    cell.owner = std::ranges::equal(old.member_bytes(), input.member_bytes())
+                                     ? old.owner
+                                     : copy(input.member_bytes());
+                    cell.borrowed_members = {};
+                    peer.explicit_cells = explicit_cells.edit(peer.explicit_cells, old, &cell, true);
+                }
+            }
+        }
+    }
+    void publish(const CartesianSourceManifestSet* previous, std::span<const WirePeer> wire_peers,
+        std::span<const Source> wire_sources, std::span<ExplicitCell> wire_explicit)
+    {
+        const Peers accepted(previous ? previous->peers_.get() : nullptr);
+        if (previous)
+            result.peers_ = previous->peers_;
+        for (std::size_t ordinal = 0; ordinal < wire_peers.size(); ++ordinal)
+        {
+            const auto& packet = wire_peers[ordinal];
+            const Peer* prior = nullptr;
+            for (const auto& peer : accepted)
+                if (peer.owner == packet.owner)
+                {
+                    prior = &peer;
+                    break;
+                }
+            Peer peer = prior ? *prior : Peer{};
+            peer.owner = packet.owner;
+            peer.ordinal = ordinal;
+            update_sources(peer, wire_sources.subspan(packet.source_begin, packet.source_end - packet.source_begin));
+            update_explicit(
+                peer, wire_explicit.subspan(packet.explicit_begin, packet.explicit_end - packet.explicit_begin));
+            const bool existed = ordinal < accepted.size();
+            if (existed && prior && prior->ordinal == ordinal && peer.sources == prior->sources &&
+                peer.explicit_cells == prior->explicit_cells)
+                ++result.receipt_work_.shared_peers;
+            else
+                result.peers_ = peers.edit(result.peers_, peer, &peer, existed);
+        }
+        if (accepted.size() > wire_peers.size())
+            throw std::logic_error("A compatible previous manifest changed its owner count.");
+        result.receipt_work_.allocated_pages = work.copied_pages;
+        result.receipt_work_.allocated_page_bytes = work.copied_bytes;
+    }
+};
+
 void CartesianSourceManifestSet::validate_untrusted_wire(const AMRGrid& grid, ContactHaloContext context,
     std::uint64_t generation, std::span<const OwnerPacket> records, int ranks, Budget& budget)
 {
     Allocation memory(budget);
     std::vector<Source> sources;
     std::vector<ExplicitCell> explicit_cells;
-    decode_wire(grid, context, generation, records, ranks, sources, explicit_cells, memory);
+    std::vector<WirePeer> peers;
+    decode_wire(grid, context, generation, records, ranks, sources, explicit_cells, peers, memory);
 }
+
+void CartesianSourceManifestSet::validate_receipt_storage(const AMRGrid& grid, ContactHaloContext context,
+    std::uint64_t generation, std::span<const OwnerPacket> records, int ranks, Budget& budget)
+{
+    Allocation memory(budget);
+    std::vector<Source> sources;
+    std::vector<ExplicitCell> explicit_cells;
+    std::vector<WirePeer> peers;
+    decode_wire(grid, context, generation, records, ranks, sources, explicit_cells, peers, memory);
+    CartesianSourceManifestSet discarded;
+    const auto borrowed = std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
+    Builder(discarded, borrowed).publish(nullptr, peers, sources, explicit_cells);
+}
+void CartesianSourceManifestSet::inspect_receipt_transition(const AMRGrid& grid, DiagnosticFrame before,
+    DiagnosticFrame after, int ranks, Budget& budget,
+    const CartesianBorrowedCallback<const DiagnosticReceiptView&, const DiagnosticReceiptView&>& inspect)
+{
+    const auto borrowed = std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
+    CartesianSourceManifestSet original, candidate;
+    const auto build =
+        [&](DiagnosticFrame frame, CartesianSourceManifestSet& output, const CartesianSourceManifestSet* previous)
+    {
+        Allocation memory(budget);
+        std::vector<Source> sources;
+        std::vector<ExplicitCell> explicit_cells;
+        std::vector<WirePeer> peers;
+        decode_wire(
+            grid, frame.context, frame.generation, frame.packets, ranks, sources, explicit_cells, peers, memory);
+        Builder(output, borrowed).publish(previous, peers, sources, explicit_cells);
+    };
+    build(before, original, nullptr);
+    build(after, candidate, &original);
+    inspect(DiagnosticReceiptView(original), DiagnosticReceiptView(candidate));
+}
+
 std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::exchange(
     const CartesianSourceManifestAdmission& admission, Teuchos::RCP<const Teuchos::Comm<int>> comm, Budget& budget,
-    std::shared_ptr<Budget> keeper, std::shared_ptr<cartesian_detail::ArenaCredits> arena)
+    std::shared_ptr<Budget> keeper, std::shared_ptr<cartesian_detail::ArenaCredits> arena,
+    const std::shared_ptr<const CartesianSourceManifestSet>& previous)
 {
     if (comm.is_null())
         throw std::invalid_argument("Source manifests require a communicator.");
@@ -673,7 +1014,8 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                             ++explicit_count;
                             size = add(size, add(24, key_wire_size(key)));
                             for (const auto& member : cell.members)
-                                size = add(size, add(16, admission.owned_->pools_->supports.get(member.support).size()));
+                                size =
+                                    add(size, add(16, admission.owned_->pools_->supports.get(member.support).size()));
                         });
                 transport.retain(size);
                 Writer writer;
@@ -737,8 +1079,22 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
     collective(*comm,
         [&]
         {
+            Allocation validation(budget);
+            std::vector<Source> sources;
+            std::vector<ExplicitCell> explicit_cells;
+            std::vector<WirePeer> peers;
             decode_wire(admission.grid_, admission.context_, admission.generation_, incoming.packets, comm->getSize(),
-                result->sources_, result->explicit_cells_, retained);
+                sources, explicit_cells, peers, validation);
+            result->receipt_work_.validated_sources = sources.size();
+            result->receipt_work_.validated_explicit_cells = explicit_cells.size();
+            const bool shared =
+                keeper && previous && previous->owner_count() == std::size_t(comm->getSize()) &&
+                arena->prepaid(previous, previous->allocation_budget(), previous->metadata_bytes(), false);
+            result->shared_receipts_ = shared;
+            if (shared)
+                result->predecessor_ = previous;
+            const auto page_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
+            Builder(*result, page_arena).publish(shared ? previous.get() : nullptr, peers, sources, explicit_cells);
         });
     result->budget_ = &budget;
     result->keeper_ = std::move(keeper);

@@ -351,7 +351,8 @@ TEST_F(CartesianSourceInventoryManifests, DerivedInventoryKeepsOriginalContextAn
     EXPECT_EQ(derived->batches().back().source()->version(), 8);
     EXPECT_TRUE(derived->contains(coarse.back().key));
     EXPECT_FALSE(derived->contains(coarse.front().key));
-    const std::vector<OwnerPacket> packets{inventory_receipt(value, next, 0, 12, 12, 9, derived->encode_identity(*budget).bytes(), 0),
+    const std::vector<OwnerPacket> packets{
+        inventory_receipt(value, next, 0, 12, 12, 9, derived->encode_identity(*budget).bytes(), 0),
         inventory_receipt(value, next, 1, 12, 12, 0, empty_next->encode_identity(*budget).bytes(), 1)};
     const auto retained = budget->used;
     EXPECT_NO_THROW(CartesianSourceManifestSet::validate_untrusted_wire(value, next, 12, packets, 2, *budget));
@@ -409,7 +410,8 @@ TEST_F(CartesianSourceInventoryManifests, RejectsIncompleteOwnerReceiptsAndStale
     auto foreign_grid = value;
     foreign_grid.origin[0] = 0.125;
     packets = valid;
-    packets.front() = inventory_receipt(foreign_grid, context, 0, generation, generation, 2, inventory->encode_identity(*budget).bytes(), 0);
+    packets.front() = inventory_receipt(
+        foreign_grid, context, 0, generation, generation, 2, inventory->encode_identity(*budget).bytes(), 0);
     expect_rejected(packets); // Compare with the actual supplied trusted grid.
 }
 TEST_F(CartesianSourceInventoryManifests, RejectsStaleMalformedAndTruncatedNestedInventory)
@@ -788,3 +790,95 @@ TEST_F(CartesianSourceExplicitManifests, RejectsMalformedPrimitiveSupportIdentit
     }
 }
 } // namespace
+
+TEST_F(CartesianSourceInventoryManifests, ReceiptMaterializationExactCreditAndOneByteShortRestoreArena)
+{
+    Budget measured{budget->limit};
+    CartesianSourceManifestSet::validate_receipt_storage(value, context, generation, valid, 2, measured);
+    EXPECT_EQ(measured.used, 0u);
+    ASSERT_GT(measured.peak, 1u);
+    Budget exact{measured.peak};
+    EXPECT_NO_THROW(CartesianSourceManifestSet::validate_receipt_storage(value, context, generation, valid, 2, exact));
+    EXPECT_EQ(exact.used, 0u);
+    Budget short_budget{measured.peak - 1};
+    EXPECT_THROW(
+        CartesianSourceManifestSet::validate_receipt_storage(value, context, generation, valid, 2, short_budget),
+        std::invalid_argument);
+    EXPECT_EQ(short_budget.used, 0u);
+
+    auto foreign = valid;
+    foreign.front().bytes[16] ^= 1;
+    EXPECT_THROW(CartesianSourceManifestSet::validate_receipt_storage(value, context, generation, foreign, 2, measured),
+        std::invalid_argument);
+    EXPECT_EQ(measured.used, 0u);
+}
+
+TEST_F(CartesianSourceInventoryManifests, ReorderedRepeatedSourcePreservesOrdinalsAndIrregularProofBytes)
+{
+    using Index = std::array<std::uint64_t, 3>;
+    const auto leaf_at = [&](Index index)
+    { return cartesian_adaptive_leaf(value, {value.region_id, CartesianCellAncestry{0, index}}, {'d'}); };
+    const auto point_range = [](Index index)
+    { return CartesianIncidenceRange{0, index, {index[0] + 1, index[1] + 1, index[2] + 1}}; };
+
+    const std::array a{Index{1, 0, 0}, Index{0, 1, 0}, Index{0, 0, 0}};
+    const std::array b{Index{1, 0, 1}, Index{1, 1, 0}};
+    const std::array retained{leaf_at(a[0]), leaf_at(a[1]), leaf_at(a[2]), leaf_at(b[0]), leaf_at(b[1])};
+    const std::array removed{leaf_at({0, 0, 1})};
+    const auto repeated = CartesianIncidenceSource::make(value, retained, {'d'}, 0, 7, context, *budget, budget);
+    const auto prefix = CartesianIncidenceSource::make(value, removed, {'d'}, 0, 8, context, *budget, budget);
+    const LiteralInventory initial{context, 0, generation, 6,
+        {{prefix->identity(), 1, {point_range({0, 0, 1})}},
+            {repeated->identity(), 3, {point_range(a[0]), point_range(a[1]), point_range(a[2])}},
+            {repeated->identity(), 2, {point_range(b[0]), point_range(b[1])}}}};
+    auto next = context;
+    ++next.round;
+    const auto version = generation + 1;
+    const LiteralInventory edited{next, 0, version, 5,
+        {{repeated->identity(), 2, {point_range(b[0]), point_range(b[1])}},
+            {repeated->identity(), 3, {point_range(a[1]), point_range(a[0]), point_range(a[2])}}}};
+    const auto packets = [&](const LiteralInventory& inventory)
+    {
+        return std::array{explicit_receipt(value, inventory, {}),
+            explicit_receipt(value, {inventory.context, 1, inventory.version, 0, {}}, {})};
+    };
+    const auto before = packets(initial);
+    auto after = packets(edited);
+    std::swap(after[0], after[1]); // Receive ordinal is independent of owner identity.
+    const auto retained_bytes = budget->used;
+    CartesianSourceManifestSet::inspect_receipt_transition(value, {context, generation, before}, {next, version, after},
+        2, *budget,
+        [&](const auto& previous, const auto& current)
+        {
+            ASSERT_EQ(previous.source_count(), 4u);
+            ASSERT_EQ(current.source_count(), 3u);
+            EXPECT_EQ(current.owner(0), 1);
+            EXPECT_TRUE(current.identity(0).empty());
+            const auto expect = [](const auto& receipt, std::size_t ordinal, const auto& expected)
+            {
+                ASSERT_EQ(receipt.range_count(ordinal), expected.size());
+                for (std::size_t i = 0; i < expected.size(); ++i)
+                {
+                    const auto actual = receipt.range(ordinal, i);
+                    EXPECT_EQ(actual.level, expected[i].level);
+                    EXPECT_EQ(actual.lower, expected[i].lower);
+                    EXPECT_EQ(actual.upper, expected[i].upper);
+                }
+            };
+            expect(previous, 1, initial.batches[1].ranges);
+            expect(previous, 2, initial.batches[2].ranges);
+            expect(current, 1, edited.batches[0].ranges);
+            expect(current, 2, edited.batches[1].ranges);
+            EXPECT_EQ(current.owner(1), 0);
+            EXPECT_EQ(current.owner(2), 0);
+            EXPECT_EQ(current.version(1), 7u);
+            EXPECT_EQ(current.version(2), 7u);
+            EXPECT_EQ(current.identity(1).data(), previous.identity(2).data());
+            EXPECT_TRUE(current.identity(2).data() == previous.identity(1).data() ||
+                        current.identity(2).data() == previous.identity(2).data());
+            ASSERT_GT(current.irregular_range_admission(2), 0u);
+            // Only the changed noncanonical range order needs a new byte body.
+            EXPECT_EQ(current.work().copied_body_bytes, current.irregular_range_admission(2));
+        });
+    EXPECT_EQ(budget->used, retained_bytes);
+}

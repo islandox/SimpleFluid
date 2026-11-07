@@ -3116,8 +3116,8 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
         const auto grid = trusted_cartesian_incidence_grid(*state.kernel);
         const auto admission = source_manifest_admission(*grid, state.context, next_inventory->version(),
             next_inventory->cell_count(), next_inventory, &state.owned);
-        auto manifests =
-            CartesianSourceManifestSet::exchange(admission, state.comm, *state.budget, state.keeper, state.point_arena);
+        auto manifests = CartesianSourceManifestSet::exchange(
+            admission, state.comm, *state.budget, state.keeper, state.point_arena, state.source_manifests);
         collective(*state.comm, [&] { state.replace_source_owner(state.source_manifests, std::move(manifests)); });
         int local_complete =
             state.owned.explicit_cell_count() == inserted.size() && (inserted.empty() || bool(inserted_source));

@@ -59,7 +59,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testDeferredOwnerCharges"
       OR TEST_NAME STREQUAL "testPooledLineExchange"
       OR TEST_NAME STREQUAL "testPooledLineRegistryPersistence"
-      OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
+      OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|ManifestReceipt|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
       OR TEST_NAME STREQUAL "testIncidencePointDirectory"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
@@ -392,4 +392,12 @@ foreach(PROCS IN ITEMS 2 4)
       ARGS "--gtest_filter=AdaptiveContactSnapshot.*"
       LABELS "mpi;amr;geometry;collective"
       TIMEOUT 180)
+endforeach()
+
+# Actual source-manifest transport with inactive owners in the four-rank case.
+foreach(_receipt_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME CartesianManifestReceiptPersistence_${_receipt_ranks}procs
+    TARGET testCartesianManifestReceiptPersistence PROCS ${_receipt_ranks}
+    ARGS "--gtest_filter=CartesianManifestReceiptPersistence.*"
+    LABELS "mpi;geometry;amr;inventory;empty_rank" TIMEOUT 600)
 endforeach()
