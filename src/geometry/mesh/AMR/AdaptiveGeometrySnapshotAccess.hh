@@ -9,6 +9,15 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
+struct Budget;
+/** Admission diagnostics read scalars and six exact weak root controls. A root
+ * census counter advances only when replacement actually traverses snapshots.
+ * Independent explicit payload censuses remain available on the hierarchy. */
+struct GeometryCacheAdmissionStatistics
+{
+    std::size_t cache_header_bytes = 0, resident_bytes = 0, lease_bytes = 0;
+    std::size_t admission_queries = 0, union_censuses = 0, census_root_visits = 0;
+};
 /** Narrow internal acquisition from an authenticated hierarchy. */
 class GeometrySnapshotAccess
 {
@@ -22,5 +31,10 @@ public:
         PLIC::GeometryAllocationLedger&, PLIC::GeometryAllocationLedger&);
     /** Borrowed diagnostic access, valid only while the hierarchy is retained. */
     [[nodiscard]] static const DistributedAdaptiveContactHalo& contact_cache(const DistributedAdaptiveHierarchy&);
+    [[nodiscard]] static GeometryCacheAdmissionStatistics cache_admission_statistics(
+        const DistributedAdaptiveHierarchy&);
+    /** Same source-cache admission used by adapt, migrate and native binding.
+     * Separate caller Budget retains its existing monotonic spent prefix. */
+    static void admit_cache_residency(const DistributedAdaptiveHierarchy&, Budget&);
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

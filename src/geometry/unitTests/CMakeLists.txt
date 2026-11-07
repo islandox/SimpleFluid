@@ -65,6 +65,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryStorage"
+      OR TEST_NAME STREQUAL "testAdaptiveGeometryCacheAdmission"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
       OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")

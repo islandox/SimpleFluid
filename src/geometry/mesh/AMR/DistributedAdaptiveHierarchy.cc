@@ -51,14 +51,56 @@ struct AdaptiveGeometrySnapshotCache
     std::array<std::shared_ptr<const AdaptiveGeometrySnapshot>, 6> roots;
     std::array<std::weak_ptr<const AdaptiveGeometrySnapshot>, 6> predecessors;
     std::optional<ContactExternalResidencyLease> lease;
+    std::array<std::weak_ptr<const AdaptiveGeometrySnapshot>, 6> sealed_roots;
+    std::size_t resident_bytes = 0, union_censuses = 0, census_root_visits = 0;
+    mutable std::size_t admission_queries = 0;
+
+    // Every query holds mutex. The seal authenticates the exact immutable
+    // root controls, including an empty root, whose union was admitted.
     std::size_t root_bytes() const
     {
+        for (std::size_t slot = 0; slot < roots.size(); ++slot)
+            if (sealed_roots[slot].lock() != roots[slot] || sealed_roots[slot].owner_before(roots[slot]) ||
+                roots[slot].owner_before(sealed_roots[slot]))
+                throw std::logic_error("Geometry cache root set differs from its exact residency seal.");
+        if (lease && lease->bytes() != resident_bytes)
+            throw std::logic_error("Geometry cache residency seal differs from its admitted lease.");
+        return resident_bytes;
+    }
+    void admit_residency(Budget& budget) const
+    {
+        ++admission_queries;
+        const auto bytes = root_bytes();
+        budget.add(sizeof(*this));
+        budget.add(bytes);
+    }
+    // Root replacement still performs one exact fresh-ledger census. Accepted
+    // source admission and native rebinding consume the resulting scalar seal.
+    std::size_t census_root_bytes()
+    {
+        ++union_censuses;
         PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
         std::size_t bytes = 0;
         for (const auto& root : roots)
             if (root)
+            {
+                ++census_root_visits;
                 root->retain(ordinary_owners, bounded_owners, bytes, std::numeric_limits<std::size_t>::max());
+            }
         return bytes;
+    }
+    void seal_residency(std::size_t bytes) noexcept
+    {
+        resident_bytes = bytes;
+        for (std::size_t slot = 0; slot < roots.size(); ++slot)
+            sealed_roots[slot] = roots[slot];
+    }
+    void copy_roots_from(const AdaptiveGeometrySnapshotCache& source)
+    {
+        const auto bytes = source.root_bytes();
+        roots = source.roots;
+        predecessors = source.predecessors;
+        seal_residency(bytes);
     }
 };
 struct DistributedAdaptiveHierarchy::Data
@@ -1165,11 +1207,7 @@ void charge_source_residency(Budget& budget, const DistributedAdaptiveHierarchy:
     if (state.geometry_cache)
     {
         std::lock_guard lock(state.geometry_cache->mutex);
-        budget.add(sizeof(AdaptiveGeometrySnapshotCache));
-        PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-        for (const auto& root : state.geometry_cache->roots)
-            if (root)
-                root->retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
+        state.geometry_cache->admit_residency(budget);
     }
     charge_source_base_residency(budget, state);
 }
@@ -1950,8 +1988,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             bound->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
             {
                 std::lock_guard lock(data_->geometry_cache->mutex);
-                bound->geometry_cache->roots = data_->geometry_cache->roots;
-                bound->geometry_cache->predecessors = data_->geometry_cache->predecessors;
+                bound->geometry_cache->copy_roots_from(*data_->geometry_cache);
             }
             bound->native = std::move(partition);
             bound->owned_map = map;
@@ -2680,8 +2717,9 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     try
     {
         current = candidate;
-        const auto resident = data_->geometry_cache->root_bytes();
+        const auto resident = data_->geometry_cache->census_root_bytes();
         lease.resize(resident);
+        data_->geometry_cache->seal_residency(resident);
         data_->geometry_cache->predecessors[slot].reset();
     }
     catch (...)
@@ -2824,6 +2862,21 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapsho
     if (!hierarchy.geometry_unchanged() || hierarchy.observation() != source_observation)
         throw std::invalid_argument("Native geometry draft source changed during snapshot acquisition.");
     return result;
+}
+adaptive_detail::GeometryCacheAdmissionStatistics adaptive_detail::GeometrySnapshotAccess::cache_admission_statistics(
+    const DistributedAdaptiveHierarchy& hierarchy)
+{
+    const auto& cache = *hierarchy.data_->geometry_cache;
+    std::lock_guard lock(cache.mutex);
+    return {sizeof(cache), cache.root_bytes(), cache.lease ? cache.lease->bytes() : 0, cache.admission_queries,
+        cache.union_censuses, cache.census_root_visits};
+}
+void adaptive_detail::GeometrySnapshotAccess::admit_cache_residency(
+    const DistributedAdaptiveHierarchy& hierarchy, Budget& budget)
+{
+    const auto& cache = *hierarchy.data_->geometry_cache;
+    std::lock_guard lock(cache.mutex);
+    cache.admit_residency(budget);
 }
 void DistributedAdaptiveHierarchy::visit_geometry_snapshots(
     const std::function<void(const AdaptiveGeometrySnapshot&)>& visitor) const
