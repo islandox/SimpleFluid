@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
@@ -63,6 +64,35 @@ public:
      * Mixed domains always split, even beyond the target. Returned vector and
      * domain capacities are already charged and become the caller's charge. */
     [[nodiscard]] std::vector<ClosedContactCover> ownership_frontier_covers(std::size_t target_fragments = 8);
+    struct BorrowedOwnershipCover
+    {
+        std::span<const char> domain;
+        AdaptiveContactBounds bounds;
+        int owner;
+        std::size_t images;
+    };
+    class OwnershipFrontierVisitor
+    {
+    public:
+        template<class Visitor>
+        OwnershipFrontierVisitor(const Visitor& visit)
+            : state_(&visit), invoke_([](const void* state, const BorrowedOwnershipCover& cover)
+                                  { return (*static_cast<const Visitor*>(state))(cover); })
+        {
+        }
+        bool operator()(const BorrowedOwnershipCover& cover) const { return invoke_(state_, cover); }
+
+    private:
+        const void* state_;
+        bool (*invoke_)(const void*, const BorrowedOwnershipCover&);
+    };
+    /** Resume the exact legacy frontier without copying any domain or owning
+     * cover. The index and its resolver stay quiescent throughout the callback.
+     * cursor counts accepted covers; a false callback leaves that cover pending.
+     * Large heterogeneous frontiers skip cached subtree cardinalities. */
+    [[nodiscard]] bool visit_ownership_frontier(
+        std::size_t target_fragments, std::size_t& cursor, const OwnershipFrontierVisitor&) const;
+
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
     [[nodiscard]] std::size_t point_count() const noexcept;
     [[nodiscard]] std::size_t private_metadata_bytes() const noexcept;

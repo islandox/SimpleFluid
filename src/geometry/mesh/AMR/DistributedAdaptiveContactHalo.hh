@@ -116,6 +116,9 @@ struct ContactHaloStatistics
     std::size_t contact_record_pages_copied = 0, contact_row_pages_copied = 0, contact_work_pages_copied = 0;
     std::size_t contact_index_pages_copied = 0, contact_index_split_records = 0;
     std::size_t contact_cover_pages_copied = 0, contact_cover_page_bytes = 0;
+    std::size_t rank_cover_wire_visits = 0, rank_cover_received_covers = 0, rank_cover_reconciled_selectors = 0;
+    std::size_t rank_cover_pages_copied = 0, rank_cover_page_bytes = 0, rank_cover_domain_bytes = 0;
+    std::size_t rank_cover_owner_visits = 0, rank_cover_transient_counter_bytes = 0;
     std::size_t contact_catalog_pages_copied = 0, contact_trace_pages_copied = 0;
     std::size_t contact_owner_admission_work = 0, contact_shared_owner_bytes = 0, contact_owner_index_bytes = 0;
     std::size_t contact_query_pages_copied = 0, contact_identity_rebinds = 0, contact_frozen_groups = 0;
@@ -147,6 +150,7 @@ struct ContactHaloStatistics
 struct ContactFanView;
 class AdaptiveSubfaceSnapshot;
 class AdaptiveContactSnapshot;
+class ContactRankCoverReceipts;
 struct ContactHaloBorrowedGroup
 {
     const void* record;
@@ -240,6 +244,9 @@ public:
     void for_each_borrowed_contact_group(const std::function<void(const ContactHaloBorrowedGroup&)>&) const;
     void for_each_borrowed_contact_fact(const std::function<void(const ContactHaloBorrowedFact&)>&) const;
     void for_each_borrowed_contact_binding(const std::function<void(const ContactHaloBorrowedBinding&)>&) const;
+    /** Detached exact geometric receipt facts only; current protocol context
+     * remains in the halo. A snapshot never pins this controller. */
+    [[nodiscard]] std::shared_ptr<const ContactRankCoverReceipts> rank_cover_receipts() const;
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
 
 private:

@@ -133,7 +133,7 @@ struct ContactCoverIndex::Impl
     {
         AdaptiveContactBounds bounds;
         std::size_t parent = absent, left = absent, right = absent;
-        std::size_t homogeneous = absent, count = 0, height = 0;
+        std::size_t homogeneous = absent, count = 0, height = 0, mandatory_frontier = 0;
     };
     Budget& budget;
     int owner;
@@ -205,6 +205,10 @@ struct ContactCoverIndex::Impl
     std::size_t height(std::size_t tag) const noexcept { return is_leaf(tag) ? 1 : branch(tag).height; }
     std::size_t points(std::size_t tag) const noexcept { return is_leaf(tag) ? 1 : branch(tag).count; }
     std::size_t homogeneous(std::size_t tag) const noexcept { return is_leaf(tag) ? tag / 2 : branch(tag).homogeneous; }
+    std::size_t frontier_size(std::size_t tag) const noexcept
+    {
+        return is_leaf(tag) ? 1 : branch(tag).mandatory_frontier;
+    }
     AdaptiveContactBounds bounds(std::size_t tag) const noexcept
     {
         if (!is_leaf(tag))
@@ -269,6 +273,8 @@ struct ContactCoverIndex::Impl
         node.height = 1 + std::max(height(node.left), height(node.right));
         const auto a = homogeneous(node.left), b = homogeneous(node.right);
         node.homogeneous = a != absent && b != absent && domain(a) == domain(b) ? a : absent;
+        node.mandatory_frontier =
+            node.homogeneous != absent ? 1 : sum(frontier_size(node.left), frontier_size(node.right));
     }
     void replace_link(std::size_t parent_tag, std::size_t old_tag, std::size_t new_tag)
     {
@@ -595,6 +601,82 @@ std::vector<ClosedContactCover> ContactCoverIndex::ownership_frontier_covers(std
     }
     scratch.transfer(sum(product(output.capacity(), sizeof(ClosedContactCover)), payload));
     return output;
+}
+bool ContactCoverIndex::visit_ownership_frontier(
+    std::size_t target, std::size_t& cursor, const OwnershipFrontierVisitor& visit) const
+{
+    const MetadataEnvironment environment;
+    if (!target)
+        throw std::invalid_argument("Contact-cover frontier needs a positive target.");
+    const auto& tree = *impl_;
+    if (tree.root == absent)
+        return true;
+    const auto emit = [&](std::size_t tag)
+    {
+        const BorrowedOwnershipCover cover{
+            tree.domain(tree.homogeneous(tag)), tree.bounds(tag), tree.owner, tree.points(tag)};
+        if (!visit(cover))
+            return false;
+        ++cursor;
+        return true;
+    };
+    if (tree.frontier_size(tree.root) >= target)
+    {
+        // The mandatory frontier itself reaches the target. Its exact DFS
+        // order is already encoded by the persistent tree's children.
+        std::size_t skip = cursor;
+        const auto walk = [&](auto&& self, std::size_t tag) -> bool
+        {
+            const auto size = tree.frontier_size(tag);
+            if (skip >= size)
+            {
+                skip -= size;
+                return true;
+            }
+            if (tree.homogeneous(tag) != absent)
+                return emit(tag);
+            const auto& branch = tree.branch(tag);
+            return self(self, branch.left) && self(self, branch.right);
+        };
+        return walk(walk, tree.root);
+    }
+    // A small mandatory frontier uses the original soft-split queue order.
+    // Scratch is bounded by the requested target, independently of point N.
+    Scratch scratch(impl_->budget);
+    std::vector<std::size_t> frontier;
+    const auto append = [&](std::size_t tag)
+    {
+        if (frontier.size() == frontier.capacity())
+            scratch.reserve(frontier, frontier.capacity() ? product(frontier.capacity(), 2) : 1);
+        frontier.push_back(tag);
+    };
+    const auto mandatory = [&](auto&& self, std::size_t tag) -> void
+    {
+        if (tree.homogeneous(tag) != absent)
+            append(tag);
+        else
+        {
+            self(self, tree.branch(tag).left);
+            self(self, tree.branch(tag).right);
+        }
+    };
+    mandatory(mandatory, tree.root);
+    auto active = frontier.size();
+    for (std::size_t at = 0; active < target && at < frontier.size(); ++at)
+    {
+        const auto tag = frontier[at];
+        if (tag == absent || Impl::is_leaf(tag))
+            continue;
+        frontier[at] = absent;
+        append(tree.branch(tag).left);
+        append(tree.branch(tag).right);
+        ++active;
+    }
+    std::size_t ordinal = 0;
+    for (const auto tag : frontier)
+        if (tag != absent && ordinal++ >= cursor && !emit(tag))
+            return false;
+    return true;
 }
 std::size_t ContactCoverIndex::storage_bytes() const noexcept
 {

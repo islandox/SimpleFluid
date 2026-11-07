@@ -223,7 +223,10 @@ enum class ContactPayloadRole : std::uint8_t
     SubfaceRingObject,
     SubfaceRingSlots,
     IdentityPersistentRoot,
-    IdentityPersistentIndex
+    IdentityPersistentIndex,
+    RankCoverSnapshot,
+    RankCoverPage,
+    RankCoverDomain
 };
 enum class ContactPayloadKind : std::uint8_t
 {

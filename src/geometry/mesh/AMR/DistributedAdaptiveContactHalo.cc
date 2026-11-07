@@ -8,15 +8,16 @@
 #include "ClosedContactIndex.hh"
 #include "ContactCoverIndex.hh"
 #include "ContactPairSet.hh"
-#include "ContactRecordIndex.hh"
-#include "PersistentContactGroups.hh"
-#include "PersistentContactTraces.hh"
 #include "ContactPointGroups.hh"
+#include "ContactRankCoverReceipts.hh"
+#include "ContactRecordIndex.hh"
 #include "ContactTracePool.hh"
 #include "DeferredOwnerCharges.hh"
 #include "DistributedAdaptiveClosureRecords.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "IncidencePhysicalOwners.hh"
+#include "PersistentContactGroups.hh"
+#include "PersistentContactTraces.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/ScalarPacket.hh"
@@ -367,14 +368,8 @@ struct DistributedAdaptiveContactHalo::Impl
     std::vector<ClosedContactCover> covers;
     std::map<int, DirectoryNode> directory;
     using CoverMap = std::map<int, std::vector<ClosedContactCover>>;
-    struct RankCovers
-    {
-        ContactGroupAllocation admission;
-        CoverMap covers;
-        explicit RankCovers(ContactGroupAllocation charge) : admission(std::move(charge)) {}
-    };
     CoverMap neighbors, previous_neighbors;
-    std::shared_ptr<const RankCovers> frozen_neighbors, frozen_previous_neighbors;
+    std::shared_ptr<const ContactRankCoverReceipts> frozen_neighbors, frozen_previous_neighbors;
     Bounds local_cover;
     int ranks, rank, tree_width = 1;
     [[nodiscard]] const ContactRecordSlot& record(std::size_t id) const { return query->records[id]; }
@@ -672,7 +667,13 @@ struct DistributedAdaptiveContactHalo::Impl
     }
     void discover_neighbors()
     {
-        std::shared_ptr<RankCovers> builder;
+        std::optional<ContactRankCoverReceiptBuilder> builder;
+        collective(*comm,
+            [&]
+            {
+                if (physical_owners)
+                    builder.emplace(arena, frozen_previous_neighbors ? frozen_previous_neighbors : frozen_neighbors);
+            });
         // One requester's metadata envelope traverses the distributed tree at
         // a time. Only overlapping owner fragments return to that requester.
         for (int requester = 0; requester < ranks; ++requester)
@@ -787,28 +788,32 @@ struct DistributedAdaptiveContactHalo::Impl
                                 admit_writer(outgoing, cap);
                                 outgoing.word(0);
                                 std::size_t count = 0;
-                                while (cursor < covers.size())
+                                const auto emit = [&](const auto& cover)
                                 {
-                                    const auto& cover = covers[cursor];
+                                    ++statistics.rank_cover_wire_visits;
                                     if (!closed_contact_overlap(query.box, cover.bounds))
-                                    {
-                                        ++cursor;
-                                        continue;
-                                    }
+                                        return true;
                                     const auto need =
                                         8 + cover.domain.size() + 8 + 6 * PLIC::ScalarPacketWords{}.size() * 8;
                                     if (need > cap - outgoing.data.size())
                                     {
                                         if (!count)
                                             throw std::invalid_argument("A spatial cover exceeds page credit.");
-                                        break;
+                                        return false;
                                     }
                                     outgoing.bytes(cover.domain);
                                     write_bounds(outgoing, {cover.bounds, true});
-                                    ++cursor;
                                     ++count;
+                                    return true;
+                                };
+                                if (physical_owners)
+                                    done = !index || index->visit_ownership_frontier(8, cursor, emit);
+                                else
+                                {
+                                    while (cursor < covers.size() && emit(covers[cursor]))
+                                        ++cursor;
+                                    done = cursor == covers.size();
                                 }
-                                done = cursor == covers.size();
                                 replace_word(outgoing.data, header_bytes - 8, done);
                                 replace_word(outgoing.data, header_bytes, count);
                             }
@@ -824,24 +829,17 @@ struct DistributedAdaptiveContactHalo::Impl
                                     throw std::invalid_argument("Duplicate or foreign owner-cover page.");
                                 Reader r{incoming.packets.front().bytes};
                                 const auto frame = read(r, Kind::LeafCovers, owner);
-                                if (frame.page != expected_cover_page++)
-                                    throw std::invalid_argument("Missing or duplicate owner-cover page.");
-                                if (physical_owners && !builder)
+                                if (frame.total || frame.page != expected_cover_page++)
+                                    throw std::invalid_argument("Missing, duplicate, or malformed owner-cover page.");
+                                auto found = neighbors.end();
+                                if (!builder)
                                 {
-                                    ContactGroupAllocation charge(arena);
-                                    charge.add(sizeof(RankCovers) + 128);
-                                    builder = std::make_shared<RankCovers>(std::move(charge));
-                                }
-                                auto& tables = builder ? builder->covers : neighbors;
-                                auto found = tables.find(owner);
-                                if (found == tables.end())
-                                {
-                                    constexpr auto node = sizeof(CoverMap::value_type) + map_links;
-                                    if (builder)
-                                        builder->admission.add(node);
-                                    else
-                                        budget.add(node);
-                                    found = tables.try_emplace(owner).first;
+                                    found = neighbors.find(owner);
+                                    if (found == neighbors.end())
+                                    {
+                                        budget.add(sizeof(CoverMap::value_type) + map_links);
+                                        found = neighbors.try_emplace(owner).first;
+                                    }
                                 }
                                 auto n = r.word();
                                 if (frame.query != std::uint64_t(requester) || n > r.data.size() / 16)
@@ -853,17 +851,14 @@ struct DistributedAdaptiveContactHalo::Impl
                                     if (domain.empty() || !bounds.present || !overlaps(local_cover, bounds))
                                         throw std::invalid_argument("Foreign owner-cover response.");
                                     if (builder)
-                                    {
-                                        builder->admission.add(domain.size());
-                                        builder->admission.append(found->second);
-                                    }
+                                        builder->accept(owner, domain, bounds.box);
                                     else
                                     {
                                         budget.add(domain.size());
                                         budget.append_capacity(found->second);
+                                        found->second.push_back(
+                                            {AdaptiveBytes(domain.begin(), domain.end()), bounds.box, owner, 0});
                                     }
-                                    found->second.push_back(
-                                        {AdaptiveBytes(domain.begin(), domain.end()), bounds.box, owner, 0});
                                 }
                                 r.done();
                                 received_final = frame.final;
@@ -888,9 +883,16 @@ struct DistributedAdaptiveContactHalo::Impl
             {
                 if (builder)
                 {
-                    physical_owners->retain(ContactPhysicalResidency::Role::RankCovers, builder,
-                        builder->admission.bytes(), &budget);
-                    frozen_neighbors = std::move(builder);
+                    auto complete = builder->finish();
+                    statistics.rank_cover_owner_visits += complete->observe(*physical_owners, true);
+                    const auto receipt_work = complete->work();
+                    statistics.rank_cover_received_covers += receipt_work.received_covers;
+                    statistics.rank_cover_reconciled_selectors += receipt_work.reconciled_selectors;
+                    statistics.rank_cover_pages_copied += receipt_work.copied_pages;
+                    statistics.rank_cover_page_bytes += receipt_work.copied_page_bytes;
+                    statistics.rank_cover_domain_bytes += receipt_work.copied_domain_bytes;
+                    statistics.rank_cover_transient_counter_bytes = receipt_work.transient_counter_bytes;
+                    frozen_neighbors = std::move(complete);
                 }
                 if (physical_owners)
                 {
@@ -906,12 +908,13 @@ struct DistributedAdaptiveContactHalo::Impl
     }
     bool candidate(int owner, GroupId id) const
     {
-        const auto& current = frozen_neighbors ? frozen_neighbors->covers : neighbors;
-        const auto found = current.find(owner);
-        if (found == current.end())
-            return false;
         const auto normalized = group_normalized(id);
         const auto& coordinate = PLIC::details::GeometryIdentityAccess::point(normalized);
+        if (frozen_neighbors)
+            return frozen_neighbors->contains(owner, group_domain(id), coordinate);
+        const auto found = neighbors.find(owner);
+        if (found == neighbors.end())
+            return false;
         for (const auto& cover : found->second)
             if (std::ranges::equal(group_domain(id), cover.domain) && contains(cover.bounds, coordinate))
                 return true;
@@ -1593,7 +1596,7 @@ void DistributedAdaptiveContactHalo::Impl::refresh_covers()
         return;
     if (const auto bounds = index->aggregate_bounds())
         local_cover = {*bounds, true};
-    if (ranks > 1 || !physical_owners)
+    if (!physical_owners)
         covers = index->ownership_frontier_covers(8);
 }
 
@@ -1603,9 +1606,11 @@ void DistributedAdaptiveContactHalo::Impl::notify_dirty_points()
     {
         if (candidate(owner, id))
             return true;
-        const auto& old = frozen_previous_neighbors ? frozen_previous_neighbors->covers : previous_neighbors;
-        const auto previous = old.find(owner);
-        if (previous != old.end())
+        if (frozen_previous_neighbors)
+            return frozen_previous_neighbors->contains(
+                owner, group_domain(id), PLIC::details::GeometryIdentityAccess::point(group_normalized(id)));
+        const auto previous = previous_neighbors.find(owner);
+        if (previous != previous_neighbors.end())
             for (const auto& cover : previous->second)
                 if (std::ranges::equal(group_domain(id), cover.domain) &&
                     contains(cover.bounds, PLIC::details::GeometryIdentityAccess::point(group_normalized(id))))
@@ -2705,6 +2710,12 @@ void AdaptiveContactSnapshot::visit_borrowed_payload(
     contact_payload_object(visitor, this, ContactPayloadRole::ContactSnapshotObject, sizeof(*this), true);
     storage_->visit_borrowed_payload(visitor);
 }
+std::shared_ptr<const ContactRankCoverReceipts> DistributedAdaptiveContactHalo::rank_cover_receipts() const
+{
+    if (!impl_->ready || !impl_->evaluated)
+        throw std::invalid_argument("Rank-cover receipts need a completed halo.");
+    return impl_->frozen_neighbors;
+}
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
@@ -2783,6 +2794,10 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     if (impl_->index)
         impl_->index->visit_borrowed_pages([&](const void* page, bool branch, std::size_t bytes)
             { visit_contact_page(visitor, page, branch, bytes); });
+    if (impl_->frozen_neighbors)
+        impl_->frozen_neighbors->visit_borrowed_payload(visitor);
+    if (impl_->frozen_previous_neighbors)
+        impl_->frozen_previous_neighbors->visit_borrowed_payload(visitor);
     impl_->deferred_owners.visit_borrowed_payload(visitor);
     contact_payload_buffer(visitor, impl_.get(), ContactPayloadRole::HaloGroupEditPositions, impl_->pending_positions);
     contact_payload_buffer(visitor, impl_.get(), ContactPayloadRole::HaloFanEdits, impl_->pending_edits);
@@ -3176,7 +3191,8 @@ void DistributedAdaptiveContactHalo::apply_delta(std::span<const ContactRetiredL
             state.budget.used -= bytes;
             if (state.frozen_previous_neighbors)
             {
-                state.physical_owners->release(ContactPhysicalResidency::Role::RankCovers, state.frozen_previous_neighbors);
+                state.statistics.rank_cover_owner_visits +=
+                    state.frozen_previous_neighbors->observe(*state.physical_owners, false);
                 state.frozen_previous_neighbors.reset();
             }
         });

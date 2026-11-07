@@ -39,6 +39,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testGeometryRetentionCensus"
       OR TEST_NAME STREQUAL "testClosedContactIndex"
       OR TEST_NAME STREQUAL "testContactCoverIndex"
+      OR TEST_NAME STREQUAL "testRankCoverReceiptPersistence"
       OR TEST_NAME STREQUAL "testAdaptiveClosureRecords"
       OR TEST_NAME STREQUAL "testSpatialAdaptiveClosure"
       OR TEST_NAME STREQUAL "testCompleteSupportOverlay"
@@ -401,4 +402,12 @@ foreach(_receipt_ranks IN ITEMS 2 4)
     TARGET testCartesianManifestReceiptPersistence PROCS ${_receipt_ranks}
     ARGS "--gtest_filter=CartesianManifestReceiptPersistence.*"
     LABELS "mpi;geometry;amr;inventory;empty_rank" TIMEOUT 600)
+endforeach()
+
+# Actual peer-cover exchange, including inactive owners at four ranks.
+foreach(_cover_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME RankCoverReceiptPersistence_${_cover_ranks}procs
+    TARGET testRankCoverReceiptPersistence PROCS ${_cover_ranks}
+    ARGS "--gtest_filter=RankCoverReceiptPersistence.*"
+    LABELS "mpi;geometry;amr;cover;empty_rank" TIMEOUT 600)
 endforeach()

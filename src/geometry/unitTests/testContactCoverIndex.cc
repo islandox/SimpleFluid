@@ -243,3 +243,50 @@ TEST(ContactCoverIndex, LogicalBindingsForkPagesAndResolveOnlyInTheCandidate)
         EXPECT_EQ(source_budget->used, 0u);
     }
 }
+
+TEST(ContactCoverIndex, BorrowedPagedFrontierMatchesLegacyOrderWithoutDomainCopies)
+{
+    D::Budget budget{ample};
+    std::array<A::AdaptiveBytes, 48> domains;
+    std::array<Point, 96> points;
+    D::ContactCoverIndex index(budget, 0);
+    index.reserve(points.size());
+    for (std::size_t i = 0; i < points.size(); ++i)
+    {
+        domains[i / 2] = {'d', char(i / 2)};
+        points[i] = {static_cast<long double>(i), static_cast<long double>(i % 3), 0};
+        (void) index.insert(&points[i], &domains[i / 2]);
+    }
+    for (const auto target : {std::size_t(1), std::size_t(8), std::size_t(128)})
+    {
+        auto legacy = index.ownership_frontier_covers(target);
+        const auto before = budget.used;
+        const auto cumulative = budget.cumulative;
+        std::size_t cursor = 0;
+        while (cursor < legacy.size())
+        {
+            std::size_t accepted = 0;
+            const auto complete = index.visit_ownership_frontier(target, cursor,
+                [&](const auto& cover)
+                {
+                    if (accepted == 3)
+                        return false;
+                    EXPECT_EQ(cover.owner, legacy[cursor].owner);
+                    EXPECT_EQ(cover.images, legacy[cursor].images);
+                    EXPECT_EQ(cover.bounds.lower, legacy[cursor].bounds.lower);
+                    EXPECT_EQ(cover.bounds.upper, legacy[cursor].bounds.upper);
+                    EXPECT_TRUE(std::ranges::equal(cover.domain, legacy[cursor].domain));
+                    EXPECT_TRUE(std::ranges::any_of(
+                        domains, [&](const auto& domain) { return cover.domain.data() == domain.data(); }));
+                    ++accepted;
+                    return true;
+                });
+            EXPECT_EQ(complete, cursor == legacy.size());
+            EXPECT_EQ(budget.used, before);
+        }
+        // For a large mandatory frontier no scratch/output array is allocated.
+        if (target <= 8)
+            EXPECT_EQ(budget.cumulative, cumulative);
+        retire(legacy, budget);
+    }
+}
