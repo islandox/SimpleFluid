@@ -444,7 +444,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
           keeper(std::move(arena)), external_physical_residency(bool(physical)),
           physical_residency(make_residency(lease, keeper, std::move(physical))),
           pools(b, i, keeper, physical_residency ? IdentityPoolStorage::Persistent : IdentityPoolStorage::Flat),
-          tile_bodies(b, keeper), owned(b, pools),
+          tile_bodies(b, keeper), owned(b, pools, keeper, physical_residency.get()),
           supports(b, pools.supports, pools.cells, physical_residency ? keeper : nullptr), lines(b, pools),
           owner_rows(b, i, pools, k, comm->getRank(), keeper), tiles(b, keeper),
           authority_tile_counts(b, keeper), resident_generations(b, keeper)
@@ -463,7 +463,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
           point_arena((source.native_source_protocol || source.pools.points.source() || source.owned.source())
                           ? make_point_arena() : nullptr),
           source_manifests(source.source_manifests), pools(source.pools, b, i, keeper, point_arena),
-          tile_bodies(b, keeper), owned(source.owned, b, pools, point_arena),
+          tile_bodies(b, keeper), owned(source.owned, b, pools, point_arena, keeper, physical_residency.get()),
           supports(source.supports, b, pools.supports, pools.cells, keeper), lines(source.lines, b, pools),
           owner_rows(source.owner_rows, b, i, pools, keeper), tiles(b, keeper), subfaces(source.subfaces),
           authority_tile_counts(source.authority_tile_counts, b, keeper),
@@ -576,6 +576,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         authority_tile_counts.finish_overlap();
         resident_generations.finish_overlap();
         owner_rows.finish_inherited_overlap();
+        owned.finish_inherited_overlap();
         supports.finish_overlap();
         pools.finish_overlap();
         if (physical_residency && !external_physical_residency)
@@ -648,7 +649,7 @@ struct DistributedAdaptiveIncidenceSession::Impl
         { found = found || owner.get() == identity; };
         if (!physical_residency && pools.points.source())
             pools.points.source()->visit_dependencies(inspect);
-        if (owned.inventory())
+        if (!physical_residency && owned.inventory())
             owned.inventory()->visit_dependencies(inspect);
         if (physical_residency)
             found = found || bool(physical_residency->usage().find({identity,
@@ -3130,7 +3131,8 @@ std::size_t DistributedAdaptiveIncidenceSession::inherited_overlap_metadata_byte
                                     ? state.physical_residency->overlap_bytes() : 0;
     return state.retired_inherited_metadata_bytes + state.authority_tile_counts.overlap_bytes() +
            state.resident_generations.overlap_bytes() + state.owner_rows.inherited_overlap_metadata_bytes() +
-           state.pools.overlap_bytes() + state.supports.overlap_bytes() + owned_registry;
+           state.pools.overlap_bytes() + state.supports.overlap_bytes() +
+           state.owned.inherited_overlap_metadata_bytes() + owned_registry;
 }
 void DistributedAdaptiveIncidenceSession::finish_inherited_overlap() noexcept
 {
@@ -3169,7 +3171,8 @@ std::size_t DistributedAdaptiveIncidenceSession::metadata_bytes() const noexcept
     const auto source_page_credits = state.tile_bodies.statistics().page_credit_overhead_bytes;
     const auto source_arena_metadata = state.source_arena_overlap_metadata();
     return sizeof(Impl) + state.pools.source_only_metadata_bytes() +
-           state.owned.metadata_bytes() + state.supports.source_only_metadata_bytes() + state.lines.metadata_bytes() +
+           state.owned.source_overlap_metadata_bytes() + state.supports.source_only_metadata_bytes() +
+           state.lines.metadata_bytes() +
            state.owner_rows.source_overlap_metadata_bytes() +
            state.borrowed.metadata_bytes() +
            state.tile_bodies.metadata_bytes() + source_page_credits + source_arena_metadata +

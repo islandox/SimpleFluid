@@ -670,15 +670,17 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                 auto size = add(add(manifest_bytes, identity.size()), 8);
                 std::size_t explicit_count = 0;
                 if (admission.owned_)
-                    for (const auto& [slot, cell] : admission.owned_->cells_)
-                        if (!admission.inventory_->contains(admission.owned_->pools_->cells.get(slot)))
+                    admission.owned_->visit_explicit_cells(
+                        [&](std::size_t slot, const OwnedSupportMembership::Cell& cell)
                         {
+                            const auto& key = admission.owned_->pools_->cells.get(slot);
+                            if (admission.inventory_->contains(key))
+                                return;
                             ++explicit_count;
-                            size = add(size, add(24, key_wire_size(admission.owned_->pools_->cells.get(slot))));
-                            for (const auto& member : cell->members)
-                                size =
-                                    add(size, add(16, admission.owned_->pools_->supports.get(member.support).size()));
-                        }
+                            size = add(size, add(24, key_wire_size(key)));
+                            for (const auto& member : cell.members)
+                                size = add(size, add(16, admission.owned_->pools_->supports.get(member.support).size()));
+                        });
                 transport.retain(size);
                 Writer writer;
                 writer.data.reserve(size);
@@ -696,22 +698,24 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                 writer.bytes(identity);
                 writer.word(explicit_count);
                 if (admission.owned_)
-                    for (const auto& [slot, cell] : admission.owned_->cells_)
-                        if (!admission.inventory_->contains(admission.owned_->pools_->cells.get(slot)))
+                    admission.owned_->visit_explicit_cells(
+                        [&](std::size_t slot, const OwnedSupportMembership::Cell& cell)
                         {
-                            Allocation key_memory(budget);
                             const auto& key = admission.owned_->pools_->cells.get(slot);
+                            if (admission.inventory_->contains(key))
+                                return;
+                            Allocation key_memory(budget);
                             key_memory.retain(cartesian_detail::insertion_growth(key_wire_size(key)));
                             const auto encoded = encode_adaptive_key(key);
                             writer.bytes(encoded);
-                            writer.word(cell->revision);
-                            writer.word(cell->members.size());
-                            for (const auto& member : cell->members)
+                            writer.word(cell.revision);
+                            writer.word(cell.members.size());
+                            for (const auto& member : cell.members)
                             {
                                 writer.bytes(admission.owned_->pools_->supports.get(member.support));
                                 writer.word(member.encoded_size);
                             }
-                        }
+                        });
                 if (writer.data.size() != size)
                     throw std::logic_error("Source manifest frame size differs.");
                 outgoing.push_back({peer, std::move(writer.data)});

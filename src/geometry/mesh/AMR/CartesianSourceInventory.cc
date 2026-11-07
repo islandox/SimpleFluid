@@ -263,6 +263,8 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     result->context_ = context;
     result->owner_ = owner;
     result->version_ = version;
+    if (old)
+        result->predecessor_ = old->weak_from_this();
     const auto completely_retired = [&](const Batch& batch)
     {
         std::size_t count = 0;
@@ -327,6 +329,7 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
         else
             coalesce(batch.ranges_);
     std::erase_if(result->batches_, [](const auto& batch) { return batch.cells_ == 0; });
+    result->added_begin_ = result->batches_.size();
 
     for (const auto& captured : sources)
     {
@@ -358,6 +361,7 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
                         throw std::invalid_argument("Duplicate current Cartesian inventory ancestry.");
         }
         result->cells_ = add(result->cells_, batch.cells_);
+        result->maximum_domain_bytes_ = std::max(result->maximum_domain_bytes_, batch.source_->domain().size());
     }
 
     // One exact reservation precedes Writer insertion. Full identities include
@@ -397,6 +401,12 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     retained.bytes = 0;
     credits.committed = true;
     return result;
+}
+bool CartesianSourceInventory::derived_from(
+    const std::shared_ptr<const CartesianSourceInventory>& source) const noexcept
+{
+    return source && !predecessor_.owner_before(source) && !source.owner_before(predecessor_) &&
+           predecessor_.lock().get() == source.get();
 }
 CartesianSourceInventory::~CartesianSourceInventory()
 {

@@ -9,10 +9,12 @@
 #include "SupportRegistry.hh"
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+class ContactPhysicalResidency;
 /** Cached owner-local surface metadata makes retirement independent of a leaf
  * that the hierarchy may already have removed. No geometry pointers retained. */
 class OwnedSupportMembership
@@ -28,12 +30,18 @@ public:
     {
         std::uint64_t revision = 0;
         std::vector<Member> members;
-        std::size_t charge = 0;
-        const CartesianIncidenceSource* construction_source = nullptr;
+        std::size_t charge = 0, maximum_change = 0;
+        std::weak_ptr<const CartesianIncidenceSource> construction_source;
     };
-    OwnedSupportMembership(Budget&, IncidencePools&);
+    struct PersistenceWork
+    {
+        std::size_t copied_pages = 0, copied_bytes = 0, legacy_fork_visits = 0, inventory_validation_visits = 0;
+    };
+    OwnedSupportMembership(
+        Budget&, IncidencePools&, std::shared_ptr<Budget> keeper = {}, ContactPhysicalResidency* residency = nullptr);
     OwnedSupportMembership(const OwnedSupportMembership&, Budget&, IncidencePools&,
-        std::shared_ptr<CartesianAuthorityArena> source_arena = {});
+        std::shared_ptr<CartesianAuthorityArena> source_arena = {}, std::shared_ptr<Budget> keeper = {},
+        ContactPhysicalResidency* residency = nullptr);
     ~OwnedSupportMembership();
     OwnedSupportMembership(const OwnedSupportMembership&) = delete;
     OwnedSupportMembership& operator=(const OwnedSupportMembership&) = delete;
@@ -59,10 +67,11 @@ public:
     }
     [[nodiscard]] std::size_t source_cell_count() const noexcept
     {
-        return inventory_ ? inventory_->cell_count()
-                          : (source_ ? source_->cell_count() - retired_source_cells_.size() : 0);
+        return inventory_ ? inventory_->cell_count() : (source_ ? source_->cell_count() - retired_source_count() : 0);
     }
-    [[nodiscard]] std::size_t explicit_cell_count() const noexcept { return cells_.size(); }
+    [[nodiscard]] std::size_t explicit_cell_count() const noexcept;
+    /** Exact original slot order. This callback borrows the current root. */
+    void visit_explicit_cells(const CartesianBorrowedCallback<Slot, const Cell&>&) const;
     [[nodiscard]] const Cell& at(Slot) const;
     [[nodiscard]] std::size_t member_count(Slot) const;
     [[nodiscard]] std::uint64_t leaf_revision(Slot) const;
@@ -81,53 +90,13 @@ public:
     using SupportCells = SmallMembership<Slot>;
     [[nodiscard]] const SupportCells* support_cells(Slot support) const;
     void erase(Slot);
-    [[nodiscard]] std::size_t metadata_bytes() const noexcept
-    {
-        return cells_.size() * cell_node_bytes + reverse_.size() * reverse_node_bytes +
-               retired_source_cells_.size() * retired_node_bytes + deferred_.metadata_bytes() +
-               source_leases_.capacity() * sizeof(source_leases_[0]);
-    }
-    [[nodiscard]] std::size_t retained_bytes() const noexcept
-    {
-        return charged_ + deferred_.retained_bytes() +
-               (source_ && source_->allocation_budget() == budget_ ? source_->metadata_bytes() : 0) +
-               (!source_ && construction_source_ && construction_source_->allocation_budget() == budget_
-                       ? construction_source_->metadata_bytes()
-                       : 0);
-    }
-    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
-    {
-        for (const auto& entry : cells_)
-        {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipNodes, entry);
-            contact_payload_object(
-                visitor, entry.second.get(), ContactPayloadRole::OwnedMembershipCell, sizeof(Cell), true);
-            contact_payload_buffer(
-                visitor, entry.second.get(), ContactPayloadRole::OwnedMembershipMembers, entry.second->members);
-        }
-        for (const auto& entry : reverse_)
-        {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipReverseNodes, entry);
-            if (const auto& spill = entry.second.spill())
-            {
-                contact_payload_object(
-                    visitor, spill.get(), ContactPayloadRole::OwnedMembershipSpill, sizeof(SupportCells::Spill), true);
-                contact_payload_buffer(visitor, spill.get(), ContactPayloadRole::OwnedMembershipValues, *spill);
-            }
-        }
-        for (const auto& entry : retired_source_cells_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipRetiredNodes, entry);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::OwnedMembershipLeases, source_leases_);
-        for (const auto& lease : source_leases_)
-            lease->visit_borrowed_payload(visitor);
-        if (inventory_)
-            inventory_->visit_borrowed_payload(visitor);
-        else if (source_)
-            source_->visit_borrowed_payload(visitor);
-        if (construction_source_)
-            construction_source_->visit_borrowed_payload(visitor);
-        deferred_.visit_borrowed_payload(visitor);
-    }
+    [[nodiscard]] std::size_t metadata_bytes() const noexcept;
+    [[nodiscard]] std::size_t source_overlap_metadata_bytes() const noexcept;
+    [[nodiscard]] std::size_t inherited_overlap_metadata_bytes() const noexcept;
+    void finish_inherited_overlap() noexcept;
+    [[nodiscard]] std::size_t retained_bytes() const noexcept;
+    [[nodiscard]] PersistenceWork persistence_work() const noexcept;
+    template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const { visit_payload(visitor); }
     void reap_deferred() noexcept { deferred_.reap(); }
 
 private:
@@ -141,12 +110,27 @@ private:
     [[nodiscard]] const CartesianSourceInventory::Batch* source_batch(Slot) const;
     [[nodiscard]] std::array<Member, 6> generated_members(Slot) const;
     void update_reverse(Slot support, Slot cell, bool remove);
-    [[nodiscard]] Slot add_leaf(const AdaptiveLeaf&, const CartesianIncidenceSource*);
+    struct Persistent;
+    [[nodiscard]] Slot add_leaf(const AdaptiveLeaf&, const std::shared_ptr<const CartesianIncidenceSource>&);
+    [[nodiscard]] const Cell* find_explicit(Slot) const noexcept;
+    [[nodiscard]] std::optional<Slot> first_explicit(Slot first = 0) const noexcept;
+    [[nodiscard]] bool retired_source_contains(Slot) const noexcept;
+    [[nodiscard]] std::size_t retired_source_count() const noexcept;
+    void clear_retired_source();
+    void clear_explicit();
+    void observe_source(bool add, const std::shared_ptr<const CartesianIncidenceSource>&, CartesianAuthorityArena*);
+    void observe_inventory(bool add, const std::shared_ptr<const CartesianSourceInventory>&, CartesianAuthorityArena*);
+    void visit_payload(const CartesianBorrowedCallback<const ContactPayloadAllocation&>&) const;
     void admit(std::size_t);
     void release(std::size_t);
+    // The borrowed-budget accounting helpers are destroyed before this keeper.
+    std::shared_ptr<Budget> keeper_;
     Budget* budget_;
     DeferredOwnerCharges deferred_;
     IncidencePools* pools_;
+    ContactPhysicalResidency* residency_;
+    std::unique_ptr<Persistent> persistent_;
+    PersistenceWork work_{};
     std::size_t charged_ = 0;
     Index cells_;
     ReverseIndex reverse_;
@@ -155,7 +139,7 @@ private:
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> source_leases_;
     std::shared_ptr<const CartesianIncidenceSource> construction_source_;
     std::fenv_t construction_environment_{};
-    std::set<Slot> retired_source_cells_;
+    std::set<Slot> retired_source_cells_, changed_explicit_cells_;
     std::fenv_t source_environment_{}; // Local cached controls; never serialized.
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

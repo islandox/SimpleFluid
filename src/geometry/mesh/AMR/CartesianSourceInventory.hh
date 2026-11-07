@@ -18,7 +18,7 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
  * Active selectors describe ancestry, never physical incidence or adjacency.
  * The session authenticates collective context changes and the trusted grid.
  * No predecessor is retained solely for transition history. */
-class CartesianSourceInventory
+class CartesianSourceInventory : public std::enable_shared_from_this<CartesianSourceInventory>
 {
 public:
     /** Original local evaluation state, captured when the trusted source was
@@ -117,6 +117,8 @@ public:
     }
 
 private:
+    friend class OwnedSupportMembership;
+    [[nodiscard]] bool derived_from(const std::shared_ptr<const CartesianSourceInventory>&) const noexcept;
     CartesianSourceInventory() = default;
     static std::shared_ptr<const CartesianSourceInventory> construct(const CartesianSourceInventory*,
         ContactHaloContext, int, std::uint64_t, std::span<const Retirement>, std::span<const CapturedSource>, Budget&,
@@ -124,7 +126,8 @@ private:
     ContactHaloContext context_;
     int owner_ = -1;
     std::uint64_t version_ = 0;
-    std::size_t cells_ = 0;
+    std::size_t cells_ = 0, added_begin_ = 0, maximum_domain_bytes_ = 0;
+    std::weak_ptr<const CartesianSourceInventory> predecessor_;
     std::vector<Batch> batches_;
     AdaptiveBytes identity_;
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> leases_;

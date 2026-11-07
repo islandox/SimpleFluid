@@ -106,6 +106,7 @@ enum class ContactPayloadRole : std::uint8_t
     SourcePointValueBlockObject,
     IncidenceSessionObject,
     IncidenceSessionImpl,
+    OwnedMembershipController,
     OwnedMembershipNodes,
     OwnedMembershipCell,
     OwnedMembershipMembers,
