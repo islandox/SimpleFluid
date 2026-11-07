@@ -3,21 +3,23 @@
 #include "CartesianIncidenceAuthority.hh"
 #include "CartesianSourceManifests.hh"
 #include "ContactPayloadCensus.hh"
+#include "PersistentOrderedPages.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <variant>
-#include <type_traits>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveIncidenceSession;
 class ContactSourcePointSnapshot;
+template<class Hasher, class Payload> class IncidencePointDirectory;
 /** A source namespace is distinct from immutable physical(page,offset) refs. */
 struct ContactSourcePointReference
 {
@@ -52,6 +54,18 @@ class ContactSourcePointAdmission
 using ContactSourcePoint = PLIC::PointIdentity<ArithmeticMode::Ordinary>;
 using ContactSourcePointEmit = CartesianBorrowedCallback<const ContactSourcePoint&, std::uint64_t>;
 using ContactSourcePointRead = CartesianBorrowedCallback<std::size_t, const ContactSourcePointEmit&>;
+namespace cartesian_detail
+{
+/** Admit the manifest and its exact live grant or foreign physical graph.
+ * The manifest header's arena alone says nothing about inherited credit. */
+inline void retain_point_manifest(const std::shared_ptr<const CartesianSourceManifestSet>& manifest,
+    CreditConstruction& credits, std::vector<std::shared_ptr<AuthorityOwnerCredit>>& leases, Allocation& memory)
+{
+    credits.retain(manifest, manifest->allocation_budget(), manifest->metadata_bytes(), manifest->has_arena_keeper(),
+        leases, memory);
+    manifest->retain_dependencies(credits, leases, memory);
+}
+} // namespace cartesian_detail
 /** Lossless immutable cached values, not coordinate equivalence authority.
  * Every component-composed FULL key equals its actual original identity before
  * publication; otherwise the complete actual identity remains an exception.
@@ -82,14 +96,15 @@ public:
     [[nodiscard]] const Budget* allocation_budget() const noexcept { return budget_; }
     [[nodiscard]] bool has_arena_keeper() const noexcept { return bool(keeper_); }
     [[nodiscard]] std::size_t exception_count() const noexcept;
-    [[nodiscard]] std::size_t storage_block_count() const noexcept { return blocks_.size(); }
+    [[nodiscard]] std::size_t storage_block_count() const noexcept { return blocks_ ? blocks_->size : 0; }
     /** Local immutable slot lineage, supplemental to complete identity proof.
      * Fork/recapture shares this DATA block; no historical proof is retained. */
-    [[nodiscard]] const void* slot_namespace() const noexcept
-    {
-        return blocks_.empty() ? nullptr : blocks_.front().get();
-    }
+    [[nodiscard]] const void* slot_namespace() const noexcept { return slot_namespace_; }
     [[nodiscard]] std::size_t new_storage_records() const noexcept { return new_records_; }
+    [[nodiscard]] std::size_t copied_directory_bytes() const noexcept { return directory_work_.copied_bytes; }
+    [[nodiscard]] std::size_t indexed_axis_values() const noexcept { return indexed_axis_values_; }
+    [[nodiscard]] std::size_t value_build_admitted_bytes() const noexcept { return value_build_bytes_; }
+    [[nodiscard]] std::size_t verified_prefix_records() const noexcept { return verified_prefix_records_; }
     [[nodiscard]] std::size_t value_storage_bytes() const noexcept;
     [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
     {
@@ -107,9 +122,16 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
         contact_payload_object(visitor, this, ContactPayloadRole::SourcePointSnapshotObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointDirectoryObject, blocks_);
-        for (const auto& block : blocks_)
-            block->visit_borrowed_payload(visitor);
+        BlockDirectory::visit_pages(blocks_,
+            [&](const auto& page)
+            {
+                constexpr auto role = ContactPayloadRole::SourcePointDirectoryObject;
+                contact_payload_object(visitor, page.get(), role, sizeof(*page), true);
+                contact_payload_buffer(visitor, page.get(), role, page->children);
+                contact_payload_buffer(visitor, page.get(), role, page->rows);
+                for (const auto& block : page->rows)
+                    block->visit_borrowed_payload(visitor);
+            });
         contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointLeases, leases_);
         if (control_identity_)
             contact_payload_object(visitor, control_identity_, ContactPayloadRole::CartesianControlCreditObject,
@@ -125,8 +147,7 @@ public:
     template<CartesianDependencyVisit Mode = CartesianDependencyVisit::Flat, class Visitor>
     void visit_dependencies(Visitor&& visitor) const
     {
-        for (const auto& block : blocks_)
-            visitor(block, block->budget, block->metadata_bytes(), bool(block->keeper));
+        visit_value_dependencies<Mode == CartesianDependencyVisit::Observed>(blocks_, visitor);
         if (source_)
             visitor(source_, source_->allocation_budget(), source_->metadata_bytes(), source_->has_arena_keeper());
         if (manifests_)
@@ -152,6 +173,20 @@ public:
     }
 
 private:
+    template<class Hasher, class Payload> friend class IncidencePointDirectory;
+    static std::shared_ptr<const ContactSourcePointSnapshot> capture_impl(const ContactSourcePointAdmission&,
+        bool hashing, const ContactSourcePointRead&, Budget&, std::shared_ptr<Budget>,
+        std::shared_ptr<CartesianAuthorityArena>, bool canonical_hash,
+        const std::shared_ptr<const ContactSourcePointSnapshot>* accepted_prefix);
+    [[nodiscard]] static bool same_snapshot(const std::shared_ptr<const ContactSourcePointSnapshot>& a,
+        const std::shared_ptr<const ContactSourcePointSnapshot>& b) noexcept
+    {
+        return a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
+    }
+    [[nodiscard]] static bool exact_control(const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot) noexcept
+    {
+        return snapshot && !snapshot->self_.owner_before(snapshot) && !snapshot.owner_before(snapshot->self_);
+    }
     ContactSourcePointSnapshot() = default;
     using Component = PLIC::details::CanonicalPointComponent;
     template<class UInt> using Selectors = std::vector<std::array<UInt, 3>>;
@@ -194,10 +229,44 @@ private:
             contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointExceptions, exceptions);
         }
     };
+    using Block = std::shared_ptr<const ValueBlock>;
+    struct BlockLess
+    {
+        bool operator()(const Block& a, const Block& b) const noexcept { return a->first < b->first; }
+    };
+    using BlockDirectory = persistent_ordered_detail::OrderedPages<Block, BlockLess>;
+    template<bool Prune, class Visitor>
+    static void visit_value_dependencies(const BlockDirectory::Ptr& page, Visitor&& visit)
+    {
+        if (!page)
+            return;
+        const std::shared_ptr<Budget> empty;
+        const bool keeper = page->charge.arena.owner_before(empty) || empty.owner_before(page->charge.arena);
+        if constexpr (Prune)
+        {
+            if (!visit(page, page->charge.arena.get(), page->charge.bytes, keeper))
+                return;
+        }
+        else
+            visit(page, page->charge.arena.get(), page->charge.bytes, keeper);
+        for (const auto& child : page->children)
+            visit_value_dependencies<Prune>(child, visit);
+        for (const auto& block : page->rows)
+            visit(block, block->budget, block->metadata_bytes(), bool(block->keeper));
+    }
+    template<class Visitor> bool visit_blocks(const Visitor& visit) const
+    {
+        return BlockDirectory::visit_from(blocks_, [](const Block&) { return false; }, visit);
+    }
     [[nodiscard]] const ValueBlock& block_at(std::size_t) const;
     [[nodiscard]] const Component& component(unsigned axis, std::size_t index) const;
-    std::vector<std::shared_ptr<const ValueBlock>> blocks_;
+    [[nodiscard]] std::optional<std::size_t> find_component(unsigned axis, long double value) const;
+    BlockDirectory::Ptr blocks_;
+    std::weak_ptr<const ContactSourcePointSnapshot> self_;
+    const void* slot_namespace_ = nullptr; // The first block is pinned by blocks_.
     std::array<std::size_t, 3> component_counts_{};
+    persistent_ordered_detail::OrderedPageWork directory_work_;
+    std::size_t indexed_axis_values_ = 0, verified_prefix_records_ = 0, value_build_bytes_ = 0;
     std::size_t new_records_ = 0, control_charge_ = 0;
     // Non-owning observation; custom deleter keeps this typed token alive.
     const void* control_identity_ = nullptr;

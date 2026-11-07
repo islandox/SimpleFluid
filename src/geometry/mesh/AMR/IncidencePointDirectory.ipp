@@ -125,7 +125,7 @@ template<class H, class P> std::size_t IncidencePointDirectory<H, P>::intern(Poi
     return cartesian_detail::add(source_size(), store_->intern(std::move(point)));
 }
 template<class H, class P>
-std::shared_ptr<const ContactSourcePointSnapshot> IncidencePointDirectory<H, P>::prepare_source(
+typename IncidencePointDirectory<H, P>::PreparedSource IncidencePointDirectory<H, P>::prepare_source(
     const ContactSourcePointAdmission& admission, std::shared_ptr<CartesianAuthorityArena> arena)
 {
     // A custom payload policy retains its original explicit admission semantics.
@@ -133,7 +133,11 @@ std::shared_ptr<const ContactSourcePointSnapshot> IncidencePointDirectory<H, P>:
         return {};
     if (!arena || arena->budget != budget_)
         throw std::invalid_argument("Foreign source point arena.");
-    auto snapshot = ContactSourcePointSnapshot::capture(
+    PreparedSource prepared;
+    prepared.prefix_ = source_;
+    prepared.prefix_namespace_ = source_ ? source_->slot_namespace() : nullptr;
+    prepared.trusted_prefix_ = std::is_same_v<H, IdentityPoolHasher<Point>>;
+    prepared.snapshot_ = ContactSourcePointSnapshot::capture_impl(
         admission, H::enabled,
         [&](std::size_t index, const ContactSourcePointEmit& emit)
         {
@@ -143,19 +147,36 @@ std::shared_ptr<const ContactSourcePointSnapshot> IncidencePointDirectory<H, P>:
                 hash = hasher_(point);
             emit(point, hash);
         },
-        *budget_, keeper_, arena, std::is_same_v<H, IdentityPoolHasher<Point>>);
+        *budget_, keeper_, arena, prepared.trusted_prefix_, prepared.trusted_prefix_ ? &prepared.prefix_ : nullptr);
     arena_ = std::move(arena);
-    return snapshot;
+    return prepared;
 }
 template<class H, class P>
 template<class Retire>
 bool IncidencePointDirectory<H, P>::publish_source(
     std::shared_ptr<const ContactSourcePointSnapshot> snapshot, Retire retire)
 {
-    if (!snapshot || !arena_ || snapshot->size() != size() || snapshot->allocation_budget() != budget_ ||
-        snapshot->hashing() != H::enabled)
+    return publish_source_from(std::move(snapshot), 0, std::move(retire));
+}
+template<class H, class P>
+template<class Retire>
+bool IncidencePointDirectory<H, P>::publish_source(const PreparedSource& prepared, Retire retire)
+{
+    if (!ContactSourcePointSnapshot::same_snapshot(prepared.prefix_, source_) ||
+        prepared.prefix_namespace_ != (source_ ? source_->slot_namespace() : nullptr))
         return false;
-    for (std::size_t i = 0; i < snapshot->size(); ++i)
+    return publish_source_from(prepared.snapshot_, prepared.trusted_prefix_ ? source_size() : 0, std::move(retire));
+}
+template<class H, class P>
+template<class Retire>
+bool IncidencePointDirectory<H, P>::publish_source_from(
+    std::shared_ptr<const ContactSourcePointSnapshot> snapshot, std::size_t first, Retire retire)
+{
+    if (!ContactSourcePointSnapshot::exact_control(snapshot) || !arena_ || snapshot->size() != size() ||
+        snapshot->allocation_budget() != budget_ || snapshot->hashing() != H::enabled ||
+        (source_ && snapshot->generation() <= source_->generation()))
+        return false;
+    for (std::size_t i = first; i < snapshot->size(); ++i)
         if (snapshot->value({i}) != get(i))
             return false;
     cartesian_detail::Allocation memory(*budget_);

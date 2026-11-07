@@ -7,6 +7,7 @@
 #include <array>
 #include <gtest/gtest.h>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -91,6 +92,13 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
     std::shared_ptr<const ContactSourcePointSnapshot> latest;
     std::weak_ptr<const ContactSourcePointSnapshot> old_proof;
     std::vector<std::pair<IncidenceRowHandle, FullPointPairs>> escaped;
+    struct StoredCapture
+    {
+        std::shared_ptr<const ContactSourcePointView> view;
+        CapturedSourcePointReference reference;
+        ContactSourcePoint point;
+    };
+    std::vector<StoredCapture> stored_captures;
     std::size_t external_identity_admission = 0;
     std::vector<std::weak_ptr<const PLIC::details::GeometryIdentityBacking>> plane_owners;
     {
@@ -109,6 +117,9 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
         std::size_t expected_points = 27;
         for (std::size_t step = 0; step != targets.size(); ++step)
         {
+            const auto previous = session.point_pool().source();
+            IncidencePointDirectory<> shadow(
+                session.point_pool(), *budget, budget, session.point_pool().source_arena());
             const AdaptiveCellKey parent{config.region_id, CartesianCellAncestry{0, targets[step]}};
             const auto before = rows.at(parent);
             const auto split = kernel->split(current.at(parent), AdaptiveSplit::Isotropic);
@@ -130,6 +141,57 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
             EXPECT_EQ(latest->size(), expected_points);
             EXPECT_EQ(latest->storage_block_count(), step + 2);
             EXPECT_EQ(latest->new_storage_records(), appended[step]);
+            EXPECT_EQ(latest->verified_prefix_records(), 0u);
+            EXPECT_EQ(latest->slot_namespace(), previous->slot_namespace());
+            for (std::size_t i = 0; i < previous->size(); ++i)
+            {
+                EXPECT_EQ(latest->value({i}), previous->value({i}));
+                EXPECT_EQ(latest->component_indices({i}), previous->component_indices({i}));
+            }
+            for (std::size_t i = previous->size(); i < latest->size(); ++i)
+                ASSERT_EQ(shadow.intern(latest->value({i})), i);
+            auto capture = ContactSourcePointView::create(previous, *budget, budget, shadow.source_arena());
+            const auto stored = capture->capture(shadow, previous->size());
+            capture->freeze();
+            ASSERT_TRUE(capture->stored_location(stored));
+            stored_captures.push_back({capture, stored, latest->value({previous->size()})});
+            const auto used_before_rejected = budget->used;
+            const auto spent = budget->cumulative;
+            const std::shared_ptr<const ContactSourcePointSnapshot> foreign_control(latest.get(), [](const auto*) {});
+            EXPECT_FALSE(shadow.publish_source(foreign_control));
+            EXPECT_FALSE(shadow.publish_source(previous));
+            EXPECT_EQ(budget->used, used_before_rejected);
+            EXPECT_EQ(budget->cumulative, spent);
+            if (step == 0)
+            {
+                std::size_t required = 0;
+                {
+                    IncidencePointDirectory<> probe(shadow, *budget, budget, shadow.source_arena());
+                    const auto live = budget->used;
+                    budget->peak = live;
+                    ASSERT_TRUE(probe.publish_source(latest));
+                    required = budget->peak - live;
+                }
+                ASSERT_GT(required, 0u);
+                const auto live = budget->used;
+                const auto limit = budget->limit;
+                budget->limit = live + required - 1;
+                EXPECT_THROW((void) shadow.publish_source(latest), std::invalid_argument);
+                EXPECT_EQ(budget->used, live);
+                EXPECT_EQ(shadow.source(), previous);
+                EXPECT_EQ(capture->get(stored), latest->value({previous->size()}));
+                budget->limit = live + required;
+                budget->peak = live;
+                const bool published = shadow.publish_source(latest);
+                EXPECT_EQ(budget->peak, budget->limit);
+                budget->limit = limit;
+                ASSERT_TRUE(published);
+            }
+            else
+                ASSERT_TRUE(shadow.publish_source(latest));
+            EXPECT_EQ(shadow.physical_pool().size(), 0u);
+            for (const auto& saved : stored_captures)
+                EXPECT_EQ(saved.view->get(saved.reference), saved.point);
             EXPECT_EQ(session.point_pool().physical_pool().size(), 0);
             EXPECT_EQ(session.statistics().source_membership_cells, current.size());
             EXPECT_EQ(session.statistics().retained_explicit_line_records, 0);
@@ -196,6 +258,10 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
     for (const auto& [row, expected] : escaped)
         EXPECT_EQ(keys(row->points), expected);
     escaped.clear();
+    EXPECT_FALSE(old_proof.expired()); // A stored suffix also pins its captured prefix.
+    for (const auto& saved : stored_captures)
+        EXPECT_EQ(saved.view->get(saved.reference), saved.point);
+    stored_captures.clear();
     EXPECT_TRUE(old_proof.expired()); // Latest shared data blocks do not pin its historical snapshot/manifest.
     ASSERT_TRUE(latest);
     EXPECT_EQ(latest->size(), 84);
@@ -205,6 +271,101 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
     old_proof.reset();
     EXPECT_EQ(budget->used, 0);
 }
+TEST(CartesianPointSourceUpdates, LargerAcceptedPrefixDoesNotCopyOrReindexPointValues)
+{
+    RestoreEnvironment restore;
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    struct Work
+    {
+        std::size_t old_points = 0, new_points = 0, new_axes = 0, directory_bytes = 0, admitted_bytes = 0;
+    };
+    const auto refine = [](std::uint64_t x_cells, Work& work)
+    {
+        auto config = grid();
+        config.block_cells[0] = x_cells;
+        config.extent[0] = double(x_cells) / 2;
+        const auto kernel = cartesian_adaptive_kernel(config);
+        auto budget = std::make_shared<Budget>(Budget{ample});
+        auto comm = Teuchos::rcp(new Teuchos::SerialComm<int>);
+        IdentityBudget identities;
+        DistributedAdaptiveIncidenceSession session(*kernel, comm, {}, {}, *budget, identities, budget);
+        std::vector<AdaptiveLeaf> original;
+        LeafMap current;
+        for (std::uint64_t z = 0; z < 2; ++z)
+            for (std::uint64_t y = 0; y < 2; ++y)
+                for (std::uint64_t x = 0; x < x_cells; ++x)
+                {
+                    auto leaf =
+                        cartesian_adaptive_leaf(config, {config.region_id, CartesianCellAncestry{0, {x, y, z}}}, {'d'});
+                    current.emplace(leaf.key, leaf);
+                    original.push_back(std::move(leaf));
+                }
+        const auto lookup = [&](const AdaptiveCellKey& key) -> const AdaptiveLeaf& { return current.at(key); };
+        RowMap rows;
+        auto initial = session.bootstrap(original, lookup);
+        consume(initial, rows, *budget);
+        const auto accepted = session.point_pool().source();
+        ASSERT_TRUE(accepted);
+        using BufferKey = std::pair<ContactPayloadRole, const void*>;
+        using Inventory = std::map<BufferKey, std::size_t>;
+        const auto value_buffers = [](const ContactSourcePointSnapshot& snapshot)
+        {
+            Inventory result;
+            snapshot.visit_borrowed_payload(
+                [&](const ContactPayloadAllocation& item)
+                {
+                    const auto role = item.identity.role;
+                    if (role == ContactPayloadRole::SourcePointComponents ||
+                        role == ContactPayloadRole::SourcePointSelectors ||
+                        role == ContactPayloadRole::SourcePointLookup ||
+                        role == ContactPayloadRole::SourcePointExceptions)
+                        result.emplace(BufferKey{role, item.identity.address}, item.payload_bytes);
+                });
+            return result;
+        };
+        const auto accepted_buffers = value_buffers(*accepted);
+        const auto parent = original.front().key;
+        const auto split = kernel->split(current.at(parent), AdaptiveSplit::Isotropic);
+        const std::array retired{
+            IncidenceCellVersion{parent, rows.at(parent)->revision, rows.at(parent)->incidence_generation}};
+        current.erase(parent);
+        std::vector<AdaptiveCellKey> inserted;
+        for (const auto& child : split.children)
+        {
+            current.emplace(child.key, child);
+            inserted.push_back(child.key);
+        }
+        ContactHaloContext context;
+        context.round = 1;
+        auto update = session.apply_delta(retired, inserted, context, lookup);
+        consume(update, rows, *budget);
+        const auto recaptured = session.point_pool().source();
+        ASSERT_TRUE(recaptured);
+        ASSERT_NE(recaptured, accepted);
+        EXPECT_EQ(recaptured->verified_prefix_records(), 0u);
+        const auto new_buffers = value_buffers(*recaptured);
+        for (const auto& [key, bytes] : accepted_buffers)
+        {
+            ASSERT_TRUE(new_buffers.contains(key));
+            EXPECT_EQ(new_buffers.at(key), bytes);
+        }
+        work = {accepted->size(), recaptured->new_storage_records(), recaptured->indexed_axis_values(),
+            recaptured->copied_directory_bytes(), recaptured->value_build_admitted_bytes()};
+    };
+    Work small, large;
+    ASSERT_NO_FATAL_FAILURE(refine(2, small));
+    ASSERT_NO_FATAL_FAILURE(refine(8, large));
+    EXPECT_GE(large.old_points, 2 * small.old_points);
+    EXPECT_GT(small.new_points, 0u);
+    EXPECT_EQ(large.new_points, small.new_points);
+    EXPECT_GT(small.new_axes, 0u);
+    EXPECT_EQ(large.new_axes, small.new_axes);
+    EXPECT_GT(small.directory_bytes, 0u);
+    EXPECT_EQ(large.directory_bytes, small.directory_bytes);
+    EXPECT_GT(small.admitted_bytes, 0u);
+    EXPECT_EQ(large.admitted_bytes, small.admitted_bytes);
+}
+
 TEST(CartesianPointSourceUpdates, SameControlTranslatedAndNonbinaryRefinementMatchesExplicitAndFresh)
 {
     RestoreEnvironment restore;

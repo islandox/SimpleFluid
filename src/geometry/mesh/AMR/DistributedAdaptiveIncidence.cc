@@ -2401,13 +2401,14 @@ struct DistributedAdaptiveIncidenceSession::Impl
         const bool recapture = bool(pools.points.source());
         const auto capture_spent = budget->cumulative;
         const auto previous_points = pools.points.source();
-        auto snapshot = pools.points.prepare_source(admission, point_arena);
+        const auto prepared = pools.points.prepare_source(admission, point_arena);
+        const auto& snapshot = prepared.snapshot();
         const auto retire_physical_suffix = [&](auto& pool)
         {
             if (physical_residency && pool.persistent())
                 pool.transfer_inherited_page_bytes(physical_residency->detach_funded_point_scope(pool.scope_id()));
         };
-        if (!snapshot || !pools.points.publish_source(snapshot, retire_physical_suffix))
+        if (!snapshot || !pools.points.publish_source(prepared, retire_physical_suffix))
         {
             lines.finish_source_selection();
             return;

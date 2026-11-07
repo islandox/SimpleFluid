@@ -56,8 +56,24 @@ public:
     [[nodiscard]] const std::shared_ptr<Budget>& keeper() const noexcept { return keeper_; }
     [[nodiscard]] Budget& allocation() const noexcept { return *budget_; }
     [[nodiscard]] const std::shared_ptr<CartesianAuthorityArena>& source_arena() const noexcept { return arena_; }
-    [[nodiscard]] std::shared_ptr<const ContactSourcePointSnapshot> prepare_source(
+    class PreparedSource
+    {
+        friend class IncidencePointDirectory;
+        PreparedSource() = default;
+        std::shared_ptr<const ContactSourcePointSnapshot> snapshot_, prefix_;
+        const void* prefix_namespace_ = nullptr;
+        bool trusted_prefix_ = false;
+
+    public:
+        [[nodiscard]] const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot() const noexcept
+        {
+            return snapshot_;
+        }
+    };
+    [[nodiscard]] PreparedSource prepare_source(
         const ContactSourcePointAdmission&, std::shared_ptr<CartesianAuthorityArena>);
+    template<class Retire = std::nullptr_t>
+    [[nodiscard]] bool publish_source(const PreparedSource&, Retire retire = nullptr);
     /** Only private, unexposed initial rows may be rebound by the caller. Old
      * escaped physical views remain attached to their original page owners. */
     template<class Retire = std::nullptr_t>
@@ -111,6 +127,8 @@ public:
     }
 
 private:
+    template<class Retire>
+    [[nodiscard]] bool publish_source_from(std::shared_ptr<const ContactSourcePointSnapshot>, std::size_t, Retire);
     [[nodiscard]] std::unique_ptr<Store> make_store(const Store* copy, cartesian_detail::Allocation&);
     void credit_source(cartesian_detail::CreditConstruction&, cartesian_detail::Allocation&);
     Budget* budget_;

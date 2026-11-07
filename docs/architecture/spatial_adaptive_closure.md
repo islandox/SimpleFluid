@@ -347,6 +347,14 @@ Candidates share unchanged piece and provenance pages. The face index selects
 pieces by owned persistent key and source surface ordinal and reports the sign
 of the requested incidence.
 
+Native point recapture authenticates the directory's accepted snapshot by its
+exact shared owner and immutable slot namespace. The new snapshot shares
+independent value blocks through an immutable block directory and indexes only
+the appended axis values. Existing point and component slots retain their
+original identities. External point readers still verify their complete
+prefix and routing before publication. Escaped references to the physical
+suffix keep their original pages and admission credits across replacement.
+
 Geometry materialization admits its work and output separately. The canonical
 identity uses the support-normalized intrinsic loop before edge enrichment.
 The returned face keeps the final first-cell physical loop. Node and face GIDs

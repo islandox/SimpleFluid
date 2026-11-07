@@ -1,5 +1,6 @@
 /** Physical owner graph persistence across authenticated Cartesian inventory generations. */
 #include "geometry/mesh/AMR/CartesianSourceInventory.hh"
+#include "geometry/mesh/AMR/ContactSourcePoints.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIncidence.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 #include "geometry/mesh/AMR/IncidencePhysicalOwners.hh"
@@ -568,26 +569,52 @@ TEST(CartesianInventoryDependencyGraph, ActualPointSnapshotsRetainTheirOwnManife
     }
     third.residency->finish_overlap();
     ASSERT_FALSE(authority->prepaid_policy.expired());
-    EXPECT_FALSE(third_manifest->local_dependencies_admitted_in(*authority));
+    ASSERT_EQ(third_manifest->allocation_budget(), third.memory.get());
+    ASSERT_FALSE(third_manifest->local_dependencies_admitted_in(*authority));
+    const auto admit_escaped_point_manifest = [&](std::optional<std::size_t> cap, bool reject)
     {
-        // This is the manifest dependency adapter used by point snapshot construction.
-        D::cartesian_detail::Allocation memory(*third.memory);
-        std::vector<std::shared_ptr<D::cartesian_detail::AuthorityOwnerCredit>> leases;
-        D::cartesian_detail::CreditConstruction credits(authority);
-        third_manifest->retain_dependencies(credits, leases, memory);
-        credits.committed = true;
-        std::size_t foreign = 0;
-        third_inventory->visit_physical_dependencies(
-            [&](const auto& owner, const D::Budget* origin, std::size_t bytes, bool)
+        auto capture_arena = D::CartesianGroupAuthority::make_arena(*third.memory, third.memory);
+        D::IncidencePhysicalOwners::bind_policy(capture_arena, third.residency);
+        const auto before = third.memory->used;
+        const auto limit = third.memory->limit;
+        third.memory->peak = before;
+        if (cap)
+            third.memory->limit = before + *cap;
+        {
+            D::cartesian_detail::Allocation memory(*third.memory);
+            std::vector<std::shared_ptr<D::cartesian_detail::AuthorityOwnerCredit>> leases;
+            D::cartesian_detail::CreditConstruction credits(capture_arena);
+            const auto admit = [&]
+            { D::cartesian_detail::retain_point_manifest(third_manifest, credits, leases, memory); };
+            if (reject)
+                EXPECT_THROW(admit(), std::invalid_argument);
+            else
             {
-                if (origin != third.memory.get())
-                {
-                    EXPECT_TRUE(authority->admits_owner(owner, bytes));
-                    ++foreign;
-                }
-            });
-        EXPECT_GT(foreign, 0u);
-    }
+                EXPECT_NO_THROW(admit());
+                credits.committed = true;
+                std::size_t foreign = 0;
+                third_inventory->visit_physical_dependencies(
+                    [&](const auto& owner, const D::Budget* origin, std::size_t bytes, bool)
+                    {
+                        if (origin != third.memory.get())
+                        {
+                            EXPECT_TRUE(capture_arena->admits_owner(owner, bytes));
+                            ++foreign;
+                        }
+                    });
+                EXPECT_GT(foreign, 0u);
+            }
+        }
+        if (reject)
+            EXPECT_EQ(third.memory->used, before);
+        const auto peak = third.memory->peak - before;
+        third.memory->limit = limit;
+        return peak;
+    };
+    const auto exact = admit_escaped_point_manifest({}, false);
+    ASSERT_GT(exact, 1u);
+    EXPECT_EQ(admit_escaped_point_manifest(exact, false), exact);
+    (void) admit_escaped_point_manifest(exact - 1, true);
     first_points.reset();
     first_manifest.reset();
     first_inventory.reset();

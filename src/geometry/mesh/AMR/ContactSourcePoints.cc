@@ -87,7 +87,7 @@ ContactSourcePointSnapshot::ValueBlock::~ValueBlock()
 }
 ContactSourcePointSnapshot::~ContactSourcePointSnapshot()
 {
-    decltype(blocks_){}.swap(blocks_);
+    blocks_.reset();
     source_.reset();
     manifests_.reset();
     decltype(leases_){}.swap(leases_);
@@ -101,46 +101,75 @@ std::array<std::size_t, 3> ContactSourcePointSnapshot::component_counts() const 
 std::size_t ContactSourcePointSnapshot::exception_count() const noexcept
 {
     std::size_t count = 0;
-    for (const auto& block : blocks_)
-        count += block->exceptions.size();
+    visit_blocks(
+        [&](const Block& block)
+        {
+            count += block->exceptions.size();
+            return true;
+        });
     return count;
 }
 std::size_t ContactSourcePointSnapshot::value_storage_bytes() const noexcept
 {
     std::size_t bytes = 0;
-    for (const auto& block : blocks_)
-        bytes += block->metadata_bytes();
+    visit_blocks(
+        [&](const Block& block)
+        {
+            bytes += block->metadata_bytes();
+            return true;
+        });
     return bytes;
 }
 std::size_t ContactSourcePointSnapshot::selector_width() const noexcept
 {
     std::size_t width = 0;
-    for (const auto& block : blocks_)
-        width = std::max(width, std::visit(
-                                    [](const auto& values)
-                                    {
-                                        using Element = typename std::remove_cvref_t<decltype(values)>::value_type;
-                                        return sizeof(typename Element::value_type);
-                                    },
-                                    block->selectors));
+    visit_blocks(
+        [&](const Block& block)
+        {
+            const auto block_width = std::visit(
+                [](const auto& values)
+                {
+                    using Element = typename std::remove_cvref_t<decltype(values)>::value_type;
+                    return sizeof(typename Element::value_type);
+                },
+                block->selectors);
+            width = std::max(width, block_width);
+            return true;
+        });
     return width;
 }
 const ContactSourcePointSnapshot::ValueBlock& ContactSourcePointSnapshot::block_at(std::size_t index) const
 {
-    const auto at = std::upper_bound(blocks_.begin(), blocks_.end(), index,
-        [](auto slot, const auto& block) { return slot < block->first + block->count; });
-    if (at == blocks_.end() || index < (*at)->first)
+    const auto* at = BlockDirectory::lower_bound(
+        blocks_, [index](const Block& block) { return block->first + block->count <= index; });
+    if (!at || index < (*at)->first)
         throw std::out_of_range("Invalid certified source point reference.");
     return **at;
 }
 const ContactSourcePointSnapshot::Component& ContactSourcePointSnapshot::component(
     unsigned axis, std::size_t index) const
 {
-    const auto at = std::upper_bound(blocks_.begin(), blocks_.end(), index, [axis](auto slot, const auto& block)
-        { return slot < block->component_first[axis] + block->components[axis].size(); });
-    if (at == blocks_.end() || index < (*at)->component_first[axis])
+    const auto* at = BlockDirectory::lower_bound(blocks_, [axis, index](const Block& block)
+        { return block->component_first[axis] + block->components[axis].size() <= index; });
+    if (!at || index < (*at)->component_first[axis])
         throw std::out_of_range("Invalid certified source point component.");
     return (*at)->components[axis][index - (*at)->component_first[axis]];
+}
+std::optional<std::size_t> ContactSourcePointSnapshot::find_component(unsigned axis, long double scalar) const
+{
+    std::optional<std::size_t> found;
+    visit_blocks(
+        [&](const Block& block)
+        {
+            const auto& values = block->components[axis];
+            const auto at = std::lower_bound(values.begin(), values.end(), scalar,
+                [](const Component& component, long double query) { return component.value() < query; });
+            if (at == values.end() || at->value() != scalar)
+                return true;
+            found = block->component_first[axis] + static_cast<std::size_t>(at - values.begin());
+            return false;
+        });
+    return found;
 }
 ContactSourcePoint ContactSourcePointSnapshot::value(ContactSourcePointReference reference) const
 {
@@ -194,58 +223,69 @@ std::optional<std::size_t> ContactSourcePointSnapshot::find(
     const ContactSourcePoint& point, std::uint64_t route_hash) const
 {
     const MetadataEnvironment environment;
-    for (const auto& block : blocks_)
-    {
-        const auto found = std::visit(
-            [&](const auto& values) -> std::optional<std::size_t>
-            {
-                if (hashing_)
+    std::optional<std::size_t> found;
+    visit_blocks(
+        [&](const Block& block)
+        {
+            found = std::visit(
+                [&](const auto& values) -> std::optional<std::size_t>
                 {
-                    using UInt = typename std::remove_cvref_t<decltype(values)>::value_type;
-                    const auto empty = std::numeric_limits<UInt>::max();
-                    const auto mask = values.size() - 1;
-                    auto slot = std::size_t(route_hash) & mask;
-                    for (std::size_t probes = 0; probes < values.size(); ++probes)
+                    if (hashing_)
                     {
-                        if (values[slot] == empty)
-                            return {};
-                        const auto candidate = std::size_t(values[slot]);
-                        if (full_equal(value({candidate}), point))
-                            return candidate;
-                        slot = (slot + 1) & mask;
+                        using UInt = typename std::remove_cvref_t<decltype(values)>::value_type;
+                        const auto empty = std::numeric_limits<UInt>::max();
+                        const auto mask = values.size() - 1;
+                        auto slot = std::size_t(route_hash) & mask;
+                        for (std::size_t probes = 0; probes < values.size(); ++probes)
+                        {
+                            if (values[slot] == empty)
+                                return {};
+                            const auto candidate = std::size_t(values[slot]);
+                            if (full_equal(value({candidate}), point))
+                                return candidate;
+                            slot = (slot + 1) & mask;
+                        }
+                        throw std::invalid_argument("Certified source lookup lacks an empty collision slot.");
                     }
-                    throw std::invalid_argument("Certified source lookup lacks an empty collision slot.");
-                }
-                std::size_t lower = 0, upper = values.size();
-                while (lower < upper)
-                {
-                    const auto middle = lower + (upper - lower) / 2;
-                    if (value({std::size_t(values[middle])}) < point)
-                        lower = middle + 1;
-                    else
-                        upper = middle;
-                }
-                if (lower < values.size() && full_equal(value({std::size_t(values[lower])}), point))
-                    return std::size_t(values[lower]);
-                return {};
-            },
-            block->lookup);
-        if (found)
-            return found;
-    }
-    return {};
+                    std::size_t lower = 0, upper = values.size();
+                    while (lower < upper)
+                    {
+                        const auto middle = lower + (upper - lower) / 2;
+                        if (value({std::size_t(values[middle])}) < point)
+                            lower = middle + 1;
+                        else
+                            upper = middle;
+                    }
+                    if (lower < values.size() && full_equal(value({std::size_t(values[lower])}), point))
+                        return std::size_t(values[lower]);
+                    return {};
+                },
+                block->lookup);
+            return !found;
+        });
+    return found;
 }
 std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::capture(
     const ContactSourcePointAdmission& admission, bool hashing, const ContactSourcePointRead& read, Budget& budget,
     std::shared_ptr<Budget> keeper, std::shared_ptr<CartesianAuthorityArena> arena, bool canonical_hash)
 {
+    return capture_impl(admission, hashing, read, budget, std::move(keeper), std::move(arena), canonical_hash, nullptr);
+}
+std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::capture_impl(
+    const ContactSourcePointAdmission& admission, bool hashing, const ContactSourcePointRead& read, Budget& budget,
+    std::shared_ptr<Budget> keeper, std::shared_ptr<CartesianAuthorityArena> arena, bool canonical_hash,
+    const std::shared_ptr<const ContactSourcePointSnapshot>* accepted_prefix)
+{
     cartesian_detail::check_keeper(budget, keeper);
     if (!arena || arena->budget != &budget || !read || admission.owner_ < 0 || admission.layer_ >= 64)
         throw std::invalid_argument("Unbound or incomplete certified point source admission.");
     const auto& previous = admission.previousSnapshot_;
-    if (previous && (previous->owner_ != admission.owner_ || !same_grid(previous->grid_, admission.grid_) ||
-                        previous->hashing_ != hashing || previous->canonical_hash_ != canonical_hash ||
-                        previous->count_ > admission.count_ || previous->generation_ >= admission.generation_))
+    if (accepted_prefix && !same_snapshot(previous, *accepted_prefix))
+        throw std::invalid_argument("Certified point admission changed its accepted prefix owner.");
+    if (previous && (!exact_control(previous) || previous->owner_ != admission.owner_ ||
+                        !same_grid(previous->grid_, admission.grid_) || previous->hashing_ != hashing ||
+                        previous->canonical_hash_ != canonical_hash || previous->count_ > admission.count_ ||
+                        previous->generation_ >= admission.generation_))
         throw std::invalid_argument("Incompatible previous certified source point inventory.");
     if (!admission.manifests_ || admission.manifests_->context() != admission.context_ ||
         admission.manifests_->generation() != admission.generation_ ||
@@ -257,6 +297,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     cartesian_detail::CreditConstruction credits(arena);
     auto result = std::shared_ptr<ContactSourcePointSnapshot>(
         new ContactSourcePointSnapshot, [snapshot_control](auto* body) { delete body; });
+    result->self_ = result;
     result->control_charge_ = control_bytes;
     result->control_identity_ = snapshot_control.get();
     result->control_payload_bytes_ = sizeof(ControlCredit);
@@ -277,37 +318,22 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         const std::shared_ptr<const std::remove_const_t<Element>> fixed = owner;
         credits.retain(fixed, origin, bytes, has_keeper, result->leases_, memory);
     };
-    retain(result->manifests_, result->manifests_->allocation_budget(), result->manifests_->metadata_bytes(),
-        result->manifests_->has_arena_keeper());
-    result->manifests_->retain_dependencies(credits, result->leases_, memory);
+    cartesian_detail::retain_point_manifest(result->manifests_, credits, result->leases_, memory);
     if (result->source_)
         retain(result->source_, result->source_->allocation_budget(), result->source_->metadata_bytes(),
             result->source_->has_arena_keeper());
+    const auto value_build_start = budget.cumulative;
     const auto first = previous ? previous->count_ : 0;
     result->new_records_ = admission.count_ - first;
-    const auto block_count = add(previous ? previous->blocks_.size() : 0, result->new_records_ ? 1 : 0);
-    memory.reserve(result->blocks_, block_count);
     if (previous)
     {
         result->component_counts_ = previous->component_counts_;
-        for (const auto& block : previous->blocks_)
-        {
-            retain(block, block->budget, block->metadata_bytes(), bool(block->keeper));
-            result->blocks_.push_back(block);
-        }
+        result->blocks_ = previous->blocks_;
+        result->slot_namespace_ = previous->slot_namespace_;
     }
     using AxisMap = std::map<long double, std::size_t>;
     std::array<AxisMap, 3> axes;
     const MetadataEnvironment environment;
-    // Import components, never a full point copy or a historical proof object.
-    if (previous)
-        for (const auto& block : previous->blocks_)
-            for (unsigned axis = 0; axis < 3; ++axis)
-                for (std::size_t i = 0; i < block->components[axis].size(); ++i)
-                {
-                    scratch.retain(sizeof(AxisMap::value_type) + 4 * sizeof(void*));
-                    axes[axis].emplace(block->components[axis][i].value(), block->component_first[axis] + i);
-                }
     std::shared_ptr<ValueBlock> appended;
     if (result->new_records_)
     {
@@ -320,7 +346,12 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         appended->first = first;
         appended->count = result->new_records_;
         appended->component_first = result->component_counts_;
-        result->blocks_.push_back(appended);
+        const Block block = appended;
+        const auto directory_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, &budget);
+        const BlockDirectory directory(directory_arena, &result->directory_work_);
+        result->blocks_ = directory.edit(result->blocks_, block, &block, false);
+        if (!result->slot_namespace_)
+            result->slot_namespace_ = block.get();
     }
     std::vector<std::array<std::size_t, 3>> selectors;
     std::vector<std::uint64_t> hashes;
@@ -331,7 +362,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         scratch.reserve(hashes, result->new_records_);
         hashes.resize(result->new_records_);
     }
-    for (std::size_t i = 0; i < admission.count_; ++i)
+    for (std::size_t i = accepted_prefix ? first : 0; i < admission.count_; ++i)
     {
         bool supplied = false;
         read(i,
@@ -346,6 +377,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
                     // Recheck actual routing too; no old hash array is copied.
                     if (previous->find(point, hash) != std::optional<std::size_t>(i))
                         throw std::invalid_argument("Changed prior certified source point routing policy.");
+                    ++result->verified_prefix_records_;
                     return;
                 }
                 for (unsigned axis = 0; axis < 3; ++axis)
@@ -354,6 +386,12 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
                     auto at = axes[axis].lower_bound(scalar.value());
                     if (at == axes[axis].end() || at->first != scalar.value())
                     {
+                        if (previous)
+                            if (const auto old = previous->find_component(axis, scalar.value()))
+                            {
+                                selectors[i - first][axis] = *old;
+                                continue;
+                            }
                         scratch.retain(sizeof(AxisMap::value_type) + 4 * sizeof(void*));
                         values_memory.append(appended->components[axis]);
                         const auto slot = result->component_counts_[axis];
@@ -380,6 +418,28 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     }
     if (appended)
     {
+        // Sort only the private suffix dictionaries. Accepted component slots
+        // and the exact selectors that reference them remain immutable.
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            auto& values = appended->components[axis];
+            result->indexed_axis_values_ = add(result->indexed_axis_values_, values.size());
+            if (values.size() < 2)
+                continue;
+            Allocation remap_memory(budget);
+            std::vector<std::size_t> remap;
+            remap_memory.reserve(remap, values.size());
+            remap.resize(values.size());
+            const auto first_component = appended->component_first[axis];
+            std::size_t rank = 0;
+            for (const auto& item : axes[axis])
+                remap[item.second - first_component] = rank++;
+            std::sort(values.begin(), values.end(),
+                [](const Component& a, const Component& b) { return a.value() < b.value(); });
+            for (auto& point : selectors)
+                if (point[axis] >= first_component)
+                    point[axis] = first_component + remap[point[axis] - first_component];
+        }
         std::size_t largest = 0;
         for (const auto count : result->component_counts_)
             if (count)
@@ -452,6 +512,18 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         appended->keeper = keeper;
         appended->charge = std::exchange(values_memory.bytes, 0);
     }
+    result->value_build_bytes_ = budget.cumulative - value_build_start;
+    // Shared residency already covers the dependencies beneath an exact
+    // admitted page. Standalone arenas acquire their own foreign allowances.
+    visit_value_dependencies<true>(result->blocks_,
+        [&](const auto& owner, const Budget* origin, std::size_t bytes, bool has_keeper)
+        {
+            if (arena->prepaid(owner, origin, bytes, false))
+                return false;
+            if (origin != &budget)
+                retain(owner, origin, bytes, has_keeper);
+            return true;
+        });
     result->budget_ = &budget;
     result->keeper_ = std::move(keeper);
     result->charge_ = std::exchange(memory.bytes, 0);
