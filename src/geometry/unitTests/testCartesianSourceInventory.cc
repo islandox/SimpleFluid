@@ -52,7 +52,7 @@ TEST(CartesianSourceInventory, RefineCoarsenAndFailedTransitionsKeepExactImmutab
     auto source = CartesianIncidenceSource::make(value, coarse, {'d'}, 0, 1, initial, *budget, budget);
     const std::array captured{capture(source)};
     auto accepted = CartesianSourceInventory::make(initial, 0, 1, captured, *budget, budget, arena);
-    const auto old_identity = accepted->identity();
+    const auto old_identity = accepted->encode_identity(*budget).bytes();
     ASSERT_EQ(std::fesetround(FE_UPWARD), 0);
     std::vector<AdaptiveLeaf> fine;
     for (std::uint64_t z = 0; z != 2; ++z)
@@ -70,7 +70,7 @@ TEST(CartesianSourceInventory, RefineCoarsenAndFailedTransitionsKeepExactImmutab
     EXPECT_EQ(refined->batches().front().source(), source);
     EXPECT_EQ(refined->batches().back().source(), refined_source);
     EXPECT_NE(source->evaluation_environment(), refined_source->evaluation_environment());
-    EXPECT_EQ(accepted->identity(), old_identity);
+    EXPECT_EQ(accepted->encode_identity(*budget).bytes(), old_identity);
     EXPECT_TRUE(accepted->contains(coarse.front().key));
     EXPECT_FALSE(refined->contains(coarse.front().key));
     auto stale = retired;
@@ -94,7 +94,7 @@ TEST(CartesianSourceInventory, RefineCoarsenAndFailedTransitionsKeepExactImmutab
     auto rejected = std::make_shared<Budget>(Budget{0});
     EXPECT_THROW(CartesianGroupAuthority::make_arena(*rejected, rejected), std::exception);
     EXPECT_EQ(rejected->used, 0);
-    EXPECT_EQ(accepted->identity(), old_identity);
+    EXPECT_EQ(accepted->encode_identity(*budget).bytes(), old_identity);
     EXPECT_EQ(std::fegetround(), FE_UPWARD);
 }
 } // namespace

@@ -656,12 +656,12 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                     result->local_->has_arena_keeper(), result->leases_, retained);
             result->local_->retain_dependencies(credits, result->leases_, retained);
             transport.reserve(outgoing, std::size_t(comm->getSize()));
-            const auto identity = std::span<const char>(admission.inventory_->identity());
+            const auto identity_size = admission.inventory_->identity_size();
             const auto version = admission.inventory_->version();
             const auto descriptor = grid_descriptor(admission.grid_);
             for (int peer = 0; peer < comm->getSize(); ++peer)
             {
-                auto size = add(add(manifest_bytes, identity.size()), 8);
+                auto size = add(add(manifest_bytes, identity_size), 8);
                 std::size_t explicit_count = 0;
                 if (admission.owned_)
                     admission.owned_->visit_explicit_cells(
@@ -689,7 +689,8 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
                 writer.word(admission.cells_ == 0);
                 writer.word(admission.generation_);
                 writer.bytes(descriptor);
-                writer.bytes(identity);
+                writer.word(identity_size);
+                admission.inventory_->emit_identity(writer);
                 writer.word(explicit_count);
                 if (admission.owned_)
                     admission.owned_->visit_explicit_cells(

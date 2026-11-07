@@ -260,7 +260,7 @@ protected:
         const std::array sources{captured(original)};
         inventory = CartesianSourceInventory::make(context, 0, generation, sources, *budget, budget, arena);
         empty_inventory = CartesianSourceInventory::make(context, 1, generation, {}, *budget, budget, arena);
-        immutable_inventory = inventory->identity();
+        immutable_inventory = inventory->encode_identity(*budget).bytes();
         // Independent expected membership: two touching level-0 cells form this box.
         literal.batches = {{original_identity, 2, {{0, {0, 0, 0}, {2, 1, 1}}}}};
         valid = {packet(literal), packet({context, 1, generation, 0, {}})};
@@ -287,7 +287,7 @@ protected:
             EXPECT_EQ(packets[i].bytes, immutable_packets[i].bytes);
         }
         EXPECT_EQ(original->identity(), original_identity);
-        EXPECT_EQ(inventory->identity(), immutable_inventory);
+        EXPECT_EQ(inventory->encode_identity(*budget).bytes(), immutable_inventory);
         EXPECT_EQ(std::fegetround(), FE_TONEAREST);
     }
     void expect_bad_inventory(const LiteralInventory& bad)
@@ -299,9 +299,9 @@ protected:
 };
 TEST_F(CartesianSourceInventoryManifests, Schema2CarriesExactCurrentInventoryAndEveryEmptyOwner)
 {
-    EXPECT_EQ(inventory->identity(), inventory_bytes(literal));
-    EXPECT_EQ(empty_inventory->identity(), inventory_bytes({context, 1, generation, 0, {}}));
-    EXPECT_EQ(valid.front().bytes.size(), 264 + inventory->identity().size());
+    EXPECT_EQ(inventory->encode_identity(*budget).bytes(), inventory_bytes(literal));
+    EXPECT_EQ(empty_inventory->encode_identity(*budget).bytes(), inventory_bytes({context, 1, generation, 0, {}}));
+    EXPECT_EQ(valid.front().bytes.size(), 264 + inventory->identity_size());
     EXPECT_EQ(valid.back().bytes.size(), 264 + 96);
     EXPECT_GT(empty_inventory->version(), 0);
     EXPECT_EQ(empty_inventory->version(), generation);
@@ -338,21 +338,21 @@ TEST_F(CartesianSourceInventoryManifests, DerivedInventoryKeepsOriginalContextAn
     auto empty_next = CartesianSourceInventory::make(next, 1, 12, {}, *budget, budget, arena);
     const LiteralInventory expected{next, 0, 12, 9,
         {{original_identity, 1, {{0, {1, 0, 0}, {2, 1, 1}}}}, {child_identity, 8, {{1, {0, 0, 0}, {2, 2, 2}}}}}};
-    EXPECT_EQ(derived->identity(), inventory_bytes(expected));
+    EXPECT_EQ(derived->encode_identity(*budget).bytes(), inventory_bytes(expected));
     ASSERT_EQ(derived->batches().size(), 2);
     EXPECT_EQ(derived->batches().front().source(), original);
     EXPECT_EQ(derived->batches().front().source()->context(), context);
     EXPECT_NE(original->evaluation_environment(), children->evaluation_environment());
     EXPECT_EQ(original->identity(), original_identity);
-    EXPECT_EQ(inventory->identity(), immutable_inventory);
+    EXPECT_EQ(inventory->encode_identity(*budget).bytes(), immutable_inventory);
     EXPECT_EQ(derived->batches().front().source()->identity(), original_identity);
     EXPECT_EQ(derived->batches().back().source()->identity(), child_identity);
     EXPECT_EQ(derived->batches().front().source()->version(), 7);
     EXPECT_EQ(derived->batches().back().source()->version(), 8);
     EXPECT_TRUE(derived->contains(coarse.back().key));
     EXPECT_FALSE(derived->contains(coarse.front().key));
-    const std::vector<OwnerPacket> packets{inventory_receipt(value, next, 0, 12, 12, 9, derived->identity(), 0),
-        inventory_receipt(value, next, 1, 12, 12, 0, empty_next->identity(), 1)};
+    const std::vector<OwnerPacket> packets{inventory_receipt(value, next, 0, 12, 12, 9, derived->encode_identity(*budget).bytes(), 0),
+        inventory_receipt(value, next, 1, 12, 12, 0, empty_next->encode_identity(*budget).bytes(), 1)};
     const auto retained = budget->used;
     EXPECT_NO_THROW(CartesianSourceManifestSet::validate_untrusted_wire(value, next, 12, packets, 2, *budget));
     EXPECT_EQ(budget->used, retained);
@@ -409,7 +409,7 @@ TEST_F(CartesianSourceInventoryManifests, RejectsIncompleteOwnerReceiptsAndStale
     auto foreign_grid = value;
     foreign_grid.origin[0] = 0.125;
     packets = valid;
-    packets.front() = inventory_receipt(foreign_grid, context, 0, generation, generation, 2, inventory->identity(), 0);
+    packets.front() = inventory_receipt(foreign_grid, context, 0, generation, generation, 2, inventory->encode_identity(*budget).bytes(), 0);
     expect_rejected(packets); // Compare with the actual supplied trusted grid.
 }
 TEST_F(CartesianSourceInventoryManifests, RejectsStaleMalformedAndTruncatedNestedInventory)
@@ -421,7 +421,7 @@ TEST_F(CartesianSourceInventoryManifests, RejectsStaleMalformedAndTruncatedNeste
             std::size_t(48), std::size_t(56), std::size_t(64), std::size_t(72), std::size_t(80), std::size_t(88)})
     {
         SCOPED_TRACE(offset);
-        auto bad = inventory->identity();
+        auto bad = inventory->encode_identity(*budget).bytes();
         bad[offset] ^= 1;
         auto packets = valid;
         packets.front() = inventory_receipt(value, context, 0, generation, generation, 2, bad, 0);
@@ -431,16 +431,16 @@ TEST_F(CartesianSourceInventoryManifests, RejectsStaleMalformedAndTruncatedNeste
     const auto range_start = source_end + 16;
     for (auto cut : {std::size_t(0), std::size_t(7), std::size_t(15), std::size_t(55), std::size_t(95), std::size_t(96),
              std::size_t(103), source_end - 1, source_end, source_end + 7, source_end + 15, range_start,
-             range_start + 7, range_start + 31, inventory->identity().size() - 1})
+             range_start + 7, range_start + 31, inventory->identity_size() - 1})
     {
         SCOPED_TRACE(cut);
-        auto truncated = inventory->identity();
+        auto truncated = inventory->encode_identity(*budget).bytes();
         truncated.resize(cut);
         auto packets = valid;
         packets.front() = inventory_receipt(value, context, 0, generation, generation, 2, truncated, 0);
         expect_rejected(packets);
     }
-    auto trailing = inventory->identity();
+    auto trailing = inventory->encode_identity(*budget).bytes();
     trailing.push_back('x');
     auto packets = valid;
     packets.front() = inventory_receipt(value, context, 0, generation, generation, 2, trailing, 0);
@@ -448,7 +448,7 @@ TEST_F(CartesianSourceInventoryManifests, RejectsStaleMalformedAndTruncatedNeste
     for (auto offset : {std::size_t(96), source_end, source_end + 8})
     {
         SCOPED_TRACE(offset);
-        auto bad = inventory->identity();
+        auto bad = inventory->encode_identity(*budget).bytes();
         replace_word(bad, offset, 0); // No native identity, no active cells, or no active ranges.
         packets = valid;
         packets.front() = inventory_receipt(value, context, 0, generation, generation, 2, bad, 0);
@@ -538,8 +538,8 @@ TEST_F(CartesianSourceInventoryManifests, RejectedTinyBudgetsRestoreAdmissionAnd
             std::exception);
         EXPECT_EQ(rejected.used, 0);
         EXPECT_EQ(original->identity(), original_identity);
-        EXPECT_EQ(inventory->identity(), immutable_inventory);
-        EXPECT_EQ(empty_inventory->identity(), inventory_bytes({context, 1, generation, 0, {}}));
+        EXPECT_EQ(inventory->encode_identity(*budget).bytes(), immutable_inventory);
+        EXPECT_EQ(empty_inventory->encode_identity(*budget).bytes(), inventory_bytes({context, 1, generation, 0, {}}));
         EXPECT_EQ(std::fegetround(), FE_TONEAREST);
     }
 }
@@ -663,7 +663,7 @@ TEST_F(CartesianSourceExplicitManifests, Schema3CarriesSparseExplicitHeadersBesi
     EXPECT_NO_THROW(validate(explicit_only));
     EXPECT_EQ(budget->used, retained);
     EXPECT_EQ(original->identity(), original_identity);
-    EXPECT_EQ(inventory->identity(), immutable_inventory);
+    EXPECT_EQ(inventory->encode_identity(*budget).bytes(), immutable_inventory);
 }
 TEST_F(CartesianSourceExplicitManifests, RejectsIncompleteRepeatedAndNativeOverlappingExplicitContributors)
 {
@@ -784,7 +784,7 @@ TEST_F(CartesianSourceExplicitManifests, RejectsMalformedPrimitiveSupportIdentit
             std::exception);
         EXPECT_EQ(rejected.used, 0);
         EXPECT_EQ(original->identity(), original_identity);
-        EXPECT_EQ(inventory->identity(), immutable_inventory);
+        EXPECT_EQ(inventory->encode_identity(*budget).bytes(), immutable_inventory);
     }
 }
 } // namespace

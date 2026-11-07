@@ -571,9 +571,8 @@ void OwnedSupportMembership::publish_inventory(
     if (residency_ && !inventory->has_arena_keeper())
         throw std::invalid_argument("Owner source inventory lacks its original arena keeper.");
     const bool sparse = persistent_ && inventory->derived_from(inventory_);
-    const auto batches = inventory->batches();
     const auto new_batch = [&](const CartesianSourceInventory::Batch* batch)
-    { return batch && batch >= batches.data() + inventory->added_begin_; };
+    { return batch && inventory->is_added(*batch); };
     const auto validate = [&](Slot slot, const Cell& cell)
     {
         ++work_.inventory_validation_visits;
@@ -591,8 +590,15 @@ void OwnedSupportMembership::publish_inventory(
     if (sparse)
     {
         std::size_t additions = 0;
-        for (const auto& batch : batches.subspan(inventory->added_begin_))
-            additions = cartesian_detail::add(additions, batch.cell_count());
+        // Stable insertion slots make the appended range addressable without
+        // walking clean batches or comparing addresses from different pages.
+        for (auto slot = inventory->first_added_slot_; slot < inventory->next_slot_; ++slot)
+        {
+            const auto* batch = inventory->batch_at(slot);
+            if (!batch)
+                throw std::logic_error("Missing newly admitted source batch.");
+            additions = cartesian_detail::add(additions, batch->cell_count());
+        }
         for (const auto slot : changed_explicit_cells_)
             verified += validate(slot, at(slot));
         if (verified != additions || retired_source_count() > inventory_->cell_count() ||
@@ -755,9 +761,8 @@ void OwnedSupportMembership::visit_support_members(
             [&](const auto& occurrence)
             {
                 const auto cell = pools_->cells.find(occurrence.cell);
-                const auto* ancestry = std::get_if<CartesianCellAncestry>(&occurrence.cell.ancestry);
                 if (!cell || find_explicit(*cell) || retired_source_contains(*cell) ||
-                    (batch && (!ancestry || !batch->contains(*ancestry))))
+                    (batch && inventory_->lookup(occurrence.cell) != batch))
                     return;
                 const Member member{support, occurrence.packet.size()};
                 environment.in_caller([&] { emit(*cell, occurrence.revision, occurrence.ordinal, member); });
@@ -785,7 +790,7 @@ bool OwnedSupportMembership::has_support(Slot support) const
 std::size_t OwnedSupportMembership::maximum_change_capacity() const
 {
     const auto native = inventory_ && !inventory_->batches().empty()
-                            ? cartesian_detail::add(64, inventory_->maximum_domain_bytes_)
+                            ? cartesian_detail::add(64, inventory_->maximum_domain_bytes())
                             : (source_ ? cartesian_detail::add(64, source_->domain().size()) : 1);
     auto result = native;
     if (persistent_)

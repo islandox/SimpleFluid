@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -99,14 +101,11 @@ void coalesce(std::vector<CartesianIncidenceRange>& ranges)
     std::sort(ranges.begin(), ranges.end(), range_less);
 }
 /** Splitting one same-level half-open box needs at most six disjoint slabs. */
-void retire(std::vector<CartesianIncidenceRange>& ranges, const CartesianCellAncestry& cell, Allocation& allocation)
+std::pair<std::array<CartesianIncidenceRange, 6>, std::size_t> split_at(
+    CartesianIncidenceRange remainder, const CartesianCellAncestry& cell)
 {
-    const auto at =
-        std::find_if(ranges.begin(), ranges.end(), [&](const auto& range) { return range_contains(range, cell); });
-    if (at == ranges.end())
+    if (!range_contains(remainder, cell))
         throw std::invalid_argument("Missing Cartesian inventory retirement selector.");
-    const auto position = std::size_t(at - ranges.begin());
-    auto remainder = *at;
     std::array<CartesianIncidenceRange, 6> pieces{};
     std::size_t count = 0;
     for (unsigned axis = 0; axis < 3; ++axis)
@@ -118,7 +117,6 @@ void retire(std::vector<CartesianIncidenceRange>& ranges, const CartesianCellAnc
             pieces[count++] = slab;
             remainder.lower[axis] = cell.index[axis];
         }
-        // Contains proves index + 1 <= upper, so the increment cannot wrap.
         const auto after = cell.index[axis] + 1;
         if (after < remainder.upper[axis])
         {
@@ -128,15 +126,30 @@ void retire(std::vector<CartesianIncidenceRange>& ranges, const CartesianCellAnc
             remainder.upper[axis] = after;
         }
     }
-    if (!count)
-        ranges.erase(ranges.begin() + position);
-    else
+    return {pieces, count};
+}
+std::optional<CartesianIncidenceRange> merge(
+    const CartesianIncidenceRange& first, const CartesianIncidenceRange& second) noexcept
+{
+    if (first.level != second.level)
+        return std::nullopt;
+    for (unsigned direction = 0; direction < 3; ++direction)
     {
-        allocation.reserve(ranges, add(ranges.size(), count - 1));
-        ranges[position] = pieces[0];
-        for (std::size_t i = 1; i < count; ++i)
-            ranges.push_back(pieces[i]);
+        bool same = true;
+        for (unsigned axis = 0; axis < 3; ++axis)
+            if (axis != direction &&
+                (first.lower[axis] != second.lower[axis] || first.upper[axis] != second.upper[axis]))
+                same = false;
+        if (same &&
+            (first.upper[direction] == second.lower[direction] || second.upper[direction] == first.lower[direction]))
+        {
+            auto combined = first;
+            combined.lower[direction] = std::min(first.lower[direction], second.lower[direction]);
+            combined.upper[direction] = std::max(first.upper[direction], second.upper[direction]);
+            return combined;
+        }
     }
+    return std::nullopt;
 }
 /** The trusted source encoding contains its complete kernel descriptor. No
  * parsed descriptor is promoted to authority by this comparison. */
@@ -180,22 +193,321 @@ void authenticate_environment(const CartesianSourceInventory::CapturedSource& ca
 }
 } // namespace
 
+bool CartesianSourceInventory::RangeLess::operator()(
+    const CartesianIncidenceRange& first, const CartesianIncidenceRange& second) const noexcept
+{
+    return range_less(first, second);
+}
+bool CartesianSourceInventory::Endpoint::operator<(const Endpoint& other) const noexcept
+{
+    if (level == other.level)
+        return index < other.index;
+    if (level > other.level)
+        return (index >> (level - other.level)) < other.index;
+    const auto shift = other.level - level;
+    const auto floor = other.index >> shift;
+    return index < floor || (index == floor && other.index != (floor << shift));
+}
+bool CartesianSourceInventory::SelectorLess::operator()(const Selector& first, const Selector& second) const noexcept
+{
+    if (first.region != second.region)
+        return first.region < second.region;
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        const Endpoint a{first.range.lower[axis], first.range.level};
+        const Endpoint b{second.range.lower[axis], second.range.level};
+        if (a < b)
+            return true;
+        if (b < a)
+            return false;
+    }
+    if (range_less(first.range, second.range))
+        return true;
+    if (range_less(second.range, first.range))
+        return false;
+    return first.batch < second.batch;
+}
+void CartesianSourceInventory::BatchWeights::add_row(Summary& total, const Batch& row, const Budget*)
+{
+    total.cells = add(total.cells, row.cell_count());
+    total.maximum_domain = std::max(total.maximum_domain, row.source()->domain().size());
+    total.identity_bytes =
+        add(total.identity_bytes, add(add(24, row.source()->identity().size()), product(56, row.ranges().size())));
+}
+void CartesianSourceInventory::BatchWeights::add_child(Summary& total, const Summary& child, bool)
+{
+    total.cells = add(total.cells, child.cells);
+    total.maximum_domain = std::max(total.maximum_domain, child.maximum_domain);
+    total.identity_bytes = add(total.identity_bytes, child.identity_bytes);
+}
+void CartesianSourceInventory::SelectorWeights::add_row(Summary& total, const Selector& row, const Budget*)
+{
+    Summary value;
+    value.present = true;
+    value.first_region = value.last_region = row.region;
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        value.lower[axis] = {row.range.lower[axis], row.range.level};
+        value.upper[axis] = {row.range.upper[axis], row.range.level};
+    }
+    add_child(total, value, true);
+}
+void CartesianSourceInventory::SelectorWeights::add_child(Summary& total, const Summary& child, bool)
+{
+    if (!total.present)
+    {
+        total = child;
+        return;
+    }
+    if (!child.present)
+        return;
+    total.first_region = std::min(total.first_region, child.first_region);
+    total.last_region = std::max(total.last_region, child.last_region);
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        total.lower[axis] = std::min(total.lower[axis], child.lower[axis]);
+        total.upper[axis] = std::max(total.upper[axis], child.upper[axis]);
+    }
+}
+
+struct CartesianSourceInventory::Builder
+{
+    using Work = persistent_ordered_detail::OrderedPageWork;
+    using Dirty = std::set<CartesianIncidenceRange, RangeLess>;
+    static constexpr auto dirty_bytes = sizeof(Dirty::value_type) + 4 * sizeof(void*);
+    CartesianSourceInventory& result;
+    Work work;
+    RangeTree ranges;
+    BatchTree batches;
+    SelectorTree selectors;
+    Builder(CartesianSourceInventory& inventory, const std::shared_ptr<Budget>& arena)
+        : result(inventory), ranges(arena, &work), batches(arena, &work), selectors(arena, &work)
+    {
+    }
+
+    template<class Visit>
+    static bool visit_selectors(const SelectorTree::Node* node, std::uint64_t region,
+        const std::array<Endpoint, 3>& lower, const std::array<Endpoint, 3>& upper, Visit& visit, DependencyWork* work)
+    {
+        if (!node)
+            return true;
+        if (work)
+            ++work->selector_nodes;
+        const auto& bounds = node->weights;
+        if (!bounds.present || region < bounds.first_region || region > bounds.last_region)
+            return true;
+        for (unsigned axis = 0; axis < 3; ++axis)
+            if (bounds.upper[axis] < lower[axis] || upper[axis] < bounds.lower[axis])
+                return true;
+        if (node->leaf())
+        {
+            for (const auto& row : node->rows)
+            {
+                if (work)
+                    ++work->selector_rows;
+                if (row.region != region)
+                    continue;
+                bool intersects = true;
+                for (unsigned axis = 0; axis < 3; ++axis)
+                    if (Endpoint{row.range.upper[axis], row.range.level} < lower[axis] ||
+                        upper[axis] < Endpoint{row.range.lower[axis], row.range.level})
+                        intersects = false;
+                if (intersects && !visit(row))
+                    return false;
+            }
+            return true;
+        }
+        for (const auto& child : node->children)
+            if (!visit_selectors(child.get(), region, lower, upper, visit, work))
+                return false;
+        return true;
+    }
+    template<class Visit> void neighbors(std::uint64_t region, const CartesianIncidenceRange& range, Visit&& visit)
+    {
+        std::array<Endpoint, 3> lower{}, upper{};
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            lower[axis] = {range.lower[axis], range.level};
+            upper[axis] = {range.upper[axis], range.level};
+        }
+        auto observe = [&](const Selector& row)
+        {
+            ++result.work_.selector_tests;
+            return visit(row);
+        };
+        (void) visit_selectors(result.selectors_.get(), region, lower, upper, observe, &result.work_);
+    }
+    void add_selector(const Batch& batch, const CartesianIncidenceRange& range, bool check)
+    {
+        const auto region = batch.source_->region();
+        if (check)
+            neighbors(region, range,
+                [&](const Selector& other)
+                {
+                    if (other.batch != batch.slot_ && overlap(range, other.range))
+                        throw std::invalid_argument("Duplicate current Cartesian inventory ancestry.");
+                    return true;
+                });
+        const Selector row{region, batch.slot_, range};
+        result.selectors_ = selectors.edit(result.selectors_, row, &row, false);
+    }
+    void erase_selector(const Batch& batch, const CartesianIncidenceRange& range)
+    {
+        const Selector row{batch.source_->region(), batch.slot_, range};
+        result.selectors_ = selectors.edit(result.selectors_, row, nullptr, true);
+    }
+    void insert(Batch& batch, const CartesianIncidenceRange& range)
+    {
+        add_selector(batch, range, false);
+        batch.ranges_ = ranges.edit(batch.ranges_, range, &range, false);
+    }
+    void erase(Batch& batch, const CartesianIncidenceRange& range)
+    {
+        erase_selector(batch, range);
+        batch.ranges_ = ranges.edit(batch.ranges_, range, nullptr, true);
+    }
+    static void track(Dirty& dirty, const CartesianIncidenceRange& range, Allocation& scratch)
+    {
+        scratch.retain(dirty_bytes);
+        if (!dirty.insert(range).second)
+            throw std::logic_error("Duplicate changed Cartesian selector.");
+    }
+    static void untrack(Dirty& dirty, const CartesianIncidenceRange& range, Allocation& scratch)
+    {
+        if (dirty.erase(range))
+        {
+            scratch.bytes -= dirty_bytes;
+            scratch.budget.used -= dirty_bytes;
+        }
+    }
+    void coalesce_changed(Batch& batch, Dirty& dirty, Allocation& scratch)
+    {
+        // The accepted ranges were already at the legacy merge fixed point.
+        // Removing a range cannot make two unchanged rectangles adjacent.
+        // Every new merge therefore touches a slab or a previous merge. Take
+        // the same lexicographically first eligible pair as the full replay.
+        for (;;)
+        {
+            using Pair = std::pair<CartesianIncidenceRange, CartesianIncidenceRange>;
+            std::optional<Pair> first;
+            const auto less = [](const Pair& a, const Pair& b)
+            {
+                if (range_less(a.first, b.first))
+                    return true;
+                if (range_less(b.first, a.first))
+                    return false;
+                return range_less(a.second, b.second);
+            };
+            for (const auto& range : dirty)
+                neighbors(batch.source_->region(), range,
+                    [&](const Selector& other)
+                    {
+                        if (other.batch == batch.slot_ && merge(range, other.range))
+                        {
+                            const auto ordered = std::minmax(range, other.range, range_less);
+                            const Pair candidate{ordered.first, ordered.second};
+                            if (!first || less(candidate, *first))
+                                first = candidate;
+                        }
+                        return true;
+                    });
+            if (!first)
+                return;
+            const auto combined = *merge(first->first, first->second);
+            erase(batch, first->first);
+            erase(batch, first->second);
+            untrack(dirty, first->first, scratch);
+            untrack(dirty, first->second, scratch);
+            insert(batch, combined);
+            track(dirty, combined, scratch);
+        }
+    }
+    void retire_batch(std::size_t slot, std::span<const Retirement* const> retired)
+    {
+        const auto* prior = result.batch_at(slot);
+        if (!prior)
+            throw std::logic_error("Missing Cartesian inventory retirement batch.");
+        auto batch = *prior;
+        ++result.work_.rebuilt_batches;
+        if (retired.size() == batch.cells_)
+        {
+            for (const auto& range : batch.ranges())
+                erase_selector(batch, range);
+            result.batches_ = batches.edit(result.batches_, batch, nullptr, true);
+            return;
+        }
+        Allocation scratch(*result.budget_);
+        Dirty dirty;
+        for (const auto* retirement : retired)
+        {
+            const auto* found = result.select(retirement->key, &result.work_);
+            if (!found || found->batch != slot)
+                throw std::logic_error("Authenticated Cartesian retirement lost its selector.");
+            const auto previous = found->range;
+            const auto& cell = std::get<CartesianCellAncestry>(retirement->key.ancestry);
+            const auto [pieces, count] = split_at(previous, cell);
+            erase(batch, previous);
+            untrack(dirty, previous, scratch);
+            for (const auto& range : std::span(pieces).first(count))
+            {
+                insert(batch, range);
+                track(dirty, range, scratch);
+            }
+        }
+        batch.cells_ -= retired.size();
+        coalesce_changed(batch, dirty, scratch);
+        result.batches_ = batches.edit(result.batches_, batch, &batch, true);
+    }
+    void add_batch(Batch batch, std::span<const CartesianIncidenceRange> input, bool check)
+    {
+        batch.ranges_ = ranges.build(input);
+        for (const auto& range : input)
+            add_selector(batch, range, check);
+        result.batches_ = batches.edit(result.batches_, batch, &batch, false);
+        ++result.work_.rebuilt_batches;
+    }
+};
+
 bool CartesianSourceInventory::Batch::contains(const CartesianCellAncestry& cell) const noexcept
 {
-    for (const auto& range : ranges_)
+    for (const auto& range : ranges())
         if (range_contains(range, cell))
             return true;
     return false;
 }
-const CartesianSourceInventory::Batch* CartesianSourceInventory::lookup(const AdaptiveCellKey& key) const noexcept
+const CartesianSourceInventory::Batch* CartesianSourceInventory::batch_at(std::size_t slot) const noexcept
+{
+    const auto* batch = BatchTree::lower_bound(batches_, [slot](const Batch& row) { return row.slot_ < slot; });
+    return batch && batch->slot_ == slot ? batch : nullptr;
+}
+const CartesianSourceInventory::Selector* CartesianSourceInventory::select(
+    const AdaptiveCellKey& key, DependencyWork* work) const noexcept
 {
     const auto* cell = std::get_if<CartesianCellAncestry>(&key.ancestry);
-    if (!cell)
+    if (!cell || cell->level >= 63)
         return nullptr;
-    for (const auto& batch : batches_)
-        if (batch.source_->region() == key.region && batch.contains(*cell))
-            return &batch;
-    return nullptr;
+    const Selector* found = nullptr;
+    std::array<Endpoint, 3> point{};
+    for (unsigned axis = 0; axis < 3; ++axis)
+        point[axis] = {cell->index[axis], cell->level};
+    auto test = [&](const Selector& row)
+    {
+        if (work)
+            ++work->selector_tests;
+        if (range_contains(row.range, *cell))
+        {
+            found = &row;
+            return false;
+        }
+        return true;
+    };
+    (void) Builder::visit_selectors(selectors_.get(), key.region, point, point, test, work);
+    return found;
+}
+const CartesianSourceInventory::Batch* CartesianSourceInventory::lookup(const AdaptiveCellKey& key) const noexcept
+{
+    const auto* match = select(key);
+    return match ? batch_at(match->batch) : nullptr;
 }
 std::uint64_t CartesianSourceInventory::revision(const AdaptiveCellKey& key) const
 {
@@ -230,19 +542,40 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     if (!keeper)
         keeper = arena->keeper;
 
-    // Validate exact predecessor retirements before changing candidate selectors.
-    // Delta-sized quadratic comparisons avoid a permanent per-cell catalog.
-    for (std::size_t i = 0; i < retired.size(); ++i)
+    // Group exact predecessor retirements by borrowed typed key and stable
+    // batch slot. The scratch is proportional to the supplied delta.
+    struct KeyLess
     {
-        if (!old || !old->contains(retired[i].key) || old->revision(retired[i].key) != retired[i].revision)
+        bool operator()(const AdaptiveCellKey* first, const AdaptiveCellKey* second) const { return *first < *second; }
+    };
+    using RetiredKeys = std::set<const AdaptiveCellKey*, KeyLess>;
+    using RetiredBatches = std::map<std::size_t, std::vector<const Retirement*>>;
+    Allocation retirement_memory(budget);
+    RetiredKeys keys;
+    RetiredBatches retired_batches;
+    DependencyWork retirement_work;
+    for (const auto& item : retired)
+    {
+        const auto* selector = old ? old->select(item.key, &retirement_work) : nullptr;
+        const auto* batch = selector ? old->batch_at(selector->batch) : nullptr;
+        if (!batch || batch->source_->revision(std::get<CartesianCellAncestry>(item.key.ancestry)) != item.revision)
             throw std::invalid_argument("Missing or stale Cartesian inventory retirement.");
-        for (std::size_t j = 0; j < i; ++j)
-            if (retired[i].key == retired[j].key)
-                throw std::invalid_argument("Repeated Cartesian inventory retirement.");
+        retirement_memory.retain(sizeof(RetiredKeys::value_type) + 4 * sizeof(void*));
+        if (!keys.insert(&item.key).second)
+            throw std::invalid_argument("Repeated Cartesian inventory retirement.");
+        auto position = retired_batches.find(selector->batch);
+        if (position == retired_batches.end())
+        {
+            retirement_memory.retain(sizeof(RetiredBatches::value_type) + 4 * sizeof(void*));
+            position = retired_batches.try_emplace(selector->batch).first;
+        }
+        retirement_memory.append(position->second);
+        position->second.push_back(&item);
     }
+
     std::span<const char> descriptor;
-    if (old && !old->batches_.empty())
-        descriptor = grid_descriptor(*old->batches_.front().source_);
+    if (old && !old->batches().empty())
+        descriptor = grid_descriptor(*old->batches().front().source_);
     for (const auto& captured : sources)
     {
         if (!captured.source || captured.source->owner() != owner || captured.source->context() != context)
@@ -263,176 +596,104 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     result->context_ = context;
     result->owner_ = owner;
     result->version_ = version;
+    result->work_ = retirement_work;
+    result->observed_dependencies_ = result->keeper_ && arena->prepaid_query && !arena->prepaid_policy.expired();
     if (old)
+    {
         result->predecessor_ = old->weak_from_this();
-    result->dependency_graph_ = result->keeper_ && arena->prepaid_query && !arena->prepaid_policy.expired();
-    const bool share_dependencies =
-        result->dependency_graph_ && old && old->dependency_graph_ &&
+        result->next_slot_ = old->next_slot_;
+    }
+    result->first_added_slot_ = result->next_slot_;
+    result->shared_dependencies_ =
+        result->observed_dependencies_ && old && old->keeper_ &&
         arena->prepaid(old->shared_from_this(), old->allocation_budget(), old->metadata_bytes(), false);
-    result->shared_dependencies_ = share_dependencies;
-    persistent_ordered_detail::OrderedPageWork graph_work;
-    DependencyTree graph(result->keeper_, &graph_work);
-    if (share_dependencies)
+    // Borrowed-arena compatibility roots never cross a publication fork.
+    const auto page_arena =
+        result->keeper_ ? result->keeper_ : std::shared_ptr<Budget>(std::shared_ptr<void>{}, &budget);
+    Builder builder(*result, page_arena);
+    if (result->shared_dependencies_)
     {
-        result->dependency_root_ = old->dependency_root_;
-        result->next_dependency_slot_ = old->next_dependency_slot_;
+        result->batches_ = old->batches_;
+        result->selectors_ = old->selectors_;
     }
-    const auto completely_retired = [&](const Batch& batch)
-    {
-        std::size_t count = 0;
-        for (const auto& item : retired)
-            if (old->lookup(item.key) == &batch)
-                ++count;
-        return count == batch.cells_;
-    };
-    // Foreign immutable bodies coexist with candidate storage. Import their
-    // exact owners before copying a single range, while omitting sources whose
-    // entire active batch is retired by this authenticated delta.
-    if (old && !share_dependencies)
-        for (const auto& previous : old->batches_)
+    else if (old)
+        for (const auto& batch : old->batches())
         {
-            ++result->dependency_work_.inherited_admission_visits;
-            if (!completely_retired(previous))
-                credits.retain(previous.source_, previous.source_->allocation_budget(),
-                    previous.source_->metadata_bytes(), previous.source_->has_arena_keeper(), result->leases_,
-                    retained);
-        }
-    for (const auto& captured : sources)
-        if (captured.source->cell_count())
-            credits.retain(captured.source, captured.source->allocation_budget(), captured.source->metadata_bytes(),
-                captured.source->has_arena_keeper(), result->leases_, retained);
-    retained.reserve(result->batches_, add(old ? old->batches_.size() : 0, sources.size()));
-    if (old)
-        for (const auto& previous : old->batches_)
-        {
-            if (completely_retired(previous))
-            {
-                if (share_dependencies)
-                {
-                    const Dependency key{previous.dependency_slot_, {}};
-                    result->dependency_root_ = graph.edit(result->dependency_root_, key, nullptr, true);
-                }
+            ++result->work_.inherited_admission_visits;
+            const auto retirement = retired_batches.find(batch.slot_);
+            if (retirement != retired_batches.end() && retirement->second.size() == batch.cells_)
                 continue;
-            }
-            result->batches_.emplace_back();
-            auto& batch = result->batches_.back();
-            batch.source_ = previous.source_;
-            batch.environment_ = previous.environment_;
-            batch.dependency_slot_ = previous.dependency_slot_;
-            retained.reserve(batch.ranges_, previous.ranges_.size());
-            batch.ranges_.assign(previous.ranges_.begin(), previous.ranges_.end());
-            batch.cells_ = previous.cells_;
+            credits.retain(batch.source_, batch.source_->allocation_budget(), batch.source_->metadata_bytes(),
+                batch.source_->has_arena_keeper(), result->leases_, retained);
+            Allocation scratch(budget);
+            std::vector<CartesianIncidenceRange> copied;
+            scratch.reserve(copied, batch.ranges().size());
+            for (const auto& range : batch.ranges())
+                copied.push_back(range);
+            builder.add_batch(batch, copied, false);
         }
-    for (const auto& item : retired)
+    for (const auto& [slot, edits] : retired_batches)
     {
-        const auto& cell = std::get<CartesianCellAncestry>(item.key.ancestry);
-        bool found = false;
-        for (auto& batch : result->batches_)
-            if (batch.source_->region() == item.key.region && batch.contains(cell))
-            {
-                retire(batch.ranges_, cell, retained);
-                --batch.cells_;
-                found = true;
-                break;
-            }
-        if (!found && !completely_retired(*old->lookup(item.key)))
-            throw std::logic_error("Authenticated Cartesian retirement lost its predecessor selector.");
+        if (result->batch_at(slot))
+            builder.retire_batch(slot, edits);
+        else if (edits.size() != old->batch_at(slot)->cells_)
+            throw std::logic_error("Authenticated Cartesian retirement lost its predecessor batch.");
     }
-    for (auto& batch : result->batches_)
-        if (!batch.cells_)
-        {
-            const auto bytes = product(batch.ranges_.capacity(), sizeof(CartesianIncidenceRange));
-            {
-                std::vector<CartesianIncidenceRange> discarded;
-                discarded.swap(batch.ranges_);
-            }
-            retained.bytes -= bytes;
-            budget.used -= bytes;
-        }
-        else
-            coalesce(batch.ranges_);
-    std::erase_if(result->batches_, [](const auto& batch) { return batch.cells_ == 0; });
-    result->added_begin_ = result->batches_.size();
 
     for (const auto& captured : sources)
     {
         if (!captured.source->cell_count())
             continue;
-        result->batches_.emplace_back();
-        auto& batch = result->batches_.back();
+        if (result->next_slot_ == std::numeric_limits<std::size_t>::max())
+            throw std::invalid_argument("Cartesian inventory batch slots exhausted.");
+        credits.retain(captured.source, captured.source->allocation_budget(), captured.source->metadata_bytes(),
+            captured.source->has_arena_keeper(), result->leases_, retained);
+        Batch batch;
         batch.source_ = captured.source;
         batch.environment_ = captured.environment;
-        retained.reserve(batch.ranges_, captured.source->ranges().size());
-        batch.ranges_.assign(captured.source->ranges().begin(), captured.source->ranges().end());
-        coalesce(batch.ranges_);
-        for (const auto& range : batch.ranges_)
+        batch.slot_ = result->next_slot_++;
+        Allocation scratch(budget);
+        std::vector<CartesianIncidenceRange> selected;
+        scratch.reserve(selected, captured.source->ranges().size());
+        selected.assign(captured.source->ranges().begin(), captured.source->ranges().end());
+        coalesce(selected);
+        for (const auto& range : selected)
             batch.cells_ = add(batch.cells_, volume(range));
         if (batch.cells_ != captured.source->cell_count())
             throw std::invalid_argument("Trusted Cartesian source selectors disagree with its cell count.");
-        if (share_dependencies)
-        {
-            if (result->next_dependency_slot_ == std::numeric_limits<std::size_t>::max())
-                throw std::invalid_argument("Cartesian inventory dependency slots exhausted.");
-            batch.dependency_slot_ = result->next_dependency_slot_++;
-            const Dependency row{batch.dependency_slot_, batch.source_};
-            result->dependency_root_ = graph.edit(result->dependency_root_, row, &row, false);
-        }
+        builder.add_batch(std::move(batch), selected, true);
     }
-    if (result->dependency_graph_ && !share_dependencies)
-    {
-        Allocation scratch(budget);
-        std::vector<Dependency> rows;
-        scratch.reserve(rows, result->batches_.size());
-        for (auto& batch : result->batches_)
-        {
-            batch.dependency_slot_ = rows.size();
-            rows.push_back({batch.dependency_slot_, batch.source_});
-        }
-        result->next_dependency_slot_ = rows.size();
-        result->dependency_root_ = graph.build(rows);
-    }
-    result->dependency_work_.allocated_pages = graph_work.copied_pages;
-    result->dependency_work_.allocated_bytes = graph_work.copied_bytes;
+    if (result->batches_)
+        (void) add(96, result->batches_->weights.identity_bytes);
+    result->work_.allocated_pages = builder.work.copied_pages;
+    result->work_.allocated_bytes = builder.work.copied_bytes;
+    result->charge_ = retained.bytes;
+    retained.bytes = 0;
+    credits.committed = true;
+    return result;
+}
 
-    for (std::size_t i = 0; i < result->batches_.size(); ++i)
-    {
-        const auto& batch = result->batches_[i];
-        for (std::size_t j = 0; j < i; ++j)
-        {
-            const auto& other = result->batches_[j];
-            if (batch.source_->region() != other.source_->region())
-                continue;
-            for (const auto& first : batch.ranges_)
-                for (const auto& second : other.ranges_)
-                    if (overlap(first, second))
-                        throw std::invalid_argument("Duplicate current Cartesian inventory ancestry.");
-        }
-        result->cells_ = add(result->cells_, batch.cells_);
-        result->maximum_domain_bytes_ = std::max(result->maximum_domain_bytes_, batch.source_->domain().size());
-    }
-
-    // One exact reservation precedes Writer insertion. Full identities include
-    // every actual axis value, domain, source context, revision and signature.
-    auto size = std::size_t(96);
-    for (const auto& batch : result->batches_)
-        size = add(size, add(add(24, batch.source_->identity().size()), product(56, batch.ranges_.size())));
-    Writer writer;
-    retained.reserve(writer.data, size);
+void CartesianSourceInventory::emit_identity(Writer& writer) const
+{
+    const auto size = identity_size();
+    const auto before = writer.data.size();
+    if (size > writer.data.capacity() - before)
+        throw std::invalid_argument("Cartesian inventory wire identity lacks pre-admitted writer capacity.");
     writer.word(inventory_magic);
     writer.word(1);
-    for (auto value : {context.epoch, context.topology, context.partition, context.round, context.transaction})
+    for (auto value : {context_.epoch, context_.topology, context_.partition, context_.round, context_.transaction})
         writer.word(value);
-    writer.word(std::uint64_t(owner));
-    writer.word(version);
-    writer.word(result->cells_);
-    writer.word(result->batches_.size());
-    writer.word(0); // Reserved fixed-format field; not a predecessor/history hash.
-    for (const auto& batch : result->batches_)
+    writer.word(std::uint64_t(owner_));
+    writer.word(version_);
+    writer.word(cell_count());
+    writer.word(batches().size());
+    writer.word(0);
+    for (const auto& batch : batches())
     {
         writer.bytes(batch.source_->identity());
         writer.word(batch.cells_);
-        writer.word(batch.ranges_.size());
-        for (const auto& range : batch.ranges_)
+        writer.word(batch.ranges().size());
+        for (const auto& range : batch.ranges())
         {
             writer.word(range.level);
             for (auto value : range.lower)
@@ -441,17 +702,22 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
                 writer.word(value);
         }
     }
-    if (writer.data.size() != size)
+    if (writer.data.size() - before != size)
         throw std::logic_error("Cartesian inventory identity differs from its preflight.");
-    result->identity_ = std::move(writer.data);
-    result->charge_ = retained.bytes;
-    retained.bytes = 0;
-    credits.committed = true;
-    return result;
+}
+CartesianSourceInventory::EncodedIdentity::EncodedIdentity(Budget& budget, const CartesianSourceInventory& inventory)
+    : memory_(budget)
+{
+    memory_.reserve(writer_.data, inventory.identity_size());
+    inventory.emit_identity(writer_);
+}
+CartesianSourceInventory::EncodedIdentity CartesianSourceInventory::encode_identity(Budget& budget) const
+{
+    return EncodedIdentity(budget, *this);
 }
 bool CartesianSourceInventory::dependencies_admitted_in(const CartesianAuthorityArena& arena) const noexcept
 {
-    if (!dependency_graph_ || budget_ != arena.budget)
+    if (!observed_dependencies_ || budget_ != arena.budget)
         return false;
     if (const auto self = weak_from_this().lock(); self && arena.prepaid(self, budget_, metadata_bytes(), false))
         return true;
@@ -497,21 +763,10 @@ bool CartesianSourceInventory::derived_from(
 }
 CartesianSourceInventory::~CartesianSourceInventory()
 {
-    dependency_root_.reset();
-    // Release actual allocations before their admission and keep the budget
-    // keeper alive through the final decrement. No arena directory is pinned.
-    {
-        std::vector<Batch> discarded;
-        discarded.swap(batches_);
-    }
-    {
-        AdaptiveBytes discarded;
-        discarded.swap(identity_);
-    }
-    {
-        std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> discarded;
-        discarded.swap(leases_);
-    }
+    // Drop actual immutable owners before returning the exclusive header.
+    selectors_.reset();
+    batches_.reset();
+    decltype(leases_){}.swap(leases_);
     if (budget_)
         budget_->used -= charge_;
 }

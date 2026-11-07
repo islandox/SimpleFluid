@@ -78,7 +78,7 @@ std::shared_ptr<const Inventory> replace(Arena& arena, const std::shared_ptr<con
 
 struct Visits
 {
-    std::size_t nodes = 0, sources = 0;
+    std::size_t nodes = 0, sources = 0, walked = 0, branches = 0, child_probes = 0, height = 0;
 };
 Visits observe(D::ContactPhysicalResidency& residency, D::CartesianAuthorityArena& authority,
     const std::shared_ptr<const Inventory>& inventory, bool added)
@@ -92,13 +92,29 @@ Visits observe(D::ContactPhysicalResidency& residency, D::CartesianAuthorityAren
         {
             using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
             using T = std::remove_const_t<Element>;
+            constexpr auto role = std::is_same_v<T, D::cartesian_detail::AuthorityOwnerCredit> ? Role::CreditMetadata
+                                                                                               : Role::SourceDependency;
+            const bool walked = owners.observe(role, owner, bytes, origin);
             if constexpr (std::is_same_v<T, Native>)
                 ++visits.sources;
             else if constexpr (!std::is_same_v<T, D::cartesian_detail::AuthorityOwnerCredit>)
+            {
                 ++visits.nodes;
-            constexpr auto role = std::is_same_v<T, D::cartesian_detail::AuthorityOwnerCredit> ? Role::CreditMetadata
-                                                                                               : Role::SourceDependency;
-            return owners.observe(role, owner, bytes, origin);
+                if (walked)
+                {
+                    ++visits.walked;
+                    if (!owner->leaf())
+                    {
+                        ++visits.branches;
+                        visits.child_probes += owner->children.size();
+                    }
+                    std::size_t height = 1;
+                    for (auto* node = owner.get(); !node->leaf(); node = node->children.front().get())
+                        ++height;
+                    visits.height = std::max(visits.height, height);
+                }
+            }
+            return walked;
         });
     return visits;
 }
@@ -162,14 +178,42 @@ void expect_unfunded_directory_fork(const D::IncidencePointDirectory<>& source, 
     EXPECT_EQ(run(exact, false), exact);
     (void) run(exact - 1, true);
 }
+using AllocationKey = std::pair<std::uintptr_t, D::ContactPayloadRole>;
+std::map<AllocationKey, std::size_t> inventory_metadata(const Inventory& inventory)
+{
+    std::map<AllocationKey, std::size_t> result;
+    inventory.visit_borrowed_payload(
+        [&](const D::ContactPayloadAllocation& allocation)
+        {
+            using Role = D::ContactPayloadRole;
+            switch (allocation.identity.role)
+            {
+                case Role::CartesianInventoryObject:
+                case Role::CartesianInventoryBatches:
+                case Role::CartesianInventoryRanges:
+                case Role::CartesianInventoryIdentity:
+                case Role::CartesianInventoryLeases:
+                case Role::CartesianInventoryDependencyNode:
+                case Role::CartesianInventoryDependencyRows:
+                case Role::CartesianInventoryDependencyChildren:
+                    result.emplace(AllocationKey{reinterpret_cast<std::uintptr_t>(allocation.identity.address),
+                                       allocation.identity.role},
+                        allocation.payload_bytes);
+                    break;
+                default:
+                    break;
+            }
+        });
+    return result;
+}
 } // namespace
 
 TEST(CartesianInventoryDependencyGraph, FixedNativeEditSharesDoubledInventoryOwners)
 {
     struct Work
     {
-        std::size_t shared, pages, bytes, sources, nodes;
-        std::size_t inventory_bytes, batch_slots, range_bytes, identity_bytes;
+        std::size_t shared, pages, bytes, sources, nodes, walked, branches, child_probes;
+        std::size_t new_inventory_bytes, selector_nodes, selector_rows, selector_tests, streamed_identity_bytes;
     };
     const auto measure = [](std::size_t count)
     {
@@ -178,6 +222,7 @@ TEST(CartesianInventoryDependencyGraph, FixedNativeEditSharesDoubledInventoryOwn
         EXPECT_TRUE(before->has_observed_dependencies());
         EXPECT_EQ(observe(accepted, before, true).sources, count);
         const auto base = pages(*before);
+        const auto baseline = inventory_metadata(*before);
         const auto retained = accepted.budget->used;
 
         Arena candidate(accepted);
@@ -191,49 +236,65 @@ TEST(CartesianInventoryDependencyGraph, FixedNativeEditSharesDoubledInventoryOwn
         EXPECT_EQ(pages(*before), base);
         EXPECT_EQ(accepted.budget->used, retained);
         Work work{};
-        for (const auto& [identity, bytes] : pages(*next))
+        const auto current = pages(*next);
+        std::size_t changed_nodes = 0;
+        for (const auto& [identity, bytes] : current)
             if (base.contains(identity))
                 work.shared += bytes;
+            else
+                ++changed_nodes;
+        for (const auto& [identity, bytes] : base)
+            if (!current.contains(identity))
+                ++changed_nodes;
         work.pages = next->dependency_work().allocated_pages;
         work.bytes = next->dependency_work().allocated_bytes;
         work.sources = added.sources + removed.sources;
         work.nodes = added.nodes + removed.nodes;
-        work.inventory_bytes = next->metadata_bytes();
-        next->visit_borrowed_payload(
-            [&](const D::ContactPayloadAllocation& allocation)
-            {
-                if (allocation.owner != next.get())
-                    return;
-                using Payload = D::ContactPayloadRole;
-                if (allocation.identity.role == Payload::CartesianInventoryBatches)
-                    work.batch_slots = allocation.capacity;
-                else if (allocation.identity.role == Payload::CartesianInventoryRanges)
-                    work.range_bytes += allocation.payload_bytes;
-                else if (allocation.identity.role == Payload::CartesianInventoryIdentity)
-                    work.identity_bytes = allocation.payload_bytes;
-            });
+        work.walked = added.walked + removed.walked;
+        work.branches = added.branches + removed.branches;
+        work.child_probes = added.child_probes + removed.child_probes;
+        EXPECT_EQ(work.walked, changed_nodes);
+        EXPECT_EQ(added.height, 2u);
+        EXPECT_EQ(removed.height, 2u);
+        // The two height-two indexes each enter one root on publication and
+        // retirement. Their child checks include shared nodes that do not
+        // descend. Each visited batch row probes exactly one range root.
+        EXPECT_EQ(work.branches, 4u);
+        EXPECT_EQ(work.nodes, 4u + work.child_probes + work.sources);
+        EXPECT_LE(work.child_probes, work.branches * D::persistent_ordered_detail::branch_capacity);
+        work.selector_nodes = next->dependency_work().selector_nodes;
+        work.selector_rows = next->dependency_work().selector_rows;
+        work.selector_tests = next->dependency_work().selector_tests;
+        work.streamed_identity_bytes = next->identity_size();
+        EXPECT_EQ(next->dependency_work().rebuilt_batches, 2u); // one retirement and one insertion
+        for (const auto& [key, bytes] : inventory_metadata(*next))
+            if (!baseline.contains(key))
+                work.new_inventory_bytes += bytes;
         EXPECT_GT(work.shared, 0u);
         EXPECT_LT(work.sources, 5 * 64u);
         return work;
     };
     const auto small = measure(192), large = measure(384);
-    // Measure the separately rebuilt inventory shell without making its
-    // current representation part of the persistent graph's contract.
-    RecordProperty("small_inventory_bytes", std::to_string(small.inventory_bytes));
-    RecordProperty("large_inventory_bytes", std::to_string(large.inventory_bytes));
-    RecordProperty("small_inventory_batch_slots", std::to_string(small.batch_slots));
-    RecordProperty("large_inventory_batch_slots", std::to_string(large.batch_slots));
-    RecordProperty("small_inventory_range_bytes", std::to_string(small.range_bytes));
-    RecordProperty("large_inventory_range_bytes", std::to_string(large.range_bytes));
-    RecordProperty("small_inventory_identity_bytes", std::to_string(small.identity_bytes));
-    RecordProperty("large_inventory_identity_bytes", std::to_string(large.identity_bytes));
+    RecordProperty("small_new_inventory_bytes", std::to_string(small.new_inventory_bytes));
+    RecordProperty("large_new_inventory_bytes", std::to_string(large.new_inventory_bytes));
+    RecordProperty("small_streamed_identity_bytes", std::to_string(small.streamed_identity_bytes));
+    RecordProperty("large_streamed_identity_bytes", std::to_string(large.streamed_identity_bytes));
     RecordProperty("small_dependency_owner_visits", std::to_string(small.sources + small.nodes));
     RecordProperty("large_dependency_owner_visits", std::to_string(large.sources + large.nodes));
+    RecordProperty("small_walked_dependency_pages", std::to_string(small.walked));
+    RecordProperty("large_walked_dependency_pages", std::to_string(large.walked));
+    RecordProperty("small_branch_child_probes", std::to_string(small.child_probes));
+    RecordProperty("large_branch_child_probes", std::to_string(large.child_probes));
+    EXPECT_GT(large.streamed_identity_bytes, small.streamed_identity_bytes);
+    EXPECT_LE(large.new_inventory_bytes, small.new_inventory_bytes + 4096);
+    EXPECT_LE(large.selector_nodes, small.selector_nodes + 16);
+    EXPECT_LE(large.selector_rows, small.selector_rows + 64);
+    EXPECT_LE(large.selector_tests, small.selector_tests + 8);
     EXPECT_GT(large.shared, small.shared);
     EXPECT_LE(large.pages, small.pages + 2);
     EXPECT_LE(large.bytes, small.bytes + 4096);
     EXPECT_LE(large.sources, small.sources + 4);
-    EXPECT_LE(large.nodes, small.nodes + 16);
+    EXPECT_EQ(large.walked, small.walked);
 }
 
 TEST(CartesianInventoryDependencyGraph, HistoricalCapturesDoNotPinAncestorInventoryBodies)
@@ -536,4 +597,101 @@ TEST(CartesianInventoryDependencyGraph, ActualPointSnapshotsRetainTheirOwnManife
     EXPECT_TRUE(first_lifetime.expired());
     EXPECT_TRUE(second_lifetime.expired());
     EXPECT_EQ(third_inventory->revision(changed), 2u);
+}
+
+TEST(CartesianInventoryDependencyGraph, ChangedSlabKeepsLegacyMergePriorityAtExactMutationCredit)
+{
+    Arena accepted;
+    A::AMRGrid config;
+    config.block_cells = {4, 4, 2};
+    config.extent = {4.0, 4.0, 2.0};
+    const D::ContactHaloContext initial{0, 0, 0, 0, 2}, next{0, 0, 0, 1, 2};
+    using Index = std::array<std::uint64_t, 3>;
+    const std::array locations{Index{0, 0, 0}, Index{1, 0, 0}, Index{0, 1, 0}, Index{1, 1, 0}, Index{0, 2, 0}};
+    std::vector<A::AdaptiveLeaf> leaves;
+    for (const auto& index : locations)
+        leaves.push_back(
+            A::cartesian_adaptive_leaf(config, {config.region_id, A::CartesianCellAncestry{0, index}}, {'d'}));
+    auto capsule =
+        Native::make(config, leaves, leaves.front().domain, 0, 1, initial, *accepted.budget, accepted.budget);
+    Inventory::CapturedSource captured{capsule};
+    ASSERT_EQ(std::fegetenv(&captured.environment), 0);
+    const auto original =
+        Inventory::make(initial, 0, 1, std::span(&captured, 1), *accepted.budget, accepted.budget, accepted.authority);
+    EXPECT_EQ(original->batches().front().ranges().size(), 2u);
+    (void) observe(accepted, original, true);
+    const auto identity = original->encode_identity(*accepted.budget).bytes();
+    const auto metadata = inventory_metadata(*original);
+    const auto source_used = accepted.budget->used;
+    const std::array retired{Inventory::Retirement{leaves[0].key, leaves[0].revision},
+        Inventory::Retirement{leaves[1].key, leaves[1].revision}};
+    const auto run = [&](std::optional<std::size_t> cap, bool reject)
+    {
+        Arena candidate(accepted);
+        const auto before = candidate.budget->used;
+        candidate.budget->peak = before;
+        if (cap)
+            candidate.budget->limit = before + *cap;
+        const auto derive = [&]
+        { return original->derive(next, 2, retired, {}, *candidate.budget, candidate.budget, candidate.authority); };
+        if (reject)
+        {
+            EXPECT_THROW((void) derive(), std::invalid_argument);
+            EXPECT_EQ(candidate.budget->used, before);
+        }
+        else
+        {
+            const auto result = derive();
+            EXPECT_EQ(result->cell_count(), 3u);
+            EXPECT_EQ(result->dependency_work().rebuilt_batches, 1u);
+            EXPECT_EQ(result->dependency_work().inherited_admission_visits, 0u);
+            for (std::size_t i = 0; i < leaves.size(); ++i)
+                EXPECT_EQ(result->contains(leaves[i].key), i >= 2);
+            // The left slab can merge either up into an unchanged range or
+            // right into a new slab. Legacy sorted pair order chooses up.
+            const auto rows = result->batches().front().ranges();
+            EXPECT_EQ(rows.size(), 2u);
+            if (rows.size() == 2)
+            {
+                EXPECT_EQ(rows.front().level, 0u);
+                EXPECT_EQ(rows.front().lower, (Index{0, 1, 0}));
+                EXPECT_EQ(rows.front().upper, (Index{1, 3, 1}));
+                EXPECT_EQ(rows.back().lower, (Index{1, 1, 0}));
+                EXPECT_EQ(rows.back().upper, (Index{2, 2, 1}));
+            }
+        }
+        EXPECT_EQ(accepted.budget->used, source_used);
+        EXPECT_EQ(inventory_metadata(*original), metadata);
+        EXPECT_EQ(original->encode_identity(*accepted.budget).bytes(), identity);
+        return candidate.budget->peak - before;
+    };
+    const auto exact = run({}, false);
+    ASSERT_GT(exact, 1u);
+    EXPECT_EQ(run(exact, false), exact);
+    (void) run(exact - 1, true);
+}
+
+TEST(CartesianInventoryDependencyGraph, DerivedIndexRejectsCrossLevelOverlapWithAnUnchangedRange)
+{
+    Arena accepted;
+    const auto original = bootstrap(accepted, 128);
+    (void) observe(accepted, original, true);
+    const auto before = inventory_metadata(*original);
+    Arena candidate(accepted);
+    auto context = original->context();
+    ++context.round;
+    const A::AMRGrid config = grid();
+    auto leaf = A::cartesian_adaptive_leaf(config, {config.region_id, A::CartesianCellAncestry{1, {1, 0, 0}}}, {'d'});
+    Inventory::CapturedSource captured;
+    ASSERT_EQ(std::fegetenv(&captured.environment), 0);
+    captured.source =
+        Native::make(config, std::span(&leaf, 1), leaf.domain, 0, 2, context, *candidate.budget, candidate.budget);
+    const auto retained = candidate.budget->used;
+    EXPECT_THROW((void) original->derive(
+                     context, 2, {}, std::span(&captured, 1), *candidate.budget, candidate.budget, candidate.authority),
+        std::invalid_argument);
+    EXPECT_EQ(candidate.budget->used, retained);
+    EXPECT_EQ(inventory_metadata(*original), before);
+    EXPECT_TRUE(original->contains(key(0)));
+    EXPECT_FALSE(original->contains(leaf.key));
 }
