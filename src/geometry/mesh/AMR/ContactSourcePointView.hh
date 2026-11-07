@@ -43,13 +43,15 @@ public:
         result->arena_ = std::move(arena);
         credits.retain(result->source_, result->source_->allocation_budget(), result->source_->metadata_bytes(),
             result->source_->has_arena_keeper(), result->leases_, memory);
-        result->source_->visit_dependencies(
-            [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
-            {
-                using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
-                const std::shared_ptr<const std::remove_const_t<Element>> fixed = owner;
-                credits.retain(fixed, origin, bytes, keeper, result->leases_, memory);
-            });
+        if (!result->arena_->prepaid(result->source_, result->source_->allocation_budget(),
+                result->source_->metadata_bytes(), false))
+            result->source_->visit_dependencies<CartesianDependencyVisit::Physical>(
+                [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
+                {
+                    using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
+                    const std::shared_ptr<const std::remove_const_t<Element>> fixed = owner;
+                    credits.retain(fixed, origin, bytes, keeper, result->leases_, memory);
+                });
         result->charge_ = std::exchange(memory.bytes, 0);
         credits.committed = true;
         return result;

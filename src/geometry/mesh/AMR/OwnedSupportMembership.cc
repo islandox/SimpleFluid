@@ -274,7 +274,7 @@ OwnedSupportMembership::OwnedSupportMembership(const OwnedSupportMembership& sou
             source_credit->retain(source.inventory_, source.inventory_->allocation_budget(),
                 source.inventory_->metadata_bytes(), source.inventory_->has_arena_keeper(), source_leases_,
                 source_memory);
-            source.inventory_->visit_dependencies(
+            source.inventory_->visit_physical_dependencies(
                 [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
                 {
                     using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
@@ -551,7 +551,7 @@ void OwnedSupportMembership::observe_inventory(
     using Role = IncidencePhysicalOwners::Role;
     if (!owners.observe(Role::SourceDependency, inventory, inventory->metadata_bytes(), inventory->allocation_budget()))
         return;
-    inventory->visit_dependencies(
+    inventory->visit_observed_dependencies(
         [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
         {
             if (!origin || !keep)
@@ -560,7 +560,7 @@ void OwnedSupportMembership::observe_inventory(
             constexpr auto role = std::is_same_v<std::remove_const_t<Element>, cartesian_detail::AuthorityOwnerCredit>
                                       ? Role::CreditMetadata
                                       : Role::SourceDependency;
-            owners.observe(role, owner, bytes, origin);
+            return owners.observe(role, owner, bytes, origin);
         });
 }
 void OwnedSupportMembership::publish_inventory(
@@ -626,7 +626,7 @@ void OwnedSupportMembership::publish_inventory(
         credits.emplace(arena);
         credits->retain(inventory, inventory->allocation_budget(), inventory->metadata_bytes(),
             inventory->has_arena_keeper(), leases, memory);
-        inventory->visit_dependencies(
+        inventory->visit_physical_dependencies(
             [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
             {
                 using E = typename std::remove_cvref_t<decltype(owner)>::element_type;

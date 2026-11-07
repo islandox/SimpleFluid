@@ -123,7 +123,26 @@ public:
             if (lease)
                 lease->visit_borrowed_payload(visitor);
     }
-    template<class Visitor> void visit_dependencies(Visitor&& visitor) const
+    [[nodiscard]] bool local_dependencies_admitted_in(const CartesianAuthorityArena& arena) const noexcept
+    {
+        return budget_ == arena.budget && local_ && local_->dependencies_admitted_in(arena);
+    }
+    void retain_dependencies(cartesian_detail::CreditConstruction& credits,
+        std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>& leases,
+        cartesian_detail::Allocation& memory) const
+    {
+        if (local_dependencies_admitted_in(*credits.arena))
+            return;
+        visit_dependencies<CartesianDependencyVisit::Physical>(
+            [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
+            {
+                using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
+                const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
+                credits.retain(fixed, origin, bytes, keep, leases, memory);
+            });
+    }
+    template<CartesianDependencyVisit Mode = CartesianDependencyVisit::Flat, class Visitor>
+    void visit_dependencies(Visitor&& visitor) const
     {
         if (local_)
         {
@@ -131,15 +150,24 @@ public:
             {
                 return visitor(local_, local_->allocation_budget(), local_->metadata_bytes(), local_->has_arena_keeper());
             };
+            const auto descend = [&]
+            {
+                if constexpr (Mode == CartesianDependencyVisit::Observed)
+                    local_->visit_observed_dependencies(visitor);
+                else if constexpr (Mode == CartesianDependencyVisit::Physical)
+                    local_->visit_physical_dependencies(visitor);
+                else
+                    local_->visit_dependencies(visitor);
+            };
             if constexpr (std::is_same_v<decltype(visit_inventory()), bool>)
             {
                 if (visit_inventory())
-                    local_->visit_dependencies(visitor);
+                    descend();
             }
             else
             {
                 visit_inventory();
-                local_->visit_dependencies(visitor);
+                descend();
             }
         }
         for (const auto& lease : leases_)

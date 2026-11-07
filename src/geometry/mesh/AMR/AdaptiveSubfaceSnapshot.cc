@@ -450,7 +450,7 @@ struct SubfacePiecePage
         {
             credits.retain(source, source->allocation_budget(), source->metadata_bytes(), source->has_arena_keeper(),
                 leases, memory);
-            source->visit_dependencies(
+            source->visit_dependencies<CartesianDependencyVisit::Physical>(
                 [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
                 {
                     using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;

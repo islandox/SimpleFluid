@@ -122,7 +122,8 @@ public:
             if (lease)
                 lease->visit_borrowed_payload(visitor);
     }
-    template<class Visitor> void visit_dependencies(Visitor&& visitor) const
+    template<CartesianDependencyVisit Mode = CartesianDependencyVisit::Flat, class Visitor>
+    void visit_dependencies(Visitor&& visitor) const
     {
         for (const auto& block : blocks_)
             visitor(block, block->budget, block->metadata_bytes(), bool(block->keeper));
@@ -138,12 +139,12 @@ public:
             if constexpr (std::is_same_v<decltype(visit_manifest()), bool>)
             {
                 if (visit_manifest())
-                    manifests_->visit_dependencies(visitor);
+                    manifests_->visit_dependencies<Mode>(visitor);
             }
             else
             {
                 visit_manifest();
-                manifests_->visit_dependencies(visitor);
+                manifests_->visit_dependencies<Mode>(visitor);
             }
         }
         for (const auto& lease : leases_)

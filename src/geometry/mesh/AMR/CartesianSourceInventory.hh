@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/mesh/AMR/CartesianAuthorityCredits.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceAuthority.hh"
+#include "geometry/mesh/AMR/PersistentOrderedPages.hh"
 #include <cfenv>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +14,12 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+enum class CartesianDependencyVisit
+{
+    Flat,
+    Physical,
+    Observed
+};
 /** Owner-local current membership. Only trusted sources enter construction;
  * subsequent transitions are derived from this exact immutable predecessor.
  * Active selectors describe ancestry, never physical incidence or adjacency.
@@ -49,7 +56,7 @@ public:
         std::shared_ptr<const CartesianIncidenceSource> source_;
         std::fenv_t environment_{};
         std::vector<CartesianIncidenceRange> ranges_;
-        std::size_t cells_ = 0;
+        std::size_t cells_ = 0, dependency_slot_ = 0;
         friend class CartesianSourceInventory;
     };
 
@@ -89,6 +96,17 @@ public:
     [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge_; }
     [[nodiscard]] const Budget* allocation_budget() const noexcept { return budget_; }
     [[nodiscard]] bool has_arena_keeper() const noexcept { return bool(keeper_); }
+    [[nodiscard]] bool has_observed_dependencies() const noexcept { return dependency_graph_; }
+    /** Check actual current funding. A newly derived graph can borrow its
+     * shared paths only while the exact predecessor grant remains live. */
+    [[nodiscard]] bool dependencies_admitted_in(const CartesianAuthorityArena&) const noexcept;
+    void retain_dependencies(cartesian_detail::CreditConstruction&,
+        std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>&, cartesian_detail::Allocation&) const;
+    struct DependencyWork
+    {
+        std::size_t allocated_pages = 0, allocated_bytes = 0, inherited_admission_visits = 0;
+    };
+    [[nodiscard]] DependencyWork dependency_work() const noexcept { return dependency_work_; }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
         contact_payload_object(visitor, this, ContactPayloadRole::CartesianInventoryObject, sizeof(*this), true);
@@ -104,6 +122,16 @@ public:
         for (const auto& lease : leases_)
             if (lease)
                 lease->visit_borrowed_payload(visitor);
+        DependencyTree::visit_pages(dependency_root_,
+            [&](const auto& node)
+            {
+                contact_payload_object(
+                    visitor, node.get(), ContactPayloadRole::CartesianInventoryDependencyNode, sizeof(*node), true);
+                contact_payload_buffer(
+                    visitor, node.get(), ContactPayloadRole::CartesianInventoryDependencyRows, node->rows);
+                contact_payload_buffer(
+                    visitor, node.get(), ContactPayloadRole::CartesianInventoryDependencyChildren, node->children);
+            });
     }
     /** Immutable source bodies and lease-token metadata are separate owners;
      * imported tokens never contribute another arena's payload credit. */
@@ -116,8 +144,53 @@ public:
             visitor(lease, lease->budget, lease->metadata, bool(lease->keeper));
     }
 
+    /** A compatibility importer admits physical graph pages too. The flat
+     * diagnostic order remains unchanged for ordinary complete visitors. */
+    template<class Visitor> void visit_physical_dependencies(Visitor&& visitor) const
+    {
+        visit_dependencies(visitor);
+        DependencyTree::visit_pages(dependency_root_,
+            [&](const auto& node) { visitor(node, node->charge.arena.get(), node->charge.bytes, true); });
+    }
+    /** Exact immutable graph traversal for a first/last-owner observer.
+     * Returning false for an already live node skips its entire subtree.
+     * Legacy readers retain the flat complete dependency order above. */
+    template<class Visitor> void visit_observed_dependencies(Visitor&& visitor) const
+    {
+        if (!dependency_graph_)
+        {
+            visit_dependencies(visitor);
+            return;
+        }
+        const auto descend = [&](auto&& self, const auto& node) -> void
+        {
+            if (!node || !visitor(node, node->charge.arena.get(), node->charge.bytes, true))
+                return;
+            if (node->leaf())
+                for (const auto& row : node->rows)
+                    visitor(row.source, row.source->allocation_budget(), row.source->metadata_bytes(),
+                        row.source->has_arena_keeper());
+            else
+                for (const auto& child : node->children)
+                    self(self, child);
+        };
+        descend(descend, dependency_root_);
+        for (const auto& lease : leases_)
+            visitor(lease, lease->budget, lease->metadata, bool(lease->keeper));
+    }
+
 private:
     friend class OwnedSupportMembership;
+    struct Dependency
+    {
+        std::size_t slot = 0;
+        std::shared_ptr<const CartesianIncidenceSource> source;
+    };
+    struct DependencyLess
+    {
+        bool operator()(const Dependency& a, const Dependency& b) const noexcept { return a.slot < b.slot; }
+    };
+    using DependencyTree = persistent_ordered_detail::OrderedPages<Dependency, DependencyLess>;
     [[nodiscard]] bool derived_from(const std::shared_ptr<const CartesianSourceInventory>&) const noexcept;
     CartesianSourceInventory() = default;
     static std::shared_ptr<const CartesianSourceInventory> construct(const CartesianSourceInventory*,
@@ -126,7 +199,10 @@ private:
     ContactHaloContext context_;
     int owner_ = -1;
     std::uint64_t version_ = 0;
-    std::size_t cells_ = 0, added_begin_ = 0, maximum_domain_bytes_ = 0;
+    std::size_t cells_ = 0, added_begin_ = 0, maximum_domain_bytes_ = 0, next_dependency_slot_ = 0;
+    bool dependency_graph_ = false, shared_dependencies_ = false;
+    DependencyTree::Ptr dependency_root_;
+    DependencyWork dependency_work_;
     std::weak_ptr<const CartesianSourceInventory> predecessor_;
     std::vector<Batch> batches_;
     AdaptiveBytes identity_;

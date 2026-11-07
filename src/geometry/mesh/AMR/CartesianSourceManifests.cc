@@ -654,13 +654,7 @@ std::shared_ptr<const CartesianSourceManifestSet> CartesianSourceManifestSet::ex
             if (result->local_)
                 credits.retain(result->local_, result->local_->allocation_budget(), result->local_->metadata_bytes(),
                     result->local_->has_arena_keeper(), result->leases_, retained);
-            result->local_->visit_dependencies(
-                [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
-                {
-                    using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
-                    const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
-                    credits.retain(fixed, origin, bytes, keep, result->leases_, retained);
-                });
+            result->local_->retain_dependencies(credits, result->leases_, retained);
             transport.reserve(outgoing, std::size_t(comm->getSize()));
             const auto identity = std::span<const char>(admission.inventory_->identity());
             const auto version = admission.inventory_->version();

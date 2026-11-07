@@ -139,13 +139,14 @@ std::shared_ptr<TileSourceCredit> source_credit(std::shared_ptr<const ContactSou
     result->source = std::move(source);
     credits.retain(result->source, result->source->allocation_budget(), result->source->metadata_bytes(),
         result->source->has_arena_keeper(), result->leases, memory);
-    result->source->visit_dependencies(
-        [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
-        {
-            using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
-            const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
-            credits.retain(fixed, origin, bytes, keep, result->leases, memory);
-        });
+    if (!arena->prepaid(result->source, result->source->allocation_budget(), result->source->metadata_bytes(), false))
+        result->source->visit_dependencies<CartesianDependencyVisit::Physical>(
+            [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
+            {
+                using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
+                const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
+                credits.retain(fixed, origin, bytes, keep, result->leases, memory);
+            });
     result->budget = &budget;
     result->keeper = keeper;
     result->bytes = std::exchange(memory.bytes, 0);

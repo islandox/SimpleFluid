@@ -83,7 +83,7 @@ public:
                 if (!observer.descend(snapshot, snapshot->allocation_budget(), snapshot->metadata_bytes(),
                         snapshot->has_arena_keeper(), unused, scratch))
                     return;
-                snapshot->visit_dependencies(
+                snapshot->visit_dependencies<CartesianDependencyVisit::Observed>(
                     [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
                     {
                         using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;

@@ -605,12 +605,17 @@ CartesianSourceLineRangeBuilder::CartesianSourceLineRangeBuilder(
     cartesian_detail::CreditConstruction credits(arena);
     credits.retain(c.points, c.points->allocation_budget(), c.points->metadata_bytes(), c.points->has_arena_keeper(),
         c.leases, memory);
-    c.points->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { retain_owner(credits, owner, origin, bytes, keeper, c.leases, memory); });
+    if (!arena->prepaid(c.points, c.points->allocation_budget(), c.points->metadata_bytes(), false))
+        c.points->visit_dependencies<CartesianDependencyVisit::Physical>(
+            [&](const auto& owner, auto origin, auto bytes, auto keeper)
+            { retain_owner(credits, owner, origin, bytes, keeper, c.leases, memory); });
     credits.retain(c.manifests, c.manifests->allocation_budget(), c.manifests->metadata_bytes(),
         c.manifests->has_arena_keeper(), c.leases, memory);
-    c.manifests->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { retain_owner(credits, owner, origin, bytes, keeper, c.leases, memory); });
+    if (!c.manifests->local_dependencies_admitted_in(*arena) &&
+        !arena->prepaid(c.manifests, c.manifests->allocation_budget(), c.manifests->metadata_bytes(), false))
+        c.manifests->visit_dependencies<CartesianDependencyVisit::Physical>(
+            [&](const auto& owner, auto origin, auto bytes, auto keeper)
+            { retain_owner(credits, owner, origin, bytes, keeper, c.leases, memory); });
     c.budget = &budget;
     c.keeper = arena->keeper;
     c.charge = std::exchange(memory.bytes, 0);
@@ -1235,10 +1240,20 @@ void CartesianSourceLineRangeRecipe::retain_dependencies(cartesian_detail::Credi
     };
     if (credits.descend(c.points, c.points->allocation_budget(), c.points->metadata_bytes(),
             c.points->has_arena_keeper(), leases, memory))
-        c.points->visit_dependencies(visit);
+    {
+        if (credits.observer)
+            c.points->visit_dependencies<CartesianDependencyVisit::Observed>(visit);
+        else
+            c.points->visit_dependencies<CartesianDependencyVisit::Physical>(visit);
+    }
     if (credits.descend(c.manifests, c.manifests->allocation_budget(), c.manifests->metadata_bytes(),
             c.manifests->has_arena_keeper(), leases, memory))
-        c.manifests->visit_dependencies(visit);
+    {
+        if (credits.observer)
+            c.manifests->visit_dependencies<CartesianDependencyVisit::Observed>(visit);
+        else
+            c.manifests->visit_dependencies<CartesianDependencyVisit::Physical>(visit);
+    }
     for (const auto& lease : c.leases)
         retain_owner(credits, lease, lease->budget, lease->metadata, bool(lease->keeper), leases, memory);
 }

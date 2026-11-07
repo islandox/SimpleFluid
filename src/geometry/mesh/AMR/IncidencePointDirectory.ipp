@@ -31,7 +31,9 @@ void IncidencePointDirectory<H, P>::credit_source(
         return;
     credits.retain(
         source_, source_->allocation_budget(), source_->metadata_bytes(), source_->has_arena_keeper(), leases_, memory);
-    source_->visit_dependencies(
+    if (credits.arena->prepaid(source_, source_->allocation_budget(), source_->metadata_bytes(), false))
+        return;
+    source_->visit_dependencies<CartesianDependencyVisit::Physical>(
         [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
         {
             using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;

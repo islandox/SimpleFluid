@@ -265,6 +265,18 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     result->version_ = version;
     if (old)
         result->predecessor_ = old->weak_from_this();
+    result->dependency_graph_ = result->keeper_ && arena->prepaid_query && !arena->prepaid_policy.expired();
+    const bool share_dependencies =
+        result->dependency_graph_ && old && old->dependency_graph_ &&
+        arena->prepaid(old->shared_from_this(), old->allocation_budget(), old->metadata_bytes(), false);
+    result->shared_dependencies_ = share_dependencies;
+    persistent_ordered_detail::OrderedPageWork graph_work;
+    DependencyTree graph(result->keeper_, &graph_work);
+    if (share_dependencies)
+    {
+        result->dependency_root_ = old->dependency_root_;
+        result->next_dependency_slot_ = old->next_dependency_slot_;
+    }
     const auto completely_retired = [&](const Batch& batch)
     {
         std::size_t count = 0;
@@ -276,12 +288,15 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     // Foreign immutable bodies coexist with candidate storage. Import their
     // exact owners before copying a single range, while omitting sources whose
     // entire active batch is retired by this authenticated delta.
-    if (old)
+    if (old && !share_dependencies)
         for (const auto& previous : old->batches_)
+        {
+            ++result->dependency_work_.inherited_admission_visits;
             if (!completely_retired(previous))
                 credits.retain(previous.source_, previous.source_->allocation_budget(),
                     previous.source_->metadata_bytes(), previous.source_->has_arena_keeper(), result->leases_,
                     retained);
+        }
     for (const auto& captured : sources)
         if (captured.source->cell_count())
             credits.retain(captured.source, captured.source->allocation_budget(), captured.source->metadata_bytes(),
@@ -291,11 +306,19 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
         for (const auto& previous : old->batches_)
         {
             if (completely_retired(previous))
+            {
+                if (share_dependencies)
+                {
+                    const Dependency key{previous.dependency_slot_, {}};
+                    result->dependency_root_ = graph.edit(result->dependency_root_, key, nullptr, true);
+                }
                 continue;
+            }
             result->batches_.emplace_back();
             auto& batch = result->batches_.back();
             batch.source_ = previous.source_;
             batch.environment_ = previous.environment_;
+            batch.dependency_slot_ = previous.dependency_slot_;
             retained.reserve(batch.ranges_, previous.ranges_.size());
             batch.ranges_.assign(previous.ranges_.begin(), previous.ranges_.end());
             batch.cells_ = previous.cells_;
@@ -346,7 +369,31 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
             batch.cells_ = add(batch.cells_, volume(range));
         if (batch.cells_ != captured.source->cell_count())
             throw std::invalid_argument("Trusted Cartesian source selectors disagree with its cell count.");
+        if (share_dependencies)
+        {
+            if (result->next_dependency_slot_ == std::numeric_limits<std::size_t>::max())
+                throw std::invalid_argument("Cartesian inventory dependency slots exhausted.");
+            batch.dependency_slot_ = result->next_dependency_slot_++;
+            const Dependency row{batch.dependency_slot_, batch.source_};
+            result->dependency_root_ = graph.edit(result->dependency_root_, row, &row, false);
+        }
     }
+    if (result->dependency_graph_ && !share_dependencies)
+    {
+        Allocation scratch(budget);
+        std::vector<Dependency> rows;
+        scratch.reserve(rows, result->batches_.size());
+        for (auto& batch : result->batches_)
+        {
+            batch.dependency_slot_ = rows.size();
+            rows.push_back({batch.dependency_slot_, batch.source_});
+        }
+        result->next_dependency_slot_ = rows.size();
+        result->dependency_root_ = graph.build(rows);
+    }
+    result->dependency_work_.allocated_pages = graph_work.copied_pages;
+    result->dependency_work_.allocated_bytes = graph_work.copied_bytes;
+
     for (std::size_t i = 0; i < result->batches_.size(); ++i)
     {
         const auto& batch = result->batches_[i];
@@ -402,6 +449,46 @@ std::shared_ptr<const CartesianSourceInventory> CartesianSourceInventory::constr
     credits.committed = true;
     return result;
 }
+bool CartesianSourceInventory::dependencies_admitted_in(const CartesianAuthorityArena& arena) const noexcept
+{
+    if (!dependency_graph_ || budget_ != arena.budget)
+        return false;
+    if (const auto self = weak_from_this().lock(); self && arena.prepaid(self, budget_, metadata_bytes(), false))
+        return true;
+    if (shared_dependencies_)
+    {
+        const auto predecessor = predecessor_.lock();
+        if (!predecessor ||
+            !arena.prepaid(predecessor, predecessor->allocation_budget(), predecessor->metadata_bytes(), false))
+            return false;
+    }
+    return std::ranges::all_of(leases_,
+        [&](const auto& lease)
+        {
+            if (lease->budget != arena.budget)
+                return false;
+            if (lease->charged_payload == lease->payload)
+                return true;
+            const auto owner = lease->owner.lock();
+            return owner && owner.get() == lease->owner_identity &&
+                   arena.prepaid(owner, lease->origin, lease->payload, lease->credit_metadata);
+        });
+}
+
+void CartesianSourceInventory::retain_dependencies(cartesian_detail::CreditConstruction& credits,
+    std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>& leases, Allocation& memory) const
+{
+    if (dependencies_admitted_in(*credits.arena))
+        return;
+    visit_physical_dependencies(
+        [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keep)
+        {
+            using E = typename std::remove_cvref_t<decltype(owner)>::element_type;
+            const std::shared_ptr<const std::remove_const_t<E>> fixed = owner;
+            credits.retain(fixed, origin, bytes, keep, leases, memory);
+        });
+}
+
 bool CartesianSourceInventory::derived_from(
     const std::shared_ptr<const CartesianSourceInventory>& source) const noexcept
 {
@@ -410,6 +497,7 @@ bool CartesianSourceInventory::derived_from(
 }
 CartesianSourceInventory::~CartesianSourceInventory()
 {
+    dependency_root_.reset();
     // Release actual allocations before their admission and keep the budget
     // keeper alive through the final decrement. No arena directory is pinned.
     {

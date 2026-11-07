@@ -279,7 +279,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     };
     retain(result->manifests_, result->manifests_->allocation_budget(), result->manifests_->metadata_bytes(),
         result->manifests_->has_arena_keeper());
-    result->manifests_->visit_dependencies(retain);
+    result->manifests_->retain_dependencies(credits, result->leases_, memory);
     if (result->source_)
         retain(result->source_, result->source_->allocation_budget(), result->source_->metadata_bytes(),
             result->source_->has_arena_keeper());

@@ -90,8 +90,12 @@ void retain_snapshot(cartesian_detail::CreditConstruction& credits,
     if (!credits.descend(snapshot, snapshot->allocation_budget(), snapshot->metadata_bytes(),
             snapshot->has_arena_keeper(), leases, memory))
         return;
-    snapshot->visit_dependencies([&](const auto& owner, auto origin, auto bytes, auto keeper)
-        { return descend_owner(credits, owner, origin, bytes, keeper, leases, memory); });
+    const auto visit = [&](const auto& owner, auto origin, auto bytes, auto keeper)
+    { return descend_owner(credits, owner, origin, bytes, keeper, leases, memory); };
+    if (credits.observer)
+        snapshot->visit_dependencies<CartesianDependencyVisit::Observed>(visit);
+    else
+        snapshot->visit_dependencies<CartesianDependencyVisit::Physical>(visit);
 }
 /** Five actual global component IDs occupy 60 bits; the two axes occupy four.
  * This is a saved-value selector, with no coordinate calculation. */
