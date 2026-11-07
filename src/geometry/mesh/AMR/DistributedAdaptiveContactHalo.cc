@@ -3556,6 +3556,7 @@ const ContactHaloStatistics& DistributedAdaptiveContactHalo::statistics() const 
         impl_->statistics.source_tile_records = incidence.source_tile_records;
         impl_->statistics.explicit_tile_ring_slots = incidence.explicit_tile_ring_slots;
         impl_->statistics.source_line_records = incidence.source_line_records;
+        impl_->statistics.certified_line_witnesses = incidence.certified_line_witnesses;
         impl_->statistics.source_line_nonforward_records = incidence.source_line_nonforward_records;
         impl_->statistics.source_line_families = incidence.source_line_families;
         impl_->statistics.source_axis_maps = incidence.source_axis_maps;

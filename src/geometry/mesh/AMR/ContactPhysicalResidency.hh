@@ -30,6 +30,8 @@ public:
         Layer,
         LayerHistory = Layer,
         TileBody,
+        TileSourceContext,
+        LineBucket,
         SourceDependency,
         TraceInventory,
         TraceSupport,
@@ -127,7 +129,11 @@ public:
                 scoped_point_credit_bytes_ += bytes;
             if (fixed_pool_scope(scope))
                 scoped_fixed_pool_credit_bytes_ += bytes;
+            if (scope == source_credit_scope_)
+                scoped_source_credit_bytes_ += bytes;
         }
+        if (transition.inserted() && role == Role::TileSourceContext && origin == &imported_.arena())
+            exported_tile_source_bytes_ += bytes;
         return transition;
     }
     template<class Owner> Transition release(Role role, const std::shared_ptr<Owner>& owner, PointScope scope = 0)
@@ -190,7 +196,11 @@ public:
                 scoped_point_credit_bytes_ -= before->bytes;
             if (fixed_pool_scope(scope))
                 scoped_fixed_pool_credit_bytes_ -= before->bytes;
+            if (scope == source_credit_scope_)
+                scoped_source_credit_bytes_ -= before->bytes;
         }
+        if (transition.retired() && role == Role::TileSourceContext && before->origin == &imported_.arena())
+            exported_tile_source_bytes_ -= before->bytes;
         return transition;
     }
     [[nodiscard]] bool admits(
@@ -225,6 +235,15 @@ public:
         funded_point_bytes_ = funded_point_local_ = 0;
         return transfer;
     }
+    void begin_source_credit_scope(PointScope scope) noexcept
+    {
+        if (source_credit_scope_ != scope)
+        {
+            source_credit_scope_ = scope;
+            scoped_source_credit_bytes_ = 0;
+        }
+    }
+    [[nodiscard]] std::size_t scoped_source_credit_bytes() const noexcept { return scoped_source_credit_bytes_; }
     void begin_point_scope(PointScope scope) noexcept
     {
         if (point_scope_ != scope)
@@ -317,6 +336,7 @@ public:
         else
             release(Role::CreditMetadata, credit, scope_of(*credit));
     }
+    [[nodiscard]] std::size_t exported_tile_source_bytes() const noexcept { return exported_tile_source_bytes_; }
     [[nodiscard]] std::size_t payload_bytes() const noexcept { return usage_.payload_bytes() + unique_; }
     [[nodiscard]] std::size_t overlap_bytes() const noexcept
     {
@@ -358,6 +378,8 @@ private:
     {
         if constexpr (requires { credit.pool_scope; })
             return credit.pool_scope;
+        if constexpr (requires { credit.arena_scope; })
+            return credit.arena_scope;
         return 0;
     }
     struct Less
@@ -376,6 +398,9 @@ private:
     ContactOwnerUsage usage_;
     Retired retired_;
     std::size_t unique_ = 0, retired_payload_ = 0, work_ = 0;
+    PointScope source_credit_scope_ = 0;
+    std::size_t scoped_source_credit_bytes_ = 0;
+    std::size_t exported_tile_source_bytes_ = 0;
     PointScope point_scope_ = 0;
     std::size_t scoped_point_credit_bytes_ = 0, scoped_fixed_pool_credit_bytes_ = 0;
     std::array<PointScope, 7> fixed_scopes_{};

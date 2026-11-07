@@ -1,8 +1,10 @@
 #pragma once
 #include "CartesianSourceLineRanges.hh"
-#include "DeferredOwnerCharges.hh"
+#include "ContactPhysicalResidency.hh"
+#include "PersistentOrderedPages.hh"
 #include "PooledLineQuery.hh"
 #include <array>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -59,8 +61,9 @@ public:
         std::size_t source_nonforward_records = 0, source_result_selectors = 0;
         std::size_t retained_explicit_records = 0, retained_run_records = 0, retained_source_records = 0;
     };
-    PooledLineRegistry(Budget&, IncidencePools&);
-    PooledLineRegistry(const PooledLineRegistry&, Budget&, IncidencePools&);
+    PooledLineRegistry(Budget&, IncidencePools&, std::shared_ptr<ContactPhysicalResidency> = {});
+    PooledLineRegistry(
+        const PooledLineRegistry&, Budget&, IncidencePools&, std::shared_ptr<ContactPhysicalResidency> = {});
     ~PooledLineRegistry();
     PooledLineRegistry(const PooledLineRegistry&) = delete;
     PooledLineRegistry& operator=(const PooledLineRegistry&) = delete;
@@ -71,21 +74,28 @@ public:
     void finish_replay(unsigned last_layer);
     [[nodiscard]] std::size_t metadata_bytes() const noexcept
     {
-        return lines_.size() * index_node_bytes + (dirty_.size() + touched_.size()) * set_node_bytes +
-               deferred_.metadata_bytes() + source_lease_bytes_ + source_owners_.capacity() * sizeof(SourceOwner);
+        // Immutable indexes and buckets have already joined the candidate's
+        // imported owner union. Only controller-private working sets overlap.
+        return (dirty_.size() + touched_.size()) * set_node_bytes;
     }
+    [[nodiscard]] std::size_t overlap_bytes() const noexcept;
+    /** A failed private admission can leave a prefix in the shared owner
+     * editor. Drop the whole candidate (including a supplied editor) in that
+     * case. Borrowed payload and scalar counters remain diagnostic only. */
+    [[nodiscard]] bool poisoned() const noexcept { return poisoned_; }
+    [[nodiscard]] std::size_t owner_admission_work() const noexcept { return residency_->work(); }
+    [[nodiscard]] std::size_t certified_witnesses() const noexcept { return certified_witnesses_; }
+    void require_publishable() const;
+    void finish_overlap() noexcept;
+    void finish_source_selection() noexcept;
     [[nodiscard]] std::size_t processed_lines() const noexcept { return processed_lines_; }
     [[nodiscard]] bool imports_source_owner(const void*) const noexcept;
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
-    /** Effective current-layer representation; saved future/older snapshots
-     * remain separately included in retained_bytes(). This census allocates nothing. */
+    /** Explicit diagnostic. Reads immutable snapshots without preparing facts. */
     [[nodiscard]] ActiveStorage active_storage() const;
     [[nodiscard]] std::size_t retained_bytes() const noexcept;
-    void reap_deferred() noexcept
-    {
-        deferred_.reap();
-        reap_source_owners();
-    }
+    [[nodiscard]] bool has_touched_raw_buckets() const noexcept;
+    void reap_deferred() noexcept;
     void apply(std::span<const PooledLineEdit>);
     void recompute(const PooledChangedLineQuery&);
     [[nodiscard]] std::optional<std::size_t> next_dirty() const;
@@ -116,6 +126,12 @@ public:
     void certify_source_ranges(const CartesianLineRangeAdmission&, std::shared_ptr<CartesianAuthorityArena>);
 
 private:
+    friend struct PooledLineRegistryAdmissionTestAccess;
+    // Observes the mandatory final replay allocation after all recipes freeze.
+    // The observer can tighten only this reservation's budget in focused tests.
+    using ReplayAdmissionObserver = std::size_t (*)(const Budget&, std::size_t);
+    static ReplayAdmissionObserver exchange_replay_admission_observer(ReplayAdmissionObserver) noexcept;
+
     struct SubscriberRun
     {
         /** support/first/last/emission/edge/actual support generation. */
@@ -165,6 +181,8 @@ private:
         std::size_t subscription_count = 0;
         unsigned certified_layer = 0;
         std::size_t charge = 0;
+        std::shared_ptr<Budget> arena;
+        ~Bucket();
         [[nodiscard]] std::size_t size() const noexcept
         {
             return source_ranges ? source_ranges->size() : (runs.empty() ? subscribers.size() : subscription_count);
@@ -176,46 +194,58 @@ private:
         [[nodiscard]] std::size_t spill_bytes(std::size_t, const IncidencePools&) const;
         [[nodiscard]] StoredSubscriber clone(std::size_t, const IncidencePools&) const;
     };
+    struct MutationGuard
+    {
+        PooledLineRegistry& registry;
+        int exceptions = std::uncaught_exceptions();
+        bool committed = false;
+        ~MutationGuard()
+        {
+            if (!committed && std::uncaught_exceptions() > exceptions)
+                registry.poisoned_ = true;
+        }
+        void commit() noexcept { committed = true; }
+    };
     using Key = std::pair<std::size_t, unsigned>;
-    using Index = std::map<Key, std::shared_ptr<const Bucket>>;
-    static constexpr std::size_t index_node_bytes = sizeof(Index::value_type) + 4 * sizeof(void*);
+    struct Witness
+    {
+        Key key{};
+        std::shared_ptr<const Bucket> bucket;
+    };
+    struct WitnessLess
+    {
+        bool operator()(const Witness& a, const Witness& b) const noexcept { return a.key < b.key; }
+    };
+    using Index = persistent_ordered_detail::OrderedPages<Witness, WitnessLess>;
     static constexpr std::size_t set_node_bytes = sizeof(std::size_t) + 4 * sizeof(void*);
-    [[nodiscard]] Index::const_iterator effective(std::size_t, unsigned) const;
+    static constexpr std::size_t bucket_owner_bytes = sizeof(Bucket) + 128;
+    [[nodiscard]] const Witness* effective(std::size_t, unsigned) const noexcept;
+    [[nodiscard]] const Witness* exact(Key) const noexcept;
     void preserve_future(std::size_t);
     void replace(std::size_t, std::shared_ptr<const Bucket>);
+    void edit_witness(Key, const std::shared_ptr<const Bucket>* replacement);
+    void observe_bucket(const std::shared_ptr<const Bucket>&, bool add);
+    void sync_index_charge();
+    void transfer_bucket(Bucket&, std::size_t, std::size_t& source_charge) noexcept;
     static std::size_t body(const Bucket&);
     /** Build from real complete-line output only. Every ordered full identity,
      * metadata field and source generation is compared before array retirement. */
     [[nodiscard]] bool certify_runs(Bucket&, std::span<const PooledLineSubscriber>, std::size_t& scratch);
     void admit(std::size_t);
     void release(std::size_t);
-    void reap_source_owners() noexcept;
     Budget* budget_;
-    DeferredOwnerCharges deferred_;
     IncidencePools* pools_;
+    std::shared_ptr<Budget> keeper_;
+    ContactGroupAllocation inherited_, residency_header_;
+    std::shared_ptr<ContactPhysicalResidency> residency_;
+    bool shared_residency_ = false, keep_overlap_ = false;
     std::size_t charged_ = 0;
-    Index lines_;
+    Index::Ptr lines_;
     std::set<std::size_t> dirty_;
     std::set<std::size_t> touched_;
     unsigned layer_ = 0;
-    bool replay_ = false;
-    std::size_t processed_lines_ = 0;
-    std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>> source_leases_;
-    std::size_t source_lease_bytes_ = 0;
-    struct SourceOwner
-    {
-        std::weak_ptr<const CartesianSourceLineRangeRecipe> owner;
-        const void* control = nullptr;
-        std::size_t control_bytes = 0;
-        SourceOwner(const std::shared_ptr<const CartesianSourceLineRangeRecipe>& value) : owner(value)
-        {
-            const auto observation = value->borrowed_control_payload();
-            control = observation.first;
-            control_bytes = observation.second;
-        }
-        [[nodiscard]] bool expired() const noexcept { return owner.expired(); }
-        [[nodiscard]] auto lock() const noexcept { return owner.lock(); }
-    };
-    std::vector<SourceOwner> source_owners_;
+    bool replay_ = false, poisoned_ = false;
+    std::size_t processed_lines_ = 0, retained_bucket_bytes_ = 0, certified_witnesses_ = 0;
+    ActiveStorage retained_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

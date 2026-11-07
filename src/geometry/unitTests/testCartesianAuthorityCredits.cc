@@ -93,7 +93,7 @@ TEST(CartesianAuthorityCredits, ObserverVisitsActualOwnersWithoutAllocatingTyped
     } probe{owner.get(), &budget};
     CreditConstruction observe(budget, &probe,
         [](void* context, const std::shared_ptr<const void>& actual, const Budget* origin, std::size_t bytes,
-            bool keeper, bool metadata)
+            bool keeper, bool metadata, std::uint64_t scope)
         {
             auto& value = *static_cast<Probe*>(context);
             EXPECT_EQ(actual.get(), value.address);
@@ -101,6 +101,7 @@ TEST(CartesianAuthorityCredits, ObserverVisitsActualOwnersWithoutAllocatingTyped
             EXPECT_EQ(bytes, sizeof(Payload));
             EXPECT_TRUE(keeper);
             EXPECT_FALSE(metadata);
+            EXPECT_EQ(scope, 0u);
             return value.visits++ == 0;
         });
     EXPECT_TRUE(observe.descend(owner, &budget, sizeof(Payload), true, leases, memory));
@@ -169,5 +170,85 @@ TEST(CartesianAuthorityCredits, PrepaidBodyPreservesCapacityAndRechargesAfterPol
     arena.reset();
     EXPECT_EQ(budget->used, memory.bytes + bytes);
     budget->used -= bytes;
+}
+TEST(CartesianAuthorityCredits, ExpiredPolicyReapsPreviouslyActiveOwnerWithoutAHint)
+{
+    auto origin = std::make_shared<Budget>(Budget{ample});
+    auto destination = std::make_shared<Budget>(Budget{ample});
+    auto arena = CartesianGroupAuthority::make_arena(*destination, destination);
+    const auto header = destination->used;
+    auto owner = std::make_shared<const Payload>();
+    auto policy = std::make_shared<const int>(1);
+    arena->set_prepaid_policy(policy, [](const void*, const std::shared_ptr<const void>&, const Budget*, std::size_t,
+                                          bool) noexcept { return false; });
+    Allocation memory(*destination);
+    std::vector<std::shared_ptr<AuthorityOwnerCredit>> leases;
+    {
+        CreditConstruction credit(arena);
+        credit.retain(owner, origin.get(), sizeof(Payload), true, leases, memory);
+        credit.committed = true;
+    }
+    ASSERT_EQ(leases.size(), 1u);
+    ASSERT_EQ(arena->retired_hints.size(), 1u);
+    const auto hint_census = [&]
+    {
+        std::size_t count = 0;
+        arena->visit_borrowed_payload(
+            [&](const ContactPayloadAllocation& allocation)
+            {
+                if (allocation.identity.role != ContactPayloadRole::CartesianArenaRetirementHints)
+                    return;
+                ++count;
+                ASSERT_FALSE(arena->retired_hints.empty());
+                EXPECT_EQ(allocation.identity.address, &*arena->retired_hints.begin());
+                EXPECT_EQ(allocation.owner, arena.get());
+                EXPECT_EQ(allocation.kind, ContactPayloadKind::NodeValue);
+                EXPECT_EQ(allocation.payload_bytes, sizeof(ArenaCredits::RetiredHints::value_type));
+                EXPECT_TRUE(allocation.allocator_overhead_excluded);
+                EXPECT_TRUE(allocation.node_overhead_excluded);
+            });
+        return count;
+    };
+    EXPECT_EQ(hint_census(), 1u);
+    auto arena_scope = arena->scope_id;
+    CreditConstruction observer(*destination, &arena_scope,
+        [](void* context, const std::shared_ptr<const void>&, const Budget*, std::size_t, bool, bool metadata,
+            std::uint64_t scope)
+        {
+            EXPECT_TRUE(metadata);
+            EXPECT_EQ(scope, *static_cast<const std::uint64_t*>(context));
+            return true;
+        });
+    EXPECT_TRUE(observer.descend(std::shared_ptr<const AuthorityOwnerCredit>(leases.front()), destination.get(),
+        leases.front()->metadata, true, leases, memory));
+    // Exact owner admission in the live residency cancels its retirement hint.
+    const auto hinted_bytes = destination->used;
+    arena->cancel_retirement(owner);
+    EXPECT_EQ(hint_census(), 0u);
+    EXPECT_EQ(destination->used + ArenaCredits::hint_node_bytes, hinted_bytes);
+    arena->reap();
+    ASSERT_EQ(arena->entries.size(), 1u);
+
+    auto hinted_owner = std::make_shared<const Payload>();
+    {
+        CreditConstruction credit(arena);
+        credit.retain(hinted_owner, origin.get(), sizeof(Payload), true, leases, memory);
+        credit.committed = true;
+    }
+    ASSERT_EQ(leases.size(), 2u);
+    ASSERT_EQ(hint_census(), 1u);
+    hinted_owner.reset();
+    leases.pop_back();
+    arena->reap();
+    EXPECT_EQ(hint_census(), 0u);
+    ASSERT_EQ(arena->entries.size(), 1u);
+
+    policy.reset();
+    owner.reset();
+    leases.clear();
+    arena->reap();
+    EXPECT_TRUE(arena->entries.empty());
+    EXPECT_EQ(arena->private_metadata_bytes(), header);
+    EXPECT_EQ(destination->used, header + memory.bytes);
 }
 } // namespace

@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactAllocationScope.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceBudget.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include <algorithm>
@@ -24,6 +25,7 @@ struct AuthorityOwnerCredit
     std::size_t charged_payload = payload;
     const Budget* origin = nullptr;
     bool credit_metadata = false;
+    std::uint64_t arena_scope = 0;
     const void* owner_identity = nullptr; // observation only; ownership key remains the full weak control
     // The weak owner keeps its custom deleter alive. A borrowed typed-control
     // observation therefore remains valid even after that owner's body dies.
@@ -53,18 +55,25 @@ struct ArenaCredits
     using Entries = std::map<Owner, std::shared_ptr<AuthorityOwnerCredit>, std::owner_less<>>;
     static constexpr std::size_t node_bytes = sizeof(Entries::value_type) + 4 * sizeof(void*);
     static constexpr std::size_t control_bytes = 128;
+    static constexpr std::size_t token_bytes = sizeof(AuthorityOwnerCredit) + control_bytes;
     Budget* budget;
     std::shared_ptr<Budget> keeper;
     Entries entries;
+    using RetiredHints = std::map<const AuthorityOwnerCredit*, Entries::iterator>;
+    static constexpr std::size_t hint_node_bytes = sizeof(RetiredHints::value_type) + 4 * sizeof(void*);
+    RetiredHints retired_hints;
     std::size_t charge = 0;
+    const std::uint64_t scope_id = next_contact_allocation_scope();
     std::weak_ptr<const void> prepaid_policy;
     PrepaidQuery prepaid_query = nullptr;
 
     ArenaCredits(Budget& b, std::shared_ptr<Budget> k) : budget(&b), keeper(std::move(k)) {}
     ~ArenaCredits()
     {
+        const auto hints = retired_hints.size() * hint_node_bytes;
+        retired_hints.clear();
         entries.clear();
-        budget->used -= charge;
+        budget->used -= charge + hints;
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
@@ -75,31 +84,71 @@ struct ArenaCredits
             if (entry.second)
                 entry.second->visit_borrowed_payload(visitor);
         }
+        for (const auto& hint : retired_hints)
+            contact_payload_node_value(visitor, this, ContactPayloadRole::CartesianArenaRetirementHints, hint);
+    }
+    void cancel_retirement(Entries::iterator at) noexcept
+    {
+        if (retired_hints.erase(at->second.get()))
+            budget->used -= hint_node_bytes;
+    }
+    void cancel_retirement(const std::shared_ptr<const void>& owner) noexcept
+    {
+        if (const auto at = entries.find(Owner(owner)); at != entries.end())
+            cancel_retirement(at);
+    }
+    bool hint_retirement(Entries::iterator at)
+    {
+        if (!prepaid_query || retired_hints.contains(at->second.get()))
+            return false;
+        budget->add(hint_node_bytes);
+        try
+        {
+            retired_hints.emplace(at->second.get(), at);
+        }
+        catch (...)
+        {
+            budget->used -= hint_node_bytes;
+            throw;
+        }
+        return true;
+    }
+    bool hint_retirement(const std::shared_ptr<const void>& owner)
+    {
+        const auto at = entries.find(Owner(owner));
+        return at != entries.end() && hint_retirement(at);
+    }
+    void erase_entry(Entries::iterator at) noexcept
+    {
+        cancel_retirement(at);
+        entries.erase(at);
+        charge -= node_bytes;
+        budget->used -= node_bytes;
     }
     void reap() noexcept
     {
-        for (auto at = entries.begin(); at != entries.end();)
-            // A lease may outlive its observed payload. Keep its actual map
-            // node until the final external lease releases the token, so the
-            // accepted-arena overlap census includes that immutable metadata.
-            if (at->first.expired() && at->second.use_count() == 1)
+        if (prepaid_query && !prepaid_policy.expired())
+        {
+            // Only edited or abandoned proofs enter this list. A stale
+            // immutable control can remain alive through an escaped proof.
+            for (auto hint = retired_hints.begin(); hint != retired_hints.end();)
             {
-                at = entries.erase(at);
-                charge -= node_bytes;
-                budget->used -= node_bytes;
+                const auto at = (hint++)->second;
+                if (at->first.expired() && at->second.use_count() == 1)
+                    erase_entry(at);
             }
-            else
-                ++at;
+            return;
+        }
+        for (auto at = entries.begin(); at != entries.end();)
+        {
+            const auto current = at++;
+            if (current->first.expired() && current->second.use_count() == 1)
+                erase_entry(current);
+        }
     }
-    /** Accepted-arena allocations that coexist with a candidate. Imported
-     * immutable payload bodies are admitted by candidate owners separately.
-     * Shared lease vectors cannot supply this census without duplicate credit. */
     [[nodiscard]] std::size_t private_metadata_bytes() const noexcept
     {
-        auto result = charge;
-        for (const auto& [owner, credit] : entries)
-            result += credit->metadata;
-        return result;
+        return charge + entries.size() * token_bytes + retired_hints.size() * hint_node_bytes;
     }
     [[nodiscard]] bool owns_credit(const void* identity) const noexcept
     {
@@ -155,8 +204,8 @@ struct ArenaCredits
 struct CreditConstruction
 {
     using Entries = ArenaCredits::Entries;
-    using Observer = bool (*)(
-        void*, const std::shared_ptr<const void>&, const Budget*, std::size_t, bool has_keeper, bool credit_metadata);
+    using Observer = bool (*)(void*, const std::shared_ptr<const void>&, const Budget*, std::size_t, bool has_keeper,
+        bool credit_metadata, std::uint64_t owner_scope);
     std::shared_ptr<ArenaCredits> arena;
     Allocation scratch;
     std::vector<Entries::iterator> inserted;
@@ -176,7 +225,8 @@ struct CreditConstruction
 
     explicit CreditConstruction(std::shared_ptr<ArenaCredits> a) : arena(std::move(a)), scratch(*arena->budget)
     {
-        arena->reap();
+        if (!arena->prepaid_query || arena->prepaid_policy.expired())
+            arena->reap();
     }
     /** Observe exact dependencies without creating a typed directory or leases.
      * The callback controls whether a newly observed owner needs descent. */
@@ -194,9 +244,7 @@ struct CreditConstruction
             arena->budget->used -= credit->take_payload_charge();
         for (auto at : inserted)
         {
-            arena->entries.erase(at);
-            arena->charge -= ArenaCredits::node_bytes;
-            arena->budget->used -= ArenaCredits::node_bytes;
+            arena->erase_entry(at);
         }
     }
     template<class T>
@@ -208,7 +256,12 @@ struct CreditConstruction
             return false;
         credit_metadata |= std::is_same_v<std::remove_cv_t<T>, AuthorityOwnerCredit>;
         if (observer)
-            return observer(observer_context, owner, origin, bytes, has_keeper, credit_metadata);
+        {
+            std::uint64_t scope = 0;
+            if constexpr (std::is_same_v<std::remove_cv_t<T>, AuthorityOwnerCredit>)
+                scope = owner->arena_scope;
+            return observer(observer_context, owner, origin, bytes, has_keeper, credit_metadata, scope);
+        }
         const ArenaCredits::Owner key(owner);
         if (seen.find(key) != seen.end())
             return false;
@@ -223,13 +276,15 @@ struct CreditConstruction
         {
             scratch.append(inserted);
             Allocation token(*arena->budget), node(*arena->budget);
-            constexpr auto metadata = sizeof(AuthorityOwnerCredit) + ArenaCredits::control_bytes;
-            const auto charged = arena->prepaid(owner, origin, bytes, credit_metadata) ? 0 : bytes;
+            constexpr auto metadata = ArenaCredits::token_bytes;
+            const bool prepaid = arena->prepaid(owner, origin, bytes, credit_metadata);
+            const auto charged = prepaid ? 0 : bytes;
             token.retain(add(charged, metadata));
             node.retain(ArenaCredits::node_bytes);
             auto value = std::make_shared<AuthorityOwnerCredit>(arena->budget, arena->keeper, key, bytes, metadata);
             value->charged_payload = charged;
             value->origin = origin;
+            value->arena_scope = arena->scope_id;
             value->credit_metadata = credit_metadata;
             value->owner_identity = owner.get();
             if constexpr (requires { owner->borrowed_control_payload(); })
@@ -243,6 +298,8 @@ struct CreditConstruction
             arena->charge = add(arena->charge, node.bytes);
             node.bytes = 0;
             inserted.push_back(at);
+            if (!prepaid)
+                arena->hint_retirement(at);
         }
         else
         {

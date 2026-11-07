@@ -129,6 +129,7 @@ struct ContactHaloStatistics
     std::size_t source_tile_records = 0, explicit_tile_ring_slots = 0;
     std::size_t source_line_records = 0, source_line_nonforward_records = 0, source_line_families = 0;
     std::size_t source_axis_maps = 0, source_result_selectors = 0;
+    std::size_t certified_line_witnesses = 0;
     std::size_t explicit_line_records = 0, stride_line_records = 0;
     std::size_t retained_explicit_line_records = 0, retained_stride_line_records = 0, retained_source_line_records = 0;
     std::size_t source_point_recaptures = 0, source_point_recaptured_records = 0;

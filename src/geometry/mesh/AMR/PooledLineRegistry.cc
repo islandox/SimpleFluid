@@ -1,14 +1,18 @@
 #include "PooledLineRegistry.hh"
+#include "IncidencePhysicalOwners.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
 #include <cfenv>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 namespace
 {
+thread_local std::size_t (*replay_admission_observer)(const Budget&, std::size_t) = nullptr;
+
 class CompletedMemberEnvironment
 {
     std::fenv_t caller_{};
@@ -32,7 +36,6 @@ bool completed_point_equal(const IncidencePools::Point& a, const IncidencePools:
             return false;
     return true;
 }
-constexpr std::size_t owner = 128;
 void add_checked(std::size_t& a, std::size_t b)
 {
     if (b > std::numeric_limits<std::size_t>::max() - a)
@@ -62,6 +65,11 @@ std::optional<std::uint64_t> progressed(std::uint64_t origin, std::int64_t step,
     return origin + delta;
 }
 } // namespace
+PooledLineRegistry::ReplayAdmissionObserver PooledLineRegistry::exchange_replay_admission_observer(
+    ReplayAdmissionObserver observer) noexcept
+{
+    return std::exchange(replay_admission_observer, observer);
+}
 PooledLineSubscriber PooledLineRegistry::SubscriberRun::at(
     std::size_t index, std::span<const std::array<std::uint64_t, 6>> patterns) const
 {
@@ -258,84 +266,136 @@ std::size_t PooledLineRegistry::StoredSubscriber::spill_bytes() const
     add_checked(bytes, array_bytes(spill->result.capacity(), sizeof(std::size_t)));
     return bytes;
 }
-PooledLineRegistry::PooledLineRegistry(Budget& budget, IncidencePools& pools)
-    : budget_(&budget), deferred_(budget), pools_(&pools)
+PooledLineRegistry::Bucket::~Bucket()
+{
+    source_ranges.reset();
+    decltype(patterns){}.swap(patterns);
+    decltype(runs){}.swap(runs);
+    decltype(subscribers){}.swap(subscribers);
+    if (arena)
+        arena->used -= charge;
+}
+namespace
+{
+std::shared_ptr<Budget> line_arena(Budget& budget, const IncidencePools& pools)
+{
+    if (const auto& keeper = pools.points.keeper())
+    {
+        if (keeper.get() != &budget)
+            throw std::invalid_argument("Pooled line registry received a foreign arena.");
+        return keeper;
+    }
+    return std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, &budget);
+}
+std::shared_ptr<ContactPhysicalResidency> line_residency(ContactGroupAllocation& header,
+    const std::shared_ptr<ContactPhysicalResidency>& supplied, const ContactPhysicalResidency* previous = nullptr)
+{
+    if (supplied)
+        return supplied;
+    header.add(sizeof(ContactPhysicalResidency) + 128);
+    return previous ? std::make_shared<ContactPhysicalResidency>(*previous, header.keeper())
+                    : std::make_shared<ContactPhysicalResidency>(header.keeper());
+}
+} // namespace
+PooledLineRegistry::PooledLineRegistry(
+    Budget& budget, IncidencePools& pools, std::shared_ptr<ContactPhysicalResidency> shared)
+    : budget_(&budget), pools_(&pools), keeper_(line_arena(budget, pools)), inherited_(keeper_),
+      residency_header_(keeper_), residency_(line_residency(residency_header_, shared)), shared_residency_(bool(shared))
 {
 }
-PooledLineRegistry::PooledLineRegistry(const PooledLineRegistry& source, Budget& budget, IncidencePools& pools)
-    : budget_(&budget), deferred_(budget), pools_(&pools), layer_(source.layer_), replay_(source.replay_),
+PooledLineRegistry::PooledLineRegistry(const PooledLineRegistry& source, Budget& budget, IncidencePools& pools,
+    std::shared_ptr<ContactPhysicalResidency> shared)
+    : budget_(&budget), pools_(&pools), keeper_(line_arena(budget, pools)), inherited_(keeper_),
+      residency_header_(keeper_),
+      residency_((source.require_publishable(),
+          line_residency(residency_header_, shared,
+              pools.points.keeper() && source.pools_->points.keeper() ? source.residency_.get() : nullptr))),
+      shared_residency_(bool(shared)), keep_overlap_(true), layer_(source.layer_), replay_(source.replay_),
       processed_lines_(source.processed_lines_)
 {
     try
     {
-        std::set<const Bucket*> unique;
-        std::size_t scratch = 0;
-        for (const auto& [slot, bucket] : source.lines_)
+        if (bool(shared) != source.shared_residency_)
+            throw std::invalid_argument("Pooled line registry fork changed its ownership policy.");
+        const bool share = bool(pools.points.keeper()) && bool(source.pools_->points.keeper());
+        if (share)
         {
-            admit(index_node_bytes);
-            if (bucket && !unique.contains(bucket.get()))
-            {
-                admit(sizeof(const Bucket*) + 4 * sizeof(void*));
-                scratch += sizeof(const Bucket*) + 4 * sizeof(void*);
-                unique.insert(bucket.get());
-                admit(bucket->charge);
-            }
+            lines_ = source.lines_;
+            inherited_.add(lines_ ? lines_->subtree_bytes : 0);
+            retained_ = source.retained_;
+            retained_bucket_bytes_ = source.retained_bucket_bytes_;
         }
-        unique.clear();
-        release(scratch);
+        else
+        {
+            if (shared)
+                throw std::invalid_argument("Shared incidence line registries need exact lifetime keepers.");
+            // Raw-budget standalone compatibility. Do not leave a shared
+            // bucket or index node referring to a caller's expired arena.
+            cartesian_detail::Allocation scratch(budget);
+            std::map<const Bucket*, std::shared_ptr<const Bucket>> aliases;
+            std::vector<Witness> rows;
+            scratch.reserve(rows, source.lines_ ? source.lines_->size : 0);
+            Index::visit_from(
+                source.lines_, [](const auto&) { return false; },
+                [&](const Witness& row)
+                {
+                    std::shared_ptr<const Bucket> bucket;
+                    if (row.bucket)
+                    {
+                        const auto* old = row.bucket.get();
+                        auto found = aliases.find(old);
+                        if (found == aliases.end())
+                        {
+                            const auto bytes = old->charge;
+                            scratch.retain(bytes);
+                            auto next = std::make_shared<Bucket>();
+                            next->certified_layer = old->certified_layer;
+                            next->subscription_count = old->subscription_count;
+                            next->source_ranges = old->source_ranges;
+                            next->runs = old->runs;
+                            next->patterns = old->patterns;
+                            next->subscribers.reserve(old->subscribers.size());
+                            for (const auto& sub : old->subscribers)
+                                next->subscribers.push_back(sub.clone());
+                            const auto actual = body(*next);
+                            if (actual > bytes)
+                                throw std::invalid_argument("Copied line bucket exceeds its original admission.");
+                            transfer_bucket(*next, actual, scratch.bytes);
+                            scratch.retain(sizeof(decltype(aliases)::value_type) + 4 * sizeof(void*));
+                            found = aliases.emplace(old, std::move(next)).first;
+                        }
+                        bucket = found->second;
+                        observe_bucket(bucket, true);
+                    }
+                    rows.push_back({row.key, std::move(bucket)});
+                    return true;
+                });
+            lines_ = Index(keeper_).build(rows);
+        }
         for (const auto slot : source.dirty_)
             admit(set_node_bytes);
-        lines_ = source.lines_;
         dirty_ = source.dirty_;
-        const auto arena = pools.points.source_arena();
-        const bool source_ranges = std::ranges::any_of(
-            lines_, [](const auto& entry) { return entry.second && bool(entry.second->source_ranges); });
-        if (source_ranges)
-        {
-            if (!arena || arena->budget != &budget)
-                throw std::invalid_argument("Source line fork requires its destination typed arena.");
-            cartesian_detail::CreditConstruction credits(arena);
-            cartesian_detail::Allocation memory(budget);
-            admit(array_bytes(lines_.size(), sizeof(SourceOwner)));
-            source_owners_.reserve(lines_.size());
-            if (source_owners_.capacity() != lines_.size())
-                throw std::invalid_argument("Source line owner capacity differs from admission.");
-            for (const auto& [key, bucket] : lines_)
-                if (bucket && bucket->source_ranges)
-                {
-                    const auto& recipe = bucket->source_ranges;
-                    if (std::ranges::none_of(source_owners_, [&](const auto& old) { return old.lock() == recipe; }))
-                        source_owners_.push_back(recipe);
-                    credits.retain(recipe, recipe->allocation_budget(), recipe->metadata_bytes(),
-                        recipe->has_arena_keeper(), source_leases_, memory);
-                    recipe->retain_dependencies(credits, source_leases_, memory);
-                }
-            source_lease_bytes_ = std::exchange(memory.bytes, 0);
-            credits.committed = true;
-        }
     }
     catch (...)
     {
-        Index().swap(lines_);
-        decltype(source_owners_){}.swap(source_owners_);
-        std::set<std::size_t>().swap(dirty_);
+        lines_.reset();
+        decltype(dirty_){}.swap(dirty_);
         budget_->used -= charged_;
         charged_ = 0;
-        decltype(source_leases_){}.swap(source_leases_);
-        budget_->used -= source_lease_bytes_;
-        source_lease_bytes_ = 0;
         throw;
     }
 }
 PooledLineRegistry::~PooledLineRegistry()
 {
-    Index().swap(lines_);
-    decltype(source_owners_){}.swap(source_owners_);
-    std::set<std::size_t>().swap(dirty_);
-    std::set<std::size_t>().swap(touched_);
-    decltype(source_leases_){}.swap(source_leases_);
-    budget_->used -= source_lease_bytes_;
+    lines_.reset();
+    decltype(dirty_){}.swap(dirty_);
+    decltype(touched_){}.swap(touched_);
     budget_->used -= charged_;
+}
+void PooledLineRegistry::require_publishable() const
+{
+    if (poisoned_)
+        throw std::logic_error("Discard the poisoned private line registry and its owner editor.");
 }
 void PooledLineRegistry::admit(std::size_t n)
 {
@@ -349,42 +409,76 @@ void PooledLineRegistry::release(std::size_t n)
     budget_->used -= n;
     charged_ -= n;
 }
-void PooledLineRegistry::reap_source_owners() noexcept
+void PooledLineRegistry::transfer_bucket(Bucket& bucket, std::size_t bytes, std::size_t& from) noexcept
 {
-    source_owners_.erase(
-        std::remove_if(source_owners_.begin(), source_owners_.end(), [](const auto& owner) { return owner.expired(); }),
-        source_owners_.end());
-    source_leases_.erase(std::remove_if(source_leases_.begin(), source_leases_.end(),
-                             [](const auto& lease) { return lease->owner.expired(); }),
-        source_leases_.end());
-    if (const auto& arena = pools_->points.source_arena())
-        arena->reap();
+    bucket.arena = keeper_;
+    bucket.charge = bytes;
+    from -= bytes;
+}
+void PooledLineRegistry::observe_bucket(const std::shared_ptr<const Bucket>& bucket, bool add)
+{
+    if (!bucket)
+        return;
+    using Role = IncidencePhysicalOwners::Role;
+    const auto& credit_arena = pools_->points.source_arena();
+    IncidencePhysicalOwners owners(*residency_, credit_arena.get(), *budget_, add);
+    if (!owners.observe(Role::LineBucket, bucket, bucket->charge, bucket->arena.get()))
+        return;
+    const auto adjust = [&](std::size_t& count, std::size_t value)
+    {
+        if (add)
+            add_checked(count, value);
+        else
+            count -= value;
+    };
+    adjust(retained_bucket_bytes_, bucket->charge);
+    if (const auto& recipe = bucket->source_ranges)
+    {
+        adjust(retained_.retained_source_records, bucket->size());
+        if (owners.observe(Role::SourceDependency, recipe, recipe->metadata_bytes(), recipe->allocation_budget()))
+            owners.observe_proof(*recipe);
+    }
+    else if (bucket->runs.empty())
+        adjust(retained_.retained_explicit_records, bucket->size());
+    else
+        adjust(retained_.retained_run_records, bucket->size());
 }
 std::size_t PooledLineRegistry::retained_bytes() const noexcept
 {
-    std::size_t result = charged_ + deferred_.retained_bytes() + source_lease_bytes_;
-    for (std::size_t i = 0; i < source_owners_.size(); ++i)
-        if (const auto recipe = source_owners_[i].lock())
-        {
-            result += recipe->metadata_bytes();
-            bool first_catalog = true;
-            for (std::size_t j = 0; j < i; ++j)
-                if (const auto previous = source_owners_[j].lock();
-                    previous && previous->catalog() == recipe->catalog())
-                {
-                    first_catalog = false;
-                    break;
-                }
-            if (first_catalog)
-                result += recipe->catalog()->metadata_bytes();
-        }
-        else
-            result += CartesianSourceLineRangeRecipe::control_metadata_bytes();
-    return result;
+    return charged_ + retained_bucket_bytes_ + (lines_ ? lines_->subtree_bytes : 0);
+}
+std::size_t PooledLineRegistry::overlap_bytes() const noexcept
+{
+    const auto live = !lines_ || lines_->charge.arena != keeper_ ? (lines_ ? lines_->subtree_bytes : 0)
+                                                                 : lines_->subtree_bytes - lines_->same_arena_bytes;
+    return inherited_.bytes() - live + (shared_residency_ ? 0 : residency_->overlap_bytes());
+}
+void PooledLineRegistry::finish_overlap() noexcept
+{
+    if (poisoned_)
+        return;
+    keep_overlap_ = false;
+    sync_index_charge();
+    if (!shared_residency_)
+        residency_->finish_overlap();
+}
+void PooledLineRegistry::sync_index_charge()
+{
+    const auto live = !lines_ || lines_->charge.arena != keeper_ ? (lines_ ? lines_->subtree_bytes : 0)
+                                                                 : lines_->subtree_bytes - lines_->same_arena_bytes;
+    if (live > inherited_.bytes())
+        throw std::logic_error("Line edit introduced an unadmitted inherited index page.");
+    if (!keep_overlap_)
+        inherited_.release(inherited_.bytes() - live);
+}
+void PooledLineRegistry::reap_deferred() noexcept
+{
+    if (const auto& arena = pools_->points.source_arena())
+        arena->reap();
 }
 std::size_t PooledLineRegistry::body(const Bucket& bucket)
 {
-    std::size_t result = owner;
+    std::size_t result = bucket_owner_bytes;
     add_checked(result, array_bytes(bucket.subscribers.capacity(), sizeof(StoredSubscriber)));
     add_checked(result, array_bytes(bucket.runs.capacity(), sizeof(SubscriberRun)));
     add_checked(result, array_bytes(bucket.patterns.capacity(), sizeof(std::array<std::uint64_t, 6>)));
@@ -394,52 +488,45 @@ std::size_t PooledLineRegistry::body(const Bucket& bucket)
 }
 PooledLineRegistry::ActiveStorage PooledLineRegistry::active_storage() const
 {
-    ActiveStorage result;
-    for (auto entry = lines_.begin(); entry != lines_.end(); ++entry)
-        if (entry->second)
+    ActiveStorage result = retained_;
+    std::optional<std::size_t> seen;
+    Index::visit_from(
+        lines_, [](const auto&) { return false; },
+        [&](const Witness& row)
         {
-            bool seen = false;
-            for (auto previous = lines_.begin(); previous != entry; ++previous)
-                seen = seen || previous->second == entry->second;
-            if (!seen)
-            {
-                if (entry->second->source_ranges)
-                    result.retained_source_records += entry->second->size();
-                else if (entry->second->runs.empty())
-                    result.retained_explicit_records += entry->second->size();
-                else
-                    result.retained_run_records += entry->second->size();
-            }
-        }
-    for (auto next = lines_.begin(); next != lines_.end();)
-    {
-        const auto line = next->first.first;
-        const auto current = effective(line, layer_);
-        if (current != lines_.end() && current->second)
-        {
+            const auto line = row.key.first;
+            if (seen == line)
+                return true;
+            seen = line;
+            const auto* current = effective(line, layer_);
+            if (!current || !current->bucket)
+                return true;
             ++result.lines;
-            const auto& bucket = *current->second;
-            if (bucket.source_ranges)
+            const auto& bucket = *current->bucket;
+            if (const auto& recipe = bucket.source_ranges)
             {
-                const auto& recipe = bucket.source_ranges;
                 result.source_records += recipe->size();
                 result.source_families += recipe->family_count();
                 result.source_nonforward_records += recipe->nonforward_count();
                 result.source_result_selectors += recipe->result_selector_count();
                 result.source_bytes += body(bucket) + recipe->metadata_bytes();
+                std::optional<std::size_t> prior;
                 bool first_catalog = true;
-                for (auto old = lines_.begin(); old != lines_.end() && old->first.first < line;)
-                {
-                    const auto previous_line = old->first.first;
-                    const auto previous = effective(previous_line, layer_);
-                    if (previous != lines_.end() && previous->second && previous->second->source_ranges &&
-                        previous->second->source_ranges->catalog() == recipe->catalog())
+                Index::visit_from(
+                    lines_, [](const auto&) { return false; },
+                    [&](const Witness& old)
                     {
-                        first_catalog = false;
-                        break;
-                    }
-                    old = lines_.upper_bound({previous_line, std::numeric_limits<unsigned>::max()});
-                }
+                        const auto old_line = old.key.first;
+                        if (old_line >= line)
+                            return false;
+                        if (prior == old_line)
+                            return true;
+                        prior = old_line;
+                        const auto* earlier = effective(old_line, layer_);
+                        first_catalog = !earlier || !earlier->bucket || !earlier->bucket->source_ranges ||
+                                        earlier->bucket->source_ranges->catalog() != recipe->catalog();
+                        return first_catalog;
+                    });
                 if (first_catalog)
                 {
                     result.source_catalog_bytes += recipe->catalog()->metadata_bytes();
@@ -458,99 +545,148 @@ PooledLineRegistry::ActiveStorage PooledLineRegistry::active_storage() const
                 result.runs += bucket.runs.size();
                 result.run_bytes += body(bucket);
             }
-        }
-        next = lines_.upper_bound({line, std::numeric_limits<unsigned>::max()});
-    }
+            return true;
+        });
     return result;
 }
-PooledLineRegistry::Index::const_iterator PooledLineRegistry::effective(std::size_t line, unsigned layer) const
+const PooledLineRegistry::Witness* PooledLineRegistry::effective(std::size_t line, unsigned layer) const noexcept
 {
-    auto position = lines_.upper_bound({line, layer});
-    if (position == lines_.begin())
-        return lines_.end();
-    --position;
-    return position->first.first == line ? position : lines_.end();
+    const Key target{line, layer};
+    auto* node = lines_.get();
+    const Witness* previous = nullptr;
+    while (node && !node->leaf())
+    {
+        const auto child = std::partition_point(node->children.begin(), node->children.end(),
+            [&](const auto& entry) { return entry->maximum->key <= target; });
+        if (child == node->children.end())
+        {
+            previous = node->maximum;
+            node = nullptr;
+            break;
+        }
+        if (child != node->children.begin())
+            previous = (*std::prev(child))->maximum;
+        node = child->get();
+    }
+    if (node)
+    {
+        const auto at = std::partition_point(
+            node->rows.begin(), node->rows.end(), [&](const auto& row) { return row.key <= target; });
+        if (at != node->rows.begin())
+            previous = &*std::prev(at);
+    }
+    return previous && previous->key.first == line ? previous : nullptr;
+}
+const PooledLineRegistry::Witness* PooledLineRegistry::exact(Key key) const noexcept
+{
+    const auto* found = Index::lower_bound(lines_, [&](const auto& value) { return value.key < key; });
+    return found && found->key == key ? found : nullptr;
+}
+bool PooledLineRegistry::has_touched_raw_buckets() const noexcept
+{
+    if (!retained_.retained_explicit_records && !retained_.retained_run_records)
+        return false;
+    for (const auto line : touched_)
+    {
+        bool raw = false;
+        Index::visit_from(
+            lines_, [&](const auto& row) { return row.key.first < line; },
+            [&](const Witness& row)
+            {
+                if (row.key.first != line)
+                    return false;
+                raw = row.bucket && !row.bucket->source_ranges;
+                return !raw;
+            });
+        if (raw)
+            return true;
+    }
+    return false;
 }
 void PooledLineRegistry::begin_replay(bool bootstrap)
 {
-    reap_source_owners();
+    require_publishable();
+    reap_deferred();
     if (!dirty_.empty())
         throw std::invalid_argument("Unfinished line replay.");
-    release(touched_.size() * set_node_bytes);
-    touched_.clear();
+    finish_source_selection();
+    certified_witnesses_ = 0;
     replay_ = !bootstrap;
     layer_ = 0;
 }
 void PooledLineRegistry::set_layer(unsigned layer)
 {
+    require_publishable();
     if (!dirty_.empty() || layer < layer_ || layer >= 64)
         throw std::invalid_argument("Invalid incremental line layer.");
     layer_ = layer;
 }
+void PooledLineRegistry::finish_source_selection() noexcept
+{
+    if (poisoned_)
+        return;
+    const auto bytes = touched_.size() * set_node_bytes;
+    touched_.clear();
+    release(bytes);
+}
 void PooledLineRegistry::finish_replay(unsigned last_layer)
 {
-    reap_source_owners();
+    require_publishable();
     if (!dirty_.empty())
         throw std::invalid_argument("Unfinished line replay.");
+    MutationGuard mutation{*this};
     for (const auto line : touched_)
-    {
-        auto it = lines_.upper_bound({line, last_layer});
-        while (it != lines_.end() && it->first.first == line)
+        while (const auto* found =
+                   Index::lower_bound(lines_, [&](const auto& row) { return row.key <= Key{line, last_layer}; }))
         {
-            const auto bytes = it->second ? it->second->charge : 0;
-            const bool deferred = it->second && (it->second.use_count() > 1 || deferred_.contains(it->second));
-            if (deferred && deferred_.adopt(it->second, bytes))
-                charged_ -= bytes;
-            it = lines_.erase(it);
-            release(index_node_bytes);
-            if (bytes && !deferred)
-                release(bytes);
+            if (found->key.first != line)
+                break;
+            edit_witness(found->key, nullptr);
         }
+    reap_deferred();
+}
+void PooledLineRegistry::edit_witness(Key key, const std::shared_ptr<const Bucket>* replacement)
+{
+    const auto* found = exact(key);
+    if (!found && !replacement)
+        throw std::logic_error("Missing exact line witness retirement.");
+    const auto old = found ? found->bucket : nullptr;
+    Witness next{key, replacement ? *replacement : nullptr};
+    if (found && replacement && old == next.bucket)
+        return;
+    MutationGuard mutation{*this};
+    auto root = Index(keeper_).edit(lines_, next, replacement ? &next : nullptr, found != nullptr);
+    // Add new owners before retiring old. A future-layer alias is an actual
+    // second reference to the same physical bucket, not a second body charge.
+    if (old != next.bucket)
+    {
+        observe_bucket(next.bucket, true);
+        observe_bucket(old, false);
     }
-    release(touched_.size() * set_node_bytes);
-    touched_.clear();
-    reap_source_owners();
+    lines_ = std::move(root);
+    sync_index_charge();
 }
 void PooledLineRegistry::preserve_future(std::size_t line)
 {
-    if (!replay_ || layer_ == 63 || lines_.contains({line, layer_ + 1}))
+    if (!replay_ || layer_ == 63 || exact({line, layer_ + 1}))
         return;
-    const auto old = effective(line, layer_);
-    admit(index_node_bytes);
-    lines_.emplace(Key{line, layer_ + 1}, old == lines_.end() ? nullptr : old->second);
+    const auto* found = effective(line, layer_);
+    const auto old = found ? found->bucket : nullptr;
+    edit_witness({line, layer_ + 1}, &old);
 }
 void PooledLineRegistry::replace(std::size_t line, std::shared_ptr<const Bucket> next)
 {
-    auto old = lines_.find({line, layer_});
-    if (old == lines_.end())
-    {
-        admit(index_node_bytes);
-        lines_.emplace(Key{line, layer_}, std::move(next));
-        return;
-    }
-    const auto charge = old->second ? old->second->charge : 0;
-    const bool deferred = old->second && (old->second.use_count() > 1 || deferred_.contains(old->second));
-    if (deferred && deferred_.adopt(old->second, charge))
-        charged_ -= charge;
-    old->second = std::move(next);
-    if (charge && !deferred)
-        release(charge);
-    reap_source_owners();
+    edit_witness({line, layer_}, &next);
 }
 void PooledLineRegistry::apply(std::span<const PooledLineEdit> changes)
 {
-    reap_source_owners();
+    require_publishable();
+    reap_deferred();
     for (const auto& change : changes)
     {
         (void) pools_->lines.get(change.line);
-        if (!touched_.contains(change.line))
-        {
-            admit(set_node_bytes);
-            touched_.insert(change.line);
-        }
-        preserve_future(change.line);
-        const auto found = effective(change.line, layer_);
-        const auto* old = found == lines_.end() ? nullptr : found->second.get();
+        const auto* found = effective(change.line, layer_);
+        const auto old = found ? found->bucket : nullptr;
         const auto count = old ? old->size() : 0;
         if (!change.remove && count == std::numeric_limits<std::size_t>::max())
             throw std::invalid_argument("Pooled subscriber count overflow.");
@@ -582,8 +718,17 @@ void PooledLineRegistry::apply(std::span<const PooledLineEdit> changes)
         }
         if (!change.remove && (same || change.subscriber.has_result() || !change.subscriber.result.empty()))
             throw std::invalid_argument("Duplicate or prepopulated line subscription.");
+        // Membership and generation rejection are read-only, so callers can
+        // correct a stale request and retry. Admissions below are private.
+        MutationGuard mutation{*this};
+        if (!touched_.contains(change.line))
+        {
+            admit(set_node_bytes);
+            touched_.insert(change.line);
+        }
+        preserve_future(change.line);
         const auto next_count = change.remove ? count - 1 : count + 1;
-        std::size_t admitted = owner;
+        std::size_t admitted = bucket_owner_bytes;
         add_checked(admitted, array_bytes(next_count, sizeof(StoredSubscriber)));
         if (old)
             for (std::size_t i = 0; i < count; ++i)
@@ -612,11 +757,10 @@ void PooledLineRegistry::apply(std::span<const PooledLineEdit> changes)
         if (actual > admitted)
             throw std::invalid_argument("Pooled line copy exceeded its admission.");
         release(admitted - actual);
-        next->charge = actual;
+        transfer_bucket(*next, actual, charged_);
         if (next->subscribers.empty())
         {
             next.reset();
-            release(actual);
             replace(change.line, {});
         }
         else
@@ -635,6 +779,7 @@ void PooledLineRegistry::recompute(const PooledChangedLineQuery& publish)
 }
 std::optional<std::size_t> PooledLineRegistry::next_dirty() const
 {
+    require_publishable();
     if (dirty_.empty())
         return {};
     return *dirty_.begin();
@@ -798,15 +943,17 @@ bool PooledLineRegistry::certify_runs(
 }
 void PooledLineRegistry::recompute_one(std::size_t line, const PooledChangedLineQuery& publish)
 {
-    reap_source_owners();
+    require_publishable();
+    reap_deferred();
     const auto dirty = dirty_.find(line);
     if (dirty == dirty_.end())
         throw std::invalid_argument("Line is not dirty.");
+    MutationGuard mutation{*this};
     ++processed_lines_;
     const auto found = effective(line, layer_);
-    if (found != lines_.end() && found->second)
+    if (found && found->bucket)
     {
-        const auto& old = *found->second;
+        const auto& old = *found->bucket;
         const auto count = old.size();
         std::size_t scratch = array_bytes(count, sizeof(PooledLineSubscriber));
         for (std::size_t i = 0; i < count; ++i)
@@ -872,7 +1019,7 @@ void PooledLineRegistry::recompute_one(std::size_t line, const PooledChangedLine
         // The query's explicit result buffers already have scratch credit.
         // Admit only packed metadata here, then move those buffers into the
         // new immutable bucket before retiring the complete-line workspace.
-        credit.add(owner);
+        credit.add(bucket_owner_bytes);
         auto next = std::make_shared<Bucket>();
         next->certified_layer = layer_;
         if (!certify_runs(*next, working, scratch))
@@ -892,9 +1039,14 @@ void PooledLineRegistry::recompute_one(std::size_t line, const PooledChangedLine
         const auto actual = body(*next);
         if (actual > scratch)
             throw std::invalid_argument("Pooled line query exceeded its admission.");
-        next->charge = actual;
+        // This scratch is part of charged_. The immutable bucket takes
+        // ownership of these live bytes from both registry counters.
+        transfer_bucket(*next, actual, charged_);
+        scratch -= actual;
         replace(line, std::move(next));
-        scratch -= actual; // The immutable bucket now owns this admitted body.
+        // A publisher sees an already committed replacement. Its exception
+        // does not poison or roll back the completed line result.
+        mutation.commit();
         for (const auto index : changed)
             publish(line, index);
         std::vector<PooledLineSubscriber>().swap(working);
@@ -905,16 +1057,17 @@ void PooledLineRegistry::recompute_one(std::size_t line, const PooledChangedLine
 }
 PooledLineResultView PooledLineRegistry::query_result(std::size_t line, std::size_t subscriber) const
 {
+    require_publishable();
     const auto found = effective(line, layer_);
-    if (found == lines_.end() || !found->second)
+    if (!found || !found->bucket)
         throw std::invalid_argument("Missing pooled line query result.");
     PooledLineResultView result{
-        found->second->metadata(subscriber, *pools_), found->second->explicit_result(subscriber)};
+        found->bucket->metadata(subscriber, *pools_), found->bucket->explicit_result(subscriber)};
     if (!result.subscriber.has_result())
         throw std::invalid_argument("Uncomputed pooled line query result.");
-    if (found->second->source_ranges && result.subscriber.result_state == PooledLineSubscriber::ResultState::Explicit)
+    if (found->bucket->source_ranges && result.subscriber.result_state == PooledLineSubscriber::ResultState::Explicit)
     {
-        result.source_result = found->second->source_ranges.get();
+        result.source_result = found->bucket->source_ranges.get();
         result.source_pools = pools_;
         result.source_ordinal = subscriber;
     }
@@ -923,14 +1076,15 @@ PooledLineResultView PooledLineRegistry::query_result(std::size_t line, std::siz
 std::optional<PooledLineRegistry::CompletedMember> PooledLineRegistry::find_completed_member(std::size_t line,
     unsigned effective_layer, const PooledLineSubscriber& expected, const IncidencePools& request_namespace) const
 {
+    require_publishable();
     if (&request_namespace != pools_ || !expected.native_source || !expected.source_generation ||
         expected.has_result() || expected.result.capacity() || dirty_.contains(line))
         return {};
     CompletedMemberEnvironment environment;
     const auto found = effective(line, effective_layer);
-    if (found == lines_.end() || !found->second)
+    if (!found || !found->bucket)
         return {};
-    const auto& bucket = *found->second;
+    const auto& bucket = *found->bucket;
     if (bucket.certified_layer > effective_layer)
         return {};
     for (std::size_t i = 0; i < bucket.size(); ++i)
@@ -962,10 +1116,11 @@ std::optional<PooledLineRegistry::CompletedMember> PooledLineRegistry::find_comp
 std::optional<PooledLineRegistry::SavedSourceQuery> PooledLineRegistry::capture_saved_source_query(std::size_t line,
     unsigned effective_layer, unsigned kernel_witness_layer, const PooledLineSubscriber& expected) const
 {
+    require_publishable();
     const auto found = effective(line, effective_layer);
-    if (found == lines_.end() || !found->second || !found->second->source_ranges)
+    if (!found || !found->bucket || !found->bucket->source_ranges)
         return {};
-    const auto& bucket = *found->second;
+    const auto& bucket = *found->bucket;
     if (bucket.certified_layer != kernel_witness_layer ||
         bucket.source_ranges->certified_layer() != kernel_witness_layer)
         return {};
@@ -988,67 +1143,69 @@ std::optional<PooledLineRegistry::SavedSourceQuery> PooledLineRegistry::capture_
 void PooledLineRegistry::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    deferred_.visit_borrowed_payload(visitor);
-    for (const auto& entry : lines_)
-    {
-        contact_payload_node_value(visitor, this, ContactPayloadRole::LineRegistryNodes, entry);
-        if (!entry.second)
-            continue;
-        const auto& bucket = *entry.second;
-        contact_payload_object(visitor, &bucket, ContactPayloadRole::LineBucketObject, sizeof(bucket), true);
-        contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineSubscriberValues, bucket.subscribers);
-        contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineRunValues, bucket.runs);
-        contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LinePatternValues, bucket.patterns);
-        for (const auto& subscriber : bucket.subscribers)
-            if (subscriber.spill)
-            {
-                contact_payload_object(
-                    visitor, subscriber.spill.get(), ContactPayloadRole::LineSpillObject, sizeof(SubscriberSpill));
-                contact_payload_buffer(
-                    visitor, subscriber.spill.get(), ContactPayloadRole::LineResultValues, subscriber.spill->result);
-            }
-        if (bucket.source_ranges)
-            bucket.source_ranges->visit_borrowed_payload(visitor);
-    }
+    Index::visit_pages(lines_,
+        [&](const auto& page)
+        {
+            contact_payload_object(visitor, page.get(), ContactPayloadRole::LineRegistryNodes, sizeof(*page), true);
+            contact_payload_buffer(visitor, page.get(), ContactPayloadRole::LineHistoryRows, page->rows);
+            contact_payload_buffer(visitor, page.get(), ContactPayloadRole::LineHistoryChildren, page->children);
+        });
+    Index::visit_from(
+        lines_, [](const auto&) { return false; },
+        [&](const Witness& row)
+        {
+            if (!row.bucket)
+                return true;
+            const auto& bucket = *row.bucket;
+            contact_payload_object(visitor, &bucket, ContactPayloadRole::LineBucketObject, sizeof(bucket), true);
+            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineSubscriberValues, bucket.subscribers);
+            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineRunValues, bucket.runs);
+            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LinePatternValues, bucket.patterns);
+            for (const auto& subscriber : bucket.subscribers)
+                if (subscriber.spill)
+                {
+                    contact_payload_object(
+                        visitor, subscriber.spill.get(), ContactPayloadRole::LineSpillObject, sizeof(SubscriberSpill));
+                    contact_payload_buffer(visitor, subscriber.spill.get(), ContactPayloadRole::LineResultValues,
+                        subscriber.spill->result);
+                }
+            if (bucket.source_ranges)
+                bucket.source_ranges->visit_borrowed_payload(visitor);
+            return true;
+        });
     for (const auto& entry : dirty_)
         contact_payload_node_value(visitor, this, ContactPayloadRole::LineRegistryDirtyNodes, entry);
     for (const auto& entry : touched_)
         contact_payload_node_value(visitor, this, ContactPayloadRole::LineRegistryTouchedNodes, entry);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::LineSourceOwners, source_owners_);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::LineSourceLeases, source_leases_);
-    for (const auto& owner : source_owners_)
-        if (owner.control)
-            contact_payload_object(
-                visitor, owner.control, ContactPayloadRole::CartesianControlCreditObject, owner.control_bytes, true);
-    for (const auto& lease : source_leases_)
-        lease->visit_borrowed_payload(visitor);
 }
 bool PooledLineRegistry::imports_source_owner(const void* identity) const noexcept
 {
-    for (const auto& [key, bucket] : lines_)
-        if (bucket && bucket->source_ranges && bucket->source_ranges->imports_owner(identity))
-            return true;
-    return false;
+    return bool(residency_->usage().find({identity, std::uint32_t(ContactPhysicalResidency::Role::CreditMetadata)}));
 }
 void PooledLineRegistry::certify_source_ranges(
     const CartesianLineRangeAdmission& admission, std::shared_ptr<CartesianAuthorityArena> arena)
 {
-    reap_source_owners();
+    require_publishable();
+    reap_deferred();
     if (!dirty_.empty())
         throw std::invalid_argument("Source line ranges require a completed actual line pass.");
+    if (!has_touched_raw_buckets())
+    {
+        finish_source_selection();
+        return;
+    }
     CartesianSourceLineRangeBuilder builder(admission, *budget_, std::move(arena));
     struct Pending
     {
-        Index::iterator position;
-        std::shared_ptr<Bucket> replacement;
-        bool owns_replacement = true;
+        Key key;
+        std::shared_ptr<const Bucket> accepted;
+        std::shared_ptr<const Bucket> replacement;
     };
     cartesian_detail::Allocation scratch(*budget_);
     std::vector<Pending> pending;
     const auto materialize =
         [&](const Bucket& bucket, std::vector<PooledLineSubscriber>& values, cartesian_detail::Allocation& group)
     {
-        group.reserve(values, bucket.size());
         for (std::size_t i = 0; i < bucket.size(); ++i)
         {
             auto value = bucket.metadata(i, *pools_);
@@ -1065,95 +1222,79 @@ void PooledLineRegistry::certify_source_ranges(
         }
         return true;
     };
-    for (auto current = lines_.begin(); current != lines_.end(); ++current)
-        if (current->second && !current->second->source_ranges)
-        {
-            const auto alias = std::find_if(pending.begin(), pending.end(),
-                [&](const auto& item)
-                {
-                    return item.position->first.first == current->first.first &&
-                           item.position->second == current->second;
-                });
-            if (alias != pending.end())
+    for (const auto line : touched_)
+        Index::visit_from(
+            lines_, [&](const auto& row) { return row.key.first < line; },
+            [&](const Witness& row)
             {
-                auto replacement = alias->replacement;
-                scratch.append(pending);
-                pending.push_back({current, std::move(replacement), false});
-                continue;
-            }
-            const auto& old = *current->second;
-            cartesian_detail::Allocation group(*budget_);
-            std::vector<PooledLineSubscriber> values;
-            if (materialize(old, values, group))
-                if (auto recipe = builder.make_recipe(current->first.first, values, *pools_, old.certified_layer))
+                if (row.key.first != line)
+                    return false;
+                if (!row.bucket || row.bucket->source_ranges)
+                    return true;
+                const auto alias = std::find_if(pending.begin(), pending.end(),
+                    [&](const auto& item) { return item.key.first == line && item.accepted == row.bucket; });
+                if (alias != pending.end())
                 {
+                    auto replacement = alias->replacement;
                     scratch.append(pending);
-                    scratch.retain(owner);
-                    auto replacement = std::make_shared<Bucket>();
-                    replacement->source_ranges = std::move(recipe);
-                    replacement->certified_layer = old.certified_layer;
-                    replacement->charge = owner;
-                    pending.push_back({current, std::move(replacement), true});
+                    pending.push_back({row.key, row.bucket, std::move(replacement)});
+                    return true;
                 }
-        }
+                const auto& old = *row.bucket;
+                cartesian_detail::Allocation group(*budget_);
+                std::vector<PooledLineSubscriber> values;
+                group.reserve(values, old.size());
+                if (materialize(old, values, group))
+                    if (auto recipe = builder.make_recipe(line, values, *pools_, old.certified_layer))
+                    {
+                        scratch.append(pending);
+                        scratch.retain(bucket_owner_bytes);
+                        auto replacement = std::make_shared<Bucket>();
+                        replacement->source_ranges = std::move(recipe);
+                        replacement->certified_layer = old.certified_layer;
+                        transfer_bucket(*replacement, bucket_owner_bytes, scratch.bytes);
+                        pending.push_back({row.key, row.bucket, std::move(replacement)});
+                    }
+                return true;
+            });
     builder.freeze();
     // A separate final pass proves every ordered scalar, FULL support identity,
     // endpoint identity and complete query result against real execution. Maps
     // are now immutable; no proof can be changed by a later bucket observation.
     for (const auto& item : pending)
     {
-        const auto& old = *item.position->second;
+        const auto& old = *item.accepted;
         cartesian_detail::Allocation group(*budget_);
         std::vector<PooledLineSubscriber> values;
+        if (replay_admission_observer)
+        {
+            struct RestoreLimit
+            {
+                Budget& budget;
+                std::size_t limit;
+                ~RestoreLimit() { budget.limit = limit; }
+            } restore{*budget_, budget_->limit};
+            const auto requested =
+                replay_admission_observer(*budget_, array_bytes(old.size(), sizeof(PooledLineSubscriber)));
+            budget_->limit = std::clamp(requested, budget_->used, restore.limit);
+            group.reserve(values, old.size());
+        }
+        else
+            group.reserve(values, old.size());
         if (!materialize(old, values, group))
             throw std::invalid_argument("Source line replay lost a completed real query result.");
         if (!item.replacement->source_ranges->exact_replay(values, *pools_))
             throw std::invalid_argument("Source line ranges differ from the actual complete ordered output.");
     }
-    const auto new_owners = std::ranges::count_if(pending, [](const auto& item) { return item.owns_replacement; });
-    const auto needed = cartesian_detail::add(source_owners_.size(), std::size_t(new_owners));
-    if (needed > source_owners_.capacity())
-    {
-        const auto bytes = array_bytes(needed, sizeof(SourceOwner));
-        const auto previous = array_bytes(source_owners_.capacity(), sizeof(SourceOwner));
-        admit(bytes);
-        try
-        {
-            source_owners_.reserve(needed);
-        }
-        catch (...)
-        {
-            release(bytes);
-            throw;
-        }
-        if (source_owners_.capacity() != needed)
-            throw std::invalid_argument("Source line owner capacity differs from admission.");
-        release(previous);
-    }
-    // Admit deferred metadata before committing replacements. Existing keys are
-    // replaced in place; this pass does not create a new fixed-point layer.
+    MutationGuard mutation{*this};
     for (const auto& item : pending)
     {
-        const auto& old = item.position->second;
-        if (old && (old.use_count() > 1 || deferred_.contains(old)))
-            if (deferred_.adopt(old, old->charge))
-                charged_ -= old->charge;
+        const auto* accepted = exact(item.key);
+        if (!accepted || accepted->bucket != item.accepted)
+            throw std::logic_error("Source line witness changed before certification publication.");
+        edit_witness(item.key, &item.replacement);
+        ++certified_witnesses_;
     }
-    for (auto& item : pending)
-    {
-        auto& old = item.position->second;
-        const auto old_bytes = old->charge;
-        const bool deferred = deferred_.contains(old);
-        if (item.owns_replacement)
-            source_owners_.push_back(item.replacement->source_ranges);
-        old = std::move(item.replacement);
-        if (!deferred)
-            release(old_bytes);
-        if (item.owns_replacement)
-        {
-            charged_ += owner;
-            scratch.bytes -= owner;
-        }
-    }
+    finish_source_selection();
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

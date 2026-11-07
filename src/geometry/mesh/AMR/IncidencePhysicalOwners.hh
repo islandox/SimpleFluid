@@ -32,11 +32,30 @@ public:
     {
         if (!value || !bytes)
             return false;
+        if constexpr (std::is_same_v<std::remove_cv_t<T>, cartesian_detail::AuthorityOwnerCredit>)
+            if (!scope && role == Role::CreditMetadata)
+                scope = value->arena_scope;
         if (!added_)
-            return residency_.release(role, value, scope).retired();
+        {
+            const auto active = residency_.usage().find({value.get(), std::uint32_t(role)});
+            const bool hinted = arena_ && active && active->references == 1 && arena_->hint_retirement(value);
+            try
+            {
+                return residency_.release(role, value, scope).retired();
+            }
+            catch (...)
+            {
+                if (hinted)
+                    arena_->cancel_retirement(value);
+                throw;
+            }
+        }
         const auto prepaid = arena_ ? arena_->find_paid_token(value, origin, bytes) : nullptr;
-        return residency_.retain(role, value, bytes, origin, prepaid ? &prepaid->charged_payload : nullptr, scope)
-            .inserted();
+        const auto transition =
+            residency_.retain(role, value, bytes, origin, prepaid ? &prepaid->charged_payload : nullptr, scope);
+        if (arena_ && transition.inserted())
+            arena_->cancel_retirement(value);
+        return transition.inserted();
     }
 
     template<class View> void observe_pool_credits(const std::shared_ptr<View>& view)
@@ -73,38 +92,47 @@ public:
             [&](auto& observer, auto& unused, auto& scratch) { proof.retain_dependencies(observer, unused, scratch); });
     }
 
-    void observe_snapshot(const std::shared_ptr<const ContactSourcePointSnapshot>& snapshot)
+    template<class Source> void observe_source(const std::shared_ptr<const Source>& source)
     {
-        if (!snapshot)
+        if (!source)
             return;
         observe_dependencies(
             [&](auto& observer, auto& unused, auto& scratch)
             {
-                if (!observer.descend(snapshot, snapshot->allocation_budget(), snapshot->metadata_bytes(),
-                        snapshot->has_arena_keeper(), unused, scratch))
+                if (!observer.descend(source, source->allocation_budget(), source->metadata_bytes(),
+                        source->has_arena_keeper(), unused, scratch))
                     return;
-                snapshot->visit_dependencies<CartesianDependencyVisit::Observed>(
-                    [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
-                    {
-                        using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
-                        const std::shared_ptr<const std::remove_const_t<Element>> stable = owner;
-                        return observer.descend(stable, origin, bytes, keeper, unused, scratch);
-                    });
+                const auto visit = [&](const auto& owner, const Budget* origin, std::size_t bytes, bool keeper)
+                {
+                    using Element = typename std::remove_cvref_t<decltype(owner)>::element_type;
+                    const std::shared_ptr<const std::remove_const_t<Element>> stable = owner;
+                    return observer.descend(stable, origin, bytes, keeper, unused, scratch);
+                };
+                if constexpr (requires { source->visit_observed_dependencies(visit); })
+                    source->visit_observed_dependencies(visit);
+                else if constexpr (requires {
+                                       source->template visit_dependencies<CartesianDependencyVisit::Observed>(visit);
+                                   })
+                    source->template visit_dependencies<CartesianDependencyVisit::Observed>(visit);
+                else if constexpr (requires { source->visit_dependencies(visit); })
+                    source->visit_dependencies(visit);
             });
     }
+    void observe_snapshot(const std::shared_ptr<const ContactSourcePointSnapshot>& source) { observe_source(source); }
 
     static void bind_policy(const std::shared_ptr<cartesian_detail::ArenaCredits>& arena,
         const std::shared_ptr<ContactPhysicalResidency>& residency) noexcept
     {
-        if (arena && residency)
-            arena->set_prepaid_policy(residency,
-                [](const void* policy, const std::shared_ptr<const void>& owner, const Budget* origin,
-                    std::size_t bytes, bool metadata) noexcept
-                {
-                    const auto& editor = *static_cast<const ContactPhysicalResidency*>(policy);
-                    return editor.admits(
-                        metadata ? Role::CreditMetadata : Role::SourceDependency, owner, origin, bytes);
-                });
+        if (!arena || !residency)
+            return;
+        residency->begin_source_credit_scope(arena->scope_id);
+        arena->set_prepaid_policy(residency,
+            [](const void* policy, const std::shared_ptr<const void>& owner, const Budget* origin, std::size_t bytes,
+                bool metadata) noexcept
+            {
+                const auto& editor = *static_cast<const ContactPhysicalResidency*>(policy);
+                return editor.admits(metadata ? Role::CreditMetadata : Role::SourceDependency, owner, origin, bytes);
+            });
     }
 
 private:
@@ -112,12 +140,12 @@ private:
     {
         cartesian_detail::CreditConstruction observer(budget_, this,
             [](void* context, const std::shared_ptr<const void>& owner, const Budget* origin, std::size_t bytes,
-                bool keeper, bool metadata)
+                bool keeper, bool metadata, std::uint64_t scope)
             {
                 if (!origin || !keeper)
                     throw std::invalid_argument("Incidence proof dependency has no immutable arena lifetime.");
                 return static_cast<IncidencePhysicalOwners*>(context)->observe(
-                    metadata ? Role::CreditMetadata : Role::SourceDependency, owner, bytes, origin);
+                    metadata ? Role::CreditMetadata : Role::SourceDependency, owner, bytes, origin, scope);
             });
         Credits unused;
         cartesian_detail::Allocation scratch(budget_);

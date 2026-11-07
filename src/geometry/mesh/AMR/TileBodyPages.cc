@@ -1,8 +1,10 @@
 #include "TileBodyPages.hh"
+#include "IncidencePhysicalOwners.hh"
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -534,9 +536,12 @@ TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::s
         for (std::size_t i = 0; i < source.pages_.size(); ++i)
             if (const auto& old = source.pages_[i])
             {
-                pages_[i] = make_credit(*budget_, keeper_, old->page, old->bytes - credit_overhead,
+                auto credit = make_credit(*budget_, keeper_, old->page, old->bytes - credit_overhead,
                     old->page->source ? source_context(old->page->source) : nullptr);
-                pages_[i]->ordinal = i;
+                retain_source_context(credit->source);
+                credit->ordinal = i;
+                pages_[i] = std::move(credit);
+                ++active_page_credits_;
             }
         while (first_free_ < pages_.size() && pages_[first_free_])
             ++first_free_;
@@ -561,6 +566,8 @@ TileBodyPages::TileBodyPages(const TileBodyPages& source, Budget& budget, std::s
     catch (...)
     {
         decltype(pages_)().swap(pages_);
+        source_credit_.reset();
+        release_source_context_index();
         release_deferred();
         budget_->used -= charged_;
         charged_ = 0;
@@ -571,20 +578,73 @@ TileBodyPages::~TileBodyPages()
 {
     decltype(pages_)().swap(pages_);
     source_credit_.reset();
+    release_source_context_index();
     // Retiring this admission domain follows DeferredOwnerCharges: surviving
     // foreign bodies have independent admission in their remaining domains.
     release_deferred();
     budget_->used -= charged_;
 }
+void TileBodyPages::retain_source_context(const std::shared_ptr<TileSourceCredit>& context)
+{
+    if (!context)
+        return;
+    const auto key = context->source.get();
+    if (const auto found = source_contexts_.find(key); found != source_contexts_.end())
+    {
+        if (found->second.owner.owner_before(context) || context.owner_before(found->second.owner))
+            throw std::logic_error("Tile source context allocation identity changed.");
+        found->second.references = sum(found->second.references, 1);
+        return;
+    }
+    const auto next = sum(source_context_bytes_, context->bytes);
+    budget_->add(source_context_node_bytes);
+    try
+    {
+        source_contexts_.emplace(key, SourceContextUse{context, 1});
+    }
+    catch (...)
+    {
+        budget_->used -= source_context_node_bytes;
+        throw;
+    }
+    source_context_bytes_ = next;
+}
+void TileBodyPages::release_source_context(const std::shared_ptr<TileSourceCredit>& context) noexcept
+{
+    if (!context)
+        return;
+    const auto found = source_contexts_.find(context->source.get());
+    if (found == source_contexts_.end() || !found->second.references || found->second.owner.owner_before(context) ||
+        context.owner_before(found->second.owner))
+        std::terminate();
+    if (--found->second.references == 0)
+    {
+        source_context_bytes_ -= context->bytes;
+        source_contexts_.erase(found);
+        budget_->used -= source_context_node_bytes;
+    }
+}
+void TileBodyPages::release_source_context_index() noexcept
+{
+    const auto bytes = source_contexts_.size() * source_context_node_bytes;
+    source_contexts_.clear();
+    budget_->used -= bytes;
+    source_context_bytes_ = 0;
+}
 std::shared_ptr<TileSourceCredit> TileBodyPages::source_context(
     std::shared_ptr<const ContactSourcePointSnapshot> source)
 {
-    if (source_credit_ && source_credit_->source == source)
-        return source_credit_;
-    for (const auto& credit : pages_)
-        if (credit && credit->source && credit->source->source == source)
-            return credit->source;
-    source_credit_ = source_credit(std::move(source), *budget_, keeper_, source_arena_);
+    if (const auto found = source_contexts_.find(source.get()); found != source_contexts_.end())
+    {
+        auto existing = found->second.owner.lock();
+        if (!existing)
+            throw std::logic_error("Live tile source context lost its physical owner.");
+        return existing;
+    }
+    auto next = source_credit(std::move(source), *budget_, keeper_, source_arena_);
+    retain_source_context(next);
+    release_source_context(source_credit_);
+    source_credit_ = std::move(next);
     return source_credit_;
 }
 std::size_t TileBodyPages::certify_private_source_loops(
@@ -626,7 +686,8 @@ std::size_t TileBodyPages::certify_private_source_loops(
                 credit->page->data);
             if (!matches)
                 continue;
-            auto context = source_context(source); // All throwing admission precedes publication.
+            auto context = source_context(source);
+            retain_source_context(context); // All throwing admission precedes publication.
             std::size_t old_rings = 0;
             std::visit(
                 [&](auto& data)
@@ -686,12 +747,13 @@ std::size_t TileBodyPages::install(std::shared_ptr<TileBodyPageCredit> credit)
 {
     const auto index = first_free_;
     if (index == pages_.size())
-    {
         grow_directory();
+    retain_source_context(credit->source);
+    if (index == pages_.size())
         pages_.push_back(std::move(credit));
-    }
     else
         pages_[index] = std::move(credit);
+    ++active_page_credits_;
     pages_[index]->ordinal = index;
     while (first_free_ < pages_.size() && pages_[first_free_])
         ++first_free_;
@@ -810,10 +872,15 @@ TileBodyReapStatistics TileBodyPages::reap()
             result.occupied_records += occupied_records;
             result.released_bytes += credit->bytes;
             first_free_ = std::min(first_free_, credit->ordinal);
+            release_source_context(credit->source);
+            --active_page_credits_;
             credit.reset();
         }
     if (source_credit_ && source_credit_.use_count() == 1)
+    {
+        release_source_context(source_credit_);
         source_credit_.reset();
+    }
     return result;
 }
 TileBodyPageStatistics TileBodyPages::statistics() const noexcept
@@ -888,6 +955,18 @@ void visit_tile_credit(const std::shared_ptr<TileBodyPageCredit>& credit,
     visit_tile_source(credit->source, visitor);
 }
 } // namespace
+void TileBodyHandle::observe_source_owners(IncidencePhysicalOwners& owners) const
+{
+    using Role = IncidencePhysicalOwners::Role;
+    if (!credit_ || !credit_->source)
+        return;
+    const auto& source = credit_->source;
+    if (!owners.observe(Role::TileSourceContext, source, source->bytes, source->budget))
+        return;
+    owners.observe_source(source->source);
+    for (const auto& lease : source->leases)
+        owners.observe(Role::CreditMetadata, lease, lease->metadata, lease->budget, lease->arena_scope);
+}
 const Budget* TileBodyHandle::credit_origin() const noexcept { return credit_ ? credit_->budget : nullptr; }
 void TileBodyHandle::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
@@ -898,6 +977,8 @@ void TileBodyPages::visit_borrowed_payload(const std::function<void(const Contac
     contact_payload_buffer(visitor, this, ContactPayloadRole::TilePageDirectory, pages_);
     for (const auto& entry : deferred_)
         contact_payload_node_value(visitor, this, ContactPayloadRole::DeferredOwnerChargeNodes, entry);
+    for (const auto& context : source_contexts_)
+        contact_payload_node_value(visitor, this, ContactPayloadRole::TileSourceContextIndexNodes, context);
     visit_tile_source(source_credit_, visitor);
     for (const auto& credit : pages_)
         visit_tile_credit(credit, visitor);
@@ -921,21 +1002,18 @@ bool TileBodyPages::imports_source_owner(const void* identity) const noexcept
 }
 std::size_t TileBodyPages::metadata_bytes() const noexcept
 {
-    auto bytes = charged_ + deferred_metadata_bytes_;
-    if (source_credit_)
-        bytes += source_credit_->bytes;
-    // Several pages share one source context. Count each independently owned
-    // context once, including older contexts still held by live pages.
-    for (std::size_t i = 0; i < pages_.size(); ++i)
-        if (const auto& credit = pages_[i]; credit && credit->source && credit->source != source_credit_)
-        {
-            bool seen = false;
-            for (std::size_t j = 0; j < i; ++j)
-                seen = seen || (pages_[j] && pages_[j]->source == credit->source);
-            if (!seen)
-                bytes += credit->source->bytes;
-        }
-    return bytes;
+    return charged_ + deferred_metadata_bytes_ + source_context_bytes_ +
+           source_contexts_.size() * source_context_node_bytes;
+}
+std::size_t TileBodyPages::source_only_metadata_bytes(std::size_t exported_context_bytes) const noexcept
+{
+    if (exported_context_bytes > source_context_bytes_)
+        std::terminate();
+    return metadata_bytes() - exported_context_bytes;
+}
+std::size_t TileBodyPages::page_credit_metadata_bytes() const noexcept
+{
+    return active_page_credits_ * credit_overhead;
 }
 std::size_t TileBodyPages::retained_bytes() const noexcept
 {

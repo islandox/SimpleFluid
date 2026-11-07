@@ -1,4 +1,5 @@
 #pragma once
+#include "ContactAllocationScope.hh"
 #include "ContactStorageBreakdown.hh"
 #include "IdentityPoolBorrowedPayload.hh"
 #include "IdentityPoolHash.hh"
@@ -28,23 +29,6 @@ enum class IdentityPoolStorage
     Persistent
 };
 
-namespace identity_pool_detail
-{
-inline std::uint64_t next_scope()
-{
-    // Shared across point and typed metadata pools. The maximum value is
-    // reserved for the incidence tile-body credit family.
-    static std::atomic<std::uint64_t> next{1};
-    auto value = next.load(std::memory_order_relaxed);
-    for (;;)
-    {
-        if (value == std::numeric_limits<std::uint64_t>::max())
-            throw std::invalid_argument("Identity pool scope exhausted.");
-        if (next.compare_exchange_weak(value, value + 1, std::memory_order_relaxed))
-            return value;
-    }
-}
-} // namespace identity_pool_detail
 /** Full identities reside in immutable shared pages. Persistent forks share
  * the ordinal directory and lookup roots, path-copying only appended records.
  * Flat storage supports standalone pools with a borrowed allocation arena.
@@ -759,7 +743,7 @@ public:
 
 private:
     static constexpr Slot empty_slot = std::numeric_limits<Slot>::max();
-    std::uint64_t scope_id_ = identity_pool_detail::next_scope();
+    std::uint64_t scope_id_ = next_contact_allocation_scope();
     static std::size_t checked_sum(std::size_t a, std::size_t b)
     {
         return persistent_ordered_detail::checked_sum(a, b);

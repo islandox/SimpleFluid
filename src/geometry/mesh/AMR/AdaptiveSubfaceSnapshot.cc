@@ -419,9 +419,10 @@ struct SubfacePiecePage
                     record.explicit_loop->origin());
             owners.observe(Role::TileBody, record.body.body_storage_owner(), record.body.body_bytes(),
                 record.body.credit_origin());
-            owners.observe(Role::CreditMetadata, record.body.credit_owner(),
-                record.body.credit_bytes() - record.body.body_bytes(), record.body.credit_origin(),
-                IncidencePhysicalOwners::tile_credit_scope);
+            if (owners.observe(Role::CreditMetadata, record.body.credit_owner(),
+                    record.body.credit_bytes() - record.body.body_bytes(), record.body.credit_origin(),
+                    IncidencePhysicalOwners::tile_credit_scope))
+                record.body.observe_source_owners(owners);
             if (record.certified)
                 owners.observe_proof(*record.certified);
         }

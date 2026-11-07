@@ -15,6 +15,7 @@
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+class IncidencePhysicalOwners;
 struct TileBodyPageCredit;
 struct TileSourceCredit;
 class TileBodyView;
@@ -35,6 +36,7 @@ public:
     [[nodiscard]] TileBodyLoopView intrinsic_loop() const;
     [[nodiscard]] std::shared_ptr<const void> credit_owner() const noexcept;
     [[nodiscard]] std::size_t credit_bytes() const noexcept;
+    void observe_source_owners(IncidencePhysicalOwners&) const;
     [[nodiscard]] const Budget* credit_origin() const noexcept;
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
     [[nodiscard]] const void* page_identity() const noexcept;
@@ -166,6 +168,10 @@ public:
     std::size_t certify_private_source_loops(
         std::shared_ptr<const ContactSourcePointSnapshot>, std::shared_ptr<CartesianAuthorityArena>);
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
+    /** Admission metadata private to the builder, apart from the exact
+     * current-origin contexts carried in the shared subface owner union. */
+    [[nodiscard]] std::size_t source_only_metadata_bytes(std::size_t exported_context_bytes) const noexcept;
+    [[nodiscard]] std::size_t page_credit_metadata_bytes() const noexcept;
     [[nodiscard]] std::size_t retained_bytes() const noexcept;
     [[nodiscard]] bool imports_source_owner(const void*) const noexcept;
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
@@ -180,6 +186,16 @@ private:
     using WeakBodyOwner = std::weak_ptr<const void>;
     using DeferredBodies = std::map<WeakBodyOwner, std::size_t, std::owner_less<>>;
     static constexpr std::size_t deferred_node_bytes = sizeof(DeferredBodies::value_type) + 4 * sizeof(void*);
+    struct SourceContextUse
+    {
+        std::weak_ptr<TileSourceCredit> owner;
+        std::size_t references = 0;
+    };
+    using SourceContexts = std::map<const ContactSourcePointSnapshot*, SourceContextUse>;
+    static constexpr std::size_t source_context_node_bytes = sizeof(SourceContexts::value_type) + 4 * sizeof(void*);
+    void retain_source_context(const std::shared_ptr<TileSourceCredit>&);
+    void release_source_context(const std::shared_ptr<TileSourceCredit>&) noexcept;
+    void release_source_context_index() noexcept;
     void defer_body(TileBodyPageCredit&);
     void release_deferred() noexcept;
     static std::size_t credit_bytes(const std::shared_ptr<TileBodyPageCredit>&) noexcept;
@@ -190,6 +206,8 @@ private:
     std::shared_ptr<Budget> keeper_;
     std::shared_ptr<CartesianAuthorityArena> source_arena_;
     std::shared_ptr<TileSourceCredit> source_credit_;
+    SourceContexts source_contexts_;
+    std::size_t source_context_bytes_ = 0, active_page_credits_ = 0;
     std::size_t charged_ = 0;
     std::size_t active_ = std::numeric_limits<std::size_t>::max(), first_free_ = 0;
     std::vector<std::shared_ptr<TileBodyPageCredit>> pages_;
