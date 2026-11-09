@@ -83,9 +83,11 @@ struct NoRowWeights
  * distinguish bodies created in the current node arena from inherited bodies.
  * Shared payloads appearing in several rows require a separate owner union. */
 template<class Row, class Less, bool FixedLeafCapacity = false, class Work = OrderedPageWork,
-    class Weights = NoRowWeights>
+    class Weights = NoRowWeights, std::size_t LeafCapacity = leaf_capacity>
 class OrderedPages
 {
+    static_assert(LeafCapacity >= 2);
+
 public:
     struct Node;
     using Ptr = std::shared_ptr<const Node>;
@@ -102,7 +104,8 @@ public:
         [[nodiscard]] std::size_t occupancy() const noexcept { return leaf() ? rows.size() : children.size(); }
     };
 
-    explicit OrderedPages(std::shared_ptr<Budget> arena, Work* work = nullptr) : arena_(std::move(arena)), work_(work)
+    explicit OrderedPages(std::shared_ptr<Budget> arena, Work* work = nullptr, Less less = {})
+        : arena_(std::move(arena)), work_(work), less_(std::move(less))
     {
     }
 
@@ -111,11 +114,11 @@ public:
         if (sorted.empty())
             return {};
         for (std::size_t slot = 1; slot < sorted.size(); ++slot)
-            if (!Less{}(sorted[slot - 1], sorted[slot]))
+            if (!less_(sorted[slot - 1], sorted[slot]))
                 throw std::invalid_argument("Ordered metadata index contains duplicate selectors.");
         PageCharge scratch(arena_);
         std::vector<Ptr> pages;
-        const auto groups = ceiling(sorted.size(), leaf_capacity);
+        const auto groups = ceiling(sorted.size(), LeafCapacity);
         reserve(pages, groups, scratch);
         std::size_t offset = 0;
         for (std::size_t group = 0; group < groups; ++group)
@@ -253,7 +256,7 @@ private:
     [[nodiscard]] Ptr leaf(std::span<const Row> values) const
     {
         auto node = allocate();
-        reserve(node->rows, FixedLeafCapacity ? leaf_capacity : values.size(), node->charge);
+        reserve(node->rows, FixedLeafCapacity ? LeafCapacity : values.size(), node->charge);
         node->rows.assign(values.begin(), values.end());
         node->maximum = &node->rows.back();
         node->size = values.size();
@@ -289,7 +292,7 @@ private:
     {
         if (rows.empty())
             return {{}, 0};
-        if (rows.size() <= leaf_capacity)
+        if (rows.size() <= LeafCapacity)
             return {{leaf(rows), {}}, 1};
         const auto middle = rows.size() / 2;
         return {{leaf(rows.first(middle)), leaf(rows.subspan(middle))}, 2};
@@ -309,7 +312,7 @@ private:
         while (index < children.size() && children.size() > 1)
         {
             const auto& child = *children[index];
-            const auto minimum = child.leaf() ? leaf_capacity / 2 : branch_capacity / 2;
+            const auto minimum = child.leaf() ? LeafCapacity / 2 : branch_capacity / 2;
             if (child.occupancy() >= minimum)
             {
                 ++index;
@@ -335,7 +338,7 @@ private:
         retire(second);
         if (first.leaf())
         {
-            std::array<Row, 2 * leaf_capacity> rows;
+            std::array<Row, 2 * LeafCapacity> rows;
             auto end = std::copy(first.rows.begin(), first.rows.end(), rows.begin());
             end = std::copy(second.rows.begin(), second.rows.end(), end);
             return pack_leaves(std::span(rows.begin(), end));
@@ -349,12 +352,12 @@ private:
     {
         if (node.leaf())
         {
-            const auto at = std::lower_bound(node.rows.begin(), node.rows.end(), key, Less{});
-            const bool present = at != node.rows.end() && !Less{}(key, *at);
+            const auto at = std::lower_bound(node.rows.begin(), node.rows.end(), key, less_);
+            const bool present = at != node.rows.end() && !less_(key, *at);
             if (present != expected)
                 throw std::invalid_argument("Ordered metadata edit changed its accepted selector.");
             retire(node);
-            std::array<Row, leaf_capacity + 1> rows;
+            std::array<Row, LeafCapacity + 1> rows;
             auto end = std::copy(node.rows.begin(), at, rows.begin());
             if (replacement)
                 *end++ = *replacement;
@@ -362,7 +365,7 @@ private:
             return pack_leaves(std::span(rows.begin(), end));
         }
         auto at = std::lower_bound(node.children.begin(), node.children.end(), key,
-            [](const Ptr& value, const Row& target) { return Less{}(*value->maximum, target); });
+            [&](const Ptr& value, const Row& target) { return less_(*value->maximum, target); });
         if (at == node.children.end())
             --at;
         const auto edited = rewrite(**at, key, replacement, expected);
@@ -375,5 +378,6 @@ private:
     }
     std::shared_ptr<Budget> arena_;
     Work* work_;
+    [[no_unique_address]] Less less_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail::persistent_ordered_detail

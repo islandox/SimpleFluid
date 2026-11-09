@@ -80,13 +80,13 @@ ContactSourcePointSnapshot::ValueBlock::~ValueBlock()
     for (auto& values : components)
         std::remove_reference_t<decltype(values)>{}.swap(values);
     std::visit([](auto& values) { std::remove_reference_t<decltype(values)>{}.swap(values); }, selectors);
-    std::visit([](auto& values) { std::remove_reference_t<decltype(values)>{}.swap(values); }, lookup);
     decltype(exceptions){}.swap(exceptions);
     if (budget)
         budget->used -= charge;
 }
 ContactSourcePointSnapshot::~ContactSourcePointSnapshot()
 {
+    indexes_ = ContactPointValueIndex{};
     blocks_.reset();
     source_.reset();
     manifests_.reset();
@@ -111,7 +111,7 @@ std::size_t ContactSourcePointSnapshot::exception_count() const noexcept
 }
 std::size_t ContactSourcePointSnapshot::value_storage_bytes() const noexcept
 {
-    std::size_t bytes = 0;
+    std::size_t bytes = indexes_.metadata_bytes();
     visit_blocks(
         [&](const Block& block)
         {
@@ -138,44 +138,52 @@ std::size_t ContactSourcePointSnapshot::selector_width() const noexcept
         });
     return width;
 }
-const ContactSourcePointSnapshot::ValueBlock& ContactSourcePointSnapshot::block_at(std::size_t index) const
+const ContactSourcePointSnapshot::ValueBlock& ContactSourcePointSnapshot::block_at(
+    std::size_t index, LookupWork* work) const
 {
-    const auto* at = BlockDirectory::lower_bound(
-        blocks_, [index](const Block& block) { return block->first + block->count <= index; });
+    const auto* at = BlockDirectory::lower_bound(blocks_,
+        [index, work](const Block& block)
+        {
+            if (work)
+                ++work->directory_comparisons;
+            return block->first + block->count <= index;
+        });
     if (!at || index < (*at)->first)
         throw std::out_of_range("Invalid certified source point reference.");
     return **at;
 }
 const ContactSourcePointSnapshot::Component& ContactSourcePointSnapshot::component(
-    unsigned axis, std::size_t index) const
+    unsigned axis, std::size_t index, LookupWork* work) const
 {
-    const auto* at = BlockDirectory::lower_bound(blocks_, [axis, index](const Block& block)
-        { return block->component_first[axis] + block->components[axis].size() <= index; });
-    if (!at || index < (*at)->component_first[axis])
-        throw std::out_of_range("Invalid certified source point component.");
-    return (*at)->components[axis][index - (*at)->component_first[axis]];
-}
-std::optional<std::size_t> ContactSourcePointSnapshot::find_component(unsigned axis, long double scalar) const
-{
-    std::optional<std::size_t> found;
-    visit_blocks(
-        [&](const Block& block)
+    const auto* at = BlockDirectory::lower_bound(blocks_,
+        [axis, index, work](const Block& block)
         {
-            const auto& values = block->components[axis];
-            const auto at = std::lower_bound(values.begin(), values.end(), scalar,
-                [](const Component& component, long double query) { return component.value() < query; });
-            if (at == values.end() || at->value() != scalar)
-                return true;
-            found = block->component_first[axis] + static_cast<std::size_t>(at - values.begin());
-            return false;
+            if (work)
+                ++work->directory_comparisons;
+            return block->component_first[axis] + block->components[axis].size() <= index;
         });
-    return found;
+    const auto* value = at ? (*at)->component_at(axis, index) : nullptr;
+    if (!value)
+        throw std::out_of_range("Invalid certified source point component.");
+    return *value;
 }
-ContactSourcePoint ContactSourcePointSnapshot::value(ContactSourcePointReference reference) const
+ContactPointValueIndex::Reader ContactSourcePointSnapshot::index_reader() const noexcept
+{
+    return {this, [](const void* context, std::size_t slot, LookupWork* work)
+        { return static_cast<const ContactSourcePointSnapshot*>(context)->value({slot}, work); },
+        [](const void* context, unsigned axis, std::size_t slot, LookupWork* work) -> const Component&
+        { return static_cast<const ContactSourcePointSnapshot*>(context)->component(axis, slot, work); }};
+}
+std::optional<std::size_t> ContactSourcePointSnapshot::find_component(
+    unsigned axis, long double scalar, LookupWork* work) const
+{
+    return indexes_.find_component(index_reader(), axis, scalar, work);
+}
+ContactSourcePoint ContactSourcePointSnapshot::value(ContactSourcePointReference reference, LookupWork* work) const
 {
     if (reference.value >= count_)
         throw std::out_of_range("Invalid certified source point reference.");
-    const auto& block = block_at(std::size_t(reference.value));
+    const auto& block = block_at(std::size_t(reference.value), work);
     const auto at = std::lower_bound(block.exceptions.begin(), block.exceptions.end(), std::size_t(reference.value),
         [](const auto& entry, auto index) { return entry.first < index; });
     if (at != block.exceptions.end() && at->first == reference.value)
@@ -187,7 +195,13 @@ ContactSourcePoint ContactSourcePointSnapshot::value(ContactSourcePointReference
             return std::array<std::size_t, 3>{v[0], v[1], v[2]};
         },
         block.selectors);
-    return Access::point_components({component(0, indices[0]), component(1, indices[1]), component(2, indices[2])});
+    const auto select = [&](unsigned axis) -> const Component&
+    {
+        if (const auto* local = block.component_at(axis, indices[axis]))
+            return *local;
+        return component(axis, indices[axis], work);
+    };
+    return Access::point_components({select(0), select(1), select(2)});
 }
 std::optional<std::array<std::size_t, 3>> ContactSourcePointSnapshot::component_indices(
     ContactSourcePointReference ref) const
@@ -220,50 +234,10 @@ std::optional<std::size_t> ContactSourcePointSnapshot::find_components(const std
     return find(point, hashing_ ? IdentityPoolHasher<ContactSourcePoint>{}(point) : 0);
 }
 std::optional<std::size_t> ContactSourcePointSnapshot::find(
-    const ContactSourcePoint& point, std::uint64_t route_hash) const
+    const ContactSourcePoint& point, std::uint64_t route_hash, LookupWork* work) const
 {
     const MetadataEnvironment environment;
-    std::optional<std::size_t> found;
-    visit_blocks(
-        [&](const Block& block)
-        {
-            found = std::visit(
-                [&](const auto& values) -> std::optional<std::size_t>
-                {
-                    if (hashing_)
-                    {
-                        using UInt = typename std::remove_cvref_t<decltype(values)>::value_type;
-                        const auto empty = std::numeric_limits<UInt>::max();
-                        const auto mask = values.size() - 1;
-                        auto slot = std::size_t(route_hash) & mask;
-                        for (std::size_t probes = 0; probes < values.size(); ++probes)
-                        {
-                            if (values[slot] == empty)
-                                return {};
-                            const auto candidate = std::size_t(values[slot]);
-                            if (full_equal(value({candidate}), point))
-                                return candidate;
-                            slot = (slot + 1) & mask;
-                        }
-                        throw std::invalid_argument("Certified source lookup lacks an empty collision slot.");
-                    }
-                    std::size_t lower = 0, upper = values.size();
-                    while (lower < upper)
-                    {
-                        const auto middle = lower + (upper - lower) / 2;
-                        if (value({std::size_t(values[middle])}) < point)
-                            lower = middle + 1;
-                        else
-                            upper = middle;
-                    }
-                    if (lower < values.size() && full_equal(value({std::size_t(values[lower])}), point))
-                        return std::size_t(values[lower]);
-                    return {};
-                },
-                block->lookup);
-            return !found;
-        });
-    return found;
+    return indexes_.find(index_reader(), point, route_hash, work);
 }
 std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::capture(
     const ContactSourcePointAdmission& admission, bool hashing, const ContactSourcePointRead& read, Budget& budget,
@@ -291,7 +265,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
         admission.manifests_->generation() != admission.generation_ ||
         !same_grid(admission.manifests_->grid(), admission.grid_))
         throw std::invalid_argument("Point source admission lacks its current closed source inventory.");
-    Allocation memory(budget), scratch(budget), values_memory(budget);
+    Allocation memory(budget), scratch(budget), routes_memory(budget), values_memory(budget);
     memory.retain(sizeof(ContactSourcePointSnapshot));
     const auto snapshot_control = make_control(budget, keeper);
     cartesian_detail::CreditConstruction credits(arena);
@@ -325,6 +299,10 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     const auto value_build_start = budget.cumulative;
     const auto first = previous ? previous->count_ : 0;
     result->new_records_ = admission.count_ - first;
+    result->indexes_ = previous ? previous->indexes_
+                                : ContactPointValueIndex{!hashing         ? ContactPointValueIndex::Routing::Ordered
+                                                         : canonical_hash ? ContactPointValueIndex::Routing::Canonical
+                                                                          : ContactPointValueIndex::Routing::Custom};
     if (previous)
     {
         result->component_counts_ = previous->component_counts_;
@@ -359,7 +337,7 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
     selectors.resize(result->new_records_);
     if (hashing)
     {
-        scratch.reserve(hashes, result->new_records_);
+        routes_memory.reserve(hashes, result->new_records_);
         hashes.resize(result->new_records_);
     }
     for (std::size_t i = accepted_prefix ? first : 0; i < admission.count_; ++i)
@@ -387,7 +365,8 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
                     if (at == axes[axis].end() || at->first != scalar.value())
                     {
                         if (previous)
-                            if (const auto old = previous->find_component(axis, scalar.value()))
+                            if (const auto old =
+                                    previous->find_component(axis, scalar.value(), &result->index_work_.probes))
                             {
                                 selectors[i - first][axis] = *old;
                                 continue;
@@ -459,63 +438,36 @@ std::shared_ptr<const ContactSourcePointSnapshot> ContactSourcePointSnapshot::ca
             pack.template operator()<std::uint32_t>();
         else
             pack.template operator()<std::uint64_t>();
-        // Old blocks retain their own original widths and local lookup tables.
-        auto index = [&]<class UInt>()
-        {
-            auto& values = appended->lookup.template emplace<std::vector<UInt>>();
-            std::size_t size = appended->count;
-            if (hashing)
-            {
-                size = 2;
-                const auto required = product(appended->count, 2);
-                while (size < required)
-                    size = product(size, 2);
-            }
-            values_memory.reserve(values, size);
-            values.resize(size, std::numeric_limits<UInt>::max());
-            for (std::size_t i = first; i < admission.count_; ++i)
-            {
-                const auto point = result->value({i});
-                const auto route = hashing ? hashes[i - first] : 0;
-                if (previous && previous->find(point, route))
-                    throw std::invalid_argument("Duplicate previous identity in certified source point suffix.");
-                if (hashing)
-                {
-                    auto slot = std::size_t(route) & (size - 1);
-                    while (values[slot] != std::numeric_limits<UInt>::max())
-                    {
-                        if (full_equal(result->value({std::size_t(values[slot])}), point))
-                            throw std::invalid_argument(
-                                "Duplicate actual identity in certified source point inventory.");
-                        slot = (slot + 1) & (size - 1);
-                    }
-                    values[slot] = UInt(i);
-                }
-                else
-                    values[i - first] = UInt(i);
-            }
-            if (!hashing)
-            {
-                std::sort(values.begin(), values.end(),
-                    [&](auto a, auto b) { return result->value({std::size_t(a)}) < result->value({std::size_t(b)}); });
-                for (std::size_t i = 1; i < values.size(); ++i)
-                    if (full_equal(
-                            result->value({std::size_t(values[i - 1])}), result->value({std::size_t(values[i])})))
-                        throw std::invalid_argument("Duplicate actual identity in ordered source point inventory.");
-            }
-        };
-        if (result->count_ <= std::numeric_limits<std::uint32_t>::max())
-            index.template operator()<std::uint32_t>();
-        else
-            index.template operator()<std::uint64_t>();
         appended->budget = &budget;
         appended->keeper = keeper;
         appended->charge = std::exchange(values_memory.bytes, 0);
     }
+    // Final selectors and component tokens now live in immutable value blocks.
+    // Destroy their construction scratch before admitting independent index pages.
+    decltype(axes){}.swap(axes);
+    decltype(selectors){}.swap(selectors);
+    budget.used -= std::exchange(scratch.bytes, 0);
     result->value_build_bytes_ = budget.cumulative - value_build_start;
+    const auto index_build_start = budget.cumulative;
+    if (appended)
+    {
+        const auto page_arena = keeper ? keeper : std::shared_ptr<Budget>(std::shared_ptr<Budget>{}, &budget);
+        result->indexes_.append(result->index_reader(), appended->component_first, result->component_counts_, first,
+            result->count_, hashes, page_arena, result->index_work_);
+    }
+    result->index_build_bytes_ = budget.cumulative - index_build_start;
     // Shared residency already covers the dependencies beneath an exact
     // admitted page. Standalone arenas acquire their own foreign allowances.
     visit_value_dependencies<true>(result->blocks_,
+        [&](const auto& owner, const Budget* origin, std::size_t bytes, bool has_keeper)
+        {
+            if (arena->prepaid(owner, origin, bytes, false))
+                return false;
+            if (origin != &budget)
+                retain(owner, origin, bytes, has_keeper);
+            return true;
+        });
+    result->indexes_.visit_dependencies<true>(
         [&](const auto& owner, const Budget* origin, std::size_t bytes, bool has_keeper)
         {
             if (arena->prepaid(owner, origin, bytes, false))

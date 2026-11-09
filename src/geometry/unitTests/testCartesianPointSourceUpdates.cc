@@ -112,6 +112,10 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
         old_proof = session.point_pool().source();
         ASSERT_TRUE(session.point_pool().source());
         ASSERT_EQ(session.point_pool().source()->storage_block_count(), 1);
+        ASSERT_TRUE(session.point_pool().source()->component_indices({0}));
+        ContactSourcePointSnapshot::LookupWork bootstrap_read;
+        (void) session.point_pool().source()->value({0}, &bootstrap_read);
+        EXPECT_EQ(bootstrap_read.directory_comparisons, 1u);
         constexpr std::array<std::array<std::uint64_t, 3>, 4> targets{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}}};
         constexpr std::array<std::size_t, 4> appended{19, 14, 14, 10};
         std::size_t expected_points = 27;
@@ -142,6 +146,9 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
             EXPECT_EQ(latest->storage_block_count(), step + 2);
             EXPECT_EQ(latest->new_storage_records(), appended[step]);
             EXPECT_EQ(latest->verified_prefix_records(), 0u);
+            EXPECT_GT(latest->index_metadata_bytes(), 0u);
+            EXPECT_GT(latest->index_build_work().pages.copied_pages, 0u);
+            EXPECT_GT(latest->index_build_admitted_bytes(), 0u);
             EXPECT_EQ(latest->slot_namespace(), previous->slot_namespace());
             for (std::size_t i = 0; i < previous->size(); ++i)
             {
@@ -214,6 +221,17 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
                         actual_selector_records += item.live_count;
                 });
             EXPECT_EQ(actual_selector_records, expected_points); // 84, not27+46+60+74+84.
+            std::size_t old_lookup_buffers = 0, scalar_indexes = 0, point_indexes = 0;
+            latest->visit_borrowed_payload(
+                [&](const ContactPayloadAllocation& item)
+                {
+                    old_lookup_buffers += item.identity.role == ContactPayloadRole::SourcePointLookup;
+                    scalar_indexes += item.identity.role == ContactPayloadRole::SourcePointScalarIndex;
+                    point_indexes += item.identity.role == ContactPayloadRole::SourcePointIdentityIndex;
+                });
+            EXPECT_EQ(old_lookup_buffers, 0u);
+            EXPECT_GT(scalar_indexes, 0u);
+            EXPECT_GT(point_indexes, 0u);
             for (const auto& [row, expected] : escaped)
                 EXPECT_EQ(keys(row->points), expected);
         }

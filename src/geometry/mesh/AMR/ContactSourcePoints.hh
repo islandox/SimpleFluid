@@ -3,6 +3,7 @@
 #include "CartesianIncidenceAuthority.hh"
 #include "CartesianSourceManifests.hh"
 #include "ContactPayloadCensus.hh"
+#include "ContactPointValueIndex.hh"
 #include "PersistentOrderedPages.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <array>
@@ -79,8 +80,12 @@ public:
     ~ContactSourcePointSnapshot();
     ContactSourcePointSnapshot(const ContactSourcePointSnapshot&) = delete;
     ContactSourcePointSnapshot& operator=(const ContactSourcePointSnapshot&) = delete;
-    [[nodiscard]] ContactSourcePoint value(ContactSourcePointReference) const;
-    [[nodiscard]] std::optional<std::size_t> find(const ContactSourcePoint&, std::uint64_t route_hash) const;
+    using LookupWork = ContactPointValueIndex::Probe;
+    [[nodiscard]] ContactSourcePoint value(ContactSourcePointReference, LookupWork* = nullptr) const;
+    /** route_hash must come from the configured deterministic lookup policy.
+     * An arbitrary incorrect hash does not establish an identity lookup. */
+    [[nodiscard]] std::optional<std::size_t> find(
+        const ContactSourcePoint&, std::uint64_t route_hash, LookupWork* = nullptr) const;
     [[nodiscard]] std::optional<std::array<std::size_t, 3>> component_indices(ContactSourcePointReference) const;
     [[nodiscard]] std::optional<std::size_t> find_components(const std::array<std::size_t, 3>&) const;
     /** Read an already issued canonical dictionary token. No arbitrary scalar
@@ -105,6 +110,9 @@ public:
     [[nodiscard]] std::size_t indexed_axis_values() const noexcept { return indexed_axis_values_; }
     [[nodiscard]] std::size_t value_build_admitted_bytes() const noexcept { return value_build_bytes_; }
     [[nodiscard]] std::size_t verified_prefix_records() const noexcept { return verified_prefix_records_; }
+    [[nodiscard]] const ContactPointValueIndex::Work& index_build_work() const noexcept { return index_work_; }
+    [[nodiscard]] std::size_t index_metadata_bytes() const noexcept { return indexes_.metadata_bytes(); }
+    [[nodiscard]] std::size_t index_build_admitted_bytes() const noexcept { return index_build_bytes_; }
     [[nodiscard]] std::size_t value_storage_bytes() const noexcept;
     [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
     {
@@ -132,6 +140,7 @@ public:
                 for (const auto& block : page->rows)
                     block->visit_borrowed_payload(visitor);
             });
+        indexes_.visit_borrowed_payload(visitor);
         contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointLeases, leases_);
         if (control_identity_)
             contact_payload_object(visitor, control_identity_, ContactPayloadRole::CartesianControlCreditObject,
@@ -148,6 +157,7 @@ public:
     void visit_dependencies(Visitor&& visitor) const
     {
         visit_value_dependencies<Mode == CartesianDependencyVisit::Observed>(blocks_, visitor);
+        indexes_.visit_dependencies<Mode == CartesianDependencyVisit::Observed>(visitor);
         if (source_)
             visitor(source_, source_->allocation_budget(), source_->metadata_bytes(), source_->has_arena_keeper());
         if (manifests_)
@@ -199,7 +209,6 @@ private:
         std::variant<Selectors<std::uint8_t>, Selectors<std::uint16_t>, Selectors<std::uint32_t>,
             Selectors<std::uint64_t>>
             selectors;
-        std::variant<std::vector<std::uint32_t>, std::vector<std::uint64_t>> lookup;
         std::vector<std::pair<std::size_t, ContactSourcePoint>> exceptions;
         Budget* budget = nullptr;
         std::shared_ptr<Budget> keeper;
@@ -208,6 +217,12 @@ private:
         const void* control_identity = nullptr;
         std::size_t control_payload_bytes = 0;
         ~ValueBlock();
+        [[nodiscard]] const Component* component_at(unsigned axis, std::size_t index) const noexcept
+        {
+            const auto first_slot = component_first[axis];
+            const auto& values = components[axis];
+            return index >= first_slot && index - first_slot < values.size() ? &values[index - first_slot] : nullptr;
+        }
         [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge + control_charge; }
         [[nodiscard]] std::pair<const void*, std::size_t> borrowed_control_payload() const noexcept
         {
@@ -224,8 +239,6 @@ private:
             std::visit([&](const auto& values)
                 { contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointSelectors, values); },
                 selectors);
-            std::visit([&](const auto& values)
-                { contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointLookup, values); }, lookup);
             contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointExceptions, exceptions);
         }
     };
@@ -258,10 +271,15 @@ private:
     {
         return BlockDirectory::visit_from(blocks_, [](const Block&) { return false; }, visit);
     }
-    [[nodiscard]] const ValueBlock& block_at(std::size_t) const;
-    [[nodiscard]] const Component& component(unsigned axis, std::size_t index) const;
-    [[nodiscard]] std::optional<std::size_t> find_component(unsigned axis, long double value) const;
+    [[nodiscard]] ContactPointValueIndex::Reader index_reader() const noexcept;
+    [[nodiscard]] const ValueBlock& block_at(std::size_t, LookupWork* = nullptr) const;
+    [[nodiscard]] const Component& component(unsigned axis, std::size_t index, LookupWork* = nullptr) const;
+    [[nodiscard]] std::optional<std::size_t> find_component(
+        unsigned axis, long double value, LookupWork* = nullptr) const;
     BlockDirectory::Ptr blocks_;
+    ContactPointValueIndex indexes_;
+    ContactPointValueIndex::Work index_work_;
+    std::size_t index_build_bytes_ = 0;
     std::weak_ptr<const ContactSourcePointSnapshot> self_;
     const void* slot_namespace_ = nullptr; // The first block is pinned by blocks_.
     std::array<std::size_t, 3> component_counts_{};

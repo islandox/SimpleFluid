@@ -62,6 +62,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testPooledLineRegistryPersistence"
       OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|ManifestReceipt|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
       OR TEST_NAME STREQUAL "testIncidencePointDirectory"
+      OR TEST_NAME STREQUAL "testContactPointValueIndex"
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"

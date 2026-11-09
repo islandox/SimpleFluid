@@ -67,6 +67,8 @@ enum class ContactPayloadRole : std::uint8_t
     SourcePointLeases,
     SourcePointViewObject,
     SourcePointDirectoryObject,
+    SourcePointScalarIndex,
+    SourcePointIdentityIndex,
     CartesianSourceObject,
     CartesianSourceDomain,
     CartesianSourceIdentity,

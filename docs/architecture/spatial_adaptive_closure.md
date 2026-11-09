@@ -355,6 +355,16 @@ original identities. External point readers still verify their complete
 prefix and routing before publication. Escaped references to the physical
 suffix keep their original pages and admission credits across replacement.
 
+Scalar and complete-point lookup use persistent ordinal indexes over the same
+immutable value blocks. Appends copy only the affected index paths. Native
+point indexes store compact ordinals and read the original complete identities
+for ordering and equality. The configured deterministic hash validates routing;
+a collision never replaces identity comparison. Generic hashless and custom-hash
+policies retain their complete-value lookup and exact supplied routing checks.
+Index pages and their old/new overlap participate in admission and physical census.
+A complete identity query performs O(log P * log B) work for P points in B value
+blocks, including selector reconstruction and component-directory descent.
+
 Geometry materialization admits its work and output separately. The canonical
 identity uses the support-normalized intrinsic loop before edge enrichment.
 The returned face keeps the final first-cell physical loop. Node and face GIDs
