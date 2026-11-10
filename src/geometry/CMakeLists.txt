@@ -35,13 +35,6 @@ set(SIMPLEFLUID_MESH_SOURCES
 )
 
 simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)
-foreach(source IN LISTS SIMPLEFLUID_MESH_SOURCES)
-    if(source MATCHES "/PLIC/")
-        simplefluid_debug_symbols_sources("PLIC;MESH" "${source}")
-    elseif(source MATCHES "/swept_volume/")
-        simplefluid_debug_symbols_sources("SWEPT_VOLUME;MESH" "${source}")
-    endif()
-endforeach()
 list(APPEND SIMPLEFLUID_MESH_SOURCES ${SIMPLEFLUID_IO_SOURCES} ${SIMPLEFLUID_PARALLEL_SOURCES})
 
 # Geometry, partitioning and mesh output retain one archive and type identity.

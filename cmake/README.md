@@ -78,16 +78,17 @@ provenance, so existing profiles require fresh training.
 | `CORE` | Database and project runtime/ABI bridge objects |
 | `MESH` | Mesh archive sources |
 | `IO`, `PARALLEL` | Their sources inside the mesh archive; then `MESH` |
-| `PLIC`, `SWEPT_VOLUME` | Their geometry source paths, across Mesh and FVM; then the owning `MESH` or `FVM` |
 | `FIELDS`, `FVM` | Remaining sources in those components |
 | `EQUATIONS` | Equation sources inside the solver DSO; then `SOLVERS` |
 | `SOLVERS` | Remaining solver sources |
 | `NOX` | The `NoxNonlinearSolver.cc` adapter, including its disabled-feature fallback; then `SOLVERS` |
-| `EXPERIMENTAL_VOF` | The optional VoF solver source groups; then `SOLVERS` |
 | `IF97` | Optional `IF97Water.cc`; then `MATERIALS` |
 | `MATERIALS` | Material implementations (currently IF97); header-only material interfaces emit symbols in their consumers |
 | `TESTS` | Translation units compiled by unit-test targets |
 | `BENCHMARKS`, `EXAMPLES` | Benchmark and example targets, including the optional main application |
+
+The `PLIC`, `SWEPT_VOLUME`, and `EXPERIMENTAL_VOF` cache entries are reserved
+for the VoF branches; this branch has no compiled sources in those scopes.
 
 The first non-`INHERIT` setting wins: explicit source module, its fallback
 component from the table, target module, then global. Tests that compile a
@@ -97,15 +98,14 @@ it; these controls cannot isolate symbols originating in included headers.
 They neither enable optional features nor rebuild imported dependencies.
 
 For example, configure the existing compatible GCC tree with debug information
-only in the swept-volume translation units, and build the general VoF fixture:
+only in the core module, and build the Database fixture:
 
 ```sh
 cmake -S . -B build/gcc \
-  -DSIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON \
   -DSIMPLEFLUID_DEBUG_SYMBOLS=OFF \
-  -DSIMPLEFLUID_DEBUG_SYMBOLS_SWEPT_VOLUME=ON
+  -DSIMPLEFLUID_DEBUG_SYMBOLS_CORE=ON
 cmake --build build/gcc --config RelWithDebInfo \
-  --target testGeneralVoFSolver --parallel 4
+  --target testDatabase --parallel 4
 ```
 
 Other module overrides in an existing cache still take precedence; set those
