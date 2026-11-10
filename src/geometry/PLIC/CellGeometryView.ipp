@@ -29,25 +29,22 @@ template<ArithmeticMode M> void CellGeometryView<M>::require_valid() const
 template<ArithmeticMode M> bool CellGeometryView<M>::is_procedural() const
 {
     require_valid();
-    return !catalog_->select(slot_).is_explicit();
+    return catalog_->procedural_slot(slot_);
 }
 template<ArithmeticMode M> const ConvexGeometryPtr<M>& CellGeometryView<M>::fallback() const
 {
     require_valid();
-    const auto entry = catalog_->select(slot_);
-    if (!entry.is_explicit())
-        throw std::bad_variant_access();
-    return catalog_->explicit_pages_[entry.index()]->cells[entry.slot];
+    return catalog_->shell_geometry(slot_);
 }
 template<ArithmeticMode M> const typename CellGeometryCatalog<M>::SourcePtr& CellGeometryView<M>::native_source() const
 {
     require_valid();
-    return catalog_->sources_[catalog_->select(slot_).index()];
+    return catalog_->source_owner(slot_);
 }
 template<ArithmeticMode M> std::size_t CellGeometryView<M>::source_slot() const
 {
     require_valid();
-    return catalog_->select(slot_).slot;
+    return catalog_->physical_row(slot_);
 }
 template<ArithmeticMode M> GeometryValue<M> CellGeometryView<M>::volume() const
 {

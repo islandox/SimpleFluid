@@ -23,6 +23,11 @@ namespace SimpleFluid::PLIC
 namespace details
 {
 class NativeCellGeometrySourceAccess;
+class CellCatalogDemandAccess;
+namespace geometry_demand
+{
+struct SourceSlot;
+}
 class CellGeometryWorkspaceAccess;
 struct NativeOriginalFace;
 struct NativeFramedBounds;
@@ -162,6 +167,7 @@ class SIMPLEFLUID_LOCAL CellCatalogAdmission
 public:
     explicit CellCatalogAdmission(GeometryLimits limits) : limits_(limits) {}
     void charge(std::size_t count, std::size_t width);
+    [[nodiscard]] std::size_t used_bytes() const noexcept { return used_; }
 
 private:
     GeometryLimits limits_;
@@ -194,9 +200,9 @@ public:
         friend class CellGeometryCatalog;
         std::shared_ptr<const ExplicitPage> page_;
         std::size_t slot_ = 0;
-        ExplicitEntry(std::shared_ptr<const ExplicitPage> page, std::size_t slot)
-            : page_(std::move(page)), slot_(slot)
-        {}
+        ExplicitEntry(std::shared_ptr<const ExplicitPage> page, std::size_t slot) : page_(std::move(page)), slot_(slot)
+        {
+        }
     };
     using Entry = std::variant<NativeEntry, ConvexGeometryPtr<Mode>, ExplicitEntry>;
     CellGeometryCatalog(const CellGeometryCatalog&) = delete;
@@ -220,13 +226,14 @@ public:
         std::shared_ptr<const CellGeometryCatalog>, std::span<const std::size_t>, GeometryLimits = {});
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
-    [[nodiscard]] std::size_t source_count() const noexcept { return sources_.size(); }
+    [[nodiscard]] std::size_t source_count() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
     [[nodiscard]] ExplicitEntry explicit_entry(std::size_t) const;
 
 private:
     friend class GeometryAllocationLedger;
     friend class details::RetentionAccess;
+    friend class details::CellCatalogDemandAccess;
     friend class CellGeometryView<Mode>;
     friend class CellGeometryFace<Mode>;
     struct Selector
@@ -250,6 +257,13 @@ private:
     void reserve_selection(std::size_t, details::CellCatalogAdmission&);
     void append_selection(std::span<const Selector>, details::CellCatalogAdmission&);
     [[nodiscard]] Selector select(std::size_t) const noexcept;
+    struct DemandState;
+    std::shared_ptr<const DemandState> demand_;
+    [[nodiscard]] details::geometry_demand::SourceSlot physical_reference(std::size_t) const;
+    [[nodiscard]] bool procedural_slot(std::size_t) const;
+    [[nodiscard]] const ConvexGeometryPtr<Mode>& shell_geometry(std::size_t) const;
+    [[nodiscard]] const SourcePtr& source_owner(std::size_t) const;
+    [[nodiscard]] std::size_t physical_row(std::size_t) const;
     SourceTable sources_;
     std::vector<std::shared_ptr<const ExplicitPage>> explicit_pages_;
     std::vector<SelectionPage> selection_;

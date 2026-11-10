@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/CellGeometryCatalog.tcc"
 #include "geometry/PLIC/details/CellGeometryCoordinates.hh"
+#include "geometry/PLIC/details/CellGeometryDemandCatalog.tcc"
 #include "geometry/PLIC/details/CellGeometryEvaluation.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/LocalCoordinates.hh"
@@ -325,11 +326,9 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
         work.charge(base->axes[axis].size(), sizeof(std::uint32_t));
-        canonical_support_slots[axis].assign(
-            base->axes[axis].size(), CartesianSourceCellSlot::canonical_support);
+        canonical_support_slots[axis].assign(base->axes[axis].size(), CartesianSourceCellSlot::canonical_support);
         if (canonical_support_slots[axis].capacity() > base->axes[axis].size())
-            work.charge(
-                canonical_support_slots[axis].capacity() - base->axes[axis].size(), sizeof(std::uint32_t));
+            work.charge(canonical_support_slots[axis].capacity() - base->axes[axis].size(), sizeof(std::uint32_t));
     }
     for (std::size_t slot = 0; slot < cell_count; ++slot)
     {
@@ -341,8 +340,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
             if (recipe.lower[axis] >= recipe.upper[axis] || recipe.upper[axis] >= base->axes[axis].size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian source interval.");
         for (const auto support : recipe.support_slots)
-            if (support != CartesianSourceCellSlot::canonical_support &&
-                support >= base->original_supports.size())
+            if (support != CartesianSourceCellSlot::canonical_support && support >= base->original_supports.size())
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian original-support slot.");
         const bool custom_supports = std::any_of(recipe.support_slots.begin(), recipe.support_slots.end(),
             [](const auto slot) { return slot != CartesianSourceCellSlot::canonical_support; });
@@ -563,13 +561,15 @@ void GeometryAllocationLedger::retain(
         else
             impl_->mode = ordinary;
         const auto source_bytes = source->retention_bytes();
-        impl_->admit({allocation_detail::Kind::CartesianSource, source},
-            source_bytes[0] + source_bytes[1] + source_bytes[2], used, limit);
-        const auto base_bytes = source->base_retention_bytes();
-        impl_->admit({allocation_detail::Kind::ExternalOwner, source->base_owner()},
-            base_bytes[0] + base_bytes[1] + base_bytes[2], used, limit);
-        for (const auto& support : source->retained_supports())
-            impl_->retain_identity(support, used, limit);
+        if (impl_->admit({allocation_detail::Kind::CartesianSource, source},
+                source_bytes[0] + source_bytes[1] + source_bytes[2], used, limit))
+        {
+            const auto base_bytes = source->base_retention_bytes();
+            impl_->admit({allocation_detail::Kind::ExternalOwner, source->base_owner()},
+                base_bytes[0] + base_bytes[1] + base_bytes[2], used, limit);
+            for (const auto& support : source->retained_supports())
+                impl_->retain_identity(support, used, limit);
+        }
         impl_->last_counter = used;
     }
     catch (...)
@@ -594,13 +594,58 @@ void GeometryAllocationLedger::retain(
             impl_->mode = M;
         if (impl_->admit({allocation_detail::Kind::CellCatalog, catalog}, catalog->storage_bytes(), used, limit))
         {
-            if constexpr (M == ordinary)
-                for (const auto& source : catalog->sources_)
-                    retain(source, used, limit);
-            for (const auto& page : catalog->explicit_pages_)
-                if (impl_->admit({allocation_detail::Kind::CellShellPage, page}, page->storage_bytes(), used, limit))
-                    for (const auto& geometry : page->cells)
-                        retain(geometry, used, limit);
+            if (catalog->demand_)
+            {
+                namespace G = details::geometry_demand;
+                struct Context
+                {
+                    GeometryAllocationLedger& ledger;
+                    std::size_t& used;
+                    std::size_t limit;
+                } context{*this, used, limit};
+                details::CellCatalogDemandAccess::visit_dependencies(*catalog,
+                    {&context,
+                        [](void* raw, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t)
+                        {
+                            auto& value = *static_cast<Context*>(raw);
+                            return value.ledger.impl_->admit(
+                                {allocation_detail::Kind::ExternalOwner, owner}, payload, value.used, value.limit);
+                        }},
+                    {&context, [](void* raw, G::SourceKind kind, const std::shared_ptr<const void>& owner)
+                        {
+                            auto& value = *static_cast<Context*>(raw);
+                            if (kind == G::SourceKind::Cartesian)
+                            {
+                                if constexpr (M == ordinary)
+                                    value.ledger.retain(std::static_pointer_cast<const CartesianCellSource>(owner),
+                                        value.used, value.limit);
+                                else
+                                    throw GeometryError(
+                                        GeometryErrorCode::InvalidInput, "Procedural source in a nonordinary catalog.");
+                            }
+                            else
+                            {
+                                const auto page =
+                                    std::static_pointer_cast<const typename CellGeometryCatalog<M>::ExplicitPage>(
+                                        owner);
+                                if (value.ledger.impl_->admit({allocation_detail::Kind::CellShellPage, page},
+                                        page->storage_bytes(), value.used, value.limit))
+                                    for (const auto& geometry : page->cells)
+                                        value.ledger.retain(geometry, value.used, value.limit);
+                            }
+                        }});
+            }
+            else
+            {
+                if constexpr (M == ordinary)
+                    for (const auto& source : catalog->sources_)
+                        retain(source, used, limit);
+                for (const auto& page : catalog->explicit_pages_)
+                    if (impl_->admit(
+                            {allocation_detail::Kind::CellShellPage, page}, page->storage_bytes(), used, limit))
+                        for (const auto& geometry : page->cells)
+                            retain(geometry, used, limit);
+            }
         }
         impl_->last_counter = used;
     }
@@ -834,16 +879,15 @@ std::pair<ConvexGeometryPtr<ordinary>, ConvexGeometryPtr<ordinary>> CartesianCel
 
 namespace
 {
-std::shared_ptr<const details::NativeGeometryBody> native_body(
-    const details::GeometryStorage<ordinary>& stored)
+std::shared_ptr<const details::NativeGeometryBody> native_body(const details::GeometryStorage<ordinary>& stored)
 {
     details::active_work->charge(1, sizeof(details::NativeGeometryBody));
     auto body = std::make_shared<details::NativeGeometryBody>();
     details::active_work->charge(stored.vertices.size(), sizeof(details::FrozenVertex<ordinary>));
     body->vertices.reserve(stored.vertices.size());
     if (body->vertices.capacity() > stored.vertices.size())
-        details::active_work->charge(body->vertices.capacity() - stored.vertices.size(),
-            sizeof(details::FrozenVertex<ordinary>));
+        details::active_work->charge(
+            body->vertices.capacity() - stored.vertices.size(), sizeof(details::FrozenVertex<ordinary>));
     body->vertices.assign(stored.vertices.begin(), stored.vertices.end());
     body->frame = stored.frame;
     body->reference_origin = stored.reference_origin;
@@ -903,18 +947,18 @@ ConvexGeometryPtr<ordinary> CartesianCellSource::materialize(
                         moments->integrals = *fact.integrals;
                         moments->ready.store(true, std::memory_order_release);
                     });
-                const auto root = details::construction_native({shared_from_this(), slot, primed, limits,
-                    std::move(moments), body});
+                const auto root =
+                    details::construction_native({shared_from_this(), slot, primed, limits, std::move(moments), body});
                 auto output = details::materialize_native_construction(root);
                 return std::pair{output, std::move(output)};
             }
             auto [source, output] = materialize_inputs(slot, limits);
-            auto stored = std::const_pointer_cast<details::GeometryStorage<ordinary>>(
-                details::checked_geometry_storage<ordinary>(
+            auto stored =
+                std::const_pointer_cast<details::GeometryStorage<ordinary>>(details::checked_geometry_storage<ordinary>(
                     DynamicGeometryAccess::implementation(*output->dynamic_geometry())));
             body = native_body(*stored);
-            stored->construction = details::construction_native({shared_from_this(), slot, primed, limits,
-                stored->moment_cache, body});
+            stored->construction =
+                details::construction_native({shared_from_this(), slot, primed, limits, stored->moment_cache, body});
             // Weak memoization changes no retained source ownership after admission.
             // Publish only after this operation's complete output admission below.
             return std::pair{std::move(source), std::move(output)};
@@ -923,8 +967,10 @@ ConvexGeometryPtr<ordinary> CartesianCellSource::materialize(
         admission.temporaries.retain(output, admission.bytes, admission.limits.byte_budget);
         if (primed)
         {
-            impl_->facts.at(slot).representation =
-                DynamicGeometryAccess::implementation(*output->dynamic_geometry())->construction->source().native()->body;
+            impl_->facts.at(slot).representation = DynamicGeometryAccess::implementation(*output->dynamic_geometry())
+                                                       ->construction->source()
+                                                       .native()
+                                                       ->body;
         }
         return output;
     }
@@ -1297,6 +1343,94 @@ namespace SimpleFluid::PLIC
 template class CellGeometryCatalog<ArithmeticMode::Ordinary>;
 template class CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
 template class CellGeometryCatalog<ArithmeticMode::Exact>;
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+    details::CellCatalogDemandAccess::initialize<ArithmeticMode::Ordinary>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, GeometryLimits);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+details::CellCatalogDemandAccess::extended<ArithmeticMode::Ordinary>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::optional<std::size_t>>,
+    GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+details::CellCatalogDemandAccess::exported<ArithmeticMode::Ordinary>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>, bool,
+    GeometryLimits);
+
+template details::geometry_demand::OrderStamp details::CellCatalogDemandAccess::stamp<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&, std::size_t);
+
+template bool details::CellCatalogDemandAccess::persistent<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&) noexcept;
+
+template void details::CellCatalogDemandAccess::visit_dependencies<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&, details::geometry_demand::MetadataSink,
+    details::geometry_demand::SourceSink);
+
+template void details::CellCatalogDemandAccess::visit_borrowed_dependencies<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&, details::geometry_demand::BorrowedMetadataSink,
+    details::geometry_demand::BorrowedSourceSink);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+    details::CellCatalogDemandAccess::initialize<ArithmeticMode::BoundedCertification>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, GeometryLimits);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+details::CellCatalogDemandAccess::extended<ArithmeticMode::BoundedCertification>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
+    std::span<const std::optional<std::size_t>>, GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+details::CellCatalogDemandAccess::exported<ArithmeticMode::BoundedCertification>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
+    bool, GeometryLimits);
+
+template details::geometry_demand::OrderStamp
+details::CellCatalogDemandAccess::stamp<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&, std::size_t);
+
+template bool details::CellCatalogDemandAccess::persistent<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&) noexcept;
+
+template void details::CellCatalogDemandAccess::visit_dependencies<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&, details::geometry_demand::MetadataSink,
+    details::geometry_demand::SourceSink);
+
+template void details::CellCatalogDemandAccess::visit_borrowed_dependencies<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&, details::geometry_demand::BorrowedMetadataSink,
+    details::geometry_demand::BorrowedSourceSink);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
+    details::CellCatalogDemandAccess::initialize<ArithmeticMode::Exact>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, GeometryLimits);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
+details::CellCatalogDemandAccess::extended<ArithmeticMode::Exact>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, std::span<const std::optional<std::size_t>>,
+    GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
+details::CellCatalogDemandAccess::exported<ArithmeticMode::Exact>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, std::span<const std::size_t>, bool,
+    GeometryLimits);
+
+template details::geometry_demand::OrderStamp details::CellCatalogDemandAccess::stamp<ArithmeticMode::Exact>(
+    const CellGeometryCatalog<ArithmeticMode::Exact>&, std::size_t);
+
+template bool details::CellCatalogDemandAccess::persistent<ArithmeticMode::Exact>(
+    const CellGeometryCatalog<ArithmeticMode::Exact>&) noexcept;
+
+template void details::CellCatalogDemandAccess::visit_dependencies<ArithmeticMode::Exact>(
+    const CellGeometryCatalog<ArithmeticMode::Exact>&, details::geometry_demand::MetadataSink,
+    details::geometry_demand::SourceSink);
+
+template void details::CellCatalogDemandAccess::visit_borrowed_dependencies<ArithmeticMode::Exact>(
+    const CellGeometryCatalog<ArithmeticMode::Exact>&, details::geometry_demand::BorrowedMetadataSink,
+    details::geometry_demand::BorrowedSourceSink);
 } // namespace SimpleFluid::PLIC
 
 namespace SimpleFluid::PLIC
@@ -1559,8 +1693,7 @@ details::NativeFramedBounds CartesianCellSource::framed_bounds(std::size_t slot)
     }
     return result;
 }
-std::size_t details::NativeCellGeometrySourceAccess::regular_page_byte_bound(
-    std::size_t cells, std::size_t axis_points)
+std::size_t details::NativeCellGeometrySourceAccess::regular_page_byte_bound(std::size_t cells, std::size_t axis_points)
 {
     using Impl = CartesianCellSource::Impl;
     if (!cells || cells > Impl::interval_page_size || axis_points > 6 * cells)
@@ -1571,11 +1704,10 @@ std::size_t details::NativeCellGeometrySourceAccess::regular_page_byte_bound(
     // geometric support-table growth and both construction and retained ledgers.
     return sizeof(CartesianCellSource) + sizeof(Impl) + sizeof(Impl::Base) +
            sizeof(std::array<Impl::IntervalColumn, 3>) +
-           cells * (2 * sizeof(CartesianSourceCellSlot) + sizeof(Impl::Facts) +
-                       2 * sizeof(Impl::InitialFacts) + 6 * sizeof(Impl::Interval)) +
-           axis_points * (2 * sizeof(double) + 2 * sizeof(std::uint32_t) +
-                             4 * sizeof(PlaneSupportIdentity<ordinary>) + sizeof(SupportLookup::value_type) +
-                             4 * sizeof(void*) + 2 * support_payload) +
+           cells * (2 * sizeof(CartesianSourceCellSlot) + sizeof(Impl::Facts) + 2 * sizeof(Impl::InitialFacts) +
+                       6 * sizeof(Impl::Interval)) +
+           axis_points * (2 * sizeof(double) + 2 * sizeof(std::uint32_t) + 4 * sizeof(PlaneSupportIdentity<ordinary>) +
+                             sizeof(SupportLookup::value_type) + 4 * sizeof(void*) + 2 * support_payload) +
            2 * identity_ledger_bookkeeping_bound(axis_points + 2);
 }
 std::pair<GeometryPoint, GeometryPoint> details::NativeCellGeometrySourceAccess::raw_bounds(
@@ -1648,7 +1780,8 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> materialize_native_construction(
     active_work->charge(body.vertices.size(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
     stored->vertices.reserve(body.vertices.size());
     if (stored->vertices.capacity() > body.vertices.size())
-        active_work->charge(stored->vertices.capacity() - body.vertices.size(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
+        active_work->charge(
+            stored->vertices.capacity() - body.vertices.size(), sizeof(FrozenVertex<ArithmeticMode::Ordinary>));
     stored->vertices.assign(body.vertices.begin(), body.vertices.end());
     stored->frame = body.frame;
     stored->reference_origin = body.reference_origin;
@@ -1664,7 +1797,8 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> materialize_native_construction(
     stored->ancestry = body.ancestry;
     stored->export_seal = body.export_seal;
     stored->construction = root;
-    return ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(DynamicGeometryAccess::geometry(std::move(stored)));
+    return ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(
+        DynamicGeometryAccess::geometry(std::move(stored)));
 }
 } // namespace SimpleFluid::PLIC::details
 
@@ -1676,7 +1810,8 @@ bool cell_evaluation_cache_ready(const ConvexGeometryPtr<Mode>& geometry)
 {
     if (!geometry)
         return false;
-    const auto source = checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*geometry->dynamic_geometry()));
+    const auto source =
+        checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*geometry->dynamic_geometry()));
     return source->moment_cache && source->moment_cache->ready.load(std::memory_order_acquire);
 }
 template bool cell_evaluation_cache_ready(const ConvexGeometryPtr<ArithmeticMode::Ordinary>&);
@@ -1690,15 +1825,17 @@ ConvexGeometryPtr<Mode> clone_cell_evaluation(
         throw GeometryError(GeometryErrorCode::InvalidInput, "Null immutable cell evaluation source.");
     limits.arithmetic_mode = Mode;
     Operation operation(limits);
-    const auto source = checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*original->dynamic_geometry()));
+    const auto source =
+        checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*original->dynamic_geometry()));
     if (source->vertices.size() > std::min(limits.maximum_vertices, active_work->limits.maximum_vertices) ||
         source->faces.size() > std::min(limits.maximum_faces, active_work->limits.maximum_faces))
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Cell evaluation exceeds selected shape limits.");
     if (copy_established_integrals && !source->moment_cache->ready.load(std::memory_order_acquire))
         throw GeometryError(GeometryErrorCode::InvalidInput, "Established cell moment facts are absent.");
-    active_work->charge(1, sizeof(GeometryStorage<Mode>) + sizeof(DynamicConvexGeometry) + sizeof(StoredMomentCache<Mode>));
-    auto stored = std::make_shared<GeometryStorage<Mode>>(GeometryMetadata<Mode>(*source), source->topology,
-        std::vector<FrozenVertex<Mode>>{});
+    active_work->charge(
+        1, sizeof(GeometryStorage<Mode>) + sizeof(DynamicConvexGeometry) + sizeof(StoredMomentCache<Mode>));
+    auto stored = std::make_shared<GeometryStorage<Mode>>(
+        GeometryMetadata<Mode>(*source), source->topology, std::vector<FrozenVertex<Mode>>{});
     auto moments = std::make_shared<StoredMomentCache<Mode>>();
     if (copy_established_integrals)
         std::call_once(moments->prepared,

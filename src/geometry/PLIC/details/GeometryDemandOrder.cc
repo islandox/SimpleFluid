@@ -99,8 +99,30 @@ template<class T> struct Column
 };
 struct SourceOwner
 {
-    std::shared_ptr<const void> owner;
-    SourceKind kind = SourceKind::Explicit;
+    std::variant<std::shared_ptr<const void>, std::shared_ptr<const CartesianCellSource>> value;
+    SourceKind kind() const noexcept { return value.index() == 0 ? SourceKind::Explicit : SourceKind::Cartesian; }
+    const void* address() const noexcept
+    {
+        return std::visit([](const auto& owner) -> const void* { return owner.get(); }, value);
+    }
+    std::shared_ptr<const void> pin() const
+    {
+        return std::visit([](const auto& owner) -> std::shared_ptr<const void> { return owner; }, value);
+    }
+    bool matches(SourceKind type, const std::shared_ptr<const void>& owner) const noexcept
+    {
+        return kind() == type && std::visit([&](const auto& stored)
+                                     { return !stored.owner_before(owner) && !owner.owner_before(stored); }, value);
+    }
+    static SourceOwner capture(const SourceSlot& slot)
+    {
+        SourceOwner result;
+        if (slot.kind == SourceKind::Cartesian)
+            result.value.emplace<1>(std::static_pointer_cast<const CartesianCellSource>(slot.source));
+        else
+            result.value.emplace<0>(slot.source);
+        return result;
+    }
 };
 struct SelectorPage
 {
@@ -113,7 +135,7 @@ struct SelectorPage
         if (work)
             ++work->visited_source_rows;
         const auto& source = sources[owner.at(slot)];
-        return {{generation.at(slot), position.at(slot)}, {source.owner, row.at(slot), source.kind}};
+        return {{generation.at(slot), position.at(slot)}, {source.pin(), row.at(slot), source.kind()}};
     }
     std::size_t payload_bytes() const noexcept
     {
@@ -134,13 +156,11 @@ struct SelectorPage
                 (slot && !before(values[slot - 1].stamp, values[slot].stamp)))
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid geometry selector page ownership/order.");
             std::size_t source = 0;
-            while (source < sources && source_owners[source].owner.get() != values[slot].physical.source.get())
+            while (source < sources && source_owners[source].address() != values[slot].physical.source.get())
                 ++source;
             if (source == sources)
-                source_owners[sources++] = {values[slot].physical.source, values[slot].physical.kind};
-            else if (source_owners[source].kind != values[slot].physical.kind ||
-                     source_owners[source].owner.owner_before(values[slot].physical.source) ||
-                     values[slot].physical.source.owner_before(source_owners[source].owner))
+                source_owners[sources++] = SourceOwner::capture(values[slot].physical);
+            else if (!source_owners[source].matches(values[slot].physical.kind, values[slot].physical.source))
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry selector address has foreign controls.");
             selected[slot] = std::uint8_t(source);
         }
@@ -368,6 +388,34 @@ GeometryDemandOrder GeometryDemandOrder::rebound(
     result.state_ = std::make_shared<const State>(std::move(root), generation());
     return result;
 }
+void GeometryDemandOrder::visit_dependencies(MetadataSink metadata, SourceSink sources) const
+{
+    if (!state_ || !metadata(state_, sizeof(State), sizeof(State) + control_bytes))
+        return;
+    Pages::visit_dependencies(state_->root, metadata,
+        [&](const Group& value)
+        {
+            const auto payload = value.page->payload_bytes();
+            if (metadata(value.page, payload, payload + control_bytes))
+                for (const auto& source : value.page->sources)
+                    sources(source.kind(), source.pin());
+        });
+}
+void GeometryDemandOrder::visit_borrowed_dependencies(
+    BorrowedMetadataSink metadata, BorrowedSourceSink sources, const void* parent) const
+{
+    if (!state_ || !metadata(state_.get(), parent, sizeof(State)))
+        return;
+    Pages::visit_borrowed_dependencies(
+        state_->root, metadata,
+        [&](const Group& value, const void* node)
+        {
+            if (metadata(value.page.get(), node, value.page->payload_bytes()))
+                for (const auto& source : value.page->sources)
+                    sources(value.page.get(), source.kind(), source.address());
+        },
+        state_.get());
+}
 std::size_t GeometryDemandOrder::size() const noexcept
 {
     return state_ && state_->root ? state_->root->logical_size : 0;
@@ -376,6 +424,12 @@ OrderedSourceSlot GeometryDemandOrder::at(std::size_t slot) const
 {
     const auto value = Pages::logical_at(state_ ? state_->root : nullptr, slot);
     return value.row->page->at(value.offset);
+}
+const std::shared_ptr<const CartesianCellSource>& GeometryDemandOrder::native_owner(std::size_t slot) const
+{
+    const auto value = Pages::logical_at(state_ ? state_->root : nullptr, slot);
+    const auto& page = *value.row->page;
+    return std::get<1>(page.sources[page.owner.at(value.offset)].value);
 }
 std::size_t GeometryDemandOrder::rank(OrderStamp stamp) const
 {
@@ -425,7 +479,7 @@ void GeometryDemandOrder::visit_source_pages(
             [&](const auto& group)
             {
                 for (const auto& source : group.page->sources)
-                    visitor(source.kind, source.owner);
+                    visitor(source.kind(), source.pin());
                 return true;
             });
 }

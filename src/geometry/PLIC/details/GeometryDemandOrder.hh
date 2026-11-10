@@ -8,6 +8,10 @@
 #include <memory>
 #include <span>
 
+namespace SimpleFluid::PLIC
+{
+class CartesianCellSource;
+}
 namespace SimpleFluid::PLIC::details::geometry_demand
 {
 struct OrderStamp
@@ -25,6 +29,21 @@ struct SourceSlot
     std::shared_ptr<const void> source;
     std::uint64_t row = 0;
     SourceKind kind = SourceKind::Explicit;
+};
+struct SourceSink
+{
+    void* context;
+    void (*visit)(void*, SourceKind, const std::shared_ptr<const void>&);
+    void operator()(SourceKind kind, const std::shared_ptr<const void>& owner) const { visit(context, kind, owner); }
+};
+struct BorrowedSourceSink
+{
+    void* context;
+    void (*visit)(void*, const void* parent, SourceKind, const void* owner);
+    void operator()(const void* parent, SourceKind kind, const void* owner) const
+    {
+        visit(context, parent, kind, owner);
+    }
 };
 struct OrderedSourceSlot
 {
@@ -47,8 +66,12 @@ public:
         std::span<const SourceSlot> prefix, std::span<const OrderStamp> retired, Admission, PageWork* = nullptr) const;
     /** Repack source pointer arrays without moving their logical cells. */
     [[nodiscard]] GeometryDemandOrder rebound(std::span<const OrderedSourceSlot>, Admission, PageWork* = nullptr) const;
+    /** First/last dependency traversal skips complete inherited subtrees. */
+    void visit_dependencies(MetadataSink, SourceSink) const;
+    void visit_borrowed_dependencies(BorrowedMetadataSink, BorrowedSourceSink, const void* parent = nullptr) const;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] OrderedSourceSlot at(std::size_t) const;
+    [[nodiscard]] const std::shared_ptr<const CartesianCellSource>& native_owner(std::size_t) const;
     [[nodiscard]] std::size_t rank(OrderStamp) const;
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;

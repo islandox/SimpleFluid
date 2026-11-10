@@ -47,6 +47,19 @@ struct GeometryOwnerManifest::State
     Pages::Ptr root;
     explicit State(Pages::Ptr value) : root(std::move(value)) {}
 };
+void GeometryOwnerManifest::visit_dependencies(MetadataSink metadata, RecordSink records) const
+{
+    if (!state_ || !metadata(state_, sizeof(State), sizeof(State) + control_bytes))
+        return;
+    Pages::visit_dependencies(state_->root, metadata, records);
+}
+void GeometryOwnerManifest::visit_borrowed_dependencies(
+    BorrowedMetadataSink metadata, BorrowedRecordSink records, const void* parent) const
+{
+    if (!state_ || !metadata(state_.get(), parent, sizeof(State)))
+        return;
+    Pages::visit_borrowed_dependencies(state_->root, metadata, records, state_.get());
+}
 GeometryOwnerManifest GeometryOwnerManifest::retained(std::uint8_t channel, std::uint8_t kind,
     std::shared_ptr<const void> owner, std::size_t bytes, Admission admission, PageWork* work) const
 {

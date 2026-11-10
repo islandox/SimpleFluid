@@ -96,7 +96,8 @@ const char* owner_label(unsigned kind)
 {
     static constexpr const char* labels[] = {"typed_wrapper", "dynamic_wrapper", "geometry", "topology", "export_cache",
         "dynamic_export", "typed_export", "compact_batch", "plane", "point_context", "native_facts", "moment",
-        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source", "cell_catalog", "native_source_body", "external_owner", "cell_shell_page"};
+        "ancestry", "split", "certificate", "recipe", "clip", "identity", "opaque_authority", "cartesian_source",
+        "cell_catalog", "native_source_body", "external_owner", "cell_shell_page"};
     if (kind < std::size(labels))
         return labels[kind];
     return kind == planar_wrapper ? "planar_wrapper" : "planar_payload";
@@ -105,8 +106,8 @@ class Census
 {
 public:
     Census(Report& r, ProbeScratch& s, ProbeLimits l)
-        : report(r), limits(l), nodes(&s), work(&s), records(&s), contexts(&s), external_sizes(&s), owner_edges(&s), point_edges(&s),
-          colors(&s), depths(&s), frames(&s)
+        : report(r), limits(l), nodes(&s), work(&s), records(&s), contexts(&s), external_sizes(&s), owner_edges(&s),
+          point_edges(&s), colors(&s), depths(&s), frames(&s)
     {
     }
     Report& report;
@@ -387,10 +388,11 @@ public:
                     metadata = sizeof(g);
                     if (!g.vertices.borrowed())
                         table(g.vertices, populated, unused);
-                    if (const auto* owner = std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(
-                            &g.vertex_owner))
+                    if (const auto* owner =
+                            std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(&g.vertex_owner))
                         push(K::Geometry, owner->get(), w);
-                    else if (const auto* owner = std::get_if<std::shared_ptr<const NativeGeometryBody>>(&g.vertex_owner))
+                    else if (const auto* owner =
+                                 std::get_if<std::shared_ptr<const NativeGeometryBody>>(&g.vertex_owner))
                         push(K::NativeSourceBody, owner->get(), w);
                     push(K::Topology, g.topology.get(), w);
                     push(K::PointSnapshot, g.point_context.get(), w);
@@ -411,7 +413,9 @@ public:
                 }
                 case K::ExternalOwner: {
                     const auto bytes = external_sizes.at(p);
-                    metadata = bytes[0]; populated = bytes[1]; unused = bytes[2];
+                    metadata = bytes[0];
+                    populated = bytes[1];
+                    unused = bytes[2];
                     break;
                 }
                 case K::NativeSourceBody: {
@@ -631,6 +635,52 @@ public:
                 case K::CellCatalog: {
                     const auto& catalog = *static_cast<const CellGeometryCatalog<M>*>(p);
                     metadata = sizeof(catalog);
+                    if (RetentionAccess::catalog_persistent(catalog))
+                    {
+                        namespace G = SimpleFluid::PLIC::details::geometry_demand;
+                        struct Context
+                        {
+                            Census& census;
+                            const CensusWork& work;
+                            std::size_t catalog_parent;
+                        } context{*this, w, n.id};
+                        RetentionAccess::visit_catalog_dependencies(catalog,
+                            {&context,
+                                [](void* raw, const void* owner, const void* parent, std::size_t bytes)
+                                {
+                                    auto& value = *static_cast<Context*>(raw);
+                                    auto& census = value.census;
+                                    const auto [entry, inserted] =
+                                        census.external_sizes.emplace(owner, std::array<std::size_t, 3>{bytes, 0, 0});
+                                    if (!inserted && entry->second != std::array<std::size_t, 3>{bytes, 0, 0})
+                                        throw InvalidGraph{};
+                                    const auto saved = census.owner_parent;
+                                    census.owner_parent =
+                                        parent ? census
+                                                     .ensure_node({static_cast<unsigned>(K::ExternalOwner), parent,
+                                                         value.work.key.mode})
+                                                     .id
+                                               : value.catalog_parent;
+                                    census.push(K::ExternalOwner, owner, value.work);
+                                    census.owner_parent = saved;
+                                    return true;
+                                }},
+                            {&context, [](void* raw, const void* parent, G::SourceKind kind, const void* owner)
+                                {
+                                    auto& value = *static_cast<Context*>(raw);
+                                    auto& census = value.census;
+                                    const auto saved = census.owner_parent;
+                                    census.owner_parent = census
+                                                              .ensure_node({static_cast<unsigned>(K::ExternalOwner),
+                                                                  parent, value.work.key.mode})
+                                                              .id;
+                                    census.push(
+                                        kind == G::SourceKind::Cartesian ? K::CartesianSource : K::CellShellPage, owner,
+                                        value.work);
+                                    census.owner_parent = saved;
+                                }});
+                        break;
+                    }
                     table(RetentionAccess::catalog_pages(catalog), populated, unused);
                     table(RetentionAccess::catalog_selection(catalog), populated, unused);
                     for (const auto& page : RetentionAccess::catalog_selection(catalog))
@@ -654,7 +704,9 @@ public:
                 case K::CartesianSource: {
                     const auto& source = *static_cast<const CartesianCellSource*>(p);
                     const auto bytes = RetentionAccess::cartesian_bytes(source);
-                    metadata = bytes[0]; populated = bytes[1]; unused = bytes[2];
+                    metadata = bytes[0];
+                    populated = bytes[1];
+                    unused = bytes[2];
                     const auto base = NativeCellGeometrySourceAccess::base_owner(source);
                     external_sizes.insert_or_assign(base.get(), NativeCellGeometrySourceAccess::base_bytes(source));
                     push(K::ExternalOwner, base.get(), w);
@@ -1037,8 +1089,8 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
                 if (key.kind == K::PlanarPayload)
                     continue;
                 if (key.kind == K::ExternalOwner)
-                    census.external_sizes.emplace(value.pin.get(),
-                        std::array<std::size_t, 3>{value.payload_bytes, 0, 0});
+                    census.external_sizes.emplace(
+                        value.pin.get(), std::array<std::size_t, 3>{value.payload_bytes, 0, 0});
                 census.push(static_cast<unsigned>(key.kind), value.pin.get(), mode, 0, true, false);
             }
             report.pending_pins = census_add(report.pending_pins, impl->pending.size());

@@ -1,6 +1,7 @@
 #pragma once
-#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/CellGeometryView.hh"
+#include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
 #include "geometry/PLIC/details/PointSnapshot.hh"
 namespace SimpleFluid::PLIC::details
@@ -9,16 +10,37 @@ namespace SimpleFluid::PLIC::details
 class RetentionAccess
 {
 public:
+    template<ArithmeticMode M> static bool catalog_persistent(const CellGeometryCatalog<M>& catalog)
+    {
+        return CellCatalogDemandAccess::persistent(catalog);
+    }
+    template<ArithmeticMode M>
+    static void visit_catalog_dependencies(const CellGeometryCatalog<M>& catalog,
+        geometry_demand::BorrowedMetadataSink metadata, geometry_demand::BorrowedSourceSink sources)
+    {
+        CellCatalogDemandAccess::visit_borrowed_dependencies(catalog, metadata, sources);
+    }
     template<ArithmeticMode M> static const auto& catalog_sources(const CellGeometryCatalog<M>& catalog)
-    { return catalog.sources_; }
+    {
+        return catalog.sources_;
+    }
     template<ArithmeticMode M> static const auto& catalog_pages(const CellGeometryCatalog<M>& catalog)
-    { return catalog.explicit_pages_; }
+    {
+        return catalog.explicit_pages_;
+    }
     template<ArithmeticMode M> static const auto& catalog_selection(const CellGeometryCatalog<M>& catalog)
-    { return catalog.selection_; }
-    static std::array<std::size_t,3> cartesian_bytes(const CartesianCellSource& source)
-    { return source.retention_bytes(); }
-    static std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> cartesian_supports(const CartesianCellSource& source)
-    { return source.retained_supports(); }
+    {
+        return catalog.selection_;
+    }
+    static std::array<std::size_t, 3> cartesian_bytes(const CartesianCellSource& source)
+    {
+        return source.retention_bytes();
+    }
+    static std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> cartesian_supports(
+        const CartesianCellSource& source)
+    {
+        return source.retained_supports();
+    }
     static const GeometryAllocationLedger::Impl* ledger(const GeometryAllocationLedger& p) noexcept
     {
         return p.impl_.get();

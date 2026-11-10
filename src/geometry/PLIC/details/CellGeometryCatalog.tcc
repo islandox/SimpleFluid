@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/CellGeometryView.hh"
+#include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
 #include <map>
 #include <utility>
 #include <vector>
@@ -19,9 +20,10 @@ void reserve_catalog(std::vector<T>& buffer, std::size_t count, details::CellCat
         admission.charge(buffer.capacity() - count, sizeof(T));
 }
 } // namespace
-template<ArithmeticMode M>
-std::size_t CellGeometryCatalog<M>::storage_bytes() const noexcept
+template<ArithmeticMode M> std::size_t CellGeometryCatalog<M>::storage_bytes() const noexcept
 {
+    if (demand_)
+        return sizeof(*this);
     auto bytes = sizeof(*this) + sources_.capacity() * sizeof(SourcePtr) +
                  explicit_pages_.capacity() * sizeof(typename decltype(explicit_pages_)::value_type) +
                  selection_.capacity() * sizeof(SelectionPage);
@@ -39,10 +41,10 @@ typename CellGeometryCatalog<M>::Selector CellGeometryCatalog<M>::select(std::si
 template<ArithmeticMode M>
 typename CellGeometryCatalog<M>::ExplicitEntry CellGeometryCatalog<M>::explicit_entry(std::size_t slot) const
 {
-    if (slot >= size() || !select(slot).is_explicit())
+    const auto value = physical_reference(slot);
+    if (value.kind != details::geometry_demand::SourceKind::Explicit)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid shell page slot.");
-    const auto value = select(slot);
-    return {explicit_pages_[value.index()], value.slot};
+    return {std::static_pointer_cast<const ExplicitPage>(value.source), value.row};
 }
 template<ArithmeticMode M>
 void CellGeometryCatalog<M>::reserve_selection(std::size_t count, details::CellCatalogAdmission& admission)
@@ -259,6 +261,8 @@ template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::selected(
     std::shared_ptr<const CellGeometryCatalog> original, std::span<const std::size_t> slots, GeometryLimits limits)
 {
+    if (original && original->demand_)
+        return details::CellCatalogDemandAccess::exported(std::move(original), slots, false, limits);
     if (!original)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Null geometry catalog selection source.");
     bool identity = slots.size() == original->size();
@@ -314,6 +318,8 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellGeometryCatalog<M>::reordered(
     std::shared_ptr<const CellGeometryCatalog> original, std::span<const std::size_t> permutation,
     GeometryLimits limits)
 {
+    if (original && original->demand_)
+        return details::CellCatalogDemandAccess::exported(std::move(original), permutation, true, limits);
     if (!original || permutation.size() != original->size())
         throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid geometry catalog permutation size.");
     details::CellCatalogAdmission admission(limits);

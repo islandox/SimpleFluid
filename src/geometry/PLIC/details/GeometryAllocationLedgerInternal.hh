@@ -5,8 +5,8 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
-#include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include <algorithm>
 #include <cstddef>
 #include <functional>
@@ -144,8 +144,12 @@ struct GeometryAllocationLedger::Impl
     {
         if (!pointer)
             return;
-        if (owners.contains({kind, pointer.get()}))
+        if (const auto found = owners.find({kind, pointer.get()}); found != owners.end())
+        {
+            if (found->second.pin.owner_before(pointer) || pointer.owner_before(found->second.pin))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry allocation has conflicting controls.");
             return;
+        }
         if (pending.size() == pending.capacity())
         {
             const auto old = pending.capacity();
@@ -164,8 +168,9 @@ struct GeometryAllocationLedger::Impl
         const Key key{item.kind, item.owner.get()};
         if (const auto found = owners.find(key); found != owners.end())
         {
-            if (found->second.payload_bytes != bytes)
-                throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable allocation payload size changed.");
+            if (found->second.payload_bytes != bytes || found->second.pin.owner_before(item.owner) ||
+                item.owner.owner_before(found->second.pin))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable allocation ownership or size changed.");
             return false;
         }
         // Charge before publishing the seen identity. A failed call cannot
@@ -218,8 +223,12 @@ struct GeometryAllocationLedger::Impl
         {
             const auto item = std::move(pending.back());
             pending.pop_back();
-            if (owners.contains({item.kind, item.owner.get()}))
+            if (const auto found = owners.find({item.kind, item.owner.get()}); found != owners.end())
+            {
+                if (found->second.pin.owner_before(item.owner) || item.owner.owner_before(found->second.pin))
+                    throw GeometryError(GeometryErrorCode::InvalidInput, "Pending geometry owner has foreign controls.");
                 continue;
+            }
             switch (item.kind)
             {
                 case Kind::TypedWrapper: {
@@ -244,11 +253,11 @@ struct GeometryAllocationLedger::Impl
                     if (!admit_owner(item, bytes, used, limit))
                         break;
                     push(Kind::Topology, geometry->topology, used, limit);
-                    if (const auto* owner = std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(
-                            &geometry->vertex_owner))
+                    if (const auto* owner =
+                            std::get_if<std::shared_ptr<const DynamicConvexGeometry::Impl>>(&geometry->vertex_owner))
                         push(Kind::Geometry, *owner, used, limit);
-                    else if (const auto* owner = std::get_if<std::shared_ptr<const NativeGeometryBody>>(
-                                 &geometry->vertex_owner))
+                    else if (const auto* owner =
+                                 std::get_if<std::shared_ptr<const NativeGeometryBody>>(&geometry->vertex_owner))
                         push(Kind::NativeSourceBody, *owner, used, limit);
                     push(Kind::PointSnapshot, std::shared_ptr<const PointSnapshotContextBase>(geometry->point_context),
                         used, limit);
@@ -272,7 +281,8 @@ struct GeometryAllocationLedger::Impl
                     {
                         push(Kind::Topology, body->topology, used, limit);
                         push(Kind::PointSnapshot, body->point_context, used, limit);
-                        push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(body->export_cache), used, limit);
+                        push(Kind::ExportCache, std::shared_ptr<const PointExportCache>(body->export_cache), used,
+                            limit);
                         push(Kind::Ancestry, body->ancestry, used, limit);
                     }
                     break;
@@ -399,8 +409,9 @@ struct GeometryAllocationLedger::Impl
                                 require_mode(Mode, ArithmeticMode::Ordinary);
                                 push(Kind::CartesianSource, native->source, used, limit);
                                 push(Kind::NativeSourceBody, native->body, used, limit);
-                                push(Kind::Moment, std::shared_ptr<const StoredMomentCache<ArithmeticMode::Ordinary>>(
-                                    native->moments), used, limit);
+                                push(Kind::Moment,
+                                    std::shared_ptr<const StoredMomentCache<ArithmeticMode::Ordinary>>(native->moments),
+                                    used, limit);
                             }
                             else
                                 push(Kind::Geometry, recipe->source().geometry(), used, limit);

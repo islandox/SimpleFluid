@@ -32,6 +32,20 @@ class GeometryOwnerManifest
 {
 public:
     GeometryOwnerManifest() = default;
+    struct RecordSink
+    {
+        void* context;
+        void (*visit)(void*, const OwnerRecord&);
+        void operator()(const OwnerRecord& value) const { visit(context, value); }
+    };
+    void visit_dependencies(MetadataSink, RecordSink) const;
+    struct BorrowedRecordSink
+    {
+        void* context;
+        void (*visit)(void*, const void* parent, const OwnerRecord&);
+        void operator()(const OwnerRecord& value, const void* parent) const { visit(context, parent, value); }
+    };
+    void visit_borrowed_dependencies(BorrowedMetadataSink, BorrowedRecordSink, const void* parent = nullptr) const;
     [[nodiscard]] GeometryOwnerManifest retained(std::uint8_t channel, std::uint8_t kind, std::shared_ptr<const void>,
         std::size_t bytes, Admission, PageWork* = nullptr) const;
     [[nodiscard]] GeometryOwnerManifest retired(std::uint8_t channel, std::uint8_t kind,

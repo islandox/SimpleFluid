@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/GeometryError.hh"
 #include <cstddef>
+#include <memory>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
 {
@@ -13,6 +14,28 @@ struct Admission
     void* context;
     void (*retain_bytes)(void*, std::size_t);
     void charge(std::size_t count, std::size_t width) const;
+};
+/** Borrowed first/last physical-owner visitor. Returning false proves this
+ * exact owner's child edges are already held by the destination allowance.
+ * Payload and admission sizes remain distinct for physical census. */
+struct MetadataSink
+{
+    void* context;
+    bool (*visit)(void*, const std::shared_ptr<const void>&, std::size_t payload, std::size_t admitted);
+    bool operator()(const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted) const
+    {
+        return visit(context, owner, payload, admitted);
+    }
+};
+/** Diagnostic borrows preserve the physical metadata parent edge. */
+struct BorrowedMetadataSink
+{
+    void* context;
+    bool (*visit)(void*, const void* owner, const void* parent, std::size_t payload);
+    bool operator()(const void* owner, const void* parent, std::size_t payload) const
+    {
+        return visit(context, owner, parent, payload);
+    }
 };
 struct PageWork
 {

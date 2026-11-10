@@ -268,6 +268,33 @@ public:
         return true;
     }
 
+    template<class RowVisit>
+    static void visit_dependencies(const Ptr& root, MetadataSink metadata, const RowVisit& row_visit)
+    {
+        if (!root || !metadata(root, root->payload_bytes, root->bytes))
+            return;
+        if (root->leaf())
+            for (const auto& row : root->rows)
+                row_visit(row);
+        else
+            for (const auto& child : root->children)
+                visit_dependencies(child, metadata, row_visit);
+    }
+
+    template<class RowVisit>
+    static void visit_borrowed_dependencies(
+        const Ptr& root, BorrowedMetadataSink metadata, const RowVisit& row_visit, const void* parent = nullptr)
+    {
+        if (!root || !metadata(root.get(), parent, root->payload_bytes))
+            return;
+        if (root->leaf())
+            for (const auto& row : root->rows)
+                row_visit(row, root.get());
+        else
+            for (const auto& child : root->children)
+                visit_borrowed_dependencies(child, metadata, row_visit, root.get());
+    }
+
     template<class Visit> static void visit_pages(const Ptr& root, const Visit& visit)
     {
         if (!root)
