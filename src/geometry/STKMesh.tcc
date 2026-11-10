@@ -177,14 +177,10 @@ STKMesh<Pack>::STKMesh(const std::string& mesh_filename, const Options& options)
  * 3. `compute_cell_geometry()` — compute cell centroids and volumes.
  * 4. `build_face_table()` — build the internal face table from element
  *    side connectivity, deduplicating via sorted-node-GID keys.
- * 5. **Parallel partition** — `MetisPartitioner::partition()` is called.
- *    On multi-rank runs this redistributes cells, rebuilds the mesh, and
- *    already computes face geometry on the receiving rank.  It returns
- *    `true` when partitioning occurred.
- * 6. **Conditional face geometry** — `compute_face_geometry()` is called
- *    *only* when partitioning did **not** occur (single-rank or
- *    already-partitioned mesh), because the partition step computes face
- *    geometry internally.
+ * 5. `compute_face_geometry()` — compute source face centroids, areas,
+ *    normals, and distances once before redistribution.
+ * 6. **Parallel partition** — `MeshPartitioner::partition()` redistributes
+ *    cells and their existing face metrics on multi-rank runs.
  * 7. `prefer_owned_face_owners()` — ensure face owners point to locally
  *    owned cells where possible.
  * 8. `create_cell_face_distances()` — compute cell-centroid-to-face-
@@ -215,6 +211,7 @@ void STKMesh<Pack>::assemble()
     compute_cell_geometry();
     build_face_table();
     assign_boundary_ids_from_stk_side_parts();
+    compute_face_geometry();
 
     // Face matching is complete. Do not carry one string/hash allocation per
     // global face into the partition packet exchange.
@@ -227,14 +224,7 @@ void STKMesh<Pack>::assemble()
 
     // Partition programmatic source geometry for parallel runs. MeshFactory
     // holds the complete source only on rank zero.
-    // Returns true if partitioning occurred (face geometry already computed).
-    const bool was_partitioned =
-        MeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
-
-    if (!was_partitioned)
-    {
-        compute_face_geometry();
-    }
+    MeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
     prefer_owned_face_owners();
     create_cell_face_distances();
     rebuild_boundary_face_batches();

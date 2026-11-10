@@ -1967,8 +1967,9 @@ void MeshPartitioner<Pack>::release_rebuildable_storage(
  * @brief Rebuild the mesh data structures from owned and ghost cell packets.
  *
  * Clears and repopulates d_cells, d_faces, node tables, face lookups,
- * cell-face adjacency, and face geometry (centroids, normals, areas,
- * distances).  Face deduplication uses sorted-node-GID keys.
+ * cell-face adjacency, and source face metrics. Face deduplication uses
+ * sorted-node-GID keys. Source distances are retained even when the other
+ * cell is outside the local ghost layer.
  *
  * @tparam Pack Tpetra scalar, ordinal, graph, and communicator types.
  * @param mesh Mesh instance to rebuild (modified in place).
@@ -2124,6 +2125,26 @@ void MeshPartitioner<Pack>::rebuild(
                             face_info.boundary_id = face.boundary_id;
                             face_info.owner = cl;
                             face_info.neighbor = invalid_lid;
+                            face_info.center = face.geometry.center;
+                            face_info.area = face.geometry.area;
+                            // Rebuilt owners follow packet order. Preserve the
+                            // source metric and only reverse its orientation.
+                            const bool same_owner =
+                                packet.gid() == face.geometry.owner_gid;
+                            const auto normal =
+                                same_owner
+                                    ? face.geometry.unit_normal_from_owner
+                                    : face.geometry.unit_normal_from_owner * -1.0;
+                            face_info.unit_normal_from_owner = normal;
+                            face_info.unit_normal_from_neighbor = normal * -1.0;
+                            face_info.owner_to_face_distance = same_owner
+                                ? face.geometry.owner_to_face_distance
+                                : face.geometry.neighbor_to_face_distance;
+                            face_info.neighbor_to_face_distance = same_owner
+                                ? face.geometry.neighbor_to_face_distance
+                                : face.geometry.owner_to_face_distance;
+                            face_info.cell_center_distance =
+                                face.geometry.cell_center_distance;
                             face_info.node_gids =
                                 typename Mesh<Pack>::ViewGO(
                                     mesh.d_face_owned_node_global_ids.data()
@@ -2177,34 +2198,6 @@ void MeshPartitioner<Pack>::rebuild(
     add_packet_faces(owned_pkts, 0);
     add_packet_faces(ghost_pkts, owned_pkts.size());
 
-    // Compute face geometry
-    for (auto& fi : mesh.d_faces) {
-        std::vector<Vec3> fcs; fcs.reserve(fi.node_gids.size());
-        for (auto ngo : fi.node_gids) {
-            auto nit = mesh.d_node_gid_to_lid.find(ngo);
-            if (nit != mesh.d_node_gid_to_lid.end()) fcs.push_back(mesh.d_node_coords[static_cast<size_t>(nit->second)]);
-        }
-        if (fcs.size() < 3) continue;
-        // Match STKMesh::compute_face_geometry: a graded quad centroid is
-        // area-weighted, not the mean of its vertices.
-        fi.center = MeshUtils::face_centroid(fcs);
-        auto av = MeshUtils::face_area_vector(fcs);
-        fi.area = av.norm();
-        if (fi.area <= 0.0) continue;
-        auto nml = av / fi.area;
-        auto& oc = mesh.d_cells[static_cast<size_t>(fi.owner)];
-        auto ov = fi.center - oc.center;
-        if (nml.dot(ov) < 0.0) nml = nml * -1.0;
-        fi.unit_normal_from_owner = nml; fi.unit_normal_from_neighbor = nml * -1.0;
-        fi.owner_to_face_distance = ov.norm();
-        if (fi.neighbor != invalid_lid) {
-            auto& nc = mesh.d_cells[static_cast<size_t>(fi.neighbor)];
-            auto nv = fi.center - nc.center;
-            fi.neighbor_to_face_distance = nv.norm();
-            fi.cell_center_distance = (nc.center - oc.center).norm();
-        }
-    }
-
     // Set cell face views
     size_t tcf = 0; for (auto& cf : cfl) tcf += cf.size();
 
@@ -2215,15 +2208,12 @@ void MeshPartitioner<Pack>::rebuild(
         if (it == mesh.d_face_key_to_face.end()) continue;
         auto& fi = mesh.d_faces[static_cast<size_t>(it->second)];
 
-        // Recompute cell-centre distance for the periodic pair if the
-        // paired cell is available locally.
+        // The source face already carried this periodic neighbor and its
+        // distances. Restore the local connection when the cell is present.
         auto plid = mesh.d_cell_gid_to_lid.find(pgid);
         if (plid != mesh.d_cell_gid_to_lid.end())
         {
             fi.neighbor = plid->second;
-            auto& oc = mesh.d_cells[static_cast<size_t>(fi.owner)];
-            auto& pc = mesh.d_cells[static_cast<size_t>(plid->second)];
-            fi.cell_center_distance = (pc.center - oc.center).norm();
         }
     }
 

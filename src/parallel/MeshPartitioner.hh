@@ -36,7 +36,9 @@ namespace partition_detail {
  * Used to redistribute cells across MPI ranks after partitioning.
  * `node_gids` and `node_coords` are parallel arrays. Face node IDs are sorted
  * to form stable keys, and `face_global_ids`, `face_boundary_ids`,
- * `face_neighbor_gids`, and `face_neighbor_ranks` are parallel to those keys.
+ * `face_neighbor_gids`, `face_neighbor_ranks`, and `face_geometry` are
+ * parallel to those keys. Face centers, areas, normals, and distances retain
+ * their source values and owner orientation.
  *
  * @tparam Pack Tpetra type pack providing GO, LO, map, and graph types.
  */
@@ -45,6 +47,17 @@ struct CellPacket {
     using GO = typename Pack::global_ordinal_type;
     using Vec3 = MeshUtils::Vec3;
     using CellType = MeshUtils::CellType;
+
+    struct FaceGeometry
+    {
+        Vec3 center{};
+        double area = 0.0;
+        Vec3 unit_normal_from_owner{};
+        double owner_to_face_distance = 0.0;
+        double neighbor_to_face_distance = 0.0;
+        double cell_center_distance = 0.0;
+        GO owner_gid = invalid_id<GO>();
+    };
 
     GO gid{};
     CellType cell_type = CellType::INVALID;
@@ -57,6 +70,7 @@ struct CellPacket {
     std::vector<int> face_boundary_ids;
     std::vector<GO> face_neighbor_gids;
     std::vector<int> face_neighbor_ranks;
+    std::vector<FaceGeometry> face_geometry;
 
     /**
      * @brief Validated, non-owning view of one packet body in an MPI buffer.
@@ -89,6 +103,7 @@ struct CellPacket {
             int boundary_id = Mesh<Pack>::invalid_boundary_id;
             GO neighbor_gid = invalid_id<GO>();
             int neighbor_rank = -1;
+            FaceGeometry geometry{};
             std::array<GO, 4> node_gids{};
             std::uint32_t node_count = 0;
         };
@@ -151,6 +166,23 @@ struct CellPacket {
                     cursor.template read<GO>();
                 decoded.neighbor_rank =
                     cursor.template read<std::int32_t>();
+                decoded.geometry.center.x = cursor.template read<double>();
+                decoded.geometry.center.y = cursor.template read<double>();
+                decoded.geometry.center.z = cursor.template read<double>();
+                decoded.geometry.area = cursor.template read<double>();
+                decoded.geometry.unit_normal_from_owner.x =
+                    cursor.template read<double>();
+                decoded.geometry.unit_normal_from_owner.y =
+                    cursor.template read<double>();
+                decoded.geometry.unit_normal_from_owner.z =
+                    cursor.template read<double>();
+                decoded.geometry.owner_to_face_distance =
+                    cursor.template read<double>();
+                decoded.geometry.neighbor_to_face_distance =
+                    cursor.template read<double>();
+                decoded.geometry.cell_center_distance =
+                    cursor.template read<double>();
+                decoded.geometry.owner_gid = cursor.template read<GO>();
                 decoded.node_count =
                     cursor.template read<std::uint32_t>();
                 if (decoded.node_count != 3
@@ -185,6 +217,11 @@ struct CellPacket {
                 (void)cursor.template read<std::int32_t>();
                 (void)cursor.template read<GO>();
                 (void)cursor.template read<std::int32_t>();
+                for (int metric = 0; metric < 10; ++metric)
+                {
+                    (void)cursor.template read<double>();
+                }
+                (void)cursor.template read<GO>();
                 const auto node_count =
                     cursor.template read<std::uint32_t>();
                 if (node_count != 3 && node_count != 4)
@@ -364,7 +401,8 @@ struct CellPacket {
         {
             bytes +=
                 sizeof(GO) + sizeof(std::int32_t) + sizeof(GO)
-              + sizeof(std::int32_t) + sizeof(std::uint32_t)
+              + sizeof(std::int32_t) + 10 * sizeof(double) + sizeof(GO)
+              + sizeof(std::uint32_t)
               + nodes.size() * sizeof(GO);
         }
         return bytes;
@@ -413,6 +451,18 @@ struct CellPacket {
             writer.write(packet.face_neighbor_gids[face]);
             writer.write(static_cast<std::int32_t>(
                 packet.face_neighbor_ranks[face]));
+            const auto& geometry = packet.face_geometry[face];
+            writer.write(geometry.center.x);
+            writer.write(geometry.center.y);
+            writer.write(geometry.center.z);
+            writer.write(geometry.area);
+            writer.write(geometry.unit_normal_from_owner.x);
+            writer.write(geometry.unit_normal_from_owner.y);
+            writer.write(geometry.unit_normal_from_owner.z);
+            writer.write(geometry.owner_to_face_distance);
+            writer.write(geometry.neighbor_to_face_distance);
+            writer.write(geometry.cell_center_distance);
+            writer.write(geometry.owner_gid);
             const auto& nodes = packet.face_node_keys[face];
             writer.write(static_cast<std::uint32_t>(nodes.size()));
             for (const auto node_gid : nodes)
@@ -440,7 +490,8 @@ struct CellPacket {
             const auto& face = mesh.face(face_lid);
             bytes +=
                 sizeof(GO) + sizeof(std::int32_t) + sizeof(GO)
-              + sizeof(std::int32_t) + sizeof(std::uint32_t)
+              + sizeof(std::int32_t) + 10 * sizeof(double) + sizeof(GO)
+              + sizeof(std::uint32_t)
               + face.node_gids.size() * sizeof(GO);
         }
         return bytes;
@@ -512,6 +563,17 @@ struct CellPacket {
                 adjacent_gid == invalid_id<GO>()
                     ? -1
                     : neighbor_rank(adjacent_gid)));
+            writer.write(face.center.x);
+            writer.write(face.center.y);
+            writer.write(face.center.z);
+            writer.write(face.area);
+            writer.write(face.unit_normal_from_owner.x);
+            writer.write(face.unit_normal_from_owner.y);
+            writer.write(face.unit_normal_from_owner.z);
+            writer.write(face.owner_to_face_distance);
+            writer.write(face.neighbor_to_face_distance);
+            writer.write(face.cell_center_distance);
+            writer.write(mesh.cell_global_id(face.owner));
             writer.write(static_cast<std::uint32_t>(
                 face.node_gids.size()));
             for (const auto node_gid : face.node_gids)
@@ -565,6 +627,7 @@ struct CellPacket {
             pk.face_boundary_ids.resize(nf);
             pk.face_neighbor_gids.resize(nf);
             pk.face_neighbor_ranks.resize(nf);
+            pk.face_geometry.resize(nf);
             for (std::uint32_t face = 0; face < nf; ++face)
             {
                 pk.face_global_ids[face] =
@@ -575,6 +638,21 @@ struct CellPacket {
                     reader.template read<GO>();
                 pk.face_neighbor_ranks[face] =
                     reader.template read<std::int32_t>();
+                auto& geometry = pk.face_geometry[face];
+                geometry.center.x = reader.template read<double>();
+                geometry.center.y = reader.template read<double>();
+                geometry.center.z = reader.template read<double>();
+                geometry.area = reader.template read<double>();
+                geometry.unit_normal_from_owner.x =
+                    reader.template read<double>();
+                geometry.unit_normal_from_owner.y =
+                    reader.template read<double>();
+                geometry.unit_normal_from_owner.z =
+                    reader.template read<double>();
+                geometry.owner_to_face_distance = reader.template read<double>();
+                geometry.neighbor_to_face_distance = reader.template read<double>();
+                geometry.cell_center_distance = reader.template read<double>();
+                geometry.owner_gid = reader.template read<GO>();
                 const auto node_count =
                     reader.template read<std::uint32_t>();
                 auto& nodes = pk.face_node_keys[face];
@@ -681,7 +759,9 @@ private:
             || packet.face_node_keys.size()
                 != packet.face_neighbor_gids.size()
             || packet.face_node_keys.size()
-                != packet.face_neighbor_ranks.size())
+                != packet.face_neighbor_ranks.size()
+            || packet.face_node_keys.size()
+                != packet.face_geometry.size())
         {
             throw std::invalid_argument(
                 "CellPacket face metadata arrays have different sizes.");
@@ -767,6 +847,7 @@ public:
      *    node tables, and face geometry from owned + ghost packets.
      *
      * @pre Every rank in @p comm calls this function collectively.
+     *      Source cells and faces already contain their geometry metrics.
      * @param mesh Source mesh to partition (modified in place).
      * @param comm Teuchos MPI communicator.
      * @return true if partitioning occurred, false if single-rank or
@@ -956,8 +1037,8 @@ private:
      * @brief Rebuild the mesh data structures from owned and ghost cell packets.
      *
      * Clears and repopulates d_cells, d_faces, node tables, face lookups,
-     * cell-face adjacency, and face geometry (centroids, normals, areas,
-     * distances).  Face deduplication uses sorted-node-GID keys.
+     * cell-face adjacency, and source face metrics including distances.
+     * Face deduplication uses sorted-node-GID keys.
      *
      * @param mesh Mesh instance to rebuild (modified in place).
      * @param owned_pkts Cell packets destined for this rank.

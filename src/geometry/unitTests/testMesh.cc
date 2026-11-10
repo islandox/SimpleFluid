@@ -419,6 +419,127 @@ TEST(MeshUtilsTest, VolumeComputations)
     }
 }
 
+/** @brief Checks analytical centroids after a large, exactly representable translation. */
+TEST(MeshUtilsTest, TranslatedCentroidsUseLocalMoments)
+{
+    using Vec3 = SimpleFluid::MeshUtils::Vec3;
+    const Vec3 origin{0x1p40, -0x1p39, 0x1p38};
+    const auto translate = [&origin](std::vector<Vec3> points)
+    {
+        for (auto& point : points)
+            point = point + origin;
+        return points;
+    };
+
+    const std::vector<Vec3> graded_sector = {
+        {1, -1, 0}, {2, -2, 0}, {2, 2, 0}, {1, 1, 0},
+        {1, -1, 1}, {2, -2, 1}, {2, 2, 1}, {1, 1, 1}};
+    const auto translated_hex = translate(graded_sector);
+    // Exact equality detects a one-ULP error from global-coordinate moments.
+    EXPECT_EQ(SimpleFluid::MeshUtils::hex_centroid(translated_hex),
+              origin + (Vec3{14.0 / 9.0, 0.0, 0.5}));
+    EXPECT_EQ(SimpleFluid::MeshUtils::hex_volume(translated_hex),
+              SimpleFluid::MeshUtils::hex_volume(graded_sector));
+
+    const std::vector<Vec3> graded_face(
+        graded_sector.begin(), graded_sector.begin() + 4);
+    const auto translated_quad = translate(graded_face);
+    EXPECT_EQ(SimpleFluid::MeshUtils::face_centroid(translated_quad),
+              origin + (Vec3{14.0 / 9.0, 0.0, 0.0}));
+    EXPECT_EQ(SimpleFluid::MeshUtils::face_area_vector(translated_quad),
+              SimpleFluid::MeshUtils::face_area_vector(graded_face));
+
+    const std::vector<Vec3> wedge = {
+        {0, 0, 0}, {3, 0, 0}, {0, 3, 0},
+        {0, 0, 2}, {3, 0, 2}, {0, 3, 2}};
+    EXPECT_EQ(SimpleFluid::MeshUtils::wedge_centroid(wedge), (Vec3{1, 1, 1}));
+    const auto translated_wedge = translate(wedge);
+    EXPECT_EQ(SimpleFluid::MeshUtils::wedge_centroid(translated_wedge),
+              origin + (Vec3{1, 1, 1}));
+    EXPECT_EQ(SimpleFluid::MeshUtils::wedge_volume(translated_wedge),
+              SimpleFluid::MeshUtils::wedge_volume(wedge));
+
+    const std::vector<Vec3> triangle(wedge.begin(), wedge.begin() + 3);
+    EXPECT_EQ(SimpleFluid::MeshUtils::face_centroid(triangle), (Vec3{1, 1, 0}));
+    const auto translated_triangle = translate(triangle);
+    EXPECT_EQ(SimpleFluid::MeshUtils::face_centroid(translated_triangle),
+              origin + (Vec3{1, 1, 0}));
+    EXPECT_EQ(SimpleFluid::MeshUtils::face_area_vector(translated_triangle),
+              SimpleFluid::MeshUtils::face_area_vector(triangle));
+
+    const std::vector<Vec3> tetra = {
+        {0, 0, 0}, {4, 0, 0}, {0, 4, 0}, {0, 0, 4}};
+    EXPECT_EQ(SimpleFluid::MeshUtils::tetra_centroid(
+                  tetra[0], tetra[1], tetra[2], tetra[3]),
+              (Vec3{1, 1, 1}));
+    const auto translated_tetra = translate(tetra);
+    EXPECT_EQ(SimpleFluid::MeshUtils::tetra_centroid(
+                  translated_tetra[0], translated_tetra[1],
+                  translated_tetra[2], translated_tetra[3]),
+              origin + (Vec3{1, 1, 1}));
+    EXPECT_EQ(SimpleFluid::MeshUtils::tetra_volume(
+                  translated_tetra[0], translated_tetra[1],
+                  translated_tetra[2], translated_tetra[3]),
+              SimpleFluid::MeshUtils::tetra_volume(
+                  tetra[0], tetra[1], tetra[2], tetra[3]));
+}
+
+/** @brief Preserves a physical face-to-cell offset much smaller than typical tolerances. */
+TEST(MeshUtilsTest, LocalMomentsPreserveLegitimateSkew)
+{
+    using Vec3 = SimpleFluid::MeshUtils::Vec3;
+    const double shear = 0x1p-45;
+    const std::vector<Vec3> sheared_cube = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {shear, 0, 1}, {1 + shear, 0, 1},
+        {1 + shear, 1, 1}, {shear, 1, 1}};
+    const std::vector<Vec3> top_face(
+        sheared_cube.begin() + 4, sheared_cube.end());
+    const auto cell_centroid = SimpleFluid::MeshUtils::hex_centroid(sheared_cube);
+    const auto face_centroid = SimpleFluid::MeshUtils::face_centroid(top_face);
+    const auto tolerance = 2.0 * std::numeric_limits<double>::epsilon();
+    EXPECT_NEAR(cell_centroid.x, 0.5 + 0.5 * shear, tolerance);
+    EXPECT_NEAR(face_centroid.x, 0.5 + shear, tolerance);
+    EXPECT_GT(face_centroid.x - cell_centroid.x, 0.0);
+    EXPECT_NEAR(face_centroid.x - cell_centroid.x, 0.5 * shear, tolerance);
+}
+
+/** @brief Checks volume weighting on a genuinely tapered, skewed hexahedron. */
+TEST(MeshUtilsTest, TaperedHexCentroidUsesVolumeWeights)
+{
+    using Vec3 = SimpleFluid::MeshUtils::Vec3;
+    const std::vector<Vec3> tapered_hex = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {0.25, -0.125, 1}, {2.25, -0.125, 1},
+        {2.25, 1.875, 1}, {0.25, 1.875, 1}};
+    // Integrating cross sections of area (1 + z)^2 gives these moments.
+    EXPECT_NEAR(SimpleFluid::MeshUtils::hex_volume(tapered_hex), 7.0 / 3.0, 1.0e-14);
+    const auto centroid = SimpleFluid::MeshUtils::hex_centroid(tapered_hex);
+    EXPECT_NEAR(centroid.x, 107.0 / 112.0, 1.0e-14);
+    EXPECT_NEAR(centroid.y, 163.0 / 224.0, 1.0e-14);
+    EXPECT_NEAR(centroid.z, 17.0 / 28.0, 1.0e-14);
+}
+
+/** @brief Retains rejection of zero-area and zero-volume centroid inputs. */
+TEST(MeshUtilsTest, DegenerateCentroidsThrow)
+{
+    using Vec3 = SimpleFluid::MeshUtils::Vec3;
+    const std::vector<Vec3> collinear_quad = {
+        {0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {3, 0, 0}};
+    EXPECT_THROW(SimpleFluid::MeshUtils::face_centroid(collinear_quad),
+                 std::runtime_error);
+    const std::vector<Vec3> flat_hex = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+    EXPECT_THROW(SimpleFluid::MeshUtils::hex_centroid(flat_hex),
+                 std::runtime_error);
+    const std::vector<Vec3> flat_wedge = {
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0},
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    EXPECT_THROW(SimpleFluid::MeshUtils::wedge_centroid(flat_wedge),
+                 std::runtime_error);
+}
+
 /** @brief Verifies polygon area vectors have the expected magnitude and orientation. */
 TEST(MeshUtilsTest, FaceAreaVector)
 {

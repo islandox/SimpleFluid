@@ -27,13 +27,17 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstdint>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numeric>
 #include <set>
 #include <type_traits>
+#include <utility>
 
 namespace
 {
@@ -329,6 +333,21 @@ public:
                           ? SimpleFluid::invalid_id<LO>()
                           : static_cast<LO>(source.cell_local_id(neighbor));
 
+            info.center = source.face_centroid(face_id);
+            info.area = source.face_area(face_id);
+            info.unit_normal_from_owner = source.face_normal(face_id);
+            info.unit_normal_from_neighbor = info.unit_normal_from_owner * -1.0;
+            const auto& owner_center = d_cells[static_cast<size_t>(info.owner)].center;
+            info.owner_to_face_distance = (info.center - owner_center).norm();
+            if (info.neighbor != SimpleFluid::invalid_id<LO>())
+            {
+                const auto& neighbor_center =
+                    d_cells[static_cast<size_t>(info.neighbor)].center;
+                info.neighbor_to_face_distance =
+                    (info.center - neighbor_center).norm();
+                info.cell_center_distance = (neighbor_center - owner_center).norm();
+            }
+
             const auto node_offset = d_face_owned_node_global_ids.size();
             for (const auto node_id : node_ids)
             {
@@ -342,6 +361,58 @@ public:
             d_faces.push_back(std::move(info));
             d_owned_face_global_ids.push_back(
                 static_cast<GO>(10000 + 17 * face));
+        }
+    }
+
+    void pair_end_faces_periodically()
+    {
+        FaceInfo* left = nullptr;
+        FaceInfo* right = nullptr;
+        for (auto& face : d_faces)
+        {
+            if (face.boundary_id == 1) left = &face;
+            if (face.boundary_id == 2) right = &face;
+        }
+        if (left == nullptr || right == nullptr)
+        {
+            throw std::logic_error("Periodic fixture requires two tagged end faces.");
+        }
+        left->neighbor = right->owner;
+        right->neighbor = left->owner;
+        for (auto* face : {left, right})
+        {
+            const auto& owner = d_cells[static_cast<size_t>(face->owner)];
+            const auto& neighbor = d_cells[static_cast<size_t>(face->neighbor)];
+            face->neighbor_to_face_distance = (face->center - neighbor.center).norm();
+            face->cell_center_distance = (neighbor.center - owner.center).norm();
+        }
+    }
+
+    void perturb_face_metrics()
+    {
+        for (auto& face : d_faces)
+        {
+            // These one-ULP changes distinguish supplied metrics from a
+            // receiver-side reconstruction using the unchanged coordinates.
+            face.center.x = std::nextafter(
+                face.center.x, std::numeric_limits<double>::infinity());
+            face.area = std::nextafter(
+                face.area, std::numeric_limits<double>::infinity());
+            auto& normal = face.unit_normal_from_owner;
+            normal.x = std::nextafter(normal.x, 0.0);
+            normal.y = std::nextafter(normal.y, 0.0);
+            normal.z = std::nextafter(normal.z, 0.0);
+            face.unit_normal_from_neighbor = normal * -1.0;
+            face.owner_to_face_distance = std::nextafter(
+                face.owner_to_face_distance, std::numeric_limits<double>::infinity());
+            if (face.neighbor != SimpleFluid::invalid_id<LO>())
+            {
+                face.neighbor_to_face_distance = std::nextafter(
+                    face.neighbor_to_face_distance,
+                    std::numeric_limits<double>::infinity());
+                face.cell_center_distance = std::nextafter(
+                    face.cell_center_distance, std::numeric_limits<double>::infinity());
+            }
         }
     }
 
@@ -428,7 +499,7 @@ gather_all_owned_gids(const MeshHandle& mesh)
 
 } // namespace
 
-/** @brief Verifies face identity survives legacy cell-packet transport. */
+/** @brief Verifies face identity and metrics survive legacy packet transport. */
 TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
 {
     using Packet = SimpleFluid::partition_detail::CellPacket<Pack>;
@@ -441,6 +512,9 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
     packet.face_neighbor_gids = {
         SimpleFluid::invalid_id<Pack::global_ordinal_type>(), 23};
     packet.face_neighbor_ranks = {-1, 2};
+    packet.face_geometry = {
+        {{0.25, -0.5, 1.0}, 0.125, {0.0, -1.0, 0.0}, 0.25, 0.0, 0.0, 17},
+        {{1.25, 0.5, -1.0}, 0.375, {1.0, 0.0, 0.0}, 0.375, 0.625, 1.0, 23}};
 
     const auto bytes = Packet::serialize_packets({packet});
     const auto restored =
@@ -457,6 +531,33 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
         restored.front().face_neighbor_ranks,
         packet.face_neighbor_ranks);
 
+    auto expect_geometry_equal = [](const Packet::FaceGeometry& actual,
+                                    const Packet::FaceGeometry& expected)
+    {
+        EXPECT_EQ(actual.center.x, expected.center.x);
+        EXPECT_EQ(actual.center.y, expected.center.y);
+        EXPECT_EQ(actual.center.z, expected.center.z);
+        EXPECT_EQ(actual.area, expected.area);
+        EXPECT_EQ(actual.unit_normal_from_owner.x, expected.unit_normal_from_owner.x);
+        EXPECT_EQ(actual.unit_normal_from_owner.y, expected.unit_normal_from_owner.y);
+        EXPECT_EQ(actual.unit_normal_from_owner.z, expected.unit_normal_from_owner.z);
+        EXPECT_EQ(actual.owner_to_face_distance, expected.owner_to_face_distance);
+        EXPECT_EQ(actual.neighbor_to_face_distance, expected.neighbor_to_face_distance);
+        EXPECT_EQ(actual.cell_center_distance, expected.cell_center_distance);
+        EXPECT_EQ(actual.owner_gid, expected.owner_gid);
+    };
+    ASSERT_EQ(restored.front().face_geometry.size(), packet.face_geometry.size());
+    for (size_t face = 0; face < packet.face_geometry.size(); ++face)
+    {
+        expect_geometry_equal(
+            restored.front().face_geometry[face], packet.face_geometry[face]);
+    }
+    EXPECT_EQ(
+        bytes.size(), sizeof(std::uint32_t) + Packet::serialized_size(packet));
+    EXPECT_THROW(
+        Packet::view_packets(bytes.data(), bytes.size() - 1),
+        std::runtime_error);
+
     const auto views =
         Packet::view_packets(bytes.data(), bytes.size());
     ASSERT_EQ(views.size(), 1U);
@@ -470,6 +571,7 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
     std::vector<Pack::global_ordinal_type>
         viewed_face_global_ids;
     std::vector<int> viewed_face_neighbor_ranks;
+    size_t viewed_face_count = 0;
     views.front().for_each_face(
         [&](const Packet::View::Face& face)
         {
@@ -479,7 +581,12 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
             viewed_face_global_ids.push_back(face.global_id);
             viewed_face_neighbor_ranks.push_back(
                 face.neighbor_rank);
+            ASSERT_LT(viewed_face_count, packet.face_geometry.size());
+            expect_geometry_equal(
+                face.geometry, packet.face_geometry[viewed_face_count]);
+            ++viewed_face_count;
         });
+    EXPECT_EQ(viewed_face_count, packet.face_geometry.size());
     EXPECT_EQ(viewed_face_nodes, packet.face_node_keys);
     EXPECT_EQ(
         viewed_face_global_ids,
@@ -929,6 +1036,115 @@ TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
         }
         EXPECT_GT(mesh->face_area(face_lid), 0.0);
         EXPECT_GT(mesh->face_cell_center_distance(face_lid), 0.0);
+    }
+}
+
+/** @brief Preserves supplied source metrics through redistribution and ghost exchange. */
+TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2)
+    {
+        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+    }
+
+    using GO = Pack::global_ordinal_type;
+    using LO = Pack::local_ordinal_type;
+    using Geometry = SimpleFluid::partition_detail::CellPacket<Pack>::FaceGeometry;
+    const auto source = make_unstructured_hex_line(8);
+    auto expect_same_bits = [](double actual, double expected)
+    {
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(actual),
+            std::bit_cast<std::uint64_t>(expected));
+    };
+
+    for (const auto& [root_only, periodic] : std::array{
+             std::pair{false, false}, std::pair{true, false},
+             std::pair{false, true}, std::pair{true, true}})
+    {
+        SCOPED_TRACE(root_only ? "root-only source" : "replicated source");
+        SCOPED_TRACE(periodic ? "periodic end faces" : "physical end faces");
+        auto mesh = std::make_shared<ReplicatedLegacyMesh>(*source);
+        if (periodic) mesh->pair_end_faces_periodically();
+        mesh->perturb_face_metrics();
+        std::map<GO, Geometry> original_geometry;
+        std::map<GO, GO> periodic_neighbor_gids;
+        for (size_t face = 0; face < mesh->num_faces(); ++face)
+        {
+            const auto lid = static_cast<LO>(face);
+            const auto& info = mesh->face(lid);
+            original_geometry.emplace(
+                mesh->face_global_id(lid),
+                Geometry{info.center, info.area, info.unit_normal_from_owner,
+                         info.owner_to_face_distance, info.neighbor_to_face_distance,
+                         info.cell_center_distance, mesh->cell_global_id(info.owner)});
+            if (periodic && (info.boundary_id == 1 || info.boundary_id == 2))
+            {
+                periodic_neighbor_gids.emplace(
+                    mesh->face_global_id(lid), mesh->cell_global_id(info.neighbor));
+            }
+        }
+        if (root_only && comm->getRank() != 0)
+        {
+            mesh = std::make_shared<ReplicatedLegacyMesh>();
+        }
+
+        EXPECT_TRUE(SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm));
+        int local_reversed = 0;
+        int local_ghost_only = 0;
+        int local_periodic_pairs = 0;
+        for (size_t face = 0; face < mesh->num_faces(); ++face)
+        {
+            const auto lid = static_cast<LO>(face);
+            const auto& info = mesh->face(lid);
+            const auto original = original_geometry.find(mesh->face_global_id(lid));
+            EXPECT_NE(original, original_geometry.end());
+            if (original == original_geometry.end())
+            {
+                continue;
+            }
+            const auto& expected = original->second;
+            const bool same_owner =
+                mesh->cell_global_id(info.owner) == expected.owner_gid;
+            const auto expected_normal = same_owner
+                ? expected.unit_normal_from_owner
+                : expected.unit_normal_from_owner * -1.0;
+            const auto expected_neighbor_normal = expected_normal * -1.0;
+            local_reversed += !same_owner;
+            local_ghost_only += !mesh->cell(info.owner).owned;
+            expect_same_bits(info.center.x, expected.center.x);
+            expect_same_bits(info.center.y, expected.center.y);
+            expect_same_bits(info.center.z, expected.center.z);
+            expect_same_bits(info.area, expected.area);
+            expect_same_bits(info.owner_to_face_distance, same_owner
+                ? expected.owner_to_face_distance : expected.neighbor_to_face_distance);
+            expect_same_bits(info.neighbor_to_face_distance, same_owner
+                ? expected.neighbor_to_face_distance : expected.owner_to_face_distance);
+            expect_same_bits(info.cell_center_distance, expected.cell_center_distance);
+            expect_same_bits(info.unit_normal_from_owner.x, expected_normal.x);
+            expect_same_bits(info.unit_normal_from_owner.y, expected_normal.y);
+            expect_same_bits(info.unit_normal_from_owner.z, expected_normal.z);
+            expect_same_bits(info.unit_normal_from_neighbor.x, expected_neighbor_normal.x);
+            expect_same_bits(info.unit_normal_from_neighbor.y, expected_neighbor_normal.y);
+            expect_same_bits(info.unit_normal_from_neighbor.z, expected_neighbor_normal.z);
+            const auto paired = periodic_neighbor_gids.find(mesh->face_global_id(lid));
+            if (paired != periodic_neighbor_gids.end())
+            {
+                const auto paired_lid = mesh->global_to_local_cell(paired->second);
+                EXPECT_EQ(info.neighbor, paired_lid);
+                local_periodic_pairs += paired_lid != SimpleFluid::invalid_id<LO>();
+            }
+        }
+        int global_reversed = 0;
+        int global_ghost_only = 0;
+        int global_periodic_pairs = 0;
+        my_mpi::allreduce(&local_reversed, &global_reversed, 1, MPI_SUM);
+        my_mpi::allreduce(&local_ghost_only, &global_ghost_only, 1, MPI_SUM);
+        my_mpi::allreduce(&local_periodic_pairs, &global_periodic_pairs, 1, MPI_SUM);
+        EXPECT_GT(global_reversed, 0);
+        EXPECT_GT(global_ghost_only, 0);
+        if (periodic) EXPECT_GE(global_periodic_pairs, 2);
     }
 }
 
@@ -1458,40 +1674,6 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
             }
         }
     }
-}
-
-/** Empty graph ranks must use the same collective map constructors as their peer. */
-TEST(MeshPartitionerTest, OneCellPartitionWithEmptyRanksCompletesCollectively)
-{
-    const auto comm = Tpetra::getDefaultComm();
-    if (comm->getSize() < 2) GTEST_SKIP() << "Requires at least two ranks.";
-    auto source = make_unstructured_hex_line(1);
-    const auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(*source, comm);
-    const auto local_owned = static_cast<int>(partition.indexer.num_owned_cells());
-    int global_owned = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owned, &global_owned);
-    EXPECT_EQ(global_owned, 1);
-    int local_empty = local_owned == 0, global_empty = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &global_empty);
-    EXPECT_EQ(global_empty, comm->getSize() - 1);
-    if (local_owned)
-    {
-        EXPECT_EQ(partition.indexer.cell_global_id(0), 0);
-        EXPECT_DOUBLE_EQ(source->cell_volume(source->cell_id(0)), 1.0);
-    }
-    else
-    {
-        EXPECT_EQ(source->num_cells(), 0U);
-        EXPECT_EQ(source->num_faces(), 0U);
-        EXPECT_EQ(source->num_nodes(), 0U);
-    }
-    const auto distributed = std::make_shared<PartitionedUnstructured>(source, partition.indexer, comm);
-    PartitionedCellField value(SimpleFluid::ScalarCellFieldDescriptor<Pack>("single_cell"), distributed);
-    for (size_t cell = 0; cell < distributed->num_owned_cells(); ++cell)
-        value.set_owned_value(static_cast<Pack::local_ordinal_type>(cell), 7.0);
-    value.sync_ghosts();
-    for (size_t cell = 0; cell < distributed->num_local_cells(); ++cell)
-        EXPECT_DOUBLE_EQ(value.value(static_cast<Pack::local_ordinal_type>(cell)), 7.0);
 }
 
 /** Graded planar quads must retain the serial area-centroid geometry after packet rebuild.

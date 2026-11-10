@@ -118,7 +118,7 @@ inline real_t tetra_volume(const Vec3& a, const Vec3& b, const Vec3& c, const Ve
 /**
  * @brief Compute the centroid of a tetrahedron.
  *
- * @tparam Vec3 Vector type supporting addition and scalar division.
+ * @tparam Vec3 Vector type supporting addition, subtraction and scalar division.
  * @param a First tetrahedron vertex.
  * @param b Second tetrahedron vertex.
  * @param c Third tetrahedron vertex.
@@ -128,7 +128,8 @@ inline real_t tetra_volume(const Vec3& a, const Vec3& b, const Vec3& c, const Ve
 template <class Vec3>
 inline Vec3 tetra_centroid(const Vec3& a, const Vec3& b, const Vec3& c, const Vec3& d)
 {
-    return (a + b + c + d) / static_cast<typename Vec3::scalar_t>(4);
+    return a + ((b - a) + (c - a) + (d - a))
+             / static_cast<typename Vec3::scalar_t>(4);
 }
 
 /**
@@ -174,18 +175,19 @@ inline Vec3 hex_centroid(const std::vector<Vec3>& x)
         {{1, 3, 4, 6}},
     }};
 
-    Vec3 weighted_centroid{};
+    const auto& origin = x[0];
+    Vec3 weighted_offset{};
     real_t total_volume = 0.0;
     for (const auto& tetrahedron : tetrahedra)
     {
         const auto volume =
             tetra_volume(x[tetrahedron[0]], x[tetrahedron[1]],
                          x[tetrahedron[2]], x[tetrahedron[3]]);
-        weighted_centroid =
-            weighted_centroid
-          + tetra_centroid(x[tetrahedron[0]], x[tetrahedron[1]],
-                           x[tetrahedron[2]], x[tetrahedron[3]])
-          * volume;
+        const auto centroid_offset =
+            ((x[tetrahedron[0]] - origin) + (x[tetrahedron[1]] - origin)
+           + (x[tetrahedron[2]] - origin) + (x[tetrahedron[3]] - origin))
+          / static_cast<typename Vec3::scalar_t>(4);
+        weighted_offset = weighted_offset + centroid_offset * volume;
         total_volume += volume;
     }
     if (total_volume <= 0.0)
@@ -193,7 +195,7 @@ inline Vec3 hex_centroid(const std::vector<Vec3>& x)
         throw std::runtime_error(
             "Cannot compute the centroid of a zero-volume hexahedron.");
     }
-    return weighted_centroid / total_volume;
+    return origin + weighted_offset / total_volume;
 }
 
 /**
@@ -230,18 +232,19 @@ inline Vec3 wedge_centroid(const std::vector<Vec3>& x)
         {{2, 4, 5, 3}},
     }};
 
-    Vec3 weighted_centroid{};
+    const auto& origin = x[0];
+    Vec3 weighted_offset{};
     real_t total_volume = 0.0;
     for (const auto& tetrahedron : tetrahedra)
     {
         const auto volume =
             tetra_volume(x[tetrahedron[0]], x[tetrahedron[1]],
                          x[tetrahedron[2]], x[tetrahedron[3]]);
-        weighted_centroid =
-            weighted_centroid
-          + tetra_centroid(x[tetrahedron[0]], x[tetrahedron[1]],
-                           x[tetrahedron[2]], x[tetrahedron[3]])
-          * volume;
+        const auto centroid_offset =
+            ((x[tetrahedron[0]] - origin) + (x[tetrahedron[1]] - origin)
+           + (x[tetrahedron[2]] - origin) + (x[tetrahedron[3]] - origin))
+          / static_cast<typename Vec3::scalar_t>(4);
+        weighted_offset = weighted_offset + centroid_offset * volume;
         total_volume += volume;
     }
     if (total_volume <= 0.0)
@@ -249,7 +252,7 @@ inline Vec3 wedge_centroid(const std::vector<Vec3>& x)
         throw std::runtime_error(
             "Cannot compute the centroid of a zero-volume wedge.");
     }
-    return weighted_centroid / total_volume;
+    return origin + weighted_offset / total_volume;
 }
 
 /**
@@ -267,14 +270,15 @@ inline Vec3 face_centroid(const std::vector<Vec3>& x)
     CHECK(x.size() == 3 || x.size() == 4);
     if (x.size() == 3)
     {
-        return (x[0] + x[1] + x[2])
-             / static_cast<typename Vec3::scalar_t>(3);
+        return x[0] + ((x[1] - x[0]) + (x[2] - x[0]))
+                    / static_cast<typename Vec3::scalar_t>(3);
     }
 
-    const auto first_area =
-        (x[1] - x[0]).cross(x[2] - x[0]).norm() * 0.5;
-    const auto second_area =
-        (x[2] - x[0]).cross(x[3] - x[0]).norm() * 0.5;
+    const auto first_offset = x[1] - x[0];
+    const auto second_offset = x[2] - x[0];
+    const auto third_offset = x[3] - x[0];
+    const auto first_area = first_offset.cross(second_offset).norm() * 0.5;
+    const auto second_area = second_offset.cross(third_offset).norm() * 0.5;
     const auto total_area = first_area + second_area;
     if (total_area <= 0.0)
     {
@@ -282,15 +286,15 @@ inline Vec3 face_centroid(const std::vector<Vec3>& x)
             "Cannot compute the centroid of a zero-area face.");
     }
 
-    const auto first_centroid =
-        (x[0] + x[1] + x[2])
+    const auto first_centroid_offset =
+        (first_offset + second_offset)
       / static_cast<typename Vec3::scalar_t>(3);
-    const auto second_centroid =
-        (x[0] + x[2] + x[3])
+    const auto second_centroid_offset =
+        (second_offset + third_offset)
       / static_cast<typename Vec3::scalar_t>(3);
-    return (first_centroid * first_area
-          + second_centroid * second_area)
-         / total_area;
+    return x[0] + (first_centroid_offset * first_area
+                 + second_centroid_offset * second_area)
+                / total_area;
 }
 
 /**
