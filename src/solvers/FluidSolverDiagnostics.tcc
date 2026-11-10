@@ -1,5 +1,14 @@
 #pragma once
+#include "FVM/details/DiagnosticCapture.hh"
+#include <cstdint>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <memory>
 #include <set>
+#include <sstream>
+#include <string>
+#include <string_view>
 namespace SimpleFluid {
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::evaluate_diagnostics(const SolverDiagnosticsOptions& options) const -> SolverDiagnosticsResult<scalar_type>
@@ -44,10 +53,95 @@ auto FluidSolver<Pack>::evaluate_flow_diagnostics(const SolverDiagnosticsOptions
     stored.data().update(scalar_type{1}, pressure_corrected_face_fluxes().data(), scalar_type{}); stored.sync_ghosts();
     const auto& bc=retained_boundaries ? *retained_boundaries : d_problem.boundary_conditions();
     const auto boundaries = retained_velocity_boundary ? *retained_velocity_boundary : FVM::cache_velocity_boundary_conditions<Pack>(d_mesh,bc);
+    SimpleFluid::diagnostics::arm_pressure_gradient_build_capture();
     native_face_flux_workspace_type workspace(d_mesh);
     velocity_field_type gradient(d_mesh, "diagnostic_pressure_gradient");
     FVM::cell_gradient(p, bc.pressure, gradient, workspace.gradient_cache(),
         d_problem.time_options().pressure_gradient_scheme);
+    SimpleFluid::diagnostics::disarm_pressure_gradient_build_capture();
+    // Opt-in frozen-operand capture of the pressure-gradient reconstruction.
+    // Read-only second pass over the same cached rows; never affects the gate.
+    if (SimpleFluid::diagnostics::pressure_gradient_eval_capture_enabled()
+            && d_problem.time_options().pressure_gradient_scheme == FVM::CellGradientScheme::LeastSquares)
+    {
+        const auto& capture_configuration = SimpleFluid::diagnostics::capture_configuration();
+        const auto& capture_prefix = capture_configuration.pressure_gradient_prefix;
+        const auto& cache = workspace.gradient_cache();
+        const auto p_owned = p.owned_read_view();
+        const auto p_local = p.local_read_view();
+        const auto g_values = gradient.owned_read_view();
+        const int rank = d_mesh->owned_cell_map()->getComm()->getRank();
+        const int size = d_mesh->owned_cell_map()->getComm()->getSize();
+        std::ofstream out(capture_prefix + "_gradient_eval_np" + std::to_string(size)
+                + "_rank" + std::to_string(rank) + ".csv",
+            std::ios::trunc);
+        out << std::hexfloat
+            << "cell_gid,kind,p_i,sample_index,sample_kind,other_lid,other_gid,"
+               "batch,in_batch,cond_type,cond_value,normal_distance,"
+               "w_x,w_y,w_z,p_other,delta,grad_x,grad_y,grad_z\n";
+        const auto boundary_condition = [&](int batch_id, size_t)
+        {
+            const auto it = bc.pressure.find(d_mesh->boundary_batch_name(batch_id));
+            return it == bc.pressure.end() ? BoundaryCondition{} : it->second;
+        };
+        FVM::detail::visit_cached_gradient_rows<true>(cache,
+            [&](local_ordinal_type cell_lid, const auto& geometry)
+        {
+            const auto gid = [&]
+            {
+                if constexpr (requires { d_mesh->cell_geometry_global_id(cell_lid); })
+                    return static_cast<std::uint64_t>(d_mesh->cell_geometry_global_id(cell_lid));
+                else
+                    return static_cast<std::uint64_t>(
+                        d_mesh->owned_cell_map()->getGlobalElement(cell_lid));
+            }();
+            if (!capture_configuration.targets_pressure_gradient_cell(gid)) return;
+            std::string_view kind = "generic";
+            if constexpr (requires { cache.structured_geometry(); })
+                if (cache.structured_geometry()) kind = "structured";
+            if constexpr (requires { cache.layered_geometry(); })
+                if (cache.layered_geometry()) kind = "layered";
+            const auto p_i = p_owned(cell_lid, 0);
+            const auto gx = g_values(cell_lid, 0);
+            const auto gy = g_values(cell_lid, 1);
+            const auto gz = g_values(cell_lid, 2);
+            size_t index = 0;
+            for (const auto& sample : geometry.interior_samples)
+            {
+                const auto p_other = p_local(sample.other_lid, 0);
+                const auto other_gid = [&]
+                {
+                    if constexpr (requires { d_mesh->cell_geometry_global_id(sample.other_lid); })
+                        return static_cast<std::uint64_t>(
+                            d_mesh->cell_geometry_global_id(sample.other_lid));
+                    else
+                        return static_cast<std::uint64_t>(
+                            d_mesh->overlap_cell_map()->getGlobalElement(sample.other_lid));
+                }();
+                out << gid << ',' << kind << ',' << p_i << ',' << index++
+                    << ",interior," << sample.other_lid << ',' << other_gid
+                    << ",,,,,," << sample.weight.x << ',' << sample.weight.y << ','
+                    << sample.weight.z << ',' << p_other << ','
+                    << (p_other - p_i) << ',' << gx << ',' << gy << ',' << gz << '\n';
+            }
+            for (const auto& sample : geometry.boundary_samples)
+            {
+                const auto condition = boundary_condition(
+                    sample.location.batch_id, sample.location.in_batch_id);
+                const auto increment = condition.type == BoundaryConditionType::Neumann
+                    ? static_cast<scalar_type>(condition.value)
+                        * static_cast<scalar_type>(sample.normal_distance)
+                    : static_cast<scalar_type>(condition.value) - p_i;
+                out << gid << ',' << kind << ',' << p_i << ',' << index++
+                    << ",boundary,,," << sample.location.batch_id << ','
+                    << sample.location.in_batch_id << ','
+                    << static_cast<int>(condition.type) << ',' << condition.value << ','
+                    << sample.normal_distance << ',' << sample.weight.x << ','
+                    << sample.weight.y << ',' << sample.weight.z << ',' << ','
+                    << increment << ',' << gx << ',' << gy << ',' << gz << '\n';
+            }
+        });
+    }
     auto flux_pressure_bc=bc.pressure;
     std::set<std::string> kinematic_patches;
     if(mesh_flux) for(auto& [name,condition]:flux_pressure_bc) {
@@ -75,6 +169,34 @@ auto FluidSolver<Pack>::evaluate_flow_diagnostics(const SolverDiagnosticsOptions
         result.unavailable.push_back("stored accepted face flux unavailable before accepted steps; transport uses reconstructed flux");
     }
     const auto grad = gradient.owned_read_view();
+    // Opt-in isolation capture of the reconstructed pressure gradient and its input.
+    // Off unless diagnostics::transpose_stress_capture_enabled(). Never affects the gates.
+    std::unique_ptr<std::ofstream> pressure_gradient_dump;
+    if (SimpleFluid::diagnostics::transpose_stress_capture_enabled())
+    {
+        const auto& capture_prefix = SimpleFluid::diagnostics::capture_configuration().transpose_stress_prefix;
+        const int dump_rank = d_mesh->owned_cell_map()->getComm()->getRank();
+        const int dump_size = d_mesh->owned_cell_map()->getComm()->getSize();
+        pressure_gradient_dump = std::make_unique<std::ofstream>(
+            capture_prefix + "_pressure_gradient_np" + std::to_string(dump_size)
+                + "_rank" + std::to_string(dump_rank) + ".csv", std::ios::trunc);
+        if (pressure_gradient_dump->good())
+            *pressure_gradient_dump << std::setprecision(17)
+                                    << "cell_geometry_gid,pressure,grad_x,grad_y,grad_z\n";
+    }
+    if (pressure_gradient_dump)
+    {
+        for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
+        {
+            const auto lid = static_cast<local_ordinal_type>(cell);
+            if constexpr (requires { d_mesh->cell_geometry_global_id(lid); })
+                *pressure_gradient_dump << d_mesh->cell_geometry_global_id(lid);
+            else
+                *pressure_gradient_dump << d_mesh->owned_cell_map()->getGlobalElement(lid);
+            *pressure_gradient_dump << ',' << p.value(lid) << ',' << grad(lid, 0) << ',' << grad(lid, 1)
+                                    << ',' << grad(lid, 2) << '\n';
+        }
+    }
     auto source = [&](local_ordinal_type c) -> vec_type {
         vec_type a{-grad(c,0)/rho, -grad(c,1)/rho, -grad(c,2)/rho};
         if (k_gradient) {

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Exercise real graded-mesh replay; retain generated evidence outside source."""
 from pathlib import Path
-import json,os,subprocess,sys,math,argparse,tempfile
+import json,os,subprocess,sys,argparse,tempfile
+from replay_comparison import compare_replays, format_comparison
 parser=argparse.ArgumentParser(description="Native pitzDaily replay, MPI reproducibility, and rejection checks")
 parser.add_argument('--executable',type=Path,required=True)
 parser.add_argument('--output',type=Path)
@@ -44,13 +45,18 @@ assert final['stored_flux_available'] is True and len(final['pressure_update_l2_
 prefix=generated/'simplefluid_cells'
 serial=run('serial-replay',1,dict(REPLAY_PREFIX=prefix,REPLAY_RANKS=producer_count,DIAGNOSTIC_ONLY=1))
 parallel=run('parallel-replay',producer_count,dict(REPLAY_PREFIX=prefix,REPLAY_RANKS=producer_count,DIAGNOSTIC_ONLY=1))
-a=json.loads((serial/'diagnostics_step0.json').read_text());b=json.loads((parallel/'diagnostics_step0.json').read_text())
-for field in ('k','secondary','reconstructed_continuity'):
-    for norm in ('volume_rms','max_density','signed_sum'):
-        assert math.isclose(a[field][norm],b[field][norm],rel_tol=1e-10,abs_tol=1e-10),(field,norm,a[field][norm],b[field][norm])
-for axis in range(3):
-    for norm in ('volume_rms','max_density','signed_sum'):
-        assert math.isclose(a['momentum'][axis][norm],b['momentum'][axis][norm],rel_tol=1e-10,abs_tol=1e-10)
+comparison=compare_replays(serial,parallel)
+comparison_path=out/'comparison.json'
+comparison_path.write_text(json.dumps(comparison,indent=2)+'\n')
+integrated=comparison['integrated_residual_check']
+counts=integrated['counts']
+print(f'Integrated accumulation-only diagnostic status={integrated["status"]} '
+      f'checked={counts["checked"]} within={counts["within"]} exceeds={counts["exceeds"]} '
+      f'unavailable={counts["unavailable"]} tau=0 upstream=unassessed',flush=True)
+if not comparison['passed']:
+    print(format_comparison(comparison),file=sys.stderr)
+    print(f'Retained replay comparison: {comparison_path}',file=sys.stderr)
+    raise AssertionError(f'{len(comparison["failures"])} serial/parallel replay summaries failed. Evidence written to {comparison_path}')
 run('missing-input-partition',producer_count,dict(REPLAY_PREFIX=prefix,REPLAY_RANKS=producer_count-1,DIAGNOSTIC_ONLY=1),False)
 run('wrong-mesh',producer_count,dict(REPLAY_PREFIX=prefix,REPLAY_RANKS=producer_count,DIAGNOSTIC_ONLY=1,MESH_DIVISOR=3),False)
 run('bad-coefficient',producer_count,dict(REPLAY_PREFIX=prefix,REPLAY_RANKS=producer_count,DIAGNOSTIC_ONLY=1,DIAGNOSTIC_COEFFICIENT_DT='nan'),False)

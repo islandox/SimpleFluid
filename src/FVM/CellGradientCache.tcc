@@ -5,6 +5,52 @@
 #pragma once
 
 #include "FVM/CellOperators.hh"
+#include "FVM/details/DiagnosticCapture.hh"
+
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <string>
+
+namespace SimpleFluid::FVM::detail
+{
+/** Opt-in frozen geometry capture for the cached least-squares weights. */
+struct GradientBuildSink
+{
+    std::ofstream out;
+    bool opened = false;
+    bool active = false;
+};
+
+inline GradientBuildSink& gradient_build_sink()
+{
+    static GradientBuildSink sink;
+    return sink;
+}
+
+template<class MeshType>
+GradientBuildSink* gradient_build_capture(const MeshType& mesh, bool include_boundary)
+{
+    auto& sink = gradient_build_sink();
+    if (!include_boundary) return nullptr;
+    const auto& configuration = SimpleFluid::diagnostics::capture_configuration();
+    if (!SimpleFluid::diagnostics::pressure_gradient_build_capture_enabled()) return nullptr;
+    if (!sink.opened)
+    {
+        sink.opened = true;
+        const int rank = mesh.owned_cell_map()->getComm()->getRank();
+        const int size = mesh.owned_cell_map()->getComm()->getSize();
+        sink.out.open(configuration.pressure_gradient_prefix + "_gradient_build_np" + std::to_string(size)
+                + "_rank" + std::to_string(rank) + ".csv", std::ios::trunc);
+        if (!sink.out.good()) return nullptr;
+        sink.out << std::hexfloat
+                 << "cell_gid,n00,n01,n02,n11,n12,n22,index,sample_kind,other_gid,"
+                    "dir_x,dir_y,dir_z,normal_distance,w_x,w_y,w_z\n";
+        sink.active = true;
+    }
+    return sink.active ? &sink : nullptr;
+}
+}
 
 namespace SimpleFluid::FVM
 {
@@ -68,6 +114,55 @@ auto CellGradientCache<Pack, MeshType>::build_geometry(
                 cell_geometry.boundary_samples.push_back({
                     boundary_locations.at(sample.face_lid), apply_inverse(inverse, sample.direction),
                     sample.normal_distance});
+            if constexpr (IncludeBoundary)
+            {
+                if (auto* sink = detail::gradient_build_capture(mesh, true))
+                {
+                    const auto gid = [&]
+                    {
+                        if constexpr (requires { mesh.cell_geometry_global_id(cell_lid); })
+                            return static_cast<std::uint64_t>(mesh.cell_geometry_global_id(cell_lid));
+                        else
+                            return static_cast<std::uint64_t>(
+                                mesh.owned_cell_map()->getGlobalElement(cell_lid));
+                    }();
+                    if (SimpleFluid::diagnostics::capture_configuration().targets_pressure_gradient_cell(gid))
+                    {
+                        const auto emit = [&](size_t index, const auto& sample, const auto& weight,
+                                              const char* kind, std::uint64_t other_gid,
+                                              real_t normal_distance)
+                        {
+                            sink->out << gid << ',' << normal[0][0] << ',' << normal[0][1] << ','
+                                       << normal[0][2] << ',' << normal[1][1] << ',' << normal[1][2] << ','
+                                       << normal[2][2] << ',' << index << ',' << kind << ','
+                                       << other_gid << ',' << sample.direction.x << ','
+                                       << sample.direction.y << ',' << sample.direction.z << ','
+                                       << normal_distance << ',' << weight.x << ',' << weight.y << ','
+                                       << weight.z << '\n';
+                        };
+                        for (size_t i = 0; i < interior_samples.size(); ++i)
+                        {
+                            const auto& sample = interior_samples[i];
+                            const auto other_gid = [&]
+                            {
+                                if constexpr (requires { mesh.cell_geometry_global_id(sample.other_lid); })
+                                    return static_cast<std::uint64_t>(
+                                        mesh.cell_geometry_global_id(sample.other_lid));
+                                else
+                                    return static_cast<std::uint64_t>(
+                                        mesh.overlap_cell_map()->getGlobalElement(sample.other_lid));
+                            }();
+                            emit(i, sample, cell_geometry.interior_samples[i].weight, "interior", other_gid, 0.0);
+                        }
+                        for (size_t i = 0; i < boundary_samples.size(); ++i)
+                        {
+                            const auto& sample = boundary_samples[i];
+                            emit(i, sample, cell_geometry.boundary_samples[i].weight, "boundary", 0,
+                                sample.normal_distance);
+                        }
+                    }
+                }
+            }
         };
         if constexpr (IncludeBoundary) traversal.cells().boundary().apply(build_cell);
         else traversal.cells().all().apply(build_cell);

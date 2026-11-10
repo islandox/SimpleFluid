@@ -11,6 +11,7 @@
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/ScalarTransportDiscretization.hh"
+#include "FVM/details/DiagnosticCapture.hh"
 #include "FVM/details/NonOrthogonalSelection.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/StoredScalarGradientKernel.hh"
@@ -27,7 +28,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <exception>
+#include <fstream>
+#include <iomanip>
 #include <map>
 #include <memory>
 #include <optional>
@@ -2194,7 +2198,7 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
     FaceCoefficientInterpolation coefficient_interpolation,
     const TransportAssemblyGeometry<MeshType>& assembly_geometry,
     TensorCellFieldStored<Pack, MeshType>* gradient_workspace = nullptr,
-    BoundaryFaceSelector zero_gradient_stress = {})
+    BoundaryFaceSelector zero_gradient_stress = {}, const char* dump_prefix = nullptr)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -2213,11 +2217,30 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
     const auto rhs_data = rhs.getLocalViewHost(Tpetra::Access::ReadWrite);
     const auto& mesh = old_velocity.mesh();
     const auto execution = acquire_mesh_execution(mesh);
+    // Opt-in isolation capture: per-cell RHS immediately before and after the
+    // lagged deviatoric transpose-stress injection, plus the expanded affine
+    // velocity-gradient tensor that feeds the traction. Never enabled by default.
+    std::unique_ptr<std::ofstream> stress_dump;
+    if (dump_prefix != nullptr && *dump_prefix != '\0')
+    {
+        const int rank = mesh.owned_cell_map()->getComm()->getRank();
+        const int size = mesh.owned_cell_map()->getComm()->getSize();
+        stress_dump = std::make_unique<std::ofstream>(std::string(dump_prefix) + "_np" + std::to_string(size)
+                + "_rank" + std::to_string(rank) + ".csv", std::ios::trunc);
+        if (stress_dump->good())
+        {
+            *stress_dump << std::setprecision(17)
+                         << "cell_geometry_gid,rhs_x_before,rhs_y_before,rhs_z_before,"
+                            "rhs_x_after,rhs_y_after,rhs_z_after,"
+                            "g00,g01,g02,g10,g11,g12,g20,g21,g22\n";
+        }
+    }
 
     visit_transport_assembly_rows(mesh, assembly_geometry,
         [&](local_ordinal_type cell_lid, auto, const auto& visit_faces)
     {
         std::array<scalar_type, 3> cell_rhs{rhs_data(cell_lid, 0), rhs_data(cell_lid, 1), rhs_data(cell_lid, 2)};
+        const std::array<scalar_type, 3> stress_rhs_before = cell_rhs;
         tensor_type cell_gradient{};
         for (size_t component = 0; component < 3; ++component)
         {
@@ -2297,6 +2320,21 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
         {
             rhs_data(cell_lid, component) = cell_rhs[component];
         }
+        if (stress_dump)
+        {
+            if constexpr (requires { mesh.cell_geometry_global_id(cell_lid); })
+                *stress_dump << mesh.cell_geometry_global_id(cell_lid);
+            else
+                *stress_dump << mesh.owned_cell_map()->getGlobalElement(cell_lid);
+            for (size_t component = 0; component < 3; ++component)
+                *stress_dump << ',' << stress_rhs_before[component];
+            for (size_t component = 0; component < 3; ++component)
+                *stress_dump << ',' << cell_rhs[component];
+            for (size_t row = 0; row < 3; ++row)
+                for (size_t column = 0; column < 3; ++column)
+                    *stress_dump << ',' << cell_gradient[row].component(column);
+            *stress_dump << '\n';
+        }
     });
 }
 
@@ -2328,6 +2366,20 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
     const auto& mesh = old_velocity.mesh();
     validate_assembly_mode(mesh, mode);
     const auto execution = acquire_mesh_execution(mesh);
+    // Opt-in isolation capture for the pre-stress RHS decomposition. Off by default.
+    const bool capture_stress = mode == AssemblyMode::Steady
+        && SimpleFluid::diagnostics::transpose_stress_capture_enabled();
+    const std::string& stress_prefix =
+        SimpleFluid::diagnostics::capture_configuration().transpose_stress_prefix;
+    std::unique_ptr<std::ofstream> source_dump;
+    if (capture_stress)
+    {
+        const int dump_rank = mesh.owned_cell_map()->getComm()->getRank();
+        const int dump_size = mesh.owned_cell_map()->getComm()->getSize();
+        source_dump = std::make_unique<std::ofstream>(stress_prefix + "_source_np"
+                + std::to_string(dump_size) + "_rank" + std::to_string(dump_rank) + ".csv", std::ios::trunc);
+        if (source_dump->good()) *source_dump << std::setprecision(17) << "cell_geometry_gid,source_x,source_y,source_z\n";
+    }
     const std::array<int, 2> local_ale_state{
         ale == nullptr ? 0 : 1, ale == nullptr ? 0 : -1};
     const auto ale_state =
@@ -2491,6 +2543,16 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
                             * old_value.component(component)
                         + new_volume * source_value.component(component));
             }
+            if (source_dump)
+            {
+                if constexpr (requires { mesh.cell_geometry_global_id(cell_lid); })
+                    *source_dump << mesh.cell_geometry_global_id(cell_lid);
+                else
+                    *source_dump << mesh.owned_cell_map()->getGlobalElement(cell_lid);
+                for (size_t component = 0; component < components; ++component)
+                    *source_dump << ',' << new_volume * source_value.component(component);
+                *source_dump << '\n';
+            }
 
             auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
                                                   scalar_type face_kinematic_viscosity,
@@ -2635,7 +2697,8 @@ VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
 
     add_stored_deviatoric_transpose_gradient_stress<Pack>(old_velocity, dynamic_viscosity, reference_density, *rhs,
         boundary_diffusion, boundary_viscosity, gradient_stencils, *locations, coefficient_interpolation,
-        assembly_geometry, gradient_workspace, std::move(zero_gradient_stress));
+        assembly_geometry, gradient_workspace, std::move(zero_gradient_stress),
+        capture_stress ? stress_prefix.c_str() : nullptr);
 
     const auto prepared = prepare_stored_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32, rows);
     const auto& matrix = prepared.matrix;

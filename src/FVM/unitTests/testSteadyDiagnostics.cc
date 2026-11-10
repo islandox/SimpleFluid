@@ -6,6 +6,10 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include <Tpetra_Core.hpp>
 #include <limits>
+#include <cfenv>
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 namespace {
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
@@ -173,6 +177,178 @@ TEST(SteadyDiagnostics, FluxComponentsSupportEmptyPartitions)
  const auto comm=tiny->owned_cell_map()->getComm();
  if(comm->getSize()>2){int empty=tiny->num_owned_cells()==0?1:0,total=0;
   Teuchos::reduceAll(*comm,Teuchos::REDUCE_SUM,1,&empty,&total);EXPECT_GT(total,0);}
+}
+
+
+TEST(SteadyDiagnostics, IntegratedAccumulationMetadataUsesActualStoredRows)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto map = Teuchos::rcp(new Pack::map_type(8, 0, comm));
+    Pack::matrix_type matrix(map, 2);
+    Pack::vector_type values(map, true), rhs(map, true);
+    std::vector<double> volumes(map->getLocalNumElements());
+    std::vector<unsigned char> excluded(map->getLocalNumElements());
+    const double tiny_normal = 2.0 * std::numeric_limits<double>::min();
+    for (size_t owned = 0; owned < map->getLocalNumElements(); ++owned)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(owned);
+        const auto gid = map->getGlobalElement(lid);
+        Teuchos::Array<Pack::global_ordinal_type> columns;
+        Teuchos::Array<double> coefficients;
+        double value = 1.0, right_hand_side = 1.0;
+        switch (gid)
+        {
+            case 0:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{0, 7};
+                coefficients = Teuchos::Array<double>{2.0, 1.0};
+                value = 3.0;
+                right_hand_side = 4.0;
+                break;
+            case 1:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{0, 1};
+                coefficients = Teuchos::Array<double>{1.0, -1.0};
+                value = 3.0;
+                right_hand_side = 0.0;
+                break;
+            case 2:
+                // A genuine zero-term row evaluates the exact unary negation of b.
+                break;
+            case 3:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{3};
+                coefficients = Teuchos::Array<double>{2.0};
+                excluded[owned] = 1;
+                break;
+            case 4:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{4};
+                coefficients = Teuchos::Array<double>{std::numeric_limits<double>::denorm_min()};
+                break;
+            case 5:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{5};
+                coefficients = Teuchos::Array<double>{tiny_normal};
+                value = tiny_normal;
+                break;
+            case 6:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{6};
+                coefficients = Teuchos::Array<double>{std::numeric_limits<double>::min()};
+                break;
+            case 7:
+                columns = Teuchos::Array<Pack::global_ordinal_type>{7};
+                coefficients = Teuchos::Array<double>{2.0};
+                value = 3.0;
+                right_hand_side = 4.0;
+                break;
+        }
+        if (!columns.empty()) matrix.insertGlobalValues(gid, columns(), coefficients());
+        values.replaceLocalValue(lid, value);
+        rhs.replaceLocalValue(lid, right_hand_side);
+        volumes[owned] = 0.5 * static_cast<double>(gid + 1);
+    }
+    matrix.fillComplete();
+    const auto result = steady_residual_report<Pack>(matrix, rhs, values, volumes, excluded, true);
+    ASSERT_TRUE(result.row_accumulation_available);
+    EXPECT_TRUE(result.evaluation_round_to_nearest);
+    ASSERT_EQ(result.accumulation_terms.size(), volumes.size());
+    ASSERT_EQ(result.accumulation_eligible.size(), volumes.size());
+    for (size_t owned = 0; owned < volumes.size(); ++owned)
+    {
+        const auto gid = map->getGlobalElement(static_cast<Pack::local_ordinal_type>(owned));
+        if (gid == 0)
+        {
+            EXPECT_EQ(result.accumulation_terms[owned], 2u);
+            EXPECT_EQ(result.accumulation_eligible[owned], 1u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], 5.0);
+            EXPECT_DOUBLE_EQ(result.algebraic_scale[owned], 13.0);
+            EXPECT_DOUBLE_EQ(result.density[owned], 10.0);
+        }
+        else if (gid == 1)
+        {
+            EXPECT_EQ(result.accumulation_terms[owned], 2u);
+            EXPECT_EQ(result.accumulation_eligible[owned], 1u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], 0.0);
+            EXPECT_DOUBLE_EQ(result.algebraic_scale[owned], 6.0);
+        }
+        else if (gid == 2)
+        {
+            EXPECT_EQ(result.accumulation_terms[owned], 0u);
+            EXPECT_EQ(result.accumulation_eligible[owned], 1u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], -1.0);
+            EXPECT_DOUBLE_EQ(result.algebraic_scale[owned], 1.0);
+        }
+        else if (gid == 3)
+        {
+            EXPECT_EQ(result.accumulation_eligible[owned], 0u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], 0.0);
+        }
+        else if (gid == 7)
+        {
+            EXPECT_EQ(result.accumulation_terms[owned], 1u);
+            EXPECT_EQ(result.accumulation_eligible[owned], 1u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], 2.0);
+            EXPECT_DOUBLE_EQ(result.algebraic_scale[owned], 10.0);
+        }
+        else
+        {
+            // Subnormal/zero products can hide behind normal final r and s.
+            EXPECT_EQ(result.accumulation_terms[owned], 1u);
+            EXPECT_EQ(result.accumulation_eligible[owned], 0u);
+            EXPECT_DOUBLE_EQ(result.integrated[owned], -1.0);
+            EXPECT_DOUBLE_EQ(result.algebraic_scale[owned], 1.0);
+        }
+    }
+}
+
+TEST(SteadyDiagnostics, CallerProvidedResidualHasNoInventedAccumulationCount)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const std::vector<double> residual{2.0}, scale{4.0}, volume{2.0};
+    const auto report = integrated_residual_report(residual, scale, volume, *comm, true);
+    EXPECT_FALSE(report.row_accumulation_available);
+    EXPECT_TRUE(report.accumulation_terms.empty());
+    EXPECT_TRUE(report.accumulation_eligible.empty());
+    ASSERT_EQ(report.integrated.size(), 1u);
+    EXPECT_DOUBLE_EQ(report.integrated[0], 2.0);
+    EXPECT_DOUBLE_EQ(report.algebraic_scale[0], 4.0);
+    EXPECT_DOUBLE_EQ(report.density[0], 1.0);
+}
+
+TEST(SteadyDiagnostics, ReportRecordsEvaluationRoundingMode)
+{
+    struct RestoreEnvironment
+    {
+        std::fenv_t saved;
+        RestoreEnvironment() { std::fegetenv(&saved); }
+        ~RestoreEnvironment() { std::fesetenv(&saved); }
+    } restore;
+    if (std::fesetround(FE_UPWARD) != 0)
+        GTEST_SKIP() << "Platform does not expose alternate rounding modes.";
+    const SteadyResidualReport<double> upward;
+    EXPECT_FALSE(upward.evaluation_round_to_nearest);
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    const SteadyResidualReport<double> nearest;
+    EXPECT_TRUE(nearest.evaluation_round_to_nearest);
+}
+
+
+TEST(SteadyDiagnostics, BinaryRangeChecksRejectSubnormalsInDazMode)
+{
+#if defined(__SSE__)
+    struct RestoreControl
+    {
+        unsigned int saved = _mm_getcsr();
+        ~RestoreControl() { _mm_setcsr(saved); }
+    } restore;
+    _mm_setcsr(restore.saved | (1u << 6) | (1u << 15));
+    volatile double subnormal_double = std::numeric_limits<double>::denorm_min();
+    volatile float subnormal_float = std::numeric_limits<float>::denorm_min();
+    EXPECT_FALSE(steady_diagnostic_detail::normal_or_zero(subnormal_double));
+    EXPECT_FALSE(steady_diagnostic_detail::normal_or_zero(subnormal_float));
+    EXPECT_FALSE(steady_diagnostic_detail::normal_or_zero(std::numeric_limits<double>::min()));
+    EXPECT_FALSE(steady_diagnostic_detail::normal_or_zero(std::numeric_limits<float>::min()));
+    EXPECT_TRUE(steady_diagnostic_detail::normal_or_zero(0.0));
+    EXPECT_TRUE(steady_diagnostic_detail::normal_or_zero(2.0 * std::numeric_limits<double>::min()));
+#else
+    GTEST_SKIP() << "SSE floating-point control modes are unavailable on this platform.";
+#endif
 }
 
 }

@@ -2,7 +2,9 @@
 #pragma once
 #include "solvers/SolverDiagnostics.hh"
 #include "equations/CollectiveValidation.hh"
+#include <algorithm>
 #include <fstream>
+#include <limits>
 #include <iomanip>
 #include <sstream>
 
@@ -28,23 +30,62 @@ template<class T> void report(std::ostream& out, const FVM::SteadyResidualReport
         << ",\"scale_kind\":\"algebraic_absolute_row_terms\",\"dimensionless\":";
     if (r.dimensionless_available) out << r.dimensionless; else out << "null";
     out << ",\"included_count\":" << r.included_count << ",\"excluded_count\":" << r.excluded_count
-        << ",\"volume\":" << r.volume << '}';
+        << ",\"volume\":" << r.volume
+        << ",\"residual_evaluation\":{\"kind\":"
+        << quote(r.row_accumulation_available ? "crs_row_dot_minus_rhs" : "caller_supplied_integrated")
+        << ",\"scalar_radix\":" << std::numeric_limits<T>::radix
+        << ",\"scalar_digits\":" << std::numeric_limits<T>::digits
+        << ",\"unit_roundoff\":";
+    constexpr bool binary_ieee = std::numeric_limits<T>::is_iec559 && std::numeric_limits<T>::radix == 2;
+    if constexpr (binary_ieee) out << std::numeric_limits<T>::epsilon() / T{2};
+    else out << "null";
+    out << ",\"round_to_nearest\":" << (r.evaluation_round_to_nearest ? "true" : "false")
+        << ",\"arithmetic_assumptions\":{\"iec559_binary\":" << (binary_ieee ? "true" : "false")
+        << ",\"fast_math_disabled\":"
+        << (FVM::steady_diagnostic_detail::standard_arithmetic_compilation ? "true" : "false")
+        << ",\"underflow_checks\":\"normal_or_zero_intermediates\"}}}";
 }
 template<class T> void optional_report(std::ostream& out, const std::optional<FVM::SteadyResidualReport<T>>& r)
 { if (r) report(out,*r); else out << "null"; }
+
+// Cell scales use residual-density units. Empty arrays leave the CSV field blank.
+template<class T> void algebraic_scale_density(std::ostream& out, const FVM::SteadyResidualReport<T>& r,
+    size_t cell, T volume)
+{
+    if (!r.algebraic_scale.empty())
+        out << r.algebraic_scale.at(cell) / volume;
+}
+
+// These raw arrays have integrated equation units, independent of CSV cell volume.
+// Unavailable row metadata stays blank. Eligibility is serialized as the Boolean 0 or 1.
+template<class T> void integrated_cell_values(std::ostream& out, const FVM::SteadyResidualReport<T>& r,
+    std::size_t cell)
+{
+    out << ',';
+    if (!r.integrated.empty()) out << r.integrated.at(cell);
+    out << ',';
+    if (!r.algebraic_scale.empty()) out << r.algebraic_scale.at(cell);
+    out << ',';
+    if (r.row_accumulation_available && !r.accumulation_terms.empty())
+        out << r.accumulation_terms.at(cell);
+    out << ',';
+    if (r.row_accumulation_available && !r.accumulation_eligible.empty())
+        out << static_cast<unsigned int>(r.accumulation_eligible.at(cell));
+}
 
 /** All ranks call with matching prefix. Each file contains owned entities only. */
 template<class MeshType, class Scalar>
 void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, const std::string& prefix,
     const std::string& secondary_units = "m^2/s^4")
 {
+    const int output_precision = std::max(17, std::numeric_limits<Scalar>::max_digits10);
     const int rank=mesh.owned_cell_map()->getComm()->getRank();
     collective_detail::collective_local_validation(mesh,"Diagnostic output",[&]
     {
         if (rank==0)
         {
             std::ofstream out(prefix+".json"); if(!out) throw std::runtime_error("Cannot write diagnostic JSON");
-            out << std::setprecision(17) << "{\"schema_version\":1,\"qualification\":\"not_assessed\","
+            out << std::setprecision(output_precision) << "{\"schema_version\":1,\"qualification\":\"not_assessed\","
                 << "\"time_since_replay_s\":" << result.time << ",\"step_index\":" << result.step_index
                 << ",\"pressure_coefficient_dt_s\":" << result.pressure_coefficient_time_step
                 << ",\"pressure_coefficient\":" << result.pressure_coefficient
@@ -105,7 +146,16 @@ void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, 
         {
             std::ofstream out(prefix+"_cells_rank"+std::to_string(rank)+".csv");
             if(!out)throw std::runtime_error("Cannot write diagnostic cell CSV");
-            out<<std::setprecision(17)<<"cell_id,x,y,z,volume,momentum_x,momentum_y,momentum_z,continuity,k,secondary\n";
+            out<<std::setprecision(output_precision)<<"cell_id,x,y,z,volume,momentum_x,momentum_y,momentum_z,continuity,k,secondary"
+                <<",cell_geometry_gid,momentum_x_algebraic_scale_density,momentum_y_algebraic_scale_density"
+                <<",momentum_z_algebraic_scale_density,continuity_algebraic_scale_density"
+                <<",k_algebraic_scale_density,secondary_algebraic_scale_density";
+            for (const auto* component : {"momentum_x", "momentum_y", "momentum_z", "continuity", "k", "secondary"})
+                out << ',' << component << "_integrated_residual"
+                    << ',' << component << "_integrated_algebraic_scale"
+                    << ',' << component << "_accumulation_terms"
+                    << ',' << component << "_accumulation_eligible";
+            out << '\n';
             for(size_t i=0;i<result.cell_volume.size();++i)
             {
                 const auto lid=static_cast<typename MeshType::local_ordinal_type>(i);
@@ -114,7 +164,25 @@ void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, 
                 for(const auto& m:result.momentum)out<<','<<m.density.at(i);
                 out<<','<<result.reconstructed_continuity.density.at(i)<<',';
                 if(result.turbulent_k)out<<result.turbulent_k->density.at(i);
-                out<<',';if(result.turbulent_secondary)out<<result.turbulent_secondary->density.at(i);out<<'\n';
+                out<<',';if(result.turbulent_secondary)out<<result.turbulent_secondary->density.at(i);
+                out<<',';
+                // Geometry identity survives repartitioning. cell_id stores the algebraic map ID.
+                if constexpr (requires { mesh.cell_geometry_global_id(lid); })
+                    out<<mesh.cell_geometry_global_id(lid);
+                else if constexpr (requires { mesh.mesh_gid_to_tpetra_gid(mesh.cell_global_id(lid)); })
+                    out<<mesh.cell_global_id(lid); // Legacy Mesh stores geometry IDs separately from Tpetra IDs.
+                for(const auto& m:result.momentum)
+                {out<<',';algebraic_scale_density(out,m,i,result.cell_volume[i]);}
+                out<<',';algebraic_scale_density(out,result.reconstructed_continuity,i,result.cell_volume[i]);
+                out<<',';if(result.turbulent_k)algebraic_scale_density(out,*result.turbulent_k,i,result.cell_volume[i]);
+                out<<',';if(result.turbulent_secondary)algebraic_scale_density(out,*result.turbulent_secondary,i,result.cell_volume[i]);
+                for (const auto& m : result.momentum) integrated_cell_values(out,m,i);
+                integrated_cell_values(out,result.reconstructed_continuity,i);
+                if (result.turbulent_k) integrated_cell_values(out,*result.turbulent_k,i);
+                else out << ",,,,";
+                if (result.turbulent_secondary) integrated_cell_values(out,*result.turbulent_secondary,i);
+                else out << ",,,,";
+                out<<'\n';
             }
             out.flush();if(!out)throw std::runtime_error("Diagnostic cell CSV write failed");
         }
@@ -122,7 +190,7 @@ void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, 
         {
             std::ofstream out(prefix+"_faces_rank"+std::to_string(rank)+".csv");
             if(!out)throw std::runtime_error("Cannot write diagnostic face CSV");
-            out<<std::setprecision(17)<<"face_id,x,y,z,area_m2,area_x_m2,area_y_m2,area_z_m2,velocity_flux_m3_s,pressure_flux_m3_s,reconstructed_flux_m3_s,stored_flux_m3_s,relative_flux_m3_s\n";
+            out<<std::setprecision(output_precision)<<"face_id,x,y,z,area_m2,area_x_m2,area_y_m2,area_z_m2,velocity_flux_m3_s,pressure_flux_m3_s,reconstructed_flux_m3_s,stored_flux_m3_s,relative_flux_m3_s\n";
             for(size_t i=0;i<result.reconstructed_face_flux.size();++i)
             {
                 const auto lid=static_cast<typename MeshType::local_ordinal_type>(i);

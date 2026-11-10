@@ -278,6 +278,9 @@ if(BUILD_TESTING AND Python3_EXECUTABLE)
   add_test(NAME pitz_daily_diagnostic_authentication
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_native_diagnostics.py")
   set_tests_properties(pitz_daily_diagnostic_authentication PROPERTIES LABELS "verification;diagnostics" TIMEOUT 30)
+  add_test(NAME pitz_daily_replay_comparison
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/verification/openfoam/pitzDaily/test_replay_comparison.py")
+  set_tests_properties(pitz_daily_replay_comparison PROPERTIES LABELS "verification;diagnostics" TIMEOUT 30)
 endif()
 
 if(BUILD_TESTING AND Python3_EXECUTABLE AND MPIEXEC_EXECUTABLE)
