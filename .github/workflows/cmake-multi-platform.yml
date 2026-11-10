@@ -108,7 +108,7 @@ jobs:
     - name: Install dependencies
       uses: ./.github/actions/setup-trilinos-source
       with:
-        trilinos-version: trilinos-release-17-2-1
+        trilinos-version: trilinos-release-17-3-0
         compiler-id: ${{ matrix.compiler_id }}
         c-compiler: ${{ matrix.c_compiler }}
         cxx-compiler: ${{ matrix.cpp_compiler }}
@@ -192,7 +192,7 @@ jobs:
 
     - name: Build
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
-      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 1
 
     # Persist completed compilation work even if a subsequent test fails.
     - name: Save SimpleFluid compiler cache
