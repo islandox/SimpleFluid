@@ -13,6 +13,13 @@ jobs:
     name: ${{ matrix.os }} ${{ matrix.build_type }} (${{ matrix.compiler_id }})
     runs-on: ${{ matrix.os }}
 
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+      # Required to cache compilations that use the shared precompiled headers.
+      CCACHE_SLOPPINESS: pch_defines,time_macros
+
     strategy:
       # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
       fail-fast: false
@@ -36,13 +43,16 @@ jobs:
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: flang
+            cmake_platform_options: -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
             cache_suffix: v5
           - os: macos-26
             compiler_id: LLVM
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: mpifort
-            cmake_platform_options: -DCMAKE_OSX_ARCHITECTURES=arm64
+            cmake_platform_options: >-
+              -DCMAKE_OSX_ARCHITECTURES=arm64
+              -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
             cache_suffix: v8
         exclude:
           - os: macos-26
@@ -117,6 +127,42 @@ jobs:
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
+    - name: Install compiler cache
+      id: ccache_setup
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo apt-get install -y --no-install-recommends ccache
+        else
+          brew install ccache
+        fi
+        ccache --version
+
+        # Separate archive generations when the compiler or macOS SDK changes.
+        # ccache also checks compiler content and each compilation's inputs.
+        {
+          "${{ matrix.c_compiler }}" --version
+          "${{ matrix.cpp_compiler }}" --version
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            xcrun --show-sdk-version
+          fi
+        } > "$RUNNER_TEMP/simplefluid-compiler-identity.txt"
+        compiler_hash="$(shasum -a 256 "$RUNNER_TEMP/simplefluid-compiler-identity.txt" | cut -d ' ' -f1)"
+        echo "compiler-hash=$compiler_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Restore SimpleFluid compiler cache
+      id: ccache
+      uses: actions/cache/restore@v5
+      continue-on-error: true
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ hashFiles('.github/actions/setup-trilinos-source/action.yml') }}-${{ matrix.cache_suffix }}-${{ github.sha }}
+        restore-keys: |
+          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ hashFiles('.github/actions/setup-trilinos-source/action.yml') }}-${{ matrix.cache_suffix }}-
+
+    - name: Reset compiler cache statistics
+      run: ccache --zero-stats
+
     - name: Configure CMake
       # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
       # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
@@ -124,6 +170,9 @@ jobs:
         cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        -DSIMPLEFLUID_SPLIT_DEBUG_INFO=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
         ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
         -DSIMPLEFLUID_MAX_TEST_PROCS=2
@@ -145,6 +194,15 @@ jobs:
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2
 
+    # Persist completed compilation work even if a subsequent test fails.
+    - name: Save SimpleFluid compiler cache
+      if: steps.ccache.outputs.cache-hit != 'true' && steps.ccache.outputs.cache-primary-key != ''
+      uses: actions/cache/save@v5
+      continue-on-error: true
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        key: ${{ steps.ccache.outputs.cache-primary-key }}
+
     - name: Test
       id: test
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
@@ -163,3 +221,7 @@ jobs:
       with:
         name: mpi-diagnostics-${{ matrix.compiler_id }}-${{ matrix.build_type }}
         path: ${{ steps.strings.outputs.build-output-dir }}/mpi-diagnostics
+
+    - name: Compiler cache statistics
+      if: always() && steps.ccache_setup.outcome == 'success'
+      run: ccache --show-stats --verbose

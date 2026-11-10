@@ -5,7 +5,7 @@ inputs:
   trilinos-version:
     description: Trilinos git tag
     required: false
-    default: trilinos-release-17-2-1
+    default: trilinos-release-17-3-0
   compiler-id:
     required: true
   c-compiler:
@@ -138,10 +138,9 @@ runs:
       with:
         path: |
           ${{ github.workspace }}/_deps/trilinos_build
-        key: ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-build }}
+        key: trilinos-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-build }}
         restore-keys: |
-          ${{ inputs.trilinos-version }}-build-${{ runner.os }}-${{ inputs.compiler-id }}-
-          trilinos-${{ inputs.trilinos-version }}-${{ runner.os }}-${{ inputs.compiler-id }}-mpi-all-
+          trilinos-build-${{ runner.os }}-${{ inputs.compiler-id }}-
 
     - name: Build NetCDF with MPI HDF5
       if: runner.os == 'macOS' && steps.cache-trilinos.outputs.cache-hit != 'true' && steps.cache-netcdf.outputs.cache-hit != 'true'
