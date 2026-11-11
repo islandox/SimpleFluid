@@ -110,6 +110,7 @@ void MeshHandle<Pack>::initialize_composite(MultiRegionPtr mesh, DistributionOpt
     d_indexer.set_nodes(checked_global_ids(std::move(local_nodes)));
     initialize_boundary_batches(*mesh);
     create_maps(comm);
+    publish_binding();
 }
 
 template<TpetraTypePack Pack>
@@ -141,6 +142,7 @@ MeshHandle<Pack>::MeshHandle(const CompositePartition<Pack>& partition)
         throw std::invalid_argument("Composite partition handle failed on another rank.");
     }
     create_maps(comm);
+    publish_binding();
 }
 
 template<TpetraTypePack Pack>
@@ -479,6 +481,7 @@ void MeshHandle<Pack>::initialize_orthogonal(SP<const MeshType> mesh, Distributi
     }
     else
         initialize_contiguous_native_maps(comm);
+    publish_binding();
 }
 
 /**
@@ -728,6 +731,7 @@ void MeshHandle<Pack>::initialize_semi_structured(SemiStructuredPtr mesh, Distri
     }
     collective_error(error, "SemiStructuredXY_Z local compact topology failed on another rank.");
     initialize_contiguous_native_maps(comm);
+    publish_binding();
 }
 
 /** Assign algebraic IDs after a native owned-first geometry layout is fixed.
@@ -926,6 +930,7 @@ void MeshHandle<Pack>::initialize_unstructured(
         global_ids(indexer.node_global_ids())));
     initialize_boundary_batches(*mesh);
     create_maps(comm ? std::move(comm) : Tpetra::getDefaultComm());
+    publish_binding();
 }
 
 /**
@@ -1007,6 +1012,7 @@ void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
     }
     d_overlap_face_map = make_map(
         Tpetra::getDefaultComm(), overlap_face_gids);
+    publish_binding();
 }
 
 /**
@@ -1027,6 +1033,7 @@ void MeshHandle<Pack>::initialize_serial(const MeshType& mesh)
     initialize_boundary_batches(mesh);
     if constexpr (std::same_as<MeshType, MultiRegion>) create_maps(mesh.communicator());
     else create_maps(Tpetra::getDefaultComm());
+    publish_binding();
 }
 
 /**

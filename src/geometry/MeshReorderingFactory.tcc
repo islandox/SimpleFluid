@@ -275,6 +275,10 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
             parent->d_legacy_indexer_materialized = false;
             if (!parent->d_cell_face_offsets.empty())
                 parent->initialize_cell_faces();
+            // The compact topology keeps its construction order; the local
+            // overlay changed this handle's field row order, so publish a new
+            // layout generation with the refreshed binding snapshot.
+            parent->bump_layout_generation();
         }
         return {std::move(parent), selected_owned, selected_ghost};
     }
@@ -367,6 +371,12 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     }
     reordered->d_owned_cell_map = reordered->make_map(comm, owned_gids);
     reordered->d_overlap_cell_map = reordered->make_map(comm, overlap_gids);
+
+    if (!local_identity)
+    {
+        // A real permutation changed this handle's local field row order.
+        reordered->bump_layout_generation();
+    }
 
     return {std::move(reordered), selected_owned, selected_ghost};
 }

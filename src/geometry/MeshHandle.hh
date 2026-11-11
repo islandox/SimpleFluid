@@ -13,6 +13,9 @@
 
 #include "SimpleFluidExport.hh"
 #include "dataclass/TpetraTypes.hh"
+#include "geometry/MeshBinding.hh"
+#include "geometry/MeshGeometryHandle.hh"
+#include "geometry/MeshTopologyHandle.hh"
 #include "geometry/mesh/DecomposedOrthogonalTopology.hh"
 #include "geometry/mesh/DecomposedSemiStructuredTopology.hh"
 #include "geometry/mesh/EntityRange.hh"
@@ -99,6 +102,10 @@ class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
     friend struct detail::MeshTraverseBinding;
     friend class MeshReorderingFactory<Pack>;
+    template<TpetraTypePack>
+    friend class MeshGeometryHandle;
+    template<TpetraTypePack>
+    friend class MeshTopologyHandle;
     template<class PublicMesh, class GeometryMesh>
     friend class detail::TraverseAccess;
 
@@ -181,36 +188,22 @@ public:
     };
 
     /** Count/width-selected orthogonal plan; null for another mesh family. */
-    [[nodiscard]] SP<const Meshes::OrthogonalMeshDecomposition> orthogonal_decomposition() const noexcept
-    {
-        return d_orthogonal_decomposition;
-    }
+    [[nodiscard]] SP<const Meshes::OrthogonalMeshDecomposition> orthogonal_decomposition() const noexcept;
 
     /** Compact construction-local topology; null for one-part serial and other families.
      * Selected-cell overlays are applied by this handle's geometry accessors.
      */
-    [[nodiscard]] SP<const Meshes::DecomposedOrthogonalTopology> decomposed_orthogonal_topology() const noexcept
-    {
-        return d_orthogonal_topology;
-    }
+    [[nodiscard]] SP<const Meshes::DecomposedOrthogonalTopology> decomposed_orthogonal_topology() const noexcept;
 
     /** @brief Selected compact XY-graph/Z-slab factors; throws for another mesh family. */
-    [[nodiscard]] const SemiStructuredDecomposition& semi_structured_decomposition() const
-    {
-        if (!std::holds_alternative<SemiStructuredPtr>(d_mesh))
-            throw std::invalid_argument("XY/Z decomposition requires a SemiStructuredXY_Z handle.");
-        return d_semi_structured_decomposition;
-    }
+    [[nodiscard]] const SemiStructuredDecomposition& semi_structured_decomposition() const;
 
     /** Read-only compact topology in construction order; null for serial identity and other families.
      * A later selected_cells_first overlay changes field rows; use this handle's
      * geometry accessors to apply that row permutation.
      */
     [[nodiscard]] SP<const Meshes::DecomposedSemiStructuredTopology>
-    decomposed_semi_structured_topology() const noexcept
-    {
-        return d_semi_structured_topology;
-    }
+    decomposed_semi_structured_topology() const noexcept;
 
     static constexpr int invalid_boundary_id = -1;
 
@@ -404,7 +397,29 @@ public:
     {
     }
 
-    const variant_type& variant() const noexcept { return d_mesh; }
+    /**
+     * @brief Borrow the topology view over this handle.
+     *
+     * The returned view is cheap and borrows this handle; it must not outlive
+     * the handle. This handle remains the sole owner of all topology storage.
+     */
+    [[nodiscard]] MeshTopologyHandle<Pack> topology() const { return MeshTopologyHandle<Pack>(*this); }
+
+    /**
+     * @brief Borrow the geometry view over this handle.
+     *
+     * The returned view is cheap and borrows this handle; it must not outlive
+     * the handle. This handle remains the sole owner of the concrete geometry.
+     */
+    [[nodiscard]] MeshGeometryHandle<Pack> geometry() const { return MeshGeometryHandle<Pack>(*this); }
+
+    /**
+     * @brief Validated distribution binding snapshot recorded for this handle.
+     * @throws std::logic_error If the binding has not been published yet.
+     */
+    [[nodiscard]] const detail::MeshBinding<Pack>& binding() const;
+
+    const variant_type& variant() const noexcept;
 
     /**
      * @brief Identity of the concrete geometry shared by this handle.
@@ -414,10 +429,7 @@ public:
      * reject a copied or otherwise unrelated geometry even when its topology
      * happens to be equivalent.
      */
-    [[nodiscard]] const void* geometry_identity() const noexcept
-    {
-        return std::visit([](const auto& mesh) noexcept -> const void* { return mesh.get(); }, d_mesh);
-    }
+    [[nodiscard]] const void* geometry_identity() const noexcept;
 
     /**
      * @brief Return the compatibility indexer using canonical geometry IDs.
@@ -477,15 +489,7 @@ public:
      * Pointer alternatives are dereferenced before dispatch.
      */
     template<class Visitor>
-    SIMPLEFLUID_LOCAL decltype(auto) visit(Visitor&& visitor) const
-    {
-        return std::visit(
-            [&](const auto& mesh) -> decltype(auto)
-            {
-                return std::forward<Visitor>(visitor)(*mesh);
-            },
-            d_mesh);
-    }
+    SIMPLEFLUID_LOCAL decltype(auto) visit(Visitor&& visitor) const;
 
     /**
      * @brief Invoke a visitor with mutable access to the concrete geometry.
@@ -502,40 +506,16 @@ public:
      * @throws std::logic_error If the handle was built from a const mesh.
      */
     template<class Visitor>
-    decltype(auto) visit_mutable(Visitor&& visitor)
-    {
-        if (!d_mutable_mesh)
-        {
-            throw std::logic_error(
-                "MeshHandle does not retain mutable geometry ownership.");
-        }
-        return std::visit(
-            [&](auto& mesh) -> decltype(auto)
-            {
-                return std::forward<Visitor>(visitor)(*mesh);
-            },
-            *d_mutable_mesh);
-    }
+    decltype(auto) visit_mutable(Visitor&& visitor);
 
     /** @brief True when visit_mutable() can access the concrete geometry. */
-    bool has_mutable_geometry() const noexcept
-    {
-        return d_mutable_mesh.has_value();
-    }
+    bool has_mutable_geometry() const noexcept;
 
     /** @brief Pin and validate composite geometry for a bulk operation; native paths are unchanged. */
-    [[nodiscard]] Meshes::MultiRegionMesh::ExecutionView acquire_execution_view() const
-    {
-        const auto* composite = std::get_if<MultiRegionPtr>(&d_mesh);
-        return Meshes::MultiRegionMesh::ExecutionView(composite ? composite->get() : nullptr);
-    }
+    [[nodiscard]] Meshes::MultiRegionMesh::ExecutionView acquire_execution_view() const;
 
     /** @brief Whether owned cells retain increasing canonical region order. */
-    bool supports_region_execution() const noexcept
-    {
-        return std::holds_alternative<MultiRegionPtr>(d_mesh)
-            && !d_cells_reordered && d_cell_geometry_lids.empty();
-    }
+    bool supports_region_execution() const noexcept;
 
     /**
      * @brief Visit owned cells through one typed, transformed provider dispatch per region.
@@ -570,20 +550,10 @@ public:
     }
 
     /** @brief Translate a resolved canonical cell into the existing owned/ghost field map. */
-    local_ordinal_type region_cell_local_id(MultiRegion::ID cell) const
-    {
-        if (!std::holds_alternative<MultiRegionPtr>(d_mesh))
-            throw std::logic_error("Resolved region cells require a composite mesh.");
-        return geometry_to_local_cell(cell);
-    }
+    local_ordinal_type region_cell_local_id(MultiRegion::ID cell) const;
 
     /** @brief Translate a resolved canonical face into the existing owned/ghost field map. */
-    local_ordinal_type region_face_local_id(MultiRegion::ID face) const
-    {
-        if (!std::holds_alternative<MultiRegionPtr>(d_mesh))
-            throw std::logic_error("Resolved region faces require a composite mesh.");
-        return geometry_to_local_face(face);
-    }
+    local_ordinal_type region_face_local_id(MultiRegion::ID face) const;
 
     /** @brief Resolve one visible canonical face into an operation-local geometry snapshot. */
     auto resolve_region_face(local_ordinal_type face) const
@@ -601,22 +571,7 @@ public:
      * revision. Geometry-dependent caches may retain their graph structure,
      * but must refresh numeric data whenever this value changes.
      */
-    std::uint64_t geometry_epoch() const
-    {
-        return std::visit(
-            [](const auto& mesh) -> std::uint64_t
-            {
-                if constexpr (requires { mesh->geometry_epoch(); })
-                {
-                    return mesh->geometry_epoch();
-                }
-                else
-                {
-                    return 0;
-                }
-            },
-            d_mesh);
-    }
+    std::uint64_t geometry_epoch() const;
 
     bool is_stk() const noexcept
     {
@@ -624,10 +579,7 @@ public:
     }
 
     /** @brief True after a factory has changed this handle's local cell order. */
-    bool has_reordered_cells() const noexcept
-    {
-        return d_cells_reordered;
-    }
+    bool has_reordered_cells() const noexcept;
 
     SP<const SimpleFluid::Mesh<Pack>> legacy_mesh() const noexcept
     {
@@ -639,86 +591,17 @@ public:
     }
 
     size_t spatial_dimension() const noexcept { return 3; }
-    size_t num_owned_cells() const noexcept
-    {
-        if (d_orthogonal_topology)
-            return d_orthogonal_topology->num_owned_cells();
-        if (d_semi_structured_topology) return d_semi_structured_topology->num_owned_cells();
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->num_owned_cells();
-        }
-        return d_serial_identity ? d_serial_counts[0] : (d_map_indexing ? d_owned_cell_map->getLocalNumElements() : d_indexer.num_owned_cells());
-    }
-    size_t num_local_cells() const noexcept
-    {
-        if (d_orthogonal_topology)
-            return d_orthogonal_topology->num_local_cells();
-        if (d_semi_structured_topology) return d_semi_structured_topology->num_local_cells();
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->num_local_cells();
-        }
-        return d_serial_identity ? d_serial_counts[0] : (d_map_indexing ? d_overlap_cell_map->getLocalNumElements() : d_indexer.num_local_cells());
-    }
+    size_t num_owned_cells() const noexcept;
+    size_t num_local_cells() const noexcept;
     size_t num_cells() const noexcept { return num_local_cells(); }
-    size_t num_owned_faces() const noexcept
-    {
-        if (d_orthogonal_topology)
-            return d_orthogonal_topology->num_owned_faces();
-        if (d_semi_structured_topology) return d_semi_structured_topology->num_owned_faces();
-        if (const auto legacy = legacy_mesh())
-        {
-            const auto map = legacy->owned_face_map();
-            return map.is_null() ? 0 : map->getLocalNumElements();
-        }
-        return d_serial_identity ? d_serial_counts[1] : (d_map_indexing ? d_owned_face_map->getLocalNumElements() : d_indexer.num_owned_faces());
-    }
-    size_t num_faces() const noexcept
-    {
-        if (d_orthogonal_topology)
-            return d_orthogonal_topology->num_local_faces();
-        if (d_semi_structured_topology) return d_semi_structured_topology->num_local_faces();
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->num_faces();
-        }
-        return d_serial_identity ? d_serial_counts[1] : (d_map_indexing ? d_overlap_face_map->getLocalNumElements() : d_indexer.num_local_faces());
-    }
+    size_t num_owned_faces() const noexcept;
+    size_t num_faces() const noexcept;
 
-    bool is_owned_cell(local_ordinal_type cell_lid) const
-    {
-        check_cell(cell_lid);
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->is_owned_cell(cell_lid);
-        }
-        return static_cast<size_t>(cell_lid) < num_owned_cells();
-    }
-
-    bool is_owned_face(local_ordinal_type face_lid) const
-    {
-        check_face(face_lid);
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->is_owned_face(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
-        }
-        return static_cast<size_t>(face_lid) < num_owned_faces();
-    }
+    bool is_owned_cell(local_ordinal_type cell_lid) const;
+    bool is_owned_face(local_ordinal_type face_lid) const;
 
     /** Algebraic cell ID in the field maps; distinct from canonical geometry identity. */
-    global_ordinal_type cell_global_id(local_ordinal_type cell_lid) const
-    {
-        check_cell(cell_lid);
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->mesh_gid_to_tpetra_gid(
-                legacy->cell_global_id(checked_local(static_cast<size_t>(geometry_cell_lid(cell_lid)))));
-        }
-        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid)
-                                 : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid)
-                                                   : d_indexer.cell_global_id(cell_lid));
-    }
+    global_ordinal_type cell_global_id(local_ordinal_type cell_lid) const;
 
     /**
      * @brief Return the partition-independent geometry identifier of a cell.
@@ -727,43 +610,15 @@ public:
      * map ID and remains attached to the same geometric cell after
      * repartitioning.
      */
-    global_ordinal_type cell_geometry_global_id(local_ordinal_type cell_lid) const
-    {
-        check_cell(cell_lid);
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->cell_global_id(checked_local(static_cast<size_t>(geometry_cell_lid(cell_lid))));
-        }
-        if (d_semi_structured_topology || d_orthogonal_decomposition)
-            return geometry_cell_lid(cell_lid);
-        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid)
-                                 : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid)
-                                                   : d_indexer.cell_global_id(cell_lid));
-    }
+    global_ordinal_type cell_geometry_global_id(local_ordinal_type cell_lid) const;
 
     /** Algebraic face ID in the field maps. Initial distributed XY/Z owned
      * IDs are rank-contiguous; later explicit local reordering preserves IDs.
      */
-    global_ordinal_type face_global_id(local_ordinal_type face_lid) const
-    {
-        check_face(face_lid);
-        if (const auto legacy = legacy_mesh())
-        {
-            return legacy->face_global_id(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
-        }
-        return d_serial_identity ? static_cast<global_ordinal_type>(face_lid)
-                                 : (d_map_indexing ? d_overlap_face_map->getGlobalElement(face_lid)
-                                                   : d_indexer.face_global_id(face_lid));
-    }
+    global_ordinal_type face_global_id(local_ordinal_type face_lid) const;
 
     /** @brief Partition-independent source topology identifier of a face. */
-    global_ordinal_type face_geometry_global_id(local_ordinal_type face_lid) const
-    {
-        check_face(face_lid);
-        if (const auto legacy = legacy_mesh())
-            return legacy->face_global_id(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
-        return (d_semi_structured_topology || d_orthogonal_decomposition) ? geometry_face_lid(face_lid) : face_global_id(face_lid);
-    }
+    global_ordinal_type face_geometry_global_id(local_ordinal_type face_lid) const;
 
     real_t cell_volume(local_ordinal_type cell_lid) const;
     Vec3 cell_centroid(local_ordinal_type cell_lid) const;
@@ -886,51 +741,22 @@ public:
     int boundary_id(local_ordinal_type face_lid) const;
     bool is_boundary_face(local_ordinal_type face_lid) const;
 
-    const std::string& boundary_batch_name(int batch_id) const
-    {
-        const auto iter = d_boundary_names.find(batch_id);
-        if (iter == d_boundary_names.end())
-        {
-            throw std::out_of_range("Unknown boundary batch ID.");
-        }
-        return iter->second;
-    }
+    const std::string& boundary_batch_name(int batch_id) const;
 
-    const BoundaryFaceBatch& boundary_face_batch(int batch_id) const
-    {
-        return d_boundary_batches.at(batch_id);
-    }
+    const BoundaryFaceBatch& boundary_face_batch(int batch_id) const;
 
     const std::unordered_map<int, BoundaryFaceBatch>&
-    boundary_batches() const noexcept
-    {
-        return d_boundary_batches;
-    }
+    boundary_batches() const noexcept;
 
-    Teuchos::RCP<const map_type> owned_cell_map() const
-    {
-        return d_owned_cell_map;
-    }
+    Teuchos::RCP<const map_type> owned_cell_map() const;
 
-    Teuchos::RCP<const map_type> overlap_cell_map() const
-    {
-        return d_overlap_cell_map;
-    }
+    Teuchos::RCP<const map_type> overlap_cell_map() const;
 
-    Teuchos::RCP<const map_type> owned_face_map() const
-    {
-        return d_owned_face_map;
-    }
+    Teuchos::RCP<const map_type> owned_face_map() const;
 
-    Teuchos::RCP<const map_type> overlap_face_map() const
-    {
-        return d_overlap_face_map;
-    }
+    Teuchos::RCP<const map_type> overlap_face_map() const;
 
-    Teuchos::RCP<const map_type> boundary_face_map() const
-    {
-        return d_boundary_face_map;
-    }
+    Teuchos::RCP<const map_type> boundary_face_map() const;
 
     static constexpr local_ordinal_type invalid_local_id() noexcept
     {
@@ -1003,6 +829,23 @@ private:
             result.push_back(static_cast<global_ordinal_type>(id));
         }
         return result;
+    }
+
+    /**
+     * @brief Publish the validated binding after construction or a layout edit.
+     *
+     * Records the current geometry identity, ownership counts, map local sizes,
+     * reorder flag, and layout generation. The binding owns no map or mesh.
+     */
+    SIMPLEFLUID_LOCAL void publish_binding();
+
+    /** @brief Advance the local-layout generation and republish the binding. */
+    SIMPLEFLUID_LOCAL void bump_layout_generation();
+
+    /** @brief Borrowed binding snapshot; null until construction publishes it. */
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::shared_ptr<const detail::MeshBinding<Pack>> binding_ptr() const noexcept
+    {
+        return d_binding;
     }
 
     SIMPLEFLUID_LOCAL std::string local_output_filename(const std::string& filename) const;
@@ -1407,6 +1250,8 @@ private:
     std::vector<size_t> d_orthogonal_cell_permutation, d_orthogonal_cell_inverse_permutation;
     variant_type d_mesh;
     std::optional<mutable_variant_type> d_mutable_mesh;
+    std::shared_ptr<const detail::MeshBinding<Pack>> d_binding;
+    std::uint64_t d_layout_generation = 0;
     mutable indexer_type d_indexer;
     mutable bool d_legacy_indexer_materialized = false;
     bool d_cells_reordered = false;
