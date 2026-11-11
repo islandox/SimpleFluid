@@ -362,7 +362,7 @@ public:
         const Teuchos::RCP<const matrix_type>& preconditioning_matrix = Teuchos::null);
 
     /** @brief Validate local option values before callers agree across ranks. */
-    static void validate_options(const LinearSolverOptions& options);
+    static inline void validate_options(const LinearSolverOptions& options);
 
 private:
     LinearSolveStatistics solve_impl(

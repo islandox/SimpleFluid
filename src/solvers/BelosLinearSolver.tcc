@@ -609,33 +609,6 @@ void BelosLinearSolver<Pack>::reset()
 }
 
 template <TpetraTypePack Pack>
-void BelosLinearSolver<Pack>::validate_options(const LinearSolverOptions& options)
-{
-    if (options.max_iterations <= 0)
-    {
-        throw std::invalid_argument(
-            "BelosLinearSolver requires positive maximum iterations.");
-    }
-    if (!std::isfinite(options.tolerance)
-        || options.tolerance <= real_t{})
-    {
-        throw std::invalid_argument(
-            "BelosLinearSolver requires a positive finite tolerance.");
-    }
-    static_cast<void>(to_string(options.backend));
-    static_cast<void>(to_string(options.preconditioner));
-    if (options.backend == LinearSolverBackend::Cg
-        && (options.preconditioner == LinearPreconditioner::ILU0
-            || options.preconditioner == LinearPreconditioner::ILUT
-            || options.preconditioner == LinearPreconditioner::GaussSeidel))
-    {
-        throw std::invalid_argument(
-            "CG requires a symmetric positive-definite preconditioner; "
-            "ILU0, ILUT, and forward Gauss-Seidel are not supported.");
-    }
-}
-
-template <TpetraTypePack Pack>
 bool BelosLinearSolver<Pack>::set_problem_with_prepared_residual()
 {
     d_problem->setInitResVec(d_residual_workspace);
