@@ -1,10 +1,16 @@
 /**
  * @file testFvmLibrary.cc
  * @author islandox
- * @brief Verify compiled linear algebra is available to FVM-only consumers.
+ * @brief Verify the compiled DIC preconditioner that the FVM DSO owns and solvers consume.
  * @version 0.1
  * @date 2026-09-17
  * @copyright Copyright (c) 2026
+ *
+ * This test belongs with the solver tests because solvers are the supported
+ * consumers of the compiled FVM DSO: FVM code performs linear solves, so FVM and
+ * Solvers are loaded together at runtime. The FVM-side contract (the DSO exports
+ * the compiled DIC API and the non-orthogonal diffusion assemblers) is enforced
+ * independently by `simplefluid_fvm_elf_export_boundary`.
  */
 
 #include <gtest/gtest.h>
@@ -21,7 +27,7 @@ using Pack = SimpleFluid::DefaultTpetraTypes;
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-TEST(FvmLibraryTest, AppliesCompiledDICWithoutSolverLibrary)
+TEST(FvmLibraryTest, AppliesCompiledDICFromFvmLibrary)
 {
     auto map = Teuchos::rcp(new Pack::map_type(3, 0, Tpetra::getDefaultComm()));
     auto matrix = SimpleFluid::FVM::identity_matrix<Pack>(map);

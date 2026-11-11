@@ -12,12 +12,12 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFvmLibrary")
-    # Catch dependencies from FVM back into the higher-level solver DSO.
-    target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
-  else()
-    target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
-  endif()
+  # Every FVM test links the supported consumer layer. FVM and Solvers are
+  # loaded together because FVM code performs linear solves; the compiled-FVM-API
+  # contract is enforced separately by simplefluid_fvm_elf_export_boundary, and
+  # solver-facing checks (the compiled DIC preconditioner) live in
+  # src/solvers/unitTests/testFvmLibrary.cc.
+  target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
