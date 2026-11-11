@@ -13,6 +13,7 @@
 
 #include "FVM/Operators.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/DICPreconditioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>

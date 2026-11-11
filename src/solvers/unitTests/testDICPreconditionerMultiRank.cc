@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/DICPreconditioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
