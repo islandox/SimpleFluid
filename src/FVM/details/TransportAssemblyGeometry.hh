@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "FVM/details/AssemblyFaceMetrics.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/ResolvedTransportGeometry.hh"
 #include "FVM/details/TransportValidation.hh"
@@ -298,21 +299,145 @@ void visit_transport_face_runs(const TransportAssemblyGeometry<MeshType>& geomet
     }
 }
 
+/** @brief Pack the stable record's compile-time face category bits. */
+inline std::uint8_t face_flags(bool interior, bool boundary, bool owned_orientation)
+{
+    std::uint8_t flags = 0;
+    if (interior) flags |= AssemblyFaceMetrics::interior_bit;
+    if (boundary) flags |= AssemblyFaceMetrics::physical_boundary_bit;
+    if (owned_orientation) flags |= AssemblyFaceMetrics::owned_orientation_bit;
+    return flags;
+}
+
 /**
- * @brief Ordered typed transport batches with borrowed, current-epoch metrics.
+ * @brief Fill the stable record from the typed access the kernels used before.
  *
- * Composite providers still resolve native incidence once per row. One reused
- * row-sized scratch buffer holds resolved snapshots while its homogeneous runs
- * execute; there is no persistent global resolved-face/metric table. Generic
- * providers dispatch once outside the row traversal through typed mesh access.
+ * Every value comes from the same provider query in the same arithmetic order,
+ * so stored and wrapped distances and periodic-image displacements stay
+ * bit-exact. Interior faces populate both incident orientations.
+ */
+template<class Access, class Local>
+AssemblyFaceMetrics make_assembly_face_metrics(const Access& access, Local face_lid, Local other, Local cell,
+    bool interior, bool boundary, bool owned_orientation)
+{
+    const bool row_is_owner = interior ? owned_orientation : true;
+    const Local owner = row_is_owner ? cell : other;
+    const Local neighbor = row_is_owner ? other : cell;
+    AssemblyFaceMetrics metrics;
+    metrics.area = access.face_area(face_lid);
+    metrics.normal = access.face_normal(face_lid);
+    metrics.area_vector = access.face_area_vector_outward(face_lid, owner);
+    metrics.centroid = access.face_centroid(face_lid);
+    metrics.owner_centroid = access.cell_centroid(owner);
+    metrics.owner_center_vector = access.face_center_vector(face_lid, owner);
+    metrics.owner_to_face_distance = access.cell_to_face_distance(face_lid, owner);
+    if (interior)
+    {
+        metrics.neighbor_centroid = access.cell_centroid(neighbor);
+        metrics.neighbor_center_vector = access.face_center_vector(face_lid, neighbor);
+        metrics.owner_to_neighbor = access.cell_center_vector(face_lid, owner);
+        metrics.neighbor_to_owner = access.cell_center_vector(face_lid, neighbor);
+        metrics.neighbor_to_face_distance = access.cell_to_face_distance(face_lid, neighbor);
+        metrics.face_cell_center_distance = access.face_cell_center_distance(face_lid);
+    }
+    metrics.boundary_id = static_cast<int>(access.boundary_id(face_lid));
+    metrics.flags = face_flags(interior, boundary, owned_orientation);
+    return metrics;
+}
+
+/**
+ * @brief Fill the stable record from an already resolved composite region face.
+ *
+ * The resolved snapshot already carries transformed centroids, owner-oriented
+ * area vectors, and periodic-image displacements. Distances keep the previous
+ * adapter's norms of those stored displacements; no centroid subtraction is
+ * substituted for them.
+ */
+inline AssemblyFaceMetrics make_resolved_assembly_face_metrics(const Meshes::MultiRegionMesh::ResolvedFace& resolved,
+    bool interior, bool boundary, bool owned_orientation, int boundary_id)
+{
+    AssemblyFaceMetrics metrics;
+    metrics.area = resolved.area();
+    metrics.normal = resolved.normal();
+    metrics.area_vector = resolved.face_area_vector_outward(resolved.owner);
+    metrics.centroid = resolved.centroid;
+    metrics.owner_centroid = resolved.owner_centroid;
+    metrics.owner_center_vector = resolved.face_center_vector(resolved.owner);
+    metrics.owner_to_face_distance = metrics.owner_center_vector.norm();
+    if (interior)
+    {
+        metrics.neighbor_centroid = resolved.neighbor_centroid;
+        metrics.neighbor_center_vector = resolved.face_center_vector(resolved.neighbor);
+        metrics.owner_to_neighbor = resolved.cell_center_vector(resolved.owner);
+        metrics.neighbor_to_owner = resolved.cell_center_vector(resolved.neighbor);
+        metrics.neighbor_to_face_distance = metrics.neighbor_center_vector.norm();
+        metrics.face_cell_center_distance = metrics.owner_to_neighbor.norm();
+    }
+    metrics.boundary_id = boundary_id;
+    metrics.flags = face_flags(interior, boundary, owned_orientation);
+    return metrics;
+}
+
+/**
+ * @brief Stable, geometry-independent face visitor for one assembly row.
+ *
+ * The concrete type depends only on the public mesh and row types, never on the
+ * runtime geometry backend behind `detail::TraverseAccess`. Passing this
+ * closure into the numerical visitor keeps the large kernel bodies instantiated
+ * once per `(Pack, MeshType)` instead of once per `MeshHandle` geometry
+ * alternative, while run/face/order dispatch stays exactly
+ * `visit_transport_face_runs`.
+ */
+template<class Geometry, class Row> struct TransportAssemblyRowFaces
+{
+    const Geometry& geometry;
+    size_t cell;
+    Row& row;
+
+    template<class VisitFace> void operator()(VisitFace&& visit_face) const
+    {
+        visit_transport_face_runs(geometry, cell,
+            [&]<bool Interior, bool Boundary, bool Owned>(const auto& run)
+            {
+                using local_ordinal_type = typename Row::local_ordinal_type;
+                for (size_t index = run.begin; index < run.end; ++index)
+                {
+                    const auto& face = geometry.faces[index];
+                    row.select(index - geometry.face_offsets[cell], face.face_lid,
+                        Interior ? face.other : local_ordinal_type{});
+                    visit_face(TransportAssemblyFace<local_ordinal_type, Interior, Boundary, Owned>{
+                        face.face_lid, face.other}, row);
+                }
+            });
+    }
+};
+
+/**
+ * @brief Ordered transport batches with borrowed, current-epoch stable metrics.
+ *
+ * Composite providers still resolve native incidence once per row; generic
+ * providers fill the same backend-neutral record once per row through one typed
+ * access dispatch outside the row traversal. One reused row-sized scratch
+ * buffer holds either resolved region faces or stable metric records while its
+ * homogeneous runs execute; there is no persistent global resolved-face or
+ * metric table. The numerical visitor sees only `TransportAssemblyFace` and
+ * `AssemblyFaceRow`, so it is instantiated independently of the geometry
+ * backend.
  */
 template<class MeshType, class Visitor>
 void visit_transport_assembly_rows(const MeshType& mesh,
     const TransportAssemblyGeometry<MeshType>& geometry, Visitor&& visitor)
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;
+    using scalar_type = typename MeshType::scalar_type;
+    using geometry_type = TransportAssemblyGeometry<MeshType>;
+    using row_type = AssemblyFaceRow<local_ordinal_type, scalar_type>;
+    using face_visit_type = TransportAssemblyRowFaces<geometry_type, row_type>;
+
     geometry.require_mesh(mesh);
     const auto execution = geometry.traverse_plan->acquire();
+    std::vector<AssemblyFaceMetrics> row_metrics;
+    row_type row;
     if constexpr (requires { mesh.supports_region_execution(); })
     {
         if (mesh.supports_region_execution())
@@ -320,50 +445,46 @@ void visit_transport_assembly_rows(const MeshType& mesh,
             using resolved_type = Meshes::MultiRegionMesh::ResolvedFace;
             std::vector<resolved_type> resolved_faces;
             resolved_faces.reserve(6);
-            mesh.visit_owned_region_cells([&](local_ordinal_type cell, auto canonical_cell,
-                                             auto native_cell, const auto& region)
+            mesh.visit_owned_region_cells([&](local_ordinal_type cell, auto, auto native_cell, const auto& region)
             {
-                visitor(cell, geometry.volumes[cell], [&](auto&& visit_face)
+                const auto begin = geometry.face_offsets[cell];
+                const auto end = geometry.face_offsets[cell + 1];
+                resolved_faces.clear();
+                region.visit_cell_faces(native_cell, [&](const auto& resolved) { resolved_faces.push_back(resolved); });
+                if (resolved_faces.size() != end - begin)
+                    throw std::logic_error("Region transport geometry lost its cached incidence order.");
+                row_metrics.resize(end - begin);
+                for (size_t index = begin; index < end; ++index)
                 {
-                    const auto begin = geometry.face_offsets[cell];
-                    const auto end = geometry.face_offsets[cell + 1];
-                    resolved_faces.clear();
-                    region.visit_cell_faces(native_cell, [&](const auto& resolved) { resolved_faces.push_back(resolved); });
-                    if (resolved_faces.size() != end - begin)
-                        throw std::logic_error("Region transport geometry lost its cached incidence order.");
-                    visit_transport_face_runs(geometry, static_cast<size_t>(cell),
-                        [&]<bool Interior, bool Boundary, bool Owned>(const auto& run)
-                    {
-                        for (size_t index = run.begin; index < run.end; ++index)
-                        {
-                            const auto& face = geometry.faces[index];
-                            const auto& resolved = resolved_faces[index - begin];
-                            const ResolvedTransportGeometry<MeshType, resolved_type> metrics(resolved, cell, canonical_cell);
-                            visit_face(TransportAssemblyFace<local_ordinal_type, Interior, Boundary, Owned>{
-                                face.face_lid, face.other}, metrics);
-                        }
-                    });
-                });
+                    const auto& face = geometry.faces[index];
+                    row_metrics[index - begin] = make_resolved_assembly_face_metrics(resolved_faces[index - begin],
+                        face.interior, face.boundary, face.owned_orientation,
+                        static_cast<int>(mesh.boundary_id(face.face_lid)));
+                }
+                row.reset(std::span<const AssemblyFaceMetrics>(row_metrics.data(), row_metrics.size()), cell);
+                visitor(cell, geometry.volumes[cell], face_visit_type{geometry, static_cast<size_t>(cell), row});
             });
             return;
         }
     }
-    execution.cells().all().apply([&](const auto& cell)
+    ::SimpleFluid::detail::with_traverse_access(mesh, [&](const auto& access)
     {
-        const auto id = cell.id();
-        visitor(id, geometry.volumes[static_cast<size_t>(id)], [&](auto&& visit_face)
+        const auto count = geometry.volumes.size();
+        for (size_t cell = 0; cell < count; ++cell)
         {
-            visit_transport_face_runs(geometry, static_cast<size_t>(id),
-                [&]<bool Interior, bool Boundary, bool Owned>(const auto& run)
+            const auto cell_lid = static_cast<local_ordinal_type>(cell);
+            const auto begin = geometry.face_offsets[cell];
+            const auto end = geometry.face_offsets[cell + 1];
+            row_metrics.resize(end - begin);
+            for (size_t index = begin; index < end; ++index)
             {
-                for (size_t index = run.begin; index < run.end; ++index)
-                {
-                    const auto& face = geometry.faces[index];
-                    visit_face(TransportAssemblyFace<local_ordinal_type, Interior, Boundary, Owned>{
-                        face.face_lid, face.other}, cell.geometry());
-                }
-            });
-        });
+                const auto& face = geometry.faces[index];
+                row_metrics[index - begin] = make_assembly_face_metrics(
+                    access, face.face_lid, face.other, cell_lid, face.interior, face.boundary, face.owned_orientation);
+            }
+            row.reset(std::span<const AssemblyFaceMetrics>(row_metrics.data(), row_metrics.size()), cell_lid);
+            visitor(cell_lid, geometry.volumes[cell], face_visit_type{geometry, cell, row});
+        }
     });
 }
 
