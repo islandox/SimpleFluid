@@ -290,7 +290,9 @@ be invalidated by the caller. `geometry_epoch()` is not a topology revision.
 Execution retains runtime provider ownership until its borrowed leases release,
 so replacing a handle rejects subsequent proxy use without dangling its lease.
 
-Runtime handle provider dispatch occurs once per traversal. Composite metric
+Runtime handle provider dispatch occurs once per traversal call, outside the
+numerical loops; the assembly row fill reuses that single typed access for every
+row. Composite metric
 queries retain the existing canonical geometry path, including transformed ALE
 coordinates and periodic images; its internal region resolution is unchanged.
 This API removes repeated selection dispatch, while numerical conditions and
@@ -533,14 +535,52 @@ new snapshot and recomputes volumes; it does not rediscover incidence or rebuild
 category schedules. Previous snapshots remain unchanged and stale epochs are
 rejected before execution. Uncached builders create operation-local geometry.
 
-Native/mapped geometry access dispatches outside the row traversal. Composite
-meshes keep their typed region resolution: a reusable buffer, bounded by the
-largest row, holds that row's resolved face metrics while its runs execute.
-There is no persistent global resolved-metric table. Canonical coarse/fine
-faces, periodic images, field-local IDs, repeated neighbours and numerical
-accumulation order retain their existing meaning.
+Native/mapped geometry access dispatches outside the numerical face loops. One
+reusable row-sized buffer holds the backend-neutral metrics of the current row
+while its runs execute. There is no persistent global resolved-metric table.
+Canonical coarse/fine faces, periodic images, field-local IDs, repeated
+neighbours and numerical accumulation order retain their existing meaning.
 Bounded row scratch preserves compact storage without a persistent global geometry
 table.
+
+### Stable assembly metrics
+
+`visit_transport_assembly_rows` no longer passes the concrete traversal access
+type into numerical callbacks. Each row is resolved once into
+`FVM/details/AssemblyFaceMetrics` records (area, owner-oriented normal and area
+vector, centroids, provider image-aware cell-to-face and cell-to-cell
+displacements, provider distances, boundary ID, category flags) and the callback
+receives a borrowed `FVM/details/AssemblyFaceRow`. That record exposes the same
+duck-typed accessor names as the traversal access, so the numerical helper
+functions in `FVM/details/OperatorDetails.hh` and the transport kernels keep
+their formulas and accumulation order unchanged.
+
+The record is filled from the same typed provider query that the kernels used
+before: the generic branch performs one `with_traverse_access` dispatch per
+builder call and fills rows from the typed access; the composite branch fills
+from the same resolved region faces as before, keeping coarse/fine expansion and
+periodic image arithmetic. No metric is re-derived by centroid subtraction, and
+sign flips for the neighbor orientation stay exact sign flips of the stored
+owner-oriented vectors.
+
+Consequences:
+
+- A numerical callback type depends on the public mesh type only, never on the
+  runtime geometry backend behind a `MeshHandle`.
+- Run/category dispatch (`visit_transport_face_runs`), boundary-slot order,
+  ownership filters, and provider arithmetic are unchanged.
+- The static row view throws `std::invalid_argument` if a kernel reads a face
+  other than the currently selected row face or a cell that is not incident.
+  This turns a stale-index bug into a failed assembly instead of silently
+  reading another face's metrics.
+
+The supported mapped `weighted_scalar_transport_system` request entry point
+(`FVM::weighted_scalar_transport_system<DefaultTpetraTypes,
+FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<...>>>`)
+is explicitly instantiated in the FVM library and declared `extern template` in
+`FVM/TransportSystem.hh`. Equation translation units therefore link the one
+compiled assembly body instead of instantiating it per consumer and per geometry
+backend. Caller-defined mesh types and Tpetra packs keep the inline template.
 
 The legacy uniform scalar/vector builders still apply boundary conditions
 after the row pass. Their preclassified boundary descriptors preserve the
