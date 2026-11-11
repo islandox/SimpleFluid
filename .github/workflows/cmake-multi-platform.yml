@@ -156,9 +156,9 @@ jobs:
       continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ hashFiles('.github/actions/setup-trilinos-source/action.yml') }}-${{ matrix.cache_suffix }}-${{ github.sha }}
+        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.cache_suffix }}
         restore-keys: |
-          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ hashFiles('.github/actions/setup-trilinos-source/action.yml') }}-${{ matrix.cache_suffix }}-
+          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.cache_suffix }}
 
     - name: Reset compiler cache statistics
       run: ccache --zero-stats
