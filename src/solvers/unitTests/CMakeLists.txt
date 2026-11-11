@@ -462,6 +462,8 @@ foreach(_region_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME MultiRegionSolverALE_${_region_procs}procs TARGET testBoussinesqPlanarALE
         PROCS ${_region_procs} ARGS "--gtest_filter=BoussinesqPlanarALESupportMatrixTest.AcceptsCompositeAxialMotion"
         LABELS "mpi;multi_region;ale;pressure_velocity" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME SteadyDiffusionConvergence_${_region_procs}procs TARGET testSteadyDiffusionConvergence
+        PROCS ${_region_procs} LABELS "mpi;non_orthogonal;multi_region" TIMEOUT 120)
 endforeach()
 
 simplefluid_add_mpi_test(

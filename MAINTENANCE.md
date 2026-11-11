@@ -328,10 +328,19 @@ The CMake targets make the same boundary explicit:
 Keep dependencies pointing down this table. If a low-level layer needs a
 solver type, the abstraction is probably in the wrong layer.
 
-The compiled DIC preconditioner is owned by `SimpleFluid::FVM`: non-orthogonal
-FVM solves and higher-level solvers both use it. Its existing header path under
-`solvers/` is retained for source compatibility. Keep the FVM-only consumer
-test and the FVM/solver export audits passing when changing this ownership.
+`SimpleFluid::FVM` owns reconstruction, face fluxes, discrete operators,
+assemblers, residuals, and RHS corrections, and it must not reference any
+symbol that only `SimpleFluidSolvers` defines. The Belos wrapper, the compiled
+`SimpleFluid::detail::DICPreconditioner`, and the steady non-orthogonal
+diffusion solve entry points are compiled into `SimpleFluidSolvers`;
+`solvers/NonOrthogonalDiffusionSolve.hh` keeps the `SimpleFluid::FVM` namespace
+and header-visible names for source compatibility, so including it is how a
+caller reaches a steady solve. This boundary is not cosmetic: `libSimpleFluidFVM`
+has to link on its own, because macOS `ld64` rejects undefined symbols in a
+dylib while Linux ELF tolerates them, and the tolerated state is exactly what
+previously hid an FVM-to-solver reference until CI reached macOS. Keep the
+`testFvmLibrary` FVM-only link guard, `simplefluid_fvm_elf_export_boundary`, and
+`simplefluid_elf_export_boundary` passing when moving code across this boundary.
 
 `SimpleFluid::Equations` remains a logical link target, but compiled equation
 and solver specializations share the `SimpleFluidSolvers` DSO. On ELF builds,

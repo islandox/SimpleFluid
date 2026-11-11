@@ -12,12 +12,17 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  # Every FVM test links the supported consumer layer. FVM and Solvers are
-  # loaded together because FVM code performs linear solves; the compiled-FVM-API
-  # contract is enforced separately by simplefluid_fvm_elf_export_boundary, and
-  # solver-facing checks (the compiled DIC preconditioner) live in
-  # src/solvers/unitTests/testFvmLibrary.cc.
-  target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testFvmLibrary")
+    # Link the FVM DSO alone. GNU ld reports undefined shared-library
+    # symbols when creating an executable, so this fails on Linux too if FVM
+    # regresses to depending on the solver DSO (macOS ld64 fails first).
+    target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
+  else()
+    # Tests calling the solver-owned steady-diffusion entry points link the
+    # consumer layer; FVM-side export coverage stays in
+    # simplefluid_fvm_elf_export_boundary.
+    target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
@@ -150,8 +155,6 @@ foreach(_region_procs IN ITEMS 2 4)
         PROCS ${_region_procs} LABELS "mpi;multi_region;accuracy;qualification" TIMEOUT 180)
     simplefluid_add_mpi_test(NAME RegionDiffusionAssembly_${_region_procs}procs TARGET testRegionDiffusionAssembly
         PROCS ${_region_procs} LABELS "mpi;multi_region;diffusion;execution" TIMEOUT 120)
-    simplefluid_add_mpi_test(NAME SteadyDiffusionConvergence_${_region_procs}procs TARGET testSteadyDiffusionConvergence
-        PROCS ${_region_procs} LABELS "mpi;fvm;non_orthogonal;multi_region" TIMEOUT 120)
 endforeach()
 
 foreach(_gradient_procs IN ITEMS 2 4)

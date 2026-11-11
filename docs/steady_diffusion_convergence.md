@@ -78,3 +78,17 @@ per-rank GoogleTest XML retain the results. The
 [native symbol audit](qualification/region_production/llvm_debug/steady_diffusion_native_symbols.txt)
 confirms that the FVM static archive defines both original native helper
 signatures and both overloads accepting explicit convergence controls.
+
+## Ownership
+
+The paragraphs above record the qualification that ran while these entry points
+were still compiled into `libSimpleFluidFVM`; the historical manifests and
+symbol audit are left as recorded. Current ownership is different: the steady
+solve entry points, the implicit-correction loop, and the native helper
+signatures they use now live in `libSimpleFluidSolvers`
+(`solvers/NonOrthogonalDiffusionSolve.hh` and `solvers/details/SteadyDiffusionConvergence.hh`).
+`libSimpleFluidFVM` exports only the assemblers, residuals, and RHS corrections
+they call, and must link without any symbol that only the solver DSO defines.
+The `SimpleFluid::FVM` namespace is retained on the solve entry points for
+source compatibility, so call sites include
+`solvers/NonOrthogonalDiffusionSolve.hh` rather than `FVM/Operators.hh`.
