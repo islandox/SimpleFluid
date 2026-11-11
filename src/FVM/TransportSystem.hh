@@ -375,7 +375,7 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
  * separate field.
  */
 template<TpetraTypePack Pack, class MeshType>
-TransportSystem<Pack> weighted_scalar_transport_system(
+SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(
     FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request)
 {
     return detail::stored_weighted_scalar_transport_system<Pack>(request.old_values, request.face_fluxes,
@@ -386,6 +386,19 @@ TransportSystem<Pack> weighted_scalar_transport_system(
         request.coefficient_interpolation, request.discretization, request.older_values, request.old_storage_weight,
         request.ale, request.symbolic_plan, std::move(request.cached_rhs));
 }
+
+/**
+ * @brief Compiled mapped weighted-scalar entry point for the supported runtime mesh.
+ *
+ * The FieldStored assembly body is large; instantiating it in every equation
+ * translation unit duplicates the whole kernel once per consumer and, through
+ * MeshHandle, once per concrete geometry backend. The default runtime-mesh
+ * specialization is compiled once in the FVM library. Caller-defined mesh
+ * types and Tpetra packs remain supported through the inline template above.
+ */
+extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes,
+    MeshHandle<DefaultTpetraTypes>>(
+    FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>);
 
 /**
  * @brief Compatibility overload for weighted scalar transport on mapped fields.
