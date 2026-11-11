@@ -295,9 +295,6 @@ list(FILTER simplefluid_forbidden_api_symbols EXCLUDE REGEX
 set(simplefluid_required_api_patterns
     "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::DICPreconditioner[(]"
     "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::apply[(]"
-    # Function-template symbols carry an encoded return type before the name.
-    "SimpleFluid::FVM::solve_explicit_non_orthogonal_diffusion<"
-    "SimpleFluid::FVM::solve_non_orthogonal_diffusion<"
     "^SimpleFluid::BubbleGasPhysics::advance_microbubble_substep[(]"
     "^SimpleFluid::BubbleGasPhysics::advance_upper_bubble_population[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
@@ -1214,6 +1211,22 @@ if(simplefluid_missing_api_patterns)
         "${SIMPLEFLUID_LIBRARY} is missing required public API anchors:\n  "
         "${simplefluid_missing_api_patterns}")
 endif()
+
+# Clang encodes a constrained function template's constraint in the symbol
+# (`ITk`), and GNU c++filt leaves those names undecoded. These two families are
+# therefore matched on the mangled prefix, which both compilers share up to the
+# template argument list.
+foreach(simplefluid_solve_family IN ITEMS
+        solve_explicit_non_orthogonal_diffusion
+        solve_non_orthogonal_diffusion)
+    if(NOT simplefluid_dynamic_symbols MATCHES
+       "_ZN11SimpleFluid3FVM[0-9]+${simplefluid_solve_family}I")
+        message(FATAL_ERROR
+            "${SIMPLEFLUID_LIBRARY} does not export the steady diffusion "
+            "solve family ${simplefluid_solve_family}")
+    endif()
+endforeach()
+
 if(simplefluid_missing_exact_api_patterns)
     list(JOIN simplefluid_missing_exact_api_patterns "\n  "
          simplefluid_missing_exact_api_patterns)
