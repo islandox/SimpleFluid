@@ -1174,14 +1174,115 @@ from another layout before inspecting its rows; the existing per-row recipe,
 revision, geometry epoch and arithmetic checks still apply. Historical layout
 pins remain usable after the hierarchy is released or a candidate is accepted.
 
+The internal `AdaptiveContactSnapshot` exposes the complete closed-contact
+witnesses used by closure. Each occurrence preserves the neighbor key, owner and
+revision, connected domain, normalized point and both physical points. Repeated
+physical occurrences remain distinct even when their periodic normalization
+agrees. Local identities borrow their immutable leaf selection; foreign identities
+retain the authenticated owner record. Sealing a changed selection requires the
+hierarchy's validated leaf transition, including unchanged records on copied
+pages. An equal-by-value layout or a different owner at the same address cannot
+supply that authority. Detached queries retain no mutable hierarchy or session.
+
+`AdaptiveSubfaceSnapshot` exposes completed canonical pieces and source-face
+queries after the support and line fixed point. A piece retains both incidents,
+source-surface provenance, support and domain, boundary, generation, periodic
+mapping and its final physical loop. An individual view pins the immutable
+owners it needs after its snapshot is released. Materialization is explicit and
+budgeted: its identity is the authority identity before edge enrichment, while
+its geometry contains the completed loop. Native publication consumes these
+pieces, resolves current native face addresses against the repacked owned
+records, and performs the existing canonical face/node numbering. It does not
+repeat support-overlay or line-completion geometry. Both periodic physical node
+loops and owner-oriented signs remain part of publication.
+
+Candidate edits use a sparse overlay of replacements, insertions and retirements
+over the accepted leaf root. Closing an edit copies the affected leaf pages and
+ancestor paths, while unchanged pages retain their physical owners. A persistent
+allocation-usage index distinguishes active leaf bodies from saved family-parent
+bodies; retiring the final active occurrence does not release a body still needed
+for coarsening. The escaped leaf layout carries only its own leaf dependency
+lease. Repacking is restricted to dirty records when the provider explicitly
+supports subset repacking. Migration transports actual remote moves and preserves
+unchanged local recipe/ordinal bindings. Directory publication and numeric GID
+assignment can still stream the complete active selection.
+
+### Persistent geometry-demand storage
+
+Sparse demand geometry keeps its representation in immutable persistent pages
+rather than in per-row containers. Binding key groups and the logical selector
+order each live in compiled 64-row/32-child pages holding complete persistent
+keys, generation stamps and request positions. Extending a selection rewrites
+only the bounded pages its keys touch and repacks a bounded trailing ancestry
+group; unchanged complete pages stay shared by physical identity. Rows of a
+rewritten page remain in complete persistent-key order, which is also the order
+their binary searches require. No expansion materialises the previous selection
+or rebuilds every binding row.
+
+Prepared State contexts are an optional immutable index keyed by exact native
+recipe control and the 64-cell source block. Each entry names an actual
+source-only body plus the block's cell mask; lookup needs no allocation and no
+hierarchy lifetime. Optional preparation is decided from already admitted
+headroom before any allocation, so insufficient room chooses demand-only while a
+genuine construction or resource failure still propagates. A page covers every
+eligible cell of its block, and a cell that was selected before its page existed
+adopts that page through one persistent catalog rebind that retires its per-build
+source hold and retains the page source without changing the cell's order stamp,
+selector order or bindings. A raw OriginalSources context that would otherwise
+rebuild the selected rows instead takes a deferred subset body: it shares the
+prepared page's immutable base and allocates facts only for the rows it exposes,
+so raw demand stays identical in value while its isolated evaluation state and
+source identity remain its own. Prepared bodies retain neither an older catalog,
+snapshot, hierarchy nor controller chain.
+
+Physical ownership is stored in a controlled persistent owner manifest keyed by
+channel, allocation kind, address and full shared control. A row keeps its exact
+exclusive byte count; reference multiplicity records how many slots or parent
+edges hold the owner and is never folded into unique payload bytes. A repeated
+exact owner keeps one byte count, an address with a conflicting control rejects,
+and a one-owner set is held inline without an index page. Owners constructed
+during the same operation are admitted as prepaid so their bytes are not charged
+twice when the published root is retained; a catalog that is immediately
+replaced by a persistent demand catalog is charged as construction scratch
+rather than silently omitted. Bounded construction scratch is not retained.
+
+A fresh operation ledger can import an authenticated immutable owner set: it
+shares the root, charges that set's cached union without enumerating retained
+geometry, and preserves a nonzero caller cumulative counter. Importing into a
+populated ledger requires the exact union, enumerates the imported rows once and
+reports that work. Imported owners participate in later retention, duplicate and
+control detection, payload and bookkeeping queries and the borrowed physical
+census exactly like locally admitted owners; the admission entry points consult
+the imported root before charging or publishing anything.
+
+The published geometry cache keeps one exact owner manifest per root slot and per
+owner channel (ordinary and bounded certification). A root manifest is built once
+when that root is published, copied when a cache is rebound, and charged as cache
+metadata. A warm State cache hit with a fresh caller ledger installs the
+maintained ordinary manifest instead of re-walking the snapshot's dependency
+graph; a populated caller ledger keeps the complete walk so its exact union is
+preserved.
+
+Root replacement rebuilds the exact cache union from those manifests: each root
+contributes its own authenticated set, empty channels are skipped, and no
+snapshot dependency graph is re-walked. The residency seal and lease are that
+union's payload plus the union ledger's own bookkeeping, so the seal remains an
+exact-union admission and every later source/rebinding query consumes it without
+another census. The cache also accumulates the persistent-catalog construction
+work of each replacement (copied metadata bytes, copied pages and visited
+pages), so a fixed demand change appended to a warm selection can be shown to
+copy a bounded amount independent of that selection's size. Its regression reconstructs the same union independently from
+fresh per-root manifests and additionally requires that union's payload to equal
+the payload reached by walking the snapshot graph, so representation and
+dependency views must agree. Rollback is unchanged: a rejected construction
+leaves the accepted roots, their manifests and their residency seal intact while
+the genuinely spent admission prefix stays accounted.
+
 This reuses the typed topology/geometry separation above the existing native
-block providers. It does not turn a mixed-level forest into a rectilinear tensor
-product, change native metrics or represented PLIC geometry, or establish a
-new logical-contact capability. Complete support/edge incidence remains the
-contact authority. Persistent topology pages, candidate overlays, procedural
-mixed-level contact/subface traversal and compaction of regular geometry
-bindings remain separate extensions; current real edits still construct a new
-transient candidate map. Canonical fine-face flux and signed restriction are unchanged.
+block providers. Complete support/edge incidence remains the contact authority;
+typed ancestry and logical adjacency alone cannot certify a mixed-level contact.
+The represented native metrics, PLIC geometry, canonical fine-face flux and
+signed restriction retain their existing contracts.
 
 The hierarchy retains its accepted spatial contact session and forks a private
 candidate for adaptation or migration. Sparse owner/revision changes, dirty

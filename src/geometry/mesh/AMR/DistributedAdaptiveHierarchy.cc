@@ -2,12 +2,15 @@
  * @brief Distributed complete-family transactions with immutable local state.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/AdaptiveContactSnapshot.hh"
-#include "geometry/mesh/AMR/AdaptiveLeafOverlay.hh"
-#include "geometry/mesh/AMR/AdaptiveLeafBodyUsage.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
+#include "geometry/mesh/AMR/AdaptiveLeafBodyUsage.hh"
+#include "geometry/mesh/AMR/AdaptiveLeafOverlay.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
@@ -54,6 +57,13 @@ struct AdaptiveGeometrySnapshotCache
     std::array<std::weak_ptr<const AdaptiveGeometrySnapshot>, 6> sealed_roots;
     std::size_t resident_bytes = 0, union_censuses = 0, census_root_visits = 0;
     mutable std::size_t admission_queries = 0;
+    /** Exact immutable owner set of each cached root, built once when the root is
+     * published. Warm cache hits install it into the caller ledger instead of
+     * re-walking the snapshot dependency graph. */
+    std::array<std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2>, 6> manifests;
+    std::size_t manifest_bytes = 0;
+    /** Cumulative persistent-catalog construction work since the last reset. */
+    PLIC::details::CellCatalogDemandWork catalog_work;
 
     // Every query holds mutex. The seal authenticates the exact immutable
     // root controls, including an empty root, whose union was admitted.
@@ -74,20 +84,28 @@ struct AdaptiveGeometrySnapshotCache
         budget.add(sizeof(*this));
         budget.add(bytes);
     }
-    // Root replacement still performs one exact fresh-ledger census. Accepted
-    // source admission and native rebinding consume the resulting scalar seal.
+    // Root replacement rebuilds the exact union from the maintained immutable
+    // owner manifests: each root contributes its own authenticated set, so the
+    // replacement does not re-walk any snapshot dependency graph.
     std::size_t census_root_bytes()
     {
         ++union_censuses;
         PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-        std::size_t bytes = 0;
-        for (const auto& root : roots)
-            if (root)
+        std::size_t ordinary_used = 0, bounded_used = 0;
+        for (std::size_t slot = 0; slot < roots.size(); ++slot)
+            for (std::size_t channel = 0; channel < 2; ++channel)
             {
-                ++census_root_visits;
-                root->retain(ordinary_owners, bounded_owners, bytes, std::numeric_limits<std::size_t>::max());
+                const auto& manifest = manifests[slot][channel];
+                if (!manifest.owner_count())
+                    continue;
+                auto& ledger = channel ? bounded_owners : ordinary_owners;
+                auto& used = channel ? bounded_used : ordinary_used;
+                PLIC::details::GeometryOwnerImportAccess::import(
+                    ledger, manifest, used, std::numeric_limits<std::size_t>::max());
+                census_root_visits += manifest.owner_count();
             }
-        return bytes;
+        return ordinary_owners.payload_bytes() + ordinary_owners.bookkeeping_bytes() + bounded_owners.payload_bytes() +
+               bounded_owners.bookkeeping_bytes();
     }
     void seal_residency(std::size_t bytes) noexcept
     {
@@ -95,11 +113,25 @@ struct AdaptiveGeometrySnapshotCache
         for (std::size_t slot = 0; slot < roots.size(); ++slot)
             sealed_roots[slot] = roots[slot];
     }
+    /** Build the exact owner manifest of a freshly published root. One walk per
+     * published root; every later warm admission reuses the maintained set. */
+    void seal_manifest(std::size_t slot)
+    {
+        if (!roots[slot])
+        {
+            manifests[slot] = {};
+            return;
+        }
+        adaptive_detail::Budget budget{std::numeric_limits<std::size_t>::max()};
+        adaptive_detail::GeometrySnapshotAccess::owner_manifests(
+            *roots[slot], budget, manifests[slot][0], manifests[slot][1]);
+    }
     void copy_roots_from(const AdaptiveGeometrySnapshotCache& source)
     {
         const auto bytes = source.root_bytes();
         roots = source.roots;
         predecessors = source.predecessors;
+        manifests = source.manifests;
         seal_residency(bytes);
     }
 };
@@ -2647,7 +2679,15 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     if (compatible && purpose == GeometrySnapshotPurpose::State &&
         std::all_of(leaves.begin(), leaves.end(), [&](const auto* leaf) { return leaf && current->find(*leaf); }))
     {
-        current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
+        // A fresh caller ledger installs the maintained immutable owner set and
+        // charges its exact cached union. A populated ledger keeps the existing
+        // complete walk so its exact union is preserved.
+        if (mode == ArithmeticMode::Ordinary && operation_ordinary.owner_count() == 0 &&
+            data_->geometry_cache->manifests[slot][0].owner_count())
+            PLIC::details::GeometryOwnerImportAccess::import(
+                operation_ordinary, data_->geometry_cache->manifests[slot][0], operation_used, operation_limit);
+        else
+            current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
         return current;
     }
     // Failed construction preserves the spent admission prefix while leaving
@@ -2672,7 +2712,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     if (!predecessor && purpose == GeometrySnapshotPurpose::OriginalSources)
         predecessor = data_->geometry_cache->roots[2 * mode_slot];
     auto candidate = AdaptiveGeometrySnapshot::build(*this, leaves, mode, purpose, pending_used, operation_limit,
-        operation_ordinary, operation_bounded, predecessor);
+        operation_ordinary, operation_bounded, predecessor, {}, &data_->geometry_cache->catalog_work);
     Budget hierarchy_budget{data_->options.byte_budget};
     hierarchy_budget.add(sizeof(AdaptiveGeometrySnapshotCache));
     charge_source_base_residency(hierarchy_budget, *data_);
@@ -2701,14 +2741,56 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
             const auto arena_available = lease.available();
             const auto optional_headroom = std::min(hierarchy_budget.limit - hierarchy_budget.used,
                 arena_available - std::min(demand_growth, arena_available));
-            if (candidate->prepare_cartesian_page(*this, *leaf, pending_used, operation_limit, optional_headroom))
+            const auto prepare = [&](std::uint64_t first)
             {
-                candidate->retain_prepared_cartesian_sources(operation_ordinary, pending_used, operation_limit);
-                const auto before = overlap_bytes;
-                candidate->retain_prepared_cartesian_sources(ordinary_owners, overlap_bytes, data_->options.byte_budget);
-                hierarchy_budget.add(overlap_bytes - before);
-            }
+                if (candidate->prepare_cartesian_page(
+                        *this, *leaf, pending_used, operation_limit, optional_headroom, first))
+                {
+                    candidate->retain_prepared_cartesian_sources(operation_ordinary, pending_used, operation_limit);
+                    const auto before = overlap_bytes;
+                    candidate->retain_prepared_cartesian_sources(
+                        ordinary_owners, overlap_bytes, data_->options.byte_budget);
+                    hierarchy_budget.add(overlap_bytes - before);
+                }
+            };
+            const auto block = leaf->native_cell / geometry_snapshot_detail::prepared_cartesian_page_size *
+                               geometry_snapshot_detail::prepared_cartesian_page_size;
+            prepare(block);
+            // Look one block ahead once the request reaches the end of its own
+            // block, so the next block's page exists before its first cell is
+            // selected and can therefore cover every cell of that block.
+            if (leaf->native_cell + maximum_stream_batch >=
+                block + geometry_snapshot_detail::prepared_cartesian_page_size)
+                prepare(block + geometry_snapshot_detail::prepared_cartesian_page_size);
         }
+    if (compatible && mode == ArithmeticMode::Ordinary && purpose == GeometrySnapshotPurpose::State &&
+        leaves.size() <= maximum_stream_batch)
+    {
+        // Cells whose page was prepared after they were already selected keep
+        // their per-build source until they adopt the page here. Only genuinely
+        // different sources are rebound, so already adopted cells cost nothing.
+        std::vector<std::size_t> ordinals;
+        std::vector<AdaptiveGeometrySnapshot::PreparedSourceSlot> prepared;
+        for (const auto* leaf : leaves)
+        {
+            const auto ordinal = candidate->find(*leaf);
+            if (!ordinal)
+                continue;
+            const auto slot = candidate->prepared_slot(*leaf);
+            if (!slot.valid)
+                continue;
+            const PLIC::CellGeometryView<ArithmeticMode::Ordinary> view(candidate->ordinary_catalog(), *ordinal);
+            if (!view.is_procedural())
+                continue;
+            const auto current = PLIC::details::NativeCellGeometrySourceAccess::source_cell(view);
+            if (current.source.get() == slot.source.get())
+                continue;
+            ordinals.push_back(*ordinal);
+            prepared.push_back(slot);
+        }
+        if (!ordinals.empty())
+            candidate->rebind_prepared_slots(ordinals, prepared, operation_ordinary, pending_used, operation_limit);
+    }
     if (!geometry_unchanged())
         throw std::invalid_argument("Distributed geometry snapshot source moved before publication.");
     const auto previous_lease_bytes = lease.bytes();
@@ -2717,9 +2799,19 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     try
     {
         current = candidate;
+        data_->geometry_cache->seal_manifest(slot);
         const auto resident = data_->geometry_cache->census_root_bytes();
         lease.resize(resident);
         data_->geometry_cache->seal_residency(resident);
+        {
+            std::size_t manifest_bytes = 0;
+            for (const auto& channels : data_->geometry_cache->manifests)
+                for (const auto& manifest : channels)
+                    manifest_bytes += manifest.metadata_admission_bytes();
+            if (manifest_bytes > data_->geometry_cache->manifest_bytes)
+                hierarchy_budget.add(manifest_bytes - data_->geometry_cache->manifest_bytes);
+            data_->geometry_cache->manifest_bytes = manifest_bytes;
+        }
         data_->geometry_cache->predecessors[slot].reset();
     }
     catch (...)
@@ -2848,8 +2940,8 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapsho
     const auto slot = 2 * mode_slot + (purpose == GeometrySnapshotPurpose::OriginalSources ? 1 : 0);
     const auto& previous = state.geometry_cache->roots[slot] ? state.geometry_cache->roots[slot]
                                                              : state.geometry_cache->roots[2 * mode_slot];
-    auto result = AdaptiveGeometrySnapshot::build(
-        hierarchy, selected, mode, purpose, budget.used, limit, ordinary_owners, bounded_owners, previous, publication);
+    auto result = AdaptiveGeometrySnapshot::build(hierarchy, selected, mode, purpose, budget.used, limit,
+        ordinary_owners, bounded_owners, previous, publication, &state.geometry_cache->catalog_work);
     Budget hierarchy_budget{state.options.byte_budget};
     hierarchy_budget.add(sizeof(AdaptiveGeometrySnapshotCache));
     charge_source_base_residency(hierarchy_budget, state);
@@ -2869,7 +2961,8 @@ adaptive_detail::GeometryCacheAdmissionStatistics adaptive_detail::GeometrySnaps
     const auto& cache = *hierarchy.data_->geometry_cache;
     std::lock_guard lock(cache.mutex);
     return {sizeof(cache), cache.root_bytes(), cache.lease ? cache.lease->bytes() : 0, cache.admission_queries,
-        cache.union_censuses, cache.census_root_visits};
+        cache.union_censuses, cache.census_root_visits, cache.catalog_work.cumulative_metadata_bytes,
+        cache.catalog_work.pages.copied_pages, cache.catalog_work.pages.visited_pages};
 }
 void adaptive_detail::GeometrySnapshotAccess::admit_cache_residency(
     const DistributedAdaptiveHierarchy& hierarchy, Budget& budget)

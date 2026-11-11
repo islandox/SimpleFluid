@@ -45,35 +45,109 @@ const OwnerRecord* find(const Pages::Ptr& root, const OwnerRecord& key, PageWork
 struct GeometryOwnerManifest::State
 {
     Pages::Ptr root;
+    /** The single admitted row of a one-owner set, held inline. A singleton set
+     * needs no index page; the row and its multiplicity live with the state. */
+    OwnerRecord single;
     explicit State(Pages::Ptr value) : root(std::move(value)) {}
+    explicit State(OwnerRecord value) : single(std::move(value)) {}
+    [[nodiscard]] bool inline_row() const noexcept { return !root; }
 };
 void GeometryOwnerManifest::visit_dependencies(MetadataSink metadata, RecordSink records) const
 {
     if (!state_ || !metadata(state_, sizeof(State), sizeof(State) + control_bytes))
         return;
-    Pages::visit_dependencies(state_->root, metadata, records);
+    if (state_->inline_row())
+        records(state_->single);
+    else
+        Pages::visit_dependencies(state_->root, metadata, records);
 }
 void GeometryOwnerManifest::visit_borrowed_dependencies(
     BorrowedMetadataSink metadata, BorrowedRecordSink records, const void* parent) const
 {
     if (!state_ || !metadata(state_.get(), parent, sizeof(State)))
         return;
-    Pages::visit_borrowed_dependencies(state_->root, metadata, records, state_.get());
+    if (state_->inline_row())
+        records(state_->single, state_.get());
+    else
+        Pages::visit_borrowed_dependencies(state_->root, metadata, records, state_.get());
+}
+GeometryOwnerManifest GeometryOwnerManifest::built(
+    std::span<const OwnerRecord> rows, Admission admission, PageWork* work)
+{
+    GeometryOwnerManifest result;
+    if (rows.empty())
+        return result;
+    for (const auto& row : rows)
+    {
+        if (!row.owner || !row.references || row.bytes == std::numeric_limits<std::size_t>::max())
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry owner set has an unusable row.");
+        if (row.key.address != row.owner.get())
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Geometry owner row address differs from its control.");
+    }
+    for (std::size_t index = 1; index < rows.size(); ++index)
+        if (!OwnerLess{}(rows[index - 1], rows[index]))
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Geometry owner set rows are not in strict canonical order.");
+    if (rows.size() == 1)
+        result.state_ = std::make_shared<const State>(rows[0]);
+    else
+        result.state_ = std::make_shared<const State>(Pages(admission, work).build(rows));
+    admission.charge(1, sizeof(State) + control_bytes);
+    return result;
 }
 GeometryOwnerManifest GeometryOwnerManifest::retained(std::uint8_t channel, std::uint8_t kind,
     std::shared_ptr<const void> owner, std::size_t bytes, Admission admission, PageWork* work) const
 {
+    return retained(channel, kind, std::move(owner), bytes, 1, admission, work);
+}
+GeometryOwnerManifest GeometryOwnerManifest::retained(std::uint8_t channel, std::uint8_t kind,
+    std::shared_ptr<const void> owner, std::size_t bytes, std::size_t references, Admission admission,
+    PageWork* work) const
+{
+    if (!references)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry owner admission lacks a reference.");
     auto row = lookup(channel, kind, owner);
+    if (state_ && state_->inline_row())
+    {
+        const auto& accepted = state_->single;
+        const bool same = !OwnerLess{}(accepted, row) && !OwnerLess{}(row, accepted);
+        GeometryOwnerManifest result;
+        if (same)
+        {
+            if (!same_owner(accepted.owner, row.owner))
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Geometry allocation address has conflicting controls.");
+            if (accepted.bytes != bytes || accepted.references > std::numeric_limits<std::size_t>::max() - references)
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Geometry owner admission changes its immutable size.");
+            row = accepted;
+            row.bytes = bytes;
+            row.references += references;
+            result.state_ = std::make_shared<const State>(std::move(row));
+            admission.charge(1, sizeof(State) + control_bytes);
+            return result;
+        }
+        // A second distinct owner needs the indexed representation.
+        row.bytes = bytes;
+        row.references = references;
+        std::array<OwnerRecord, 2> rows{accepted, row};
+        if (OwnerLess{}(rows[1], rows[0]))
+            std::swap(rows[0], rows[1]);
+        result.state_ = std::make_shared<const State>(Pages(admission, work).build(rows));
+        admission.charge(1, sizeof(State) + control_bytes);
+        return result;
+    }
     const auto* accepted = state_ ? find(state_->root, row, work) : nullptr;
     if (accepted)
     {
-        if (accepted->bytes != bytes || accepted->references == std::numeric_limits<std::size_t>::max())
+        if (accepted->bytes != bytes || accepted->references > std::numeric_limits<std::size_t>::max() - references)
             throw GeometryError(
                 GeometryErrorCode::InvalidInput, "Geometry owner admission changes its immutable size.");
         row = *accepted;
     }
     row.bytes = bytes;
-    ++row.references;
+    row.references += references;
     auto root = Pages(admission, work).edit(state_ ? state_->root : nullptr, row, &row, accepted != nullptr);
     admission.charge(1, sizeof(State) + control_bytes);
     GeometryOwnerManifest result;
@@ -83,12 +157,38 @@ GeometryOwnerManifest GeometryOwnerManifest::retained(std::uint8_t channel, std:
 GeometryOwnerManifest GeometryOwnerManifest::retired(std::uint8_t channel, std::uint8_t kind,
     const std::shared_ptr<const void>& owner, Admission admission, PageWork* work) const
 {
+    return retired(channel, kind, owner, 1, admission, work);
+}
+GeometryOwnerManifest GeometryOwnerManifest::retired(std::uint8_t channel, std::uint8_t kind,
+    const std::shared_ptr<const void>& owner, std::size_t references, Admission admission, PageWork* work) const
+{
+    if (!references)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner lacks a reference.");
     auto row = lookup(channel, kind, owner);
+    if (state_ && state_->inline_row())
+    {
+        const auto& accepted = state_->single;
+        if (OwnerLess{}(accepted, row) || OwnerLess{}(row, accepted))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner is absent.");
+        if (!same_owner(accepted.owner, row.owner))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner has foreign controls.");
+        if (accepted.references < references)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner is absent.");
+        row = accepted;
+        row.references -= references;
+        GeometryOwnerManifest result;
+        if (row.references)
+        {
+            result.state_ = std::make_shared<const State>(std::move(row));
+            admission.charge(1, sizeof(State) + control_bytes);
+        }
+        return result;
+    }
     const auto* accepted = state_ ? find(state_->root, row, work) : nullptr;
-    if (!accepted || !accepted->references)
+    if (!accepted || accepted->references < references)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Retired geometry owner is absent.");
     row = *accepted;
-    --row.references;
+    row.references -= references;
     auto root = Pages(admission, work).edit(state_->root, row, row.references ? &row : nullptr, true);
     GeometryOwnerManifest result;
     if (root)
@@ -101,33 +201,56 @@ GeometryOwnerManifest GeometryOwnerManifest::retired(std::uint8_t channel, std::
 bool GeometryOwnerManifest::admits(
     std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
 {
-    const auto* row = state_ ? find(state_->root, lookup(channel, kind, owner)) : nullptr;
+    const auto wanted = lookup(channel, kind, owner);
+    if (state_ && state_->inline_row())
+        return !OwnerLess{}(state_->single, wanted) && !OwnerLess{}(wanted, state_->single) &&
+               same_owner(state_->single.owner, wanted.owner) && state_->single.bytes == bytes;
+    const auto* row = state_ ? find(state_->root, wanted) : nullptr;
     return row && row->bytes == bytes;
 }
 std::size_t GeometryOwnerManifest::references(
     std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner) const
 {
-    const auto* row = state_ ? find(state_->root, lookup(channel, kind, owner)) : nullptr;
+    const auto wanted = lookup(channel, kind, owner);
+    if (state_ && state_->inline_row())
+        return !OwnerLess{}(state_->single, wanted) && !OwnerLess{}(wanted, state_->single) &&
+                       same_owner(state_->single.owner, wanted.owner)
+                   ? state_->single.references
+                   : 0;
+    const auto* row = state_ ? find(state_->root, wanted) : nullptr;
     return row ? row->references : 0;
 }
 std::size_t GeometryOwnerManifest::payload_bytes() const noexcept
 {
-    return state_ ? state_->root->subtree_owner_bytes : 0;
+    if (!state_)
+        return 0;
+    return state_->inline_row() ? state_->single.bytes : state_->root->subtree_owner_bytes;
 }
 std::size_t GeometryOwnerManifest::metadata_admission_bytes() const noexcept
 {
-    return state_ ? sizeof(State) + control_bytes + state_->root->subtree_bytes : 0;
+    if (!state_)
+        return 0;
+    return sizeof(State) + control_bytes + (state_->inline_row() ? 0 : state_->root->subtree_bytes);
 }
 std::size_t GeometryOwnerManifest::metadata_payload_bytes() const noexcept
 {
-    return state_ ? sizeof(State) + state_->root->subtree_payload_bytes : 0;
+    if (!state_)
+        return 0;
+    return sizeof(State) + (state_->inline_row() ? 0 : state_->root->subtree_payload_bytes);
 }
 std::size_t GeometryOwnerManifest::owner_count() const noexcept
 {
-    return state_ ? state_->root->size : 0;
+    if (!state_)
+        return 0;
+    return state_->inline_row() ? 1 : state_->root->size;
 }
 void GeometryOwnerManifest::visit(const std::function<void(const OwnerRecord&)>& visitor) const
 {
+    if (state_ && state_->inline_row())
+    {
+        visitor(state_->single);
+        return;
+    }
     if (state_)
         Pages::visit_from(
             state_->root, [](const auto&) { return false; },
@@ -142,6 +265,8 @@ void GeometryOwnerManifest::visit_metadata(const std::function<void(const void*,
     if (!state_)
         return;
     visitor(state_.get(), sizeof(State));
+    if (state_->inline_row())
+        return;
     Pages::visit_pages(state_->root,
         [&](const auto& page)
         {

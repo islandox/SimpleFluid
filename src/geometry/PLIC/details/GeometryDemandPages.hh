@@ -3,8 +3,11 @@
  */
 #pragma once
 #include "geometry/PLIC/GeometryError.hh"
+#include <array>
 #include <cstddef>
 #include <memory>
+#include <span>
+#include <vector>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
 {
@@ -42,6 +45,38 @@ struct PageWork
     std::size_t copied_pages = 0, copied_bytes = 0, copied_payload_bytes = 0;
     std::size_t visited_pages = 0, retired_page_visits = 0;
     std::size_t visited_source_rows = 0, copied_source_rows = 0;
+};
+/** Exact construction scratch for a bounded row count. Bounded demand pages
+ * work in groups of at most 64 rows; using that room on the stack removes a
+ * transient heap allocation without changing what is retained. Larger inputs
+ * fall back to an exactly sized heap buffer. */
+template<class T, std::size_t Inline> class ScratchRows
+{
+public:
+    ScratchRows(std::size_t count, std::size_t& used, std::size_t limit) : count_(count)
+    {
+        if (count > Inline)
+        {
+            if (used > limit || count > (limit - used) / sizeof(T))
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry scratch row budget is exhausted.");
+            used += count * sizeof(T);
+            heap_.resize(count);
+            if (heap_.capacity() != count)
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry scratch row capacity is unqualified.");
+        }
+    }
+    T& operator[](std::size_t index) noexcept { return data()[index]; }
+    const T& operator[](std::size_t index) const noexcept { return data()[index]; }
+    [[nodiscard]] T* data() noexcept { return count_ > Inline ? heap_.data() : inline_.data(); }
+    [[nodiscard]] const T* data() const noexcept { return count_ > Inline ? heap_.data() : inline_.data(); }
+    [[nodiscard]] std::span<T> span() noexcept { return {data(), count_}; }
+    [[nodiscard]] operator std::span<const T>() const noexcept { return {data(), count_}; }
+    [[nodiscard]] std::size_t size() const noexcept { return count_; }
+
+private:
+    std::size_t count_ = 0;
+    std::array<T, Inline> inline_{};
+    std::vector<T> heap_;
 };
 /** Row copies must allocate nothing and be noexcept. Variable geometry, key and
  * certificate data belong to immutable source owners referenced by rows.

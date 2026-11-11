@@ -16,17 +16,6 @@ struct PublicationSource
     const AdaptiveLeaf* leaf = nullptr;
     const AdaptiveNativeCellBinding* binding = nullptr;
 };
-inline constexpr std::size_t prepared_cartesian_page_size = 64;
-struct PreparedCartesianPage
-{
-    std::shared_ptr<const NativeFragmentDescriptor> recipe;
-    std::shared_ptr<const PLIC::CartesianCellSource> source;
-    std::uint64_t first = 0, rows = 0;
-};
-struct PreparedCartesianPages
-{
-    std::vector<PreparedCartesianPage> pages;
-};
 struct BuildFacts
 {
     std::vector<AdaptiveCellMetrics> metrics;
@@ -34,10 +23,14 @@ struct BuildFacts
 };
 struct Builder
 {
+    /** `transient_catalog` marks a throwaway catalog that the caller replaces
+     * with a persistent demand catalog; its representation metadata is then
+     * admitted once, by that persistent catalog, not twice. */
     template<ArithmeticMode Mode>
     static CatalogBuild build(const DistributedAdaptiveHierarchy&, std::span<const AdaptiveLeaf* const>,
         adaptive_detail::Budget&, const AdaptiveGeometrySnapshot*, CatalogPurpose, PLIC::GeometryAllocationLedger&,
-        PLIC::GeometryAllocationLedger&, std::span<const PublicationSource>, BuildFacts&);
+        PLIC::GeometryAllocationLedger&, std::span<const PublicationSource>, BuildFacts&,
+        bool transient_catalog = false);
 };
 GeometryConstructionControls construction_controls();
 std::size_t checked_product(std::size_t, std::size_t);

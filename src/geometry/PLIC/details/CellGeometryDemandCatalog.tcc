@@ -95,7 +95,7 @@ geometry_demand::OrderStamp CellCatalogDemandAccess::stamp(const CellGeometryCat
 }
 template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initialize(
-    std::shared_ptr<const CellGeometryCatalog<M>> original, GeometryLimits limits)
+    std::shared_ptr<const CellGeometryCatalog<M>> original, GeometryLimits limits, CellCatalogDemandWork* measured)
 {
     using Catalog = CellGeometryCatalog<M>;
     namespace G = geometry_demand;
@@ -108,27 +108,81 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
     auto state = std::make_shared<typename Catalog::DemandState>();
-    std::vector<G::SourceSlot> slots;
-    memory.charge(original->size(), sizeof(G::SourceSlot));
-    slots.reserve(original->size());
-    if (slots.capacity() != original->size())
-        throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog demand capture capacity.");
+    // Bounded capture scratch stays off the heap for the common 64-row page.
+    std::array<G::SourceSlot, G::leaf_capacity> slot_stack{};
+    std::vector<G::SourceSlot> slot_heap;
+    std::span<G::SourceSlot> slots;
+    if (original->size() <= slot_stack.size())
+        slots = std::span(slot_stack).first(original->size());
+    else
+    {
+        memory.charge(original->size(), sizeof(G::SourceSlot));
+        slot_heap.resize(original->size());
+        if (slot_heap.capacity() != original->size())
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog demand capture capacity.");
+        slots = slot_heap;
+    }
     std::shared_ptr<const typename Catalog::ExplicitPage> tail;
+    // One owner row per actual source body, with its slot multiplicity. The
+    // whole manifest is built in a single persistent edit instead of one
+    // whole-path copy per selected slot.
+    std::array<G::OwnerRecord, G::leaf_capacity> owner_stack{};
+    std::vector<G::OwnerRecord> owner_heap;
+    G::OwnerRecord* owners = owner_stack.data();
+    if (original->size() > owner_stack.size())
+    {
+        memory.charge(original->size(), sizeof(G::OwnerRecord));
+        owner_heap.resize(original->size());
+        if (owner_heap.capacity() != original->size())
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog owner capacity.");
+        owners = owner_heap.data();
+    }
+    std::size_t owner_count = 0;
+    std::map<const void*, std::size_t> owner_slots;
     for (std::size_t slot = 0; slot < original->size(); ++slot)
     {
         auto value = original->physical_reference(slot);
         if (value.kind == G::SourceKind::Cartesian)
-            state->native_sources = state->native_sources.retained(
-                0, 0, value.source, catalog_demand_detail::native_body_bytes(value.source), admitted);
+        {
+            const auto bytes = catalog_demand_detail::native_body_bytes(value.source);
+            const auto known = owner_slots.find(value.source.get());
+            if (known == owner_slots.end())
+            {
+                memory.charge(1, sizeof(typename decltype(owner_slots)::value_type) + 4 * sizeof(void*));
+                owner_slots.emplace(value.source.get(), owner_count);
+                owners[owner_count++] = {{0, 0, value.source.get()}, value.source, bytes, 1};
+            }
+            else
+            {
+                auto& accepted = owners[known->second];
+                if (accepted.bytes != bytes || accepted.owner.owner_before(value.source) ||
+                    value.source.owner_before(accepted.owner))
+                    throw GeometryError(
+                        GeometryErrorCode::InvalidInput, "Catalog source has conflicting immutable controls.");
+                ++accepted.references;
+            }
+        }
         else
         {
             auto page = std::static_pointer_cast<const typename Catalog::ExplicitPage>(value.source);
             if (page->cells.size() < G::leaf_capacity)
                 tail = std::move(page);
         }
-        slots.push_back(std::move(value));
+        slots[slot] = std::move(value);
     }
+    std::sort(owners, owners + owner_count,
+        [](const auto& a, const auto& b)
+        {
+            return a.key.channel != b.key.channel
+                       ? a.key.channel < b.key.channel
+                       : (a.key.kind != b.key.kind
+                                 ? a.key.kind < b.key.kind
+                                 : std::less<const void*>{}(a.key.address, b.key.address));
+        });
+    state->native_sources = G::GeometryOwnerManifest::built(std::span(owners, owner_count), admitted);
     state->order = G::GeometryDemandOrder{}.prepended(slots, {}, admitted);
+    if (measured)
+        measured->cumulative_metadata_bytes += memory.used_bytes();
     if (tail)
     {
         memory.charge(tail->cells.size(), sizeof(G::OrderStamp));
@@ -182,8 +236,16 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended(
         {
             if (output)
             {
-                output->cumulative_metadata_bytes = memory.used_bytes();
-                output->pages = pages;
+                // Cumulative construction work over the operation, not the
+                // last conversion alone.
+                output->cumulative_metadata_bytes += memory.used_bytes();
+                output->pages.copied_pages += pages.copied_pages;
+                output->pages.copied_bytes += pages.copied_bytes;
+                output->pages.copied_payload_bytes += pages.copied_payload_bytes;
+                output->pages.visited_pages += pages.visited_pages;
+                output->pages.retired_page_visits += pages.retired_page_visits;
+                output->pages.visited_source_rows += pages.visited_source_rows;
+                output->pages.copied_source_rows += pages.copied_source_rows;
             }
         }
     } measure{memory, measured, {}};
@@ -326,6 +388,64 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended(
     result->demand_ = std::move(state);
     return result;
 }
+template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
+    std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
+    std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits)
+{
+    using Catalog = CellGeometryCatalog<M>;
+    namespace G = geometry_demand;
+    if (!accepted || !accepted->demand_ || ordinals.size() != physical.size())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid persistent catalog rebind sources.");
+    if (ordinals.empty())
+        return accepted;
+    const auto& old = *accepted->demand_;
+    if (old.order.generation() == std::numeric_limits<std::uint64_t>::max())
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Persistent catalog generation overflows.");
+    for (std::size_t index = 0; index < ordinals.size(); ++index)
+        if (ordinals[index] >= accepted->size() || physical[index].kind != G::SourceKind::Cartesian ||
+            !physical[index].source)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid persistent catalog rebind ordinal.");
+    CellCatalogAdmission memory(limits);
+    const auto admitted = catalog_demand_detail::admission(memory);
+    const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
+    {
+        memory.charge(count, sizeof(T));
+        target.reserve(count);
+        if (target.capacity() != count)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified catalog rebind capacity.");
+    };
+    memory.charge(1, sizeof(Catalog));
+    memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
+    auto state = std::make_shared<typename Catalog::DemandState>();
+    state->native_sources = old.native_sources;
+    if (old.tail)
+    {
+        state->tail = old.tail;
+        reserve(state->tail_stamps, old.tail_stamps.size());
+        state->tail_stamps.assign(old.tail_stamps.begin(), old.tail_stamps.end());
+    }
+    std::vector<G::OrderedSourceSlot> rebound;
+    reserve(rebound, ordinals.size());
+    for (std::size_t index = 0; index < ordinals.size(); ++index)
+    {
+        const auto previous = accepted->physical_reference(ordinals[index]);
+        if (previous.kind != G::SourceKind::Cartesian || !previous.source)
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Persistent catalog rebind ordinal is not procedural.");
+        state->native_sources =
+            state->native_sources.retired(0, 0, previous.source, admitted);
+        state->native_sources = state->native_sources.retained(
+            0, 0, physical[index].source, catalog_demand_detail::native_body_bytes(physical[index].source), admitted);
+        rebound.push_back({old.order.at(ordinals[index]).stamp, physical[index]});
+    }
+    state->order = old.order.rebound(rebound, admitted);
+    auto result = std::shared_ptr<Catalog>(new Catalog);
+    result->size_ = state->order.size();
+    result->demand_ = std::move(state);
+    return result;
+}
+
 template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::exported(
     std::shared_ptr<const CellGeometryCatalog<M>> original, std::span<const std::size_t> slots, bool permutation,

@@ -1093,6 +1093,20 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
                         value.pin.get(), std::array<std::size_t, 3>{value.payload_bytes, 0, 0});
                 census.push(static_cast<unsigned>(key.kind), value.pin.get(), mode, 0, true, false);
             }
+            if (impl->imported)
+            {
+                report.ledger_imported_owners =
+                    census_add(report.ledger_imported_owners, impl->imported->owner_count());
+                impl->imported->visit(
+                    [&](const geometry_demand::OwnerRecord& row)
+                    {
+                        const auto imported_kind = static_cast<unsigned>(row.key.kind);
+                        if (imported_kind == static_cast<unsigned>(K::ExternalOwner))
+                            census.external_sizes.emplace(row.owner.get(),
+                                std::array<std::size_t, 3>{row.exclusive_payload_bytes(), 0, 0});
+                        census.push(imported_kind, row.owner.get(), mode, 0, true, false);
+                    });
+            }
             report.pending_pins = census_add(report.pending_pins, impl->pending.size());
             for (const auto& pending : impl->pending)
                 census.push(static_cast<unsigned>(pending.kind), pending.owner.get(), mode, 0, true, false);

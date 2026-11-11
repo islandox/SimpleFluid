@@ -12,6 +12,7 @@ template<ArithmeticMode> class CellGeometryCatalog;
 namespace details
 {
 class GeometryAllocationOwnerAccess;
+class GeometryOwnerImportAccess;
 }
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
@@ -81,6 +82,7 @@ private:
     friend class DynamicGeometryAccess;
     friend class details::RetentionAccess;
     friend class details::GeometryAllocationOwnerAccess;
+    friend class details::GeometryOwnerImportAccess;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;

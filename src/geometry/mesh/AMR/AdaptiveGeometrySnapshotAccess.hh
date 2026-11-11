@@ -17,6 +17,8 @@ struct GeometryCacheAdmissionStatistics
 {
     std::size_t cache_header_bytes = 0, resident_bytes = 0, lease_bytes = 0;
     std::size_t admission_queries = 0, union_censuses = 0, census_root_visits = 0;
+    /** Cumulative persistent-catalog construction work over the cache lifetime. */
+    std::size_t catalog_copied_metadata_bytes = 0, catalog_copied_pages = 0, catalog_visited_pages = 0;
 };
 /** Narrow internal acquisition from an authenticated hierarchy. */
 class GeometrySnapshotAccess
@@ -36,5 +38,12 @@ public:
     /** Same source-cache admission used by adapt, migrate and native binding.
      * Separate caller Budget retains its existing monotonic spent prefix. */
     static void admit_cache_residency(const DistributedAdaptiveHierarchy&, Budget&);
+    static void visit_binding_sources(const AdaptiveGeometrySnapshot&, const std::function<void(const void*)>&);
+    /** Exact immutable owner set of a published root, charged to `budget`. */
+    [[nodiscard]] static geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(
+        const AdaptiveGeometrySnapshot&, Budget&, bool bounded = false);
+    static void owner_manifests(const AdaptiveGeometrySnapshot&, Budget&,
+        geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
+        geometry_snapshot_detail::PreparedOwnerManifest& bounded);
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

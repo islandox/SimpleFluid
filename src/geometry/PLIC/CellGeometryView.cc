@@ -173,6 +173,18 @@ struct CartesianCellSource::Impl
         const Facts& operator[](std::size_t i) const { return at(i); }
     };
     std::shared_ptr<const Base> base;
+    /** Empty means this body owns every base cell. A subset view (deferred raw
+     * context sharing a prepared base) lists the base cells it exposes. */
+    std::vector<std::uint32_t> slots;
+    std::size_t cell(std::size_t slot) const
+    {
+        if (slots.empty())
+            return slot;
+        if (slot >= slots.size())
+            throw std::out_of_range("Cartesian source subset slot.");
+        return slots[slot];
+    }
+    const InitialFacts& initial_at(std::size_t slot) const { return base->initial.at(cell(slot)); }
     FactsArray facts;
     details::NativeCellGeometryMoments moment_policy = details::NativeCellGeometryMoments::PrimedState;
     std::fenv_t environment{};
@@ -181,9 +193,10 @@ struct CartesianCellSource::Impl
     std::pair<GeometryPoint, GeometryPoint> corners(std::size_t slot) const
     {
         GeometryPoint lower, upper;
+        const auto physical = cell(slot);
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            const auto interval = base->interval(slot, axis);
+            const auto interval = base->interval(physical, axis);
             lower[axis] = base->axes[axis][interval.lower];
             upper[axis] = base->axes[axis][interval.upper];
         }
@@ -194,13 +207,16 @@ struct CartesianCellSource::Impl
         FrozenEnvironment environment_guard(environment);
         const auto [lower, upper] = corners(slot);
         kernel::FixedBoxEvaluation result(lower, upper);
-        if (result.frame.exponent != base->initial.at(slot).exponent)
+        const auto& initial = initial_at(slot);
+        if (result.frame.exponent != initial.exponent)
             throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Cartesian source frame changed.");
-        result.volume = base->initial.at(slot).constructor_volume;
+        result.volume = initial.constructor_volume;
         return result;
     }
     kernel::Integrals moment_integrals(std::size_t slot) const
     {
+        // Facts are allocated per exposed cell, so they use the view slot; only
+        // the shared immutable base uses the underlying cell ordinal.
         auto& fact = facts.at(slot);
         std::call_once(fact.moments_once,
             [&]
@@ -482,7 +498,7 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::make_authenticat
 }
 std::size_t CartesianCellSource::size() const noexcept
 {
-    return impl_->base->initial.size();
+    return impl_->slots.empty() ? impl_->base->initial.size() : impl_->slots.size();
 }
 std::size_t CartesianCellSource::storage_bytes() const
 {
@@ -491,7 +507,8 @@ std::size_t CartesianCellSource::storage_bytes() const
 }
 std::array<std::size_t, 3> CartesianCellSource::retention_bytes() const
 {
-    return {sizeof(*this) + sizeof(Impl), impl_->facts.size() * sizeof(Impl::Facts),
+    return {sizeof(*this) + sizeof(Impl) + impl_->slots.capacity() * sizeof(impl_->slots[0]),
+        impl_->facts.size() * sizeof(Impl::Facts),
         (impl_->facts.capacity() - impl_->facts.size()) * sizeof(Impl::Facts)};
 }
 std::shared_ptr<const void> CartesianCellSource::base_owner() const
@@ -523,6 +540,37 @@ std::array<std::size_t, 3> CartesianCellSource::base_retention_bytes() const
         for (const auto& column : page)
             count(column.explicit_intervals);
     return {sizeof(Impl::Base), populated, unused};
+}
+std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred_subset(
+    const std::shared_ptr<const CartesianCellSource>& original, std::span<const std::uint64_t> cells,
+    GeometryLimits requested)
+{
+    if (!original || cells.empty())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Null Cartesian source evaluation subset.");
+    const auto limits = ordinary_limits(requested);
+    details::Operation operation(limits);
+    if (std::min(limits.maximum_vertices, details::active_work->limits.maximum_vertices) < 8 ||
+        std::min(limits.maximum_faces, details::active_work->limits.maximum_faces) < 6)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Cartesian source exceeds fixed geometry shape caps.");
+    for (std::size_t index = 0; index < cells.size(); ++index)
+        if (cells[index] >= original->impl_->base->initial.size() || (index && cells[index] <= cells[index - 1]))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Cartesian source subset ordinal.");
+    auto& work = *details::active_work;
+    work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
+    work.charge(cells.size(), sizeof(Impl::Facts));
+    work.charge(cells.size(), sizeof(std::uint32_t));
+    auto impl = std::make_shared<Impl>();
+    impl->base = original->impl_->base;
+    impl->slots.reserve(cells.size());
+    if (impl->slots.capacity() > cells.size())
+        work.charge(impl->slots.capacity() - cells.size(), sizeof(std::uint32_t));
+    for (const auto cell : cells)
+        impl->slots.push_back(static_cast<std::uint32_t>(cell));
+    impl->facts.allocate(cells.size());
+    impl->limits = limits;
+    impl->environment = original->impl_->environment;
+    impl->moment_policy = details::NativeCellGeometryMoments::DeferredRaw;
+    return std::shared_ptr<const CartesianCellSource>(new CartesianCellSource(std::move(impl)));
 }
 std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
     const std::shared_ptr<const CartesianCellSource>& original, GeometryLimits requested)
@@ -661,7 +709,7 @@ template void GeometryAllocationLedger::retain<ArithmeticMode::BoundedCertificat
     const std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>&, std::size_t&, std::size_t);
 GeometryValue<ordinary> CartesianCellSource::volume(std::size_t slot) const
 {
-    return {impl_->base->initial.at(slot).constructor_volume.value};
+    return {impl_->initial_at(slot).constructor_volume.value};
 }
 GeometryPoint CartesianCellSource::origin(std::size_t slot) const
 {
@@ -670,7 +718,7 @@ GeometryPoint CartesianCellSource::origin(std::size_t slot) const
 GeometryMoments<ordinary> CartesianCellSource::moments(std::size_t slot, GeometryPoint origin) const
 {
     details::Operation operation(impl_->limits);
-    const auto frame = details::Frame{impl_->corners(slot).first, impl_->base->initial.at(slot).exponent};
+    const auto frame = details::Frame{impl_->corners(slot).first, impl_->initial_at(slot).exponent};
     const auto values = kernel::represented_moments(impl_->moment_integrals(slot), frame, origin);
     GeometryMoments<ordinary> result;
     result.origin = origin;
@@ -682,9 +730,9 @@ GeometryMoments<ordinary> CartesianCellSource::moments(std::size_t slot, Geometr
 GeometryPoint CartesianCellSource::centroid(std::size_t slot) const
 {
     details::Operation operation(impl_->limits);
-    const auto frame = details::Frame{origin(slot), impl_->base->initial.at(slot).exponent};
+    const auto frame = details::Frame{origin(slot), impl_->initial_at(slot).exponent};
     const auto values = kernel::represented_moments(impl_->moment_integrals(slot), frame, origin(slot));
-    return kernel::represented_centroid(values, impl_->base->initial.at(slot).constructor_volume, origin(slot));
+    return kernel::represented_centroid(values, impl_->initial_at(slot).constructor_volume, origin(slot));
 }
 std::array<long double, 3> CartesianCellSource::corner(std::size_t slot, std::size_t vertex) const
 {
@@ -725,11 +773,12 @@ PlaneSupportIdentity<ordinary> CartesianCellSource::source_support(std::size_t s
     if (face >= 6)
         throw std::out_of_range("Cartesian source face slot.");
     const auto axis = face / 2;
-    const auto interval = base.interval(slot, axis);
+    const auto cell = impl_->cell(slot);
+    const auto interval = base.interval(cell, axis);
     auto support = base.canonical_support_slots[axis][face % 2 ? interval.upper : interval.lower];
-    if (base.initial[slot].custom_supports)
+    if (base.initial[cell].custom_supports)
     {
-        const auto key = std::pair(slot, std::uint32_t(face));
+        const auto key = std::pair(cell, std::uint32_t(face));
         const auto found = std::lower_bound(base.support_overrides.begin(), base.support_overrides.end(), key,
             [](const auto& item, const auto& wanted) { return std::pair(item.cell, item.face) < wanted; });
         if (found != base.support_overrides.end() && std::pair(found->cell, found->face) == key)
@@ -845,7 +894,7 @@ std::pair<ConvexGeometryPtr<ordinary>, ConvexGeometryPtr<ordinary>> CartesianCel
     details::Operation operation(limits);
     const auto [lower, upper] = impl_->corners(slot);
     auto source = ConvexCellGeometry<ordinary>::box(lower, upper, limits);
-    if (impl_->base->initial.at(slot).custom_supports)
+    if (impl_->initial_at(slot).custom_supports)
     {
         std::vector<PlaneSupportIdentity<ordinary>> supports;
         details::active_work->charge(6, sizeof(PlaneSupportIdentity<ordinary>));
@@ -1345,14 +1394,20 @@ template class CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
 template class CellGeometryCatalog<ArithmeticMode::Exact>;
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
-    details::CellCatalogDemandAccess::initialize<ArithmeticMode::Ordinary>(
-        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, GeometryLimits);
+details::CellCatalogDemandAccess::initialize<ArithmeticMode::Ordinary>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, GeometryLimits,
+    details::CellCatalogDemandWork*);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
 details::CellCatalogDemandAccess::extended<ArithmeticMode::Ordinary>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>,
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::optional<std::size_t>>,
     GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+    details::CellCatalogDemandAccess::rebound<ArithmeticMode::Ordinary>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
 details::CellCatalogDemandAccess::exported<ArithmeticMode::Ordinary>(
@@ -1374,14 +1429,20 @@ template void details::CellCatalogDemandAccess::visit_borrowed_dependencies<Arit
     details::geometry_demand::BorrowedSourceSink);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
-    details::CellCatalogDemandAccess::initialize<ArithmeticMode::BoundedCertification>(
-        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, GeometryLimits);
+details::CellCatalogDemandAccess::initialize<ArithmeticMode::BoundedCertification>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, GeometryLimits,
+    details::CellCatalogDemandWork*);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
 details::CellCatalogDemandAccess::extended<ArithmeticMode::BoundedCertification>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
     std::span<const std::optional<std::size_t>>, GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+    details::CellCatalogDemandAccess::rebound<ArithmeticMode::BoundedCertification>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
 details::CellCatalogDemandAccess::exported<ArithmeticMode::BoundedCertification>(
@@ -1404,8 +1465,8 @@ template void details::CellCatalogDemandAccess::visit_borrowed_dependencies<Arit
     details::geometry_demand::BorrowedSourceSink);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
-    details::CellCatalogDemandAccess::initialize<ArithmeticMode::Exact>(
-        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, GeometryLimits);
+details::CellCatalogDemandAccess::initialize<ArithmeticMode::Exact>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, GeometryLimits, details::CellCatalogDemandWork*);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
 details::CellCatalogDemandAccess::extended<ArithmeticMode::Exact>(

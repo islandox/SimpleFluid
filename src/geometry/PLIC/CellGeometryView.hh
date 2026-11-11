@@ -72,6 +72,10 @@ public:
     [[nodiscard]] static std::shared_ptr<const CartesianCellSource> make(
         CartesianSourceDescription, GeometryLimits = {});
     /** Fresh raw query state over the same immutable coordinates/support facts. */
+    /** Deferred raw context over a sorted subset of an existing immutable base.
+     * The shared base is not duplicated; only the selected cells get facts. */
+    [[nodiscard]] static std::shared_ptr<const CartesianCellSource> clone_deferred_subset(
+        const std::shared_ptr<const CartesianCellSource>&, std::span<const std::uint64_t>, GeometryLimits);
     [[nodiscard]] static std::shared_ptr<const CartesianCellSource> clone_deferred(
         const std::shared_ptr<const CartesianCellSource>&, GeometryLimits = {});
     [[nodiscard]] const void* base_identity() const noexcept;

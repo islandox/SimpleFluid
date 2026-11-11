@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include <cstddef>
 #include <cstdint>
@@ -12,21 +13,55 @@
 #include <optional>
 #include <span>
 #include <vector>
+namespace SimpleFluid::PLIC::details
+{
+struct CellCatalogDemandWork;
+} // namespace SimpleFluid::PLIC::details
 namespace SimpleFluid::Meshes::AMR
 {
+namespace adaptive_detail
+{
+class GeometrySnapshotAccess;
+struct Budget;
+} // namespace adaptive_detail
 namespace geometry_snapshot_detail
 {
 struct Builder;
 struct PublicationSource;
 class Bindings;
-struct PreparedCartesianPages;
+inline constexpr std::size_t prepared_cartesian_page_size = 64;
+/** One immutable prepared State page: exact recipe control, 64-cell block and
+ * the actual source-only physical page. */
+using PreparedOwnerManifest = PLIC::details::geometry_demand::GeometryOwnerManifest;
+struct PreparedCartesianPage
+{
+    std::shared_ptr<const NativeFragmentDescriptor> recipe;
+    std::shared_ptr<const PLIC::CartesianCellSource> source;
+    std::uint64_t first = 0, rows = 0;
+};
+/** Immutable persistent exact recipe/page and source-context page index. The
+ * value lives inside its owning snapshot header; only the shared index pages
+ * are separate allocations. */
+class PreparedCartesianPages
+{
+public:
+    [[nodiscard]] const PreparedCartesianPage* find(
+        const std::shared_ptr<const NativeFragmentDescriptor>&, std::uint64_t first) const;
+    [[nodiscard]] bool contains_source(const std::shared_ptr<const PLIC::CartesianCellSource>&) const;
+    [[nodiscard]] std::size_t size() const noexcept;
+    [[nodiscard]] std::size_t insertion_byte_bound() const;
+    [[nodiscard]] static PreparedCartesianPages appended(
+        const PreparedCartesianPages*, PreparedCartesianPage, adaptive_detail::Budget&);
+    void visit_pages(const std::function<void(const PreparedCartesianPage&)>&) const;
+    void visit_metadata(const std::function<void(const std::shared_ptr<const void>&, std::size_t)>&) const;
+    [[nodiscard]] std::size_t metadata_bytes() const noexcept;
+
+private:
+    std::shared_ptr<const void> root_;
+};
 } // namespace geometry_snapshot_detail
 class DistributedAdaptiveHierarchy;
 class AdaptiveLeafLayout;
-namespace adaptive_detail
-{
-class GeometrySnapshotAccess;
-}
 enum class GeometrySnapshotPurpose
 {
     State,
@@ -114,19 +149,39 @@ private:
     std::shared_ptr<const OrdinaryCatalog> ordinary_, finite_ordinary_;
     std::shared_ptr<const BoundedCatalog> bounded_;
     std::shared_ptr<const geometry_snapshot_detail::Bindings> bindings_;
-    std::shared_ptr<const geometry_snapshot_detail::PreparedCartesianPages> prepared_cartesian_;
+    std::optional<geometry_snapshot_detail::PreparedCartesianPages> prepared_cartesian_;
     GeometryConstructionControls controls_;
     ArithmeticMode mode_ = ArithmeticMode::Ordinary;
     GeometrySnapshotPurpose purpose_ = GeometrySnapshotPurpose::State;
     bool stable_controls_ = false;
+    /** Prepare the 64-cell block of `requested` (or an explicitly named block of
+     * the same recipe and region) as an optional immutable State source page. */
     bool prepare_cartesian_page(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, std::size_t& used,
-        std::size_t operation_limit, std::size_t optional_headroom);
+        std::size_t operation_limit, std::size_t optional_headroom, std::uint64_t block_first = ~std::uint64_t{0});
     void retain_prepared_cartesian_sources(PLIC::GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
+    /** Physical prepared page slot for a cell, if the page covers it. */
+    struct PreparedSourceSlot
+    {
+        std::shared_ptr<const void> source;
+        std::uint64_t row = 0;
+        bool valid = false;
+    };
+    [[nodiscard]] PreparedSourceSlot prepared_slot(const AdaptiveLeaf&) const;
+    /** Adopt prepared page sources for already selected cells. */
+    void rebind_prepared_slots(std::span<const std::size_t> ordinals, std::span<const PreparedSourceSlot> physical,
+        PLIC::GeometryAllocationLedger& ordinary_owners, std::size_t& used, std::size_t limit);
+    /** Exact immutable owner set of this snapshot, excluding its own header.
+     * `bounded` selects the bounded-certification ledger's owners. */
+    [[nodiscard]] geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(
+        adaptive_detail::Budget& budget, bool bounded = false) const;
+    void owner_manifests(adaptive_detail::Budget&, geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
+        geometry_snapshot_detail::PreparedOwnerManifest& bounded) const;
     /** Internal construction. The result is published only after complete admission. */
     [[nodiscard]] static std::shared_ptr<AdaptiveGeometrySnapshot> build(const DistributedAdaptiveHierarchy&,
         std::span<const AdaptiveLeaf* const>, ArithmeticMode, GeometrySnapshotPurpose, std::size_t& used,
         std::size_t limit, PLIC::GeometryAllocationLedger&, PLIC::GeometryAllocationLedger&,
         std::shared_ptr<const AdaptiveGeometrySnapshot> previous = {},
-        std::span<const geometry_snapshot_detail::PublicationSource> publication = {});
+        std::span<const geometry_snapshot_detail::PublicationSource> publication = {},
+        PLIC::details::CellCatalogDemandWork* demand_work = nullptr);
 };
 } // namespace SimpleFluid::Meshes::AMR

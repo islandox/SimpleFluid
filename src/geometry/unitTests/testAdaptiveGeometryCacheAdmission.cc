@@ -1,6 +1,7 @@
 /** Accepted-source geometry residency uses the sealed exact current root union. */
 #include "adaptive_storage_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
@@ -49,13 +50,44 @@ auto make_source(F::Provider provider, std::size_t components)
     return std::make_shared<const Hierarchy>(std::move(fixture.owned), std::vector<AMR::AdaptiveFamily>{},
         std::move(fixture.kernel), Tpetra::getDefaultComm());
 }
-std::size_t fresh_union(const Hierarchy& source)
+/** Exact union rebuilt from each cached root's own immutable owner manifests in
+ * the cache's slot/channel order. Empty channels are not imported, exactly like
+ * the cache. Independent of the cache's maintained set. */
+struct UnionReconstruction
+{
+    std::size_t scalar = 0, payload = 0;
+};
+UnionReconstruction fresh_union(const Hierarchy& source)
+{
+    P::GeometryAllocationLedger ordinary_owners, bounded_owners;
+    std::size_t ordinary_used = 0, bounded_used = 0;
+    source.visit_geometry_snapshots(
+        [&](const auto& snapshot)
+        {
+            for (const bool bounded : {false, true})
+            {
+                D::Budget budget{ample};
+                const auto manifest = D::GeometrySnapshotAccess::owner_manifest(snapshot, budget, bounded);
+                if (!manifest.owner_count())
+                    continue;
+                auto& ledger = bounded ? bounded_owners : ordinary_owners;
+                auto& used = bounded ? bounded_used : ordinary_used;
+                P::details::GeometryOwnerImportAccess::import(ledger, manifest, used, ample);
+            }
+        });
+    UnionReconstruction result;
+    result.payload = ordinary_owners.payload_bytes() + bounded_owners.payload_bytes();
+    result.scalar = result.payload + ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes();
+    return result;
+}
+/** The same exact union reached by walking the snapshot dependency graph. */
+std::size_t walked_payload(const Hierarchy& source)
 {
     P::GeometryAllocationLedger ordinary_owners, bounded_owners;
     std::size_t bytes = 0;
     source.visit_geometry_snapshots(
         [&](const auto& snapshot) { snapshot.retain(ordinary_owners, bounded_owners, bytes, ample); });
-    return bytes;
+    return ordinary_owners.payload_bytes() + bounded_owners.payload_bytes();
 }
 std::size_t shared_owner_count(const Hierarchy& source)
 {
@@ -80,8 +112,12 @@ std::size_t shared_owner_count(const Hierarchy& source)
 void expect_exact_seal(const Hierarchy& source)
 {
     const auto before = Access::cache_admission_statistics(source);
-    EXPECT_EQ(before.resident_bytes, fresh_union(source));
+    const auto reconstructed = fresh_union(source);
+    EXPECT_EQ(before.resident_bytes, reconstructed.scalar);
     EXPECT_EQ(before.lease_bytes, before.resident_bytes);
+    // The maintained manifests and the snapshot graph must name the same exact
+    // owner payload; only the admission bookkeeping of the two shapes differs.
+    EXPECT_EQ(reconstructed.payload, walked_payload(source));
     const auto after = Access::cache_admission_statistics(source);
     EXPECT_EQ(after.union_censuses, before.union_censuses);
     EXPECT_EQ(after.census_root_visits, before.census_root_visits);
@@ -215,4 +251,93 @@ TEST(AdaptiveGeometryCacheAdmission, AdaptationAndNativeBindingReuseTheAcceptedS
     EXPECT_EQ(bound_stats.union_censuses, 0u);
     EXPECT_EQ(bound_stats.census_root_visits, 0u);
     expect_exact_seal(*bound);
+}
+
+TEST(AdaptiveGeometryCacheAdmission, WarmHitInstallsTheMaintainedExactOwnerSetIntoAFreshLedger)
+{
+    for (const auto provider : {F::Provider::Cartesian, F::Provider::Static})
+    {
+        SCOPED_TRACE(F::name(provider));
+        auto source = make_source(provider, 4);
+        const auto selected = rows(*source);
+        ASSERT_GT(selected.size(), 1u);
+        const auto first = acquire(*source, selected, AMR::GeometrySnapshotPurpose::State);
+
+        // A fresh supplied ledger takes the warm fast path: it installs the
+        // maintained immutable owner set and charges that exact cached union.
+        P::GeometryAllocationLedger ordinary_owners, bounded_owners;
+        std::size_t used = 0;
+        const auto hit = source->geometry_snapshot(
+            selected, ordinary, AMR::GeometrySnapshotPurpose::State, used, ample, &ordinary_owners, &bounded_owners);
+        ASSERT_EQ(hit, first);
+        EXPECT_GT(ordinary_owners.owner_count(), 0u);
+        EXPECT_GT(used, 0u);
+
+        // The installed set is exactly the root's own census, not a subset.
+        P::GeometryAllocationLedger census_ordinary, census_bounded;
+        std::size_t census_used = 0;
+        hit->retain(census_ordinary, census_bounded, census_used, ample);
+        EXPECT_EQ(ordinary_owners.payload_bytes(), census_ordinary.payload_bytes());
+        EXPECT_EQ(ordinary_owners.owner_count(), census_ordinary.owner_count());
+        EXPECT_LE(used, census_used);
+
+        // Imported owners are recognized by later retention of the same root:
+        // no additional owner, no additional cumulative admission.
+        const auto owners_before = ordinary_owners.owner_count();
+        const auto used_before = used;
+        hit->retain(ordinary_owners, bounded_owners, used, ample);
+        EXPECT_EQ(ordinary_owners.owner_count(), owners_before);
+        EXPECT_EQ(used, used_before);
+        expect_exact_seal(*source);
+    }
+}
+
+TEST(AdaptiveGeometryCacheAdmission, RejectedDemandConstructionKeepsAcceptedRootsAndSeals)
+{
+    if (!AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires inspectable construction controls.";
+    const auto source = make_source(F::Provider::Cartesian, 4);
+    const auto selected = rows(*source);
+    ASSERT_GT(selected.size(), 2u);
+    const auto prefix = std::span(selected).first(selected.size() / 2);
+    const auto accepted = acquire(*source, prefix, AMR::GeometrySnapshotPurpose::State);
+    expect_exact_seal(*source);
+    const auto before = Access::cache_admission_statistics(*source);
+
+    // A twin hierarchy of the same shape discovers what the same demand
+    // extension costs; the real one is then given an insufficient cap.
+    const auto twin = make_source(F::Provider::Cartesian, 4);
+    const auto twin_rows = rows(*twin);
+    ASSERT_EQ(twin_rows.size(), selected.size());
+    std::size_t twin_used = 0;
+    (void) twin->geometry_snapshot(
+        std::span(twin_rows).first(prefix.size()), ordinary, AMR::GeometrySnapshotPurpose::State, twin_used, ample);
+    twin_used = 0;
+    (void) twin->geometry_snapshot(twin_rows, ordinary, AMR::GeometrySnapshotPurpose::State, twin_used, ample);
+    ASSERT_GT(twin_used, 0u);
+
+    std::size_t used = 0;
+    EXPECT_THROW(
+        (void) source->geometry_snapshot(selected, ordinary, AMR::GeometrySnapshotPurpose::State, used, twin_used / 2),
+        std::exception);
+    // The genuinely spent prefix stays accounted for after the rejection.
+    EXPECT_GT(used, 0u);
+    // Accepted roots and their exact residency seal are unchanged.
+    const auto after = Access::cache_admission_statistics(*source);
+    EXPECT_EQ(after.resident_bytes, before.resident_bytes);
+    EXPECT_EQ(after.lease_bytes, before.lease_bytes);
+    expect_exact_seal(*source);
+    D::Budget exact{after.cache_header_bytes + after.resident_bytes};
+    Access::admit_cache_residency(*source, exact);
+    EXPECT_EQ(exact.used, after.cache_header_bytes + after.resident_bytes);
+    D::Budget short_limit{after.cache_header_bytes + after.resident_bytes - 1};
+    EXPECT_THROW(Access::admit_cache_residency(*source, short_limit), std::invalid_argument);
+
+    // The accepted root is still the answer to its own all-known request, and a
+    // later ample demand still publishes a complete extension.
+    const auto hit = acquire(*source, prefix, AMR::GeometrySnapshotPurpose::State);
+    EXPECT_EQ(hit, accepted);
+    const auto extended = acquire(*source, selected, AMR::GeometrySnapshotPurpose::State);
+    EXPECT_EQ(extended->ordinary_catalog()->size(), selected.size());
+    expect_exact_seal(*source);
 }

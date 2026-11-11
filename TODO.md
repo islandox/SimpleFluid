@@ -658,6 +658,23 @@ See [scope and limits](docs/architecture/general_amr.md#qualification-status) an
 Bounded bootstrap/catalog and seam costs remain; scalable planner storage/RSS,
 sparse ALE and physical-flow qualification are separate gates.
 
+- [ ] Finish the persistent geometry-demand storage adoption. Implemented: 64-row/32-child
+      demand pages with bounded trailing-group repacking, an allocation-free prepared State
+      source index, controlled owner manifests with exact exclusive bytes and reference
+      multiplicity (inline one-owner sets), prepaid construction admission, and fresh/populated
+      operation-ledger import of an immutable owner set with a reported enumeration fallback.
+      The cache keeps exact per-root owner manifests and rebuilds the replacement union from them
+      (its regression reconstructs that union independently and cross-checks the walked payload).
+      Both storage byte gates are closed by real cost reductions: prepared pages cover every
+      eligible cell of their block, a cell selected before its page existed adopts it through a
+      persistent catalog slot rebind, and a raw cross-purpose context takes a deferred subset body
+      that shares the prepared page's immutable base while allocating facts only for its own
+      rows. The registered scale harness adds linear per-cell/per-owner evidence for completed
+      streams and a doubled-warm-selection case showing copied catalog metadata and page visits
+      for one fixed change stay bounded independently of the warm selection. Remaining: decide
+      the prepared page shape from that harness data. Do not relax the owner-count, byte-ratio, margin or cap
+      gates.
+
 - [ ] Extend the shared owner-local `AdaptiveLeafLayout` with persistent
       topology pages/candidate overlays and certified mixed-level contact and
       subface queries. Native publication and geometry snapshots share its exact

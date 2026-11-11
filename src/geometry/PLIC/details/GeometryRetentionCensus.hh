@@ -169,6 +169,9 @@ struct Report
     std::size_t maximum_required_point_dependency_depth = 0, maximum_identity_dependency_depth = 0;
     std::size_t maximum_ancestry_dependency_depth = 0;
     std::size_t ledger_tracking_bytes = 0, ledger_payload_admission = 0, ledger_bookkeeping_admission = 0;
+    /** Rows that entered a ledger through an immutable owner-set import rather
+     * than through this ledger's own mutable admissions. */
+    std::size_t ledger_imported_owners = 0;
     std::size_t probe_used_bytes = 0, probe_capacity_bytes = 0;
     std::pmr::vector<OwnerRow> owners;
     std::pmr::vector<ContextRow> contexts;

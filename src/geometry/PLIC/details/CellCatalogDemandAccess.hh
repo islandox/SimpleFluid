@@ -19,12 +19,19 @@ class CellCatalogDemandAccess
 public:
     template<ArithmeticMode M>
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> initialize(
-        std::shared_ptr<const CellGeometryCatalog<M>>, GeometryLimits = {});
+        std::shared_ptr<const CellGeometryCatalog<M>>, GeometryLimits = {}, CellCatalogDemandWork* = nullptr);
     template<ArithmeticMode M>
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> extended(
         std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::shared_ptr<const CellGeometryCatalog<M>> requested,
         std::span<const std::optional<std::size_t>> previous_slots, GeometryLimits = {},
         CellCatalogDemandWork* = nullptr);
+    /** Replace the physical Cartesian source of existing demand ordinals, for
+     * example when an optional prepared page now covers those cells. Retires the
+     * previous source holds and retains the new sources in one persistent edit. */
+    template<ArithmeticMode M>
+    [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> rebound(
+        std::shared_ptr<const CellGeometryCatalog<M>>, std::span<const std::size_t> ordinals,
+        std::span<const geometry_demand::SourceSlot> physical, GeometryLimits = {});
     template<ArithmeticMode M>
     [[nodiscard]] static geometry_demand::OrderStamp stamp(const CellGeometryCatalog<M>&, std::size_t);
     template<ArithmeticMode M> [[nodiscard]] static bool persistent(const CellGeometryCatalog<M>&) noexcept;

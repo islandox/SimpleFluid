@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <utility>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
@@ -46,10 +47,22 @@ public:
         void operator()(const OwnerRecord& value, const void* parent) const { visit(context, parent, value); }
     };
     void visit_borrowed_dependencies(BorrowedMetadataSink, BorrowedRecordSink, const void* parent = nullptr) const;
+    /** Build one complete immutable owner set in a single persistent edit.
+     * Rows must be in (channel, kind, address) order, carry their final
+     * reference multiplicity and admit no alias with conflicting controls. */
+    [[nodiscard]] static GeometryOwnerManifest built(std::span<const OwnerRecord>, Admission, PageWork* = nullptr);
     [[nodiscard]] GeometryOwnerManifest retained(std::uint8_t channel, std::uint8_t kind, std::shared_ptr<const void>,
         std::size_t bytes, Admission, PageWork* = nullptr) const;
+    /** Add `references` slot holds in one persistent edit. A repeated exact
+     * owner keeps its single exclusive byte count; multiplicity stays separate
+     * from unique physical payload. */
+    [[nodiscard]] GeometryOwnerManifest retained(std::uint8_t channel, std::uint8_t kind, std::shared_ptr<const void>,
+        std::size_t bytes, std::size_t references, Admission, PageWork* = nullptr) const;
     [[nodiscard]] GeometryOwnerManifest retired(std::uint8_t channel, std::uint8_t kind,
         const std::shared_ptr<const void>&, Admission, PageWork* = nullptr) const;
+    /** Release `references` slot holds in one persistent edit. */
+    [[nodiscard]] GeometryOwnerManifest retired(std::uint8_t channel, std::uint8_t kind,
+        const std::shared_ptr<const void>&, std::size_t references, Admission, PageWork* = nullptr) const;
     [[nodiscard]] bool admits(
         std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
     [[nodiscard]] std::size_t references(

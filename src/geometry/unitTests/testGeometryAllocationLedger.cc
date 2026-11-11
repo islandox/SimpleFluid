@@ -7,7 +7,10 @@
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
+#include <array>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <optional>
@@ -705,3 +708,116 @@ TEST(GeometryAllocationLedgerTest, SharedPlanarPayloadHasCanonicalOwnerAdmission
     EXPECT_TRUE(weak.expired());
 }
 } // namespace
+
+TEST(GeometryAllocationLedgerTest, ImmutableOwnerSetImportsIntoFreshAndPopulatedLedgers)
+{
+    using namespace SimpleFluid::PLIC::details;
+    using namespace SimpleFluid::PLIC::details::geometry_demand;
+    struct Payload
+    {
+        double value = 1;
+    };
+    const auto first = std::make_shared<const Payload>();
+    const auto second = std::make_shared<const Payload>(Payload{2});
+    std::size_t manifest_used = 0;
+    const auto admission = geometry_demand::Admission{
+        &manifest_used, [](void* raw, std::size_t bytes) { *static_cast<std::size_t*>(raw) += bytes; }};
+    const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
+    const OwnerRecord first_row{{0, external, first.get()}, first, sizeof(Payload), 1};
+    const OwnerRecord second_row{{0, external, second.get()}, second, sizeof(Payload), 3};
+    const std::array<OwnerRecord, 2> rows{first_row, second_row};
+    const auto owners = GeometryOwnerManifest::built(rows, admission);
+
+    // Fresh ledger: the immutable set is installed, not enumerated, and a
+    // nonzero caller counter plus monotonic admission are preserved.
+    P::GeometryAllocationLedger imported;
+    std::size_t used = 4096;
+    const auto enumerated = GeometryOwnerImportAccess::import(imported, owners, used, byte_limit);
+    EXPECT_EQ(enumerated, 0u);
+    EXPECT_EQ(GeometryOwnerImportAccess::imported_owners(imported), 2u);
+    EXPECT_EQ(imported.owner_count(), 2u);
+    EXPECT_EQ(imported.payload_bytes(), 2 * sizeof(Payload));
+    EXPECT_GT(used, 4096u);
+    // A fresh import charges the operation's exact cached union: payload plus
+    // the ledger's own bookkeeping, with no retained geometry enumerated.
+    EXPECT_EQ(used, 4096u + imported.payload_bytes() + imported.bookkeeping_bytes());
+
+    // Retaining an imported owner is a no-op; multiplicity and unique payload
+    // stay distinct, and a changed exclusive size is rejected.
+    const auto before = used;
+    imported.retain_external_owner(first, sizeof(Payload), used, byte_limit);
+    EXPECT_EQ(used, before);
+    EXPECT_EQ(imported.owner_count(), 2u);
+    EXPECT_THROW(imported.retain_external_owner(first, sizeof(Payload) + 1, used, byte_limit), P::GeometryError);
+
+    // Populated ledger: the exact union enumerates the imported rows once.
+    P::GeometryAllocationLedger populated;
+    std::size_t populated_used = 0;
+    const auto alone = std::make_shared<const Payload>(Payload{3});
+    populated.retain_external_owner(alone, sizeof(Payload), populated_used, byte_limit);
+    const auto owners_before = populated.owner_count();
+    const auto merged = GeometryOwnerImportAccess::import(populated, owners, populated_used, byte_limit);
+    EXPECT_EQ(merged, 2u);
+    EXPECT_EQ(populated.owner_count(), owners_before + 2u);
+    EXPECT_EQ(populated.payload_bytes(), 3 * sizeof(Payload));
+
+    // A rejected ledger refuses the import and stays rejected.
+    P::GeometryAllocationLedger failed;
+    std::size_t failed_used = 0;
+    EXPECT_THROW(
+        failed.retain_external_owner(alone, sizeof(Payload), failed_used, sizeof(std::size_t)), P::GeometryError);
+    EXPECT_THROW((void) GeometryOwnerImportAccess::import(failed, owners, failed_used, byte_limit), P::GeometryError);
+}
+
+TEST(GeometryAllocationLedgerTest, PopulatedImportKeepsOverlapAliasesAndStaysMonotonic)
+{
+    using SimpleFluid::PLIC::details::GeometryOwnerImportAccess;
+    using namespace SimpleFluid::PLIC::details::geometry_demand;
+    struct Payload
+    {
+        double value = 0;
+    };
+    const auto shared_owner = std::make_shared<const Payload>(Payload{1});
+    const auto extra = std::make_shared<const Payload>(Payload{2});
+    std::size_t manifest_used = 0;
+    const auto admission =
+        Admission{&manifest_used, [](void* raw, std::size_t bytes) { *static_cast<std::size_t*>(raw) += bytes; }};
+    const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
+    const auto sorted = [](const OwnerRecord& first, const OwnerRecord& second)
+    {
+        const auto left = first.key.address;
+        const auto right = second.key.address;
+        return std::less<const void*>{}(left, right) ? std::array<OwnerRecord, 2>{first, second}
+                                                     : std::array<OwnerRecord, 2>{second, first};
+    };
+    const OwnerRecord shared_row{{0, external, shared_owner.get()}, shared_owner, sizeof(Payload), 1};
+    const OwnerRecord extra_row{{0, external, extra.get()}, extra, sizeof(Payload), 1};
+    const std::array<OwnerRecord, 2> overlapping = sorted(shared_row, extra_row);
+    const auto owners = GeometryOwnerManifest::built(overlapping, admission);
+
+    // The target ledger already holds one of the imported owners: the exact
+    // union enumerates the root and creates only the genuinely new owner.
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain_external_owner(shared_owner, sizeof(Payload), used, byte_limit);
+    const auto payload_before = ledger.payload_bytes();
+    const auto owners_before = ledger.owner_count();
+    EXPECT_EQ(GeometryOwnerImportAccess::import(ledger, owners, used, byte_limit), 2u);
+    EXPECT_EQ(ledger.owner_count(), owners_before + 1);
+    EXPECT_EQ(ledger.payload_bytes(), payload_before + sizeof(Payload));
+
+    // A subsequent retain of an owner the import already installed is a no-op
+    // and the caller counter stays monotonic.
+    const auto admitted = used;
+    ledger.retain_external_owner(extra, sizeof(Payload), used, byte_limit);
+    EXPECT_EQ(used, admitted);
+    EXPECT_EQ(ledger.owner_count(), owners_before + 1);
+
+    // Same address with a foreign control is a real conflict, not an alias.
+    P::GeometryAllocationLedger control_ledger;
+    std::size_t control_used = 0;
+    control_ledger.retain_external_owner(shared_owner, sizeof(Payload), control_used, byte_limit);
+    const std::shared_ptr<const void> foreign(shared_owner.get(), [](const void*) {});
+    EXPECT_THROW(
+        control_ledger.retain_external_owner(foreign, sizeof(Payload), control_used, byte_limit), P::GeometryError);
+}

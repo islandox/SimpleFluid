@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include <algorithm>
 #include <cstddef>
@@ -120,6 +121,15 @@ struct GeometryAllocationLedger::Impl
     };
     std::map<allocation_detail::Key, Entry, allocation_detail::Less> owners;
     std::vector<allocation_detail::Item> pending;
+    /** Immutable authenticated owner set installed by an operation import. The
+     * mutable map above only holds this ledger's own admissions. */
+    std::optional<geometry_demand::GeometryOwnerManifest> imported;
+    [[nodiscard]] bool imported_admits(
+        allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
+    {
+        return imported && imported->admits(
+                               0, static_cast<std::uint8_t>(kind), owner, bytes);
+    }
     std::optional<ArithmeticMode> mode;
     std::size_t payload = 0, bookkeeping = 0, last_counter = 0;
     std::size_t scratch_limit = std::numeric_limits<std::size_t>::max();
@@ -150,6 +160,14 @@ struct GeometryAllocationLedger::Impl
                 throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry allocation has conflicting controls.");
             return;
         }
+        // Owners installed by an operation import are already counted; an
+        // expired-size match proves the same allocation, so never re-descend.
+        if (imported)
+        {
+            const auto bytes = imported->references(0, static_cast<std::uint8_t>(kind), pointer);
+            if (bytes)
+                return;
+        }
         if (pending.size() == pending.capacity())
         {
             const auto old = pending.capacity();
@@ -165,6 +183,11 @@ struct GeometryAllocationLedger::Impl
         bool prepaid = false)
     {
         using namespace allocation_detail;
+        // An owner installed by an operation import is already in this ledger's
+        // exact count and pin set; every entry point must see that before it
+        // charges or publishes anything.
+        if (imported && imported->admits(0, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+            return false;
         const Key key{item.kind, item.owner.get()};
         if (const auto found = owners.find(key); found != owners.end())
         {
@@ -229,6 +252,9 @@ struct GeometryAllocationLedger::Impl
                     throw GeometryError(GeometryErrorCode::InvalidInput, "Pending geometry owner has foreign controls.");
                 continue;
             }
+            if (imported &&
+                imported->references(0, static_cast<std::uint8_t>(item.kind), item.owner))
+                continue;
             switch (item.kind)
             {
                 case Kind::TypedWrapper: {

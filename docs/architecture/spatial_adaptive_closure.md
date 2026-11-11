@@ -66,16 +66,16 @@ mixed-domain subtrees split regardless of the soft fragment target. Candidate
 copies rebind their borrowed handles to their own point and domain owners before
 use. The provider-bounds index remains a separate foundation, not this halo index.
 
-An adaptation plan forks candidate-private mutable indexes from the accepted
+An adaptation plan forks candidate-private editable indexes from the accepted
 session. Immutable identity, geometry-record and incidence bodies may be shared;
 the candidate is independently admitted and cannot mutate the accepted session.
-The one-time metadata fork and candidate hierarchy map copy may inspect the
-accepted local state. Thereafter the hierarchy routes the initial user changes and
-closure splits as retired key/revision and inserted-key deltas. A sparse owner
-and revision overlay sits over the accepted ancestry directory. Its tombstones
-never fall through to an obsolete base entry; addresses are not used as ancestry.
-The final state is repacked and registered after convergence rather than once per
-refinement pass.
+The hierarchy stages sparse leaf changes over its accepted immutable page root.
+Initial user changes and closure splits are routed as retired key/revision and
+inserted-key deltas. A sparse owner and revision overlay sits over the accepted
+ancestry directory. Its tombstones never fall through to an obsolete base entry;
+addresses are not used as ancestry. Providers with the explicit subset-repack
+capability normalize only dirty records. The final state is registered after
+convergence rather than once per refinement pass.
 
 Authority membership is established by `kernel.surfaces(source_leaf)` in a
 transient copy. A retained polyhedral leaf can already have physical support
