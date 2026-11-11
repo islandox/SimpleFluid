@@ -20,6 +20,7 @@
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FluidSolver.hh"
+#include "solvers/NonOrthogonalDiffusionSolve.hh"
 #include "solvers/unitTests/VelocityProfileCsv.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"

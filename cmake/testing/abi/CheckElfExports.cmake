@@ -287,7 +287,17 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
     endforeach()
 endforeach()
 
+# DIC's public interface is shared by solver and header-defined Belos users.
+# Its private helpers remain subject to the detail-namespace prohibition.
+list(FILTER simplefluid_forbidden_api_symbols EXCLUDE REGEX
+    "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)[(]")
+
 set(simplefluid_required_api_patterns
+    "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::DICPreconditioner[(]"
+    "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::apply[(]"
+    # Function-template symbols carry an encoded return type before the name.
+    "SimpleFluid::FVM::solve_explicit_non_orthogonal_diffusion<"
+    "SimpleFluid::FVM::solve_non_orthogonal_diffusion<"
     "^SimpleFluid::BubbleGasPhysics::advance_microbubble_substep[(]"
     "^SimpleFluid::BubbleGasPhysics::advance_upper_bubble_population[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
@@ -1296,8 +1306,15 @@ endforeach()
 set(simplefluid_api_symbol_lower_bound 1250)
 set(simplefluid_final_species_cleanup_symbol_delta -35)
 set(simplefluid_preexisting_api_symbol_upper_bound 1408)
+# The compiled DIC preconditioner (two constructors, apply, getDomainMap,
+# getRangeMap, RTTI and its vtable/VTT) and the six steady non-orthogonal
+# diffusion solve entry points moved from libSimpleFluidFVM into this DSO so the
+# FVM library no longer references a symbol only Solvers defines. They are
+# already-reviewed definitions, not new public API; budget them explicitly
+# instead of consuming the ten-percent headroom.
+set(simplefluid_relocated_fvm_solve_symbol_budget 15)
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

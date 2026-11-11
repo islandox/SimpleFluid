@@ -68,24 +68,4 @@ template DiffusionSystem<Pack> non_orthogonal_diffusion_system<Pack>(const MeshT
 template Teuchos::RCP<MatrixVector> full_diffusion_residual<Pack>(
     const ScalarField&, Scalar, ScalarBoundaryConditionProvider<Pack>);
 
-template bool solve_explicit_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar,
-    ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, ScalarField&, int,
-    const LinearSolverOptions&);
-
-template bool solve_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>,
-    ScalarCellValueProvider<Pack>, ScalarField&, NonOrthogonalTreatment, int, const LinearSolverOptions&);
-
-template bool solve_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>,
-    ScalarCellValueProvider<Pack>, ScalarField&, NonOrthogonalTreatment, int, const LinearSolverOptions&,
-    const NonOrthogonalConvergenceOptions&);
-
-template bool solve_explicit_non_orthogonal_diffusion<Pack>(
-    const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarField&, int, const LinearSolverOptions&);
-
-template bool solve_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>,
-    ScalarField&, NonOrthogonalTreatment, int, const LinearSolverOptions&, const NonOrthogonalConvergenceOptions&);
-
-template bool solve_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>,
-    ScalarField&, NonOrthogonalTreatment, int, const LinearSolverOptions&);
-
 } // namespace SimpleFluid::FVM

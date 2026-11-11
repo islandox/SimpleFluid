@@ -16,6 +16,7 @@
 #include "equations/EquationValidation.hh"
 #include "equations/CollectiveValidation.hh"
 #include "fields/MeshFieldTraits.hh"
+#include "solvers/NonOrthogonalDiffusionSolve.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 

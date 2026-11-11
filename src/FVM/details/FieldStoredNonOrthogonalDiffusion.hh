@@ -11,9 +11,7 @@
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/NonOrthogonalSelection.hh"
 #include "FVM/details/StoredScalarGradientKernel.hh"
-#include "FVM/details/SteadyDiffusionConvergence.hh"
 #include "fields/FieldStored.hh"
-#include "solvers/BelosLinearSolver.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
@@ -300,65 +298,6 @@ DiffusionSystem<Pack> stored_non_orthogonal_diffusion_system(const MeshType& mes
             *correction_field, diffusivity, boundary_condition, *system.rhs, weights.explicit_);
     }
     return system;
-}
-
-/** Solve mapped steady non-orthogonal diffusion using FieldStored data. */
-template<TpetraTypePack Pack, class MeshType>
-bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
-    const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options)
-{
-    using scalar_type = typename Pack::scalar_type;
-
-    validate_steady_diffusion_controls<Pack>(mesh, diffusivity, solution.mesh_ptr().get() == &mesh,
-        treatment, nNonOrthogonalCorrectors, linear_options, correction_options);
-
-    auto solve_system = [&](DiffusionSystem<Pack> system)
-    {
-        solution.owned_data().putScalar(scalar_type{});
-        Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
-        const auto converged = solve_linear_system<Pack>(matrix, *system.rhs, solution.owned_data(), linear_options);
-        solution.sync_ghosts();
-        return converged;
-    };
-
-    if (treatment == NonOrthogonalTreatment::Implicit)
-    {
-        return solve_implicit_diffusion_corrections<Pack>(mesh, diffusivity, solution,
-            [&](const auto& correction) { return stored_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, treatment, &correction); },
-            [&] { solution.sync_ghosts(); }, linear_options, correction_options);
-    }
-    if (treatment != NonOrthogonalTreatment::Explicit && treatment != NonOrthogonalTreatment::Hybrid)
-    {
-        throw std::invalid_argument("Unknown NonOrthogonalTreatment value.");
-    }
-
-    for (int corrector = 0; corrector <= nNonOrthogonalCorrectors; ++corrector)
-    {
-        DiffusionSystem<Pack> system;
-        if (treatment == NonOrthogonalTreatment::Explicit)
-        {
-            system = stored_non_orthogonal_diffusion_system<Pack>(mesh, diffusivity, boundary_condition,
-                right_hand_source, treatment, corrector == 0 ? nullptr : &solution);
-        }
-        else if (corrector == 0)
-        {
-            system = stored_implicit_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, scalar_type{0.5}, &solution);
-        }
-        else
-        {
-            system = stored_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, treatment, &solution);
-        }
-        if (!solve_system(std::move(system)))
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 } // namespace SimpleFluid::FVM::detail

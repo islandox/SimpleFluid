@@ -1,6 +1,6 @@
 /**
  * @file DICPreconditioner.cc
- * @brief  FVM-owned explicit DIC instantiation.
+ * @brief  Solver-owned explicit DIC instantiation.
  */
 
 #include "solvers/DICPreconditioner.tcc"

@@ -94,11 +94,6 @@ foreach(index RANGE ${last_symbol})
         message(FATAL_ERROR
             "Cannot decode FVM export with ${SIMPLEFLUID_CXXFILT}: ${name}; use a compatible llvm-cxxfilt")
     endif()
-    # DIC's public interface is shared by FVM and header-defined Belos users.
-    # Its private helpers remain subject to the detail-namespace prohibition.
-    if(name MATCHES "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)([(]|$)")
-        continue()
-    endif()
     if(name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(view|source_entity|position_in_view|lookup|band_for_local)([(]|$)"
        OR name MATCHES "^SimpleFluid::Meshes::DecomposedOrthogonalTopology::(subtract|insert|count|finalize|flatten|expand|owned_face_local_id|owned_source_face|lookup|select|add_wrapped|shape)([(]|$)"
        OR name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
@@ -107,13 +102,6 @@ foreach(index RANGE ${last_symbol})
     endif()
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
-    endif()
-endforeach()
-
-# The lower-level FVM DSO must own the compiled DIC API; solvers consume it.
-foreach(method IN ITEMS DICPreconditioner apply)
-    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::detail::DICPreconditioner<[^\n]+>::${method}([(]|\n|$)")
-        message(FATAL_ERROR "Missing compiled DIC ${method} in FVM")
     endif()
 endforeach()
 
@@ -128,8 +116,6 @@ foreach(api IN ITEMS
         fully_implicit_non_orthogonal_diffusion_system
         non_orthogonal_diffusion_system
         full_diffusion_residual
-        solve_explicit_non_orthogonal_diffusion
-        solve_non_orthogonal_diffusion
         transport_system
         non_orthogonal_transport_system
         weighted_scalar_transport_system
@@ -137,6 +123,18 @@ foreach(api IN ITEMS
         physical_momentum_transport_system)
     if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::FVM::${api}<")
         message(FATAL_ERROR "Missing versioned FVM export: ${api}")
+    endif()
+endforeach()
+
+# The iterative solves and the compiled preconditioner belong to the solver
+# DSO. Forbid them here so an accidental reintroduction cannot restore the
+# linker cycle that made the macOS Mach-O link fail while Linux ELF tolerated it.
+foreach(solver_api IN ITEMS
+        "SimpleFluid::detail::DICPreconditioner<"
+        "SimpleFluid::FVM::solve_explicit_non_orthogonal_diffusion<"
+        "SimpleFluid::FVM::solve_non_orthogonal_diffusion<")
+    if(demangled_full MATCHES "(^|\n)${solver_api}")
+        message(FATAL_ERROR "Solver-owned API exported from FVM: ${solver_api}")
     endif()
 endforeach()
 

@@ -20,6 +20,7 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/NonOrthogonalDiffusionSolve.hh"
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 

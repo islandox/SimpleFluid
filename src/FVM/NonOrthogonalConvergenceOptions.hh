@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "solvers/BelosLinearSolver.hh"
+#include "dataclass/typedefs.hh"
 
 namespace SimpleFluid::FVM
 {
