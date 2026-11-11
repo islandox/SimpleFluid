@@ -522,6 +522,8 @@ Use an appropriate type such as `feat`, `fix`, `refactor`, `test`, `docs`,
 `build`, or `perf`, and a meaningful component scope. Keep the subject short;
 scale the body to the change and omit unnecessary detail groups. Use the Codex
 co-author trailer for Codex-contributed changes, consistent with local history.
+Other agents shall change the `Co-authored-by` note to their own agent identity,
+for example `Co-authored-by: deepseek harness`, instead of the Codex trailer.
 
 For a message-only request, inspect the requested diff and recent commit style
 without editing files or the index, running new tests, committing, or pushing.
