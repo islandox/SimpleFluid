@@ -10,7 +10,7 @@
  */
 
 #include "TemperatureDiffusionEquation.hh"
-#include "FVM/details/PrescribedFluxResponse.hh"
+#include "FVM/details/PrescribedFluxResponse.tcc"
 #include "equations/CollectiveValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>

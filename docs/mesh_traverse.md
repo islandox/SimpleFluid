@@ -659,3 +659,13 @@ This removes caller-lambda constructor specializations without temporary
 coefficient fields or indirect coefficient calls in the face loop. Ordinary
 and physical equation advances retain their distinct validation, cache and
 solve orchestration while using the compiled FVM assembly providers.
+
+`FVM/details/PrescribedFluxResponse.hh` declares the response-plan layout;
+its `.tcc` holds construction, increment validation and response application.
+`equations/explicit_instantiation/TemperatureFluxResponse.cc` compiles the
+default mapped specialization once inside the solver DSO. The detail class
+remains internal; it introduces no cross-DSO helper API. Temperature equation
+providers reference these compiled methods instead of instantiating them.
+The temperature `.tcc` includes the response `.tcc` for generic mesh/type-pack
+providers, including the existing solid-subdomain path. This retains generic
+support and repeated parsing while isolating default instantiation work.
