@@ -1,7 +1,7 @@
 /**
  * @file FVM/explicit_instantiation/MappedWeightedTransportSystem.cc
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Explicit instantiations for compiled transport-system assembly.
+ * @brief Shared mapped weighted and physical-temperature assembly provider.
  * @version 0.1
  * @date 2026-07-29
  *
@@ -24,11 +24,28 @@ using VectorField = VectorCellField<Pack>;
 using FluxField = FaceField<Pack>;
 using GeometryCache = TransportGeometryCache<Mesh<Pack>>;
 using MappedGeometryCache = TransportGeometryCache<MeshHandle<Pack>>;
+using MappedScalarField = ScalarCellFieldStored<Pack>;
+using MappedFluxField = ScalarFaceFieldStored<Pack>;
+using MappedBoundaryCache = FieldStoredBoundaryCache<Pack, MeshHandle<Pack>>;
 } // namespace
 
 // Compiled mapped entry point shared by the equation translation units that
 // advance FieldStored transport on the runtime mesh handle.
 template TransportSystem<Pack> weighted_scalar_transport_system<Pack, MeshHandle<Pack>>(
     FieldStoredWeightedScalarTransportRequest<Pack, MeshHandle<Pack>>);
+
+template SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
+    const MappedScalarField&, const MappedFluxField&, Scalar, const MappedScalarField&, const MappedScalarField&,
+    const MappedScalarField&, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>,
+    ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const MappedScalarField*, Teuchos::RCP<Matrix>,
+    const MappedBoundaryCache*, const MappedGeometryCache*, FaceCoefficientInterpolation, const ALEControlVolumeState*,
+    const MappedScalarField*, const MappedScalarField*, bool, AssemblyMode);
+
+template SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
+    const MappedScalarField&, const MappedFluxField&, Scalar, const MappedScalarField&, const MappedScalarField&,
+    const MappedScalarField&, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>,
+    ScalarCellValueProvider<Pack>, ScalarTransportDiscretization, NonOrthogonalTreatment, const MappedScalarField*,
+    const MappedScalarField*, Teuchos::RCP<Matrix>, const MappedBoundaryCache*, const MappedGeometryCache*,
+    FaceCoefficientInterpolation, const ALEControlVolumeState*, const MappedScalarField*, const MappedScalarField*);
 
 } // namespace SimpleFluid::FVM

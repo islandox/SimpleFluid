@@ -285,4 +285,128 @@ TEST(StoredTransportReuseTest, MomentumScratchRecomputesGradientsAndRejectsForei
                      FaceCoefficientInterpolation::Linear, nullptr, rank == 0 ? &foreign : &scratch),
         std::invalid_argument);
 }
+
+TEST(StoredTransportReuseTest, PhysicalCapacitySharesWeightedAlgebraAndIndependentOldFactors)
+{
+    const auto mesh = make_mesh();
+    Scalar values(mesh, 0.0, "temperature"), density(mesh, 1.0, "density"), cp(mesh, 1.0, "cp"),
+        old_density(mesh, 1.0, "old_density"), old_cp(mesh, 1.0, "old_cp"), capacity(mesh, 1.0, "capacity"),
+        old_capacity(mesh, 1.0, "old_capacity"), diffusion(mesh, 0.0, "conductivity"), zero(mesh, 0.0, "zero");
+    Flux flux(mesh, 0.0, "flux");
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        const auto cell = static_cast<LO>(row);
+        const auto x = mesh->cell_centroid(cell).x;
+        values.set_owned_value(cell, 2.0 + 0.5 * x);
+        density.set_owned_value(cell, 1.5 + x);
+        cp.set_owned_value(cell, 4.0 - 0.25 * x);
+        old_density.set_owned_value(cell, 0.75 + 0.5 * x);
+        old_cp.set_owned_value(cell, 2.0 + 0.125 * x);
+        capacity.set_owned_value(cell, (1.5 + x) * (4.0 - 0.25 * x));
+        diffusion.set_owned_value(cell, 0.2 + 0.1 * x);
+    }
+    values.sync_ghosts();
+    density.sync_ghosts();
+    cp.sync_ghosts();
+    old_density.sync_ghosts();
+    old_cp.sync_ghosts();
+    capacity.sync_ghosts();
+    diffusion.sync_ghosts();
+    TransportGeometryCache<Handle> geometry(*mesh);
+    const auto boundary = [](int batch, size_t)
+    { return BoundaryCondition{batch % 2 ? BoundaryConditionType::Dirichlet : BoundaryConditionType::Neumann, 0.125}; };
+    const auto boundary_value = [](int batch, size_t) { return 1.0 + 0.25 * batch; };
+    const auto source = [](LO cell) { return 0.125 + 0.0625 * cell; };
+    constexpr double dt = 0.5;
+    for (int selection = 0; selection < 4; ++selection)
+    {
+        SCOPED_TRACE(selection);
+        const auto* accepted_density = selection & 1 ? &old_density : nullptr;
+        const auto* accepted_cp = selection & 2 ? &old_cp : nullptr;
+        for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            const auto x = mesh->cell_centroid(cell).x;
+            const auto rho = selection & 1 ? 0.75 + 0.5 * x : 1.5 + x;
+            const auto heat_capacity = selection & 2 ? 2.0 + 0.125 * x : 4.0 - 0.25 * x;
+            old_capacity.set_owned_value(cell, rho * heat_capacity);
+        }
+        old_capacity.sync_ghosts();
+        // Independent storage oracle with no face contributions, including
+        // each individual accepted-property fallback.
+        flux.data().putScalar(0.0);
+        flux.sync_ghosts();
+        const auto storage = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp, zero, boundary,
+            boundary_value, source, NonOrthogonalTreatment::Implicit, nullptr, Teuchos::null, nullptr, &geometry,
+            FaceCoefficientInterpolation::Harmonic, nullptr, accepted_density, accepted_cp);
+        for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            const auto volume = mesh->cell_volume(cell);
+            const auto entries = [&]
+            {
+                Pack::matrix_type::local_inds_host_view_type columns;
+                Pack::matrix_type::values_host_view_type coefficients;
+                storage.matrix->getLocalRowView(cell, columns, coefficients);
+                double diagonal = 0.0;
+                for (size_t i = 0; i < columns.extent(0); ++i)
+                {
+                    if (columns[i] == cell)
+                        diagonal += coefficients[i];
+                    else
+                        EXPECT_DOUBLE_EQ(coefficients[i], 0.0);
+                }
+                return diagonal;
+            }();
+            EXPECT_DOUBLE_EQ(entries, capacity.value(cell) * volume / dt);
+            EXPECT_NEAR(storage.rhs->getData()[row],
+                old_capacity.value(cell) * volume / dt * values.value(cell) + volume * source(cell), 1.0e-12);
+        }
+        for (const auto face : flux.owned_face_ids())
+            flux.set_owned_value(face, (selection % 2 ? -0.3 : 0.2) * mesh->face_area_vector(face).x);
+        flux.sync_ghosts();
+        for (auto interpolation : {FaceCoefficientInterpolation::Harmonic, FaceCoefficientInterpolation::Linear})
+        {
+            for (auto treatment :
+                {NonOrthogonalTreatment::Explicit, NonOrthogonalTreatment::Implicit, NonOrthogonalTreatment::Hybrid})
+            {
+                const auto* correction = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &values;
+                const auto weighted = weighted_scalar_transport_system<Pack>(
+                    MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = values,
+                        .face_fluxes = flux,
+                        .time_step = dt,
+                        .storage_weight = capacity,
+                        .advection_weight = capacity,
+                        .diffusivity = diffusion,
+                        .boundary_condition = boundary,
+                        .boundary_value = boundary_value,
+                        .source = source,
+                        .treatment = treatment,
+                        .correction_field = correction,
+                        .geometry_cache = &geometry,
+                        .coefficient_interpolation = interpolation,
+                        .old_storage_weight = selection == 0 ? nullptr : &old_capacity});
+                const auto physical = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp,
+                    diffusion, boundary, boundary_value, source, treatment, correction, Teuchos::null, nullptr,
+                    &geometry, interpolation, nullptr, accepted_density, accepted_cp);
+                expect_same_system(physical, weighted);
+                physical.matrix->setAllToScalar(7.0);
+                const auto rhs_only = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp,
+                    diffusion, boundary, boundary_value, source, treatment, correction, physical.matrix, nullptr,
+                    &geometry, interpolation, nullptr, accepted_density, accepted_cp, true);
+                EXPECT_EQ(rhs_only.matrix.get(), physical.matrix.get());
+                for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+                {
+                    EXPECT_DOUBLE_EQ(rhs_only.rhs->getData()[row], weighted.rhs->getData()[row]);
+                    Pack::matrix_type::local_inds_host_view_type columns;
+                    Pack::matrix_type::values_host_view_type coefficients;
+                    rhs_only.matrix->getLocalRowView(static_cast<LO>(row), columns, coefficients);
+                    for (size_t i = 0; i < coefficients.extent(0); ++i)
+                        EXPECT_DOUBLE_EQ(coefficients[i], 7.0);
+                }
+            }
+        }
+    }
+}
+
 } // namespace

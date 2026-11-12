@@ -17,6 +17,7 @@
 #include "FVM/details/StoredScalarGradientKernel.hh"
 #include "FVM/details/TransportAssemblyGeometry.hh"
 #include "FVM/details/TransportValidation.hh"
+#include "FVM/details/TransportCoefficientAccess.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/GeometryEpoch.hh"
 
@@ -994,15 +995,13 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
 }
 
 /** Shared mapped weighted-scalar assembly kernel. */
-template<TpetraTypePack Pack, class MeshType, class StorageValue, class OldStorageValue, class AdvectionValue,
-    class DiffusivityValue, class BoundaryCondition, class BoundaryValue, class Source, class BoundaryCache,
-    class GeometryCache>
+template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class BoundaryValue, class Source,
+    class BoundaryCache, class GeometryCache>
 TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::scalar_type time_step, StorageValue storage_value, OldStorageValue old_storage_value,
-    bool has_distinct_old_storage, AdvectionValue advection_value, DiffusivityValue diffusivity_value,
-    BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source, NonOrthogonalTreatment treatment,
-    const ScalarCellFieldStored<Pack, MeshType>* correction_field,
+    typename Pack::scalar_type time_step, const ScalarTransportCoefficientAccess<Pack>& coefficients,
+    bool has_distinct_old_storage, BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source,
+    NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
@@ -1010,17 +1009,20 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
     ScalarTransportDiscretization discretization, const ScalarCellFieldStored<Pack, MeshType>* older_values,
     const ALEControlVolumeState* ale, StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
-    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null, bool allow_robin = false, bool rhs_only = false)
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null, bool allow_robin = false,
+    bool rhs_only = false)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
+    const auto& storage_value = coefficients.storage;
+    const auto& old_storage_value = coefficients.old_storage;
+    const auto& advection_value = coefficients.advection;
+    const auto& diffusivity_value = coefficients.diffusion;
+
     const auto& mesh = old_values.mesh();
     const auto execution = acquire_mesh_execution(mesh);
-    const auto older_field_state =
-        older_values == nullptr
-            ? 0
-            : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
+    const auto older_field_state = older_values == nullptr ? 0 : older_values->mesh_ptr().get() == &mesh ? 1 : 2;
     validate_assembly_mode(mesh, discretization.mode);
     const auto policy_state = scalar_transport_discretization_state(discretization, older_field_state);
     const std::array<int, 5> local_optional_state{
@@ -1698,22 +1700,15 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
                                          ? 1
                                          : 0;
     const auto storage_data = storage_weight.local_read_view();
-    const auto old_storage_data = old_storage_weight == nullptr
-        ? storage_data
-        : old_storage_weight->local_read_view();
+    const auto old_storage_data = old_storage_weight == nullptr ? storage_data : old_storage_weight->local_read_view();
     const auto advection_data = advection_weight.local_read_view();
     const auto diffusion_data = diffusivity.local_read_view();
-    auto storage = [&](typename Pack::local_ordinal_type cell_lid) { return storage_data(cell_lid, 0); };
-    auto old_storage = [&](typename Pack::local_ordinal_type cell_lid)
-    {
-        return old_storage_data(cell_lid, 0);
-    };
-    auto advection = [&](typename Pack::local_ordinal_type cell_lid) { return advection_data(cell_lid, 0); };
-    auto diffusion = [&](typename Pack::local_ordinal_type cell_lid) { return diffusion_data(cell_lid, 0); };
-    return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, storage, old_storage,
-        old_storage_weight != nullptr, advection, diffusion, std::move(boundary_condition),
-        std::move(boundary_value), std::move(source), treatment,
-        correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
+    const ScalarTransportCoefficientAccess<Pack> coefficients{TransportCoefficientView<Pack>{storage_data},
+        TransportCoefficientView<Pack>{old_storage_data}, TransportCoefficientView<Pack>{advection_data},
+        TransportCoefficientView<Pack>{diffusion_data}};
+    return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, coefficients,
+        old_storage_weight != nullptr, std::move(boundary_condition), std::move(boundary_value), std::move(source),
+        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
         boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
         "weighted_scalar_transport_system", discretization, older_values, ale, symbolic_plan, std::move(cached_rhs));
 }
@@ -1765,28 +1760,22 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     const auto density_data = density.local_read_view();
     const auto specific_heat_capacity_data = specific_heat_capacity.local_read_view();
     const auto conductivity_data = thermal_conductivity.local_read_view();
-    auto capacity = [&](typename Pack::local_ordinal_type cell_lid)
-    { return density_data(cell_lid, 0) * specific_heat_capacity_data(cell_lid, 0); };
-    auto conductivity = [&](typename Pack::local_ordinal_type cell_lid)
-    { return conductivity_data(cell_lid, 0); };
     const auto* accepted_density = old_density == nullptr ? &density : old_density;
     const auto* accepted_specific_heat_capacity =
-        old_specific_heat_capacity == nullptr
-        ? &specific_heat_capacity
-        : old_specific_heat_capacity;
+        old_specific_heat_capacity == nullptr ? &specific_heat_capacity : old_specific_heat_capacity;
     const auto accepted_density_data = accepted_density->local_read_view();
     const auto accepted_specific_heat_capacity_data = accepted_specific_heat_capacity->local_read_view();
-    auto old_capacity = [&](typename Pack::local_ordinal_type cell_lid)
-    {
-        return accepted_density_data(cell_lid, 0)
-            * accepted_specific_heat_capacity_data(cell_lid, 0);
-    };
-    return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, capacity,
-        old_capacity, old_density != nullptr || old_specific_heat_capacity != nullptr, capacity, conductivity,
-        std::move(boundary_condition), std::move(boundary_value), std::move(power_density), treatment, correction_field,
-        std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache, coefficient_interpolation,
-        incompatible_fields, "physical_temperature_transport_system", discretization, older_temperature, ale, nullptr,
-        Teuchos::null, true, rhs_only);
+    const ScalarTransportCoefficientAccess<Pack> coefficients{
+        TransportCoefficientView<Pack>{density_data, specific_heat_capacity_data},
+        TransportCoefficientView<Pack>{accepted_density_data, accepted_specific_heat_capacity_data},
+        TransportCoefficientView<Pack>{density_data, specific_heat_capacity_data},
+        TransportCoefficientView<Pack>{conductivity_data}};
+    return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, coefficients,
+        old_density != nullptr || old_specific_heat_capacity != nullptr, std::move(boundary_condition),
+        std::move(boundary_value), std::move(power_density), treatment, correction_field, std::move(cached_matrix), {},
+        {}, boundary_thermal_conductivity, geometry_cache, coefficient_interpolation, incompatible_fields,
+        "physical_temperature_transport_system", discretization, older_temperature, ale, nullptr, Teuchos::null, true,
+        rhs_only);
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>

@@ -626,3 +626,16 @@ once per cell or physical boundary; the interior face loop is shared. Vector
 transport builds the matrix once and fills its three RHS components together.
 Source and boundary callback order, cache validation and boundary policies
 retain their existing contracts.
+
+Mapped weighted and physical-temperature assembly pass the same concrete
+coefficient-access type to their shared kernel. Each channel borrows an
+overlap view and reads either one field or a product of two fields through
+inline control flow. Temperature uses density times heat capacity for current
+storage and advection, independent accepted-old factors for old storage, and
+conductivity for diffusion. No coefficient fields are materialized.
+
+Both default mapped temperature overloads are compiled alongside the mapped
+weighted request in `MappedWeightedTransportSystem.cc`, sharing one kernel
+specialization. Generic mesh/type-pack wrappers remain available. Boundary
+policies, collective validation, accepted-old fallback and RHS-only matrix
+preservation retain their existing contracts.
