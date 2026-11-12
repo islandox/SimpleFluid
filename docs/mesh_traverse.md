@@ -639,3 +639,14 @@ weighted request in `MappedWeightedTransportSystem.cc`, sharing one kernel
 specialization. Generic mesh/type-pack wrappers remain available. Boundary
 policies, collective validation, accepted-old fallback and RHS-only matrix
 preservation retain their existing contracts.
+
+The default `TemperatureDiffusionEquation` providers separately instantiate
+legacy `Mesh` and mapped `MeshHandle` in the equations source inventory. Both
+remain in the solver DSO, with unchanged class layout and public extern
+templates. `TemperatureDiffusionEquation.tcc` remains the generic provider
+route, including for the embedded solid-subdomain equation.
+
+CMake 4.2 and newer place these temperature providers in a shared serial Ninja
+compile pool without limiting unrelated solver sources. On older CMake, limit
+heavy builds explicitly, for example with `--parallel 1`. The provider split
+does not establish a measured compiler-memory or time improvement.

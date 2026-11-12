@@ -23,6 +23,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     BubblePopulationKinetics.cc
     explicit_instantiation/SolidHeatConductionEquation.cc
     explicit_instantiation/TemperatureDiffusionEquation.cc
+    explicit_instantiation/MappedTemperatureDiffusionEquation.cc
     turbulence/TurbulenceModel.cc
     explicit_instantiation/TurbulenceScalarTransportEquation.cc
     turbulence/TurbulenceWallTreatment.cc

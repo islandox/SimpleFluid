@@ -50,3 +50,14 @@ if(SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
     target_compile_options(SimpleFluidSolvers PRIVATE
         "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-fno-semantic-interposition>")
 endif()
+
+# CMake 4.2 added per-source Ninja pools. Keep temperature providers bounded
+# without serializing unrelated solver compilation or changing their ownership.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.2")
+    set_property(GLOBAL APPEND PROPERTY JOB_POOLS simplefluid_temperature_compile=1)
+    foreach(equation_source IN LISTS SIMPLEFLUID_EQUATION_SOURCES)
+        if(equation_source MATCHES "/explicit_instantiation/(Mapped)?Temperature[^/]*[.]cc$")
+            set_property(SOURCE "${equation_source}" PROPERTY JOB_POOL_COMPILE simplefluid_temperature_compile)
+        endif()
+    endforeach()
+endif()
