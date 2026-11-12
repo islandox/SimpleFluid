@@ -415,3 +415,9 @@ foreach(_cover_ranks IN ITEMS 2 4)
     ARGS "--gtest_filter=RankCoverReceiptPersistence.*"
     LABELS "mpi;geometry;amr;cover;empty_rank" TIMEOUT 600)
 endforeach()
+
+foreach(_directory_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME DirectoryPersistence_${_directory_ranks}procs
+    TARGET testDirectoryPersistence PROCS ${_directory_ranks}
+    LABELS "mpi;amr;directory;empty_rank" TIMEOUT 300)
+endforeach()

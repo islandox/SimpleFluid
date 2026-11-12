@@ -1,4 +1,5 @@
 /** Independent owner-delta maps, tombstones, leases and collective rollback. */
+#include "geometry/mesh/AMR/DirectoryRegistrationAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveOwnerOverlay.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -314,4 +315,27 @@ TEST(DistributedAncestryRegistrationLease, DifferentRankCapsAreAllowedButPresenc
     EXPECT_EQ(accepted.storage_bytes(), bytes);
     EXPECT_EQ(observe(accepted.lookup(keys)), expected);
 }
+TEST(DistributedAncestryRegistrationLease, TinyLiteralKeysCountAllStorageAgainstTheMapBaseline)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto max = std::numeric_limits<std::uint64_t>::max();
+    const AMR::AdaptiveBytes name{char(comm->getRank() + 1)};
+    const std::array owned{AMR::AdaptiveOwner{name, comm->getRank(), max, max}};
+    const AMR::DistributedAncestryDirectory directory(owned, comm, ample);
+    const auto old_row = sizeof(AMR::AdaptiveBytes) + sizeof(AMR::AdaptiveOwner) + 4 * sizeof(void*) + 2;
+    EXPECT_LE(directory.storage_bytes(), sizeof(directory) + directory.local_entries() * old_row);
+    std::vector<AMR::AdaptiveBytes> keys;
+    for (int rank = comm->getSize() - 1; rank >= 0; --rank)
+        keys.push_back({char(rank + 1)});
+    for (const auto& value : directory.lookup(keys, true, ample))
+    {
+        EXPECT_EQ(value.revision, max);
+        EXPECT_EQ(value.address, max);
+    }
+    AMR::DistributedAncestryDirectory copy(directory);
+    EXPECT_EQ(observe(copy.lookup(keys)), observe(directory.lookup(keys)));
+    AMR::adaptive_detail::DirectoryRegistrationAccess::visit_storage(
+        directory, [&](const void*, std::size_t, bool numeric) { EXPECT_FALSE(numeric); });
+}
+
 } // namespace

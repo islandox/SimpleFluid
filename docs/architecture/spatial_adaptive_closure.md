@@ -77,6 +77,16 @@ addresses are not used as ancestry. Providers with the explicit subset-repack
 capability normalize only dirty records. The final state is registered after
 convergence rather than once per refinement pass.
 
+Ancestry directories retain exact keys, owner and revision in immutable ordered
+fact pages. Key buffers are admitted before they are copied, and clean page
+subtrees are shared across generations. Observed cell GIDs are a separate dense
+numeric projection in shard-key order, so a prefix shift rewrites addresses
+without rewriting ancestry facts. Generic revisions remain literal full-width
+values; Product-family rows may project the current topology epoch only through
+a private token validated against the exact family layout. A candidate directory
+reconciles only changed facts, holds inherited fact credit in its source overlap
+until publication, and transfers only surviving shared facts.
+
 Authority membership is established by `kernel.surfaces(source_leaf)` in a
 transient copy. A retained polyhedral leaf can already have physical support
 records whose keys and boundary aliases differ from the mapped authority view;

@@ -11,6 +11,7 @@
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafBodyUsage.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafOverlay.hh"
+#include "geometry/mesh/AMR/DirectoryRegistrationAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
@@ -166,6 +167,24 @@ struct DistributedAdaptiveHierarchy::Data
     std::shared_ptr<const void> map_token;
     std::uint64_t native_epoch = 0;
     std::uint64_t topology = 0, partition = 0, cell_begin = 0, global_cells = 0;
+    bool bootstrap_family_registration_validated = false;
+    [[nodiscard]] DirectorySourceCredit directory_credit(bool family, Budget& budget, std::size_t& held) const
+    {
+        return DirectorySourceCredit(family ? *family_directory : *cells, budget, held);
+    }
+    [[nodiscard]] FamilyDirectoryProjection directory_family_projection() const
+    {
+        if (family_layout)
+            return FamilyDirectoryProjection(family_layout, topology);
+        if (!bootstrap_family_registration_validated)
+            throw std::logic_error("Bootstrap directory projection lacks validated family proofs.");
+        return FamilyDirectoryProjection(staged_families, topology);
+    }
+    void finish_directory_overlap() const noexcept
+    {
+        DirectoryRegistrationAccess::finish_overlap(*cells);
+        DirectoryRegistrationAccess::finish_overlap(*family_directory);
+    }
     [[nodiscard]] const LeafMap& owned() const { return std::get<LeafMap>(leaves); }
     [[nodiscard]] LeafMap& edit_owned() { return std::get<LeafMap>(leaves); }
     [[nodiscard]] AdaptiveLeafOverlay& overlay() { return *std::get<std::shared_ptr<AdaptiveLeafOverlay>>(leaves); }
@@ -856,11 +875,17 @@ void refresh_product_families_shared(DistributedAdaptiveHierarchy::Data& state, 
         });
 }
 std::size_t fetch_key_bytes(const AdaptiveCellKey& key);
-std::shared_ptr<const DistributedAncestryDirectory> register_directory(
-    DistributedAdaptiveHierarchy::Data& state, std::span<const AdaptiveOwner> entries, ClosureScratch* retained)
+std::shared_ptr<const DistributedAncestryDirectory> register_directory(DistributedAdaptiveHierarchy::Data& state,
+    std::span<const AdaptiveOwner> entries, ClosureScratch* retained, const DirectorySourceCredit* source = nullptr,
+    const FamilyDirectoryProjection* projection = nullptr)
 {
     if (!retained)
-        return std::make_shared<const DistributedAncestryDirectory>(entries, state.comm, state.options.byte_budget);
+    {
+        auto directory = std::make_shared<const DistributedAncestryDirectory>(DirectoryRegistrationAccess::derive(
+            entries, state.comm, state.options.byte_budget, state.options.byte_budget, nullptr, projection));
+        DirectoryRegistrationAccess::finish_overlap(*directory);
+        return directory;
+    }
     std::shared_ptr<std::optional<DistributedAncestryDirectory>> holder;
     collective(*state.comm,
         [&]
@@ -878,20 +903,27 @@ std::shared_ptr<const DistributedAncestryDirectory> register_directory(
                 throw std::invalid_argument("Directory registration shared lease exhausted.");
             retained->add(cap);
         });
-    holder->emplace(entries, state.comm, state.options.byte_budget, cap);
+    holder->emplace(
+        DirectoryRegistrationAccess::derive(entries, state.comm, state.options.byte_budget, cap, source, projection));
     std::shared_ptr<const DistributedAncestryDirectory> directory(holder, &holder->value());
     collective(*state.comm,
         [&]
         {
             const auto resident = directory->storage_bytes();
-            if (resident > cap)
+            const auto shared = DirectoryRegistrationAccess::statistics(*directory).shared_fact_bytes;
+            if (shared > resident || resident - shared > cap)
                 throw std::invalid_argument("Directory registration exceeded shared lease.");
-            retained->drop(cap - resident);
+            retained->drop(cap - (resident - shared));
+            if (source)
+                DirectoryRegistrationAccess::transfer_shared(*source, *directory, retained->budget, retained->held);
+            else if (shared)
+                throw std::logic_error("Directory shared facts have no exact predecessor lease.");
         });
     return directory;
 }
 
-void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr)
+void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr,
+    const DistributedAdaptiveHierarchy::Data* source = nullptr, ClosureScratch* source_overlap = nullptr)
 {
     Budget fallback{state.options.byte_budget};
     ClosureScratch scratch{retained ? retained->budget : fallback};
@@ -940,7 +972,16 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
                 cells.push_back({std::move(bytes), state.comm->getRank(), leaf.revision, state.cell_begin + ordinal++});
             });
         });
-    state.cells = register_directory(state, cells, retained);
+    std::optional<DirectorySourceCredit> credit;
+    if (source)
+        collective(*state.comm,
+            [&]
+            {
+                if (!source_overlap || !retained || &source_overlap->budget != &retained->budget)
+                    throw std::logic_error("Directory source overlap does not belong to the current operation.");
+                credit.emplace(source->directory_credit(false, retained->budget, source_overlap->held));
+            });
+    state.cells = register_directory(state, cells, retained, credit ? &*credit : nullptr);
     std::vector<AdaptiveBytes> partner_keys;
     collective(*state.comm,
         [&]
@@ -991,7 +1032,8 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
         (void) state.cells->lookup(partner_keys);
 }
 
-void register_families(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr)
+void register_families(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr,
+    const DistributedAdaptiveHierarchy::Data* source = nullptr, ClosureScratch* source_overlap = nullptr)
 {
     Budget fallback{state.options.byte_budget};
     ClosureScratch scratch{retained ? retained->budget : fallback};
@@ -1027,8 +1069,22 @@ void register_families(DistributedAdaptiveHierarchy::Data& state, ClosureScratch
                         throw std::invalid_argument("Saved parent authority lost actual descendant owner.");
                     emit(family);
                 }
+            state.bootstrap_family_registration_validated = true;
         });
-    state.family_directory = register_directory(state, families, retained);
+    std::optional<DirectorySourceCredit> credit;
+    std::optional<FamilyDirectoryProjection> projection;
+    collective(*state.comm,
+        [&]
+        {
+            projection.emplace(state.directory_family_projection());
+            if (source)
+            {
+                if (!source_overlap || !retained || &source_overlap->budget != &retained->budget)
+                    throw std::logic_error("Family directory source lease belongs to a different operation.");
+                credit.emplace(source->directory_credit(true, retained->budget, source_overlap->held));
+            }
+        });
+    state.family_directory = register_directory(state, families, retained, credit ? &*credit : nullptr, &*projection);
 }
 std::optional<AdaptiveCellKey> original_cover(
     const DistributedAdaptiveHierarchy::Data& source, const AdaptiveCellKey& key)
@@ -1941,6 +1997,21 @@ const std::shared_ptr<const AdaptiveLeafLayout>& DistributedAdaptiveHierarchy::l
 {
     return data_->layout();
 }
+const DistributedAncestryDirectory& adaptive_detail::DirectoryRegistrationAccess::cells(
+    const DistributedAdaptiveHierarchy& state)
+{
+    return *state.data_->cells;
+}
+const std::shared_ptr<const DistributedAncestryDirectory>& adaptive_detail::DirectoryRegistrationAccess::cell_owner(
+    const DistributedAdaptiveHierarchy& state)
+{
+    return state.data_->cells;
+}
+const DistributedAncestryDirectory& adaptive_detail::DirectoryRegistrationAccess::families(
+    const DistributedAdaptiveHierarchy& state)
+{
+    return *state.data_->family_directory;
+}
 std::shared_ptr<const adaptive_detail::AdaptiveContactSnapshot> adaptive_detail::contact_snapshot(
     const DistributedAdaptiveHierarchy& hierarchy)
 {
@@ -2107,8 +2178,6 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             charge_source_residency(binding_overlap, *data_);
             source_charge = binding_overlap.used;
             binding_overlap.add(sizeof(Data) + sizeof(AdaptiveGeometrySnapshotCache) + 4 * sizeof(void*));
-            binding_overlap.add(data_->cells->storage_bytes());
-            binding_overlap.add(data_->family_directory->storage_bytes());
             binding_overlap.add(sizeof(AdaptivePublishedAdmission) + 4 * sizeof(void*));
             bound = std::make_shared<Data>(*data_);
             bound->geometry_cache = std::make_shared<AdaptiveGeometrySnapshotCache>();
@@ -2154,7 +2223,8 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
             // admitting a second copy of either root.
             const auto geometry_bytes = bound->geometry_cache->root_bytes();
             const auto layout_bytes = bound->owned_layout_bytes;
-            const auto family_bytes = bound->family_body_residency() + bound->family_layout_residency();
+            const auto family_bytes = bound->family_body_residency() + bound->family_layout_residency() +
+                                      bound->cells->storage_bytes() + bound->family_directory->storage_bytes();
             if (layout_bytes > source_memory.held || geometry_bytes > source_memory.held - layout_bytes ||
                 family_bytes > source_memory.held - layout_bytes - geometry_bytes)
                 throw std::logic_error("Shared root residency exceeds admitted source overlap.");
@@ -3595,7 +3665,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
             normalize_candidate(*next, leaf_memory);
             leaf_storage = seal_candidate_layout(*next, *data_, initial_memory, candidate_memory, leaf_memory, *frontier);
         });
-    register_cells(*next, &candidate_memory);
+    register_cells(*next, &candidate_memory, data_.get(), &initial_memory);
     refresh_compatibility_product_families(*next, *data_, family_journal, family_memory);
     collective(*data_->comm,
         [&]
@@ -3603,7 +3673,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
             seal_candidate_families(*next, *data_, leaf_storage, family_journal, initial_memory, candidate_memory,
                 leaf_memory, family_memory);
         });
-    register_families(*next, &candidate_memory);
+    register_families(*next, &candidate_memory, data_.get(), &initial_memory);
     std::shared_ptr<AdaptivePublishedAdmission> admission;
     collective(*data_->comm,
         [&]
@@ -3616,6 +3686,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
         });
     admission->halo = candidate_keepalive;
     admission->bytes = candidate_memory.held;
+    next->finish_directory_overlap();
     candidate_keepalive->bind_external_retained_bytes(admission->bytes);
     candidate_memory.held = 0;
     next->contact_halo = candidate_keepalive;
@@ -3868,7 +3939,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
     collective(*data_->comm,
         [&] { leaf_storage = seal_candidate_layout(*next, *data_, migration_memory, candidate_memory,
                   leaf_memory, *frontier); });
-    register_cells(*next, &candidate_memory);
+    register_cells(*next, &candidate_memory, data_.get(), &migration_memory);
     refresh_compatibility_product_families(*next, *data_, family_journal, family_memory);
     collective(*data_->comm,
         [&]
@@ -3876,7 +3947,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
             seal_candidate_families(*next, *data_, leaf_storage, family_journal, migration_memory, candidate_memory,
                 leaf_memory, family_memory);
         });
-    register_families(*next, &candidate_memory);
+    register_families(*next, &candidate_memory, data_.get(), &migration_memory);
     std::shared_ptr<AdaptivePublishedAdmission> admission;
     collective(*data_->comm,
         [&]
@@ -3889,6 +3960,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
         });
     admission->halo = candidate_keepalive;
     admission->bytes = candidate_memory.held;
+    next->finish_directory_overlap();
     candidate_keepalive->bind_external_retained_bytes(admission->bytes);
     candidate_memory.held = 0;
     next->contact_halo = candidate_keepalive;

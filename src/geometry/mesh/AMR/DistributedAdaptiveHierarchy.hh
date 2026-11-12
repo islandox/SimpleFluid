@@ -19,6 +19,7 @@ namespace adaptive_detail
 {
 class AdaptiveContactSnapshot;
 class AdaptiveSubfaceSnapshot;
+class DirectoryRegistrationAccess;
 /** Detached queries for this exact accepted source observation. */
 [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> contact_snapshot(const DistributedAdaptiveHierarchy&);
 [[nodiscard]] std::shared_ptr<const AdaptiveSubfaceSnapshot> subface_snapshot(const DistributedAdaptiveHierarchy&);
@@ -159,6 +160,7 @@ public:
     [[nodiscard]] AdaptiveNativeDraft native_draft() const;
 
 private:
+    friend class adaptive_detail::DirectoryRegistrationAccess;
     friend class adaptive_detail::GeometrySnapshotAccess;
     friend std::shared_ptr<const adaptive_detail::AdaptiveContactSnapshot> adaptive_detail::contact_snapshot(
         const DistributedAdaptiveHierarchy&);

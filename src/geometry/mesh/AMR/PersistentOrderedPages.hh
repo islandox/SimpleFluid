@@ -78,12 +78,17 @@ struct NoRowWeights
     static constexpr bool enabled = false;
 };
 
+struct NoRowBuffers
+{
+    static constexpr bool enabled = false;
+};
+
 /** Optional weights summarize row-exclusive immutable payloads. Implementations
  * must allocate nothing in add_row/add_child, check aggregate overflow, and
  * distinguish bodies created in the current node arena from inherited bodies.
  * Shared payloads appearing in several rows require a separate owner union. */
 template<class Row, class Less, bool FixedLeafCapacity = false, class Work = OrderedPageWork,
-    class Weights = NoRowWeights, std::size_t LeafCapacity = leaf_capacity>
+    class Weights = NoRowWeights, std::size_t LeafCapacity = leaf_capacity, class Buffers = NoRowBuffers>
 class OrderedPages
 {
     static_assert(LeafCapacity >= 2);
@@ -257,7 +262,24 @@ private:
     {
         auto node = allocate();
         reserve(node->rows, FixedLeafCapacity ? LeafCapacity : values.size(), node->charge);
+        [[maybe_unused]] std::size_t copied_buffers = 0;
+        if constexpr (Buffers::enabled)
+        {
+            for (const auto& row : values)
+                copied_buffers = checked_sum(copied_buffers, Buffers::bytes(row));
+            node->charge.add(copied_buffers);
+        }
         node->rows.assign(values.begin(), values.end());
+        if constexpr (Buffers::enabled)
+        {
+            std::size_t actual = 0;
+            for (const auto& row : node->rows)
+                actual = checked_sum(actual, Buffers::bytes(row));
+            if (actual > copied_buffers)
+                throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
+            node->charge.bytes -= copied_buffers - actual;
+            arena_->used -= copied_buffers - actual;
+        }
         node->maximum = &node->rows.back();
         node->size = values.size();
         node->subtree_bytes = node->charge.bytes;
@@ -338,9 +360,29 @@ private:
         retire(second);
         if (first.leaf())
         {
+            PageCharge scratch(arena_);
             std::array<Row, 2 * LeafCapacity> rows;
+            [[maybe_unused]] std::size_t admitted_buffers = 0;
+            if constexpr (Buffers::enabled)
+            {
+                for (const auto& row : first.rows)
+                    admitted_buffers = checked_sum(admitted_buffers, Buffers::bytes(row));
+                for (const auto& row : second.rows)
+                    admitted_buffers = checked_sum(admitted_buffers, Buffers::bytes(row));
+                scratch.add(admitted_buffers);
+            }
             auto end = std::copy(first.rows.begin(), first.rows.end(), rows.begin());
             end = std::copy(second.rows.begin(), second.rows.end(), end);
+            if constexpr (Buffers::enabled)
+            {
+                std::size_t actual_buffers = 0;
+                for (auto row = rows.begin(); row != end; ++row)
+                    actual_buffers = checked_sum(actual_buffers, Buffers::bytes(*row));
+                if (actual_buffers > admitted_buffers)
+                    throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
+                scratch.bytes -= admitted_buffers - actual_buffers;
+                arena_->used -= admitted_buffers - actual_buffers;
+            }
             return pack_leaves(std::span(rows.begin(), end));
         }
         std::array<Ptr, 2 * branch_capacity> children;
@@ -357,11 +399,34 @@ private:
             if (present != expected)
                 throw std::invalid_argument("Ordered metadata edit changed its accepted selector.");
             retire(node);
+            PageCharge scratch(arena_);
             std::array<Row, LeafCapacity + 1> rows;
+            [[maybe_unused]] std::size_t admitted_buffers = 0;
+            if constexpr (Buffers::enabled)
+            {
+                for (auto row = node.rows.begin(); row != at; ++row)
+                    admitted_buffers = checked_sum(admitted_buffers, Buffers::bytes(*row));
+                if (replacement)
+                    admitted_buffers = checked_sum(admitted_buffers, Buffers::bytes(*replacement));
+                const auto rest = present ? std::next(at) : at;
+                for (auto row = rest; row != node.rows.end(); ++row)
+                    admitted_buffers = checked_sum(admitted_buffers, Buffers::bytes(*row));
+                scratch.add(admitted_buffers);
+            }
             auto end = std::copy(node.rows.begin(), at, rows.begin());
             if (replacement)
                 *end++ = *replacement;
             end = std::copy(present ? std::next(at) : at, node.rows.end(), end);
+            if constexpr (Buffers::enabled)
+            {
+                std::size_t actual_buffers = 0;
+                for (auto row = rows.begin(); row != end; ++row)
+                    actual_buffers = checked_sum(actual_buffers, Buffers::bytes(*row));
+                if (actual_buffers > admitted_buffers)
+                    throw std::invalid_argument("Ordered row buffer copy exceeds its qualified admission.");
+                scratch.bytes -= admitted_buffers - actual_buffers;
+                arena_->used -= admitted_buffers - actual_buffers;
+            }
             return pack_leaves(std::span(rows.begin(), end));
         }
         auto at = std::lower_bound(node.children.begin(), node.children.end(), key,
