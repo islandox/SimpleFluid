@@ -450,29 +450,60 @@ void refresh_product_families(DistributedAdaptiveHierarchy::Data& state)
             {
                 const auto& key = leaf.key;
                 if (leaf.provider == AdaptiveProviderKind::Product)
-                    for (auto family : state.kernel->ancestry_families(leaf))
+                    for (auto& family : state.kernel->ancestry_families(leaf))
                     {
                         family.revision = state.topology;
+                        // The elected anchor is an owned deep key copy; admit its
+                        // exact encoded length before materializing it.
+                        const auto anchor_bytes = encoded_adaptive_key_size(key);
+                        budget.add(anchor_bytes);
                         family.anchor = encode_adaptive_key(key);
-                        auto [it, inserted] = local.emplace(family.key, family);
-                        if (!inserted)
+                        if (family.anchor.size() != anchor_bytes)
+                            throw std::logic_error("Product family anchor differs from its admitted size.");
+                        auto found = local.find(family.key);
+                        if (found == local.end())
                         {
-                            const auto revision = std::max(it->second.parent.revision, family.parent.revision);
-                            if (decode_adaptive_key(family.anchor) < decode_adaptive_key(it->second.anchor))
-                                it->second = std::move(family);
-                            it->second.parent.revision = revision;
+                            budget.add(sizeof(decltype(local)::value_type) + 4 * sizeof(void*) + family.key.size());
+                            // Extract the map key before moving the owning family;
+                            // otherwise emplace's argument evaluation order is
+                            // unspecified for a member reference plus std::move.
+                            AdaptiveBytes map_key = family.key;
+                            local.emplace(std::move(map_key), std::move(family));
                         }
                         else
-                            budget.add(sizeof(AdaptiveFamily) + family.key.size());
+                        {
+                            const auto revision = std::max(found->second.parent.revision, family.parent.revision);
+                            if (decode_adaptive_key(family.anchor) < decode_adaptive_key(found->second.anchor))
+                                found->second = std::move(family);
+                            else
+                            {
+                                // Discarded anchor: free the owned buffer before
+                                // releasing the bytes admitted for it.
+                                family.anchor = {};
+                                budget.used -= anchor_bytes;
+                            }
+                            found->second.parent.revision = revision;
+                        }
                     }
             });
             std::map<int, std::vector<AdaptiveFamily>> groups;
             for (auto& [key, family] : local)
-                groups[authority(key, state.comm->getSize())].push_back(std::move(family));
+            {
+                const int rank = authority(key, state.comm->getSize());
+                auto found = groups.find(rank);
+                if (found == groups.end())
+                {
+                    budget.add(sizeof(decltype(groups)::value_type) + 4 * sizeof(void*));
+                    found = groups.emplace(rank, std::vector<AdaptiveFamily>{}).first;
+                }
+                budget.append_capacity(found->second);
+                found->second.push_back(std::move(family));
+            }
             for (const auto& [rank, families] : groups)
             {
                 auto bytes = encode_adaptive_batch({}, families, state.options.byte_budget);
                 budget.packet(bytes.size());
+                budget.append_capacity(packets);
                 packets.push_back({rank, std::move(bytes)});
             }
         });
@@ -496,11 +527,15 @@ void refresh_product_families(DistributedAdaptiveHierarchy::Data& state)
                     throw std::invalid_argument("Unexpected leaf in factor authority packet.");
                 for (auto& family : batch.families)
                 {
-                    budget.add(sizeof(Candidate));
                     validate_family(*state.kernel, family);
                     if (authority(family.key, state.comm->getSize()) != state.comm->getRank())
                         throw std::invalid_argument("Misrouted product factor family.");
+                    // Admit the anchors copy and both owning vector growths before
+                    // each deep key copy or element construction happens.
+                    budget.append_capacity(anchors);
+                    budget.add(family.anchor.size());
                     anchors.push_back(family.anchor);
+                    budget.append_capacity(candidates);
                     candidates.push_back({std::move(family), packet.peer});
                 }
             }
@@ -517,31 +552,66 @@ void refresh_product_families(DistributedAdaptiveHierarchy::Data& state)
                 auto candidate = std::move(candidates[i]);
                 if (owners[i].owner != candidate.owner)
                     throw std::invalid_argument("Product family candidate lacks actual anchor ownership.");
-                auto [it, inserted] = elected.emplace(candidate.family.key, candidate);
-                if (!inserted)
+                auto elected_found = elected.find(candidate.family.key);
+                if (elected_found == elected.end())
                 {
-                    auto& old = it->second;
-                    const auto& a = old.family.parent;
+                    // The map node holds an independent deep key copy. Admit the
+                    // node and key capacity before emplace materializes them, and
+                    // extract the key before moving its owning candidate.
+                    budget.add(sizeof(decltype(elected)::value_type) + 4 * sizeof(void*) + candidate.family.key.size());
+                    AdaptiveBytes map_key = candidate.family.key;
+                    elected.emplace(std::move(map_key), std::move(candidate));
+                }
+                else
+                {
+                    auto& previous = elected_found->second;
+                    const auto& a = previous.family.parent;
                     const auto& b = candidate.family.parent;
-                    auto ac = old.family.children, bc = candidate.family.children;
-                    std::sort(ac.begin(), ac.end());
-                    std::sort(bc.begin(), bc.end());
-                    if (ac != bc || a.domain != b.domain || a.material != b.material || a.provider != b.provider ||
-                        !state.kernel->geometry(a)->equivalent(*state.kernel->geometry(b)))
-                        throw std::invalid_argument("Product factor authorities disagree on saved exact parent.");
+                    if (previous.family.children.size() > budget.limit / sizeof(AdaptiveCellKey) ||
+                        candidate.family.children.size() > budget.limit / sizeof(AdaptiveCellKey))
+                        throw std::invalid_argument("Product child comparison exceeds lease.");
+                    const auto comparison_start = budget.used;
+                    budget.add(previous.family.children.size() * sizeof(AdaptiveCellKey));
+                    budget.add(candidate.family.children.size() * sizeof(AdaptiveCellKey));
+                    for (const auto& key : previous.family.children)
+                        budget.add(fetch_key_bytes(key));
+                    for (const auto& key : candidate.family.children)
+                        budget.add(fetch_key_bytes(key));
+                    {
+                        // Comparison copies live only in this scope; the admitted
+                        // bytes are released after they are destroyed.
+                        auto ac = previous.family.children, bc = candidate.family.children;
+                        std::sort(ac.begin(), ac.end());
+                        std::sort(bc.begin(), bc.end());
+                        if (ac != bc || a.domain != b.domain || a.material != b.material || a.provider != b.provider ||
+                            !state.kernel->geometry(a)->equivalent(*state.kernel->geometry(b)))
+                            throw std::invalid_argument("Product factor authorities disagree on saved exact parent.");
+                    }
+                    const auto comparison_bytes = budget.used - comparison_start;
+                    budget.used -= comparison_bytes;
                     const auto revision = std::max(a.revision, b.revision);
-                    if (decode_adaptive_key(candidate.family.anchor) < decode_adaptive_key(old.family.anchor))
-                        old = std::move(candidate);
-                    old.family.parent.revision = revision;
+                    if (decode_adaptive_key(candidate.family.anchor) < decode_adaptive_key(previous.family.anchor))
+                        previous = std::move(candidate);
+                    previous.family.parent.revision = revision;
                 }
             }
             std::map<int, std::vector<AdaptiveFamily>> groups;
             for (auto& [key, candidate] : elected)
-                groups[candidate.owner].push_back(std::move(candidate.family));
+            {
+                auto found = groups.find(candidate.owner);
+                if (found == groups.end())
+                {
+                    budget.add(sizeof(decltype(groups)::value_type) + 4 * sizeof(void*));
+                    found = groups.emplace(candidate.owner, std::vector<AdaptiveFamily>{}).first;
+                }
+                budget.append_capacity(found->second);
+                found->second.push_back(std::move(candidate.family));
+            }
             for (const auto& [rank, families] : groups)
             {
                 auto bytes = encode_adaptive_batch({}, families, state.options.byte_budget);
                 budget.packet(bytes.size());
+                budget.append_capacity(packets);
                 packets.push_back({rank, std::move(bytes)});
             }
         });
@@ -846,17 +916,27 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
             {
                 const auto& key = leaf.key;
                 state.active_product |= leaf.provider == AdaptiveProviderKind::Product;
+                // Admit the owning vector capacity and the exact encoded key copy
+                // BEFORE either allocation is materialized.
+                const auto key_bytes = encoded_adaptive_key_size(key);
                 if (retained)
                 {
                     scratch.append(cells);
+                    // Preserve the established small-budget threshold: it is a
+                    // policy guard on key dynamic storage, not on wire size.
                     const auto dynamic = fetch_key_bytes(key);
                     if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
                         throw std::invalid_argument("Directory cell key exceeds shared lease.");
-                    scratch.add(4 * (dynamic + 64));
+                    scratch.add(key_bytes);
+                }
+                else
+                {
+                    budget.append_capacity(cells);
+                    budget.add(key_bytes);
                 }
                 auto bytes = encode_adaptive_key(key);
-                budget.add(sizeof(AdaptiveOwner));
-                budget.add(bytes.size());
+                if (bytes.size() != key_bytes)
+                    throw std::logic_error("Directory cell key encoding differs from its admitted size.");
                 cells.push_back({std::move(bytes), state.comm->getRank(), leaf.revision, state.cell_begin + ordinal++});
             });
         });
@@ -870,16 +950,25 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
             {
                 for (const auto& partner : state.kernel->matching_partners(leaf))
                 {
+                    const auto key_bytes = encoded_adaptive_key_size(partner);
                     if (retained)
                     {
                         scratch.append(partner_keys);
+                        // Same policy guard as register_cells: key dynamic storage,
+                        // not the encoded wire size.
                         const auto dynamic = fetch_key_bytes(partner);
                         if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
                             throw std::invalid_argument("Directory partner key exceeds shared lease.");
-                        scratch.add(4 * (dynamic + 64));
+                        scratch.add(key_bytes);
+                    }
+                    else
+                    {
+                        budget.append_capacity(partner_keys);
+                        budget.add(key_bytes);
                     }
                     auto bytes = encode_adaptive_key(partner);
-                    budget.add(bytes.size());
+                    if (bytes.size() != key_bytes)
+                        throw std::logic_error("Directory partner key encoding differs from its admitted size.");
                     partner_keys.push_back(std::move(bytes));
                 }
             });
@@ -913,13 +1002,18 @@ void register_families(DistributedAdaptiveHierarchy::Data& state, ClosureScratch
             Budget budget{state.options.byte_budget};
             const auto emit = [&](const auto& family)
             {
+                // Admit vector growth and the exact source key copy before the
+                // AdaptiveOwner element (and its deep key buffer) is constructed.
                 if (retained)
                 {
                     scratch.append(families);
                     scratch.add(family.key.size());
                 }
-                budget.add(sizeof(AdaptiveOwner));
-                budget.add(family.key.size());
+                else
+                {
+                    budget.append_capacity(families);
+                    budget.add(family.key.size());
+                }
                 families.push_back({family.key, state.comm->getRank(), family.revision});
             };
             if (state.family_layout)
@@ -1728,7 +1822,7 @@ DistributedAdaptiveHierarchy::DistributedAdaptiveHierarchy(std::vector<AdaptiveL
             for (auto& leaf : owned)
             {
                 state->kernel->validate(leaf);
-                budget.add(encode_adaptive_key(leaf.key).size() + leaf.domain.size() + leaf.parent_family.size());
+                budget.add(encoded_adaptive_key_size(leaf.key) + leaf.domain.size() + leaf.parent_family.size());
                 budget.add(sizeof(AdaptiveLeaf));
                 if (!state->edit_owned().emplace(leaf.key, std::move(leaf)).second)
                     throw std::invalid_argument("Duplicate owned adaptive leaf.");
@@ -3115,7 +3209,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 throw std::overflow_error("Distributed topology generation exhausted.");
             for (const auto& mark : refine)
             {
-                budget.add(sizeof(mark) + encode_adaptive_key(mark.key).size());
+                budget.add(sizeof(mark) + encoded_adaptive_key_size(mark.key));
                 if (!owned_leaves().contains(mark.key) || !marks.emplace(mark.key, mark.split).second)
                     throw std::invalid_argument("Refinement mark is repeated or not locally owned.");
             }
@@ -3945,7 +4039,7 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             for (const auto& leaf : owned_leaves())
             {
                 const auto& key = leaf.key;
-                budget.add(sizeof(AdaptiveNativeCellBinding) + encode_adaptive_key(key).size());
+                budget.add(sizeof(AdaptiveNativeCellBinding) + encoded_adaptive_key_size(key));
                 const auto values = data_->kernel->metrics(leaf);
                 AdaptiveNativeCellBinding binding;
                 binding.key = key;

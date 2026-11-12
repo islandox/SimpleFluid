@@ -18,6 +18,9 @@ class AdaptiveLeafLayout;
 using AdaptiveBytes = std::vector<char>;
 /** Canonical typed encoding. Hashes route messages; complete bytes prove identity. */
 [[nodiscard]] AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey&);
+/** Exact canonical encoded length without allocating. Must equal
+ * `encode_adaptive_key(key).size()` for every ancestry variant. */
+[[nodiscard]] std::size_t encoded_adaptive_key_size(const AdaptiveCellKey&) noexcept;
 [[nodiscard]] AdaptiveCellKey decode_adaptive_key(std::span<const char>);
 [[nodiscard]] std::uint64_t adaptive_route_hash(std::span<const char>) noexcept;
 

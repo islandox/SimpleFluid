@@ -191,10 +191,36 @@ template<class PacketWriter> void emit_adaptive_key(PacketWriter& w, const Adapt
         key.ancestry);
 }
 } // namespace
+namespace
+{
+// No-throw counting writer. The shared emit traversal (not a duplicate
+// encoding) decides every field, so the counted length cannot drift.
+struct KeySizeWriter
+{
+    std::size_t size = 0;
+    void byte(uint8_t) noexcept { ++size; }
+    void word(std::uint64_t) noexcept { size += 8; }
+    void path(const std::vector<std::uint64_t>& path) noexcept { size += 8 + 8 * path.size(); }
+};
+} // namespace
+std::size_t encoded_adaptive_key_size(const AdaptiveCellKey& key) noexcept
+{
+    KeySizeWriter w;
+    emit_adaptive_key(w, key);
+    return w.size;
+}
 AdaptiveBytes encode_adaptive_key(const AdaptiveCellKey& key)
 {
     Writer w;
+    const auto size = encoded_adaptive_key_size(key);
+    w.data.reserve(size);
+    // The caller admitted exactly `size` before this allocation; require the
+    // materialized capacity to match the admitted amount.
+    if (w.data.capacity() != size)
+        throw std::logic_error("Adaptive key capacity differs from its admitted size.");
     emit_adaptive_key(w, key);
+    if (w.data.size() != size)
+        throw std::logic_error("Adaptive key encoded length differs from its counted length.");
     return std::move(w.data);
 }
 
