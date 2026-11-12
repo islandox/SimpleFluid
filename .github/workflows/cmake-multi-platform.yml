@@ -324,10 +324,11 @@ jobs:
         for artifact in \
           "lib/$config/libSimpleFluidFVM.dylib" \
           "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/WeightedScalarTransportSystem.cc.o" \
+          "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/TransportSystem.cc.o" \
           "src/solvers/CMakeFiles/SimpleFluidSolvers.dir/$config/__/equations/explicit_instantiation/VariableDensityMomentumEquation.cc.o"; do
           if [ -f "$build/$artifact" ]; then
             echo "Transport symbols in $artifact"
-            nm -m "$build/$artifact" | awk '/weighted_scalar_transport_system/' || true
+            nm -m "$build/$artifact" | awk '/ __?ZN11SimpleFluid3FVM32weighted_scalar_transport_system/' || true
           fi
         done
 

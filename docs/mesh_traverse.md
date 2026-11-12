@@ -576,7 +576,7 @@ Consequences:
 
 The supported mapped `weighted_scalar_transport_system` request entry point
 (`FVM::weighted_scalar_transport_system<DefaultTpetraTypes,
-FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<...>>>`)
+MeshHandle<DefaultTpetraTypes>>`)
 is explicitly instantiated in the FVM library and declared `extern template` in
 `FVM/TransportSystem.hh`. Equation translation units therefore link the one
 compiled assembly body instead of instantiating it per consumer and per geometry
@@ -615,6 +615,11 @@ physical temperature, physical momentum, and basic scalar/vector assembly in
 separate translation units. The existing public entry points and supported
 type packs are unchanged. Custom packs continue to provide their own
 instantiations by including `FVM/TransportSystem.tcc`.
+
+The default legacy weighted overloads and mapped named-request overload have
+`extern template` declarations in the public header. Their dedicated providers
+own the assembly bodies; compatibility wrappers and other providers must
+reference those bodies without emitting additional implicit instantiations.
 
 Ninja serializes compilation of the FVM target through its dedicated compile
 pool. The split bounds the instantiation work in each process; it does not
