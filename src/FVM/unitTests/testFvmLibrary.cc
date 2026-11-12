@@ -15,6 +15,7 @@
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
+#include "FVM/TransportSystem.hh"
 #include "geometry/Mesh.hh"
 #include "utils/testing_environment.hh"
 
@@ -32,5 +33,13 @@ TEST(FvmLibraryTest, ExportedFvmApiLinksWithoutSolverDso)
     auto* residual = &SimpleFluid::FVM::full_diffusion_residual<Pack>;
     EXPECT_TRUE(validate != nullptr);
     EXPECT_TRUE(residual != nullptr);
+
+    // Keep a relocation to the named-request provider even under Release LTO.
+    // Equation DSOs call this overload directly; positional wrappers alone can
+    // inline it and therefore do not prove that it is exported.
+    using WeightedAssembler = SimpleFluid::FVM::TransportSystem<Pack> (*)(
+        SimpleFluid::FVM::WeightedScalarTransportRequest<Pack>);
+    WeightedAssembler volatile weighted = &SimpleFluid::FVM::weighted_scalar_transport_system<Pack>;
+    EXPECT_TRUE(weighted != nullptr);
 }
 } // namespace
