@@ -169,3 +169,10 @@ foreach(_momentum_ranks IN ITEMS 2 4)
         ARGS "--gtest_filter=-*LegacyStorage*"
         LABELS "mpi;low_mach;momentum;conservation;empty_rank" TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME TemperaturePreparedResponse_2procs
+    TARGET testTemperaturePreparedResponse
+    PROCS 2
+    LABELS "mpi;temperature;cache;non_orthogonal"
+    TIMEOUT 120)

@@ -650,3 +650,12 @@ CMake 4.2 and newer place these temperature providers in a shared serial Ninja
 compile pool without limiting unrelated solver sources. On older CMake, limit
 heavy builds explicitly, for example with `--parallel 1`. The provider split
 does not establish a measured compiler-memory or time improvement.
+
+Prepared temperature heat-flux response setup takes a concrete conductivity
+view, the boundary conductivity cache and the frozen boundary-condition map.
+It consumes these inputs while constructing the response plan; the plan keeps
+its existing derived coefficients and scratch rather than borrowed callbacks.
+This removes caller-lambda constructor specializations without temporary
+coefficient fields or indirect coefficient calls in the face loop. Ordinary
+and physical equation advances retain their distinct validation, cache and
+solve orchestration while using the compiled FVM assembly providers.

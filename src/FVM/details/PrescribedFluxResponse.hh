@@ -76,10 +76,11 @@ template<TpetraTypePack Pack, class MeshType> class PrescribedFluxResponsePlan
     std::unique_ptr<Gradient> d_gradient;
 
 public:
-    template<class Conductivity, class BoundaryCoefficient, class BoundaryCondition>
     PrescribedFluxResponsePlan(SP<const MeshType> mesh, const Cache& support,
-        const TransportGeometryCache<MeshType>& geometry, Conductivity conductivity, BoundaryCoefficient boundary_k,
-        BoundaryCondition condition, NonOrthogonalTreatment treatment, FaceCoefficientInterpolation interpolation)
+        const TransportGeometryCache<MeshType>& geometry, TransportCoefficientView<Pack> conductivity,
+        const MeshBoundaryCache<Pack, MeshType>* boundary_conductivity,
+        const std::map<std::pair<int, size_t>, SimpleFluid::BoundaryCondition>& frozen_conditions,
+        NonOrthogonalTreatment treatment, FaceCoefficientInterpolation interpolation)
         : d_mesh(std::move(mesh))
     {
         const auto& m = *d_mesh;
@@ -97,13 +98,14 @@ public:
                         if (!m.is_owned_cell(owner))
                             continue;
                         indices[{batch, slot}] = d_inputs.size();
-                        d_inputs.push_back({batch, slot, owner, boundary_k(batch, slot, conductivity(owner)),
+                        d_inputs.push_back({batch, slot, owner,
+                            boundary_coefficient<Pack>(boundary_conductivity, batch, slot, conductivity(owner)),
                             static_cast<Scalar>(m.face_area(faces[slot]))});
                     }
                 }
                 auto homogeneous = [&](int batch, size_t slot)
                 {
-                    auto value = condition(batch, slot);
+                    auto value = frozen_conditions.at({batch, slot});
                     value.value = 0;
                     return value;
                 };
@@ -190,9 +192,9 @@ public:
                                     const auto& location = geometry.boundary_locations().at(static_cast<size_t>(id));
                                     if (!location.active)
                                         return;
-                                    const auto bc = condition(location.batch_id, location.in_batch_id);
-                                    const Scalar k =
-                                        boundary_k(location.batch_id, location.in_batch_id, conductivity(cell));
+                                    const auto bc = frozen_conditions.at({location.batch_id, location.in_batch_id});
+                                    const Scalar k = boundary_coefficient<Pack>(
+                                        boundary_conductivity, location.batch_id, location.in_batch_id, conductivity(cell));
                                     if (bc.type == BoundaryConditionType::Neumann)
                                     {
                                         const auto found = indices.find({location.batch_id, location.in_batch_id});

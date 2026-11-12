@@ -811,10 +811,8 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         {
             d_prepared_flux_response = std::make_shared<FVM::detail::PrescribedFluxResponsePlan<Pack, mesh_type>>(
                 d_mesh, *d_boundary_heat_flux, d_transport_geometry_cache,
-                [&](local_ordinal_type cell) { return conductivity_values(cell, 0); },
-                [&](int batch, size_t slot, scalar_type fallback) {
-                    return FVM::boundary_coefficient<Pack>(boundary_thermal_conductivity, batch, slot, fallback);
-                }, boundary_condition, treatment, coefficient_interpolation);
+                FVM::detail::TransportCoefficientView<Pack>{conductivity_values}, boundary_thermal_conductivity,
+                d_prepared_boundary_conditions, treatment, coefficient_interpolation);
         }
     }
     if (d_using_prepared) d_prepared_operator_ready = true;
