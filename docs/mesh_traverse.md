@@ -606,3 +606,16 @@ mutate cached matrices.
 No transport speedup is claimed without matched timing measurements. Exact
 metric/coefficient, matrix/RHS, boundary order, retained topology, cache-reuse,
 ALE/rollback and two-rank collective tests cover the migration.
+
+## Transport assembly providers
+
+The default transport providers in `FVM/explicit_instantiation/` compile
+geometry caches, mapped weighted transport, legacy weighted transport,
+physical temperature, physical momentum, and basic scalar/vector assembly in
+separate translation units. The existing public entry points and supported
+type packs are unchanged. Custom packs continue to provide their own
+instantiations by including `FVM/TransportSystem.tcc`.
+
+Ninja serializes compilation of the FVM target through its dedicated compile
+pool. The split bounds the instantiation work in each process; it does not
+remove repeated parsing or establish a compile-time or memory speedup.
