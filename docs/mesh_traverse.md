@@ -619,3 +619,10 @@ instantiations by including `FVM/TransportSystem.tcc`.
 Ninja serializes compilation of the FVM target through its dedicated compile
 pool. The split bounds the instantiation work in each process; it does not
 remove repeated parsing or establish a compile-time or memory speedup.
+
+Basic legacy scalar and vector transport use one compiled matrix/traversal
+kernel per type pack. A concrete RHS adapter selects scalar or vector work
+once per cell or physical boundary; the interior face loop is shared. Vector
+transport builds the matrix once and fills its three RHS components together.
+Source and boundary callback order, cache validation and boundary policies
+retain their existing contracts.

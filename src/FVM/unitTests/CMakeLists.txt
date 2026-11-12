@@ -195,3 +195,10 @@ foreach(_steady_ranks IN ITEMS 2 4)
     TARGET testSteadyDiagnostics PROCS ${_steady_ranks}
     LABELS "mpi;fvm;steady;diagnostics;empty_rank" TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME BasicTransportAssembly_2procs
+    TARGET testBasicTransportAssembly
+    PROCS 2
+    LABELS "mpi;fvm;transport;legacy"
+    TIMEOUT 120)
