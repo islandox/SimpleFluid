@@ -571,7 +571,8 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
 
 // The default mapped physical wrappers share the weighted provider's concrete
 // coefficient-access kernel. Other meshes and packs retain the generic bodies.
-extern template SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+// Instantiations inherit visibility from the exported primary templates.
+extern template TransportSystem<DefaultTpetraTypes>
 physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
     const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarFaceFieldStored<DefaultTpetraTypes>&,
     DefaultTpetraTypes::scalar_type, const ScalarCellFieldStored<DefaultTpetraTypes>&,
@@ -584,7 +585,7 @@ physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpet
     const ALEControlVolumeState*, const ScalarCellFieldStored<DefaultTpetraTypes>*,
     const ScalarCellFieldStored<DefaultTpetraTypes>*, bool, AssemblyMode);
 
-extern template SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+extern template TransportSystem<DefaultTpetraTypes>
 physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
     const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarFaceFieldStored<DefaultTpetraTypes>&,
     DefaultTpetraTypes::scalar_type, const ScalarCellFieldStored<DefaultTpetraTypes>&,
