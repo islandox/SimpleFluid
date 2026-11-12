@@ -9,28 +9,21 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
-    name: ${{ matrix.os }} ${{ matrix.build_type }} (${{ matrix.compiler_id }})
+  # Build Trilinos once per OS and compiler family. The build matrix unpacks the
+  # resulting artifact instead of repeating the build in every configuration.
+  dependencies:
+    name: ${{ matrix.os }} (${{ matrix.compiler_id }}) dependencies
     runs-on: ${{ matrix.os }}
 
     env:
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 1G
+      CCACHE_DIR: ${{ github.workspace }}/_deps/ccache
+      CCACHE_MAXSIZE: 3G
       CCACHE_COMPILERCHECK: content
-      # Required to cache compilations that use the shared precompiled headers.
-      CCACHE_SLOPPINESS: pch_defines,time_macros
 
     strategy:
-      # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
       fail-fast: false
-
-      # Exercise Release and Debug on both Linux compiler families, plus native
-      # AppleClang coverage on the macOS Arm64 runner.
       matrix:
-#        windows is skipped because trilinos is not fully tested on windows.
-        os: [ubuntu-26.04, macos-26]
-        build_type: [Release, Debug]
-        compiler_id: [GCC, LLVM]
+        # One entry per installed compiler family; build configurations share it.
         include:
           - os: ubuntu-26.04
             compiler_id: GCC
@@ -43,23 +36,16 @@ jobs:
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: flang
-            cmake_platform_options: -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
             cache_suffix: v5
           - os: macos-26
             compiler_id: LLVM
             c_compiler: clang
             cpp_compiler: clang++
             fortran_compiler: mpifort
-            cmake_platform_options: >-
-              -DCMAKE_OSX_ARCHITECTURES=arm64
-              -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
             cache_suffix: v8
-        exclude:
-          - os: macos-26
-            compiler_id: GCC
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
 
     - name: Verify Arm64 runner and toolchain
       if: runner.os == 'macOS'
@@ -114,28 +100,135 @@ jobs:
         cxx-compiler: ${{ matrix.cpp_compiler }}
         fortran-compiler: ${{ matrix.fortran_compiler }}
         cache-suffix-install: ${{ matrix.cache_suffix }}
-        cache-suffix-build: ${{ matrix.cache_suffix }}
+        ccache-suffix-build: v1
 
-    - name: Restore Open MPI signal diagnostics
-      if: runner.os == 'Linux'
-      run: bash .github/scripts/restore-openmpi-help.sh
-
-    - name: Set reusable strings
-      # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
-      id: strings
+    - name: Pack Trilinos and its dependencies
       shell: bash
       run: |
-        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+        # tar preserves the install tree's symlinks and modes; a whole-tree
+        # artifact would flatten them on download.
+        members="trilinos_install partitioners_install"
+        if [ -d "${{ github.workspace }}/_deps/netcdf_install" ]; then
+          members="$members netcdf_install"
+        fi
+        archive="$RUNNER_TEMP/trilinos-${{ matrix.compiler_id }}.tar.gz"
+        tar -czf "$archive" -C "${{ github.workspace }}/_deps" $members
+        du -h "$archive"
 
-    - name: Install compiler cache
+    - uses: actions/upload-artifact@v7
+      with:
+        name: trilinos-${{ matrix.os }}-${{ matrix.compiler_id }}
+        path: ${{ runner.temp }}/trilinos-${{ matrix.compiler_id }}.tar.gz
+        retention-days: 7
+
+  build:
+    name: ${{ matrix.os }} ${{ matrix.build_type }} (${{ matrix.compiler_id }})
+    runs-on: ${{ matrix.os }}
+    needs: dependencies
+    # A failed dependency job must not hide the other configurations' results.
+    if: ${{ !cancelled() }}
+
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+      # Required to cache compilations that use the shared precompiled headers.
+      CCACHE_SLOPPINESS: pch_defines,time_macros
+
+    strategy:
+      # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
+      fail-fast: false
+
+      # Exercise Release and Debug on both Linux compiler families, plus native
+      # AppleClang coverage on the macOS Arm64 runner.
+      matrix:
+#        windows is skipped because trilinos is not fully tested on windows.
+        os: [ubuntu-26.04, macos-26]
+        build_type: [Release, Debug]
+        compiler_id: [GCC, LLVM]
+        include:
+          - os: ubuntu-26.04
+            ccache_suffix: v5
+
+          - compiler_id: GCC
+            c_compiler: gcc
+            cpp_compiler: g++
+            fortran_compiler: gfortran
+
+          - compiler_id: LLVM
+            c_compiler: clang
+            cpp_compiler: clang++
+            fortran_compiler: flang
+
+          - os: ubuntu-26.04
+            compiler_id: LLVM
+            cmake_platform_options: -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
+
+          - os: macos-26
+            ccache_suffix: v8
+            fortran_compiler: mpifort
+            cmake_platform_options: >-
+              -DCMAKE_OSX_ARCHITECTURES=arm64
+              -DCMAKE_CXX_FLAGS="-Xclang -fno-pch-timestamp"
+
+        exclude:
+          - os: macos-26
+            compiler_id: GCC
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Verify Arm64 runner and toolchain
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        test "$(uname -m)" = "arm64"
+        sw_vers
+        clang --version
+        clang++ --version
+        cmake --version
+        ninja --version
+
+    - name: Install LLVM compilers
+      if: runner.os == 'Linux' && matrix.compiler_id == 'LLVM'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          clang \
+          llvm \
+          lld \
+          flang
+
+        clang --version
+        clang++ --version
+        llvm-cxxfilt --version
+
+        if command -v flang-new >/dev/null 2>&1; then
+          flang-new --version
+          echo "LLVM_FC=flang-new" >> "$GITHUB_ENV"
+        else
+          flang --version
+          echo "LLVM_FC=flang" >> "$GITHUB_ENV"
+        fi
+
+    - name: Install GCC compilers
+      if: runner.os == 'Linux' && matrix.compiler_id == 'GCC'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          gcc g++ gfortran gdb
+
+        gcc --version
+        g++ --version
+        gfortran --version
+
+    - name: Install build dependencies
+      uses: ./.github/actions/install-build-dependencies
+
+    - name: Record compiler identity
       id: ccache_setup
       shell: bash
       run: |
-        if [ "$RUNNER_OS" = "Linux" ]; then
-          sudo apt-get install -y --no-install-recommends ccache
-        else
-          brew install ccache
-        fi
         ccache --version
 
         # Separate archive generations when the compiler or macOS SDK changes.
@@ -150,15 +243,43 @@ jobs:
         compiler_hash="$(shasum -a 256 "$RUNNER_TEMP/simplefluid-compiler-identity.txt" | cut -d ' ' -f1)"
         echo "compiler-hash=$compiler_hash" >> "$GITHUB_OUTPUT"
 
+    - name: Download Trilinos and its dependencies
+      uses: actions/download-artifact@v8
+      with:
+        name: trilinos-${{ matrix.os }}-${{ matrix.compiler_id }}
+        path: ${{ runner.temp }}/trilinos-deps
+
+    - name: Unpack Trilinos and its dependencies
+      shell: bash
+      run: |
+        mkdir -p "${{ github.workspace }}/_deps"
+        tar -xzf "${{ runner.temp }}/trilinos-deps/trilinos-${{ matrix.compiler_id }}.tar.gz" \
+          -C "${{ github.workspace }}/_deps"
+
+    - name: Export dependency prefixes
+      shell: bash
+      run: bash "${{ github.workspace }}/.github/scripts/export-dependency-prefixes.sh"
+
+    - name: Restore Open MPI signal diagnostics
+      if: runner.os == 'Linux'
+      run: bash .github/scripts/restore-openmpi-help.sh
+
+    - name: Set reusable strings
+      # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
     - name: Restore SimpleFluid compiler cache
       id: ccache
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@v6
       continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.cache_suffix }}
+        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
         restore-keys: |
-          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.cache_suffix }}
+          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
 
     - name: Reset compiler cache statistics
       run: ccache --zero-stats
@@ -197,7 +318,7 @@ jobs:
     # Persist completed compilation work even if a subsequent test fails.
     - name: Save SimpleFluid compiler cache
       if: steps.ccache.outputs.cache-hit != 'true' && steps.ccache.outputs.cache-primary-key != ''
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@v6
       continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}

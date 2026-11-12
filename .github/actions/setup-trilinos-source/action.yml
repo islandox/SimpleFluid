@@ -20,53 +20,18 @@ inputs:
   cache-suffix-install:
     required: false
     default: v1
-  cache-suffix-build:
+  ccache-suffix-build:
     required: false
     default: v1
+  ccache-dir:
+    required: false
+    default: ${{ github.workspace }}/_deps/ccache
 
 runs:
   using: composite
   steps:
-    - name: Install build dependencies on Ubuntu
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-          build-essential \
-          git \
-          cmake \
-          ninja-build \
-          pkg-config \
-          openmpi-bin \
-          libopenmpi-dev \
-          libblas-dev \
-          liblapack-dev \
-          libboost-dev \
-          libhdf5-openmpi-dev \
-          libnetcdf-mpi-dev \
-          libpnetcdf-dev \
-          netcdf-bin \
-          libgtest-dev \
-          libgmock-dev \
-          zlib1g-dev
-
-    - name: Install build dependencies on macOS
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        brew install \
-          boost \
-          googletest \
-          hdf5-mpi \
-          open-mpi
-
-        brew list --versions boost googletest hdf5-mpi open-mpi
-        clang --version
-        clang++ --version
-        mpicc --showme:command
-        mpicxx --showme:command
-        mpifort --showme:command
+    - name: Install build dependencies
+      uses: ./.github/actions/install-build-dependencies
 
     - name: Inspect HDF5 and NetCDF on Ubuntu
       if: runner.os == 'Linux'
@@ -104,7 +69,7 @@ runs:
 
     - name: Restore Trilinos install cache
       id: cache-trilinos
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: |
           ${{ github.workspace }}/_deps/netcdf_install
@@ -115,7 +80,7 @@ runs:
     - name: Restore NetCDF install cache
       id: cache-netcdf
       if: runner.os == 'macOS' && steps.cache-trilinos.outputs.cache-hit != 'true'
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: |
           ${{ github.workspace }}/_deps/netcdf_install
@@ -123,7 +88,7 @@ runs:
 
     - name: Restore partitioners install cache
       id: cache-partitioners
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
         path: |
           ${{ github.workspace }}/_deps/partitioners_install
@@ -134,13 +99,12 @@ runs:
     - name: Restore Trilinos build cache
       id: cache-trilinos-build
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
-      uses: actions/cache@v5
+      uses: actions/cache@v6
       with:
-        path: |
-          ${{ github.workspace }}/_deps/trilinos_build
-        key: trilinos-build-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-build }}
+        path: ${{ inputs.ccache-dir }}
+        key: trilinos-build-ccache-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.ccache-suffix-build }}
         restore-keys: |
-          trilinos-build-${{ runner.os }}-${{ inputs.compiler-id }}-
+          trilinos-build-ccache-${{ runner.os }}-${{ inputs.compiler-id }}-
 
     - name: Build NetCDF with MPI HDF5
       if: runner.os == 'macOS' && steps.cache-trilinos.outputs.cache-hit != 'true' && steps.cache-netcdf.outputs.cache-hit != 'true'
@@ -292,6 +256,8 @@ runs:
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        CCACHE_DIR: ${{ inputs.ccache-dir }}
       run: |
         PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
         PARTITIONER_LIBRARY_SUFFIX=so
@@ -413,6 +379,9 @@ runs:
         cmake -S ${{ github.workspace }}/_deps/Trilinos \
           -B ${{ github.workspace }}/_deps/trilinos_build \
           -G Ninja \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_Fortran_COMPILER_LAUNCHER=ccache \
           -D CMAKE_BUILD_TYPE=Release \
           -D CMAKE_INSTALL_PREFIX=${{ github.workspace }}/_deps/trilinos_install \
           -D CMAKE_C_COMPILER=mpicc \
@@ -456,20 +425,6 @@ runs:
         cmake --build ${{ github.workspace }}/_deps/trilinos_build --parallel 2
         cmake --install ${{ github.workspace }}/_deps/trilinos_build
 
-    - name: Export Trilinos prefix
+    - name: Export dependency prefixes
       shell: bash
-      run: |
-        PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
-        TRILINOS_PREFIX="${{ github.workspace }}/_deps/trilinos_install"
-
-        if [ "$RUNNER_OS" = "macOS" ]; then
-          BREW_PREFIX="$(brew --prefix)"
-          HDF5_PREFIX="$(brew --prefix hdf5-mpi)"
-          NETCDF_PREFIX="${{ github.workspace }}/_deps/netcdf_install"
-          echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:$HDF5_PREFIX:$NETCDF_PREFIX:$BREW_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:$TRILINOS_PREFIX/lib:$HDF5_PREFIX/lib:$NETCDF_PREFIX/lib:$BREW_PREFIX/lib:${DYLD_FALLBACK_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-        else
-          echo "CMAKE_PREFIX_PATH=$PARTITIONER_PREFIX:$TRILINOS_PREFIX:${CMAKE_PREFIX_PATH:-}" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$PARTITIONER_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
-        fi
-        echo "Trilinos_DIR=$TRILINOS_PREFIX/lib/cmake/Trilinos" >> "$GITHUB_ENV"
+      run: bash "${{ github.workspace }}/.github/scripts/export-dependency-prefixes.sh"
