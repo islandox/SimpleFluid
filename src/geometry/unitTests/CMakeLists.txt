@@ -49,6 +49,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testDistributedAdaptiveOwnerOverlay"
       OR TEST_NAME STREQUAL "testIncrementalAdaptiveClosure"
       OR TEST_NAME STREQUAL "testIncrementalAdaptiveHierarchy"
+      OR TEST_NAME STREQUAL "testProductFamilyElectionState"
       OR TEST_NAME STREQUAL "testAdaptiveIdentityPool"
       OR TEST_NAME STREQUAL "testContactPointArray"
       OR TEST_NAME STREQUAL "testPooledContactRows"
@@ -337,6 +338,10 @@ endif()
 # Sparse owner authority and complete support partition regressions. The
 # support geometry fixture is rank-local; the owner fixture uses collectives.
 foreach(_incremental_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME ProductFamilyFrames_${_incremental_ranks}procs
+    TARGET testProductFamilyElectionState PROCS ${_incremental_ranks}
+    ARGS "--gtest_filter=ProductFamilyElectionState.CollectiveMalformedFrameRejectsWithoutChangingAcceptedState"
+    LABELS "mpi;amr;protocol;collective" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME DistributedAdaptiveOwnerOverlay_${_incremental_ranks}procs
     TARGET testDistributedAdaptiveOwnerOverlay PROCS ${_incremental_ranks}
     ARGS "--gtest_filter=DistributedAdaptiveOwnerOverlay.*:DistributedAncestryRegistrationLease.*"

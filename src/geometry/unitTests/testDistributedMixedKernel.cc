@@ -252,6 +252,18 @@ TEST(DistributedMixedKernel, PartialNamedPatchOfWholeNativeFacesKeepsPhysicalRem
     refined = scatter(*refined);
     closed(*refined);
     check_remainder(*refined);
+    const auto compare_product_families = [](const auto& state)
+    {
+        namespace AMR = ::SimpleFluid::Meshes::AMR;
+        std::vector<AMR::AdaptiveBytes> actual, expected;
+        for (const auto family : state.owned_families())
+            if (family.parent.provider == AMR::AdaptiveProviderKind::Product)
+                actual.push_back(AMR::encode_adaptive_family(family.materialize()));
+        for (const auto& family : AMR::adaptive_detail::product_family_reference(state))
+            expected.push_back(AMR::encode_adaptive_family(family));
+        EXPECT_EQ(actual, expected);
+    };
+    compare_product_families(*refined);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> inverse;
     for (const auto f : refined->owned_families())
         if (f.parent.provider == ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Product &&
@@ -259,6 +271,7 @@ TEST(DistributedMixedKernel, PartialNamedPatchOfWholeNativeFacesKeepsPhysicalRem
             inverse.push_back(f.key);
     auto restored = refined->apply(refined->plan_adaptation({}, inverse));
     EXPECT_EQ(restored->global_cells(), h->global_cells());
+    compare_product_families(*restored);
     closed(*restored);
     check_remainder(*restored);
 }

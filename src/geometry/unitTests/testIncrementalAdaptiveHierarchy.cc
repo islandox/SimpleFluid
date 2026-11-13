@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/ProductFamilyElectionState.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -97,7 +98,79 @@ AMR::AdaptiveCellKey product_key(unsigned base, unsigned axial, std::vector<std:
 {
     return {0, AMR::ProductCellAncestry{{base, 1, std::move(base_path)}, {axial, std::move(axial_path)}}};
 }
-State product_source()
+class RevisionSensitiveProductKernel final : public AMR::AdaptiveProviderKernel
+{
+public:
+    explicit RevisionSensitiveProductKernel(std::shared_ptr<const AMR::AdaptiveProviderKernel> product)
+        : product_(std::move(product))
+    {
+    }
+
+    AMR::AdaptiveBytes descriptor() const override
+    {
+        auto result = product_->descriptor();
+        result.push_back('r');
+        return result;
+    }
+    void validate(const AMR::AdaptiveLeaf& leaf) const override { product_->validate(leaf); }
+    auto geometry(const AMR::AdaptiveLeaf& leaf) const -> P::ConvexGeometryPtr<ordinary> override
+    {
+        return product_->geometry(leaf);
+    }
+    std::vector<AMR::AdaptiveSurface> surfaces(const AMR::AdaptiveLeaf& leaf) const override
+    {
+        return product_->surfaces(leaf);
+    }
+    AMR::AdaptiveTrace traces(const AMR::AdaptiveLeaf& leaf) const override { return product_->traces(leaf); }
+    std::vector<AMR::AdaptiveCellKey> matching_partners(const AMR::AdaptiveLeaf& leaf) const override
+    {
+        return product_->matching_partners(leaf);
+    }
+    AMR::AdaptiveSplit closure_split(const AMR::AdaptiveLeaf& leaf, std::size_t axis) const override
+    {
+        return product_->closure_split(leaf, axis);
+    }
+    AMR::AdaptiveContactCapabilities contact_capabilities(const AMR::AdaptiveLeaf& leaf) const override
+    {
+        return product_->contact_capabilities(leaf);
+    }
+    std::vector<AMR::AdaptiveLeaf> repack(std::span<const AMR::AdaptiveLeaf> rows) const override
+    {
+        return product_->repack(rows);
+    }
+    bool supports_leaf_local_repack() const noexcept override { return product_->supports_leaf_local_repack(); }
+    std::vector<AMR::AdaptiveFamily> ancestry_families(const AMR::AdaptiveLeaf& leaf) const override
+    {
+        return product_->ancestry_families(leaf);
+    }
+    AMR::AdaptiveSplitResult split(const AMR::AdaptiveLeaf& parent, AMR::AdaptiveSplit split) const override
+    {
+        auto result = product_->split(parent, split);
+        if (split != AMR::AdaptiveSplit::Base)
+            return result;
+        if (parent.revision == projected_revision)
+        {
+            ++projected_proof_checks;
+            result.family.children.pop_back();
+        }
+        else
+        {
+            const auto anchor = AMR::decode_adaptive_key(result.family.anchor);
+            for (auto& child : result.children)
+                child.revision = child.key == anchor ? anchor_revision : projected_revision;
+        }
+        return result;
+    }
+
+    mutable std::uint64_t projected_proof_checks = 0;
+
+private:
+    static constexpr std::uint64_t anchor_revision = 12, projected_revision = 17;
+    std::shared_ptr<const AMR::AdaptiveProviderKernel> product_;
+};
+
+State product_source(std::shared_ptr<const RevisionSensitiveProductKernel>* sensitive = nullptr,
+    std::shared_ptr<const AMR::AdaptiveProviderKernel>* kernel_out = nullptr)
 {
     AMR::ExtrudedAMRGrid grid;
     for (unsigned y = 0; y < 3; ++y)
@@ -114,6 +187,17 @@ State product_source()
         AMR::ExtrudedAMR source(grid);
         return source.detach_owned(selected, {'f', 'a', 'c', 't', 'o', 'r'});
     }();
+    if (!detached.owned.empty())
+        EXPECT_TRUE(detached.kernel->product_family_proof_revision_invariant(&detached.owned.front()));
+    if (sensitive)
+    {
+        *sensitive = std::make_shared<const RevisionSensitiveProductKernel>(std::move(detached.kernel));
+        detached.kernel = *sensitive;
+        if (!detached.owned.empty())
+            EXPECT_FALSE(detached.kernel->product_family_proof_revision_invariant(&detached.owned.front()));
+    }
+    if (kernel_out)
+        *kernel_out = detached.kernel;
     return std::make_shared<const Hierarchy>(
         std::move(detached.owned), std::move(detached.families), std::move(detached.kernel), Tpetra::getDefaultComm());
 }
@@ -182,6 +266,20 @@ void expect_product(const Hierarchy& state, bool base_split, bool axial_split)
     EXPECT_EQ(global_boxes, std::vector<int>(expected_boxes.size(), 1));
     EXPECT_EQ(state.global_cells(), expected_keys.size());
     EXPECT_DOUBLE_EQ(global_volume, .25);
+    // The historical full election remains an independent authority oracle.
+    // Wire equality also checks anchor, both revisions and complete saved
+    // parent/children data including native provider recipes and geometry.
+    const auto reference = AMR::adaptive_detail::product_family_reference(state);
+    std::vector<AMR::AdaptiveBytes> expected_families, actual_families;
+    for (const auto& family : reference)
+        expected_families.push_back(AMR::encode_adaptive_family(family));
+    for (const auto family : state.owned_families())
+    {
+        EXPECT_EQ(family.parent.provider, AMR::AdaptiveProviderKind::Product);
+        EXPECT_EQ(family.revision, state.topology_generation());
+        actual_families.push_back(AMR::encode_adaptive_family(family.materialize()));
+    }
+    EXPECT_EQ(actual_families, expected_families);
 }
 std::vector<AMR::AdaptiveMark> product_marks(const Hierarchy& state, AMR::AdaptiveSplit split)
 {
@@ -234,6 +332,17 @@ State migrate_product(const State& source, bool base_split, bool axial_split, un
         EXPECT_EQ(owners[i].revision, old_owners[i].revision);
         EXPECT_EQ(owners[i].owner, product_owner(keys[i], shift));
     }
+    std::vector<AMR::AdaptiveBytes> families;
+    std::vector<int> expected_authorities;
+    for (const auto family : source->owned_families())
+    {
+        families.push_back(family.key);
+        expected_authorities.push_back(product_owner(AMR::decode_adaptive_key(family.anchor), shift));
+    }
+    const auto authorities = result->lookup_families(families);
+    EXPECT_EQ(authorities.size(), expected_authorities.size());
+    for (std::size_t i = 0; i < std::min(authorities.size(), expected_authorities.size()); ++i)
+        EXPECT_EQ(authorities[i].owner, expected_authorities[i]);
     expect_product(*result, base_split, axial_split);
     return result;
 }
@@ -445,6 +554,101 @@ TEST(IncrementalAdaptiveHierarchy, NonemptyFamilyBindingAndRankLocalPublicationR
     }
 }
 
+TEST(IncrementalAdaptiveHierarchy, RankSelectiveProductShardAdmissionRejectsAfterOneEdit)
+{
+    namespace detail = AMR::adaptive_detail;
+    using Election = detail::ProductFamilyElectionState;
+    const auto root = product_source();
+    const auto accepted = adapt(root, product_marks(*root, AMR::AdaptiveSplit::Base));
+    const auto comm = accepted->communicator();
+    const auto key = AMR::adaptive_family_key(product_key(1, 0), AMR::AdaptiveSplit::Base);
+    const auto exact = accepted->fetch_families(std::span(&key, 1));
+    const auto snapshot_before = snapshot(*accepted);
+    const auto leaf_root = accepted->leaf_layout();
+    const auto* family_root = &accepted->owned_families();
+    const auto shard = detail::authority(key, comm->getSize());
+    const bool tight_rank = comm->getRank() == shard;
+    const auto cap = accepted->options().byte_budget;
+    auto source_memory = std::make_shared<detail::Budget>(detail::Budget{cap});
+    Election source(source_memory);
+    std::optional<detail::AdaptiveFamilyProofFragment> fragment;
+    std::optional<AMR::AdaptiveCellKey> anchor;
+    std::uint64_t revision = 0;
+
+    detail::collective(*comm,
+        [&]
+        {
+            if (!tight_rank)
+                return;
+            if (exact.size() != 1)
+                throw std::logic_error("Product shard fixture lacks one actual family.");
+            fragment.emplace(detail::encode_family_proof_fragment(exact.front(), cap));
+            anchor.emplace(AMR::decode_adaptive_key(exact.front().anchor));
+            revision = exact.front().parent.revision;
+            const auto proof = source.proof(fragment->view());
+            const std::array rows{source.proposal(0, *anchor, revision, revision, proof)};
+            source.set_proposals(key, rows);
+        });
+    const auto* accepted_proposal = source.winner(key).proposal;
+    const auto initial_bytes = source_memory->used;
+
+    const auto first_edit = [&](Election& candidate)
+    {
+        const auto proof = candidate.winner(key).proposal->proof;
+        const std::array rows{candidate.proposal(0, *anchor, revision, revision + 1, proof)};
+        candidate.set_proposals(key, rows);
+        EXPECT_EQ(candidate.winner(key).proposal->proof, proof);
+    };
+    const auto second_edit = [&](Election& candidate)
+    {
+        const auto proof = candidate.proof(fragment->view());
+        const std::array rows{candidate.proposal(0, *anchor, revision, revision + 2, proof)};
+        candidate.set_proposals(key, rows);
+    };
+
+    auto limit = cap;
+    detail::collective(*comm,
+        [&]
+        {
+            if (!tight_rank)
+                return;
+            auto probe_memory = std::make_shared<detail::Budget>(detail::Budget{cap});
+            Election probe(probe_memory, &source);
+            first_edit(probe);
+            const auto first_peak = probe_memory->peak;
+            second_edit(probe);
+            if (probe_memory->peak <= first_peak)
+                throw std::logic_error("Product shard fixture did not increase its second-edit peak.");
+            limit = probe_memory->peak - 1;
+        });
+
+    auto memory = std::make_shared<detail::Budget>(detail::Budget{limit});
+    std::unique_ptr<Election> candidate;
+    bool first_completed = false, second_completed = false;
+    EXPECT_THROW(detail::collective(*comm,
+                     [&]
+                     {
+                         candidate = std::make_unique<Election>(memory, &source);
+                         if (tight_rank)
+                         {
+                             first_edit(*candidate);
+                             first_completed = true;
+                             second_edit(*candidate);
+                             second_completed = true;
+                         }
+                     }),
+        std::invalid_argument);
+    EXPECT_EQ(first_completed, tight_rank);
+    EXPECT_FALSE(second_completed);
+    candidate.reset();
+    EXPECT_EQ(memory->used, 0u);
+    EXPECT_EQ(source_memory->used, initial_bytes);
+    EXPECT_EQ(source.winner(key).proposal, accepted_proposal);
+    EXPECT_EQ(accepted->leaf_layout(), leaf_root);
+    EXPECT_EQ(&accepted->owned_families(), family_root);
+    EXPECT_EQ(snapshot(*accepted), snapshot_before);
+}
+
 TEST(IncrementalAdaptiveHierarchy, GeometrySnapshotDoesNotRetainLeafLayout)
 {
     std::weak_ptr<const AMR::AdaptiveLeafLayout> weak_layout;
@@ -465,6 +669,45 @@ TEST(IncrementalAdaptiveHierarchy, GeometrySnapshotDoesNotRetainLeafLayout)
     EXPECT_GT(geometry->retained_bytes(), 0u);
 }
 
+TEST(IncrementalAdaptiveHierarchy, CustomProductRevalidatesAtTheProjectedParentRevision)
+{
+    std::shared_ptr<const RevisionSensitiveProductKernel> kernel;
+    auto source = product_source(&kernel);
+    // Keep one actual accepted family while a different local Product root
+    // attempts a Base split with distinct anchor and maximum revisions.
+    const auto axial = product_key(0, 0);
+    std::vector<AMR::AdaptiveMark> prior;
+    if (source->owned_leaves().contains(axial))
+        prior.push_back({axial, AMR::AdaptiveSplit::Axial});
+    auto accepted = adapt(source, prior);
+    EXPECT_GT(sum(accepted->owned_families().size()), 0u);
+    const auto before = snapshot(*accepted);
+    const auto leaf_root = accepted->leaf_layout();
+    const auto* family_root = &accepted->owned_families();
+
+    std::vector<AMR::AdaptiveMark> mark;
+    const auto target = product_key(3, 0);
+    if (accepted->owned_leaves().contains(target))
+        mark.push_back({target, AMR::AdaptiveSplit::Base});
+    bool rejected = false;
+    try
+    {
+        (void) accepted->plan_adaptation(mark);
+    }
+    catch (const std::invalid_argument& error)
+    {
+        rejected = true;
+        if (accepted->communicator()->getRank() == 0)
+            EXPECT_EQ(
+                std::string_view(error.what()), "Family capsule does not name complete immediate provider children.");
+    }
+    EXPECT_EQ(sum(rejected), std::uint64_t(accepted->communicator()->getSize()));
+    EXPECT_GT(sum(kernel->projected_proof_checks), 0u);
+    EXPECT_EQ(accepted->leaf_layout(), leaf_root);
+    EXPECT_EQ(&accepted->owned_families(), family_root);
+    EXPECT_EQ(snapshot(*accepted), before);
+}
+
 TEST(IncrementalAdaptiveHierarchy, BothProductFactorOrdersMigrateAndCoarsenIndependently)
 {
     const auto root = product_source();
@@ -478,6 +721,10 @@ TEST(IncrementalAdaptiveHierarchy, BothProductFactorOrdersMigrateAndCoarsenIndep
         const auto second = base_first ? AMR::AdaptiveSplit::Axial : AMR::AdaptiveSplit::Base;
         auto one = adapt(root, product_marks(*root, first));
         expect_product(*one, base_first, !base_first); // 19 or 17 leaves.
+        const auto accepted = snapshot(*one);
+        const std::array absent{AMR::adaptive_family_key(product_key(99, 0), first)};
+        EXPECT_THROW((void) one->plan_adaptation({}, absent), std::invalid_argument);
+        EXPECT_EQ(snapshot(*one), accepted);
         one = migrate_product(one, base_first, !base_first, 1);
         auto both = adapt(one, product_marks(*one, second));
         expect_product(*both, true, true); // 23 leaves in either construction order.
@@ -637,5 +884,41 @@ TEST(IncrementalAdaptiveHierarchy, ClosureCannotUndoRequestedCoarseningAcrossOwn
     const auto retry = adapt(source, mark_owned(*source, b.key));
     expect_intervals(*retry, {{0, .5}, {.5, .75}, {.75, 1}, {1, 1.125}, {1.125, 1.25}});
     EXPECT_EQ(snapshot(*source), before);
+}
+
+TEST(IncrementalAdaptiveHierarchy, BootstrapSeedsElectedProductPartsFromPublishedFamilies)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    std::shared_ptr<const AMR::AdaptiveProviderKernel> kernel;
+    const auto source = product_source(nullptr, &kernel);
+    const auto adapted = adapt(source, product_marks(*source, AMR::AdaptiveSplit::Base));
+    std::vector<AMR::AdaptiveLeaf> owned(adapted->owned_leaves().begin(), adapted->owned_leaves().end());
+    std::vector<AMR::AdaptiveFamily> families;
+    for (const auto family : adapted->owned_families())
+        families.push_back(family.materialize());
+    EXPECT_GT(sum(families.size()), 0u);
+    // Reconstruct directly from non-empty Product families: bootstrap must seed
+    // the elected-part index from its published family controls.
+    const auto bootstrapped =
+        std::make_shared<const Hierarchy>(std::move(owned), std::move(families), kernel, comm);
+    std::uint64_t boot_product_families = 0;
+    for (const auto family : bootstrapped->owned_families())
+        boot_product_families += family.parent.provider == AMR::AdaptiveProviderKind::Product;
+    EXPECT_GT(sum(boot_product_families), 0u);
+    // An incremental Product coarsening must retire the elected part that
+    // bootstrap published; it must not report an unrecorded retirement.
+    const auto next = adapt(bootstrapped, {}, product_families(AMR::AdaptiveSplit::Base, false));
+    // Coarsening the fixture's sole Base family restores root leaves, whose
+    // empty ancestry paths have no remaining Product family to elect.
+    EXPECT_EQ(sum(next->owned_families().size()), 0u);
+    expect_product(*next, false, false);
+
+    // Exercise the same bootstrap references across an elected-owner change
+    // before their final retirement. Serial keeps the identity migration;
+    // MPI moves the typed minimum anchor and checks its directory authority.
+    const auto migrated = migrate_product(bootstrapped, true, false, 1);
+    const auto retired = adapt(migrated, {}, product_families(AMR::AdaptiveSplit::Base, false));
+    EXPECT_EQ(sum(retired->owned_families().size()), 0u);
+    expect_product(*retired, false, false);
 }
 } // namespace

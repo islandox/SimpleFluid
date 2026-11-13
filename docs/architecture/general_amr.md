@@ -1321,6 +1321,43 @@ families remain independent, including a parent synthesized on a newly refined
 other factor. Procedural descriptors share immutable root/base/axis/view parts;
 cell addresses do not retain one convex shell per procedural field cell.
 
+Product-family election keeps persistent local contributor and sharded rank-proposal
+indexes. A transaction visits changed Product leaves and their factor selectors;
+unchanged contributors, proposals and exact witnesses share immutable storage.
+Each rank proposes its smallest complete typed descendant key, that anchor's
+revision, and the maximum revision of all its contributors. The authority elects
+the smallest typed anchor across ranks and projects the independent maximum
+revision onto the saved parent. Encoded-key byte order does not decide the anchor.
+A maximum-only change reuses the accepted exact witness. Fresh witnesses validate
+the complete immediate children and exact parent geometry; custom kernels also
+validate the projected parent unless the actual kernel explicitly promises that
+its family proof is invariant under parent-revision changes.
+
+Witness records refer to exact immutable recipe parts interned by complete byte
+value. Authority state shares those parts across families and candidate roots;
+each destination wave transmits each needed part once. The elected-family index
+refers to the actual saved-parent byte owners, independently of the authority
+proof dictionary. Bootstrap seeds its reference counts exactly once, after final
+owner interning, including when saved Product families were supplied. Incremental
+replacement, ownership transfer and last-family retirement update those counts.
+Neither dictionary retains an ancestor hierarchy or a previous wave decoder.
+
+Proposal and winner frames bind topology, partition and transaction epochs.
+Authorities authenticate anchor ownership and revision against the current cell
+directory and reject malformed, duplicate, stale or foreign receipts collectively
+before publication. Current numeric GID changes remain separate from Product
+contributor changes. Caller-owned persistent page edits, deep keys, shared-part
+metadata, temporary proof records and transport enter the configured byte lease
+before allocation. Provider construction and codec internals retain their existing
+nested admission policy; this does not establish a peak-memory bound for their
+internal validation or geometry scratch. Candidate admission includes the
+source/candidate physical union and caller-owned construction overlap; owners
+remain charged until their storage is released or transferred to the accepted
+residency ledger. A failed edit leaves the accepted
+family root, owner controls and directory projection intact. These are focused
+Product-election storage and transaction contracts; they do not close the broader
+AMR planner, native-publication, geometry-cache or physical-flow qualification gates.
+
 Face authorities compare complete persistent support identity and exact
 geometry. Shared face tiles and propagated exact edge points receive sparse
 IDs; closed face/edge/vertex contact proofs drive bounded physical-span and

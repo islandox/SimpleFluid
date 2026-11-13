@@ -86,6 +86,22 @@ AdaptiveSplit AdaptiveProviderKernel::closure_split(const AdaptiveLeaf&, std::si
         throw std::out_of_range("Invalid closure axis.");
     return AdaptiveSplit::Isotropic;
 }
+std::vector<AdaptiveProductFamilySelector> AdaptiveProviderKernel::ancestry_family_selectors(
+    const AdaptiveLeaf& leaf) const
+{
+    std::vector<AdaptiveProductFamilySelector> result;
+    for (auto& family : ancestry_families(leaf))
+        result.push_back({std::move(family.parent.key), family.split});
+    return result;
+}
+AdaptiveFamily AdaptiveProviderKernel::ancestry_family(
+    const AdaptiveLeaf& leaf, const AdaptiveProductFamilySelector& selector) const
+{
+    for (auto& family : ancestry_families(leaf))
+        if (family.parent.key == selector.parent && family.split == selector.split)
+            return std::move(family);
+    throw std::invalid_argument("Unknown exact product family selector.");
+}
 std::vector<AdaptiveLeaf> AdaptiveProviderKernel::repack(std::span<const AdaptiveLeaf> leaves) const
 {
     return {leaves.begin(), leaves.end()};

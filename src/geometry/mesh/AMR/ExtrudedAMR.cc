@@ -2184,11 +2184,13 @@ LocalData local_state(const AdaptiveLeaf& leaf)
     intern_columns(state);
     return state;
 }
-std::vector<AdaptiveLeaf> export_state(LocalData& state, const AdaptiveBytes& domain)
+std::vector<AdaptiveLeaf> export_state(
+    LocalData& state, const AdaptiveBytes& domain, std::shared_ptr<const AdaptiveBytes> root = {})
 {
     intern_columns(state);
     build_local_runs(state);
-    auto root = std::make_shared<const AdaptiveBytes>(root_packet(*state.pool.grid));
+    if (!root)
+        root = std::make_shared<const AdaptiveBytes>(root_packet(*state.pool.grid));
     std::map<BaseCellKey, std::shared_ptr<const AdaptiveBytes>> bases;
     std::map<AxialIntervalKey, std::shared_ptr<const AdaptiveBytes>> axes;
     for (const auto& [base, z] : state.columns)
@@ -2422,24 +2424,12 @@ public:
         }
         return packed;
     }
-    std::vector<AdaptiveFamily> ancestry_families(const AdaptiveLeaf& leaf) const override
+    std::vector<AdaptiveProductFamilySelector> ancestry_family_selectors(const AdaptiveLeaf& leaf) const override
     {
         const auto original = std::get<ProductCellAncestry>(leaf.key.ancestry);
-        std::vector<AdaptiveFamily> families;
-        auto emit = [&](ProductCellAncestry p, AdaptiveSplit split)
-        {
-            auto state = local_state(leaf);
-            state.columns.clear();
-            state.columns.emplace(p.base, std::make_shared<const ZKeys>(ZKeys{p.axial}));
-            auto records = export_state(state, leaf.domain);
-            if (records.size() != 1)
-                throw std::logic_error("Product parent factor did not produce one cell.");
-            auto parent = std::move(records[0]);
-            parent.revision = leaf.revision;
-            auto result = this->split(parent, split);
-            result.family.anchor = encode_adaptive_key(leaf.key);
-            families.push_back(std::move(result.family));
-        };
+        std::vector<AdaptiveProductFamilySelector> families;
+        const auto emit = [&](const ProductCellAncestry& parent, AdaptiveSplit split)
+        { families.push_back({{leaf.key.region, parent}, split}); };
         auto p = original;
         while (!p.base.path.empty())
         {
@@ -2461,7 +2451,42 @@ public:
         }
         return families;
     }
+    bool product_family_proof_revision_invariant(const AdaptiveLeaf*) const override { return true; }
+
+    AdaptiveFamily ancestry_family(
+        const AdaptiveLeaf& leaf, const AdaptiveProductFamilySelector& selector) const override
+    {
+        const auto available = ancestry_family_selectors(leaf);
+        if (std::ranges::find(available, selector) == available.end())
+            throw std::invalid_argument("Unknown exact product family selector.");
+        return make_ancestry_family(leaf, selector);
+    }
+
+    std::vector<AdaptiveFamily> ancestry_families(const AdaptiveLeaf& leaf) const override
+    {
+        std::vector<AdaptiveFamily> families;
+        for (const auto& selector : ancestry_family_selectors(leaf))
+            families.push_back(make_ancestry_family(leaf, selector));
+        return families;
+    }
+
 private:
+    AdaptiveFamily make_ancestry_family(const AdaptiveLeaf& leaf, const AdaptiveProductFamilySelector& selector) const
+    {
+        const auto& parent_key = std::get<ProductCellAncestry>(selector.parent.ancestry);
+        auto state = local_state(leaf);
+        state.columns.clear();
+        state.columns.emplace(parent_key.base, std::make_shared<const ZKeys>(ZKeys{parent_key.axial}));
+        auto records = export_state(state, leaf.domain, leaf.factor_recipe->root);
+        if (records.size() != 1)
+            throw std::logic_error("Product parent factor did not produce one cell.");
+        auto parent = std::move(records.front());
+        parent.revision = leaf.revision;
+        auto result = split(parent, selector.split);
+        result.family.anchor = encode_adaptive_key(leaf.key);
+        return std::move(result.family);
+    }
+
     static ExtrudedRegion native_region(const AdaptiveLeaf& leaf)
     {
         if (!leaf.native_recipe)
@@ -2593,7 +2618,7 @@ public:
         for (const auto& base : bases)
             state.columns.emplace(base, std::make_shared<const ZKeys>(z));
         AdaptiveSplitResult result;
-        result.children = export_state(state, parent.domain);
+        result.children = export_state(state, parent.domain, parent.factor_recipe->root);
         result.family.key = adaptive_family_key(parent.key, split);
         result.family.parent = parent;
         result.family.split = split;

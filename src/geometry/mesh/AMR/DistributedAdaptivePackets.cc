@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/mesh/AMR/AdaptiveFamilyProofFragment.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
 #include <cstring>
@@ -96,14 +97,16 @@ struct Dictionary
     std::map<Part, std::uint64_t, PartLess> index;
     std::vector<Part> parts;
     std::size_t budget, charged = 0;
+    bool emit_payload = true;
     void add(const Part& part)
     {
         if (part && !index.contains(part))
         {
             constexpr auto metadata = sizeof(Part) + sizeof(std::pair<const Part, std::uint64_t>) + 4 * sizeof(void*);
-            if (metadata > budget - charged || part->size() > budget - charged - metadata)
+            const auto payload = emit_payload ? part->size() : 0;
+            if (metadata > budget - charged || payload > budget - charged - metadata)
                 throw std::invalid_argument("Adaptive batch dictionary budget exhausted.");
-            charged += metadata + part->size();
+            charged += metadata + payload;
             index.emplace(part, parts.size() + 1);
             parts.push_back(part);
         }
@@ -313,6 +316,37 @@ void family_valid(const AdaptiveFamily& family)
         if (!unique.insert(child).second)
             throw std::invalid_argument("Duplicate adaptive batch family child.");
 }
+void write_family(Writer& w, const AdaptiveFamily& family, const Dictionary& dict)
+{
+    family_valid(family);
+    w.bytes(family.key);
+    write_leaf(w, family.parent, dict);
+    w.word(std::uint64_t(family.split));
+    w.word(family.revision);
+    w.bytes(family.anchor);
+    w.word(family.children.size());
+    for (const auto& child : family.children)
+        w.bytes(encode_adaptive_key(child));
+}
+AdaptiveFamily read_family(Reader& r, Decoder& decoder)
+{
+    AdaptiveFamily family;
+    family.key = r.bytes();
+    family.parent = decoder.leaf(r);
+    const auto split = r.word();
+    if (split > 2)
+        throw std::invalid_argument("Invalid adaptive batch family split.");
+    family.split = AdaptiveSplit(split);
+    family.revision = r.word();
+    family.anchor = r.bytes();
+    const auto n = r.word();
+    if (n > (r.data.size() - r.offset) / 8)
+        throw std::invalid_argument("Invalid adaptive batch child count.");
+    for (std::uint64_t j = 0; j < n; ++j)
+        family.children.push_back(decode_adaptive_key(r.bytes()));
+    family_valid(family);
+    return family;
+}
 } // namespace
 AdaptiveBytes encode_adaptive_batch(
     std::span<const AdaptiveLeaf> leaves, std::span<const AdaptiveFamily> families, std::size_t budget)
@@ -331,17 +365,7 @@ AdaptiveBytes encode_adaptive_batch(
     for (const auto& leaf : leaves)
         write_leaf(w, leaf, dict);
     for (const auto& family : families)
-    {
-        family_valid(family);
-        w.bytes(family.key);
-        write_leaf(w, family.parent, dict);
-        w.word(std::uint64_t(family.split));
-        w.word(family.revision);
-        w.bytes(family.anchor);
-        w.word(family.children.size());
-        for (const auto& child : family.children)
-            w.bytes(encode_adaptive_key(child));
-    }
+        write_family(w, family, dict);
     if (w.data.size() > budget)
         throw std::invalid_argument("Adaptive batch wire budget exhausted.");
     return std::move(w.data);
@@ -382,25 +406,32 @@ AdaptiveBatch decode_adaptive_batch(std::span<const char> bytes, std::size_t bud
     for (std::uint64_t i = 0; i < leaves; ++i)
         batch.leaves.push_back(decoder.leaf(r));
     for (std::uint64_t i = 0; i < families; ++i)
-    {
-        AdaptiveFamily family;
-        family.key = r.bytes();
-        family.parent = decoder.leaf(r);
-        const auto split = r.word();
-        if (split > 2)
-            throw std::invalid_argument("Invalid adaptive batch family split.");
-        family.split = AdaptiveSplit(split);
-        family.revision = r.word();
-        family.anchor = r.bytes();
-        const auto n = r.word();
-        if (n > (r.data.size() - r.offset) / 8)
-            throw std::invalid_argument("Invalid adaptive batch child count.");
-        for (std::uint64_t j = 0; j < n; ++j)
-            family.children.push_back(decode_adaptive_key(r.bytes()));
-        family_valid(family);
-        batch.families.push_back(std::move(family));
-    }
+        batch.families.push_back(read_family(r, decoder));
     r.done();
     return batch;
+}
+adaptive_detail::AdaptiveFamilyProofFragment adaptive_detail::encode_family_proof_fragment(
+    const AdaptiveFamily& family, std::size_t budget)
+{
+    Dictionary dict{{}, {}, budget, 0, false};
+    dict.add(family.parent);
+    ::SimpleFluid::Meshes::AMR::Writer writer{{}, budget};
+    write_family(writer, family, dict);
+    return {std::move(writer.data), std::move(dict.parts)};
+}
+
+AdaptiveFamily adaptive_detail::decode_family_proof_fragment(AdaptiveFamilyProofView proof, std::size_t budget)
+{
+    if (proof.record.empty() || proof.record.size() > budget ||
+        proof.parts.size() > budget / sizeof(AdaptiveFamilyProofPart))
+        throw std::invalid_argument("Product proof fragment exceeds its decode lease.");
+    Reader reader{proof.record};
+    Decoder decoder(budget);
+    decoder.parts.assign(proof.parts.begin(), proof.parts.end());
+    if (decoder.parts.capacity() != proof.parts.size())
+        throw std::invalid_argument("Product proof selector capacity differs from admission.");
+    auto family = read_family(reader, decoder);
+    reader.done();
+    return family;
 }
 } // namespace SimpleFluid::Meshes::AMR

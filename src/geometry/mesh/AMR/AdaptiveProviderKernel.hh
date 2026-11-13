@@ -82,6 +82,13 @@ struct AdaptiveContactImage
     PLIC::DisplacementIdentity<ArithmeticMode::Ordinary> physical_to_contact;
     std::optional<AdaptiveContactLogicalBox> logical;
 };
+struct AdaptiveProductFamilySelector
+{
+    AdaptiveCellKey parent;
+    AdaptiveSplit split;
+    bool operator==(const AdaptiveProductFamilySelector&) const = default;
+};
+
 class AdaptiveProviderKernel
 {
 public:
@@ -141,6 +148,20 @@ public:
     /** Opt in when repack preserves every selected leaf's persistent identity
      * and certified shape without the rest of the active selection. */
     [[nodiscard]] virtual bool supports_leaf_local_repack() const noexcept { return false; }
+    /** The same exact factor parents as ancestry_families. Built-in Product
+     * routes produce selectors without constructing any parent geometry. */
+    [[nodiscard]] virtual std::vector<AdaptiveProductFamilySelector> ancestry_family_selectors(
+        const AdaptiveLeaf&) const;
+    [[nodiscard]] virtual AdaptiveFamily ancestry_family(
+        const AdaptiveLeaf&, const AdaptiveProductFamilySelector&) const;
+    /** Opt in only when changing the saved parent's revision cannot change
+     * its provider validation, geometry, or complete immediate children.
+     * A null parent asks whether the promise holds for every Product parent
+     * of this actual kernel, without constructing a routed parent copy. */
+    [[nodiscard]] virtual bool product_family_proof_revision_invariant(const AdaptiveLeaf* = nullptr) const
+    {
+        return false;
+    }
 };
 /** Allocation-free explicit provider capability. A provider label or custom
  * wrapper does not grant this opt-in contract. Virtual dispatch preserves the

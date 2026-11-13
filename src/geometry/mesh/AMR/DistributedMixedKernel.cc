@@ -704,6 +704,36 @@ public:
         }
         return families;
     }
+    std::vector<AdaptiveProductFamilySelector> ancestry_family_selectors(const AdaptiveLeaf& leaf) const override
+    {
+        const auto& provider = route(leaf);
+        auto rows = provider.kernel->ancestry_family_selectors(original(leaf));
+        for (auto& row : rows)
+            row.parent = global(provider, std::move(row.parent));
+        return rows;
+    }
+    bool product_family_proof_revision_invariant(const AdaptiveLeaf* parent) const override
+    {
+        return parent && route(*parent).kernel->product_family_proof_revision_invariant();
+    }
+
+    AdaptiveFamily ancestry_family(
+        const AdaptiveLeaf& leaf, const AdaptiveProductFamilySelector& selector) const override
+    {
+        const auto& provider = route(leaf);
+        if (selector.parent.region != leaf.key.region)
+            throw std::invalid_argument("Foreign mixed factor parent selector.");
+        auto raw = selector;
+        raw.parent.region = provider.original_region;
+        auto family = provider.kernel->ancestry_family(original(leaf), raw);
+        family.parent.key = global(provider, std::move(family.parent.key));
+        family.parent.join_recipe = leaf.join_recipe;
+        family.key = adaptive_family_key(family.parent.key, family.split);
+        for (auto& child : family.children)
+            child = global(provider, std::move(child));
+        family.anchor = encode_adaptive_key(leaf.key);
+        return family;
+    }
     bool supports_leaf_local_repack() const noexcept override
     {
         return std::all_of(routes_.begin(), routes_.end(),

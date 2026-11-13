@@ -27,6 +27,8 @@ class DirectoryRegistrationAccess;
 [[nodiscard]] AdaptiveNativeDraft compact_adaptive_native_draft(const DistributedAdaptiveHierarchy&);
 [[nodiscard]] std::vector<AdaptiveLeaf> fetch_native_source_leaves(
     const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey>);
+/** Complete historical Product election for small parity fixtures. */
+[[nodiscard]] std::vector<AdaptiveFamily> product_family_reference(const DistributedAdaptiveHierarchy&);
 } // namespace adaptive_detail
 struct AdaptiveBalancePlan;
 struct DistributedAdaptiveOptions
@@ -160,6 +162,7 @@ public:
     [[nodiscard]] AdaptiveNativeDraft native_draft() const;
 
 private:
+    friend std::vector<AdaptiveFamily> adaptive_detail::product_family_reference(const DistributedAdaptiveHierarchy&);
     friend class adaptive_detail::DirectoryRegistrationAccess;
     friend class adaptive_detail::GeometrySnapshotAccess;
     friend std::shared_ptr<const adaptive_detail::AdaptiveContactSnapshot> adaptive_detail::contact_snapshot(
