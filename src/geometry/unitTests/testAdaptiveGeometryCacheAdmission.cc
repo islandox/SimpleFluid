@@ -60,7 +60,8 @@ struct UnionReconstruction
 UnionReconstruction fresh_union(const Hierarchy& source)
 {
     P::GeometryAllocationLedger ordinary_owners, bounded_owners;
-    std::size_t ordinary_used = 0, bounded_used = 0;
+    std::size_t ordinary_used = 0, bounded_used = 0, metadata = 0, imported_metadata = 0;
+    std::array<bool, 2> imported{};
     source.visit_geometry_snapshots(
         [&](const auto& snapshot)
         {
@@ -68,8 +69,14 @@ UnionReconstruction fresh_union(const Hierarchy& source)
             {
                 D::Budget budget{ample};
                 const auto manifest = D::GeometrySnapshotAccess::owner_manifest(snapshot, budget, bounded);
+                metadata += manifest.metadata_admission_bytes();
                 if (!manifest.owner_count())
                     continue;
+                if (!imported[bounded])
+                {
+                    imported_metadata += manifest.metadata_admission_bytes();
+                    imported[bounded] = true;
+                }
                 auto& ledger = bounded ? bounded_owners : ordinary_owners;
                 auto& used = bounded ? bounded_used : ordinary_used;
                 P::details::GeometryOwnerImportAccess::import(ledger, manifest, used, ample);
@@ -77,7 +84,8 @@ UnionReconstruction fresh_union(const Hierarchy& source)
         });
     UnionReconstruction result;
     result.payload = ordinary_owners.payload_bytes() + bounded_owners.payload_bytes();
-    result.scalar = result.payload + ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes();
+    result.scalar = result.payload + ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes() +
+                    metadata - imported_metadata;
     return result;
 }
 /** The same exact union reached by walking the snapshot dependency graph. */
@@ -339,5 +347,47 @@ TEST(AdaptiveGeometryCacheAdmission, RejectedDemandConstructionKeepsAcceptedRoot
     EXPECT_EQ(hit, accepted);
     const auto extended = acquire(*source, selected, AMR::GeometrySnapshotPurpose::State);
     EXPECT_EQ(extended->ordinary_catalog()->size(), selected.size());
+    expect_exact_seal(*source);
+}
+
+TEST(AdaptiveGeometryCacheAdmission, LateLeaseRejectionPreservesManifestSealAndAcceptedRoot)
+{
+    const auto source = make_source(F::Provider::Static, 4);
+    const auto selected = rows(*source);
+    ASSERT_GT(selected.size(), 2u);
+    const auto prefix = std::span(selected).first(selected.size() / 2);
+    const auto accepted = acquire(*source, prefix, AMR::GeometrySnapshotPurpose::State);
+    const auto before = Access::cache_admission_statistics(*source);
+    const auto payload_before = walked_payload(*source);
+    {
+        // Exhaust only the backing arena. Construction/capture use their ample
+        // finite budgets and finish, then final publication lease growth fails.
+        auto blocker = Access::contact_cache(*source).external_residency_lease();
+        blocker.resize(blocker.available());
+        std::size_t used = 0;
+        EXPECT_THROW((void) source->geometry_snapshot(
+                         selected, ordinary, AMR::GeometrySnapshotPurpose::State, used, ample),
+            std::exception);
+        EXPECT_GT(used, 0u);
+        const auto after = Access::cache_admission_statistics(*source);
+        EXPECT_GT(after.union_censuses, before.union_censuses);
+        EXPECT_EQ(after.resident_bytes, before.resident_bytes);
+        EXPECT_EQ(after.lease_bytes, before.lease_bytes);
+        EXPECT_EQ(walked_payload(*source), payload_before);
+        expect_exact_seal(*source);
+        EXPECT_EQ(acquire(*source, prefix, AMR::GeometrySnapshotPurpose::State), accepted);
+    }
+    const auto extended = acquire(*source, selected, AMR::GeometrySnapshotPurpose::State);
+    EXPECT_EQ(extended->ordinary_catalog()->size(), selected.size());
+    expect_exact_seal(*source);
+}
+
+TEST(AdaptiveGeometryCacheAdmission, SnapshotManifestCaptureUsesTheProvidedFiniteBudget)
+{
+    const auto source = make_source(F::Provider::Static, 2);
+    const auto snapshot = acquire(*source, rows(*source), AMR::GeometrySnapshotPurpose::State);
+    D::Budget too_small{1};
+    EXPECT_THROW((void) Access::owner_manifest(*snapshot, too_small), P::GeometryError);
+    EXPECT_LE(too_small.used, too_small.limit);
     expect_exact_seal(*source);
 }

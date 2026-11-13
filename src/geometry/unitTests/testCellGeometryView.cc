@@ -48,6 +48,22 @@ std::shared_ptr<const Source> source(std::array<double, 3> lower = {0, 0, 0}, st
     description.cells.push_back(slot);
     return Source::make(std::move(description), limits());
 }
+std::shared_ptr<const Source> nonuniform_source()
+{
+    P::CartesianSourceDescription description;
+    for (std::uint32_t i = 0; i <= 80; ++i)
+        description.axes[0].push_back(i * i);
+    description.axes[1] = {0, 2};
+    description.axes[2] = {0, 3};
+    for (std::uint32_t i = 0; i < 80; ++i)
+    {
+        P::CartesianSourceCellSlot slot;
+        slot.lower = {i, 0, 0};
+        slot.upper = {i + 1, 1, 1};
+        description.cells.push_back(slot);
+    }
+    return Source::make(std::move(description), limits());
+}
 struct Environment
 {
     fenv_t saved{};
@@ -390,6 +406,69 @@ TEST(CellGeometryView, DeferredClonesShareImmutableBaseAndAdmitOnlyTheirOwnEvalu
     ledger = P::GeometryAllocationLedger{};
     EXPECT_TRUE(weak.expired());
     EXPECT_EQ(clone->volume(0).value, volume);
+}
+
+TEST(CellGeometryView, RepeatedDeferredClonesPreserveSparseSecondPageGeometryAndCatalogOrder)
+{
+    const auto original = nonuniform_source();
+    const std::array<std::uint64_t, 3> cells{3, 65, 78};
+    auto raw = Source::clone_deferred_subset(original, cells, limits());
+    const std::array<std::size_t, 4> order{2, 0, 1, 0};
+    for (std::size_t generation = 0; generation < 4; ++generation)
+    {
+        SCOPED_TRACE(generation);
+        ASSERT_EQ(raw->size(), cells.size());
+        EXPECT_EQ(raw->base_identity(), original->base_identity());
+        const auto catalog = Catalog::cartesian(raw, limits());
+        const Range reordered(Catalog::selected(catalog, order, limits()));
+        for (std::size_t row = 0; row < order.size(); ++row)
+        {
+            SCOPED_TRACE(row);
+            const auto cell = cells[order[row]];
+            const long double lower = cell * cell, upper = (cell + 1) * (cell + 1);
+            const long double volume = 6 * (upper - lower);
+            const auto view = reordered[row];
+            EXPECT_EQ(view.volume().value, volume);
+            EXPECT_EQ(view.corner(0), (std::array<long double, 3>{lower, 0, 0}));
+            EXPECT_EQ(view.corner(7), (std::array<long double, 3>{upper, 2, 3}));
+            EXPECT_EQ(view.centroid()[0], (lower + upper) / 2);
+            const auto moments = view.moments({static_cast<double>(lower), 0, 0});
+            EXPECT_EQ(moments.first_moment[0].value, volume * (upper - lower) / 2);
+            EXPECT_EQ(moments.first_moment[1].value, volume);
+            EXPECT_EQ(moments.first_moment[2].value, volume * 1.5L);
+            EXPECT_EQ(view.faces()[0].area().value, 6);
+            EXPECT_EQ(view.faces()[2].area().value, 3 * (upper - lower));
+            for (std::size_t face = 0; face < 6; ++face)
+                EXPECT_EQ(view.source_support(face), original->source_support(cell, face));
+        }
+        raw = Source::clone_deferred(raw, limits());
+    }
+}
+
+TEST(CellGeometryView, DeferredSubsetCloneAdmitsItsSlotMappingBeforeAllocation)
+{
+    const auto original = nonuniform_source();
+    const std::array<std::uint64_t, 3> cells{3, 65, 78};
+    const auto subset = Source::clone_deferred_subset(original, cells, limits());
+    std::size_t required = 0;
+    {
+        P::details::Operation operation(limits());
+        const auto clone = Source::clone_deferred(subset, limits());
+        const auto exclusive = P::details::NativeCellGeometrySourceAccess::exclusive_bytes(*clone);
+        const auto base = P::details::NativeCellGeometrySourceAccess::base_bytes(*clone);
+        required = exclusive[0] + exclusive[1] + exclusive[2];
+        EXPECT_EQ(operation.work.bytes, required);
+        EXPECT_EQ(clone->storage_bytes(), required + base[0] + base[1] + base[2]);
+        const auto subset_bytes = P::details::NativeCellGeometrySourceAccess::exclusive_bytes(*subset);
+        EXPECT_EQ(exclusive, subset_bytes);
+    }
+    ASSERT_GT(required, cells.size() * sizeof(std::uint32_t));
+    auto exact_limits = limits();
+    exact_limits.byte_budget = required;
+    EXPECT_NO_THROW(static_cast<void>(Source::clone_deferred(subset, exact_limits)));
+    auto short_limits = exact_limits;
+    --short_limits.byte_budget;
+    EXPECT_THROW(static_cast<void>(Source::clone_deferred(subset, short_limits)), P::GeometryError);
 }
 
 TEST(CellGeometryView, OriginalEvaluationClonesKeepDirectedLazyMomentsAndShareOnlyImmutableVertices)

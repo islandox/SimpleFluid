@@ -73,7 +73,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testGeometryDemandCatalog"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
-      OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
+      OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch"
+      OR TEST_NAME STREQUAL "testOrdinaryGeometryMeasure")
      AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${TEST_NAME} PRIVATE -fno-fast-math -ffp-contract=off -frounding-math -fno-lto)
     set_target_properties(${TEST_NAME} PROPERTIES

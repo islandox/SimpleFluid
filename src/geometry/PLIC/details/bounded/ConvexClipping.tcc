@@ -95,7 +95,7 @@ DynamicGeometrySection section(
     static_assert(Mode == kernel_mode);
     DynamicGeometrySection result;
     result.area = bounded<Mode>(Interval{});
-    result.centroid = bounded<Mode>(Point{});
+    result.centroid = bounded<Mode>(Point{StorageInterval(0), StorageInterval(0), StorageInterval(0)});
     for (const auto i : loop)
         result.vertices.push_back(
             bounded<Mode>(scaled<Mode>(vertices[i].coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin)));
@@ -574,7 +574,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
     }
     DynamicClipResult result;
     result.section.area = bounded<Mode>(Interval{});
-    result.section.centroid = bounded<Mode>(Point{});
+    result.section.centroid = bounded<Mode>(Point{StorageInterval(0), StorageInterval(0), StorageInterval(0)});
     if (!negative || !positive)
     {
         // A support face/edge/point is a proven zero-volume contact. Preserve

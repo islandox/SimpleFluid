@@ -443,20 +443,27 @@ geometry_snapshot_detail::PreparedOwnerManifest adaptive_detail::GeometrySnapsho
 }
 void adaptive_detail::GeometrySnapshotAccess::owner_manifests(const AdaptiveGeometrySnapshot& snapshot,
     adaptive_detail::Budget& budget, geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
-    geometry_snapshot_detail::PreparedOwnerManifest& bounded)
+    geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid)
 {
-    snapshot.owner_manifests(budget, ordinary, bounded);
+    snapshot.owner_manifests(budget, ordinary, bounded, payload_prepaid);
 }
 
 void AdaptiveGeometrySnapshot::owner_manifests(adaptive_detail::Budget& budget,
     geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
-    geometry_snapshot_detail::PreparedOwnerManifest& bounded) const
+    geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid) const
 {
     namespace G = PLIC::details::geometry_demand;
     PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-    std::size_t used = 0;
-    retain(ordinary_owners, bounded_owners, used, std::numeric_limits<std::size_t>::max());
-    budget.add(used);
+    if (payload_prepaid)
+    {
+        // The hierarchy overlap ledger has already admitted this entire graph.
+        // This separate capture pays only its new map/scratch allocations.
+        PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
+            ordinary_owners, budget.used, budget.limit);
+        PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
+            bounded_owners, budget.used, budget.limit);
+    }
+    retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
     const G::Admission admission{
         &budget, [](void* raw, std::size_t bytes) { static_cast<adaptive_detail::Budget*>(raw)->add(bytes); }};
     ordinary = PLIC::details::GeometryOwnerImportAccess::export_manifest(ordinary_owners, admission, nullptr, 0);
@@ -500,7 +507,16 @@ void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t
     if (ordinals.empty())
         return;
     std::vector<G::SourceSlot> slots;
+    const auto slot_bytes = geometry_snapshot_detail::checked_product(physical.size(), sizeof(G::SourceSlot));
+    if (used > limit || slot_bytes > limit - used)
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Prepared slot scratch exceeds admission.");
+    used += slot_bytes;
     slots.reserve(physical.size());
+    const auto extra =
+        geometry_snapshot_detail::checked_product(slots.capacity() - physical.size(), sizeof(G::SourceSlot));
+    if (extra > limit - used)
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Prepared slot capacity exceeds admission.");
+    used += extra;
     for (const auto& value : physical)
         slots.push_back({value.source, value.row, value.valid ? G::SourceKind::Cartesian : G::SourceKind::Explicit});
     const auto remaining = [&] { return limit - std::min(used, limit); };

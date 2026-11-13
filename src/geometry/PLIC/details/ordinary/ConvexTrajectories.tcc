@@ -129,7 +129,8 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
         return result;
     }
     unsigned rank = 0;
-    Point first_normal{}, tangent{};
+    Point first_normal{StorageScalar(0), StorageScalar(0), StorageScalar(0)};
+    Point tangent{StorageScalar(0), StorageScalar(0), StorageScalar(0)};
     const auto all_zero = [](const Point& p)
     { return std::all_of(p.begin(), p.end(), [](auto x) { return x.zero(); }); };
     const auto direction = [](const Point& p)

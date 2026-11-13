@@ -5,8 +5,8 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
-#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include <algorithm>
 #include <cstddef>
@@ -124,11 +124,12 @@ struct GeometryAllocationLedger::Impl
     /** Immutable authenticated owner set installed by an operation import. The
      * mutable map above only holds this ledger's own admissions. */
     std::optional<geometry_demand::GeometryOwnerManifest> imported;
+    std::uint8_t imported_channel = 0;
+    bool prepaid_payload = false;
     [[nodiscard]] bool imported_admits(
         allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
     {
-        return imported && imported->admits(
-                               0, static_cast<std::uint8_t>(kind), owner, bytes);
+        return imported && imported->admits(imported_channel, static_cast<std::uint8_t>(kind), owner, bytes);
     }
     std::optional<ArithmeticMode> mode;
     std::size_t payload = 0, bookkeeping = 0, last_counter = 0;
@@ -139,6 +140,11 @@ struct GeometryAllocationLedger::Impl
         using namespace allocation_detail;
         if (metadata && bytes > scratch_limit - std::min(bookkeeping, scratch_limit))
             exhausted("Geometry allocation ledger scratch byte budget is exhausted.");
+        if (!metadata && prepaid_payload)
+        {
+            payload = add(payload, bytes);
+            return;
+        }
         if (bytes > limit - std::min(used, limit))
             exhausted("Geometry allocation ledger byte budget is exhausted.");
         used += bytes;
@@ -161,10 +167,10 @@ struct GeometryAllocationLedger::Impl
             return;
         }
         // Owners installed by an operation import are already counted; an
-        // expired-size match proves the same allocation, so never re-descend.
+        // authenticated control match proves the same allocation, so never re-descend.
         if (imported)
         {
-            const auto bytes = imported->references(0, static_cast<std::uint8_t>(kind), pointer);
+            const auto bytes = imported->references(imported_channel, static_cast<std::uint8_t>(kind), pointer);
             if (bytes)
                 return;
         }
@@ -186,8 +192,12 @@ struct GeometryAllocationLedger::Impl
         // An owner installed by an operation import is already in this ledger's
         // exact count and pin set; every entry point must see that before it
         // charges or publishes anything.
-        if (imported && imported->admits(0, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+        if (imported && imported->references(imported_channel, static_cast<std::uint8_t>(item.kind), item.owner))
+        {
+            if (!imported->admits(imported_channel, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable imported allocation size changed.");
             return false;
+        }
         const Key key{item.kind, item.owner.get()};
         if (const auto found = owners.find(key); found != owners.end())
         {
@@ -249,11 +259,11 @@ struct GeometryAllocationLedger::Impl
             if (const auto found = owners.find({item.kind, item.owner.get()}); found != owners.end())
             {
                 if (found->second.pin.owner_before(item.owner) || item.owner.owner_before(found->second.pin))
-                    throw GeometryError(GeometryErrorCode::InvalidInput, "Pending geometry owner has foreign controls.");
+                    throw GeometryError(
+                        GeometryErrorCode::InvalidInput, "Pending geometry owner has foreign controls.");
                 continue;
             }
-            if (imported &&
-                imported->references(0, static_cast<std::uint8_t>(item.kind), item.owner))
+            if (imported && imported->references(imported_channel, static_cast<std::uint8_t>(item.kind), item.owner))
                 continue;
             switch (item.kind)
             {

@@ -418,7 +418,7 @@ DynamicGeometrySection section(
     static_assert(Mode == kernel_mode);
     DynamicGeometrySection result;
     result.area = bounded<Mode>(Scalar{});
-    result.centroid = bounded<Mode>(Point{});
+    result.centroid = bounded<Mode>(Point{StorageScalar(0), StorageScalar(0), StorageScalar(0)});
     for (const auto i : loop)
         result.vertices.push_back(
             bounded<Mode>(scaled<Mode>(vertices[i].coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin)));
@@ -553,7 +553,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
     {
         DynamicClipResult result;
         result.section.area = bounded<Mode>(Scalar{});
-        result.section.centroid = bounded<Mode>(Point{});
+        result.section.centroid = bounded<Mode>(Point{StorageScalar(0), StorageScalar(0), StorageScalar(0)});
         // A support face/edge/point is a proven zero-volume contact. Preserve
         // its section dimension rather than manufacturing a positive piece.
         std::vector<std::size_t> contact;
@@ -640,7 +640,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         {
             for (const auto bound : {impl_->bounds[axis].lo, impl_->bounds[axis].hi})
             {
-                Point endpoint{};
+                Point endpoint{StorageScalar(0), StorageScalar(0), StorageScalar(0)};
                 endpoint[axis] = StorageScalar(bound);
                 const auto converted = relocated(endpoint, candidate, axis);
                 if (converted.absolute_error != 0 || std::abs(converted.value) > maximum)
@@ -687,7 +687,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
     {
         DynamicClipResult result;
         result.section.area = bounded<Mode>(Scalar{});
-        result.section.centroid = bounded<Mode>(Point{});
+        result.section.centroid = bounded<Mode>(Point{StorageScalar(0), StorageScalar(0), StorageScalar(0)});
         PointSnapshotBuilder<Mode> points;
         std::vector<Vertex> vertices = draft_vertices<Mode>(*impl_);
         import_vertex_provenance(vertices, impl_->point_context.get(), points);

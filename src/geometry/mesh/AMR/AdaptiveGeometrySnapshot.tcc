@@ -257,7 +257,8 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
         {
             const PLIC::CellGeometryView<ordinary_mode> previous(reuse->ordinary_, *reused_slot);
             const auto reference = PLIC::details::NativeCellGeometrySourceAccess::source_cell(previous);
-            subset_requests.push_back({slot, reference.source, leaf.native_cell});
+            budget.append_capacity(subset_requests);
+            subset_requests.push_back({slot, reference.source, reference.cell_slot});
             facts.policy[slot] = reuse->evaluation_policy(*reused_slot);
             native_slots[slot] = 0;
             reused_slots[slot] = 0;
@@ -402,7 +403,17 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     {
         std::map<const PLIC::CartesianCellSource*, std::vector<std::size_t>> by_source;
         for (std::size_t index = 0; index < subset_requests.size(); ++index)
-            by_source[subset_requests[index].source.get()].push_back(index);
+        {
+            const auto* source = subset_requests[index].source.get();
+            auto found = by_source.find(source);
+            if (found == by_source.end())
+            {
+                budget.add(sizeof(decltype(by_source)::value_type) + 4 * sizeof(void*));
+                found = by_source.try_emplace(source).first;
+            }
+            budget.append_capacity(found->second);
+            found->second.push_back(index);
+        }
         for (const auto& [address, rows] : by_source)
         {
             std::vector<std::uint64_t> cells;
@@ -414,6 +425,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                 subset_requests[rows.front()].source, cells, geometry_limits(ordinary_mode, budget.limit - budget.used));
             ordinary_owners.retain(clone, budget.used, budget.limit);
             const auto ordinal = sources.size();
+            budget.append_capacity(sources);
             sources.push_back(clone);
             for (const auto row : rows)
             {
@@ -490,6 +502,7 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
                           : PLIC::details::NativeCellGeometryMoments::DeferredRaw);
         observe_controls();
         ordinary_owners.retain(source, budget.used, budget.limit);
+        budget.append_capacity(sources);
         sources.push_back(std::move(source));
     }
     typename Catalog::SourceTable finite_ordinary_sources;

@@ -16,6 +16,11 @@ class GeometryAllocationOwnerAccess
 {
 public:
     static void begin(GeometryAllocationLedger&, std::size_t& cumulative, std::size_t bookkeeping_limit);
+    /** Capture a fully prepaid payload graph under the caller's finite budget.
+     * Every newly constructed ledger map/scratch allocation is still charged;
+     * exclusive payload totals and strong owner pins remain complete. Imported
+     * manifests must also have prepaid their shared index metadata. */
+    static void begin_prepaid_capture(GeometryAllocationLedger&, std::size_t& cumulative, std::size_t byte_limit);
     static void visit(const GeometryAllocationLedger&,
         const std::function<void(std::uint8_t kind, const void* owner, std::size_t bytes)>&);
     /** Record an immutable owner whose allocation was already charged in the

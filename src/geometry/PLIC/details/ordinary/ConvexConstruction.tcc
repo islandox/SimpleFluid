@@ -30,7 +30,7 @@ template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool part
     // a copied shell must never clear the immutable parent's shared cache.
     // A populated cache has a completed once_flag and cannot be cleared in
     // place. Only a unique, never-prepared cache is reusable by a fresh draft.
-    if (!poly.moment_cache || !poly.moment_cache.unique() || poly.moment_cache->integrals)
+    if (!poly.moment_cache || poly.moment_cache.use_count() != 1 || poly.moment_cache->integrals)
         poly.moment_cache = std::make_shared<MomentCache>();
     poly.volume = StorageScalar{};
     active_work->charge(1, sizeof(PointExportCache));
@@ -562,8 +562,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
         identities.push_back(points.native_source(
             global.value, global.absolute_error, DynamicGeometryAccess::admit_incidence<Mode>(supports), facts));
     }
-    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(
-        import<Mode>(shell.origin, relative, shell.outward_faces, limits, true, identities, &points)));
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(ordinary_kernel::import<Mode>(
+        shell.origin, relative, shell.outward_faces, limits, true, identities, &points)));
 }
 
 template<ArithmeticMode Mode>

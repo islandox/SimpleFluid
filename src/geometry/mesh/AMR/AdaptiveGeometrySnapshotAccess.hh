@@ -42,8 +42,11 @@ public:
     /** Exact immutable owner set of a published root, charged to `budget`. */
     [[nodiscard]] static geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(
         const AdaptiveGeometrySnapshot&, Budget&, bool bounded = false);
+    /** Finite capture of both channels. `payload_prepaid` requires prior full
+     * graph admission in the same hierarchy overlap; new bookkeeping and index
+     * construction are always charged to the remaining budget. */
     static void owner_manifests(const AdaptiveGeometrySnapshot&, Budget&,
         geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
-        geometry_snapshot_detail::PreparedOwnerManifest& bounded);
+        geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid = false);
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

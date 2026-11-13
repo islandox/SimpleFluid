@@ -8,6 +8,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
 #include <array>
@@ -820,4 +821,267 @@ TEST(GeometryAllocationLedgerTest, PopulatedImportKeepsOverlapAliasesAndStaysMon
     const std::shared_ptr<const void> foreign(shared_owner.get(), [](const void*) {});
     EXPECT_THROW(
         control_ledger.retain_external_owner(foreign, sizeof(Payload), control_used, byte_limit), P::GeometryError);
+}
+
+namespace
+{
+namespace G = SimpleFluid::PLIC::details::geometry_demand;
+struct ManifestBudget
+{
+    std::size_t used = 0, limit = byte_limit;
+    [[nodiscard]] G::Admission admission()
+    {
+        return {this, [](void* raw, std::size_t bytes)
+            {
+                auto& self = *static_cast<ManifestBudget*>(raw);
+                if (self.used > self.limit || bytes > self.limit - self.used)
+                    throw P::GeometryError(P::GeometryErrorCode::ResourceLimit, "Test manifest budget exhausted.");
+                self.used += bytes;
+            }};
+    }
+};
+} // namespace
+
+TEST(GeometryAllocationLedgerTest, PartialImportPoisonsAnAdmittedWrapperWithUnpaidDependencies)
+{
+    using P::details::GeometryOwnerImportAccess;
+    constexpr auto ordinary = ArithmeticMode::Ordinary;
+    const auto geometry = Geometry<ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto sentinel = std::make_shared<const int>(1), expensive = std::make_shared<const int>(2);
+    ManifestBudget manifest_budget;
+    const std::array<G::OwnerRecord, 2> rows{
+        {{{0, static_cast<std::uint8_t>(P::allocation_detail::Kind::TypedWrapper), geometry.get()}, geometry,
+             sizeof(Geometry<ordinary>), 1},
+            {{0, static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner), expensive.get()}, expensive,
+                byte_limit, 1}}};
+    const auto manifest = G::GeometryOwnerManifest::built(rows, manifest_budget.admission());
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain_external_owner(sentinel, sizeof(int), used, byte_limit);
+    const auto cap = used + sizeof(Geometry<ordinary>) +
+                     sizeof(decltype(P::GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*);
+    EXPECT_THROW((void) GeometryOwnerImportAccess::import(ledger, manifest, used, cap), P::GeometryError);
+    // The wrapper row was paid and published before its next row failed, but
+    // none of its dynamic geometry dependencies were ever imported.
+    EXPECT_EQ(ledger.owner_count(), 2u);
+    EXPECT_EQ(ledger.payload_bytes(), sizeof(int) + sizeof(Geometry<ordinary>));
+    EXPECT_LT(ledger.payload_bytes(), geometry->storage_bytes());
+    const auto spent = used;
+    EXPECT_THROW(ledger.retain(geometry, used, byte_limit), P::GeometryError);
+    EXPECT_THROW((void) GeometryOwnerImportAccess::import(ledger, manifest, used, byte_limit), P::GeometryError);
+    EXPECT_EQ(used, spent);
+}
+
+TEST(GeometryAllocationLedgerTest, FreshImportBudgetFailurePoisonsLedger)
+{
+    using P::details::GeometryOwnerImportAccess;
+    const auto owner = std::make_shared<const int>(3);
+    ManifestBudget budget;
+    const auto manifest = G::GeometryOwnerManifest{}.retained(0,
+        static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner), owner, sizeof(int), budget.admission());
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    EXPECT_THROW(
+        (void) GeometryOwnerImportAccess::import(ledger, manifest, used, sizeof(P::GeometryAllocationLedger::Impl)),
+        P::GeometryError);
+    EXPECT_EQ(ledger.owner_count(), 0u);
+    EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(int), used, byte_limit), P::GeometryError);
+}
+
+TEST(GeometryAllocationLedgerTest, SingletonImportedOwnerRejectsForeignControlAndSize)
+{
+    using P::details::GeometryOwnerImportAccess;
+    const auto owner = std::make_shared<const int>(3);
+    const std::shared_ptr<const void> foreign(owner.get(), [](const void*) {});
+    const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
+    ManifestBudget budget;
+    const auto manifest = G::GeometryOwnerManifest{}.retained(0, external, owner, sizeof(int), budget.admission());
+    EXPECT_THROW((void) manifest.references(0, external, foreign), P::GeometryError);
+    EXPECT_THROW((void) manifest.admits(0, external, foreign, sizeof(int)), P::GeometryError);
+    for (const bool foreign_control : {false, true})
+    {
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        GeometryOwnerImportAccess::import(ledger, manifest, used, byte_limit);
+        const auto before = used;
+        EXPECT_THROW(ledger.retain_external_owner(
+                         foreign_control ? foreign : owner, sizeof(int) + (foreign_control ? 0 : 1), used, byte_limit),
+            P::GeometryError);
+        EXPECT_EQ(used, before);
+        EXPECT_EQ(ledger.owner_count(), 1u);
+        EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(int), used, byte_limit), P::GeometryError);
+    }
+}
+
+namespace
+{
+template<ArithmeticMode Mode> void imported_mode_contract()
+{
+    using P::details::GeometryOwnerImportAccess;
+    constexpr std::uint8_t channel = Mode == ArithmeticMode::Ordinary ? 0 : 1;
+    const auto geometry = Geometry<Mode>::box({0, 0, 0}, {1, 1, 1});
+    P::GeometryAllocationLedger source;
+    std::size_t source_used = 0;
+    source.retain(geometry, source_used, byte_limit);
+    ManifestBudget budget;
+    const auto manifest = GeometryOwnerImportAccess::export_manifest(source, budget.admission(), nullptr, channel);
+    for (const bool populated : {false, true})
+    {
+        P::GeometryAllocationLedger ledger;
+        std::size_t used = 0;
+        const auto sentinel = std::make_shared<const int>(7);
+        if (populated)
+            ledger.retain_external_owner(sentinel, sizeof(int), used, byte_limit);
+        GeometryOwnerImportAccess::import(ledger, manifest, used, byte_limit);
+        const auto before = used, owners = ledger.owner_count(), payload = ledger.payload_bytes();
+        ledger.retain(geometry, used, byte_limit);
+        ledger.template retain<Mode>(geometry->dynamic_geometry(), used, byte_limit);
+        EXPECT_EQ(used, before);
+        EXPECT_EQ(ledger.owner_count(), owners);
+        EXPECT_EQ(payload, geometry->storage_bytes() + (populated ? sizeof(int) : 0));
+        const auto alias = Geometry<Mode>::from_dynamic(geometry->dynamic_geometry());
+        ledger.retain(alias, used, byte_limit);
+        EXPECT_EQ(ledger.owner_count(), owners + 1);
+        EXPECT_EQ(ledger.payload_bytes(), payload + sizeof(Geometry<Mode>));
+        // Re-export includes imported rows and independently admitted aliases.
+        const auto roundtrip = GeometryOwnerImportAccess::export_manifest(ledger, budget.admission(), nullptr, channel);
+        EXPECT_EQ(roundtrip.owner_count(), ledger.owner_count());
+        EXPECT_EQ(roundtrip.payload_bytes(), ledger.payload_bytes());
+        constexpr auto other =
+            Mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        const auto foreign_mode = Geometry<other>::box({0, 0, 0}, {1, 1, 1});
+        const auto before_mismatch = used;
+        EXPECT_THROW(ledger.retain(foreign_mode, used, byte_limit), std::invalid_argument);
+        EXPECT_EQ(used, before_mismatch);
+        EXPECT_THROW(ledger.retain(geometry, used, byte_limit), P::GeometryError);
+    }
+}
+} // namespace
+
+TEST(GeometryAllocationLedgerTest, ImportedArithmeticChannelsPreserveModeAndCompleteOwnerUnion)
+{
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded certification environment unavailable.";
+    imported_mode_contract<ArithmeticMode::Ordinary>();
+    imported_mode_contract<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(GeometryAllocationLedgerTest, ImportRejectsMixedChannelsAndPoisonsLedger)
+{
+    using P::details::GeometryOwnerImportAccess;
+    ManifestBudget budget;
+    const auto owner = std::make_shared<const int>(1);
+    const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
+    auto manifest = G::GeometryOwnerManifest{}.retained(0, external, owner, sizeof(int), budget.admission());
+    manifest = manifest.retained(1, external, owner, sizeof(int), budget.admission());
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    EXPECT_THROW((void) GeometryOwnerImportAccess::import(ledger, manifest, used, byte_limit), P::GeometryError);
+    EXPECT_EQ(ledger.owner_count(), 0u);
+    EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(int), used, byte_limit), P::GeometryError);
+}
+
+TEST(GeometryAllocationLedgerTest, PrepaidCaptureKeepsPayloadTotalsAndChargesOnlyFiniteConstruction)
+{
+    using P::details::GeometryAllocationOwnerAccess;
+    using P::details::GeometryOwnerImportAccess;
+    const auto geometry = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    P::GeometryAllocationLedger reference;
+    std::size_t normal_used = 0;
+    reference.retain(geometry, normal_used, byte_limit);
+    const auto capture = [&](P::GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+    {
+        GeometryAllocationOwnerAccess::begin_prepaid_capture(ledger, used, limit);
+        ledger.retain(geometry, used, limit);
+    };
+    P::GeometryAllocationLedger prepaid;
+    std::size_t used = 23;
+    capture(prepaid, used, byte_limit);
+    EXPECT_EQ(prepaid.payload_bytes(), reference.payload_bytes());
+    EXPECT_EQ(prepaid.owner_count(), reference.owner_count());
+    EXPECT_EQ(used, 23 + prepaid.bookkeeping_bytes());
+    P::GeometryAllocationLedger short_capture;
+    std::size_t short_used = 23;
+    EXPECT_THROW(capture(short_capture, short_used, used - 1), P::GeometryError);
+    EXPECT_LE(short_used, used - 1);
+    EXPECT_THROW(short_capture.retain(geometry, short_used, byte_limit), P::GeometryError);
+    ManifestBudget budget;
+    const auto manifest = GeometryOwnerImportAccess::export_manifest(prepaid, budget.admission());
+    P::GeometryAllocationLedger imported;
+    std::size_t imported_used = 23;
+    GeometryAllocationOwnerAccess::begin_prepaid_capture(imported, imported_used, byte_limit);
+    GeometryOwnerImportAccess::import(imported, manifest, imported_used, byte_limit);
+    EXPECT_EQ(imported_used, 23 + sizeof(P::GeometryAllocationLedger::Impl));
+    EXPECT_EQ(imported.payload_bytes(), reference.payload_bytes());
+    EXPECT_EQ(
+        imported.bookkeeping_bytes(), sizeof(P::GeometryAllocationLedger::Impl) + manifest.metadata_admission_bytes());
+}
+
+TEST(GeometryAllocationLedgerTest, ManifestExportAdmitsTransientRowsBeforePersistentPages)
+{
+    using P::details::GeometryOwnerImportAccess;
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    const auto owner = std::make_shared<const int>(1);
+    ledger.retain_external_owner(owner, sizeof(int), used, byte_limit);
+    ManifestBudget budget{0, sizeof(G::OwnerRecord) - 1};
+    G::PageWork work;
+    EXPECT_THROW(
+        (void) GeometryOwnerImportAccess::export_manifest(ledger, budget.admission(), &work), P::GeometryError);
+    EXPECT_EQ(budget.used, 0u);
+    EXPECT_EQ(work.copied_pages, 0u);
+    ManifestBudget complete;
+    const auto manifest = GeometryOwnerImportAccess::export_manifest(ledger, complete.admission());
+    EXPECT_EQ(complete.used, sizeof(G::OwnerRecord) + manifest.metadata_admission_bytes());
+}
+
+TEST(GeometryAllocationLedgerTest, OverlappingImportRejectsForeignControlOrSizeAndPoisonsLedger)
+{
+    using P::details::GeometryOwnerImportAccess;
+    const auto owner = std::make_shared<const int>(3);
+    const std::shared_ptr<const void> foreign(owner.get(), [](const void*) {});
+    const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
+    ManifestBudget budget;
+    const auto accepted = G::GeometryOwnerManifest{}.retained(0, external, owner, sizeof(int), budget.admission());
+    for (const bool immutable_import : {false, true})
+        for (const bool foreign_control : {false, true})
+        {
+            P::GeometryAllocationLedger ledger;
+            std::size_t used = 0;
+            if (immutable_import)
+                GeometryOwnerImportAccess::import(ledger, accepted, used, byte_limit);
+            else
+                ledger.retain_external_owner(owner, sizeof(int), used, byte_limit);
+            const auto rejected = G::GeometryOwnerManifest{}.retained(0, external, foreign_control ? foreign : owner,
+                sizeof(int) + (foreign_control ? 0 : 1), budget.admission());
+            const auto before = used;
+            EXPECT_THROW(
+                (void) GeometryOwnerImportAccess::import(ledger, rejected, used, byte_limit), P::GeometryError);
+            EXPECT_EQ(used, before);
+            EXPECT_EQ(ledger.owner_count(), 1u);
+            EXPECT_EQ(ledger.payload_bytes(), sizeof(int));
+            EXPECT_THROW(ledger.retain_external_owner(owner, sizeof(int), used, byte_limit), P::GeometryError);
+        }
+}
+
+TEST(GeometryAllocationLedgerTest, PopulatedImportRejectsTheOppositeArithmeticChannel)
+{
+    using P::details::GeometryOwnerImportAccess;
+    if (!P::certification_environment())
+        GTEST_SKIP() << "Bounded certification environment unavailable.";
+    const auto ordinary = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto bounded = Geometry<ArithmeticMode::BoundedCertification>::box({0, 0, 0}, {1, 1, 1});
+    P::GeometryAllocationLedger source;
+    std::size_t source_used = 0;
+    source.retain(bounded, source_used, byte_limit);
+    ManifestBudget budget;
+    const auto manifest = GeometryOwnerImportAccess::export_manifest(source, budget.admission(), nullptr, 1);
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 0;
+    ledger.retain(ordinary, used, byte_limit);
+    const auto before = used;
+    EXPECT_THROW((void) GeometryOwnerImportAccess::import(ledger, manifest, used, byte_limit), std::invalid_argument);
+    EXPECT_EQ(used, before);
+    EXPECT_EQ(ledger.payload_bytes(), ordinary->storage_bytes());
+    EXPECT_THROW(ledger.retain(ordinary, used, byte_limit), P::GeometryError);
 }

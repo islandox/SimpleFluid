@@ -175,7 +175,7 @@ private:
     [[nodiscard]] geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(
         adaptive_detail::Budget& budget, bool bounded = false) const;
     void owner_manifests(adaptive_detail::Budget&, geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
-        geometry_snapshot_detail::PreparedOwnerManifest& bounded) const;
+        geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid = false) const;
     /** Internal construction. The result is published only after complete admission. */
     [[nodiscard]] static std::shared_ptr<AdaptiveGeometrySnapshot> build(const DistributedAdaptiveHierarchy&,
         std::span<const AdaptiveLeaf* const>, ArithmeticMode, GeometrySnapshotPurpose, std::size_t& used,

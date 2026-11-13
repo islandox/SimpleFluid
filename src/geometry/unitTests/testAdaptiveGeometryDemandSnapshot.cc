@@ -224,3 +224,67 @@ TEST(AdaptiveGeometryDemandSnapshot, SparseExpansionAfterCrossLayoutSuccessorKee
     EXPECT_TRUE(demand->matches_layout(candidate->leaf_layout()));
     EXPECT_TRUE(demand->find(*reused.front()));
 }
+
+TEST(AdaptiveGeometryDemandSnapshot, SparseSecondPreparedPageSurvivesRepeatedRawAcquisition)
+{
+    if (!A::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires inspectable construction controls.";
+    A::AMRGrid grid;
+    grid.block_cells = {16, 4, 2};
+    const A::CartesianAMR mesh(grid);
+    std::vector<std::uint64_t> ids(mesh.geometry()->num_cells());
+    std::iota(ids.begin(), ids.end(), 0);
+    auto detached = mesh.detach_owned(ids, {'r', 'a', 'w'});
+    const auto source = make_hierarchy(std::move(detached.owned), std::move(detached.kernel));
+    const auto selected = rows(*source);
+    const auto leaf = [&](std::uint64_t cell)
+    {
+        const auto found = std::find_if(selected.begin(), selected.end(),
+            [&](const auto* row) { return row->native_cell == cell; });
+        return found == selected.end() ? nullptr : *found;
+    };
+    const std::array sparse{leaf(110), leaf(65), leaf(79)};
+    for (const auto* row : sparse)
+        ASSERT_NE(row, nullptr);
+    // The second small State request prepares physical page [64,128).
+    (void) acquire(*source, std::array{sparse[1]});
+    (void) acquire(*source, std::array{sparse[2]});
+    const auto state = acquire(*source, std::array{sparse[0]});
+    const auto reference = Access::source_cell(P::CellGeometryView<ordinary>(
+        state->ordinary_catalog(), *state->find(*sparse[0])));
+    ASSERT_EQ(reference.source->size(), 64u);
+    ASSERT_LT(reference.cell_slot, 64u);
+    // Mix prepared subset rows with a new first-page row: both source-table
+    // construction paths must admit their growth while preserving geometry.
+    const auto* unprepared = leaf(10);
+    ASSERT_NE(unprepared, nullptr);
+    (void) acquire(*source, std::array{sparse[0], unprepared, sparse[1], sparse[2]},
+        A::GeometrySnapshotPurpose::OriginalSources);
+    const std::array all_raw{sparse[0], sparse[1], sparse[2], unprepared};
+    std::shared_ptr<const A::AdaptiveGeometrySnapshot> raw;
+    for (const auto order : {std::array{0u, 1u, 2u}, std::array{2u, 0u, 1u}, std::array{1u, 2u, 0u}})
+    {
+        const std::array request{sparse[order[0]], sparse[order[1]], sparse[order[2]]};
+        raw = acquire(*source, request, A::GeometrySnapshotPurpose::OriginalSources);
+        ASSERT_EQ(raw->ordinary_catalog()->size(), all_raw.size());
+        for (const auto* row : all_raw)
+        {
+            const auto slot = raw->find(*row);
+            ASSERT_TRUE(slot);
+            const P::CellGeometryView<ordinary> view(raw->ordinary_catalog(), *slot);
+            const auto bounds = source->native_cartesian_geometry_bounds(*row);
+            ASSERT_TRUE(bounds);
+            double volume = 1;
+            const auto center = view.centroid();
+            const auto actual = Access::raw_bounds(Access::source_cell(view));
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                volume *= bounds->upper[axis] - bounds->lower[axis];
+                EXPECT_EQ(actual.first[axis], bounds->lower[axis]);
+                EXPECT_EQ(actual.second[axis], bounds->upper[axis]);
+                EXPECT_EQ(center[axis], (bounds->lower[axis] + bounds->upper[axis]) / 2);
+            }
+            EXPECT_EQ(view.volume().value, volume);
+        }
+    }
+}

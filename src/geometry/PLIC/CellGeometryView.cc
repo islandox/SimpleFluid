@@ -503,7 +503,8 @@ std::size_t CartesianCellSource::size() const noexcept
 std::size_t CartesianCellSource::storage_bytes() const
 {
     const auto base = base_retention_bytes();
-    return sizeof(*this) + sizeof(Impl) + impl_->facts.capacity() * sizeof(Impl::Facts) + base[0] + base[1] + base[2];
+    return sizeof(*this) + sizeof(Impl) + impl_->slots.capacity() * sizeof(impl_->slots[0]) +
+        impl_->facts.capacity() * sizeof(Impl::Facts) + base[0] + base[1] + base[2];
 }
 std::array<std::size_t, 3> CartesianCellSource::retention_bytes() const
 {
@@ -582,10 +583,18 @@ std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred(
     if (std::min(limits.maximum_vertices, details::active_work->limits.maximum_vertices) < 8 ||
         std::min(limits.maximum_faces, details::active_work->limits.maximum_faces) < 6)
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Cartesian source exceeds fixed geometry shape caps.");
-    details::active_work->charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
-    details::active_work->charge(original->size(), sizeof(Impl::Facts));
+    auto& work = *details::active_work;
+    work.charge(1, sizeof(CartesianCellSource) + sizeof(Impl));
+    work.charge(original->size(), sizeof(Impl::Facts));
+    work.charge(original->impl_->slots.size(), sizeof(std::uint32_t));
     auto impl = std::make_shared<Impl>();
     impl->base = original->impl_->base;
+    // Evaluation facts are fresh, but exposed slots keep the original immutable
+    // base-cell mapping even when the original is already a deferred subset.
+    impl->slots.reserve(original->impl_->slots.size());
+    if (impl->slots.capacity() > original->impl_->slots.size())
+        work.charge(impl->slots.capacity() - original->impl_->slots.size(), sizeof(std::uint32_t));
+    impl->slots.insert(impl->slots.end(), original->impl_->slots.begin(), original->impl_->slots.end());
     impl->facts.allocate(original->size());
     impl->limits = limits;
     impl->environment = original->impl_->environment;

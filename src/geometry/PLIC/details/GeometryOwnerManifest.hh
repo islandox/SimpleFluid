@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 
@@ -67,6 +68,9 @@ public:
         std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
     [[nodiscard]] std::size_t references(
         std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&) const;
+    /** Empty sets have no channel. Mixed-channel sets cannot enter one
+     * arithmetic ledger and are rejected by this query. */
+    [[nodiscard]] std::optional<std::uint8_t> uniform_channel() const;
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_payload_bytes() const noexcept;

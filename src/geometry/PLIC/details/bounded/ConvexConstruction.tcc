@@ -660,8 +660,8 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
                                     certification_kernel::point<Mode>(shell.origin));
         identities.push_back(points.native_source(global.value, global.absolute_error, {}));
     }
-    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(
-        import<Mode>(shell.origin, relative, shell.outward_faces, limits, false, identities, &points)));
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(certification_kernel::import<Mode>(
+        shell.origin, relative, shell.outward_faces, limits, false, identities, &points)));
 }
 
 template<ArithmeticMode Mode>

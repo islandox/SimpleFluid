@@ -1232,8 +1232,10 @@ selector order or bindings. A raw OriginalSources context that would otherwise
 rebuild the selected rows instead takes a deferred subset body: it shares the
 prepared page's immutable base and allocates facts only for the rows it exposes,
 so raw demand stays identical in value while its isolated evaluation state and
-source identity remain its own. Prepared bodies retain neither an older catalog,
-snapshot, hierarchy nor controller chain.
+source identity remain its own. Subsets use the prepared source's page-local
+slots, and later deferred clones preserve that mapping through repeated raw
+acquisition. Prepared bodies retain neither an older catalog, snapshot,
+hierarchy nor controller chain.
 
 Physical ownership is stored in a controlled persistent owner manifest keyed by
 channel, allocation kind, address and full shared control. A row keeps its exact
@@ -1253,7 +1255,9 @@ populated ledger requires the exact union, enumerates the imported rows once and
 reports that work. Imported owners participate in later retention, duplicate and
 control detection, payload and bookkeeping queries and the borrowed physical
 census exactly like locally admitted owners; the admission entry points consult
-the imported root before charging or publishing anything.
+the imported root before charging or publishing anything. A ledger import accepts
+one arithmetic channel, preserves its mode for later retention, and poisons the
+ledger on every rejected import, including a partially admitted dependency set.
 
 The published geometry cache keeps one exact owner manifest per root slot and per
 owner channel (ordinary and bounded certification). A root manifest is built once
@@ -1266,10 +1270,15 @@ preserved.
 Root replacement rebuilds the exact cache union from those manifests: each root
 contributes its own authenticated set, empty channels are skipped, and no
 snapshot dependency graph is re-walked. The residency seal and lease are that
-union's payload plus the union ledger's own bookkeeping, so the seal remains an
-exact-union admission and every later source/rebinding query consumes it without
-another census. The cache also accumulates the persistent-catalog construction
-work of each replacement (copied metadata bytes, copied pages and visited
+union's payload plus the union ledger's own bookkeeping and all cache-held
+manifest metadata, counting an index shared with an imported ledger once. Thus
+every later source/rebinding query consumes the complete seal without another
+census. Capture and export admit their transient buffers and persistent index
+allocations before allocation under the remaining finite budget. Prepared-slot
+rebinding also admits replacement catalog pages into the hierarchy overlap.
+Publication stages the replacement manifests, complete union and final lease
+admission before changing the accepted roots, manifests or seal. The cache also
+accumulates the persistent-catalog construction work of each replacement (copied metadata bytes, copied pages and visited
 pages), so a fixed demand change appended to a warm selection can be shown to
 copy a bounded amount independent of that selection's size. Its regression reconstructs the same union independently from
 fresh per-root manifests and additionally requires that union's payload to equal
