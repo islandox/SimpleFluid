@@ -6,6 +6,16 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/NonOrthogonalCorrection.cc
     explicit_instantiation/TransportGeometryCache.cc
     explicit_instantiation/MappedWeightedTransportSystem.cc
+    explicit_instantiation/FieldStoredTransportSystem/ScalarMeshHandle.cc
+    explicit_instantiation/FieldStoredTransportSystem/VectorMeshHandle.cc
+    explicit_instantiation/FieldStoredTransportSystem/MomentumMeshHandle.cc
+    explicit_instantiation/FieldStoredTransportSystem/ScalarPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredTransportSystem/WeightedTemperaturePartitionedCartesian.cc
+    explicit_instantiation/FieldStoredTransportSystem/VectorPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredTransportSystem/MomentumPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredTransportSystem/SupportPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredTransportSystem/ScalarSolidSubdomain.cc
+    explicit_instantiation/FieldStoredTransportSystem/TemperatureSolidSubdomain.cc
     explicit_instantiation/WeightedScalarTransportSystem.cc
     explicit_instantiation/PhysicalTemperatureTransportSystem.cc
     explicit_instantiation/PhysicalMomentumTransportSystem.cc

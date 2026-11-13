@@ -16,6 +16,7 @@
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/ScalarTransportDiscretization.hh"
 #include "FVM/details/FieldStoredTransportSystem.hh"
+#include "FVM/details/TransportAssemblyGeometry.hh"
 #include "FVM/details/TransportValidation.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "SimpleFluidExport.hh"
@@ -320,16 +321,11 @@ using MeshWeightedScalarTransportRequest = detail::BasicWeightedScalarTransportR
  * implicit, or hybrid correction on a semi-structured mesh.
  */
 template<TpetraTypePack Pack, class MeshType>
-TransportSystem<Pack> transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
+SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
     const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> right_hand_source,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null)
-{
-    return detail::stored_scalar_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
-        std::move(boundary_condition), std::move(boundary_value), std::move(right_hand_source),
-        std::move(cached_matrix));
-}
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null);
 
 /** @brief Assemble mapped scalar transport with a zero source. */
 template<TpetraTypePack Pack, class MeshType>
@@ -352,19 +348,14 @@ TransportSystem<Pack> transport_system(const ScalarCellFieldStored<Pack, MeshTyp
  * steps when they were constructed for the same mesh and operator graph.
  */
 template<TpetraTypePack Pack, class MeshType>
-TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
-    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> right_hand_source,
-    NonOrthogonalTreatment treatment,
+SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> non_orthogonal_transport_system(
+    const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
-    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr)
-{
-    return detail::stored_scalar_non_orthogonal_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
-        std::move(boundary_condition), std::move(boundary_value), std::move(right_hand_source), treatment,
-        correction_field, std::move(cached_matrix), geometry_cache);
-}
+    const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr);
 
 /**
  * @brief Assemble mapped weighted scalar transport from named inputs.
@@ -376,16 +367,7 @@ TransportSystem<Pack> non_orthogonal_transport_system(const ScalarCellFieldStore
  */
 template<TpetraTypePack Pack, class MeshType>
 SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(
-    FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request)
-{
-    return detail::stored_weighted_scalar_transport_system<Pack>(request.old_values, request.face_fluxes,
-        request.time_step, request.storage_weight, request.advection_weight, request.diffusivity,
-        std::move(request.boundary_condition), std::move(request.boundary_value), std::move(request.source),
-        request.treatment, request.correction_field, std::move(request.cached_matrix), std::move(request.implicit_sink),
-        std::move(request.fixed_cell_value), request.boundary_diffusivity, request.geometry_cache,
-        request.coefficient_interpolation, request.discretization, request.older_values, request.old_storage_weight,
-        request.ale, request.symbolic_plan, std::move(request.cached_rhs));
-}
+    FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request);
 
 /**
  * @brief Compiled mapped weighted-scalar entry point for the supported runtime mesh.
@@ -394,11 +376,12 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(
  * translation unit duplicates the whole kernel once per consumer and, through
  * MeshHandle, once per concrete geometry backend. The default runtime-mesh
  * specialization is compiled once in the FVM library. Caller-defined mesh
- * types and Tpetra packs remain supported through the inline template above.
+ * types and Tpetra packs provide their own compiled unit including
+ * FVM/FieldStoredTransportSystem.tcc.
  */
-extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>(
-    FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>);
+extern template TransportSystem<DefaultTpetraTypes>
+    weighted_scalar_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
+        FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>);
 
 /**
  * @brief Compatibility overload for weighted scalar transport on mapped fields.
@@ -526,15 +509,8 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
-    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr, bool rhs_only = false, AssemblyMode mode = AssemblyMode::Transient)
-{
-    return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
-        specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
-        std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
-        geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{.mode = mode},
-        static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr), old_density, old_specific_heat_capacity,
-        ale, rhs_only);
-}
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr,
+    bool rhs_only = false, AssemblyMode mode = AssemblyMode::Transient);
 
 /**
  * @brief Assemble mapped physical temperature with opt-in scalar schemes.
@@ -560,17 +536,10 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
-    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr)
-{
-    return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
-        specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
-        std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
-        geometry_cache, coefficient_interpolation, discretization, older_temperature, old_density,
-        old_specific_heat_capacity, ale);
-}
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr);
 
 // The default mapped physical wrappers share the weighted provider's concrete
-// coefficient-access kernel. Other meshes and packs retain the generic bodies.
+// coefficient-access kernel. Custom providers opt into the public .tcc bodies.
 // Instantiations inherit visibility from the exported primary templates.
 extern template TransportSystem<DefaultTpetraTypes>
 physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
@@ -607,20 +576,16 @@ physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpet
  * non-null, @p face_fluxes must be the synchronized mesh-relative flux.
  */
 template<TpetraTypePack Pack, class MeshType>
-VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFieldStored<Pack, MeshType>& old_values,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    typename Pack::scalar_type diffusivity, VectorBoundaryValueProvider<Pack> boundary_value,
-    VectorCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
+SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<Pack> non_orthogonal_transport_system(
+    const VectorCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
+    typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity,
+    VectorBoundaryValueProvider<Pack> boundary_value, VectorCellValueProvider<Pack> right_hand_source,
+    NonOrthogonalTreatment treatment,
     const std::type_identity_t<VectorCellFieldStored<Pack, MeshType>>* correction_field = nullptr,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     const std::type_identity_t<TransportGeometryCache<MeshType>>* geometry_cache = nullptr,
-    const ALEControlVolumeState* ale = nullptr)
-{
-    return detail::stored_vector_transport_system<Pack>(old_values, face_fluxes, time_step, diffusivity,
-        std::move(boundary_value), std::move(right_hand_source), treatment, correction_field, std::move(cached_matrix),
-        std::move(boundary_diffusion), geometry_cache, ale);
-}
+    const ALEControlVolumeState* ale = nullptr);
 
 /**
  * @brief Assemble mapped momentum transport with variable viscosity.
@@ -633,7 +598,7 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
  * values are recomputed and synchronized for every assembly.
  */
 template<TpetraTypePack Pack, class MeshType>
-VectorTransportSystem<Pack> physical_momentum_transport_system(
+SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<Pack> physical_momentum_transport_system(
     const VectorCellFieldStored<Pack, MeshType>& old_velocity, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
     typename Pack::scalar_type time_step, const ScalarCellFieldStored<Pack, MeshType>& dynamic_viscosity,
     typename Pack::scalar_type reference_density, VectorBoundaryValueProvider<Pack> boundary_value,
@@ -646,14 +611,7 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
     std::type_identity_t<TensorCellFieldStored<Pack, MeshType>>* gradient_workspace = nullptr,
-    BoundaryFaceSelector zero_gradient_stress = {}, AssemblyMode mode = AssemblyMode::Transient)
-{
-    return detail::stored_physical_momentum_transport_system<Pack>(old_velocity, face_fluxes, time_step,
-        dynamic_viscosity, reference_density, std::move(boundary_value), std::move(acceleration_source), treatment,
-        correction_field, std::move(cached_matrix), std::move(boundary_diffusion), boundary_dynamic_viscosity,
-        geometry_cache, coefficient_interpolation, ale, gradient_workspace, std::move(zero_gradient_stress), mode);
-}
-
+    BoundaryFaceSelector zero_gradient_stress = {}, AssemblyMode mode = AssemblyMode::Transient);
 /**
  * @brief Assemble the semi-implicit transport system (unsteady
  *        advection-diffusion) for a scalar field.

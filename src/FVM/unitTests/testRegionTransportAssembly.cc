@@ -5,12 +5,10 @@
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"
+#include "transport_providers/TestMeshes.hh"
+// This test owns field storage for its custom ReferenceHandle.
 #include "fields/FieldStored.tcc"
-// The TU-local ReferenceHandle needs its own ALE validation instantiation.
-#include "FVM/ALEControlVolumeState.tcc"
 #include "geometry/MeshHandle.hh"
-// The TU-local ReferenceHandle also owns its traversal-plan instantiation.
-#include "geometry/MeshTraverse.tcc"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -31,11 +29,7 @@ using Vec = MeshUtils::Vec3;
 
 // Retain precisely the same providers, local IDs and maps while selecting the
 // generic cached-row/metric path. No production execution switch is needed.
-struct ReferenceHandle : Handle
-{
-    using Handle::Handle;
-    bool supports_region_execution() const noexcept { return false; }
-};
+using ReferenceHandle = test::transport_providers::ReferenceHandle;
 
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);

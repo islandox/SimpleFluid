@@ -202,3 +202,25 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;fvm;transport;legacy"
     TIMEOUT 120)
+
+# Custom meshes own their implementation providers outside public headers.
+target_sources(testStoredTransportReuse PRIVATE transport_providers/EpochMatrix.cc)
+target_sources(testRegionTransportAssembly PRIVATE
+    transport_providers/ReferenceGeometry.cc
+    transport_providers/ReferenceWeightedScalar.cc
+    transport_providers/ReferenceMomentum.cc)
+
+# Test-owned generic providers have the same private visibility boundary as
+# library implementation units. Bypass the executable PCH with different flags.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(_stored_transport_test_providers
+        transport_providers/EpochMatrix.cc
+        transport_providers/ReferenceGeometry.cc
+        transport_providers/ReferenceWeightedScalar.cc
+        transport_providers/ReferenceMomentum.cc)
+    set_source_files_properties(${_stored_transport_test_providers}
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    set_property(SOURCE ${_stored_transport_test_providers} APPEND PROPERTY
+        COMPILE_OPTIONS -fvisibility=hidden -fvisibility-inlines-hidden)
+    unset(_stored_transport_test_providers)
+endif()

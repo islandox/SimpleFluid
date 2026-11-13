@@ -613,8 +613,9 @@ The default transport providers in `FVM/explicit_instantiation/` compile
 geometry caches, mapped weighted transport, legacy weighted transport,
 physical temperature, physical momentum, and basic scalar/vector assembly in
 separate translation units. The existing public entry points and supported
-type packs are unchanged. Custom packs continue to provide their own
-instantiations by including `FVM/TransportSystem.tcc`.
+type packs are unchanged. Legacy custom packs provide their own instantiations
+through `FVM/TransportSystem.tcc`; mapped custom mesh/type-pack providers
+include `FVM/FieldStoredTransportSystem.tcc`.
 
 The default legacy weighted overloads and mapped named-request overload have
 `extern template` declarations in the public header. Their dedicated providers
@@ -703,3 +704,14 @@ cells plus scalar faces on `SolidSubdomain`. Other descriptors, meshes or type
 packs supply their own provider by including `fields/FieldStored.tcc`.
 Location-based weak layout caches, collective hit/miss decisions, owned/overlap
 maps, implicit copy/move behavior and field object layout remain unchanged.
+
+Mapped transport declarations and symbolic-plan layout live in
+`details/FieldStoredTransportSystem.hh`; its `.ipp` retains the generic
+read-only nonorthogonality query and its `.tcc` contains heavy builders.
+The public mapped assembly definitions live in
+`FVM/FieldStoredTransportSystem.tcc`, outside the declaration include graph.
+Default providers cover runtime handles, the supported static Cartesian
+partition wrapper, and solid scalar/temperature paths. Custom meshes own a
+provider including that public `.tcc`, plus `fields/FieldStored.tcc` when
+custom storage has no compiled provider. Detail builders remain local to the
+owning image; public APIs retain targeted export visibility.

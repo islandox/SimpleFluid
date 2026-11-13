@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"
+#include "transport_providers/TestMeshes.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
@@ -153,15 +154,7 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
 TEST(StoredTransportReuseTest, SymbolicPlanValidatesChangedGraphsEpochsAndRankCategories)
 {
     const auto mesh = make_mesh();
-    struct EpochMesh
-    {
-        const Handle& mesh;
-        std::uint64_t epoch = 0;
-        auto owned_cell_map() const { return mesh.owned_cell_map(); }
-        auto overlap_cell_map() const { return mesh.overlap_cell_map(); }
-        auto num_owned_cells() const { return mesh.num_owned_cells(); }
-        auto geometry_epoch() const { return epoch; }
-    } epoch_mesh{*mesh};
+    test::transport_providers::EpochMesh epoch_mesh{*mesh};
     std::vector<Row> rows(mesh->num_owned_cells());
     for (size_t row = 0; row < rows.size(); ++row)
     {
