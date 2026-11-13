@@ -57,7 +57,7 @@ Split storage and symbol selection are independent: `-gsplit-dwarf` does not
 enable debug information, and `OFF` selections still append `-g0` (the compiler
 may emit an empty `.dwo`). Keep the `.dwo` files and their build-tree paths
 available to the debugger; copying a binary alone is insufficient. Set
-`SIMPLEFLUID_SPLIT_DEBUG_INFO=OFF` for conventional embedded debug information.
+`SIMPLEFLUID_SPLIT_DEBUG_INFO=OFF` for embedded debug information in non-IPO targets.
 
 The GitHub Actions build uses `.github/scripts/ccache-split-dwarf.py` as the
 C/C++ compiler launcher around ccache. For split compilations it passes
@@ -89,16 +89,35 @@ run them locally with `python3 -m unittest discover -s .github/scripts/tests -v`
 Split mode preserves optimization and IPO/LTO policy. A target is eligible only
 when IPO is disabled for the active configuration: its
 `INTERPROCEDURAL_OPTIMIZATION_<CONFIG>` property takes precedence over the
-general `INTERPROCEDURAL_OPTIMIZATION` property. IPO targets retain conventional
-embedded DWARF because GCC LTO cannot provide reusable split DWARF and Clang LTO
-creates per-link debug bundles. Storage follows this target-level decision even
-when a source's numerical options include `-fno-lto`.
+general `INTERPROCEDURAL_OPTIMIZATION` property. IPO targets retain embedded
+DWARF because GCC LTO cannot provide reusable split DWARF and Clang LTO creates
+per-link debug bundles. Storage follows this target-level decision even when a
+source's numerical options include `-fno-lto`.
+
+`SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO` defaults to `ON` on Linux with GCC or Clang
+and `OFF` on other platforms/toolchains. Configuration probes linker support for
+`--compress-debug-sections=zlib`; an unsupported opt-in fails with a clear error.
+Use `OFF` with an unsupported linker or to retain uncompressed embedded DWARF.
+For IPO-enabled Debug and RelWithDebInfo executables and shared/module libraries,
+it adds only `LINKER:--compress-debug-sections=zlib`. The standard zlib-compressed
+embedded DWARF remains usable with GDB and stays separate from reusable `.dwo`
+storage. Compression works independently of `SIMPLEFLUID_SPLIT_DEBUG_INFO`,
+preserves LTO and compile/numerical flags, and does not enable debug information.
+Static/object libraries, Release, and non-IPO configurations receive no compression
+option. A non-IPO final link remains ineligible even when its static inputs contain
+embedded DWARF. The same effective per-configuration IPO property precedence
+used for split storage controls compression.
 
 With the defaults, Debug uses reusable split information, while RelWithDebInfo
-targets with LTO retain embedded information. Set `SIMPLEFLUID_ENABLE_LTO=OFF`
-to obtain reusable split information in both configurations for project targets
+targets with LTO retain zlib-compressed embedded information. Set
+`SIMPLEFLUID_ENABLE_LTO=OFF` to obtain reusable split information in both configurations for project targets
 governed by that option. PGO remains available; split mode is part of profile
 provenance, so existing profiles require fresh training.
+
+The standalone [debug-symbol policy fixture](testing/debug_symbols/README.md)
+checks GCC and Clang/LLD compression, IPO overrides, opt-outs, split storage,
+ELF section headers, executable behavior and GDB source breakpoints without
+building SimpleFluid's numerical dependencies.
 
 | Module | Compiled scope and fallback order before the global setting |
 | --- | --- |

@@ -3,25 +3,41 @@ include_guard(GLOBAL)
 
 # Keep each translation unit's DWARF beside its object, so static-library
 # consumers reuse the same debug data instead of copying it into every binary.
-set(_simplefluid_split_debug_default OFF)
+set(_simplefluid_debug_storage_default OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang)$")
-    set(_simplefluid_split_debug_default ON)
+    set(_simplefluid_debug_storage_default ON)
 endif()
 option(SIMPLEFLUID_SPLIT_DEBUG_INFO
     "Keep Debug/RelWithDebInfo symbols in reusable .dwo files (Linux GCC/Clang)"
-    ${_simplefluid_split_debug_default})
-unset(_simplefluid_split_debug_default)
-if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
-    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        message(FATAL_ERROR "SIMPLEFLUID_SPLIT_DEBUG_INFO requires Linux GCC or Clang")
-    endif()
-    include(CheckCompilerFlag)
-    include(CheckLinkerFlag)
-    foreach(language IN ITEMS C CXX)
-        if(CMAKE_${language}_COMPILER_LOADED)
-            if(NOT CMAKE_${language}_COMPILER_ID MATCHES "^(GNU|Clang)$")
-                message(FATAL_ERROR "SIMPLEFLUID_SPLIT_DEBUG_INFO requires GCC or Clang (${language})")
+    ${_simplefluid_debug_storage_default})
+option(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO
+    "Compress embedded Debug/RelWithDebInfo symbols in IPO links with zlib (Linux GCC/Clang)"
+    ${_simplefluid_debug_storage_default})
+unset(_simplefluid_debug_storage_default)
+foreach(option_name IN ITEMS SIMPLEFLUID_SPLIT_DEBUG_INFO SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
+    if(${option_name})
+        if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            message(FATAL_ERROR "${option_name} requires Linux GCC or Clang")
+        endif()
+        foreach(language IN ITEMS C CXX)
+            if(CMAKE_${language}_COMPILER_LOADED AND
+               NOT CMAKE_${language}_COMPILER_ID MATCHES "^(GNU|Clang)$")
+                message(FATAL_ERROR "${option_name} requires GCC or Clang (${language})")
             endif()
+        endforeach()
+    endif()
+endforeach()
+unset(option_name)
+if(SIMPLEFLUID_SPLIT_DEBUG_INFO OR SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
+    include(CheckLinkerFlag)
+    if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
+        include(CheckCompilerFlag)
+    endif()
+    foreach(language IN ITEMS C CXX)
+        if(NOT CMAKE_${language}_COMPILER_LOADED)
+            continue()
+        endif()
+        if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
             check_compiler_flag(${language} "-gsplit-dwarf" SIMPLEFLUID_${language}_HAS_SPLIT_DWARF)
             if(NOT SIMPLEFLUID_${language}_HAS_SPLIT_DWARF)
                 message(FATAL_ERROR "SIMPLEFLUID_SPLIT_DEBUG_INFO requires -gsplit-dwarf support (${language})")
@@ -35,9 +51,18 @@ if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
                     "select a compatible linker or set SIMPLEFLUID_SPLIT_DEBUG_INFO=OFF")
             endif()
         endif()
+        if(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
+            check_linker_flag(${language} "LINKER:--compress-debug-sections=zlib"
+                SIMPLEFLUID_${language}_HAS_COMPRESSED_LTO_DEBUG_INFO)
+            if(NOT SIMPLEFLUID_${language}_HAS_COMPRESSED_LTO_DEBUG_INFO)
+                message(FATAL_ERROR
+                    "SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO requires --compress-debug-sections=zlib support (${language}); "
+                    "select a compatible linker or set SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO=OFF")
+            endif()
+        endif()
     endforeach()
-    unset(language)
 endif()
+unset(language)
 
 set(_simplefluid_debug_symbol_modules
     CORE IO PARALLEL MESH PLIC SWEPT_VOLUME FIELDS FVM EQUATIONS SOLVERS
@@ -99,9 +124,10 @@ function(simplefluid_finalize_debug_symbols directory)
         if(imported OR NOT target_type MATCHES "^(STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY|EXECUTABLE)$")
             continue()
         endif()
-        if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
+        if(SIMPLEFLUID_SPLIT_DEBUG_INFO OR SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO)
             # GCC LTO does not support reusable split DWARF. Clang LTO emits
-            # per-link bundles instead. Preserve IPO and its embedded symbols.
+            # per-link bundles instead. Preserve IPO and compress its embedded
+            # symbols only in final links; non-IPO storage follows split policy.
             foreach(config IN ITEMS Debug RelWithDebInfo)
                 string(TOUPPER "${config}" config_upper)
                 get_property(ipo_config_set TARGET ${target_name}
@@ -112,7 +138,13 @@ function(simplefluid_finalize_debug_symbols directory)
                 else()
                     get_property(ipo TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION)
                 endif()
-                if(NOT ipo)
+                if(ipo)
+                    if(SIMPLEFLUID_COMPRESS_LTO_DEBUG_INFO AND
+                       target_type MATCHES "^(SHARED_LIBRARY|MODULE_LIBRARY|EXECUTABLE)$")
+                        target_link_options(${target_name} PRIVATE
+                            "$<$<CONFIG:${config}>:LINKER:--compress-debug-sections=zlib>")
+                    endif()
+                elseif(SIMPLEFLUID_SPLIT_DEBUG_INFO)
                     target_compile_options(${target_name} PRIVATE
                         "$<$<AND:$<CONFIG:${config}>,$<COMPILE_LANGUAGE:C,CXX>>:-gsplit-dwarf>")
                     if(target_type MATCHES "^(SHARED_LIBRARY|MODULE_LIBRARY|EXECUTABLE)$")
