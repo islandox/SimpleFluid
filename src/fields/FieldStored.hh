@@ -15,7 +15,6 @@
 #include "geometry/MeshHandle.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
-#include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Access.hpp>
 #include <Tpetra_CombineMode.hpp>
 
@@ -111,50 +110,7 @@ struct StoredFieldLayout
     template<class MakeIds>
     static std::shared_ptr<const StoredFieldLayout> acquire(
         const MeshType& mesh, const Teuchos::RCP<const map_type>& owned,
-        const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids)
-    {
-        const std::lock_guard lock(mutex);
-        std::shared_ptr<const StoredFieldLayout> cached;
-        for (auto it = entries.begin(); it != entries.end();)
-        {
-            if (auto entry = it->lock())
-            {
-                if (entry->mesh == &mesh && entry->owned.getRawPtr() == owned.getRawPtr()
-                    && entry->overlap.getRawPtr() == overlap.getRawPtr())
-                    cached = entry;
-                ++it;
-            }
-            else it = entries.erase(it);
-        }
-        // Import construction is collective. Rank-local field lifetimes may
-        // differ, so only reuse when every rank has a live matching layout.
-        const int local_hit = cached ? 1 : 0;
-        int all_hit = 0;
-        Teuchos::reduceAll(*owned->getComm(), Teuchos::REDUCE_MIN, 1, &local_hit, &all_hit);
-        if (all_hit) return cached;
-        std::shared_ptr<StoredFieldLayout> entry;
-        int local_valid = 1, all_valid = 0;
-        try
-        {
-            entry = std::make_shared<StoredFieldLayout>();
-            entry->mesh = &mesh;
-            entry->owned = owned;
-            entry->overlap = overlap;
-            entry->owned_face_ids = make_ids();
-            entries.reserve(entries.size() + 1);
-        }
-        catch (...)
-        {
-            local_valid = 0;
-        }
-        Teuchos::reduceAll(*owned->getComm(), Teuchos::REDUCE_MIN, 1,
-                          &local_valid, &all_valid);
-        if (!all_valid)
-            throw std::runtime_error("FieldStored layout allocation or owned-face validation failed on a rank.");
-        entry->importer = Teuchos::rcp(new import_type(owned, overlap));
-        entries.emplace_back(entry);
-        return entry;
-    }
+        const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids);
 };
 
 } // namespace detail
@@ -211,55 +167,25 @@ public:
     explicit FieldStored(
         descriptor_type descriptor,
         SP<const mesh_type> mesh,
-        bool zero_out = true)
-        : d_descriptor(std::move(descriptor)),
-          d_mesh(require_mesh(std::move(mesh))),
-          d_owned(make_storage(map_for<false>(*d_mesh), zero_out)),
-          d_overlap(make_storage(map_for<true>(*d_mesh), false)),
-          d_layout(layout_type::acquire(*d_mesh, d_owned.getMap(), d_overlap.getMap(),
-              [this] { return make_owned_face_ids(*d_mesh); })),
-          d_import(d_layout->importer)
-    {
-        if (zero_out)
-        {
-            sync_ghosts();
-        }
-    }
+        bool zero_out = true);
 
     /**
      * @brief Construct from a mesh first for compatibility with solver fields.
      */
-    explicit FieldStored(
+    explicit inline FieldStored(
         SP<const mesh_type> mesh,
         std::string name = {},
-        bool zero_out = true)
-        : FieldStored(
-              descriptor_type(std::move(name)),
-              std::move(mesh),
-              zero_out)
-    {
-    }
+        bool zero_out = true);
 
     /** @brief Allocate storage and initialize every local entry. */
     FieldStored(descriptor_type descriptor,
                 SP<const mesh_type> mesh,
-                const value_type& initial_value)
-        : FieldStored(
-              std::move(descriptor), std::move(mesh), false)
-    {
-        put_value(initial_value);
-    }
+                const value_type& initial_value);
 
     /** @brief Mesh-first uniformly initialized compatibility constructor. */
-    FieldStored(SP<const mesh_type> mesh,
+    inline FieldStored(SP<const mesh_type> mesh,
                 const value_type& initial_value,
-                std::string name = {})
-        : FieldStored(
-              descriptor_type(std::move(name)),
-              std::move(mesh),
-              initial_value)
-    {
-    }
+                std::string name = {});
 
     const descriptor_type& descriptor() const noexcept
     {
@@ -400,26 +326,7 @@ public:
     }
 
     /** @brief Assign one value to every owned and overlap entry. */
-    void put_value(const value_type& value)
-    {
-        if constexpr (value_traits::is_vector)
-        {
-            for (size_t component = 0;
-                 component < value_traits::components;
-                 ++component)
-            {
-                d_owned.getVectorNonConst(component)->putScalar(
-                    value_traits::component(value, component));
-                d_overlap.getVectorNonConst(component)->putScalar(
-                    value_traits::component(value, component));
-            }
-        }
-        else
-        {
-            d_owned.putScalar(value);
-            d_overlap.putScalar(value);
-        }
-    }
+    void put_value(const value_type& value);
 
     /** @brief Compatibility alias for assigning one value everywhere. */
     void put_scalar(const value_type& value)
@@ -443,42 +350,10 @@ public:
     }
 
     scalar_type component_value(local_ordinal_type local_id,
-                                size_t component) const
-    {
-        check_component(component);
-        if constexpr (value_traits::is_vector)
-        {
-            return d_owned.getData(component)[owned_row(local_id)];
-        }
-        else
-        {
-            if (component != 0)
-            {
-                throw std::out_of_range(
-                    "Scalar field has only component zero.");
-            }
-            return value(local_id);
-        }
-    }
+                                size_t component) const;
 
     scalar_type local_component_value(local_ordinal_type local_id,
-                                      size_t component) const
-    {
-        check_component(component);
-        if constexpr (value_traits::is_vector)
-        {
-            return d_overlap.getData(component)[overlap_row(local_id)];
-        }
-        else
-        {
-            if (component != 0)
-            {
-                throw std::out_of_range(
-                    "Scalar field has only component zero.");
-            }
-            return local_value(local_id);
-        }
-    }
+                                      size_t component) const;
 
     /**
      * @brief Update an owned entry and its local overlap copy.
@@ -504,48 +379,12 @@ public:
 
     void set_component_value(local_ordinal_type local_id,
                              size_t component,
-                             scalar_type value)
-    {
-        check_component(component);
-        if constexpr (value_traits::is_vector)
-        {
-            d_owned.replaceLocalValue(
-                owned_row(local_id), component, value);
-            d_overlap.replaceLocalValue(
-                overlap_row(local_id), component, value);
-        }
-        else
-        {
-            if (component != 0)
-            {
-                throw std::out_of_range(
-                    "Scalar field has only component zero.");
-            }
-            set_value(local_id, value);
-        }
-    }
+                             scalar_type value);
 
     /** @brief Update one authoritative component without touching overlap data. */
     void set_owned_component_value(local_ordinal_type local_id,
                                    size_t component,
-                                   scalar_type value)
-    {
-        check_component(component);
-        if constexpr (value_traits::is_vector)
-        {
-            d_owned.replaceLocalValue(
-                owned_row(local_id), component, value);
-        }
-        else
-        {
-            if (component != 0)
-            {
-                throw std::out_of_range(
-                    "Scalar field has only component zero.");
-            }
-            set_owned_value(local_id, value);
-        }
-    }
+                                   scalar_type value);
 
     /** @brief Accumulate a scalar value into owned and local copies. */
     void sum_into_value(local_ordinal_type local_id, scalar_type value)
@@ -845,51 +684,10 @@ private:
 
     static storage_type make_storage(
         const Teuchos::RCP<const map_type>& map,
-        bool zero_out)
-    {
-        if constexpr (value_traits::is_vector)
-        {
-            return storage_type(
-                map, value_traits::components, zero_out);
-        }
-        else
-        {
-            return storage_type(map, zero_out);
-        }
-    }
+        bool zero_out);
 
     static std::vector<local_ordinal_type> make_owned_face_ids(
-        const mesh_type& mesh)
-    {
-        std::vector<local_ordinal_type> result;
-        if constexpr (std::is_same_v<location_type, FaceLocation>)
-        {
-            result.reserve(mesh.num_owned_faces());
-            for (size_t face = 0; face < mesh.num_faces(); ++face)
-            {
-                const auto face_lid = static_cast<local_ordinal_type>(face);
-                if (mesh.is_owned_face(face_lid))
-                {
-                    result.push_back(face_lid);
-                }
-            }
-            if (result.size() != mesh.num_owned_faces())
-            {
-                throw std::runtime_error(
-                    "FieldStored owned-face IDs do not match the owned map.");
-            }
-            for (size_t row = 0; row < result.size(); ++row)
-            {
-                if (result[row] != static_cast<local_ordinal_type>(row))
-                {
-                    throw std::runtime_error(
-                        "FieldStored requires owned faces to form a "
-                        "local-ID prefix.");
-                }
-            }
-        }
-        return result;
-    }
+        const mesh_type& mesh);
 
     static constexpr local_ordinal_type invalid_local_ordinal()
     {
@@ -989,53 +787,11 @@ private:
 
     static value_type value_at(
         const storage_type& storage,
-        local_ordinal_type row)
-    {
-        if constexpr (value_traits::components == 9)
-        {
-            value_type value{};
-            for (size_t component = 0;
-                 component < value_traits::components;
-                 ++component)
-            {
-                value[component / 3].component(component % 3) =
-                    storage.getData(component)[row];
-            }
-            return value;
-        }
-        else if constexpr (value_traits::is_vector)
-        {
-            return {
-                storage.getData(0)[row],
-                storage.getData(1)[row],
-                storage.getData(2)[row]};
-        }
-        else
-        {
-            return storage.getData()[row];
-        }
-    }
+        local_ordinal_type row);
 
     static void set_at(storage_type& storage,
                        local_ordinal_type row,
-                       const value_type& value)
-    {
-        if constexpr (value_traits::is_vector)
-        {
-            for (size_t component = 0;
-                 component < value_traits::components;
-                 ++component)
-            {
-                storage.replaceLocalValue(
-                    row, component,
-                    value_traits::component(value, component));
-            }
-        }
-        else
-        {
-            storage.replaceLocalValue(row, value);
-        }
-    }
+                       const value_type& value);
 
     using layout_type = detail::StoredFieldLayout<Pack, mesh_type, location_type>;
 
@@ -1092,5 +848,57 @@ using AnyFieldStored = std::variant<
     SP<VectorFaceFieldStored<Pack, MeshType>>,
     SP<ScalarBoundaryFaceFieldStored<Pack, MeshType>>,
     SP<VectorBoundaryFaceFieldStored<Pack, MeshType>>>;
+
+} // namespace SimpleFluid
+
+#include "fields/FieldStored.ipp"
+
+namespace SimpleFluid
+{
+// Default providers own construction and bulk initialization. Other descriptors,
+// packs or meshes can supply a provider that includes fields/FieldStored.tcc.
+extern template ScalarCellFieldStored<>::FieldStored(
+    ScalarCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template ScalarCellFieldStored<>::FieldStored(
+    ScalarCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, const ScalarCellFieldStored<>::value_type&);
+extern template void ScalarCellFieldStored<>::put_value(const ScalarCellFieldStored<>::value_type&);
+
+extern template VectorCellFieldStored<>::FieldStored(
+    VectorCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template VectorCellFieldStored<>::FieldStored(
+    VectorCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, const VectorCellFieldStored<>::value_type&);
+extern template void VectorCellFieldStored<>::put_value(const VectorCellFieldStored<>::value_type&);
+
+extern template TensorCellFieldStored<>::FieldStored(
+    TensorCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template TensorCellFieldStored<>::FieldStored(
+    TensorCellFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, const TensorCellFieldStored<>::value_type&);
+extern template void TensorCellFieldStored<>::put_value(const TensorCellFieldStored<>::value_type&);
+
+extern template ScalarFaceFieldStored<>::FieldStored(
+    ScalarFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template ScalarFaceFieldStored<>::FieldStored(
+    ScalarFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, const ScalarFaceFieldStored<>::value_type&);
+extern template void ScalarFaceFieldStored<>::put_value(const ScalarFaceFieldStored<>::value_type&);
+
+extern template VectorFaceFieldStored<>::FieldStored(
+    VectorFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template VectorFaceFieldStored<>::FieldStored(
+    VectorFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, const VectorFaceFieldStored<>::value_type&);
+extern template void VectorFaceFieldStored<>::put_value(const VectorFaceFieldStored<>::value_type&);
+
+extern template ScalarBoundaryFaceFieldStored<>::FieldStored(
+    ScalarBoundaryFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template ScalarBoundaryFaceFieldStored<>::FieldStored(
+    ScalarBoundaryFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>,
+    const ScalarBoundaryFaceFieldStored<>::value_type&);
+extern template void ScalarBoundaryFaceFieldStored<>::put_value(const ScalarBoundaryFaceFieldStored<>::value_type&);
+
+extern template VectorBoundaryFaceFieldStored<>::FieldStored(
+    VectorBoundaryFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>, bool);
+extern template VectorBoundaryFaceFieldStored<>::FieldStored(
+    VectorBoundaryFaceFieldDescriptor<>, SP<const MeshHandle<DefaultTpetraTypes>>,
+    const VectorBoundaryFaceFieldStored<>::value_type&);
+extern template void VectorBoundaryFaceFieldStored<>::put_value(const VectorBoundaryFaceFieldStored<>::value_type&);
 
 } // namespace SimpleFluid

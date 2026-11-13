@@ -691,3 +691,15 @@ providers reference these compiled methods instead of instantiating them.
 The temperature `.tcc` includes the response `.tcc` for generic mesh/type-pack
 providers, including the existing solid-subdomain path. This retains generic
 support and repeated parsing while isolating default instantiation work.
+
+`fields/FieldStored.hh` retains descriptor traits, class layout, aliases and
+short storage queries. Generic location-layout acquisition and longer hot
+indexed operations live in `.ipp`; mesh-first constructor forwarding also
+stays inline so descriptor creation retains its caller context. The two
+descriptor-first constructors, bulk initialization and allocation helpers live
+in `.tcc`. The static Fields target provides those cold members for all seven
+default `MeshHandle` aliases, the five used Cartesian aliases, and scalar/vector
+cells plus scalar faces on `SolidSubdomain`. Other descriptors, meshes or type
+packs supply their own provider by including `fields/FieldStored.tcc`.
+Location-based weak layout caches, collective hit/miss decisions, owned/overlap
+maps, implicit copy/move behavior and field object layout remain unchanged.

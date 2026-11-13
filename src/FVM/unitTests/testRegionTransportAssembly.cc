@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"
+#include "fields/FieldStored.tcc"
 // The TU-local ReferenceHandle needs its own ALE validation instantiation.
 #include "FVM/ALEControlVolumeState.tcc"
 #include "geometry/MeshHandle.hh"
