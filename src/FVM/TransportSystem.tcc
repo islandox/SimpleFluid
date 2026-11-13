@@ -917,7 +917,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(const CellField<Pack>& ol
 }
 
 template<TpetraTypePack Pack>
-TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request)
+SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRequest<Pack> request)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;

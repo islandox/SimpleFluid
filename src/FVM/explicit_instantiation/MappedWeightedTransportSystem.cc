@@ -34,14 +34,14 @@ using MappedBoundaryCache = FieldStoredBoundaryCache<Pack, MeshHandle<Pack>>;
 template TransportSystem<Pack> weighted_scalar_transport_system<Pack, MeshHandle<Pack>>(
     FieldStoredWeightedScalarTransportRequest<Pack, MeshHandle<Pack>>);
 
-template SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
+template TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
     const MappedScalarField&, const MappedFluxField&, Scalar, const MappedScalarField&, const MappedScalarField&,
     const MappedScalarField&, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>,
     ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const MappedScalarField*, Teuchos::RCP<Matrix>,
     const MappedBoundaryCache*, const MappedGeometryCache*, FaceCoefficientInterpolation, const ALEControlVolumeState*,
     const MappedScalarField*, const MappedScalarField*, bool, AssemblyMode);
 
-template SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
+template TransportSystem<Pack> physical_temperature_transport_system<Pack, MeshHandle<Pack>>(
     const MappedScalarField&, const MappedFluxField&, Scalar, const MappedScalarField&, const MappedScalarField&,
     const MappedScalarField&, ScalarBoundaryConditionProvider<Pack>, ScalarBoundaryValueProvider<Pack>,
     ScalarCellValueProvider<Pack>, ScalarTransportDiscretization, NonOrthogonalTreatment, const MappedScalarField*,
