@@ -41,6 +41,7 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace SimpleFluid::FVM
@@ -1015,9 +1016,6 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    const auto& storage_value = coefficients.storage;
-    const auto& old_storage_value = coefficients.old_storage;
-    const auto& advection_value = coefficients.advection;
     const auto& diffusivity_value = coefficients.diffusion;
 
     const auto& mesh = old_values.mesh();
@@ -1104,19 +1102,25 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     int has_nonzero_diffusivity = 0;
     if (incompatible_fields == 0)
     {
-        for (size_t local = 0; local < mesh.num_local_cells(); ++local)
+        const auto validate_coefficients = [&](const auto& weight_policy)
         {
-            const auto cell_lid = static_cast<local_ordinal_type>(local);
-            const auto storage = storage_value(cell_lid);
-            const auto old_storage = old_storage_value(cell_lid);
-            const auto advection = advection_value(cell_lid);
-            const auto diffusivity = diffusivity_value(cell_lid);
-            has_nonzero_diffusivity = has_nonzero_diffusivity || diffusivity != scalar_type{};
-            invalid_coefficients = invalid_coefficients || !std::isfinite(storage) || !std::isfinite(advection) ||
-                                   !std::isfinite(diffusivity) || !std::isfinite(old_storage)
-                                   || storage <= scalar_type{} || old_storage <= scalar_type{} ||
-                                   advection < scalar_type{} || diffusivity < scalar_type{};
-        }
+            const auto& storage_value = weight_policy.storage;
+            const auto& old_storage_value = weight_policy.old_storage;
+            for (size_t local = 0; local < mesh.num_local_cells(); ++local)
+            {
+                const auto cell_lid = static_cast<local_ordinal_type>(local);
+                const auto storage = storage_value(cell_lid);
+                const auto old_storage = old_storage_value(cell_lid);
+                const auto advection = weight_policy.cell_advection(cell_lid, storage);
+                const auto diffusivity = diffusivity_value(cell_lid);
+                has_nonzero_diffusivity = has_nonzero_diffusivity || diffusivity != scalar_type{};
+                invalid_coefficients = invalid_coefficients || !std::isfinite(storage) || !std::isfinite(advection) ||
+                                       !std::isfinite(diffusivity) || !std::isfinite(old_storage)
+                                       || storage <= scalar_type{} || old_storage <= scalar_type{} ||
+                                       advection < scalar_type{} || diffusivity < scalar_type{};
+            }
+        };
+        std::visit(validate_coefficients, coefficients.weights);
     }
     if (boundary_diffusivity != nullptr && invalid_boundary_cache == 0)
     {
@@ -1440,212 +1444,218 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     const auto convection_gradient_data = convection_gradients == nullptr
         ? gradient_view_type{} : convection_gradients->local_read_view();
 
-    visit_transport_assembly_rows(mesh, assembly_geometry,
-        [&](local_ordinal_type cell_lid, auto cell_volume, const auto& visit_faces)
+    const auto assemble_rows = [&](const auto& weight_policy)
     {
-        const auto owned = static_cast<size_t>(cell_lid);
-        const auto volume = static_cast<scalar_type>(cell_volume);
-        const auto cell_storage = storage_value(cell_lid);
-        const auto cell_advection = advection_value(cell_lid);
-        const auto new_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
-        const auto old_volume = ale == nullptr
-            ? volume
-            : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
-        const auto transient = discretization.mode == AssemblyMode::Steady ? scalar_type{} : cell_storage * new_volume / time_step;
-        const auto sink = sink_values[owned];
-
-        row_values.clear();
-        add_matrix_entry(
-            row_values,
-            cell_lid,
-            transient_coefficients.diagonal * transient
-                + new_volume * sink);
-        auto rhs_value = [&]
+        const auto& storage_value = weight_policy.storage;
+        const auto& old_storage_value = weight_policy.old_storage;
+        visit_transport_assembly_rows(mesh, assembly_geometry,
+            [&](local_ordinal_type cell_lid, auto cell_volume, const auto& visit_faces)
         {
-            if (discretization.mode == AssemblyMode::Steady) return new_volume * source_values[owned];
-            if (!has_distinct_old_storage && ale == nullptr)
-            {
-                return transient
-                         * (transient_coefficients.previous
-                                * old_value_data(cell_lid, 0)
-                            + transient_coefficients.older
-                                * (older_values == nullptr
-                                       ? scalar_type{}
-                                       : older_value_data(cell_lid, 0)))
-                     + volume * source_values[owned];
-            }
-            const auto accepted_storage = old_storage_value(cell_lid);
-            return accepted_storage * old_volume / time_step
-                     * old_value_data(cell_lid, 0)
-                 + new_volume * source_values[owned];
-        }();
+            const auto owned = static_cast<size_t>(cell_lid);
+            const auto volume = static_cast<scalar_type>(cell_volume);
+            const auto cell_storage = storage_value(cell_lid);
+            const auto cell_advection = weight_policy.cell_advection(cell_lid, cell_storage);
+            const auto new_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->new_cell_volumes()[owned]);
+            const auto old_volume = ale == nullptr
+                ? volume
+                : static_cast<scalar_type>(ale->old_cell_volumes()[owned]);
+            const auto transient = discretization.mode == AssemblyMode::Steady ? scalar_type{} : cell_storage * new_volume / time_step;
+            const auto sink = sink_values[owned];
 
-        auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
-                                              scalar_type face_diffusivity,
-                                              const typename MeshType::Vec3& tangential_area)
-        {
-            if (weights.implicit == scalar_type{} || gradient_weight == scalar_type{} ||
-                !mesh.is_owned_cell(gradient_cell_lid) ||
-                static_cast<size_t>(gradient_cell_lid) >= gradient_stencils.size())
+            row_values.clear();
+            add_matrix_entry(
+                row_values,
+                cell_lid,
+                transient_coefficients.diagonal * transient
+                    + new_volume * sink);
+            auto rhs_value = [&]
             {
-                return;
-            }
-            const auto scale = -weights.implicit * face_diffusivity * gradient_weight;
-            const auto& stencil = gradient_stencils[static_cast<size_t>(gradient_cell_lid)];
-            rhs_value -= scale * stencil.constant.dot(tangential_area);
-            for (const auto& entry : stencil.entries)
-            {
-                add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
-            }
-        };
-
-        visit_faces([&](const auto& face, const auto& metrics)
-        {
-            const auto face_lid = face.face_lid;
-            using face_type = std::remove_cvref_t<decltype(face)>;
-            constexpr auto is_interior = face_type::interior;
-            const auto other = face.other;
-            if constexpr (is_interior)
-            {
-                row_values.ensure(other);
-            }
-
-            const auto owner_flux = face_flux_data(face_lid, 0);
-            const auto outward_flux = face_type::owned_orientation ? owner_flux : -owner_flux;
-            if (outward_flux >= scalar_type{})
-            {
-                add_matrix_entry(row_values, cell_lid, outward_flux * cell_advection);
-            }
-            else if constexpr (is_interior)
-            {
-                add_matrix_entry(row_values, other, outward_flux * advection_value(other));
-            }
-            else if constexpr (face_type::boundary)
-            {
-                const auto index = packed_face_local_id(mesh, face_lid);
-                if (index < locations->size() && (*locations)[index].active)
+                if (discretization.mode == AssemblyMode::Steady) return new_volume * source_values[owned];
+                if (!has_distinct_old_storage && ale == nullptr)
                 {
-                    const auto location = (*locations)[index];
-                    rhs_value -= outward_flux * cell_advection
-                        * cached_boundary_value(
-                            location.batch_id, location.in_batch_id);
+                    return transient
+                             * (transient_coefficients.previous
+                                    * old_value_data(cell_lid, 0)
+                                + transient_coefficients.older
+                                    * (older_values == nullptr
+                                           ? scalar_type{}
+                                           : older_value_data(cell_lid, 0)))
+                         + volume * source_values[owned];
                 }
-            }
+                const auto accepted_storage = old_storage_value(cell_lid);
+                return accepted_storage * old_volume / time_step
+                         * old_value_data(cell_lid, 0)
+                     + new_volume * source_values[owned];
+            }();
 
-            if constexpr (is_interior)
+            auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
+                                                  scalar_type face_diffusivity,
+                                                  const typename MeshType::Vec3& tangential_area)
             {
-                if (convection_gradients != nullptr)
-                {
-                    const auto upwind = outward_flux >= scalar_type{}
-                        ? cell_lid
-                        : other;
-                    const auto downwind = outward_flux >= scalar_type{}
-                        ? other
-                        : cell_lid;
-                    const auto upwind_value =
-                        old_value_data(upwind, 0);
-                    const auto face_value =
-                        bounded_linear_upwind_face_value(
-                            upwind_value,
-                            old_value_data(downwind, 0),
-                            vector_view_value<Pack>(convection_gradient_data, upwind),
-                            cell_to_face_displacement(
-                                metrics, face_lid, upwind));
-                    rhs_value += deferred_convection_rhs_correction(
-                        outward_flux,
-                        advection_value(upwind),
-                        upwind_value,
-                        face_value);
-                }
-            }
-
-            if constexpr (is_interior)
-            {
-                const auto face_diffusivity = face_coefficient_value(metrics, face_lid, cell_lid, other,
-                    diffusivity_value(cell_lid), diffusivity_value(other), coefficient_interpolation);
-                if (face_diffusivity <= scalar_type{})
+                if (weights.implicit == scalar_type{} || gradient_weight == scalar_type{} ||
+                    !mesh.is_owned_cell(gradient_cell_lid) ||
+                    static_cast<size_t>(gradient_cell_lid) >= gradient_stencils.size())
                 {
                     return;
                 }
-                const auto coefficient =
-                    interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_diffusivity);
-                add_matrix_entry(row_values, cell_lid, coefficient);
-                add_matrix_entry(row_values, other, -coefficient);
-
-                const auto tangential_area = non_orthogonal_area_vector(
-                    metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
-                if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
+                const auto scale = -weights.implicit * face_diffusivity * gradient_weight;
+                const auto& stencil = gradient_stencils[static_cast<size_t>(gradient_cell_lid)];
+                rhs_value -= scale * stencil.constant.dot(tangential_area);
+                for (const auto& entry : stencil.entries)
                 {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
-                    add_non_orthogonal_stencil(other, scalar_type{0.5}, face_diffusivity, tangential_area);
+                    add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
                 }
-                else if (needs_non_orthogonal_correction && weights.implicit > scalar_type{})
+            };
+
+            visit_faces([&](const auto& face, const auto& metrics)
+            {
+                const auto face_lid = face.face_lid;
+                using face_type = std::remove_cvref_t<decltype(face)>;
+                constexpr auto is_interior = face_type::interior;
+                const auto other = face.other;
+                if constexpr (is_interior)
                 {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
-                    if (partition_gradients == nullptr)
+                    row_values.ensure(other);
+                }
+
+                const auto owner_flux = face_flux_data(face_lid, 0);
+                const auto outward_flux = face_type::owned_orientation ? owner_flux : -owner_flux;
+                if (outward_flux >= scalar_type{})
+                {
+                    add_matrix_entry(row_values, cell_lid, outward_flux * cell_advection);
+                }
+                else if constexpr (is_interior)
+                {
+                    add_matrix_entry(row_values, other, outward_flux * weight_policy.advection(other));
+                }
+                else if constexpr (face_type::boundary)
+                {
+                    const auto index = packed_face_local_id(mesh, face_lid);
+                    if (index < locations->size() && (*locations)[index].active)
                     {
-                        throw std::logic_error("Partition-face implicit weighted scalar "
-                                               "reconstruction requires synchronized gradients.");
+                        const auto location = (*locations)[index];
+                        rhs_value -= outward_flux * cell_advection
+                            * cached_boundary_value(
+                                location.batch_id, location.in_batch_id);
                     }
-                    rhs_value += weights.implicit * face_diffusivity * scalar_type{0.5} *
-                                 vector_view_value<Pack>(partition_gradient_data, other).dot(tangential_area);
                 }
-                return;
-            }
 
-            if constexpr (!face_type::boundary)
-            {
-                return;
-            }
-            const auto index = packed_face_local_id(mesh, face_lid);
-            if (index >= locations->size() || !(*locations)[index].active)
-            {
-                return;
-            }
-            const auto location = (*locations)[index];
-            const auto condition = cached_boundary_condition(
-                location.batch_id, location.in_batch_id);
-            const auto face_diffusivity =
-                boundary_face_diffusivity(location.batch_id, location.in_batch_id, diffusivity_value(cell_lid));
-            if (condition.type == BoundaryConditionType::Dirichlet || condition.type == BoundaryConditionType::Robin)
-            {
-                const auto weight =
-                    condition.type == BoundaryConditionType::Robin
-                        ? robin_boundary_weight(metrics, face_lid, cell_lid, condition.robin_coefficient)
-                        : scalar_type{1};
-                const auto effective_diffusivity = face_diffusivity * weight;
-                const auto coefficient =
-                    boundary_diffusion_coefficient(metrics, face_lid, cell_lid, effective_diffusivity);
-                if (coefficient > scalar_type{})
+                if constexpr (is_interior)
                 {
-                    add_matrix_entry(row_values, cell_lid, coefficient);
-                    rhs_value +=
-                        coefficient * (condition.type == BoundaryConditionType::Robin
-                                              ? condition.value
-                                              : cached_boundary_value(location.batch_id, location.in_batch_id));
+                    if (convection_gradients != nullptr)
+                    {
+                        const auto upwind = outward_flux >= scalar_type{}
+                            ? cell_lid
+                            : other;
+                        const auto downwind = outward_flux >= scalar_type{}
+                            ? other
+                            : cell_lid;
+                        const auto upwind_value =
+                            old_value_data(upwind, 0);
+                        const auto face_value =
+                            bounded_linear_upwind_face_value(
+                                upwind_value,
+                                old_value_data(downwind, 0),
+                                vector_view_value<Pack>(convection_gradient_data, upwind),
+                                cell_to_face_displacement(
+                                    metrics, face_lid, upwind));
+                        rhs_value += deferred_convection_rhs_correction(
+                            outward_flux,
+                            weight_policy.advection(upwind),
+                            upwind_value,
+                            face_value);
+                    }
                 }
-                const auto tangential_area =
-                    non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
-                        metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
-                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, effective_diffusivity, tangential_area);
-            }
-            else if (condition.type == BoundaryConditionType::Neumann)
-            {
-                rhs_value += face_diffusivity * condition.value * static_cast<scalar_type>(metrics.face_area(face_lid));
-            }
-        });
 
-        if (fixed_values[owned])
-        {
-            row_values.fill(scalar_type{});
-            row_values.set(cell_lid, scalar_type{1});
-            rhs_value = *fixed_values[owned];
-        }
-        rows.push_back(capture_transport_row<Pack>(row_values));
-        rhs->replaceLocalValue(cell_lid, rhs_value);
-    });
+                if constexpr (is_interior)
+                {
+                    const auto face_diffusivity = face_coefficient_value(metrics, face_lid, cell_lid, other,
+                        diffusivity_value(cell_lid), diffusivity_value(other), coefficient_interpolation);
+                    if (face_diffusivity <= scalar_type{})
+                    {
+                        return;
+                    }
+                    const auto coefficient =
+                        interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_diffusivity);
+                    add_matrix_entry(row_values, cell_lid, coefficient);
+                    add_matrix_entry(row_values, other, -coefficient);
+
+                    const auto tangential_area = non_orthogonal_area_vector(
+                        metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
+                    if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
+                        add_non_orthogonal_stencil(other, scalar_type{0.5}, face_diffusivity, tangential_area);
+                    }
+                    else if (needs_non_orthogonal_correction && weights.implicit > scalar_type{})
+                    {
+                        add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
+                        if (partition_gradients == nullptr)
+                        {
+                            throw std::logic_error("Partition-face implicit weighted scalar "
+                                                   "reconstruction requires synchronized gradients.");
+                        }
+                        rhs_value += weights.implicit * face_diffusivity * scalar_type{0.5} *
+                                     vector_view_value<Pack>(partition_gradient_data, other).dot(tangential_area);
+                    }
+                    return;
+                }
+
+                if constexpr (!face_type::boundary)
+                {
+                    return;
+                }
+                const auto index = packed_face_local_id(mesh, face_lid);
+                if (index >= locations->size() || !(*locations)[index].active)
+                {
+                    return;
+                }
+                const auto location = (*locations)[index];
+                const auto condition = cached_boundary_condition(
+                    location.batch_id, location.in_batch_id);
+                const auto face_diffusivity =
+                    boundary_face_diffusivity(location.batch_id, location.in_batch_id, diffusivity_value(cell_lid));
+                if (condition.type == BoundaryConditionType::Dirichlet || condition.type == BoundaryConditionType::Robin)
+                {
+                    const auto weight =
+                        condition.type == BoundaryConditionType::Robin
+                            ? robin_boundary_weight(metrics, face_lid, cell_lid, condition.robin_coefficient)
+                            : scalar_type{1};
+                    const auto effective_diffusivity = face_diffusivity * weight;
+                    const auto coefficient =
+                        boundary_diffusion_coefficient(metrics, face_lid, cell_lid, effective_diffusivity);
+                    if (coefficient > scalar_type{})
+                    {
+                        add_matrix_entry(row_values, cell_lid, coefficient);
+                        rhs_value +=
+                            coefficient * (condition.type == BoundaryConditionType::Robin
+                                                  ? condition.value
+                                                  : cached_boundary_value(location.batch_id, location.in_batch_id));
+                    }
+                    const auto tangential_area =
+                        non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
+                            metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
+                    add_non_orthogonal_stencil(cell_lid, scalar_type{1}, effective_diffusivity, tangential_area);
+                }
+                else if (condition.type == BoundaryConditionType::Neumann)
+                {
+                    rhs_value += face_diffusivity * condition.value * static_cast<scalar_type>(metrics.face_area(face_lid));
+                }
+            });
+
+            if (fixed_values[owned])
+            {
+                row_values.fill(scalar_type{});
+                row_values.set(cell_lid, scalar_type{1});
+                rhs_value = *fixed_values[owned];
+            }
+            rows.push_back(capture_transport_row<Pack>(row_values));
+            rhs->replaceLocalValue(cell_lid, rhs_value);
+        });
+    };
+    std::visit(assemble_rows, coefficients.weights);
 
     if (needs_non_orthogonal_correction && correction_field != nullptr && weights.explicit_ > scalar_type{})
     {
@@ -1703,8 +1713,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
     const auto old_storage_data = old_storage_weight == nullptr ? storage_data : old_storage_weight->local_read_view();
     const auto advection_data = advection_weight.local_read_view();
     const auto diffusion_data = diffusivity.local_read_view();
-    const ScalarTransportCoefficientAccess<Pack> coefficients{TransportCoefficientView<Pack>{storage_data},
-        TransportCoefficientView<Pack>{old_storage_data}, TransportCoefficientView<Pack>{advection_data},
+    const ScalarTransportCoefficientAccess<Pack> coefficients{
+        WeightedScalarTransportWeights<Pack>{TransportCoefficientView<Pack>{storage_data},
+            TransportCoefficientView<Pack>{old_storage_data}, TransportCoefficientView<Pack>{advection_data}},
         TransportCoefficientView<Pack>{diffusion_data}};
     return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, coefficients,
         old_storage_weight != nullptr, std::move(boundary_condition), std::move(boundary_value), std::move(source),
@@ -1766,9 +1777,9 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     const auto accepted_density_data = accepted_density->local_read_view();
     const auto accepted_specific_heat_capacity_data = accepted_specific_heat_capacity->local_read_view();
     const ScalarTransportCoefficientAccess<Pack> coefficients{
-        TransportCoefficientView<Pack>{density_data, specific_heat_capacity_data},
-        TransportCoefficientView<Pack>{accepted_density_data, accepted_specific_heat_capacity_data},
-        TransportCoefficientView<Pack>{density_data, specific_heat_capacity_data},
+        PhysicalTemperatureTransportWeights<Pack>{
+            TransportProductCoefficientView<Pack>{density_data, specific_heat_capacity_data},
+            TransportProductCoefficientView<Pack>{accepted_density_data, accepted_specific_heat_capacity_data}},
         TransportCoefficientView<Pack>{conductivity_data}};
     return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, coefficients,
         old_density != nullptr || old_specific_heat_capacity != nullptr, std::move(boundary_condition),

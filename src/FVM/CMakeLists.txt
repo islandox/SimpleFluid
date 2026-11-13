@@ -9,6 +9,7 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/WeightedScalarTransportSystem.cc
     explicit_instantiation/PhysicalTemperatureTransportSystem.cc
     explicit_instantiation/PhysicalMomentumTransportSystem.cc
+    explicit_instantiation/TransportRhs.cc
     explicit_instantiation/TransportSystem.cc
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)

@@ -625,25 +625,42 @@ Ninja serializes compilation of the FVM target through its dedicated compile
 pool. The split bounds the instantiation work in each process; it does not
 remove repeated parsing or establish a compile-time or memory speedup.
 
-Basic legacy scalar and vector transport use one compiled matrix/traversal
-kernel per type pack. A concrete RHS adapter selects scalar or vector work
-once per cell or physical boundary; the interior face loop is shared. Vector
-transport builds the matrix once and fills its three RHS components together.
-Source and boundary callback order, cache validation and boundary policies
-retain their existing contracts.
+Basic legacy scalar and vector transport use typed RHS adapters around a
+shared face-row matrix kernel. Scalar/vector selection occurs at the public
+entry point, so cell and boundary RHS work has no access-mode check. The
+numerical face kernel is compiled once per type pack; the small outer
+traversals have scalar and vector specializations. Vector transport builds the
+matrix once and fills its three RHS components together. Source and boundary
+callback order, cache validation and boundary policies retain their contracts.
 
-Mapped weighted and physical-temperature assembly pass the same concrete
-coefficient-access type to their shared kernel. Each channel borrows an
-overlap view and reads either one field or a product of two fields through
-inline control flow. Temperature uses density times heat capacity for current
-storage and advection, independent accepted-old factors for old storage, and
-conductivity for diffusion. No coefficient fields are materialized.
+The scalar/vector RHS adapters have their own `FVM/details/TransportRhs`
+file group: `.hh` declarations/layout, `.ipp` inline cell/boundary updates and
+caller-dependent Neumann definitions, and `.tcc` allocation/view-acquisition
+and error paths. `FVM/explicit_instantiation/TransportRhs.cc` provides both
+default-pack adapters inside the FVM DSO, without exporting detail symbols.
+Hot updates remain inline-visible. `TransportSystem.tcc` includes the RHS
+`.tcc` so custom type-pack providers retain the complete implementation route.
+
+Mapped weighted and physical-temperature assembly share validation, callback
+staging, geometry preparation, correction and matrix finalization. Coefficient
+validation and numerical row traversal dispatch outside their loops to exactly
+two policies: independent direct weights, or physical temperature capacity.
+Direct and product views have separate accessor types with no per-read mode
+selection. Physical cell advection reuses the current storage capacity;
+accepted-old density and heat-capacity factors still fall back independently.
+Diffusion is a direct view shared by both policies, including explicit
+correction and prepared temperature response setup. No coefficient fields are
+materialized and no indirect per-face coefficient calls are introduced.
 
 Both default mapped temperature overloads are compiled alongside the mapped
-weighted request in `MappedWeightedTransportSystem.cc`, sharing one kernel
-specialization. Generic mesh/type-pack wrappers remain available. Boundary
-policies, collective validation, accepted-old fallback and RHS-only matrix
-preservation retain their existing contracts.
+weighted request in `MappedWeightedTransportSystem.cc`. The preparation kernel
+remains one specialization, while only its validation and numerical traversals
+have two policy specializations. This bounds code duplication without making
+four independent channel choices into a specialization matrix. Generic
+mesh/type-pack wrappers remain available. Boundary policies, collective
+validation, accepted-old fallback and RHS-only matrix preservation retain their
+existing contracts. Runtime and compiler-memory improvements require matched
+measurements; source-level dispatch placement alone does not establish them.
 
 The default `TemperatureDiffusionEquation` providers separately instantiate
 legacy `Mesh` and mapped `MeshHandle` in the equations source inventory. Both
