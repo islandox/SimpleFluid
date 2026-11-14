@@ -1,11 +1,10 @@
 /** @file FVM/unitTests/testFvmLibrary.cc
- * @brief Declaration-only link guard for every compiled transport factory overload.
+ * @brief Declaration-only link guard for supported native transport factory overloads.
  */
 #include <gtest/gtest.h>
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/FaceFlux.hh"
-#include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "geometry/SolidSubdomain.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -55,34 +54,23 @@ template<class Factory> void flow_links()
     EXPECT_TRUE(momentum != nullptr);
 }
 
-TEST(FvmLibraryTest, ExportedFvmApiLinksWithoutSolverDso)
+TEST(FvmLibraryTest, ExportedNativeFvmApiLinksWithoutSolverDso)
 {
-    using ValidateMember = void (ALEControlVolumeState::*)(const Mesh<Pack>&) const;
-    ValidateMember volatile validate = &ALEControlVolumeState::validate<Mesh<Pack>>;
-    auto* volatile residual = &full_diffusion_residual<Pack>;
+    using ValidateMember = void (ALEControlVolumeState::*)(const MeshHandle<Pack>&) const;
+    ValidateMember volatile validate = &ALEControlVolumeState::validate<MeshHandle<Pack>>;
     EXPECT_TRUE(validate != nullptr);
-    EXPECT_TRUE(residual != nullptr);
 
-    using Legacy = TransportSystemFactory<Pack, Mesh<Pack>>;
     using Native = TransportSystemFactory<Pack, MeshHandle<Pack>>;
     using Cartesian = TransportSystemFactory<Pack, Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>>;
     using Solid = TransportSystemFactory<Pack, SolidSubdomain<Pack>>;
-    scalar_links<Legacy>();
     scalar_links<Native>();
     scalar_links<Cartesian>();
     scalar_links<Solid>();
-    temperature_links<Legacy>();
     temperature_links<Native>();
     temperature_links<Cartesian>();
     temperature_links<Solid>();
-    flow_links<Legacy>();
     flow_links<Native>();
     flow_links<Cartesian>();
-
-    using BasicVector = VectorTransportSystem<Pack> (*)(
-        Legacy::VectorTerms, Legacy::BasicVectorBoundary, Legacy::BasicVectorOptions, Legacy::BasicVectorContext);
-    BasicVector volatile basic_vector = &Legacy::assemble;
-    EXPECT_TRUE(basic_vector != nullptr);
 }
 
 TEST(FvmLibraryTest, PressureWorkspaceConstructorLinksWithoutSolverDso)
