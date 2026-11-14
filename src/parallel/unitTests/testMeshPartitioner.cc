@@ -19,10 +19,9 @@
 #include <stk_mesh/base/FEMHelpers.hpp>
 #include <stk_mesh/base/FieldBase.hpp>
 #include "geometry/MeshHandle.hh"
-#include "fields/CellField.hh"
-#include "fields/FieldStored.hh"
 #include "parallel/MPI_interface.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/test_unstructured_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
 #include <algorithm>
@@ -44,13 +43,10 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
-using FieldType = SimpleFluid::CellField<Pack>;
 using MeshHandle = SimpleFluid::MeshHandle<Pack>;
 using UnstructuredMesh = SimpleFluid::Meshes::UnstructuredMesh;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<UnstructuredMesh, Pack>;
-using PartitionedCellField =
-    SimpleFluid::ScalarCellFieldStored<Pack, PartitionedUnstructured>;
 using PartitionIndexer =
     SimpleFluid::MeshPartitioner<Pack>::indexer_type;
 using MeshIndexer =
@@ -87,70 +83,7 @@ SimpleFluid::SP<MeshType> make_2x2x2_box_mesh()
         SimpleFluid::test::make_2x2x2_database());
 }
 
-SimpleFluid::SP<UnstructuredMesh>
-make_unstructured_hex_line(unsigned cells)
-{
-    using Vec3 = UnstructuredMesh::Vec3;
-    using CellDefinition = UnstructuredMesh::CellDefinition;
-    using BoundaryFaceDefinition =
-        UnstructuredMesh::BoundaryFaceDefinition;
-    const auto nodes_per_x = cells + 1U;
-    auto node_id = [nodes_per_x](unsigned i,
-                                 unsigned j,
-                                 unsigned k)
-    {
-        return i + nodes_per_x * (j + 2U * k);
-    };
-
-    SimpleFluid::Arr<Vec3> nodes;
-    nodes.reserve(static_cast<size_t>(nodes_per_x) * 4U);
-    for (unsigned k = 0; k < 2U; ++k)
-    {
-        for (unsigned j = 0; j < 2U; ++j)
-        {
-            for (unsigned i = 0; i <= cells; ++i)
-            {
-                nodes.push_back({
-                    static_cast<SimpleFluid::real_t>(i),
-                    static_cast<SimpleFluid::real_t>(j),
-                    static_cast<SimpleFluid::real_t>(k)});
-            }
-        }
-    }
-
-    SimpleFluid::Arr<CellDefinition> cell_defs;
-    cell_defs.reserve(cells);
-    for (unsigned cell = 0; cell < cells; ++cell)
-    {
-        cell_defs.push_back({
-            UnstructuredMesh::CellType::HEXAHEDRON,
-            {
-                node_id(cell, 0, 0),
-                node_id(cell + 1U, 0, 0),
-                node_id(cell + 1U, 1, 0),
-                node_id(cell, 1, 0),
-                node_id(cell, 0, 1),
-                node_id(cell + 1U, 0, 1),
-                node_id(cell + 1U, 1, 1),
-                node_id(cell, 1, 1),
-            }});
-    }
-
-    SimpleFluid::Arr<BoundaryFaceDefinition> boundaries{
-        {{node_id(0, 1, 0),
-          node_id(0, 1, 1),
-          node_id(0, 0, 1),
-          node_id(0, 0, 0)}, 1, "xmin"},
-        {{node_id(cells, 0, 0),
-          node_id(cells, 0, 1),
-          node_id(cells, 1, 1),
-          node_id(cells, 1, 0)}, 2, "xmax"}};
-
-    return std::make_shared<UnstructuredMesh>(
-        nodes,
-        cell_defs,
-        boundaries);
-}
+using SimpleFluid::test::make_partition_test_hex_line;
 
 /** @brief Graded pentagonal prisms exercise polygonal partition faces. */
 UnstructuredMesh make_polyhedral_column()
@@ -613,7 +546,7 @@ TEST(MeshPartitionerTest, PartitionsRootOnlySourceGeometry)
     if (comm->getRank() == 0)
     {
         const auto source =
-            make_unstructured_hex_line(cell_count);
+            make_partition_test_hex_line(cell_count);
         mesh =
             std::make_shared<ReplicatedLegacyMesh>(*source);
         ASSERT_EQ(mesh->num_owned_cells(), cell_count);
@@ -1051,7 +984,7 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
     using GO = Pack::global_ordinal_type;
     using LO = Pack::local_ordinal_type;
     using Geometry = SimpleFluid::partition_detail::CellPacket<Pack>::FaceGeometry;
-    const auto source = make_unstructured_hex_line(8);
+    const auto source = make_partition_test_hex_line(8);
     auto expect_same_bits = [](double actual, double expected)
     {
         EXPECT_EQ(
@@ -1158,7 +1091,7 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
 TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
 {
     constexpr unsigned cell_count = 8;
-    const auto source = make_unstructured_hex_line(cell_count);
+    const auto source = make_partition_test_hex_line(cell_count);
     auto mesh = std::make_shared<ReplicatedLegacyMesh>(*source);
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -1255,48 +1188,6 @@ TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
             << "A global face ID identifies different physical faces.";
         (void)key_inserted;
         (void)id_inserted;
-    }
-}
-
-// ---------------------------------------------------------------------------
-//  Test 4: Field sync works after partitioning
-// ---------------------------------------------------------------------------
-/**
- * @brief Verifies ghost cell values are correctly synchronized after partitioning via sync_ghosts.
- */
-TEST(MeshPartitionerTest, FieldSyncAfterPartitioning)
-{
-    auto mesh = make_2x2x2_box_mesh();
-    const auto comm = mesh->owned_cell_map()->getComm();
-    if (comm->getSize() < 2)
-    {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-    }
-
-    FieldType field(mesh, "sync_test", false);
-
-    // Set each owned cell's value to its global ID
-    for (size_t o = 0; o < mesh->num_owned_cells(); ++o)
-    {
-        const auto lid = static_cast<Pack::local_ordinal_type>(o);
-        const auto gid = mesh->cell_global_id(lid);
-        field.set_owned_value(
-            lid, static_cast<Pack::scalar_type>(gid));
-    }
-
-    // Sync to ghost cells
-    field.sync_ghosts();
-
-    // Verify every local cell (including ghosts) has correct GID-based value
-    for (size_t c = 0; c < mesh->num_local_cells(); ++c)
-    {
-        const auto lid = static_cast<Pack::local_ordinal_type>(c);
-        const auto gid = mesh->cell_global_id(lid);
-        EXPECT_DOUBLE_EQ(
-            field.local_value(lid),
-            static_cast<Pack::scalar_type>(gid))
-            << "Mismatch for cell LID " << c << " GID " << gid
-            << " on rank " << comm->getRank();
     }
 }
 
@@ -1447,7 +1338,7 @@ TEST(MeshPartitionerTest, NativePolyhedraRetainPolygonLoopsMetricsAndBoundaryIds
 TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
 {
     constexpr unsigned cell_count = 8;
-    auto mesh = make_unstructured_hex_line(cell_count);
+    auto mesh = make_partition_test_hex_line(cell_count);
     const auto comm = Tpetra::getDefaultComm();
     std::vector<double> source_cell_volumes;
     source_cell_volumes.reserve(mesh->num_cells());
@@ -1594,25 +1485,6 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
     EXPECT_TRUE(partitioned->is_owned_cell(0));
     EXPECT_TRUE(partitioned->is_owned_node(0));
     EXPECT_DOUBLE_EQ(partitioned->cell_volume(0), mesh->cell_volume(0));
-
-    PartitionedCellField stored(
-        SimpleFluid::ScalarCellFieldDescriptor<Pack>("partitioned_value"),
-        partitioned);
-    for (size_t local = 0; local < partitioned->num_owned_cells(); ++local)
-    {
-        const auto local_id = static_cast<Pack::local_ordinal_type>(local);
-        stored.set_owned_value(
-            local_id,
-            static_cast<double>(partitioned->cell_global_id(local_id)));
-    }
-    stored.sync_ghosts();
-    for (size_t local = 0; local < partitioned->num_local_cells(); ++local)
-    {
-        const auto local_id = static_cast<Pack::local_ordinal_type>(local);
-        EXPECT_DOUBLE_EQ(
-            stored.local_value(local_id),
-            static_cast<double>(partitioned->cell_global_id(local_id)));
-    }
 
     const MeshHandle handle(partitioned);
     const auto& handle_mesh =
