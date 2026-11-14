@@ -208,7 +208,8 @@ target_sources(testStoredTransportReuse PRIVATE transport_providers/EpochMatrix.
 target_sources(testRegionTransportAssembly PRIVATE
     transport_providers/ReferenceGeometry.cc
     transport_providers/ReferenceWeightedScalar.cc
-    transport_providers/ReferenceMomentum.cc)
+    transport_providers/ReferenceMomentum.cc
+    transport_providers/ReferencePressureGeometry.cc)
 
 # Test-owned generic providers have the same private visibility boundary as
 # library implementation units. Bypass the executable PCH with different flags.
@@ -217,7 +218,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         transport_providers/EpochMatrix.cc
         transport_providers/ReferenceGeometry.cc
         transport_providers/ReferenceWeightedScalar.cc
-        transport_providers/ReferenceMomentum.cc)
+        transport_providers/ReferenceMomentum.cc
+        transport_providers/ReferencePressureGeometry.cc)
     set_source_files_properties(${_stored_transport_test_providers}
         PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
     set_property(SOURCE ${_stored_transport_test_providers} APPEND PROPERTY

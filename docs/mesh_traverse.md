@@ -715,3 +715,24 @@ partition wrapper, and solid scalar/temperature paths. Custom meshes own a
 provider including that public `.tcc`, plus `fields/FieldStored.tcc` when
 custom storage has no compiled provider. Detail builders remain local to the
 owning image; public APIs retain targeted export visibility.
+
+The remaining stored-field FVM declarations use matching implementation groups.
+Cell operators retain arbitrary boundary callbacks and hot per-cell/view
+queries in `.ipp`; fixed gradient and divergence entry points compile through
+public `.tcc` providers. Face interpolation, velocity boundary caches, pressure
+fluxes/workspace setup and nonorthogonal diffusion keep their heavy kernels in
+`.tcc`. The mapped fractional-implicit diffusion entry preserves the solver's
+first half-implicit Hybrid sweep through the public FVM boundary.
+`FVM/FieldStoredOperators.tcc` is the aggregate opt-in implementation for custom
+mesh/type-pack providers. Implementation-owned diagnostics may include their
+private `.tcc`; declaration headers and `.ipp` files never include it.
+
+Pressure-workspace providers own cold construction, refresh and legacy
+materialization only. Runtime-handle cold members use explicit instantiations;
+static Cartesian cold members use targeted exported specializations so hidden
+geometry arguments do not hide their public entry points. Hot `Execution`
+construction, destruction and acquisition remain header-defined and local to
+the consuming image: their composite view tracks an image-local TLS stack.
+Whole-class extern suppression must not move that lease lifetime across DSOs.
+The object layout, immutable snapshot lifetime and field/geometry leases retain
+their established contracts.

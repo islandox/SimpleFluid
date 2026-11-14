@@ -1,0 +1,222 @@
+/** @file FieldStoredFaceFlux.tcc
+ * @brief Compiled stored-field implementation kernels.
+ */
+#pragma once
+
+#include "FVM/details/FieldStoredFaceFlux.hh"
+
+namespace SimpleFluid::FVM::detail
+{
+
+template<TpetraTypePack Pack, class MeshType, class BoundaryCache>
+void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const BoundaryCache* boundary_cache, VectorFaceFieldStored<Pack, MeshType>& face_velocity)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
+
+    require_same_stored_mesh(velocity, face_velocity, "face_velocities");
+    if (boundary_cache != nullptr && boundary_cache->mesh.get() != velocity.mesh_ptr().get())
+    {
+        throw std::invalid_argument("face_velocities received a boundary cache for another mesh.");
+    }
+
+    const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
+    face_velocity.put_value(vec_type{});
+    const auto boundary_locations = boundary_face_locations(mesh);
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!face_velocity.is_owned(face_lid))
+        {
+            continue;
+        }
+        const auto face_id = query_face_id(mesh, face_lid);
+        const auto owner_id = mesh.owner_cell(face_id);
+        const auto owner_lid = packed_cell_local_id(mesh, owner_id);
+        if (mesh.is_interior_face(face_id))
+        {
+            const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
+            const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
+            const auto [owner_weight, neighbor_weight] =
+                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
+            face_velocity.set_owned_value(face_lid,
+                velocity.local_value(owner_lid) * owner_weight + velocity.local_value(neighbor_lid) * neighbor_weight);
+            continue;
+        }
+        if (boundary_cache == nullptr || !mesh.is_boundary_face(face_id))
+        {
+            continue;
+        }
+        const auto location = boundary_locations.at(face);
+        if (!location.active)
+        {
+            continue;
+        }
+        const auto value_iter = boundary_cache->value.find(location.batch_id);
+        if (value_iter == boundary_cache->value.end() || location.in_batch_id >= value_iter->second.size())
+        {
+            continue;
+        }
+        const auto type_iter = boundary_cache->type.find(location.batch_id);
+        const auto type = type_iter == boundary_cache->type.end() ? BoundaryConditionType::Neumann : type_iter->second;
+        face_velocity.set_owned_value(face_lid, type == BoundaryConditionType::Slip
+                                                    ? stored_slip_face_velocity(velocity, face_lid)
+                                                    : value_iter->second[location.in_batch_id]);
+    }
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void stored_normal_face_fluxes(
+    const VectorFaceFieldStored<Pack, MeshType>& face_velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    require_same_stored_mesh(face_velocity, fluxes, "normal_face_fluxes");
+    const auto& mesh = face_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
+    fluxes.put_value(scalar_type{});
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!fluxes.is_owned(face_lid))
+        {
+            continue;
+        }
+        const auto face_id = query_face_id(mesh, face_lid);
+        fluxes.set_owned_value(face_lid, face_velocity.value(face_lid).dot(mesh.face_normal(face_id)) *
+                                             static_cast<scalar_type>(mesh.face_area(face_id)));
+    }
+}
+
+template<TpetraTypePack Pack, class MeshType, class BoundaryCache>
+void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
+    const BoundaryCache* boundary_cache, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+    using vec_type = typename VectorCellFieldStored<Pack, MeshType>::value_type;
+
+    require_same_stored_mesh(velocity, fluxes, "face_fluxes");
+    if (boundary_cache != nullptr && boundary_cache->mesh.get() != velocity.mesh_ptr().get())
+    {
+        throw std::invalid_argument("face_fluxes received a boundary cache for another mesh.");
+    }
+
+    const auto& mesh = velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
+    fluxes.put_value(scalar_type{});
+    const auto boundary_locations = boundary_face_locations(mesh);
+    for (size_t face = 0; face < mesh.num_faces(); ++face)
+    {
+        const auto face_lid = static_cast<local_ordinal_type>(face);
+        if (!fluxes.is_owned(face_lid))
+        {
+            continue;
+        }
+        const auto face_id = query_face_id(mesh, face_lid);
+        const auto owner_id = mesh.owner_cell(face_id);
+        const auto owner_lid = packed_cell_local_id(mesh, owner_id);
+        vec_type value{};
+        if (mesh.is_interior_face(face_id))
+        {
+            const auto neighbor_id = mesh.opposite_or_periodic_neighbor_cell(face_id, owner_id);
+            const auto neighbor_lid = packed_cell_local_id(mesh, neighbor_id);
+            const auto [owner_weight, neighbor_weight] =
+                stored_interior_face_linear_weights(mesh, face_lid, owner_lid, neighbor_lid);
+            value =
+                velocity.local_value(owner_lid) * owner_weight + velocity.local_value(neighbor_lid) * neighbor_weight;
+        }
+        else
+        {
+            if (boundary_cache == nullptr || !mesh.is_boundary_face(face_id))
+            {
+                continue;
+            }
+            const auto location = boundary_locations.at(face);
+            if (!location.active)
+            {
+                continue;
+            }
+            const auto value_iter = boundary_cache->value.find(location.batch_id);
+            if (value_iter == boundary_cache->value.end() || location.in_batch_id >= value_iter->second.size())
+            {
+                continue;
+            }
+            const auto type_iter = boundary_cache->type.find(location.batch_id);
+            const auto type =
+                type_iter == boundary_cache->type.end() ? BoundaryConditionType::Neumann : type_iter->second;
+            value = type == BoundaryConditionType::Slip ? stored_slip_face_velocity(velocity, face_lid)
+                                                        : value_iter->second[location.in_batch_id];
+        }
+        fluxes.set_owned_value(
+            face_lid, value.dot(mesh.face_normal(face_id)) * static_cast<scalar_type>(mesh.face_area(face_id)));
+    }
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void stored_mesh_relative_face_fluxes(const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
+    const ALEControlVolumeState& ale, ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes)
+{
+    using local_ordinal_type = typename Pack::local_ordinal_type;
+    using scalar_type = typename Pack::scalar_type;
+
+    const auto& mesh = absolute_fluxes.mesh();
+    using execution_type = decltype(acquire_mesh_execution(mesh));
+    // Conversion constructs the nonmovable execution lease directly in its
+    // retained stack storage through guaranteed copy elision.
+    struct ExecutionFactory
+    {
+        const MeshType& mesh;
+        operator execution_type() const { return acquire_mesh_execution(mesh); }
+    };
+    std::optional<execution_type> execution;
+    int local_execution_error = 0;
+    try
+    {
+        execution.emplace(ExecutionFactory{mesh});
+    }
+    catch (...)
+    {
+        local_execution_error = 1;
+    }
+    int any_execution_error = 0;
+    Teuchos::reduceAll(
+        *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_execution_error, &any_execution_error);
+    if (any_execution_error != 0)
+    {
+        throw std::logic_error("mesh_relative_face_fluxes could not acquire a mesh execution view.");
+    }
+    const std::array<int, 2> local_output_error{
+        absolute_fluxes.mesh_ptr().get() != relative_fluxes.mesh_ptr().get() ? 1 : 0,
+        &absolute_fluxes == &relative_fluxes ? 1 : 0};
+    std::array<int, 2> global_output_error{};
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(local_output_error.size()), local_output_error.data(), global_output_error.data());
+    if (global_output_error[0] != 0)
+    {
+        throw std::invalid_argument("mesh_relative_face_fluxes requires input and output fields on one mesh.");
+    }
+    if (global_output_error[1] != 0)
+    {
+        throw std::invalid_argument(
+            "mesh_relative_face_fluxes requires a distinct output field and never overwrites absolute flux.");
+    }
+    ale.validate(mesh);
+    const auto mesh_fluxes = ale.face_mesh_fluxes();
+    {
+        const auto absolute_values = absolute_fluxes.owned_read_view();
+        auto relative_values = relative_fluxes.owned_write_view();
+        for (const auto face_lid : relative_fluxes.owned_face_ids())
+        {
+            relative_values(relative_fluxes.owned_row(face_lid), 0) =
+                absolute_values(absolute_fluxes.owned_row(face_lid), 0) -
+                static_cast<scalar_type>(mesh_fluxes[static_cast<size_t>(face_lid)]);
+        }
+    }
+    relative_fluxes.sync_ghosts();
+}
+
+} // namespace SimpleFluid::FVM::detail

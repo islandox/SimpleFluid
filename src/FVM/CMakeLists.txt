@@ -19,6 +19,19 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/WeightedScalarTransportSystem.cc
     explicit_instantiation/PhysicalTemperatureTransportSystem.cc
     explicit_instantiation/PhysicalMomentumTransportSystem.cc
+    explicit_instantiation/FieldStoredOperators/CellMeshHandle.cc
+    explicit_instantiation/FieldStoredOperators/DiffusionMeshHandle.cc
+    explicit_instantiation/FieldStoredOperators/FaceMeshHandle.cc
+    explicit_instantiation/FieldStoredOperators/PressureMeshHandle.cc
+    explicit_instantiation/FieldStoredOperators/WorkspaceMeshHandle.cc
+    explicit_instantiation/FieldStoredOperators/CellPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredOperators/DiffusionPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredOperators/FacePartitionedCartesian.cc
+    explicit_instantiation/FieldStoredOperators/PressurePartitionedCartesian.cc
+    explicit_instantiation/FieldStoredOperators/WorkspacePartitionedCartesian.cc
+    explicit_instantiation/FieldStoredOperators/SupportSolidSubdomain.cc
+    explicit_instantiation/FieldStoredOperators/CellSolidSubdomain.cc
+    explicit_instantiation/FieldStoredOperators/DiffusionSolidSubdomain.cc
     explicit_instantiation/TransportRhs.cc
     explicit_instantiation/TransportSystem.cc
 )
