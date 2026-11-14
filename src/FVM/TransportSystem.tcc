@@ -30,6 +30,32 @@
 
 namespace SimpleFluid::FVM
 {
+// The definitions are reachable in this implementation unit. Suppress default
+// legacy weighted copies here so ThinLTO retains the dedicated provider's exports.
+extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
+    WeightedScalarTransportRequest<DefaultTpetraTypes>);
+extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
+    const CellField<DefaultTpetraTypes>&, const FaceField<DefaultTpetraTypes>&, DefaultTpetraTypes::scalar_type,
+    const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&,
+    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
+    ScalarCellValueProvider<DefaultTpetraTypes>, NonOrthogonalTreatment, const CellField<DefaultTpetraTypes>*,
+    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
+    std::function<DefaultTpetraTypes::scalar_type(DefaultTpetraTypes::local_ordinal_type)>,
+    std::function<std::optional<DefaultTpetraTypes::scalar_type>(DefaultTpetraTypes::local_ordinal_type)>,
+    const BoundaryCache<DefaultTpetraTypes>*, const TransportGeometryCache<Mesh<DefaultTpetraTypes>>*,
+    FaceCoefficientInterpolation);
+extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
+    const CellField<DefaultTpetraTypes>&, const FaceField<DefaultTpetraTypes>&, DefaultTpetraTypes::scalar_type,
+    const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&,
+    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
+    ScalarCellValueProvider<DefaultTpetraTypes>, ScalarTransportDiscretization, NonOrthogonalTreatment,
+    const CellField<DefaultTpetraTypes>*, const CellField<DefaultTpetraTypes>*,
+    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
+    std::function<DefaultTpetraTypes::scalar_type(DefaultTpetraTypes::local_ordinal_type)>,
+    std::function<std::optional<DefaultTpetraTypes::scalar_type>(DefaultTpetraTypes::local_ordinal_type)>,
+    const BoundaryCache<DefaultTpetraTypes>*, const TransportGeometryCache<Mesh<DefaultTpetraTypes>>*,
+    FaceCoefficientInterpolation);
+
 namespace detail
 {
 

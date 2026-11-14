@@ -370,20 +370,6 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(
     FieldStoredWeightedScalarTransportRequest<Pack, MeshType> request);
 
 /**
- * @brief Compiled mapped weighted-scalar entry point for the supported runtime mesh.
- *
- * The FieldStored assembly body is large; instantiating it in every equation
- * translation unit duplicates the whole kernel once per consumer and, through
- * MeshHandle, once per concrete geometry backend. The default runtime-mesh
- * specialization is compiled once in the FVM library. Caller-defined mesh
- * types and Tpetra packs provide their own compiled unit including
- * FVM/FieldStoredTransportSystem.tcc.
- */
-extern template TransportSystem<DefaultTpetraTypes>
-    weighted_scalar_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
-        FieldStoredWeightedScalarTransportRequest<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>);
-
-/**
  * @brief Compatibility overload for weighted scalar transport on mapped fields.
  *
  * Storage, advection, and diffusion coefficients are cell fields. The
@@ -537,36 +523,6 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     const ALEControlVolumeState* ale = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr);
-
-// The default mapped physical wrappers share the weighted provider's concrete
-// coefficient-access kernel. Custom providers opt into the public .tcc bodies.
-// Instantiations inherit visibility from the exported primary templates.
-extern template TransportSystem<DefaultTpetraTypes>
-physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
-    const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarFaceFieldStored<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::scalar_type, const ScalarCellFieldStored<DefaultTpetraTypes>&,
-    const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarCellFieldStored<DefaultTpetraTypes>&,
-    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
-    ScalarCellValueProvider<DefaultTpetraTypes>, NonOrthogonalTreatment,
-    const ScalarCellFieldStored<DefaultTpetraTypes>*, Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
-    const FieldStoredBoundaryCache<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>*,
-    const TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>*, FaceCoefficientInterpolation,
-    const ALEControlVolumeState*, const ScalarCellFieldStored<DefaultTpetraTypes>*,
-    const ScalarCellFieldStored<DefaultTpetraTypes>*, bool, AssemblyMode);
-
-extern template TransportSystem<DefaultTpetraTypes>
-physical_temperature_transport_system<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>(
-    const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarFaceFieldStored<DefaultTpetraTypes>&,
-    DefaultTpetraTypes::scalar_type, const ScalarCellFieldStored<DefaultTpetraTypes>&,
-    const ScalarCellFieldStored<DefaultTpetraTypes>&, const ScalarCellFieldStored<DefaultTpetraTypes>&,
-    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
-    ScalarCellValueProvider<DefaultTpetraTypes>, ScalarTransportDiscretization, NonOrthogonalTreatment,
-    const ScalarCellFieldStored<DefaultTpetraTypes>*, const ScalarCellFieldStored<DefaultTpetraTypes>*,
-    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
-    const FieldStoredBoundaryCache<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>*,
-    const TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>*, FaceCoefficientInterpolation,
-    const ALEControlVolumeState*, const ScalarCellFieldStored<DefaultTpetraTypes>*,
-    const ScalarCellFieldStored<DefaultTpetraTypes>*);
 
 /**
  * @brief Assemble mapped vector transport with selectable treatment.
@@ -886,34 +842,6 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(co
     const BoundaryCache<Pack>* boundary_diffusivity = nullptr,
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
-
-// Keep the supported legacy overloads in their dedicated compiled provider.
-// Compatibility calls in other providers must not emit competing bodies.
-extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
-    WeightedScalarTransportRequest<DefaultTpetraTypes>);
-
-extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
-    const CellField<DefaultTpetraTypes>&, const FaceField<DefaultTpetraTypes>&, DefaultTpetraTypes::scalar_type,
-    const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&,
-    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
-    ScalarCellValueProvider<DefaultTpetraTypes>, NonOrthogonalTreatment, const CellField<DefaultTpetraTypes>*,
-    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
-    std::function<DefaultTpetraTypes::scalar_type(DefaultTpetraTypes::local_ordinal_type)>,
-    std::function<std::optional<DefaultTpetraTypes::scalar_type>(DefaultTpetraTypes::local_ordinal_type)>,
-    const BoundaryCache<DefaultTpetraTypes>*, const TransportGeometryCache<Mesh<DefaultTpetraTypes>>*,
-    FaceCoefficientInterpolation);
-
-extern template TransportSystem<DefaultTpetraTypes> weighted_scalar_transport_system<DefaultTpetraTypes>(
-    const CellField<DefaultTpetraTypes>&, const FaceField<DefaultTpetraTypes>&, DefaultTpetraTypes::scalar_type,
-    const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&, const CellField<DefaultTpetraTypes>&,
-    ScalarBoundaryConditionProvider<DefaultTpetraTypes>, ScalarBoundaryValueProvider<DefaultTpetraTypes>,
-    ScalarCellValueProvider<DefaultTpetraTypes>, ScalarTransportDiscretization, NonOrthogonalTreatment,
-    const CellField<DefaultTpetraTypes>*, const CellField<DefaultTpetraTypes>*,
-    Teuchos::RCP<DefaultTpetraTypes::matrix_type>,
-    std::function<DefaultTpetraTypes::scalar_type(DefaultTpetraTypes::local_ordinal_type)>,
-    std::function<std::optional<DefaultTpetraTypes::scalar_type>(DefaultTpetraTypes::local_ordinal_type)>,
-    const BoundaryCache<DefaultTpetraTypes>*, const TransportGeometryCache<Mesh<DefaultTpetraTypes>>*,
-    FaceCoefficientInterpolation);
 
 /**
  * @brief Assemble conservative temperature transport with physical material

@@ -397,34 +397,6 @@ private:
     VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
 };
 
-// Cold default members have single providers. Hot execution construction and
-// destruction remain in the consuming image to preserve image-local TLS stacks.
-extern template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::SharedGeometry::SharedGeometry(SP<const mesh_type> mesh,
-    std::shared_ptr<const topology_type> topology, std::shared_ptr<const traverse_plan_type> gradient_traverse);
-
-extern template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh);
-
-extern template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh,
-    shared_geometry_type geometry);
-
-extern template const std::vector<typename FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::face_geometry_type>&
-FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>::face_geometry() const;
-
-extern template const typename FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::FaceBatches&
-FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>::face_batches() const;
-
-extern template void
-FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>::refresh_geometry();
-
-extern template void
-FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>::refresh_geometry(
-    shared_geometry_type geometry);
-
 // Explicit cold specializations override hidden static-mesh argument visibility
 // without suppressing header-owned execution/lease methods.
 template<>

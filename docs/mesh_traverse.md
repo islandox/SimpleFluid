@@ -577,10 +577,10 @@ Consequences:
 The supported mapped `weighted_scalar_transport_system` request entry point
 (`FVM::weighted_scalar_transport_system<DefaultTpetraTypes,
 MeshHandle<DefaultTpetraTypes>>`)
-is explicitly instantiated in the FVM library and declared `extern template` in
-`FVM/TransportSystem.hh`. Equation translation units therefore link the one
-compiled assembly body instead of instantiating it per consumer and per geometry
-backend. Caller-defined mesh types and Tpetra packs keep the inline template.
+is explicitly instantiated in the FVM library. Its declaration header does not
+expose the implementation, so equation translation units reference the compiled
+body through the ordinary template declaration. Custom mesh/type-pack providers
+opt into `FVM/FieldStoredTransportSystem.tcc`.
 
 The legacy uniform scalar/vector builders still apply boundary conditions
 after the row pass. Their preclassified boundary descriptors preserve the
@@ -617,10 +617,12 @@ type packs are unchanged. Legacy custom packs provide their own instantiations
 through `FVM/TransportSystem.tcc`; mapped custom mesh/type-pack providers
 include `FVM/FieldStoredTransportSystem.tcc`.
 
-The default legacy weighted overloads and mapped named-request overload have
-`extern template` declarations in the public header. Their dedicated providers
-own the assembly bodies; compatibility wrappers and other providers must
-reference those bodies without emitting additional implicit instantiations.
+Declaration-only function/member-function interfaces do not enumerate redundant
+`extern template` declarations. Their compiled providers own the definitions.
+The three default legacy weighted suppressions remain in `TransportSystem.tcc`,
+where implementation consumers can otherwise emit competing bodies under
+ThinLTO. Class/struct suppressions with reachable inline definitions and explicit
+specialization declarations retain their separate ownership roles.
 
 Ninja serializes compilation of the FVM target through its dedicated compile
 pool. The split bounds the instantiation work in each process; it does not

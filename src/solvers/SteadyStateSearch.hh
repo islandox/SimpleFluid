@@ -473,15 +473,5 @@ private:
 
 extern template class SteadyStateFieldMonitor<DefaultTpetraTypes>;
 extern template class SteadyStateProgressLineFormatter<real_t>;
-extern template void SteadyStateProgressStream::write<real_t>(
-    const SteadyStateStepStatistics<real_t>& statistics,
-    const FluidStepStatistics<real_t>& solver_statistics);
-extern template void SteadyStateProgressStream::write<real_t>(const SteadyStateStepStatistics<real_t>& statistics,
-    const FluidStepStatistics<real_t>& solver_statistics, std::optional<real_t> requested_linear_tolerance,
-    std::optional<real_t> next_requested_linear_tolerance);
-extern template void SteadyStateProgressStream::write_retry<real_t>(
-    int iteration, int retry, int maximum_retries,
-    real_t time, real_t time_step, real_t next_time_step,
-    std::string_view reason);
 
 } // namespace SimpleFluid
