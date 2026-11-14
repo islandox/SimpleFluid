@@ -4,6 +4,7 @@
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testGhostSyncMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testMeshToMeshTransferMultiRank\\.cc$")
+list(FILTER TEST_SOURCES EXCLUDE REGEX ".*/testPartitionedFieldSync\\.cc$")
 
 add_executable(testFields ${TEST_SOURCES})
 target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
@@ -49,3 +50,19 @@ simplefluid_add_mpi_test(
   PROCS 4
   ARGS "--gtest_filter=*LargeMesh*"
   LABELS mpi)
+
+# Field storage is tested above the mesh layer, including custom mesh providers.
+add_executable(testPartitionedFieldSync
+  testPartitionedFieldSync.cc
+  PartitionedUnstructuredFieldProvider.cc)
+target_link_libraries(testPartitionedFieldSync SimpleFluid::Fields GTest::gtest_main)
+simplefluid_configure_test_executable(testPartitionedFieldSync)
+simplefluid_discover_tests(testPartitionedFieldSync)
+foreach(_field_partition_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME PartitionedFieldSync_${_field_partition_ranks}procs
+    TARGET testPartitionedFieldSync
+    PROCS ${_field_partition_ranks}
+    LABELS "mpi;fields;partition;mesh_reordering;empty_rank"
+    TIMEOUT 120)
+endforeach()

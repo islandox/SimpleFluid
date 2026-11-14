@@ -5,7 +5,6 @@
 
 #include <gtest/gtest.h>
 
-#include "fields/FieldStored.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/SolidSubdomain.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -619,7 +618,7 @@ TEST(MeshReorderingFactoryTest, PartitionedXYOrderRejectsMissingExtraAndUnknownO
     EXPECT_EQ(Factory::partitioned_xy_order(topology, valid), (std::vector<std::size_t>{0}));
 }
 
-TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeometryAlgebraicIDsAndGhostImports)
+TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeometryAndAlgebraicIDs)
 {
     using Native = SimpleFluid::Meshes::SemiStructuredXY_Z;
     const auto comm = Tpetra::getDefaultComm();
@@ -710,19 +709,6 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
                 EXPECT_EQ(layout.mesh->face_global_id(local(face)), faces[face][1]);
                 EXPECT_EQ(layout.mesh->is_owned_face(local(face)), faces[face][2] != 0);
             }
-            SimpleFluid::ScalarCellFieldStored<Pack> imported(layout.mesh, "algebraic_cell_probe");
-            SimpleFluid::ScalarFaceFieldStored<Pack> face_imported(layout.mesh, "algebraic_face_probe");
-            for (std::size_t cell = 0; cell < layout.mesh->num_owned_cells(); ++cell)
-                imported.set_owned_value(local(cell), double(layout.mesh->cell_global_id(local(cell))) + .125);
-            for (std::size_t face = 0; face < layout.mesh->num_owned_faces(); ++face)
-                face_imported.set_owned_value(local(face), double(layout.mesh->face_global_id(local(face))) + .25);
-            imported.sync_ghosts();
-            face_imported.sync_ghosts();
-            for (std::size_t cell = 0; cell < layout.mesh->num_local_cells(); ++cell)
-                EXPECT_DOUBLE_EQ(imported.local_value(local(cell)),
-                    double(before.at(layout.mesh->cell_geometry_global_id(local(cell))).gid) + .125);
-            for (std::size_t face = 0; face < layout.mesh->num_faces(); ++face)
-                EXPECT_DOUBLE_EQ(face_imported.local_value(local(face)), double(faces[face][1]) + .25);
             return layout;
         };
         const auto original = capture_cells(*parent);
