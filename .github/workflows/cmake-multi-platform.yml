@@ -327,7 +327,7 @@ jobs:
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 1
 
-    - name: Capture macOS transport link symbols
+    - name: Capture macOS FVM link symbols
       if: failure() && runner.os == 'macOS'
       shell: bash
       run: |
@@ -337,10 +337,12 @@ jobs:
           "lib/$config/libSimpleFluidFVM.dylib" \
           "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/WeightedScalarTransportSystem.cc.o" \
           "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/TransportSystem.cc.o" \
+          "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/FieldStoredOperators/WorkspaceMeshHandle.cc.o" \
+          "src/FVM/CMakeFiles/SimpleFluidFVM.dir/$config/explicit_instantiation/FieldStoredOperators/PressureMeshHandle.cc.o" \
           "src/solvers/CMakeFiles/SimpleFluidSolvers.dir/$config/__/equations/explicit_instantiation/VariableDensityMomentumEquation.cc.o"; do
           if [ -f "$build/$artifact" ]; then
-            echo "Transport symbols in $artifact"
-            nm -m "$build/$artifact" | awk '/ __?ZN11SimpleFluid3FVM32weighted_scalar_transport_system/' || true
+            echo "FVM symbols in $artifact"
+            nm -m "$build/$artifact" | awk '/weighted_scalar_transport_system|FieldStoredPressureWeightedFaceFluxWorkspace/' || true
           fi
         done
 
