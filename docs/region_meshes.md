@@ -13,8 +13,10 @@ analytical/scaling qualification are described in
 
 ## Providers and ownership
 
-`TopologyProvider` supplies ordinal incidence, node loops, cell types and the
-owner-outward convention. `GeometryProvider` supplies physical metrics in a
+The [provider concepts](architecture/template_concepts.md) are declared in
+`geometry/mesh/RegionProviderConcepts.hh`. `TopologyProvider` supplies ordinal
+incidence, node loops, cell types and the owner-outward convention.
+`GeometryProvider` supplies physical metrics in a
 compatible ordinal layout. `IsoRegion<T,G>` retains const providers, a region
 name, and exact identity/layout/revision snapshots. Counts, indexing extents,
 mesh family, periodic dimensions and explicit/factored template identities must

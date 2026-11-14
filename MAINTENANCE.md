@@ -35,6 +35,11 @@ instead of converting a supplied native mesh into a legacy mesh.
 This avoids hidden conversions and duplicated storage while preserving compatibility
 consumers.
 
+Structural [template concepts](docs/architecture/template_concepts.md) define
+the region provider, local-ordinal mesh, field descriptor, and equation-term
+interfaces. Preserve their custom-type compatibility and the separate compiled
+implementation-provider requirements when changing template boundaries.
+
 Within the native path, Cartesian and cylindrical meshes construct
 [count-balanced, width-aware tensor decompositions](docs/architecture/orthogonal_decomposition.md)
 with initially contiguous owned cell/face algebraic maps and compact halo topology

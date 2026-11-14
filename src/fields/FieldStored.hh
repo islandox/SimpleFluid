@@ -12,6 +12,7 @@
 #pragma once
 
 #include "fields/Field.hh"
+#include "geometry/MeshConcepts.hh"
 #include "geometry/MeshHandle.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
@@ -86,22 +87,16 @@ struct StoredFieldValueTraits<std::array<vec3<Scalar>, 3>>
     }
 };
 
-template<class Location>
-inline constexpr bool supported_field_location =
-    std::is_same_v<Location, CellLocation>
- || std::is_same_v<Location, FaceLocation>
- || std::is_same_v<Location, BoundaryFaceLocation>;
-
 // Weak entries retain no mesh or importer after the last bound field dies.
 // Separate location caches prevent identical cell/face maps from sharing IDs.
-template<class Pack, class MeshType, class Location>
+template<class Pack, MeshType MeshT, class Location>
 struct StoredFieldLayout
 {
     using map_type = typename Pack::map_type;
     using import_type = typename Pack::import_type;
     Teuchos::RCP<const map_type> owned, overlap;
     Teuchos::RCP<const import_type> importer;
-    const MeshType* mesh = nullptr;
+    const MeshT* mesh = nullptr;
     std::vector<typename Pack::local_ordinal_type> owned_face_ids;
 
     inline static std::mutex mutex;
@@ -109,7 +104,7 @@ struct StoredFieldLayout
 
     template<class MakeIds>
     static std::shared_ptr<const StoredFieldLayout> acquire(
-        const MeshType& mesh, const Teuchos::RCP<const map_type>& owned,
+        const MeshT& mesh, const Teuchos::RCP<const map_type>& owned,
         const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids);
 };
 
@@ -121,17 +116,17 @@ struct StoredFieldLayout
  * Owned storage is authoritative. Overlap storage includes locally available
  * ghost entries and is refreshed explicitly with sync_ghosts().
  *
- * @tparam FieldType Field descriptor defining value and location types.
+ * @tparam Descriptor Field descriptor defining value and location types.
  * @tparam Pack Tpetra scalar, ordinal, map, and vector types.
- * @tparam MeshType MeshHandle or a compatible partitioned CRTP mesh.
+ * @tparam MeshT MeshHandle or a compatible partitioned CRTP mesh.
  */
-template<class FieldType,
+template<FieldType Descriptor,
          TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 class FieldStored
 {
 public:
-    using descriptor_type = FieldType;
+    using descriptor_type = Descriptor;
     using value_type = typename descriptor_type::value_type;
     using location_type = typename descriptor_type::location_type;
     using value_traits = detail::StoredFieldValueTraits<value_type>;
@@ -140,7 +135,7 @@ public:
     using global_ordinal_type = typename Pack::global_ordinal_type;
     using map_type = typename Pack::map_type;
     using import_type = typename Pack::import_type;
-    using mesh_type = MeshType;
+    using mesh_type = MeshT;
     using vec_type = vec3<scalar_type>;
     using tensor_type = std::array<vec_type, 3>;
     using storage_type = std::conditional_t<
@@ -151,8 +146,6 @@ public:
 
     static constexpr size_t num_components = value_traits::components;
 
-    static_assert(detail::supported_field_location<location_type>,
-                  "FieldStored does not support this field location.");
     static_assert(std::is_same_v<typename value_traits::scalar_type,
                                  scalar_type>,
                   "Field value scalar must match the Tpetra pack scalar.");
@@ -804,50 +797,50 @@ private:
 };
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using ScalarCellFieldStored =
-    FieldStored<ScalarCellFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<ScalarCellFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using VectorCellFieldStored =
-    FieldStored<VectorCellFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<VectorCellFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using TensorCellFieldStored =
-    FieldStored<TensorCellFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<TensorCellFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using ScalarFaceFieldStored =
-    FieldStored<ScalarFaceFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<ScalarFaceFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using VectorFaceFieldStored =
-    FieldStored<VectorFaceFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<VectorFaceFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using ScalarBoundaryFaceFieldStored =
-    FieldStored<ScalarBoundaryFaceFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<ScalarBoundaryFaceFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using VectorBoundaryFaceFieldStored =
-    FieldStored<VectorBoundaryFaceFieldDescriptor<Pack>, Pack, MeshType>;
+    FieldStored<VectorBoundaryFaceFieldDescriptor<Pack>, Pack, MeshT>;
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = MeshHandle<Pack>>
+         MeshType MeshT = MeshHandle<Pack>>
 using AnyFieldStored = std::variant<
-    SP<ScalarCellFieldStored<Pack, MeshType>>,
-    SP<VectorCellFieldStored<Pack, MeshType>>,
-    SP<TensorCellFieldStored<Pack, MeshType>>,
-    SP<ScalarFaceFieldStored<Pack, MeshType>>,
-    SP<VectorFaceFieldStored<Pack, MeshType>>,
-    SP<ScalarBoundaryFaceFieldStored<Pack, MeshType>>,
-    SP<VectorBoundaryFaceFieldStored<Pack, MeshType>>>;
+    SP<ScalarCellFieldStored<Pack, MeshT>>,
+    SP<VectorCellFieldStored<Pack, MeshT>>,
+    SP<TensorCellFieldStored<Pack, MeshT>>,
+    SP<ScalarFaceFieldStored<Pack, MeshT>>,
+    SP<VectorFaceFieldStored<Pack, MeshT>>,
+    SP<ScalarBoundaryFaceFieldStored<Pack, MeshT>>,
+    SP<VectorBoundaryFaceFieldStored<Pack, MeshT>>>;
 
 } // namespace SimpleFluid
 

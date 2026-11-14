@@ -100,6 +100,13 @@ public:
         return *this;
     }
 
+    template<FVM::EquationTermType<Pack> Term>
+        requires (!std::same_as<std::remove_cvref_t<Term>, operator_type>)
+    Equation& add_lhs(Term&& term)
+    {
+        return add_lhs(operator_type(std::forward<Term>(term)));
+    }
+
     /**
      * @brief Add and validate an explicit source-side operator term.
      * @return This equation for fluent construction.
@@ -109,6 +116,13 @@ public:
         FVM::validate_operator(term, value_traits::components);
         d_rhs.push_back(std::move(term));
         return *this;
+    }
+
+    template<FVM::EquationTermType<Pack> Term>
+        requires (!std::same_as<std::remove_cvref_t<Term>, operator_type>)
+    Equation& add_rhs(Term&& term)
+    {
+        return add_rhs(operator_type(std::forward<Term>(term)));
     }
 
     const std::vector<operator_type>& lhs_terms() const noexcept

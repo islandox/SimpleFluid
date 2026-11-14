@@ -25,7 +25,7 @@ namespace
 {
 using Problem = CoupledNonlinearProblem;
 using Pack = Problem::pack_type;
-using MeshType = Problem::mesh_type;
+using NativeMesh = Problem::mesh_type;
 using Velocity = Problem::velocity_field_type;
 using Pressure = Problem::field_type;
 using Flux = Problem::face_flux_field_type;
@@ -34,13 +34,13 @@ using MultiVector = Pack::multi_vector_type;
 using Operator = Pack::operator_type;
 using LO = Pack::local_ordinal_type;
 using Vec = vec3<double>;
-using NativeVelocityBoundaryCache = FVM::FieldStoredVelocityBoundaryCache<Pack, MeshType>;
-using FluxWorkspace = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>;
-using CoupledSolver = CoupledPressureVelocitySolver<Pack, MeshType>;
-using MomentumEquation = IncompressibleMomentumEquation<Pack, MeshType>;
-using BoussinesqEquation = BoussinesqMomentumEquation<Pack, MeshType>;
+using NativeVelocityBoundaryCache = FVM::FieldStoredVelocityBoundaryCache<Pack, NativeMesh>;
+using FluxWorkspace = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, NativeMesh>;
+using CoupledSolver = CoupledPressureVelocitySolver<Pack, NativeMesh>;
+using MomentumEquation = IncompressibleMomentumEquation<Pack, NativeMesh>;
+using BoussinesqEquation = BoussinesqMomentumEquation<Pack, NativeMesh>;
 
-void collective_require(const MeshType& mesh, bool condition, const char* message)
+void collective_require(const NativeMesh& mesh, bool condition, const char* message)
 {
     const int local_invalid = !condition;
     int any_invalid = 0;
@@ -49,14 +49,14 @@ void collective_require(const MeshType& mesh, bool condition, const char* messag
         throw std::invalid_argument(message);
 }
 
-SP<const MeshType> require_mesh(SP<const MeshType> mesh)
+SP<const NativeMesh> require_mesh(SP<const NativeMesh> mesh)
 {
     if (!mesh || mesh->owned_cell_map().is_null())
         throw std::invalid_argument("CoupledNonlinearProblem requires a mapped native mesh.");
     return mesh;
 }
 
-void require_boundary_consistency(const MeshType& mesh, const BoundaryConditionSet& boundaries)
+void require_boundary_consistency(const NativeMesh& mesh, const BoundaryConditionSet& boundaries)
 {
     // Like the native fixed-flux configuration, named boundary configuration
     // is replicated on the mesh communicator, even on ranks without a patch.
@@ -150,14 +150,14 @@ struct RowFace
 
 struct FrozenGeometry
 {
-    SP<const MeshType> mesh;
+    SP<const NativeMesh> mesh;
     std::vector<std::vector<RowFace>> rows;
     BoundaryConditionSet homogeneous_boundaries;
     NativeVelocityBoundaryCache homogeneous_velocity;
     FVM::CellGradientScheme gradient_scheme;
     std::uint64_t epoch;
 
-    FrozenGeometry(SP<const MeshType> mesh_, const BoundaryConditionSet& boundaries, const TimeStepperOptions& options)
+    FrozenGeometry(SP<const NativeMesh> mesh_, const BoundaryConditionSet& boundaries, const TimeStepperOptions& options)
         : mesh(std::move(mesh_)), homogeneous_boundaries(boundaries), homogeneous_velocity(mesh),
           gradient_scheme(options.pressure_gradient_scheme), epoch(mesh_geometry_epoch(*mesh))
     {
@@ -317,7 +317,7 @@ private:
 /** Storage is leased to one immutable timestep context at a time. */
 struct NativeNonlinearWorkspace
 {
-    SP<const MeshType> mesh;
+    SP<const NativeMesh> mesh;
     Velocity accepted_velocity, trial_velocity;
     Pressure initial_pressure, trial_pressure;
     Flux trial_flux;
@@ -336,7 +336,7 @@ struct NativeNonlinearWorkspace
     size_t uses = 0;
     bool ready = false;
 
-    explicit NativeNonlinearWorkspace(SP<const MeshType> selected)
+    explicit NativeNonlinearWorkspace(SP<const NativeMesh> selected)
         : mesh(require_mesh(std::move(selected))), accepted_velocity(mesh, "nonlinear_accepted_velocity"),
           trial_velocity(mesh, "nonlinear_trial_velocity"), initial_pressure(mesh, "nonlinear_initial_pressure"),
           trial_pressure(mesh, "nonlinear_trial_pressure"), trial_flux(mesh, "nonlinear_trial_flux"),
@@ -370,7 +370,7 @@ struct CoupledNonlinearWorkspace::Impl
 {
     std::vector<std::shared_ptr<NativeNonlinearWorkspace>> slots;
 
-    std::shared_ptr<NativeNonlinearWorkspace> acquire(SP<const MeshType> mesh)
+    std::shared_ptr<NativeNonlinearWorkspace> acquire(SP<const NativeMesh> mesh)
     {
         mesh = require_mesh(std::move(mesh));
         const auto comm = mesh->owned_cell_map()->getComm();

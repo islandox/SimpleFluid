@@ -9,22 +9,22 @@
 namespace SimpleFluid
 {
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline FieldStored<FieldType, Pack, MeshType>::FieldStored(SP<const mesh_type> mesh, std::string name, bool zero_out)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline FieldStored<Descriptor, Pack, MeshT>::FieldStored(SP<const mesh_type> mesh, std::string name, bool zero_out)
     : FieldStored(descriptor_type(std::move(name)), std::move(mesh), zero_out)
 {
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline FieldStored<FieldType, Pack, MeshType>::FieldStored(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline FieldStored<Descriptor, Pack, MeshT>::FieldStored(
     SP<const mesh_type> mesh, const value_type& initial_value, std::string name)
     : FieldStored(descriptor_type(std::move(name)), std::move(mesh), initial_value)
 {
 }
 
-template<class Pack, class MeshType, class Location>
+template<class Pack, MeshType MeshT, class Location>
 template<class MakeIds>
-inline auto detail::StoredFieldLayout<Pack, MeshType, Location>::acquire(const MeshType& mesh,
+inline auto detail::StoredFieldLayout<Pack, MeshT, Location>::acquire(const MeshT& mesh,
     const Teuchos::RCP<const map_type>& owned, const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids)
     -> std::shared_ptr<const StoredFieldLayout>
 {
@@ -72,8 +72,8 @@ inline auto detail::StoredFieldLayout<Pack, MeshType, Location>::acquire(const M
     return entry;
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline auto FieldStored<FieldType, Pack, MeshType>::component_value(local_ordinal_type local_id, size_t component) const
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::component_value(local_ordinal_type local_id, size_t component) const
     -> scalar_type
 {
     check_component(component);
@@ -91,8 +91,8 @@ inline auto FieldStored<FieldType, Pack, MeshType>::component_value(local_ordina
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline auto FieldStored<FieldType, Pack, MeshType>::local_component_value(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::local_component_value(
     local_ordinal_type local_id, size_t component) const -> scalar_type
 {
     check_component(component);
@@ -110,8 +110,8 @@ inline auto FieldStored<FieldType, Pack, MeshType>::local_component_value(
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline void FieldStored<FieldType, Pack, MeshType>::set_component_value(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::set_component_value(
     local_ordinal_type local_id, size_t component, scalar_type value)
 {
     check_component(component);
@@ -130,8 +130,8 @@ inline void FieldStored<FieldType, Pack, MeshType>::set_component_value(
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline void FieldStored<FieldType, Pack, MeshType>::set_owned_component_value(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::set_owned_component_value(
     local_ordinal_type local_id, size_t component, scalar_type value)
 {
     check_component(component);
@@ -149,8 +149,8 @@ inline void FieldStored<FieldType, Pack, MeshType>::set_owned_component_value(
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline auto FieldStored<FieldType, Pack, MeshType>::value_at(const storage_type& storage, local_ordinal_type row)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::value_at(const storage_type& storage, local_ordinal_type row)
     -> value_type
 {
     if constexpr (value_traits::components == 9)
@@ -172,8 +172,8 @@ inline auto FieldStored<FieldType, Pack, MeshType>::value_at(const storage_type&
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-inline void FieldStored<FieldType, Pack, MeshType>::set_at(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::set_at(
     storage_type& storage, local_ordinal_type row, const value_type& value)
 {
     if constexpr (value_traits::is_vector)

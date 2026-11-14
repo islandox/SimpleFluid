@@ -1,6 +1,8 @@
 # Unit tests for equation classes
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
+# Check public concept includes and constrained consumers without a PCH.
+set_source_files_properties(testFrameworkConcepts.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testBoussinesqModelMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX

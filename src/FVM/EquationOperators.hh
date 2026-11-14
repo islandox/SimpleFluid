@@ -15,6 +15,7 @@
 #include "dataclass/TpetraTypes.hh"
 
 #include <cstddef>
+#include <concepts>
 #include <functional>
 #include <stdexcept>
 #include <string>
@@ -95,6 +96,16 @@ using OperatorVariant = std::variant<
     SourceOperator<Pack>,
     GradientOperator,
     DivergenceOperator>;
+
+/**
+ * @brief A term implicitly convertible to the equation's supported operator variant.
+ *
+ * Pack-specific operators from another pack and unrelated look-alikes are
+ * rejected. Existing custom implicit conversion adapters remain supported;
+ * adding a new assembly operation still requires extending OperatorVariant.
+ */
+template<class Term, class Pack = DefaultTpetraTypes>
+concept EquationTermType = TpetraTypePack<Pack> && std::convertible_to<Term, OperatorVariant<Pack>>;
 
 /**
  * @brief Validate an operator before adding it to an equation.

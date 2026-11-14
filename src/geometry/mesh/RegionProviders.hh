@@ -9,6 +9,7 @@
 #pragma once
 
 #include "geometry/mesh/EntityRange.hh"
+#include "geometry/mesh/RegionProviderConcepts.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -36,48 +37,6 @@ struct MeshStorageReport
     {
         return topology + geometry + interfaces + indexing + compatibility + boundaries + objects;
     }
-};
-
-/** @brief Ordinal layout and orientation compatibility; explicit templates require identical identity. */
-struct RegionLayout
-{
-    enum class Family { Rectilinear, Extruded, Explicit, Cylindrical };
-    Family family;
-    size_t cells, faces, nodes;
-    std::array<size_t, 3> extents;
-    const void* template_identity = nullptr;
-    std::array<bool,3> periodic{};
-    bool operator==(const RegionLayout&) const = default;
-};
-
-/** @brief Topology supplies owner-oriented incidence and reversible entity ordinals. */
-template<class T>
-concept TopologyProvider = MeshIndexTypePack<typename T::index_type_pack>
-    && requires(const T& t, size_t c, size_t f, size_t n)
-{
-    { t.layout() } -> std::same_as<RegionLayout>;
-    { t.storage_identity() } -> std::same_as<const void*>;
-    { t.cell_faces(c) } -> std::ranges::random_access_range;
-    { t.owner_cell(f) } -> std::convertible_to<size_t>;
-    { t.neighbor_cell(f) } -> std::convertible_to<size_t>;
-    { t.cell_nodes(c) } -> std::ranges::random_access_range;
-    { t.face_nodes(f) } -> std::ranges::random_access_range;
-    { t.cell_type(c) } -> std::same_as<MeshUtils::CellType>;
-};
-
-/** @brief Geometry supplies physical metrics in a declared ordinal layout without incidence storage. */
-template<class G>
-concept GeometryProvider = requires(const G& g, size_t c, size_t f, size_t n)
-{
-    { g.layout() } -> std::same_as<RegionLayout>;
-    { g.storage_identity() } -> std::same_as<const void*>;
-    { g.cell_volume(c) } -> std::convertible_to<real_t>;
-    { g.cell_centroid(c) } -> std::same_as<MeshUtils::Vec3>;
-    { g.face_area(f) } -> std::convertible_to<real_t>;
-    { g.face_centroid(f) } -> std::same_as<MeshUtils::Vec3>;
-    { g.face_area_vector(f) } -> std::same_as<MeshUtils::Vec3>;
-    { g.node_coordinates(n) } -> std::same_as<MeshUtils::Vec3>;
-    { g.geometry_epoch() } -> std::convertible_to<std::uint64_t>;
 };
 
 /** @brief Procedural HEX_8 topology backed by a shared immutable orthogonal template. */

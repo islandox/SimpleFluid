@@ -13,6 +13,7 @@
 
 #include "dataclass/TpetraTypes.hh"
 #include "dataclass/vec3.hh"
+#include "fields/FieldConcepts.hh"
 
 #include <array>
 #include <atomic>
@@ -23,21 +24,6 @@
 
 namespace SimpleFluid
 {
-
-/** @brief Location tag for cell-centered fields. */
-struct CellLocation
-{
-};
-
-/** @brief Location tag for face-centered fields. */
-struct FaceLocation
-{
-};
-
-/** @brief Location tag for values stored only on boundary faces. */
-struct BoundaryFaceLocation
-{
-};
 
 /**
  * @brief Named, uniquely identified descriptor for a typed field.

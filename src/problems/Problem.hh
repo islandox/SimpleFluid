@@ -155,7 +155,7 @@ public:
     }
 
     /** @brief Allocate and register a distributed field. */
-    template<class Descriptor>
+    template<FieldType Descriptor>
     FieldStored<Descriptor, Pack>& add_field(
         Descriptor descriptor,
         bool zero_out = true)
@@ -167,7 +167,7 @@ public:
                 std::move(descriptor), d_mesh, zero_out));
     }
 
-    template<class Descriptor>
+    template<FieldType Descriptor>
     FieldStored<Descriptor, Pack>& add_field(
         Descriptor descriptor,
         const typename Descriptor::value_type& initial_value)

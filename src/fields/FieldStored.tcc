@@ -8,8 +8,8 @@
 namespace SimpleFluid
 {
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-FieldStored<FieldType, Pack, MeshType>::FieldStored(descriptor_type descriptor, SP<const mesh_type> mesh, bool zero_out)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+FieldStored<Descriptor, Pack, MeshT>::FieldStored(descriptor_type descriptor, SP<const mesh_type> mesh, bool zero_out)
     : d_descriptor(std::move(descriptor)), d_mesh(require_mesh(std::move(mesh))),
       d_owned(make_storage(map_for<false>(*d_mesh), zero_out)), d_overlap(make_storage(map_for<true>(*d_mesh), false)),
       d_layout(layout_type::acquire(
@@ -22,16 +22,16 @@ FieldStored<FieldType, Pack, MeshType>::FieldStored(descriptor_type descriptor, 
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-FieldStored<FieldType, Pack, MeshType>::FieldStored(
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+FieldStored<Descriptor, Pack, MeshT>::FieldStored(
     descriptor_type descriptor, SP<const mesh_type> mesh, const value_type& initial_value)
     : FieldStored(std::move(descriptor), std::move(mesh), false)
 {
     put_value(initial_value);
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-void FieldStored<FieldType, Pack, MeshType>::put_value(const value_type& value)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+void FieldStored<Descriptor, Pack, MeshT>::put_value(const value_type& value)
 {
     if constexpr (value_traits::is_vector)
     {
@@ -48,8 +48,8 @@ void FieldStored<FieldType, Pack, MeshType>::put_value(const value_type& value)
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-auto FieldStored<FieldType, Pack, MeshType>::make_storage(const Teuchos::RCP<const map_type>& map, bool zero_out)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+auto FieldStored<Descriptor, Pack, MeshT>::make_storage(const Teuchos::RCP<const map_type>& map, bool zero_out)
     -> storage_type
 {
     if constexpr (value_traits::is_vector)
@@ -62,8 +62,8 @@ auto FieldStored<FieldType, Pack, MeshType>::make_storage(const Teuchos::RCP<con
     }
 }
 
-template<class FieldType, TpetraTypePack Pack, class MeshType>
-auto FieldStored<FieldType, Pack, MeshType>::make_owned_face_ids(const mesh_type& mesh)
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+auto FieldStored<Descriptor, Pack, MeshT>::make_owned_face_ids(const mesh_type& mesh)
     -> std::vector<local_ordinal_type>
 {
     std::vector<local_ordinal_type> result;

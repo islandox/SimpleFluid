@@ -17,6 +17,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         mesh_traverse/StructuredIncidenceCases.cc)
   endif()
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testMultiRegionMeshMultiRank")
+    # FieldStored construction is supplied by the compiled field providers.
+    target_link_libraries(${TEST_NAME} SimpleFluid::Fields)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testMeshQualityAccess")
     simplefluid_discover_tests(${TEST_NAME}
