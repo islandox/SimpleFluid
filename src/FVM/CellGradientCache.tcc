@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/details/DiagnosticCapture.hh"
 
@@ -28,7 +29,7 @@ inline GradientBuildSink& gradient_build_sink()
     return sink;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 GradientBuildSink* gradient_build_capture(const MeshType& mesh, bool include_boundary)
 {
     auto& sink = gradient_build_sink();
@@ -55,7 +56,7 @@ GradientBuildSink* gradient_build_capture(const MeshType& mesh, bool include_bou
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CellGradientCache<Pack, MeshType>::build_geometry(
     const mesh_type& mesh,
     const std::vector<boundary_location_type>& boundary_locations,
@@ -172,7 +173,7 @@ auto CellGradientCache<Pack, MeshType>::build_geometry(
     return build.template operator()<false>();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::refresh()
 {
     const auto execution = d_traverse_plan->acquire();
@@ -182,7 +183,7 @@ void CellGradientCache<Pack, MeshType>::refresh()
     d_geometry_epoch = epoch;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CellGradientCache<Pack, MeshType>::build_snapshot() const -> std::shared_ptr<GeometrySnapshot>
 {
     auto next = std::make_shared<GeometrySnapshot>();
@@ -225,7 +226,7 @@ auto CellGradientCache<Pack, MeshType>::build_snapshot() const -> std::shared_pt
     return next;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::build_region_geometry(GeometrySnapshot& next) const
 {
     if constexpr (requires { d_mesh->supports_region_execution(); })
@@ -309,7 +310,7 @@ void CellGradientCache<Pack, MeshType>::build_region_geometry(GeometrySnapshot& 
         throw std::logic_error("Region gradient construction requires region execution support.");
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::build_layered_geometry(GeometrySnapshot& next) const
 {
     next.layered = std::make_unique<LayeredGeometry>();
@@ -395,7 +396,7 @@ void CellGradientCache<Pack, MeshType>::build_layered_geometry(GeometrySnapshot&
     traversal.cells().boundary().apply(build_cell);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::build_structured_geometry(
     GeometrySnapshot& next, const std::vector<boundary_location_type>* locations) const
 {
@@ -516,7 +517,7 @@ void CellGradientCache<Pack, MeshType>::build_structured_geometry(
     traversal.cells().boundary().apply(build_boundary);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::materialize_geometry() const
 {
     if (!d_geometry->structured && !d_geometry->layered) return;
@@ -546,7 +547,7 @@ void CellGradientCache<Pack, MeshType>::materialize_geometry() const
     });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CellGradientCache<Pack, MeshType>::materialize_locations() const
 {
     if (!d_geometry->structured) return;
@@ -568,7 +569,7 @@ void CellGradientCache<Pack, MeshType>::materialize_locations() const
     });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 size_t CellGradientCache<Pack, MeshType>::numerical_storage_bytes() const noexcept
 {
     if (!d_geometry) return 0;
@@ -587,7 +588,7 @@ size_t CellGradientCache<Pack, MeshType>::numerical_storage_bytes() const noexce
     return bytes;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CellGradientCache<Pack, MeshType>::inverse_columns(
     const std::array<std::array<real_t, 3>, 3>& normal) -> std::array<vec_type, 3>
 {
@@ -604,20 +605,20 @@ auto CellGradientCache<Pack, MeshType>::inverse_columns(
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CellGradientCache<Pack, MeshType>::CellGradientCache(SP<const mesh_type> mesh)
     : CellGradientCache(std::move(mesh), boundary_direction_provider_type{})
 {
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CellGradientCache<Pack, MeshType>::CellGradientCache(
     SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction)
     : CellGradientCache(std::move(mesh), std::move(boundary_direction), {})
 {
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CellGradientCache<Pack, MeshType>::CellGradientCache(
     SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction,
     std::shared_ptr<const traverse_plan_type> traverse_plan)

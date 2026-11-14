@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "dataclass/Database.hh"
@@ -182,7 +183,7 @@ inline BoilingSourceOptions boiling_source_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT BoilingSourceModel
 {
 public:

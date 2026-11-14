@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
 
 #include "FVM/CellOperators.hh"
@@ -22,7 +23,7 @@
 namespace SimpleFluid::FVM::detail
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto stored_pressure_face_geometry(const MeshType& mesh) -> std::vector<StoredPressureFaceGeometry<Pack>>
 {
     const auto execution = acquire_mesh_execution(mesh);
@@ -99,7 +100,7 @@ auto stored_pressure_face_geometry(const MeshType& mesh) -> std::vector<StoredPr
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType, class VelocityBoundaryCacheType, class Workspace>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class VelocityBoundaryCacheType, class Workspace>
 void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const VelocityBoundaryCacheType& boundary_cache, const BoundaryConditionMap* pressure_boundary_conditions,

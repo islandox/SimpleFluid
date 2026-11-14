@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalConvergenceOptions.hh"
@@ -138,7 +139,7 @@ SIMPLEFLUID_SOLVERS_EXPORT bool solve_non_orthogonal_diffusion(const Mesh<Pack>&
  * convergence only. A false return retains the last synchronized iterate.
  * Invalid or rank-divergent controls are rejected collectively before assembly.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
     ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,
@@ -150,7 +151,7 @@ bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_
 }
 
 /** @brief Solve zero-source mapped steady non-orthogonal diffusion. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellFieldStored<Pack, MeshType>& solution,
     NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors, const LinearSolverOptions& linear_options = {},

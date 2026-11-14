@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/CollectiveValidation.hh"
 #include "TurbulenceModel.hh"
 
@@ -55,11 +56,11 @@ auto slip_face_velocity(
 }
 
 /** @brief Own only the geometry required by the configured reconstruction scheme. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 using GradientCache = std::variant<FVM::CellGradientCache<Pack, MeshType>,
     FVM::GaussLinearGradientCache<Pack, MeshType>>;
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 GradientCache<Pack, MeshType> make_gradient_cache(
     SP<const MeshType> mesh, FVM::CellGradientScheme scheme)
 {
@@ -176,7 +177,7 @@ void reconstruct_gradient(FVM::CellGradientScheme scheme, const VectorField& fie
  * @brief Owns all fields, closures, equations, and staged wall data.
  * @tparam Pack Tpetra type pack used by the enclosing model.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
 {
     using closure_type =
@@ -749,7 +750,7 @@ struct SIMPLEFLUID_EQUATIONS_LOCAL TurbulenceModel<Pack, MeshType>::State
     std::map<std::string, const field_type*> output_fields;
 };
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 struct TurbulenceModel<Pack, MeshType>::SnapshotData
 {
     std::shared_ptr<const int> identity;
@@ -765,7 +766,7 @@ struct TurbulenceModel<Pack, MeshType>::SnapshotData
     explicit SnapshotData(const velocity_boundary_cache_type& cache) : boundary(cache) {}
 };
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     auto& state = const_cast<State&>(require_state());
@@ -792,7 +793,7 @@ auto TurbulenceModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
     auto& state = require_state();
@@ -822,14 +823,14 @@ void TurbulenceModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
     if (state.sas) state.sas->statistics = data.sas;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const SSTSASStatistics& TurbulenceModel<Pack, MeshType>::sas_statistics() const
 {
     static const SSTSASStatistics inactive;
     return d_state && d_state->sas ? d_state->sas->statistics : inactive;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::validate_time_mode(bool physical_time) const
 {
     if (d_options.model != TurbulenceModelType::SSTKOmegaSAS || !d_options.sas.enabled)
@@ -846,7 +847,7 @@ void TurbulenceModel<Pack, MeshType>::validate_time_mode(bool physical_time) con
  * @param boundary_conditions Velocity and turbulence scalar boundaries.
  * @throws std::invalid_argument if the mesh or boundary types are invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TurbulenceModel<Pack, MeshType>::TurbulenceModel(SP<const mesh_type> mesh,
                                        const BoundaryConditionSet& boundary_conditions)
     : d_mesh(std::move(mesh)), d_velocity_boundary_conditions(boundary_conditions.velocity),
@@ -882,7 +883,8 @@ TurbulenceModel<Pack, MeshType>::TurbulenceModel(SP<const mesh_type> mesh,
         });
 }
 
-template <TpetraTypePack Pack, class MeshType> TurbulenceModel<Pack, MeshType>::~TurbulenceModel() = default;
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+TurbulenceModel<Pack, MeshType>::~TurbulenceModel() = default;
 
 /**
  * @brief Parse database options and replace the active closure collectively.
@@ -893,7 +895,7 @@ template <TpetraTypePack Pack, class MeshType> TurbulenceModel<Pack, MeshType>::
  * @throws std::invalid_argument if parsing or configuration validation fails.
  * @throws std::overflow_error if a derived property is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::configure(const Database& database,
                                       const material_type& material,
                                       scalar_type reference_density)
@@ -916,7 +918,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const Database& database,
  * @throws std::logic_error if an invalid closure state is requested.
  * @throws std::overflow_error if a derived property is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& options,
                                       const material_type& material, scalar_type reference_density)
 {
@@ -1367,7 +1369,7 @@ void TurbulenceModel<Pack, MeshType>::configure(const TurbulenceModelOptions& op
  * @tparam Pack Tpetra type pack used by the model.
  * @return True when an active state was released.
  */
-template <TpetraTypePack Pack, class MeshType> bool TurbulenceModel<Pack, MeshType>::disable() noexcept
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType> bool TurbulenceModel<Pack, MeshType>::disable() noexcept
 {
     const auto was_enabled = static_cast<bool>(d_state);
     d_state.reset();
@@ -1380,7 +1382,8 @@ template <TpetraTypePack Pack, class MeshType> bool TurbulenceModel<Pack, MeshTy
  * @tparam Pack Tpetra type pack used by the model.
  * @return True when turbulence state is allocated.
  */
-template <TpetraTypePack Pack, class MeshType> bool TurbulenceModel<Pack, MeshType>::enabled() const noexcept
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+bool TurbulenceModel<Pack, MeshType>::enabled() const noexcept
 {
     return static_cast<bool>(d_state);
 }
@@ -1390,7 +1393,7 @@ template <TpetraTypePack Pack, class MeshType> bool TurbulenceModel<Pack, MeshTy
  * @tparam Pack Tpetra type pack used by the model.
  * @return Runtime model identifier.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TurbulenceModelType TurbulenceModel<Pack, MeshType>::type() const noexcept
 {
     return d_options.model;
@@ -1401,7 +1404,7 @@ TurbulenceModelType TurbulenceModel<Pack, MeshType>::type() const noexcept
  * @tparam Pack Tpetra type pack used by the model.
  * @return Stored model options.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const TurbulenceModelOptions& TurbulenceModel<Pack, MeshType>::options() const noexcept
 {
     return d_options;
@@ -1413,7 +1416,8 @@ const TurbulenceModelOptions& TurbulenceModel<Pack, MeshType>::options() const n
  * @return Mutable active state.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType> auto TurbulenceModel<Pack, MeshType>::require_state() -> State&
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+auto TurbulenceModel<Pack, MeshType>::require_state() -> State&
 {
     if (!d_state)
     {
@@ -1428,7 +1432,7 @@ template <TpetraTypePack Pack, class MeshType> auto TurbulenceModel<Pack, MeshTy
  * @return Immutable active state.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::require_state() const -> const State&
 {
     if (!d_state)
@@ -1449,7 +1453,7 @@ auto TurbulenceModel<Pack, MeshType>::require_state() const -> const State&
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::overflow_error if a derived property is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::stage_effective_properties(
     State& state, const field_type& turbulent_kinematic_viscosity, const material_type& material,
     scalar_type reference_density, scalar_type turbulent_prandtl_number) const
@@ -1545,7 +1549,7 @@ void TurbulenceModel<Pack, MeshType>::stage_effective_properties(
  * @tparam Pack Tpetra type pack used by the model.
  * @param[in,out] state State whose candidate properties are committed.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::commit_effective_properties(State& state) const
 {
     State::publish_synced_field(
@@ -1559,7 +1563,7 @@ void TurbulenceModel<Pack, MeshType>::commit_effective_properties(State& state) 
 /**
  * @brief Stage accepted-state BSL/SST eddy viscosity for new molecular data.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::stage_menter_eddy_viscosity(
     State& state, const field_type& wall_distance,
     const material_type& material, scalar_type reference_density,
@@ -1698,7 +1702,7 @@ void TurbulenceModel<Pack, MeshType>::stage_menter_eddy_viscosity(
  * @throws std::invalid_argument if material or wall inputs are invalid.
  * @throws std::overflow_error if a derived property is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::refresh_effective_properties(const material_type& material,
                                                          scalar_type reference_density)
 {
@@ -1743,7 +1747,7 @@ void TurbulenceModel<Pack, MeshType>::refresh_effective_properties(const materia
  * @param material Current molecular material-property fields.
  * @param reference_density Positive momentum reference density.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::restore_transported_state(
     const field_type& turbulent_kinetic_energy,
     const field_type& secondary,
@@ -1991,7 +1995,7 @@ void TurbulenceModel<Pack, MeshType>::restore_transported_state(
  * @throws std::runtime_error if a solve or closure evaluation fails.
  * @throws std::overflow_error if a derived property is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocity,
                                     const face_flux_field_type& projected_face_fluxes,
                                     const velocity_boundary_cache_type& velocity_boundary_cache,
@@ -2007,7 +2011,7 @@ auto TurbulenceModel<Pack, MeshType>::advance(const velocity_field_type& velocit
         nullptr, false);
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::evaluate_diagnostics(
     const velocity_field_type& velocity, const face_flux_field_type& projected_face_fluxes,
     const velocity_boundary_cache_type& velocity_boundary_cache, scalar_type time_step,
@@ -2076,7 +2080,7 @@ auto TurbulenceModel<Pack, MeshType>::evaluate_diagnostics(
     return result;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::clipping_statistics_by_field() const -> ClippingStatistics
 {
     const auto& local = require_state().clipping_by_field;
@@ -2092,7 +2096,7 @@ auto TurbulenceModel<Pack, MeshType>::clipping_statistics_by_field() const -> Cl
             {static_cast<std::size_t>(global_sums[2]), global_maxima[1], global_sums[3]}};
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PositivityClippingStatistics TurbulenceModel<Pack, MeshType>::clipping_statistics() const
 {
     const auto fields = clipping_statistics_by_field();
@@ -2101,7 +2105,7 @@ PositivityClippingStatistics TurbulenceModel<Pack, MeshType>::clipping_statistic
         fields.k.volume_integral + fields.secondary.volume_integral};
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::advance_impl(const velocity_field_type& velocity,
                                     const face_flux_field_type& projected_face_fluxes,
                                     const velocity_boundary_cache_type& velocity_boundary_cache,
@@ -3140,7 +3144,7 @@ auto TurbulenceModel<Pack, MeshType>::advance_impl(const velocity_field_type& ve
  * @throws std::invalid_argument if a field mesh or physical value is invalid.
  * @throws std::overflow_error if an effective-property calculation is invalid.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TurbulenceModel<Pack, MeshType>::set_wall_distance(
     const field_type& wall_distance, const material_type& material,
     scalar_type reference_density)
@@ -3249,7 +3253,7 @@ void TurbulenceModel<Pack, MeshType>::set_wall_distance(
  * @return Accepted k field.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy() const -> const field_type&
 {
     return require_state().k;
@@ -3261,7 +3265,7 @@ auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy() const -> const 
  * @return Accepted gradient of k.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy_gradient() const
     -> const velocity_field_type&
 {
@@ -3273,7 +3277,7 @@ auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy_gradient() const
  * @tparam Pack Tpetra type pack used by the model.
  * @return Epsilon field, or null for disabled and omega-family models.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::dissipation_rate() const noexcept -> const field_type*
 {
     return d_state && d_state->epsilon_family ? &d_state->secondary : nullptr;
@@ -3284,7 +3288,7 @@ auto TurbulenceModel<Pack, MeshType>::dissipation_rate() const noexcept -> const
  * @tparam Pack Tpetra type pack used by the model.
  * @return Omega field, or null for disabled and epsilon-family models.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::specific_dissipation_rate() const noexcept -> const field_type*
 {
     return d_state && !d_state->epsilon_family ? &d_state->secondary : nullptr;
@@ -3296,7 +3300,7 @@ auto TurbulenceModel<Pack, MeshType>::specific_dissipation_rate() const noexcept
  * @return Accepted eddy-viscosity field.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::turbulent_kinematic_viscosity() const -> const field_type&
 {
     return require_state().nu_t;
@@ -3308,7 +3312,7 @@ auto TurbulenceModel<Pack, MeshType>::turbulent_kinematic_viscosity() const -> c
  * @return Molecular plus turbulent dynamic viscosity.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::effective_dynamic_viscosity() const -> const field_type&
 {
     return require_state().effective_dynamic_viscosity;
@@ -3320,13 +3324,13 @@ auto TurbulenceModel<Pack, MeshType>::effective_dynamic_viscosity() const -> con
  * @return Molecular plus turbulent thermal conductivity.
  * @throws std::logic_error if the model is disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::effective_thermal_conductivity() const -> const field_type&
 {
     return require_state().effective_thermal_conductivity;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::buoyancy_production() const noexcept
     -> const field_type*
 {
@@ -3337,35 +3341,35 @@ auto TurbulenceModel<Pack, MeshType>::buoyancy_production() const noexcept
          : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy_source() const noexcept
     -> const field_type*
 {
     return d_state ? &d_state->k_source : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::turbulent_kinetic_energy_sink() const noexcept
     -> const field_type*
 {
     return d_state ? &d_state->k_sink : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::secondary_source() const noexcept
     -> const field_type*
 {
     return d_state ? &d_state->secondary_source : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::secondary_sink() const noexcept
     -> const field_type*
 {
     return d_state ? &d_state->secondary_sink : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::wall_distance() const noexcept
     -> const field_type*
 {
@@ -3379,7 +3383,7 @@ auto TurbulenceModel<Pack, MeshType>::wall_distance() const noexcept
  * @tparam Pack Tpetra type pack used by the model.
  * @return Active wall viscosity cache, or null.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::effective_dynamic_viscosity_boundary_cache() const noexcept
     -> const boundary_cache_type*
 {
@@ -3393,7 +3397,7 @@ auto TurbulenceModel<Pack, MeshType>::effective_dynamic_viscosity_boundary_cache
  * @tparam Pack Tpetra type pack used by the model.
  * @return Active wall conductivity cache, or null.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::effective_thermal_conductivity_boundary_cache() const noexcept
     -> const boundary_cache_type*
 {
@@ -3407,7 +3411,7 @@ auto TurbulenceModel<Pack, MeshType>::effective_thermal_conductivity_boundary_ca
  * @tparam Pack Tpetra type pack used by the model.
  * @return y+ field when wall treatment is active, or null.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::wall_y_plus() const noexcept -> const field_type*
 {
     return d_state && d_options.wall_treatment != TurbulenceWallTreatmentType::None
@@ -3415,7 +3419,7 @@ auto TurbulenceModel<Pack, MeshType>::wall_y_plus() const noexcept -> const fiel
          : nullptr;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::wall_y_plus_statistics() const noexcept
     -> const Arr<WallYPlusStatistics>&
 {
@@ -3429,7 +3433,7 @@ auto TurbulenceModel<Pack, MeshType>::wall_y_plus_statistics() const noexcept
  * @tparam Pack Tpetra type pack used by the model.
  * @return Stable name-to-field mapping, empty when disabled.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceModel<Pack, MeshType>::output_fields() const noexcept
     -> const std::map<std::string, const field_type*>&
 {

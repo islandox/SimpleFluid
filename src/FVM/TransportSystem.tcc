@@ -9,6 +9,7 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -44,7 +45,7 @@ extern template TransportSystem<DefaultTpetraTypes>
 namespace detail
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void validate_transport_matrix_graph(
     const MeshType& mesh,
     const Teuchos::RCP<typename Pack::matrix_type>& cached_matrix,
@@ -107,7 +108,7 @@ NonOrthogonalTransportWeights<typename Pack::scalar_type> validate_non_orthogona
     return validate_non_orthogonal_selection<typename Pack::scalar_type>(mesh, treatment, field_state, context);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PreparedTransportMatrix<Pack> prepare_transport_matrix(
     const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
     const std::vector<TransportMatrixRow<Pack>>* required_rows)

@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/FieldStoredVelocityBoundaryCache.hh"
 
 #include "FVM/details/OperatorDetails.hh"
@@ -18,7 +19,7 @@
 namespace SimpleFluid::FVM::detail
 {
 
-template<TpetraTypePack Pack, class MeshType, class CacheType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class CacheType>
 CacheType cache_field_stored_velocity_boundary_conditions_impl(
     SP<const MeshType> mesh, const BoundaryConditionSet& boundary_conditions)
 {

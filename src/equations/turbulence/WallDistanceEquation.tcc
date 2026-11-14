@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "WallDistanceEquation.hh"
 
 #include "FVM/CellOperators.hh"
@@ -39,7 +40,7 @@ namespace wall_distance_detail
  * Length and character reductions avoid relying on implementation-specific
  * string hashes and ensure every rank executes the same boundary branches.
  */
-template <class MeshType>
+template <SimpleFluid::MeshType MeshType>
 void require_uniform_wall_names(const MeshType& mesh,
                                 const ArrString& names)
 {
@@ -102,7 +103,7 @@ void publish_synced_candidate(FieldType& output, const FieldType& candidate) noe
  * @tparam Pack Tpetra type pack used by the equation.
  * @param mesh Computational mesh.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PoissonWallDistanceEquation<Pack, MeshType>::PoissonWallDistanceEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
@@ -114,7 +115,7 @@ PoissonWallDistanceEquation<Pack, MeshType>::PoissonWallDistanceEquation(
  * @brief Validate, solve, reconstruct, and atomically publish wall distance.
  * @tparam Pack Tpetra type pack used by the equation.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PoissonWallDistanceEquation<Pack, MeshType>::solve(
     const ArrString& wall_boundary_names,
     field_type& wall_distance,

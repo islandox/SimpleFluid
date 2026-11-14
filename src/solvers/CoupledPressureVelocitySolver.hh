@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/details/OperatorDetails.hh"
@@ -45,7 +46,7 @@
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields;
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MaterialPropertyFields;
 
 struct TimeStepperOptions;
 
@@ -57,7 +58,7 @@ template<TpetraTypePack Pack> struct VectorTransportSystem;
 
 template<TpetraTypePack Pack> struct VelocityBoundaryCache;
 
-template<TpetraTypePack Pack, class MeshType> struct FieldStoredVelocityBoundaryCache;
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct FieldStoredVelocityBoundaryCache;
 } // namespace FVM
 
 /**
@@ -192,7 +193,7 @@ namespace detail
  * @param mesh Mesh that owns the cell distribution.
  * @return Coupled velocity-pressure map.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_SOLVERS_LOCAL auto make_coupled_map(const MeshType& mesh) -> Teuchos::RCP<const typename Pack::map_type>;
 
 /** @brief Matrix reset for cached-graph assembly. */
@@ -228,7 +229,7 @@ SIMPLEFLUID_SOLVERS_LOCAL void add_coupled_global_values(const PreparedCoupledMa
  *
  * @tparam Pack Tpetra type pack defining mesh ordinals and vectors.
  */
-template<TpetraTypePack Pack, class MeshType> struct AffinePressureGradientStencil
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct AffinePressureGradientStencil
 {
     FVM::detail::LeastSquaresGradientStencil<MeshType> entries;
     typename MeshType::Vec3 constant{};
@@ -248,7 +249,7 @@ template<TpetraTypePack Pack, class MeshType> struct AffinePressureGradientStenc
  * @return One affine pressure-gradient stencil per owned cell.
  * @throws std::invalid_argument for unsupported pressure boundary types.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_SOLVERS_LOCAL auto pressure_gradient_stencils(
     const MeshType& mesh, const BoundaryConditionMap& boundary_conditions, typename Pack::scalar_type reference_density)
     -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>;
@@ -383,7 +384,7 @@ template<TpetraTypePack Pack> class CoupledSchurPreconditioner;
  *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_SOLVERS_EXPORT CoupledPressureVelocitySolver
 {
 public:

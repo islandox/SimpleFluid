@@ -4,12 +4,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/PrescribedHeatSource.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
     std::span<const scalar_type> owned_energy, scalar_type start, scalar_type duration)
 {
@@ -43,7 +44,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
     refresh_interval_energy(start, duration);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type time, scalar_type time_step)
 {
     collective_detail::collective_local_validation(*d_mesh, "Prescribed heat interval source refresh", [&]
@@ -77,7 +78,7 @@ void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type t
     apply_base_profile(scalar_type{1});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PrescribedHeatSource<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     collective_detail::collective_local_validation(*d_mesh, "Prescribed heat source checkpoint", [&]
@@ -99,7 +100,7 @@ auto PrescribedHeatSource<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::restore(const StateSnapshot& saved)
 {
     collective_detail::collective_local_validation(*d_mesh, "Prescribed heat source restore", [&]
@@ -123,7 +124,7 @@ void PrescribedHeatSource<Pack, MeshType>::restore(const StateSnapshot& saved)
     d_source->field().sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::configure(const PrescribedHeatSourceOptions& options)
 {
     collective_detail::collective_local_validation(
@@ -151,7 +152,7 @@ void PrescribedHeatSource<Pack, MeshType>::configure(const PrescribedHeatSourceO
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::initialize_constant(scalar_type power_density)
 {
     collective_detail::collective_local_validation(
@@ -169,7 +170,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_constant(scalar_type power
     apply_base_profile(scalar_type{1});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
     scalar_type total_power,
     const vec3<scalar_type>& center,
@@ -293,7 +294,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
     apply_base_profile(scalar_type{1});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
     const field_type& shape,
     scalar_type total_power)
@@ -335,7 +336,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
     apply_base_profile(scalar_type{1});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::set_time_multiplier(multiplier_type multiplier)
 {
     if (has_interval_energy())
@@ -353,7 +354,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_time_multiplier(multiplier_type m
     d_time_multiplier = std::move(multiplier);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::require_uniform_value(
     scalar_type local_value,
     const std::string& label) const
@@ -380,7 +381,7 @@ void PrescribedHeatSource<Pack, MeshType>::require_uniform_value(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::require_uniform_configuration(
     const PrescribedHeatSourceOptions& options) const
 {
@@ -430,7 +431,7 @@ void PrescribedHeatSource<Pack, MeshType>::require_uniform_configuration(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::copy_scaled_field(
     const field_type& field,
     scalar_type scale)
@@ -457,7 +458,7 @@ void PrescribedHeatSource<Pack, MeshType>::copy_scaled_field(
     d_base_profile.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PrescribedHeatSource<Pack, MeshType>::integrate(const field_type& field) const -> scalar_type
 {
     scalar_type local_power{};
@@ -475,7 +476,7 @@ auto PrescribedHeatSource<Pack, MeshType>::integrate(const field_type& field) co
     return global_sum(local_power);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::apply_base_profile(scalar_type multiplier)
 {
     auto& applied = d_source->field();
@@ -500,7 +501,7 @@ void PrescribedHeatSource<Pack, MeshType>::apply_base_profile(scalar_type multip
     applied.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::apply_time_multiplier(
     const context_type& context,
     field_type& field)
@@ -524,7 +525,7 @@ void PrescribedHeatSource<Pack, MeshType>::apply_time_multiplier(
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::initialize_from_power_density(const field_type& power_density)
 {
     collective_detail::collective_local_validation(
@@ -538,14 +539,14 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_power_density(const f
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PrescribedHeatSource<Pack, MeshType>::integrated_power() const -> scalar_type
 {
     return integrate(d_source->field());
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedHeatSource<Pack, MeshType>::copy_finite_field(const field_type& field)
 {
     copy_scaled_field(field, scalar_type{1});

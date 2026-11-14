@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/ALEControlVolumeState.hh"
@@ -68,7 +69,8 @@ template<class Scalar> struct VolumeSourceDiagnostics
  * Internal face contributions cancel pairwise; moving-surface escape remains
  * an explicit outward boundary term.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = MeshHandle<Pack>> class SIMPLEFLUID_SOLVERS_EXPORT VolumeContinuityModel
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
+class SIMPLEFLUID_SOLVERS_EXPORT VolumeContinuityModel
 {
 public:
     using mesh_type = MeshType;

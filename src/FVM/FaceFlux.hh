@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/ALEControlVolumeState.hh"
@@ -78,7 +79,7 @@ struct VelocityBoundaryCache
  * @tparam Pack Tpetra type pack used by the fields.
  * @tparam MeshType Runtime or statically dispatched mapped mesh.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 struct FieldStoredVelocityBoundaryCache
 {
     using vec_type = vec3<typename Pack::scalar_type>;
@@ -191,7 +192,7 @@ private:
  * direct paired ranges. Fixed-topology ALE refresh preserves topology identity.
  * A workspace is tied to one exact mesh and is not safe for concurrent use.
  */
-template<TpetraTypePack Pack, class MeshType = MeshHandle<Pack>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_FVM_EXPORT FieldStoredPressureWeightedFaceFluxWorkspace
 {
 public:
@@ -508,7 +509,7 @@ VelocityBoundaryCache<Pack> cache_velocity_boundary_conditions(
 }
 
 /** @brief Build a boundary cache for a mesh-aware stored velocity field. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)
 SIMPLEFLUID_FVM_EXPORT FieldStoredVelocityBoundaryCache<Pack, MeshType>
@@ -525,7 +526,7 @@ namespace detail
  * The owner value is weighted by the neighbor-to-face distance and vice
  * versa. Equal cell-to-face distances recover the arithmetic average.
  */
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 auto interior_face_linear_weights(
     const MeshType& mesh,
     typename MeshType::local_ordinal_type face_lid,
@@ -975,32 +976,32 @@ inline void face_fluxes(const VectorCellField<Pack>& velocity,
  * The mesh may be a runtime `MeshHandle` over an orthogonal or
  * semi-structured geometry, or a statically typed partitioned mesh.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_velocities(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     VectorFaceFieldStored<Pack, MeshType>& face_velocity);
 
 /** @brief Interpolate stored velocities using cached boundary values. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_velocities(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
     VectorFaceFieldStored<Pack, MeshType>& face_velocity);
 
 /** @brief Project a stored face velocity onto owner-oriented face areas. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void normal_face_fluxes(
     const VectorFaceFieldStored<Pack, MeshType>& face_velocity,
     ScalarFaceFieldStored<Pack, MeshType>& fluxes);
 
 /** @brief Assemble stored normal face fluxes without boundary treatment. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     ScalarFaceFieldStored<Pack, MeshType>& fluxes);
 
 /** @brief Assemble stored normal face fluxes with cached boundary values. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
@@ -1015,7 +1016,7 @@ SIMPLEFLUID_FVM_EXPORT void face_fluxes(
  * absolute flux retained by pressure correction and continuity diagnostics is
  * never overwritten in place.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void mesh_relative_face_fluxes(
     const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
     const ALEControlVolumeState& ale,
@@ -1397,7 +1398,7 @@ void pressure_weighted_face_fluxes(
 /**
  * @brief Compute stored-field Rhie-Chow fluxes with reusable scratch storage.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,
@@ -1409,7 +1410,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
         CellGradientScheme::LeastSquares);
 
 /** @brief Compute stored-field Rhie-Chow fluxes with one-shot scratch. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,
@@ -1420,7 +1421,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
 /**
  * @brief Compute stored-field Rhie-Chow fluxes with pressure boundaries.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,
@@ -1436,7 +1437,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
  * Pressure component is the Rhie--Chow stabilization contribution, not a pressure-only velocity.
  * Outputs must be distinct and are synchronized with the same ownership policy.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_flux_components(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,
@@ -1452,7 +1453,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_flux_components(
 /**
  * @brief Compute stored-field Rhie-Chow fluxes from a precomputed gradient.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,
@@ -1467,7 +1468,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
  * @brief Compute stored-field Rhie-Chow fluxes with boundaries and one-shot
  *        scratch storage.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure,

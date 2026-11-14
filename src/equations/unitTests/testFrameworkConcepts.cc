@@ -12,6 +12,7 @@
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "geometry/mesh/SweptRZRegionProviders.hh"
+#include "problems/Problem.hh"
 #include "utils/testing_environment.hh"
 
 #include <gtest/gtest.h>
@@ -201,6 +202,20 @@ concept CanBindField = requires { typename FieldStored<D, Pack, M>; };
 static_assert(CanBindField<Descriptor, MeshHandle<Pack>>);
 static_assert(!CanBindField<WrongFieldName, MeshHandle<Pack>>);
 static_assert(!CanBindField<Descriptor, WrongMeshMetric>);
+
+// Public stored-field boundaries reject incomplete metadata before their bodies instantiate.
+template<class F>
+concept CanFormEquation = requires { typename Equation<F, Pack>; };
+template<class F>
+concept CanFormAssembledEquation = requires { typename AssembledEquation<F, Pack>; };
+template<class F>
+concept CanLookupProblemField = requires(Problem<Pack>& problem) { problem.template field<F>(std::string{}); };
+static_assert(CanFormEquation<ScalarCellFieldStored<Pack>>);
+static_assert(CanFormAssembledEquation<ScalarCellFieldStored<Pack>>);
+static_assert(CanLookupProblemField<ScalarCellFieldStored<Pack>>);
+static_assert(!CanFormEquation<int> && !CanFormEquation<MissingFieldValue>);
+static_assert(!CanFormAssembledEquation<int> && !CanFormAssembledEquation<MissingFieldValue>);
+static_assert(!CanLookupProblemField<int> && !CanLookupProblemField<MissingFieldValue>);
 
 struct OtherPack : Pack
 {

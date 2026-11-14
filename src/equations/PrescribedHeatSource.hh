@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "dataclass/Database.hh"
@@ -236,7 +237,7 @@ prescribed_heat_source_options_from_database(const Database& database)
 /**
  * @brief Independent signed external heat source named qdot_external.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 class SIMPLEFLUID_EQUATIONS_EXPORT PrescribedHeatSource
 {
 public:

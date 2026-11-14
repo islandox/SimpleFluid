@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
@@ -124,7 +125,7 @@ bool StoredTransportSymbolicPlan<Pack>::matches(
     return true;
 }
 
-template<TpetraTypePack Pack, class MeshType, class Field>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Field>
 StoredNonOrthogonalWeights<typename Pack::scalar_type> validate_stored_non_orthogonal_selection(
     const MeshType& mesh, NonOrthogonalTreatment treatment, const Field* correction_field, std::string_view context)
 {
@@ -270,7 +271,7 @@ Teuchos::RCP<typename Pack::matrix_type> finish_stored_transport_matrix(const Me
     return matrix;
 }
 
-template<TpetraTypePack Pack, class MeshType, class Stencils>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Stencils>
 void evaluate_stored_vector_gradients(const VectorCellFieldStored<Pack, MeshType>& field, const Stencils& stencils,
     TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -328,7 +329,7 @@ void evaluate_stored_vector_gradients(const VectorCellFieldStored<Pack, MeshType
     gradients.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType, class Stencils>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Stencils>
 void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType>& field, const Stencils& stencils,
     VectorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -355,7 +356,7 @@ void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType
     gradients.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar(ScalarTerms<Pack, MeshType> terms,
     ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType>,
     ScalarAssemblyContext<Pack, MeshType> resources)
@@ -496,7 +497,7 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar(ScalarTerms<Pack,
     return {matrix, rhs};
 }
 
-template<class MeshType, class GeometryCache>
+template<SimpleFluid::MeshType MeshType, class GeometryCache>
 void select_stored_interior_geometry(const MeshType& mesh, const GeometryCache* geometry_cache,
     std::vector<LeastSquaresGradientStencil<MeshType>>& local_stencils,
     std::vector<BoundaryFaceLocation<MeshType>>& local_locations,
@@ -517,7 +518,7 @@ void select_stored_interior_geometry(const MeshType& mesh, const GeometryCache* 
     locations = &local_locations;
 }
 
-template<class MeshType, class BoundaryValue, class GeometryCache>
+template<SimpleFluid::MeshType MeshType, class BoundaryValue, class GeometryCache>
 void select_stored_affine_geometry(const MeshType& mesh, BoundaryValue boundary_value,
     const GeometryCache* geometry_cache, std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>>& stencils,
     std::vector<BoundaryFaceLocation<MeshType>>& local_locations,
@@ -536,7 +537,7 @@ void select_stored_affine_geometry(const MeshType& mesh, BoundaryValue boundary_
     locations = &local_locations;
 }
 
-template<class MeshType, class BoundaryCondition, class BoundaryValue, class GeometryCache>
+template<SimpleFluid::MeshType MeshType, class BoundaryCondition, class BoundaryValue, class GeometryCache>
 void select_stored_scalar_affine_geometry(const MeshType& mesh, BoundaryCondition boundary_condition,
     BoundaryValue boundary_value, const GeometryCache* geometry_cache,
     std::vector<AffineLeastSquaresGradientStencil<MeshType>>& stencils,
@@ -556,7 +557,8 @@ void select_stored_scalar_affine_geometry(const MeshType& mesh, BoundaryConditio
     locations = &local_locations;
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class Stencils, class BoundaryLocations>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryCondition, class Stencils,
+    class BoundaryLocations>
 void add_stored_scalar_explicit_non_orthogonal_correction(const ScalarCellFieldStored<Pack, MeshType>& correction_field,
     typename Pack::scalar_type diffusivity, BoundaryCondition boundary_condition, typename Pack::vector_type& rhs,
     typename Pack::scalar_type correction_weight, const Stencils& stencils, const BoundaryLocations& boundary_locations,
@@ -618,7 +620,7 @@ void add_stored_scalar_explicit_non_orthogonal_correction(const ScalarCellFieldS
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_corrected_scalar(ScalarTerms<Pack, MeshType> terms,
     ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType> options,
     ScalarAssemblyContext<Pack, MeshType> resources)
@@ -843,7 +845,7 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_corrected_scalar(ScalarT
     return {matrix, rhs};
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class DiffusivityValue,
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryCondition, class DiffusivityValue,
     class BoundaryCoefficient, class Stencils, class BoundaryLocations>
 void add_stored_variable_scalar_explicit_non_orthogonal_correction(
     const ScalarCellFieldStored<Pack, MeshType>& correction_field, BoundaryCondition boundary_condition,
@@ -924,7 +926,7 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar_coefficients(
     StoredScalarAssemblyTerms<Pack, MeshType> terms, CoefficientTransportBoundary<Pack, MeshType> boundary,
     WeightedScalarAssemblyOptions<Pack, MeshType> options, WeightedScalarAssemblyContext<Pack, MeshType> resources,
@@ -1551,7 +1553,7 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar_coefficients(
     return {matrix, rhs};
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_weighted(WeightedScalarTerms<Pack, MeshType> terms,
     CoefficientTransportBoundary<Pack, MeshType> boundary, WeightedScalarAssemblyOptions<Pack, MeshType> options,
     WeightedScalarAssemblyContext<Pack, MeshType> resources)
@@ -1609,7 +1611,7 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_weighted(WeightedScalarT
             .diagnostic = "weighted_scalar_transport_system"});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_temperature(TemperatureTerms<Pack, MeshType> terms,
     CoefficientTransportBoundary<Pack, MeshType> boundary, TemperatureAssemblyOptions<Pack, MeshType> options,
     TemperatureAssemblyContext<Pack, MeshType> resources, bool rhs_only)
@@ -1683,7 +1685,8 @@ SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_temperature(TemperatureT
             .rhs_only = rhs_only});
 }
 
-template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Stencils, class BoundaryLocations,
+    class BoundaryDiffusion>
 void add_stored_explicit_non_orthogonal_correction(const VectorCellFieldStored<Pack, MeshType>& correction_field,
     typename Pack::scalar_type diffusivity, typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight, BoundaryDiffusion boundary_diffusion, const Stencils& stencils,
@@ -1752,7 +1755,7 @@ void add_stored_explicit_non_orthogonal_correction(const VectorCellFieldStored<P
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_vector(VectorTerms<Pack, MeshType> terms,
     VelocityTransportBoundary<Pack> boundary, VectorAssemblyOptions<Pack, MeshType> options,
     VectorAssemblyContext<Pack, MeshType> resources)
@@ -2013,7 +2016,8 @@ SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_vector(VectorTerms
     return {matrix, rhs};
 }
 
-template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion,
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Stencils, class BoundaryLocations,
+    class BoundaryDiffusion,
     class BoundaryCoefficient>
 void add_stored_variable_explicit_non_orthogonal_correction(
     const VectorCellFieldStored<Pack, MeshType>& correction_field,
@@ -2092,7 +2096,8 @@ void add_stored_variable_explicit_non_orthogonal_correction(
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion,
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Stencils, class BoundaryLocations,
+    class BoundaryDiffusion,
     class BoundaryCoefficient>
 void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored<Pack, MeshType>& old_velocity,
     const ScalarCellFieldStored<Pack, MeshType>& dynamic_viscosity, typename Pack::scalar_type reference_density,
@@ -2242,7 +2247,7 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_momentum(MomentumTerms<Pack, MeshType> terms,
     MomentumTransportBoundary<Pack, MeshType> boundary, MomentumAssemblyOptions<Pack, MeshType> options,
     MomentumAssemblyContext<Pack, MeshType> resources)

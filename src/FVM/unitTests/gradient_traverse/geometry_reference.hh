@@ -6,6 +6,7 @@
 /** @file geometry_reference.hh
  * @brief Translation-unit-local reference gradients and traversal geometry fixtures.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/FaceFlux.hh"
 #include "FVM/TransportSystem.hh"
@@ -85,7 +86,7 @@ auto normal_matrix(const auto& samples)
 // The reference uses the original native-dispatch sample visitor, independently
 // of traverse selection and incidence descriptors. Preserve the numerical
 // backend and arithmetic order so even one changed sample is observable.
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>& cache,
     const typename FVM::CellGradientCache<Pack, MeshType>::boundary_direction_provider_type& boundary_direction = {})
 {
@@ -155,7 +156,7 @@ void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>&
 
 // Stencil builders solve each direction directly, whereas the reusable cache
 // multiplies inverse columns. Check each builder's original arithmetic exactly.
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void expect_stencil_geometry(const MeshType& mesh)
 {
     const auto locations = FVM::detail::boundary_face_locations(mesh);
@@ -210,7 +211,7 @@ void expect_stencil_geometry(const MeshType& mesh)
         }
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void expect_gauss_geometry(const FVM::GaussLinearGradientCache<Pack, MeshType>& cache)
 {
     const auto& mesh = *cache.mesh_ptr();
@@ -254,7 +255,7 @@ void expect_gauss_geometry(const FVM::GaussLinearGradientCache<Pack, MeshType>& 
     EXPECT_EQ(actual.faces.size(), entry);
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void compare_caches(SP<const MeshType> mesh)
 {
     FVM::CellGradientCache<Pack, MeshType> least_squares(mesh);

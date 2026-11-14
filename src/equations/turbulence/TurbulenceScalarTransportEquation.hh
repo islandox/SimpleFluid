@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 #include "FVM/TransportSystem.hh"
 #include "FVM/SteadyDiagnostics.hh"
@@ -57,7 +58,7 @@ template<TpetraTypePack Pack> struct TransportEquationTestAccess;
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 struct TurbulenceScalarBoundaryOverrides
 {
     using scalar_type = typename Pack::scalar_type;
@@ -92,7 +93,7 @@ struct TurbulenceScalarBoundaryOverrides
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceScalarTransportEquation
 {
 public:

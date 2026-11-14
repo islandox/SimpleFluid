@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/NumericAssemblyLease.hh"
 
 #include "SimpleFluidExport.hh"
@@ -51,7 +52,7 @@ template<TpetraTypePack Pack> struct TransportEquationTestAccess;
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 class SIMPLEFLUID_EQUATIONS_EXPORT IncompressibleMomentumEquation
 {
 public:

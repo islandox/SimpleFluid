@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/ResolvedDiffusionGeometry.hh"
 
 namespace SimpleFluid::FVM::detail
@@ -14,7 +15,7 @@ namespace SimpleFluid::FVM::detail
  * the two incident cells are translated, by comparison, into the already
  * resolved canonical geometry. The adapter and face expire after the callback.
  */
-template<class MeshType, class Face> class ResolvedTransportGeometry
+template<SimpleFluid::MeshType MeshType, class Face> class ResolvedTransportGeometry
 {
 public:
     using scalar_type = typename MeshType::scalar_type;

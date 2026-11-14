@@ -1,3 +1,4 @@
+#include "geometry/MeshConcepts.hh"
 #include "equations/LumpedInnerCavityCoupling.hh"
 #include "equations/SolidHeatConductionEquation.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -63,7 +64,7 @@ template<class Field> real_t energy(const Field& field)
     return global;
 }
 
-template<class Mesh> MaterialPropertyFields<Pack, Mesh> material(SP<const Mesh> m)
+template<SimpleFluid::MeshType Mesh> MaterialPropertyFields<Pack, Mesh> material(SP<const Mesh> m)
 {
     BoussinesqModelOptions o;
     o.reference_density = o.density = 1.0;

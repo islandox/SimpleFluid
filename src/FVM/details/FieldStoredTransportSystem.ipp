@@ -3,12 +3,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "geometry/GeometryEpoch.hh"
 
 namespace SimpleFluid::FVM::detail
 {
 
-template<class MeshType> bool stored_transport_has_non_orthogonal_faces(const MeshType& mesh)
+template<SimpleFluid::MeshType MeshType> bool stored_transport_has_non_orthogonal_faces(const MeshType& mesh)
 {
     const auto execution = acquire_mesh_execution(mesh);
     using local_ordinal_type = typename MeshType::local_ordinal_type;

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/details/OperatorDetails.hh"
@@ -34,7 +35,7 @@ namespace SimpleFluid::FVM
  * refreshes and cache copies. Independent field evaluations may share a const
  * cache.
  */
-template<TpetraTypePack Pack, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_FVM_EXPORT GaussLinearGradientCache
 {
 public:
@@ -174,7 +175,7 @@ namespace detail
 
 /** @brief Shared scalar kernel for stored and legacy fields. */
 template<TpetraTypePack Pack, class ScalarField, class BoundaryConditionProvider,
-    class BoundaryValueProvider, class VectorField, class MeshType>
+    class BoundaryValueProvider, class VectorField, SimpleFluid::MeshType MeshType>
 void cached_gauss_linear_scalar_gradient(const ScalarField& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorField& gradients, const GaussLinearGradientCache<Pack, MeshType>& cache)
@@ -347,7 +348,8 @@ void cached_gauss_linear_scalar_gradient(const ScalarField& field,
 }
 
 /** @brief Shared vector kernel with the original component and face order. */
-template<TpetraTypePack Pack, class VectorField, class BoundaryValueProvider, class TensorField, class MeshType>
+template<TpetraTypePack Pack, class VectorField, class BoundaryValueProvider, class TensorField,
+    SimpleFluid::MeshType MeshType>
 void cached_gauss_linear_vector_gradient(const VectorField& field,
     BoundaryValueProvider boundary_value, TensorField& gradients,
     const GaussLinearGradientCache<Pack, MeshType>& cache)

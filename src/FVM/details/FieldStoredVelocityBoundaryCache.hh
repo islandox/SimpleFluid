@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "dataclass/TpetraTypes.hh"
@@ -14,7 +15,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** @brief Construct a velocity boundary cache for a mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class CacheType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class CacheType>
 SIMPLEFLUID_LOCAL CacheType cache_field_stored_velocity_boundary_conditions_impl(
     SP<const MeshType> mesh, const BoundaryConditionSet& boundary_conditions);
 

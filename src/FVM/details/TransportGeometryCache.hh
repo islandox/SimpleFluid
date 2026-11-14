@@ -5,24 +5,26 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid::FVM
 {
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(const MeshType& source)
     : SharedGeometry(source, std::make_shared<const traverse_plan_type>(
           source, MeshTraverseEntities::AllWithCellFaces))
 {
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(
     const MeshType& source, std::shared_ptr<const traverse_plan_type> traverse)
     : SharedGeometry(source, std::move(traverse), nullptr)
 {
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(
     const MeshType& source, std::shared_ptr<const traverse_plan_type> traverse,
     const assembly_geometry_type* previous_assembly)
@@ -43,13 +45,13 @@ TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(
 {
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportGeometryCache<MeshType>::TransportGeometryCache(const MeshType& mesh) : d_mesh(&mesh)
 {
     refresh();
 }
 
-template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(const MeshType& mesh) const
+template<SimpleFluid::MeshType MeshType> void TransportGeometryCache<MeshType>::require_mesh(const MeshType& mesh) const
 {
     if (&mesh != d_mesh)
         throw std::invalid_argument("transport geometry cache belongs to another mesh.");
@@ -60,13 +62,13 @@ template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(con
 }
 
 /** Refresh without a caller-supplied geometry snapshot. */
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void TransportGeometryCache<MeshType>::refresh()
 {
     refresh({});
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void TransportGeometryCache<MeshType>::refresh(shared_geometry_type geometry)
 {
     const auto execution = acquire_mesh_execution(*d_mesh);
@@ -90,7 +92,7 @@ void TransportGeometryCache<MeshType>::refresh(shared_geometry_type geometry)
     }
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 const typename TransportGeometryCache<MeshType>::interior_stencils_type&
 TransportGeometryCache<MeshType>::interior_stencils() const
 {
@@ -98,7 +100,7 @@ TransportGeometryCache<MeshType>::interior_stencils() const
     return d_geometry->interior;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 const typename TransportGeometryCache<MeshType>::boundary_locations_type&
 TransportGeometryCache<MeshType>::boundary_locations() const
 {
@@ -106,7 +108,7 @@ TransportGeometryCache<MeshType>::boundary_locations() const
     return d_geometry->locations;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 const typename TransportGeometryCache<MeshType>::boundary_geometry_type&
 TransportGeometryCache<MeshType>::boundary_geometry() const
 {
@@ -114,7 +116,7 @@ TransportGeometryCache<MeshType>::boundary_geometry() const
     return d_geometry->boundary;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 const typename TransportGeometryCache<MeshType>::assembly_geometry_type&
 TransportGeometryCache<MeshType>::assembly_geometry() const
 {
@@ -122,14 +124,14 @@ TransportGeometryCache<MeshType>::assembly_geometry() const
     return d_geometry->assembly;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 bool TransportGeometryCache<MeshType>::has_non_orthogonal_faces() const
 {
     require_mesh(*d_mesh);
     return d_geometry->has_non_orthogonal_faces;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 std::vector<detail::AffineLeastSquaresGradientStencil<MeshType>>
 TransportGeometryCache<MeshType>::scalar_affine_stencils(
     std::function<BoundaryCondition(int, size_t)> boundary_condition,
@@ -147,7 +149,7 @@ TransportGeometryCache<MeshType>::scalar_affine_stencils(
         d_geometry->boundary, std::move(boundary_condition), std::move(boundary_value));
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshType>>
 TransportGeometryCache<MeshType>::vector_affine_stencils(
     std::function<typename MeshType::Vec3(int, size_t)> boundary_value) const

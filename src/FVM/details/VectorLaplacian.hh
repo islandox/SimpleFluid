@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
 
 namespace SimpleFluid::FVM
@@ -11,7 +12,7 @@ namespace SimpleFluid::FVM
 namespace detail
 {
 /** Surface integral of the outward normal, in the stored Cartesian basis. */
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 auto laplacian_face_area(const MeshType& mesh, typename MeshType::local_ordinal_type face,
     typename MeshType::local_ordinal_type cell) -> typename MeshType::Vec3
 {
@@ -45,7 +46,7 @@ auto laplacian_face_area(const MeshType& mesh, typename MeshType::local_ordinal_
  * homogeneous Neumann outlets. Slip is mixed normal-Dirichlet/tangential-Neumann;
  * unmapped periodic faces are rejected.
  */
-template<class VectorField, class TensorField, class MeshType, class BoundaryValue, class BoundaryType>
+template<class VectorField, class TensorField, SimpleFluid::MeshType MeshType, class BoundaryValue, class BoundaryType>
 void unit_vector_laplacian(const VectorField& velocity, const TensorField& gradient,
     VectorField& result, const TransportGeometryCache<MeshType>& cache,
     BoundaryValue boundary_value, BoundaryType boundary_type)

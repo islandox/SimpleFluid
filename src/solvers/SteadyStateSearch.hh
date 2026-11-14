@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 #include "dataclass/typedefs.hh"
 #include "equations/PressureVelocityCoupling.hh"
@@ -392,7 +393,7 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void capture_current_state();
 
-    template<class MeshType, class VelocityField, class TemperatureField,
+    template<SimpleFluid::MeshType MeshType, class VelocityField, class TemperatureField,
              class AdditionalFields>
     SIMPLEFLUID_SOLVERS_LOCAL
     SteadyStateUpdateRates<scalar_type> observe_fields(
@@ -402,7 +403,7 @@ private:
         const TemperatureField* temperature,
         const AdditionalFields& additional_scalar_fields);
 
-    template<class MeshType, class VelocityField, class TemperatureField,
+    template<SimpleFluid::MeshType MeshType, class VelocityField, class TemperatureField,
              class AdditionalFields>
     SIMPLEFLUID_SOLVERS_LOCAL
     void capture_current_state(

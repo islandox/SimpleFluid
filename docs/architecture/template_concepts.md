@@ -9,8 +9,8 @@ conservation, map compatibility, provider lifetime, or runtime support.
 | --- | --- | --- |
 | `Meshes::GeometryProvider<G>` | `geometry/mesh/RegionProviderConcepts.hh` | Const region metrics, node coordinates, ordinal layout, storage identity and geometry epoch; constrains `IsoRegion` geometry. |
 | `Meshes::TopologyProvider<T>` | `geometry/mesh/RegionProviderConcepts.hh` | Const owner-oriented region incidence, index pack, cell types, ordinal layout and storage identity; constrains `IsoRegion` topology. Incidence ranges must be sized and randomly accessible, with indexed elements convertible to ordinal values. |
-| `MeshType<M>` | `geometry/MeshConcepts.hh` | Const finite-volume queries using local integral ordinals: counts, cell-face traversal, owner/neighbor and physical metrics; constrains `FieldStored` mesh parameters and storage aliases. |
-| `FieldType<F>` | `fields/FieldConcepts.hh` | Value and supported location types, identity, and a stable string reference; constrains `FieldStored` descriptors and `Problem::add_field`. |
+| `MeshType<M>` | `geometry/MeshConcepts.hh` | Const finite-volume queries using local integral ordinals: counts, cell-face traversal, owner/neighbor and physical metrics; constrains field traits/storage, FVM operators and caches, transport packs/factories, physical equations and solver mesh parameters. |
+| `FieldType<F>` | `fields/FieldConcepts.hh` | Value and supported location types, identity, and a stable string reference; constrains stored-field descriptors, generic equation storage, and `Problem` field registration/retrieval. |
 | `FVM::EquationTermType<T, Pack>` | `FVM/EquationOperators.hh` | Implicit conversion to `FVM::OperatorVariant<Pack>`; constrains forwarding `Equation::add_lhs` and `add_rhs` overloads. |
 
 The provider concepts retain the ordinal-region contract previously declared
@@ -27,6 +27,27 @@ contract. Do not require `MeshType<Derived>` while forming an incomplete CRTP
 base. Maps, boundary metadata, execution leases, and geometry epochs remain
 additional capabilities checked or used by individual algorithms; a concept
 match alone does not establish that every algorithm supports that mesh.
+
+Template declarations, forward declarations, partial specializations and
+out-of-line definitions use matching constraints. When a parameter retains the
+name `MeshType`, its declaration qualifies the concept:
+`template<SimpleFluid::MeshType MeshType>`. Fixed native-family helpers inside
+`MeshHandle` instead use the existing `MeshClass` contract.
+Rebuild template consumers and their compiled providers together after changing
+constraints so declarations and instantiated symbols remain consistent.
+
+Some generic parameters intentionally retain `class` because these concepts do
+not describe their inputs:
+
+- Traversal supports native geometry, mapped meshes and the legacy STK adapter;
+  the local-ordinal `MeshType` contract does not cover all three.
+- Epoch and execution-guard helpers preserve their optional-capability fallback.
+- Symbolic matrix plans, collective validation and identity checks may require
+  only maps, a communicator or object identity.
+- `DirectBatchRange` topology/metric parameters are per-entity records; native
+  region adapters receive geometry before it implements the region contracts.
+- Callbacks, views and legacy-compatible field helpers retain their own weaker
+  contracts. Legacy fields do not carry the descriptor aliases of `FieldType`.
 
 `FieldType` describes field metadata rather than numerical storage. Locations
 are `CellLocation`, `FaceLocation`, and `BoundaryFaceLocation`. Descriptors need

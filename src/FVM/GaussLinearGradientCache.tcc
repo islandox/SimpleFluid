@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/GaussLinearGradientCache.hh"
 
 #include <array>
@@ -14,7 +15,7 @@
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 GaussLinearGradientCache<Pack, MeshType>::GaussLinearGradientCache(SP<const mesh_type> mesh)
     : d_mesh(std::move(mesh))
 {
@@ -26,7 +27,7 @@ GaussLinearGradientCache<Pack, MeshType>::GaussLinearGradientCache(SP<const mesh
     refresh();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void GaussLinearGradientCache<Pack, MeshType>::require_mesh(const mesh_type& mesh) const
 {
     if (&mesh != d_mesh.get())
@@ -36,7 +37,7 @@ void GaussLinearGradientCache<Pack, MeshType>::require_mesh(const mesh_type& mes
         throw std::invalid_argument("Gauss-linear gradient cache is stale for the mesh geometry epoch.");
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const typename GaussLinearGradientCache<Pack, MeshType>::Geometry&
 GaussLinearGradientCache<Pack, MeshType>::geometry() const
 {
@@ -129,7 +130,7 @@ GaussLinearGradientCache<Pack, MeshType>::geometry() const
     return d_snapshot->geometry;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 size_t GaussLinearGradientCache<Pack, MeshType>::numerical_storage_bytes() const noexcept
 {
     auto bytes = sizeof(Snapshot) + d_boundary_locations.capacity() * sizeof(boundary_location_type);
@@ -154,7 +155,7 @@ size_t GaussLinearGradientCache<Pack, MeshType>::numerical_storage_bytes() const
     return bytes;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void GaussLinearGradientCache<Pack, MeshType>::build_layered_geometry(
     LayeredGeometry& geometry, const MeshTraverseExecution<mesh_type>& traversal) const
 {
@@ -238,7 +239,7 @@ void GaussLinearGradientCache<Pack, MeshType>::build_layered_geometry(
     geometry.topology = std::move(topology);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void GaussLinearGradientCache<Pack, MeshType>::fill_layered_geometry(LayeredGeometry& geometry) const
 {
     const auto& topology = *geometry.topology;
@@ -316,7 +317,7 @@ void GaussLinearGradientCache<Pack, MeshType>::fill_layered_geometry(LayeredGeom
     });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void GaussLinearGradientCache<Pack, MeshType>::refresh()
 {
     const auto& mesh = *d_mesh;

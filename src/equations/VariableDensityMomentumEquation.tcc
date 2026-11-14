@@ -2,6 +2,7 @@
  * @brief Compiled conservative variable-density momentum implementation.
  */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
 
@@ -10,7 +11,7 @@
 
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 VariableDensityMomentumEquation<Pack, MeshType>::VariableDensityMomentumEquation(SP<const MeshType> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "VariableDensityMomentumEquation")),
       d_old_component(d_mesh, "old_velocity_component"), d_component(d_mesh, "velocity_component"),
@@ -19,13 +20,14 @@ VariableDensityMomentumEquation<Pack, MeshType>::VariableDensityMomentumEquation
 {
 }
 
-template<TpetraTypePack Pack, class MeshType> void VariableDensityMomentumEquation<Pack, MeshType>::refresh_geometry()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void VariableDensityMomentumEquation<Pack, MeshType>::refresh_geometry()
 {
     d_geometry.refresh();
     d_solver.notify_operator_values_changed();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(const velocity_field_type& old_velocity,
     const field_type& old_density, const field_type& density, const face_field_type& mass_flux,
     const field_type& dynamic_viscosity, scalar_type time_step, velocity_field_type& velocity, force_type force,

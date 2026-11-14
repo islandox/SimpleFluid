@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/AssemblyFaceMetrics.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/ResolvedTransportGeometry.hh"
@@ -26,7 +27,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** Geometry-independent runs retain the original row/incidence and boundary-slot order. */
-template<class MeshType> struct TransportAssemblyBatches
+template<SimpleFluid::MeshType MeshType> struct TransportAssemblyBatches
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     struct Run { size_t begin{}, end{}; unsigned category{}; };
@@ -38,7 +39,7 @@ template<class MeshType> struct TransportAssemblyBatches
 };
 
 /** Geometry-epoch-owned data; face entries retain the mesh's row traversal order. */
-template<class MeshType> struct TransportAssemblyGeometry
+template<SimpleFluid::MeshType MeshType> struct TransportAssemblyGeometry
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using plan_type = MeshTraversePlan<MeshType>;
@@ -81,7 +82,7 @@ struct TransportAssemblyFace
     static constexpr bool owned_orientation = Owned;
 };
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 std::shared_ptr<const TransportAssemblyBatches<MeshType>> make_transport_assembly_batches(
     const MeshType& mesh, const TransportAssemblyGeometry<MeshType>& geometry)
 {
@@ -125,7 +126,7 @@ std::shared_ptr<const TransportAssemblyBatches<MeshType>> make_transport_assembl
     return result;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& mesh,
     std::shared_ptr<const MeshTraversePlan<MeshType>> plan,
     const TransportAssemblyGeometry<MeshType>* previous = nullptr)
@@ -224,7 +225,7 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
     return result;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& mesh)
 {
     auto plan = std::make_shared<const MeshTraversePlan<MeshType>>(mesh, MeshTraverseEntities::AllWithCellFaces);
@@ -232,7 +233,7 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
 }
 
 /** Select or build locally, then coordinate failure before later assembly collectives. */
-template<class MeshType, class GetCached>
+template<SimpleFluid::MeshType MeshType, class GetCached>
 const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry_impl(
     const MeshType& mesh, TransportAssemblyGeometry<MeshType>& local, GetCached&& get_cached)
 {
@@ -258,7 +259,7 @@ const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry_im
     return *selected;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry(
     const MeshType& mesh, TransportAssemblyGeometry<MeshType>& local)
 {
@@ -266,7 +267,7 @@ const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry(
         []() -> const TransportAssemblyGeometry<MeshType>* { return nullptr; });
 }
 
-template<class MeshType, class Cache>
+template<SimpleFluid::MeshType MeshType, class Cache>
 const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry(
     const MeshType& mesh, TransportAssemblyGeometry<MeshType>& local, const Cache* cache)
 {
@@ -279,7 +280,7 @@ const TransportAssemblyGeometry<MeshType>& select_transport_assembly_geometry(
 }
 
 /** Dispatch once per retained run; the numerical loop contains no category tests. */
-template<class MeshType, class VisitRun>
+template<SimpleFluid::MeshType MeshType, class VisitRun>
 void visit_transport_face_runs(const TransportAssemblyGeometry<MeshType>& geometry, size_t cell, VisitRun&& visit)
 {
     const auto& batches = *geometry.batches;
@@ -424,7 +425,7 @@ template<class Geometry, class Row> struct TransportAssemblyRowFaces
  * `AssemblyFaceRow`, so it is instantiated independently of the geometry
  * backend.
  */
-template<class MeshType, class Visitor>
+template<SimpleFluid::MeshType MeshType, class Visitor>
 void visit_transport_assembly_rows(const MeshType& mesh,
     const TransportAssemblyGeometry<MeshType>& geometry, Visitor&& visitor)
 {
@@ -489,7 +490,7 @@ void visit_transport_assembly_rows(const MeshType& mesh,
 }
 
 /** Legacy post-row boundary execution keeps the original batch/slot order. */
-template<class MeshType, class Visitor>
+template<SimpleFluid::MeshType MeshType, class Visitor>
 void visit_transport_boundary_batches(const MeshType& mesh,
     const TransportAssemblyGeometry<MeshType>& geometry, Visitor&& visitor)
 {

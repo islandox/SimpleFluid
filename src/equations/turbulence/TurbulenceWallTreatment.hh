@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceFlux.hh"
@@ -177,7 +178,7 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack, class Policy,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceWallTreatment
 {
 public:
@@ -315,17 +316,17 @@ private:
 };
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 using ResolvedLowReSSTWallTreatment =
     TurbulenceWallTreatment<Pack, ResolvedLowReSSTWallPolicy, MeshType>;
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 using ResolvedLowReKEpsilonWallTreatment =
     TurbulenceWallTreatment<Pack, ResolvedLowReKEpsilonWallPolicy, MeshType>;
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 using StandardHighReKEpsilonWallTreatment =
     TurbulenceWallTreatment<Pack, StandardHighReKEpsilonWallPolicy, MeshType>;
 

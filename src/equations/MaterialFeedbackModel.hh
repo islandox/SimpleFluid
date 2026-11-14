@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/DatabaseOptionReader.hh"
 #include "equations/BoussinesqModel.hh"
@@ -186,7 +187,7 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class MaterialFeedbackModel
 {
 public:

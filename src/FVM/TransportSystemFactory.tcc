@@ -3,13 +3,14 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.tcc"
 #include "FVM/TransportSystemFactory.hh"
 #include "FVM/details/FieldStoredTransportSystem.tcc"
 
 namespace SimpleFluid::FVM
 {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     ScalarTerms terms, ScalarBoundary boundary, ScalarOptions options, ScalarContext context)
 {
@@ -38,7 +39,7 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     VectorTerms terms, BasicVectorBoundary boundary, BasicVectorOptions options, BasicVectorContext context)
     requires std::is_same_v<MeshType, Mesh<Pack>>
@@ -49,7 +50,7 @@ VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
         std::move(terms), std::move(boundary), options, std::move(context));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     VectorTerms terms, VelocityBoundary boundary, VectorOptions options, VectorContext context)
 {
@@ -63,7 +64,7 @@ VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
             std::move(terms), std::move(boundary), options, std::move(context));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(WeightedScalarTerms terms,
     WeightedScalarBoundary boundary, WeightedScalarOptions options, WeightedScalarContext context)
 {
@@ -77,7 +78,7 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(WeightedS
             std::move(terms), std::move(boundary), options, std::move(context));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
 {
@@ -91,7 +92,7 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
             std::move(terms), std::move(boundary), options, std::move(context), false);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::refresh_temperature_rhs(
     TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
 {
@@ -105,7 +106,7 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::refresh_temperatur
             std::move(terms), std::move(boundary), options, std::move(context), true);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     MomentumTerms terms, MomentumBoundary boundary, MomentumOptions options, MomentumContext context)
 {

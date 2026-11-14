@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "dataclass/TpetraTypes.hh"
@@ -107,11 +108,12 @@ public:
      * Mesh, MeshHandle and SolidSubdomain with DefaultTpetraTypes are compiled
      * into FVM. Other mesh types must include FVM/ALEControlVolumeState.tcc.
      */
-    template<class MeshType>
+    template<SimpleFluid::MeshType MeshType>
     SIMPLEFLUID_FVM_EXPORT void validate(const MeshType& mesh) const;
 
     /** @brief Also require the assembly timestep to equal the motion timestep. */
-    template<class MeshType, class Scalar> void validate(const MeshType& mesh, Scalar assembly_time_step) const
+    template<SimpleFluid::MeshType MeshType, class Scalar>
+    void validate(const MeshType& mesh, Scalar assembly_time_step) const
     {
         validate(mesh);
         const auto value = static_cast<real_t>(assembly_time_step);
@@ -126,9 +128,9 @@ public:
     }
 
 private:
-    template<class MeshType, class MotionType>
+    template<SimpleFluid::MeshType MeshType, class MotionType>
     friend ALEControlVolumeState make_ale_control_volume_state(const MeshType&, const MotionType&);
-    template<class MeshType, TpetraTypePack Pack>
+    template<SimpleFluid::MeshType MeshType, TpetraTypePack Pack>
     friend ALEControlVolumeState make_validated_planar_ale_control_volume_state(
         const MeshType&, const PlanarALEMeshMotion<Pack>&);
 
@@ -147,7 +149,7 @@ private:
         const std::vector<real_t> face_mesh_fluxes;
     };
 
-    template<class MeshType, class MotionType>
+    template<SimpleFluid::MeshType MeshType, class MotionType>
     static ALEControlVolumeState bind_to_motion(const MeshType& mesh, const MotionType& motion);
 
     ALEControlVolumeState(const MeshMotionModel& motion, const void* mesh_view_identity, const void* geometry_identity,
@@ -181,7 +183,7 @@ private:
  * The concrete motion type must expose mesh_ptr(); this prevents callers from
  * pairing valid-looking spans from one moving geometry with another mesh.
  */
-template<class MeshType, class MotionType>
+template<SimpleFluid::MeshType MeshType, class MotionType>
 ALEControlVolumeState ALEControlVolumeState::bind_to_motion(const MeshType& mesh, const MotionType& motion)
 {
     static_assert(std::derived_from<std::remove_cvref_t<MotionType>, MeshMotionModel>);
@@ -273,7 +275,7 @@ ALEControlVolumeState ALEControlVolumeState::bind_to_motion(const MeshType& mesh
  * Every later consumer repeats full validation, including for custom motion
  * models whose borrowed arrays can change without a geometry epoch change.
  */
-template<class MeshType, class MotionType>
+template<SimpleFluid::MeshType MeshType, class MotionType>
 ALEControlVolumeState make_ale_control_volume_state(const MeshType& mesh, const MotionType& motion)
 {
     auto result = ALEControlVolumeState::bind_to_motion(mesh, motion);
@@ -291,7 +293,7 @@ ALEControlVolumeState make_ale_control_volume_state(const MeshType& mesh, const 
  * Copies and moves share the immutable storage; the motion must still outlive
  * every state. Modifying the original motion arrays cannot change this snapshot.
  */
-template<class MeshType, TpetraTypePack Pack>
+template<SimpleFluid::MeshType MeshType, TpetraTypePack Pack>
 ALEControlVolumeState make_validated_planar_ale_control_volume_state(
     const MeshType& mesh, const PlanarALEMeshMotion<Pack>& motion)
 {

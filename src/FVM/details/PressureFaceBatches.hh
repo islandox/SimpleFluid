@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
 #include "FVM/details/ResolvedTransportGeometry.hh"
 #include "geometry/MeshTraverse.hh"
@@ -74,7 +75,7 @@ struct PressureFaceBoundaryGroup
 };
 
 /** Group offsets and field IDs remain unchanged across geometry epochs. */
-template<TpetraTypePack Pack, class MeshType> struct PressureFaceTopology
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct PressureFaceTopology
 {
     using interior_type = InteriorPressureFaceTopology<Pack>;
     using boundary_type = BoundaryPressureFaceTopology<Pack>;
@@ -122,7 +123,7 @@ private:
 };
 
 /** Classify once, then fill final arrays in stable field order within groups. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto make_pressure_face_topology(const MeshType& mesh,
     const std::vector<BoundaryFaceLocation<MeshType>>& locations)
     -> std::shared_ptr<const PressureFaceTopology<Pack, MeshType>>
@@ -251,7 +252,7 @@ template<TpetraTypePack Pack> struct PressureFaceMetrics
 };
 
 /** Preserve resolved provider arithmetic without repeating topology grouping. */
-template<class MeshType, class Topology, class Visitor>
+template<SimpleFluid::MeshType MeshType, class Topology, class Visitor>
 void with_pressure_face_geometry(const MeshType& mesh, const Topology& face, Visitor&& visitor)
 {
     if constexpr (requires { mesh.supports_region_execution(); })
@@ -269,7 +270,7 @@ void with_pressure_face_geometry(const MeshType& mesh, const Topology& face, Vis
 }
 
 /** Fill final category arrays directly; caller retains one geometry lease. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto pressure_face_metrics(const MeshType& mesh, const PressureFaceTopology<Pack, MeshType>& topology)
     -> PressureFaceMetrics<Pack>
 {

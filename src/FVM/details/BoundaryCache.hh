@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "equations/BoundaryConditions.hh"
 
@@ -18,7 +19,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** @brief Construct a scalar boundary cache for a mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class CacheType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class CacheType>
 CacheType cache_field_stored_boundary_conditions_impl(
     SP<const MeshType> mesh, const BoundaryConditionMap& boundary_conditions)
 {
@@ -47,7 +48,7 @@ CacheType cache_field_stored_boundary_conditions_impl(
     return cache;
 }
 
-template<TpetraTypePack Pack, class MeshType, class CacheType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class CacheType>
 void validate_boundary_coefficient_cache_impl(const MeshType& mesh, const CacheType* cache, const std::string& context)
 {
     using scalar_type = typename Pack::scalar_type;

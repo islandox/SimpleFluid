@@ -3,6 +3,7 @@
  * @brief  Linearity-preserving Gauss-linear reconstruction.
  */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/VectorLaplacian.hh"
 
 namespace SimpleFluid::FVM
@@ -14,7 +15,7 @@ namespace SimpleFluid::FVM
  * This preserves affine fields on skewed/curved cells and constant offsets.
  * Components is 1 for a scalar and 3 for a Cartesian vector; output is row-major.
  */
-template<size_t Components, class Field, class Gradient, class MeshType,
+template<size_t Components, class Field, class Gradient, SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider, class BoundaryValueProvider>
 void moment_corrected_gauss_cell_gradient(const Field& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,

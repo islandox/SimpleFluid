@@ -89,7 +89,7 @@ struct StoredFieldValueTraits<std::array<vec3<Scalar>, 3>>
 
 // Weak entries retain no mesh or importer after the last bound field dies.
 // Separate location caches prevent identical cell/face maps from sharing IDs.
-template<class Pack, MeshType MeshT, class Location>
+template<TpetraTypePack Pack, MeshType MeshT, class Location>
 struct StoredFieldLayout
 {
     using map_type = typename Pack::map_type;

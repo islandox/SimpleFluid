@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
@@ -17,7 +18,7 @@
 namespace SimpleFluid::FVM
 {
 class ALEControlVolumeState;
-template<class MeshType> class TransportGeometryCache;
+template<SimpleFluid::MeshType MeshType> class TransportGeometryCache;
 namespace detail
 {
 template<TpetraTypePack Pack> class StoredTransportSymbolicPlan;
@@ -55,13 +56,13 @@ template<TpetraTypePack Pack> struct VelocityTransportBoundary
     VectorBoundaryValueProvider<Pack> value;
     BoundaryFaceSelector diffusion = [](int, size_t) { return true; };
 };
-template<TpetraTypePack Pack, class MeshType> struct CoefficientTransportBoundary
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct CoefficientTransportBoundary
 {
     ScalarBoundaryConditionProvider<Pack> condition;
     ScalarBoundaryValueProvider<Pack> value;
     const MeshBoundaryCache<Pack, MeshType>* coefficients = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct MomentumTransportBoundary
 {
     VectorBoundaryValueProvider<Pack> value;
@@ -69,14 +70,14 @@ struct MomentumTransportBoundary
     const MeshBoundaryCache<Pack, MeshType>* coefficients = nullptr;
     BoundaryFaceSelector zero_gradient_stress = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct MomentumTransportBoundary<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MomentumTransportBoundary<Pack, MeshType, true>
 {
     VectorBoundaryValueProvider<Pack> value;
     BoundaryFaceSelector diffusion = [](int, size_t) { return true; };
     const MeshBoundaryCache<Pack, MeshType>* coefficients = nullptr;
 };
 
-template<TpetraTypePack Pack, class MeshType> struct ScalarTerms
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct ScalarTerms
 {
     using mesh_type = MeshType;
     using Field = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
@@ -88,7 +89,7 @@ template<TpetraTypePack Pack, class MeshType> struct ScalarTerms
     } coefficients;
     ScalarCellValueProvider<Pack> source = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct VectorTerms
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct VectorTerms
 {
     using mesh_type = MeshType;
     using Field = typename MeshFieldTraits<Pack, MeshType>::vector_cell_type;
@@ -100,7 +101,7 @@ template<TpetraTypePack Pack, class MeshType> struct VectorTerms
     } coefficients;
     VectorCellValueProvider<Pack> source = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct WeightedScalarTerms
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct WeightedScalarTerms
 {
     using mesh_type = MeshType;
     using Field = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
@@ -124,7 +125,7 @@ template<TpetraTypePack Pack, class MeshType> struct WeightedScalarTerms
             {};
     } constraints = {};
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct TemperatureTerms
 {
     using mesh_type = MeshType;
@@ -141,7 +142,7 @@ struct TemperatureTerms
     } material;
     ScalarCellValueProvider<Pack> power_density = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct TemperatureTerms<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct TemperatureTerms<Pack, MeshType, true>
 {
     using mesh_type = MeshType;
     using Field = typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type;
@@ -155,7 +156,7 @@ template<TpetraTypePack Pack, class MeshType> struct TemperatureTerms<Pack, Mesh
     } material;
     ScalarCellValueProvider<Pack> power_density = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct MomentumTerms
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MomentumTerms
 {
     using mesh_type = MeshType;
     using Field = typename MeshFieldTraits<Pack, MeshType>::vector_cell_type;
@@ -169,37 +170,37 @@ template<TpetraTypePack Pack, class MeshType> struct MomentumTerms
     VectorCellValueProvider<Pack> acceleration_source = {};
 };
 
-template<TpetraTypePack Pack, class MeshType> struct ScalarAssemblyOptions
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct ScalarAssemblyOptions
 {
     std::optional<TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type>> correction = {};
 };
 struct BasicVectorAssemblyOptions
 {
 };
-template<TpetraTypePack Pack, class MeshType> struct VectorAssemblyOptions
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct VectorAssemblyOptions
 {
     TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::vector_cell_type> correction = {};
 };
-template<TpetraTypePack Pack, class MeshType> struct WeightedScalarAssemblyOptions
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct WeightedScalarAssemblyOptions
 {
     ScalarTransportDiscretization discretization = {};
     TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type> correction = {};
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct TemperatureAssemblyOptions
 {
     ScalarTransportDiscretization discretization = {};
     TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type> correction = {};
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
 };
-template<TpetraTypePack Pack, class MeshType> struct TemperatureAssemblyOptions<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct TemperatureAssemblyOptions<Pack, MeshType, true>
 {
     TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::scalar_cell_type> correction = {};
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
     AssemblyMode mode = AssemblyMode::Transient;
 };
-template<TpetraTypePack Pack, class MeshType> struct MomentumAssemblyOptions
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MomentumAssemblyOptions
 {
     TransportCorrection<typename MeshFieldTraits<Pack, MeshType>::vector_cell_type> correction = {};
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
@@ -210,24 +211,24 @@ template<TpetraTypePack Pack> struct BasicVectorAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
 };
-template<TpetraTypePack Pack, class MeshType> struct ScalarAssemblyContext
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct ScalarAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct VectorAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
     const ALEControlVolumeState* ale = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType> struct VectorAssemblyContext<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct VectorAssemblyContext<Pack, MeshType, true>
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct WeightedScalarAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
@@ -236,24 +237,24 @@ struct WeightedScalarAssemblyContext
     detail::StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr;
     Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null;
 };
-template<TpetraTypePack Pack, class MeshType> struct WeightedScalarAssemblyContext<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct WeightedScalarAssemblyContext<Pack, MeshType, true>
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct TemperatureAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
     const ALEControlVolumeState* ale = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType> struct TemperatureAssemblyContext<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct TemperatureAssemblyContext<Pack, MeshType, true>
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, bool Legacy = std::is_same_v<MeshType, Mesh<Pack>>>
 struct MomentumAssemblyContext
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
@@ -261,7 +262,7 @@ struct MomentumAssemblyContext
     const ALEControlVolumeState* ale = nullptr;
     typename MeshFieldTraits<Pack, MeshType>::tensor_cell_type* gradient_workspace = nullptr;
 };
-template<TpetraTypePack Pack, class MeshType> struct MomentumAssemblyContext<Pack, MeshType, true>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MomentumAssemblyContext<Pack, MeshType, true>
 {
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix = Teuchos::null;
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;

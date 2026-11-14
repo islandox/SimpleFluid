@@ -1,6 +1,7 @@
 /** @file testTransportTraverse.cc
  * @brief Ordered transport traversal, live inputs, and retained geometry contracts.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/Operators.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshReorderingFactory.hh"
@@ -46,7 +47,7 @@ void expect_exact_vector(const char* metric, const Vec& actual, const Vec& expec
 // Query canonical point geometry independently of the batch descriptors. The
 // incidence order, multiplicity, orientation, and classification are all part
 // of the assembly contract, including repeated periodic neighbours.
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void expect_canonical_geometry(const MeshType& mesh, const TransportGeometryCache<MeshType>& cache)
 {
     const auto& geometry = cache.assembly_geometry();
@@ -208,7 +209,7 @@ void expect_same_system(const System& actual, const System& expected, bool reuse
     }
 }
 
-template<class MeshType> struct Assembly
+template<SimpleFluid::MeshType MeshType> struct Assembly
 {
     using Fields = MeshFieldTraits<Pack, MeshType>;
     using Scalar = typename Fields::scalar_cell_type;
@@ -335,7 +336,7 @@ template<class MeshType> struct Assembly
     }
 };
 
-template<class MeshType> void compare_repeated_assemblies(SP<const MeshType> mesh)
+template<SimpleFluid::MeshType MeshType> void compare_repeated_assemblies(SP<const MeshType> mesh)
 {
     Assembly<MeshType> state(mesh);
     TransportGeometryCache<MeshType> retained(*mesh);

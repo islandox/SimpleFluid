@@ -1,6 +1,7 @@
 /** @file testPressureGeometryAccess.cc
  * @brief Pressure geometry leases, exact row parity, and collective failures.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/MatrixOperators.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -114,7 +115,7 @@ void eliminate_gauge_column(Matrix& matrix, Gauge gauge)
     matrix.fillComplete();
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void check_refresh(const MeshType& mesh, Matrix& matrix, Gauge gauge, bool symmetric, bool expect_changed)
 {
     bool changed = !expect_changed;
@@ -153,7 +154,7 @@ void expect_collective_failure(const Teuchos::Comm<int>& comm, Action&& action,
     EXPECT_EQ(total_caught, comm.getSize());
 }
 
-template<class MeshType, class Boundary>
+template<SimpleFluid::MeshType MeshType, class Boundary>
 void check_failed_assembly_and_refresh(const MeshType& mesh, Boundary boundary,
     Matrix& matrix, bool local_origin, const char* local_message,
     const std::type_info& local_type = typeid(std::logic_error))

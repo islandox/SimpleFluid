@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/Operators.hh"
@@ -38,7 +39,7 @@ namespace SimpleFluid
 
 namespace FVM::detail
 {
-template<TpetraTypePack Pack, class MeshType> class PrescribedFluxResponsePlan;
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class PrescribedFluxResponsePlan;
 }
 
 namespace detail
@@ -54,7 +55,7 @@ template<TpetraTypePack Pack> struct TransportEquationTestAccess;
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TemperatureDiffusionEquation
 {
 public:

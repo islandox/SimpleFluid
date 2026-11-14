@@ -4,13 +4,14 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "solvers/VolumeContinuityModel.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::uint64_t generation) const -> Trial
 {
     inputs.ale.validate(*d_mesh);
@@ -252,7 +253,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
         diagnostics);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void VolumeContinuityModel<Pack, MeshType>::commit(const Trial& trial)
 {
     const int local_foreign = trial.d_owner != this ? 1 : 0;
@@ -286,7 +287,7 @@ void VolumeContinuityModel<Pack, MeshType>::commit(const Trial& trial)
     d_trial_nonce = next_trial_nonce;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto VolumeContinuityModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     StateSnapshot result;
@@ -307,7 +308,7 @@ auto VolumeContinuityModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void VolumeContinuityModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
     const int local_foreign = snapshot.d_owner != this ? 1 : 0;

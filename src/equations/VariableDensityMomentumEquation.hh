@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
 #include "SimpleFluidExport.hh"
 #include "equations/CollectiveValidation.hh"
@@ -20,7 +21,7 @@ namespace SimpleFluid
  * by density again. Density and viscosity inputs must have synchronized ghosts.
  * All ranks participate, including empty owners. Only successful solves publish velocity.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = MeshHandle<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT VariableDensityMomentumEquation
 {
 public:

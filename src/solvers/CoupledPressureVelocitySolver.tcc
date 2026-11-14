@@ -8,6 +8,7 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "geometry/MeshConcepts.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
 
 #include "FVM/FaceFlux.hh"
@@ -74,7 +75,7 @@ private:
     CoupledPressureVelocityCacheStatistics* d_statistics;
 };
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto make_coupled_map(const MeshType& mesh) -> Teuchos::RCP<const typename Pack::map_type>
 {
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -158,7 +159,7 @@ void add_coupled_global_values(const PreparedCoupledMatrix<Pack>& prepared, type
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto pressure_gradient_stencils(const MeshType& mesh, const BoundaryConditionMap& boundary_conditions,
     typename Pack::scalar_type reference_density) -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>
 {
@@ -277,7 +278,7 @@ auto pressure_gradient_stencils(const MeshType& mesh, const BoundaryConditionMap
 }
 
 /** Linear/affine coefficients of the existing boundary-aware Gauss gradient. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_SOLVERS_LOCAL auto gauss_pressure_gradient_stencils(
     const MeshType& mesh, const BoundaryConditionMap& boundaries, typename Pack::scalar_type reference_density)
     -> std::vector<AffinePressureGradientStencil<Pack, MeshType>>
@@ -895,13 +896,13 @@ private:
 
 } // namespace detail
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool CoupledPressureVelocitySolver<Pack, MeshType>::StaticGeometryCache::empty() const noexcept
 {
     return stencils.empty();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CoupledPressureVelocitySolver<Pack, MeshType>::CoupledPressureVelocitySolver(SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "CoupledPressureVelocitySolver")),
       d_coupled_map(detail::make_coupled_map<Pack>(*d_mesh)),
@@ -911,10 +912,10 @@ CoupledPressureVelocitySolver<Pack, MeshType>::CoupledPressureVelocitySolver(SP<
     d_cache_statistics.coupled_map_builds = 1;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CoupledPressureVelocitySolver<Pack, MeshType>::~CoupledPressureVelocitySolver() = default;
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::set_rebuild_policy(CoupledRebuildPolicy policy)
 {
     if (d_rebuild_policy == policy)
@@ -925,20 +926,20 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::set_rebuild_policy(CoupledRe
     clear_cache();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CoupledRebuildPolicy CoupledPressureVelocitySolver<Pack, MeshType>::rebuild_policy() const noexcept
 {
     return d_rebuild_policy;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const CoupledPressureVelocityCacheStatistics&
 CoupledPressureVelocitySolver<Pack, MeshType>::cache_statistics() const noexcept
 {
     return d_cache_statistics;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::observe_storage() const
 {
     std::erase_if(d_observed_matrices, [](const auto& weak) { return !weak.is_valid_ptr(); });
@@ -963,7 +964,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::observe_storage() const
     observe(d_observed_operators, system.linear_operator);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 CoupledStorageStatistics CoupledPressureVelocitySolver<Pack, MeshType>::storage_statistics() const
 {
     observe_storage();
@@ -992,7 +993,8 @@ CoupledStorageStatistics CoupledPressureVelocitySolver<Pack, MeshType>::storage_
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType> void CoupledPressureVelocitySolver<Pack, MeshType>::clear_cache()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void CoupledPressureVelocitySolver<Pack, MeshType>::clear_cache()
 {
     invalidate_cache();
     d_boundary_locations = FVM::detail::boundary_face_locations(*d_mesh);
@@ -1000,7 +1002,7 @@ template<TpetraTypePack Pack, class MeshType> void CoupledPressureVelocitySolver
 }
 
 /** @brief Configure exact fluxes on selected pressure-Dirichlet faces. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::set_fixed_boundary_flux_provider(
     std::vector<std::string> boundary_names, fixed_boundary_flux_provider_type provider, std::uint64_t generation)
 {
@@ -1023,7 +1025,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::set_fixed_boundary_flux_prov
 }
 
 /** @brief Restore ordinary pressure-outlet flux treatment. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::clear_fixed_boundary_flux_provider()
 {
     if (d_fixed_boundary_flux_names.empty() && !d_fixed_boundary_flux_provider)
@@ -1038,7 +1040,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::clear_fixed_boundary_flux_pr
 }
 
 /** @brief Collectively validate and evaluate configured boundary fluxes. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CoupledPressureVelocitySolver<Pack, MeshType>::evaluate_fixed_boundary_fluxes(
     const BoundaryConditionMap* pressure_boundaries) const -> std::vector<std::optional<scalar_type>>
 {
@@ -1170,7 +1172,7 @@ auto CoupledPressureVelocitySolver<Pack, MeshType>::evaluate_fixed_boundary_flux
 }
 
 /** @brief Enforce exact configured values on a reconstructed face field. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::apply_fixed_boundary_fluxes(face_flux_field_type& fluxes) const
 {
     EquationValidation::require_mesh_match(*d_mesh, fluxes, "CoupledPressureVelocitySolver");
@@ -1193,7 +1195,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::apply_fixed_boundary_fluxes(
 }
 
 /** @brief Build a reconstruction cache with narrowly relaxed fixed faces. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CoupledPressureVelocitySolver<Pack, MeshType>::pressure_flux_boundary_cache(
     const velocity_boundary_cache_type& boundary_cache) const -> velocity_boundary_cache_type
 {
@@ -1206,7 +1208,7 @@ auto CoupledPressureVelocitySolver<Pack, MeshType>::pressure_flux_boundary_cache
 }
 
 /** @brief Discard every operator-dependent cached object. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
 {
     d_cached_system = {};
@@ -1224,7 +1226,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::invalidate_cache() const
 }
 
 /** @brief Cache owned-cell incidences without materializing mesh connectivity. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_cell_face_adjacency() const
 {
     const auto epoch = mesh_geometry_epoch(*d_mesh);
@@ -1269,7 +1271,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_cell_face_adjacency(
 }
 
 /** @brief Detect geometry motion even when the owning solver missed refresh. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_geometry_if_needed() const
 {
     const auto current_epoch = mesh_geometry_epoch(*d_mesh);
@@ -1282,7 +1284,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::refresh_geometry_if_needed()
     d_geometry_epoch = current_epoch;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1293,7 +1295,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         time_options, reference_density, CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1305,7 +1307,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         time_options, continuity_target, reference_density, ale, CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1319,7 +1321,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         boundary_dynamic_viscosity, CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1333,7 +1335,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         boundary_dynamic_viscosity, continuity_target, ale, CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
@@ -1349,7 +1351,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
         CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
@@ -1366,7 +1368,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
         CoupledAssemblyPurpose::LinearSolve);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1377,7 +1379,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         time_options, reference_density, nullptr, nullptr, nullptr, purpose);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1389,7 +1391,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
         time_options, reference_density, nullptr, nullptr, nullptr, continuity_target, ale, purpose);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1451,7 +1453,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     return coupled;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const face_flux_field_type& face_fluxes,
@@ -1511,7 +1513,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const momentum_equation_
     return coupled;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
@@ -1569,7 +1571,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     return coupled;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentum_equation_type& momentum_equation,
     const velocity_field_type& velocity, const field_type& pressure, const field_type& temperature,
@@ -1627,7 +1629,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble(const boussinesq_momentu
     return coupled;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool CoupledPressureVelocitySolver<Pack, MeshType>::same_pressure_boundaries(
     const BoundaryConditionMap& lhs, const BoundaryConditionMap& rhs)
 {
@@ -1647,7 +1649,7 @@ bool CoupledPressureVelocitySolver<Pack, MeshType>::same_pressure_boundaries(
     return true;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::pressure_graph_signature_type
 CoupledPressureVelocitySolver<Pack, MeshType>::pressure_graph_signature(const BoundaryConditionMap& boundaries)
 {
@@ -1662,7 +1664,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::pressure_graph_signature(const Bo
     return signature;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool CoupledPressureVelocitySolver<Pack, MeshType>::has_external_generation() const
 {
     if (d_cached_system.linear_operator.is_null())
@@ -1673,7 +1675,7 @@ bool CoupledPressureVelocitySolver<Pack, MeshType>::has_external_generation() co
     return d_cached_system.linear_operator.strong_count() > aliases;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void CoupledPressureVelocitySolver<Pack, MeshType>::prepare_numeric_generation(
     const momentum_equation_type& equation, const TimeStepperOptions& options, CoupledAssemblyPurpose purpose) const
 {
@@ -1727,7 +1729,7 @@ void CoupledPressureVelocitySolver<Pack, MeshType>::prepare_numeric_generation(
     static_cast<void>(equation);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool CoupledPressureVelocitySolver<Pack, MeshType>::can_reuse_assembly_graph(
     const momentum_system_type& momentum, const pressure_graph_signature_type& pressure_signature) const
 {
@@ -1741,7 +1743,7 @@ bool CoupledPressureVelocitySolver<Pack, MeshType>::can_reuse_assembly_graph(
     return global_reuse != 0;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::system_type
 CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const momentum_system_type& momentum,
     const velocity_field_type& velocity, const field_type& pressure,
@@ -2372,7 +2374,7 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
     return assembled;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto CoupledPressureVelocitySolver<Pack, MeshType>::right_preconditioner(
     const system_type& system, bool preserve_retained_generations) const
     -> Teuchos::RCP<const operator_type>
@@ -2417,7 +2419,7 @@ auto CoupledPressureVelocitySolver<Pack, MeshType>::right_preconditioner(
     return d_preconditioner;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename CoupledPressureVelocitySolver<Pack, MeshType>::result_type
 CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, velocity_field_type& velocity,
     field_type& pressure, const LinearSolverOptions& options) const

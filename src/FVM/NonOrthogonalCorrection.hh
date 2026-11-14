@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
@@ -297,7 +298,7 @@ SIMPLEFLUID_FVM_EXPORT Teuchos::RCP<typename Pack::vector_type> full_diffusion_r
  * The solution/correction field retains FieldStored ownership on the
  * original orthogonal, semi-structured, or runtime mesh interface.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(const MeshType& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
@@ -307,7 +308,7 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(con
  * This compiled seam retains the initial half-implicit Hybrid sweep used by
  * steady solvers, including its synchronized partition correction field.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const MeshType& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type implicit_weight,

@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "solvers/SteadyStateSearch.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -179,7 +180,7 @@ SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
 }
 
 template <TpetraTypePack Pack>
-template<class MeshType, class VelocityField, class TemperatureField,
+template<SimpleFluid::MeshType MeshType, class VelocityField, class TemperatureField,
          class AdditionalFields>
 SteadyStateUpdateRates<typename Pack::scalar_type>
 SteadyStateFieldMonitor<Pack>::observe_fields(
@@ -391,7 +392,7 @@ void SteadyStateFieldMonitor<Pack>::capture_current_state()
 }
 
 template <TpetraTypePack Pack>
-template<class MeshType, class VelocityField, class TemperatureField,
+template<SimpleFluid::MeshType MeshType, class VelocityField, class TemperatureField,
          class AdditionalFields>
 void SteadyStateFieldMonitor<Pack>::capture_current_state(
     const MeshType& mesh,

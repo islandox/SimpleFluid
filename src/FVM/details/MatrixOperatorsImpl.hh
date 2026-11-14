@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/FaceStencilMatrix.hh"
 #include "FVM/details/TransportValidation.hh"
@@ -24,7 +25,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** @brief Assemble the mesh-generic two-point diffusion matrix. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Teuchos::RCP<typename Pack::matrix_type> diffusion_matrix_impl(
     const MeshType& mesh, typename Pack::scalar_type diffusivity)
 {
@@ -66,7 +67,7 @@ Teuchos::RCP<typename Pack::matrix_type> diffusion_matrix_impl(
 }
 
 /** @brief Assemble upwind convection from a generic face-flux accessor. */
-template<TpetraTypePack Pack, class MeshType, class IsOwnedFace, class FaceValue>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class IsOwnedFace, class FaceValue>
 Teuchos::RCP<typename Pack::matrix_type> upwind_convection_matrix_impl(
     const MeshType& mesh, IsOwnedFace is_owned_face, FaceValue face_value)
 {
@@ -113,7 +114,7 @@ Teuchos::RCP<typename Pack::matrix_type> upwind_convection_matrix_impl(
 }
 
 /** @brief Visit pressure rows in the same face order for fresh and reused graphs. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class RowVisitor>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider, class RowVisitor>
 void visit_pressure_poisson_rows(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
     BoundaryConditionProvider boundary_condition, RowVisitor visit_row)
@@ -186,7 +187,7 @@ void visit_pressure_poisson_rows(const MeshType& mesh,
 }
 
 /** @brief Assemble pressure Poisson on a generic mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider>
 Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid, BoundaryConditionProvider boundary_condition)
 {
@@ -239,7 +240,7 @@ Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const Mesh
  * graph, also if Tpetra unexpectedly rejects a staged replacement. The caller
  * must invalidate numeric preconditioners whenever values_changed is true.
  */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider>
 bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
     BoundaryConditionProvider boundary_condition, bool symmetric_gauge,

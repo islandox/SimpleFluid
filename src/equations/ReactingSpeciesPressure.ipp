@@ -2,9 +2,12 @@
  * @brief Pure current-inventory candidate EOS checks and liquid-volume query.
  */
 #pragma once
+
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::validate_species_pressure_metadata(scalar_type pressure_offset) const
 {
     collective_detail::collective_local_validation(*d_mesh, "Reacting candidate pressure metadata",
@@ -27,7 +30,7 @@ void ReactingGasModel<Pack, MeshType>::validate_species_pressure_metadata(scalar
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::evaluate_liquid_volume(scalar_type pressure_offset) const -> scalar_type
 {
     using reacting_species_detail::require;
@@ -73,7 +76,7 @@ auto ReactingGasModel<Pack, MeshType>::evaluate_liquid_volume(scalar_type pressu
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::validate_species_candidate_pressure(scalar_type pressure_offset) const
 {
     using reacting_species_detail::require;
@@ -126,7 +129,7 @@ void ReactingGasModel<Pack, MeshType>::validate_species_candidate_pressure(scala
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::set_species_absolute_pressure_offset(scalar_type pressure_offset)
 {
     // Pure all-phase validation precedes any writes. An unexpected publication

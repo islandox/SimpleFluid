@@ -3,6 +3,7 @@
  * @brief Tests FVM operator overloads for mesh-aware stored fields.
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
 #include <type_traits>
@@ -137,7 +138,7 @@ double stored_matrix_entry(
     return result;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 std::vector<double> stored_matrix_action(
     const Pack::matrix_type& matrix, const SimpleFluid::VectorCellFieldStored<Pack, MeshType>& field, size_t component)
 {
@@ -158,7 +159,7 @@ std::vector<double> stored_matrix_action(
     return result;
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 std::vector<double> stored_matrix_action(
     const Pack::matrix_type& matrix, const SimpleFluid::ScalarCellFieldStored<Pack, MeshType>& field)
 {
@@ -204,7 +205,8 @@ SimpleFluid::SP<const PartitionedCartesian> make_partitioned_cartesian()
     return std::make_shared<PartitionedCartesian>(std::move(mesh), std::move(indexer));
 }
 
-template<class MeshType> void expect_linear_stored_gradients(const SimpleFluid::SP<const MeshType>& mesh)
+template<SimpleFluid::MeshType MeshType>
+void expect_linear_stored_gradients(const SimpleFluid::SP<const MeshType>& mesh)
 {
     SimpleFluid::ScalarCellFieldStored<Pack, MeshType> scalar(
         SimpleFluid::ScalarCellFieldDescriptor<Pack>("phi"), mesh);
@@ -288,7 +290,7 @@ template<class MeshType> void expect_linear_stored_gradients(const SimpleFluid::
     expect_gradients("Gauss linear");
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void expect_constant_velocity_fluxes(
     const SimpleFluid::SP<const MeshType>& mesh, SimpleFluid::vec3<double> velocity_value = {1.0, -0.5, 0.25})
 {
@@ -325,7 +327,8 @@ void expect_constant_velocity_fluxes(
     }
 }
 
-template<class MeshType> void expect_stored_matrix_operators(const SimpleFluid::SP<const MeshType>& mesh)
+template<SimpleFluid::MeshType MeshType>
+void expect_stored_matrix_operators(const SimpleFluid::SP<const MeshType>& mesh)
 {
     SimpleFluid::ScalarFaceFieldStored<Pack, MeshType> fluxes(
         SimpleFluid::ScalarFaceFieldDescriptor<Pack>("fluxes"), mesh, 0.0);
@@ -452,7 +455,8 @@ template<class MeshType> void expect_stored_matrix_operators(const SimpleFluid::
     EXPECT_EQ(physical_momentum.rhs->getNumVectors(), 3U);
 }
 
-template<class MeshType> void expect_pressure_weighted_stored_fluxes(const SimpleFluid::SP<const MeshType>& mesh)
+template<SimpleFluid::MeshType MeshType>
+void expect_pressure_weighted_stored_fluxes(const SimpleFluid::SP<const MeshType>& mesh)
 {
     using local_ordinal_type = Pack::local_ordinal_type;
     using scalar_type = Pack::scalar_type;

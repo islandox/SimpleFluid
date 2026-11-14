@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "FVM/details/PrescribedFluxResponse.tcc"
 #include "TemperatureDiffusionEquation.hh"
@@ -29,7 +30,7 @@ namespace SimpleFluid
  * @param boundary_conditions Boundary-condition set for temperature.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TemperatureDiffusionEquation<Pack, MeshType>::TemperatureDiffusionEquation(
     SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "TemperatureDiffusionEquation")),
@@ -93,7 +94,7 @@ TemperatureDiffusionEquation<Pack, MeshType>::TemperatureDiffusionEquation(
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
 {
     d_face_boundary_temperature.value.clear();
@@ -114,7 +115,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux(const boundary_cache_type& heat_flux)
 {
     SP<const boundary_cache_type> candidate;
@@ -123,7 +124,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux(const 
     set_boundary_heat_flux_snapshot(std::move(candidate));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux_snapshot(
     SP<const boundary_cache_type> heat_flux)
 {
@@ -165,13 +166,14 @@ void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux_snapsh
 }
 
 /** Refresh geometry-dependent transport data after fixed-topology motion. */
-template<TpetraTypePack Pack, class MeshType> void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry()
 {
     refresh_geometry({});
 }
 
 /** Refresh transport data using an optional shared geometry snapshot. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
@@ -195,7 +197,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry(
  * @param thermal_diffusivity Thermal diffusivity coefficient.
  * @param[out] temperature Updated temperature field on return.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::vector<scalar_type>& old_temperature,
     scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature) const
 {
@@ -222,7 +224,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::v
  *         negative diffusivity.
  * @throws std::runtime_error if a Robin boundary condition is encountered.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::vector<scalar_type>& old_temperature,
     scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature,
     const source_type& right_hand_source) const
@@ -338,7 +340,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::v
  * @param[out] temperature Updated temperature field on return.
  * @param linear_options Linear solver configuration.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
     field_type& temperature, const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
@@ -370,7 +372,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const f
  *         negative diffusivity.
  * @throws std::runtime_error if the linear transport solve does not converge.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
     field_type& temperature, const source_type& right_hand_source, const LinearSolverOptions& linear_options) const
@@ -381,7 +383,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const f
 }
 
 /** @brief Advance zero-source transport with selected non-orthogonal diffusion. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
     field_type& temperature, FVM::NonOrthogonalTreatment treatment, const LinearSolverOptions& linear_options) const
@@ -393,7 +395,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const f
 }
 
 /** @brief Advance sourced transport with selected non-orthogonal diffusion. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
     field_type& temperature, const source_type& right_hand_source, FVM::NonOrthogonalTreatment treatment,
@@ -404,7 +406,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit(const f
 }
 
 /** @brief Shared orthogonal and non-orthogonal transport implementation. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,
     field_type& temperature, const source_type& right_hand_source, std::optional<FVM::NonOrthogonalTreatment> treatment,
@@ -518,7 +520,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if the linear solve fails or is non-finite.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, const material_type& material,
     field_type& temperature, const source_type& power_density, FVM::NonOrthogonalTreatment treatment,
@@ -531,7 +533,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         coefficient_interpolation, nullptr, nullptr, nullptr, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_type& old_temperature,
     const face_flux_field_type& face_fluxes, scalar_type time_step, const material_type& material,
     field_type& temperature, const source_type& power_density, FVM::NonOrthogonalTreatment treatment,
@@ -865,7 +867,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
     const field_type& old_temperature, const face_flux_field_type& face_fluxes, scalar_type time_step,
     const material_type& material, FVM::NonOrthogonalTreatment treatment,
@@ -942,7 +944,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
     };
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::advance_prepared(field_type& temperature,
     const source_type& source, const field_type* initial_guess, const LinearSolverOptions& options) const
     -> LinearSolveStatistics
@@ -962,7 +964,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_prepared(field_type& 
     catch (...) { d_prepared_initial_guess = nullptr; throw; }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_rhs(const source_type& source) const
     -> Teuchos::RCP<const typename Pack::vector_type>
 {
@@ -975,7 +977,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_rhs(const source_typ
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
     -> Teuchos::RCP<const typename Pack::vector_type>
 {
@@ -1022,7 +1024,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(co
 } // namespace SimpleFluid
 
 namespace SimpleFluid {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack,MeshType>::assemble_steady_physical(const field_type& values,
     const face_flux_field_type& flux, scalar_type time_step, const material_type& material,
     const source_type& source, FVM::NonOrthogonalTreatment treatment, const field_type* conductivity,

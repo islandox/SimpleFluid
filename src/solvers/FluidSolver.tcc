@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "FluidSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 
@@ -31,7 +32,7 @@ namespace fluid_solver_detail
 {
 
 /** @brief Compute a communicator-wide volume-weighted velocity-update norm. */
-template<class MeshType, class VelocityField, class GlobalSum>
+template<SimpleFluid::MeshType MeshType, class VelocityField, class GlobalSum>
 auto volume_weighted_velocity_update_norm(
     const MeshType& mesh,
     const VelocityField& before,
@@ -68,7 +69,7 @@ auto volume_weighted_velocity_update_norm(
 }
 
 /** @brief Collect rank-owned scalar values in mesh-local cell order. */
-template<class MeshType, class Field>
+template<SimpleFluid::MeshType MeshType, class Field>
 auto collect_owned_scalar_values(
     const MeshType& mesh,
     const Field& field) -> VTUWriter::ScalarData
@@ -87,7 +88,7 @@ auto collect_owned_scalar_values(
 }
 
 /** @brief Reduce a backend-provided cell metric to a global L2 norm. */
-template<class MeshType, class CellMetric, class GlobalSum>
+template<SimpleFluid::MeshType MeshType, class CellMetric, class GlobalSum>
 auto global_cell_metric_norm(
     const MeshType& mesh,
     CellMetric cell_metric,

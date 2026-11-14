@@ -2,6 +2,7 @@
  * @brief Schema-indexed conservative field and population execution.
  */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include <bit>
 #include <utility>
 
@@ -181,7 +182,7 @@ inline Reacting::CellSpeciesState zero_like(const Reacting::CellSpeciesState& st
 }
 } // namespace reacting_species_detail
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::allocate_species_generation(bool configuration_change)
 {
     collective_detail::require_uniform_value(*d_mesh, d_species_generation, "Reacting active initialization authority");
@@ -203,7 +204,8 @@ void ReactingGasModel<Pack, MeshType>::allocate_species_generation(bool configur
         ++d_source_configuration_generation;
     d_species_generation = ++d_species_generation_allocator;
 }
-template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::configure_species_fields()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void ReactingGasModel<Pack, MeshType>::configure_species_fields()
 {
     collective_detail::require_uniform_value(
         *d_mesh, static_cast<int>(species_enabled()), "Reacting typed schema presence");
@@ -297,7 +299,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     d_initial_state_initialized = false;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::mutable_species_field(
     Reacting::SpeciesId id, Reacting::SpeciesPhase phase, std::string_view population) -> field_type&
 {
@@ -314,14 +316,14 @@ auto ReactingGasModel<Pack, MeshType>::mutable_species_field(
         static_cast<std::size_t>(found - d_options.population_ids.begin()));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::species_field(
     Reacting::SpeciesId id, Reacting::SpeciesPhase phase, std::string_view population) const -> const field_type&
 {
     return const_cast<ReactingGasModel*>(this)->mutable_species_field(id, phase, population);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::mutable_population_number(std::string_view population) -> field_type&
 {
     if (population == "micro")
@@ -339,7 +341,7 @@ auto ReactingGasModel<Pack, MeshType>::mutable_population_number(std::string_vie
     throw std::invalid_argument("Unknown population number field.");
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::population_number_field(std::string_view population) const -> const field_type&
 {
     reacting_species_detail::require(
@@ -348,7 +350,7 @@ auto ReactingGasModel<Pack, MeshType>::population_number_field(std::string_view 
     return const_cast<ReactingGasModel*>(this)->mutable_population_number(population);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Reacting::CellSpeciesState ReactingGasModel<Pack, MeshType>::cell_species_state(
     local_ordinal_type cell, double volume) const
 {
@@ -379,13 +381,13 @@ Reacting::CellSpeciesState ReactingGasModel<Pack, MeshType>::cell_species_state(
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Reacting::CellSpeciesState ReactingGasModel<Pack, MeshType>::cell_species_state(local_ordinal_type cell) const
 {
     return cell_species_state(cell, d_mesh->cell_volume(cell));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::publish_species_states(
     std::span<const Reacting::CellSpeciesState> states, std::span<const double> volumes)
 {
@@ -407,7 +409,7 @@ void ReactingGasModel<Pack, MeshType>::publish_species_states(
         }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::initialize_species(
     std::span<const Reacting::CellSpeciesState> states, std::span<const std::vector<double>> numbers)
 {
@@ -479,7 +481,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<field_type*>& fields)
 {
     for (const auto& field : d_bouss_diagnostics)
@@ -502,7 +504,7 @@ void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<field_t
         fields.push_back(alpha.get());
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<const field_type*>& fields) const
 {
     for (const auto& field : d_bouss_diagnostics)
@@ -525,7 +527,7 @@ void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<const f
         fields.push_back(alpha.get());
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 std::vector<BubbleGasPhysics::PopulationNumberState> ReactingGasModel<Pack, MeshType>::cell_population_numbers(
     local_ordinal_type cell, double volume) const
 {
@@ -537,7 +539,7 @@ std::vector<BubbleGasPhysics::PopulationNumberState> ReactingGasModel<Pack, Mesh
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Reacting::ReactionEnvironment ReactingGasModel<Pack, MeshType>::species_environment(
     local_ordinal_type cell, double time, double temperature, double volume) const
 {
@@ -568,7 +570,7 @@ Reacting::ReactionEnvironment ReactingGasModel<Pack, MeshType>::species_environm
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 std::vector<BubbleGasPhysics::PopulationCondition> ReactingGasModel<Pack, MeshType>::population_conditions(
     const Reacting::CellSpeciesState& state, const std::vector<BubbleGasPhysics::PopulationNumberState>& numbers,
     const Reacting::ReactionEnvironment& environment) const
@@ -616,7 +618,7 @@ std::vector<BubbleGasPhysics::PopulationCondition> ReactingGasModel<Pack, MeshTy
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::reconstruct_species_derived(
     const field_type& temperature, std::span<const real_t> volumes)
 {
@@ -708,7 +710,7 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_species_derived(
         alpha->sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_species_moles(Reacting::SpeciesId id) const -> scalar_type
 {
     scalar_type total = 0;
@@ -719,7 +721,7 @@ auto ReactingGasModel<Pack, MeshType>::global_species_moles(Reacting::SpeciesId 
     return total;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 double ReactingGasModel<Pack, MeshType>::population_slip_speed(const BubbleGasPhysics::PopulationCondition& condition,
     const Reacting::ReactionEnvironment& environment, double liquid_density, double liquid_viscosity) const
 {
@@ -741,7 +743,7 @@ double ReactingGasModel<Pack, MeshType>::population_slip_speed(const BubbleGasPh
     return 0.0;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>::population_packet(
     const Reacting::ReactionContext& chemistry, const std::vector<BubbleGasPhysics::PopulationCondition>& populations,
     double duration, double liquid_density, double liquid_viscosity) const
@@ -885,7 +887,7 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
     return packet;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, scalar_type dt,
     const field_type& temperature, const field_type& gauge_pressure, const velocity_field_type& velocity,
     const face_flux_field_type& liquid_flux, const material_type& material, const FVM::ALEControlVolumeState* ale,
@@ -1857,7 +1859,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         throw;
     }
 }
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
@@ -1903,7 +1905,7 @@ auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
     return global_sum(local_volume);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::refresh_species_thermodynamics(scalar_type time, const field_type& temperature,
     const field_type& gauge_pressure, const velocity_field_type& velocity, const material_type& material)
 {
@@ -1911,7 +1913,7 @@ void ReactingGasModel<Pack, MeshType>::refresh_species_thermodynamics(scalar_typ
         throw std::logic_error("Species EOS refresh requires a general species schema.");
     initialize_state(time, temperature, gauge_pressure, velocity, material, false);
 }
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 ReactingGasOptions ReactingGasModel<Pack, MeshType>::require_options(
     const SP<const mesh_type>& mesh, ReactingGasOptions options)
 {

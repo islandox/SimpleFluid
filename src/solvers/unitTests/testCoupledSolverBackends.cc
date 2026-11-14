@@ -2,6 +2,7 @@
  * @file testCoupledSolverBackends.cc
  * @brief  End-to-end qualification of coupled backend choices.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/FaceFlux.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
@@ -130,7 +131,7 @@ struct Run
     CoupledPressureVelocityCacheStatistics statistics;
 };
 
-template<class Base, class Mesh, class... Args>
+template<class Base, SimpleFluid::MeshType Mesh, class... Args>
 Run advance(SP<const Mesh> mesh, BoundaryConditionSet boundaries, TimeStepperOptions options,
     LinearSolverOptions linear, Selection selection, bool switch_backends, Args... args)
 {
@@ -200,7 +201,7 @@ void compare(const Run& reference, const Run& candidate)
     }
 }
 
-template<class Mesh>
+template<SimpleFluid::MeshType Mesh>
 void exercise(SP<const Mesh> mesh, Family family, bool outlet, FVM::NonOrthogonalTreatment treatment,
     FVM::CellGradientScheme gradient = FVM::CellGradientScheme::LeastSquares)
 {

@@ -1,6 +1,7 @@
 /** @file testSSTSASModel.cc
  * @brief Checks SAS model integration, source diagnostics, and accepted-step behavior.
  */
+#include "geometry/MeshConcepts.hh"
 #include <gtest/gtest.h>
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "equations/CollectiveValidation.hh"
@@ -49,7 +50,7 @@ BoundaryConditionSet prescribed_boundaries()
     return bc;
 }
 
-template<class M> BoundaryConditionSet prescribed_boundaries(const M& mesh)
+template<SimpleFluid::MeshType M> BoundaryConditionSet prescribed_boundaries(const M& mesh)
 {
     BoundaryConditionSet result;
     for (const auto& [batch, faces] : mesh.boundary_batches())
@@ -57,7 +58,7 @@ template<class M> BoundaryConditionSet prescribed_boundaries(const M& mesh)
     return result;
 }
 
-template<class M> MaterialPropertyFields<Pack, M> material(SP<const M> mesh, double rho = 1)
+template<SimpleFluid::MeshType M> MaterialPropertyFields<Pack, M> material(SP<const M> mesh, double rho = 1)
 {
     BoussinesqModelOptions o;
     o.reference_density = rho; o.density = rho; o.dynamic_viscosity = rho*1e-3;
@@ -65,7 +66,8 @@ template<class M> MaterialPropertyFields<Pack, M> material(SP<const M> mesh, dou
     return {mesh, o, TimeStepperOptions{}};
 }
 
-template<class M> void model_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
+template<SimpleFluid::MeshType M>
+void model_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
 {
     using Traits = MeshFieldTraits<Pack, M>;
     using Model = TurbulenceModel<Pack, M>;
@@ -211,7 +213,7 @@ TEST(SSTSASModelTest, OneCellSourceUnitsVolumeAndDensity)
         }
 }
 
-template<class M> void derivative_contract(SP<const M> mesh, bool gauss=false)
+template<SimpleFluid::MeshType M> void derivative_contract(SP<const M> mesh, bool gauss=false)
 {
     using Traits = MeshFieldTraits<Pack, M>;
     typename Traits::vector_cell_type u(mesh, "u"), lap(mesh, "lap"), kg(mesh, "kg");
@@ -426,7 +428,7 @@ SP<const Native> cylindrical_mesh(size_t n, bool closed)
     return std::make_shared<Native>(std::make_shared<Meshes::OrthogonalCylindrial3D>(Vec3D<ArrReal>{{radial,theta,axial}}));
 }
 
-template<class M> double quadratic_laplacian_error(SP<const M> mesh, bool gauss=false)
+template<SimpleFluid::MeshType M> double quadratic_laplacian_error(SP<const M> mesh, bool gauss=false)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     typename Traits::vector_cell_type u(mesh,"quadratic_u"), lap(mesh,"quadratic_lap");
@@ -504,7 +506,8 @@ TEST(SSTSASDerivativesTest, SemiStructuredSkewedExtrusion)
 
 namespace
 {
-template<class M> void slip_derivative_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
+template<SimpleFluid::MeshType M>
+void slip_derivative_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGradientScheme::LeastSquares)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     auto bc=prescribed_boundaries(*mesh); bc.velocity["zmin"]={BoundaryConditionType::Slip,{}};
@@ -550,7 +553,7 @@ SP<const Native> periodic_mesh(size_t n)
         Vec3D<ArrReal>{{x,{0.,.5,1.},{0.,.5,1.}}},Vec3D<bool>{true,true,true}));
 }
 
-template<class M> double periodic_laplacian_error(SP<const M> mesh, bool gauss=false)
+template<SimpleFluid::MeshType M> double periodic_laplacian_error(SP<const M> mesh, bool gauss=false)
 {
     using Traits=MeshFieldTraits<Pack,M>;
     typename Traits::vector_cell_type u(mesh,"periodic_u"),lap(mesh,"periodic_lap"),kg(mesh,"periodic_kg");

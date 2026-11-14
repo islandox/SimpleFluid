@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "PressureProjectionEquation.hh"
 #include "PressureProjectionOperator.hh"
 
@@ -34,7 +35,7 @@ namespace SimpleFluid
  * @throws std::invalid_argument if @p mesh is null.
  * @throws std::runtime_error if the mesh has no owned-cell map.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const mesh_type> mesh,
     LinearSolverOptions linear_options, BoundaryConditionMap pressure_boundary_conditions,
     FVM::CellGradientScheme gradient_scheme)
@@ -55,7 +56,7 @@ PressureProjectionEquation<Pack, MeshType>::PressureProjectionEquation(SP<const 
 }
 
 /** @brief Replace the pressure linear-solver policy. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(LinearSolverOptions options)
 {
     if (d_projection_method == PressureProjectionMethod::FullOperator && options.backend == LinearSolverBackend::Cg)
@@ -70,14 +71,14 @@ void PressureProjectionEquation<Pack, MeshType>::set_linear_solver_options(Linea
 }
 
 /** @brief Return the pressure linear-solver policy. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const LinearSolverOptions& PressureProjectionEquation<Pack, MeshType>::linear_solver_options() const noexcept
 {
     return d_linear_options;
 }
 
 /** @brief Validate the selected pressure algorithm and linear policy collectively. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
     PressureProjectionMethod method, const LinearSolverOptions& options) const
 {
@@ -112,7 +113,7 @@ void PressureProjectionEquation<Pack, MeshType>::validate_projection_policy(
 }
 
 /** @brief Select the corrected pressure-projection algorithm. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_projection_method(PressureProjectionMethod method)
 {
     validate_projection_policy(method, d_linear_options);
@@ -120,7 +121,8 @@ void PressureProjectionEquation<Pack, MeshType>::set_projection_method(PressureP
 }
 
 /** @brief Refresh geometry-dependent state after a fixed-topology motion. */
-template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pack, MeshType>::refresh_geometry()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void PressureProjectionEquation<Pack, MeshType>::refresh_geometry()
 {
     d_matrix_values_stale = true;
     d_non_orthogonal_geometry_stale = true;
@@ -135,7 +137,7 @@ template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pa
 }
 
 /** @brief Configure exact fluxes on selected physical-pressure boundaries. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::set_fixed_boundary_flux_provider(
     std::vector<std::string> boundary_names, fixed_boundary_flux_provider_type provider, std::uint64_t generation)
 {
@@ -179,7 +181,7 @@ void PressureProjectionEquation<Pack, MeshType>::set_fixed_boundary_flux_provide
 }
 
 /** @brief Clear exact boundary fluxes and restore physical correction types. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::clear_fixed_boundary_flux_provider()
 {
     if (d_fixed_boundary_flux_names.empty() && !d_fixed_boundary_flux_provider) return;
@@ -199,7 +201,7 @@ void PressureProjectionEquation<Pack, MeshType>::clear_fixed_boundary_flux_provi
 }
 
 /** @brief Relax only the compatibility check for exact fixed-flux faces. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::pressure_flux_boundary_cache(
     const velocity_boundary_cache_type& boundary_cache) const -> velocity_boundary_cache_type
 {
@@ -212,7 +214,7 @@ auto PressureProjectionEquation<Pack, MeshType>::pressure_flux_boundary_cache(
 }
 
 /** @brief Validate fixed-flux configuration collectively before evaluation. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::validate_fixed_boundary_flux_provider() const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -294,7 +296,7 @@ void PressureProjectionEquation<Pack, MeshType>::validate_fixed_boundary_flux_pr
 }
 
 /** @brief Overwrite selected owned boundary faces after flux reconstruction. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::apply_fixed_boundary_fluxes(face_flux_field_type& fluxes) const
 {
     if (d_fixed_boundary_flux_names.empty())
@@ -366,7 +368,7 @@ void PressureProjectionEquation<Pack, MeshType>::apply_fixed_boundary_fluxes(fac
  * @return The mesh's owned-cell map.
  * @throws std::runtime_error if the mesh has no owned-cell map.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::require_owned_cell_map(const SP<const mesh_type>& mesh)
     -> Teuchos::RCP<const map_type>
 {
@@ -391,13 +393,14 @@ auto PressureProjectionEquation<Pack, MeshType>::require_owned_cell_map(const SP
  *
  * @tparam Pack Tpetra type pack.
  */
-template<TpetraTypePack Pack, class MeshType> void PressureProjectionEquation<Pack, MeshType>::rebuild_matrix() const
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void PressureProjectionEquation<Pack, MeshType>::rebuild_matrix() const
 {
     update_matrix(false);
 }
 
 /** @brief Refresh all coefficients while retaining collectively compatible setup. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::update_matrix(bool allow_graph_reuse) const
 {
     const auto owned_map = require_owned_cell_map(d_mesh);
@@ -486,7 +489,7 @@ void PressureProjectionEquation<Pack, MeshType>::update_matrix(bool allow_graph_
  * @param[out] pressure Pressure field to initialise.
  * @throws std::invalid_argument if the pressure field mesh does not match.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PressureProjectionEquation<Pack, MeshType>::solve(field_type& pressure)
 {
     EquationValidation::require_mesh_match(*d_mesh, pressure, "PressureProjectionEquation");
@@ -506,7 +509,7 @@ void PressureProjectionEquation<Pack, MeshType>::solve(field_type& pressure)
  * @param[in,out] velocity Velocity field corrected by the pressure
  *        gradient on output.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, scalar_type time_step,
     scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
@@ -517,7 +520,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, s
 }
 
 /** @brief Project against an integrated per-cell volume target. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, scalar_type time_step,
     scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity, const continuity_target_type& continuity_target) -> ProjectionResult
@@ -538,7 +541,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, s
  * @param[in,out] velocity Velocity field corrected by the pressure update.
  * @return Projection statistics and the norm of the physical correction.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, field_type& pressure_correction,
     scalar_type time_step, scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity) -> ProjectionResult
@@ -549,7 +552,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, f
 }
 
 /** @brief Accumulated-pressure projection to an integrated volume target. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, field_type& pressure_correction,
     scalar_type time_step, scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity, const continuity_target_type& continuity_target) -> ProjectionResult
@@ -566,7 +569,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, f
  * calls. The preceding final Rhie--Chow reconstruction is therefore exactly
  * the next predictor flux, including its cached pressure gradient.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project_reusing_cached_predictor(field_type& pressure,
     field_type& pressure_correction, scalar_type time_step, scalar_type reference_density,
     const velocity_boundary_cache_type& velocity_boundary_cache, velocity_field_type& velocity) -> ProjectionResult
@@ -577,7 +580,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_reusing_cached_predicto
 }
 
 /** @brief Reuse a predictor for the same target generation and geometry. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project_reusing_cached_predictor(field_type& pressure,
     field_type& pressure_correction, scalar_type time_step, scalar_type reference_density,
     const velocity_boundary_cache_type& velocity_boundary_cache, velocity_field_type& velocity,
@@ -604,7 +607,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project_reusing_cached_predicto
  * @throws std::invalid_argument on mesh mismatch or non-positive time
  *         step.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, scalar_type time_step,
     scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity, const source_type& right_hand_source) -> ProjectionResult
@@ -643,7 +646,7 @@ auto PressureProjectionEquation<Pack, MeshType>::project(field_type& pressure, s
  *        immediately preceding accumulated-pressure projection.
  * @return Projection statistics.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto PressureProjectionEquation<Pack, MeshType>::project_impl(field_type& pressure_correction, scalar_type time_step,
     scalar_type reference_density, const velocity_boundary_cache_type& velocity_boundary_cache,
     velocity_field_type& velocity, const continuity_target_type& continuity_target, field_type* accumulated_pressure,

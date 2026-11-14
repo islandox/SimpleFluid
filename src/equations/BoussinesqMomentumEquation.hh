@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
 
@@ -24,7 +25,7 @@ namespace SimpleFluid
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 class SIMPLEFLUID_EQUATIONS_EXPORT BoussinesqMomentumEquation : public IncompressibleMomentumEquation<Pack, MeshType>
 {
 public:

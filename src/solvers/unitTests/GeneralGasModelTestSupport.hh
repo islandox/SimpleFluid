@@ -3,6 +3,7 @@
  * No enabled null-mechanism path, preferred species slot or implicit chemical yield.
  */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include "ReactingMixtureTestSupport.hh"
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactingGasModel.hh"
@@ -307,7 +308,7 @@ inline ReactingGasOptions options(const Parameters& p = {})
     using Field = ScalarCellFieldStored<Pack>;
     return options<Field>(p, nullptr);
 }
-template<class Grid> struct Fixture
+template<SimpleFluid::MeshType Grid> struct Fixture
 {
     using Model = ReactingGasModel<Pack, Grid>;
     using Field = typename Model::field_type;
@@ -445,7 +446,7 @@ struct FilmObservation
 {
     double radius = 0, coefficient = 0, transfer = 0, gas_before = 0, gas_after = 0, count_before = 0, count_after = 0;
 };
-template<class Grid>
+template<SimpleFluid::MeshType Grid>
 std::vector<FilmObservation> advance_film(
     Fixture<Grid>& f, double end, double dt, std::string_view bin = "large", R::SpeciesId species = one)
 {

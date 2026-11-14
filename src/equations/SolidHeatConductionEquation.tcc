@@ -3,12 +3,13 @@
  * @brief Template implementations for solid heat conduction.
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "SolidHeatConductionEquation.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SolidHeatConductionEquation<Pack, MeshType>::SolidHeatConductionEquation(
     SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "SolidHeatConductionEquation")),
@@ -18,7 +19,7 @@ SolidHeatConductionEquation<Pack, MeshType>::SolidHeatConductionEquation(
 {
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_conditions(
     const BoundaryConditionSet& boundary_conditions)
 {
@@ -26,26 +27,26 @@ void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_conditions(
         std::make_unique<TemperatureDiffusionEquation<Pack, mesh_type>>(d_mesh, boundary_conditions);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_heat_flux(const boundary_cache_type& heat_flux)
 {
     d_temperature_equation->set_boundary_heat_flux(heat_flux);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_heat_flux_snapshot(
     SP<const boundary_cache_type> heat_flux)
 {
     d_temperature_equation->set_boundary_heat_flux_snapshot(std::move(heat_flux));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::boundary_heat_flux() const noexcept -> SP<const boundary_cache_type>
 {
     return d_temperature_equation->boundary_heat_flux();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_temperature, scalar_type time_step,
     const material_type& material, field_type& temperature, FVM::NonOrthogonalTreatment treatment,
     const LinearSolverOptions& linear_options, const field_type* thermal_conductivity_override,
@@ -57,7 +58,7 @@ auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_
         thermal_conductivity_override, boundary_thermal_conductivity, coefficient_interpolation);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_temperature, scalar_type time_step,
     const material_type& material, field_type& temperature, const source_type& power_density,
     FVM::NonOrthogonalTreatment treatment, const LinearSolverOptions& linear_options,
@@ -70,7 +71,7 @@ auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void SolidHeatConductionEquation<Pack, MeshType>::prepare_advance(const field_type& baseline,
     scalar_type dt, const material_type& material, FVM::NonOrthogonalTreatment treatment,
     const field_type* conductivity, const boundary_cache_type* boundary_conductivity,
@@ -80,28 +81,28 @@ void SolidHeatConductionEquation<Pack, MeshType>::prepare_advance(const field_ty
         treatment, conductivity, boundary_conductivity, interpolation);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::advance_prepared(field_type& temperature,
     const source_type& source, const field_type* guess, const LinearSolverOptions& options) const -> LinearSolveStatistics
 {
     return d_temperature_equation->advance_prepared(temperature, source, guess, options);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::prepared_rhs(const source_type& source) const
     -> Teuchos::RCP<const typename Pack::vector_type>
 {
     return d_temperature_equation->prepared_rhs(source);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::prepared_operator() const
     -> Teuchos::RCP<const typename Pack::matrix_type>
 {
     return d_temperature_equation->prepared_operator();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
     -> Teuchos::RCP<const typename Pack::vector_type>
 {

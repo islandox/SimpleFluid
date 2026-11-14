@@ -4,13 +4,14 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/ScalarSourceDecayTransport.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::configure(const ScalarSourceDecayOptions& options)
 {
     validate_collective_configuration(options);
@@ -49,7 +50,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::configure(const ScalarSourceDec
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::initialize_inventory(const field_type& alpha_l)
 {
     validate_liquid_fraction_field(alpha_l);
@@ -74,7 +75,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::initialize_inventory(const fiel
     d_inventory_initialized = true;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::advance(
     scalar_type time_step,
     const field_type& alpha_l,
@@ -251,7 +252,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::advance(
         reaction_inventory_reference);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configuration(
     const ScalarSourceDecayOptions& options) const
 {
@@ -347,7 +348,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_selection(
     scalar_type time_step,
     const field_type* additional_source,
@@ -421,7 +422,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_sel
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::validate_liquid_fraction_field(const field_type& alpha_l) const
 {
     int local_invalid = &alpha_l.mesh() != d_mesh.get();
@@ -448,7 +449,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_liquid_fraction_field(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::reconstruct_concentrations(const field_type& alpha_l)
 {
     for (size_t group = 0; group < d_fields.size(); ++group)
@@ -471,7 +472,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::reconstruct_concentrations(cons
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::transport(
     scalar_type time_step,
     const field_type& alpha_l,
@@ -631,7 +632,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::transport(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::update_inventory_diagnostics(
     scalar_type time_step,
     const field_type& alpha_l,

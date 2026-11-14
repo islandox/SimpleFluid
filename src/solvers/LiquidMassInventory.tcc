@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/CollectiveValidation.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
@@ -14,7 +15,7 @@
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::initializeFromSpecies(
     const field_type& mass_density, const field_type& pure_density)
 {
@@ -109,7 +110,7 @@ void LiquidMassInventory<Pack, MeshType>::initializeFromSpecies(
     updateMassBalance();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::previewSpeciesMass(const field_type& mass_density,
     const field_type& pure_density, scalar_type global_mass_change, scalar_type global_boundary_outflow,
     const FVM::ALEControlVolumeState* ale) -> PhaseChangePreview
@@ -223,7 +224,7 @@ auto LiquidMassInventory<Pack, MeshType>::previewSpeciesMass(const field_type& m
     result.d_species_outflow_sum = outflow;
     return result;
 }
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::previewPhaseChange(
     scalar_type evaporated_mass, scalar_type condensed_mass) const -> PhaseChangePreview
 {
@@ -274,7 +275,7 @@ auto LiquidMassInventory<Pack, MeshType>::previewPhaseChange(
     return PhaseChangePreview(this, d_phase_change_generation, std::move(preview), false, 0);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type time_step,
     const face_flux_field_type& liquid_face_flux, const field_type* evaporation_mass_rate,
     const field_type* condensation_mass_rate, const LinearSolverOptions& linear_options,
@@ -619,7 +620,7 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const PhaseChangePreview& preview,
     const std::function<scalar_type(local_ordinal_type)>& density) -> PhaseChangePreview
 {
@@ -713,7 +714,7 @@ auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const Ph
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePreview& preview)
 {
     collective_detail::require_uniform_value(
@@ -761,7 +762,7 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
     d_phase_change_generation = next_generation;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::trialCellMassInventory(const PhaseChangePreview& preview) const -> const field_type&
 {
     collective_detail::require_uniform_value(
@@ -783,7 +784,7 @@ auto LiquidMassInventory<Pack, MeshType>::trialCellMassInventory(const PhaseChan
     return d_trial_cell_mass_inventory;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto LiquidMassInventory<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     StateSnapshot result;
@@ -812,7 +813,7 @@ auto LiquidMassInventory<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
     const int local_invalid = snapshot.d_owner != this ||
@@ -853,7 +854,7 @@ void LiquidMassInventory<Pack, MeshType>::restore(const StateSnapshot& snapshot)
     invalidateGeometry();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
 {
     if (d_options.mode == LiquidVolumeMode::CellMassInventory)
@@ -891,7 +892,7 @@ void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
     d_diagnostics.liquid_volume = d_diagnostics.total_mass * d_diagnostics.mass_weighted_specific_volume;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& diagnostics)
 {
     const std::array values{diagnostics.initial_mass, diagnostics.total_mass, diagnostics.cumulative_condensed_mass,
@@ -930,7 +931,7 @@ void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& di
 }
 
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::initialize_impl(scalar_type initial_liquid_volume, const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density)
 {
     const int local_initialized = d_initialized ? 1 : 0;
@@ -1071,7 +1072,7 @@ void LiquidMassInventory<Pack, MeshType>::initialize_impl(scalar_type initial_li
     updateMassBalance();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::update_pure_liquid_density_impl(const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density)
 {
     collective_detail::require_uniform_value(

@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"
@@ -97,7 +98,7 @@ NonOrthogonalTransportWeights<typename Pack::scalar_type> validate_non_orthogona
  * @return Prepared matrix and whether its existing graph is being reused.
  * @throws std::invalid_argument if @p cached_matrix is incompatible.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PreparedTransportMatrix<Pack> prepare_transport_matrix(
     const MeshType& mesh, Teuchos::RCP<typename Pack::matrix_type> cached_matrix, size_t entries_per_row,
     const std::vector<TransportMatrixRow<Pack>>* required_rows = nullptr);
@@ -165,7 +166,7 @@ template<TpetraTypePack Pack> struct VectorTransportSystem
  *
  * @tparam MeshType Mesh interface used by the transport fields.
  */
-template<class MeshType> class SIMPLEFLUID_FVM_EXPORT TransportGeometryCache
+template<SimpleFluid::MeshType MeshType> class SIMPLEFLUID_FVM_EXPORT TransportGeometryCache
 {
 public:
     using interior_stencils_type = std::vector<detail::LeastSquaresGradientStencil<MeshType>>;

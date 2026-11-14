@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
 #include "FVM/details/MatrixOperatorsImpl.hh"
 #include "fields/FaceField.hh"
@@ -163,7 +164,7 @@ pressure_poisson_matrix(
  * The explicit @p Pack parameter preserves the established call surface:
  * `diffusion_matrix<Pack>(mesh, diffusivity)`.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)
 Teuchos::RCP<typename Pack::matrix_type>
@@ -179,7 +180,7 @@ diffusion_matrix(
  * @note Synchronize @p face_fluxes before distributed assembly so overlap
  *       partition faces contain their owning rank's accepted flux.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Teuchos::RCP<typename Pack::matrix_type>
 upwind_convection_matrix(
     const MeshType& mesh,
@@ -206,7 +207,7 @@ upwind_convection_matrix(
 
 /** @brief Assemble pressure Poisson on a mapped static/runtime mesh. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)
@@ -221,7 +222,7 @@ pressure_poisson_matrix(
 }
 
 /** @brief Assemble all-Neumann pressure Poisson on a mapped mesh. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)
 Teuchos::RCP<typename Pack::matrix_type>

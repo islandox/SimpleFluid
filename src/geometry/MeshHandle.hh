@@ -20,6 +20,7 @@
 #include "geometry/mesh/DecomposedSemiStructuredTopology.hh"
 #include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/LocalGlobalIndexer.hh"
+#include "geometry/mesh/MeshBase.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/OrthoMeshPartitioner.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -852,13 +853,13 @@ private:
 
     SIMPLEFLUID_LOCAL void add_geometry_cell_data(VTUWriter& writer) const;
 
-    template<class MeshType> SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(const MeshType& mesh) const;
+    template<MeshClass MeshType> SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(const MeshType& mesh) const;
 
     SIMPLEFLUID_LOCAL void write_vtu(const std::string& filename, VTUWriter::TopologyHandle topology) const;
 
     SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle legacy_vtu_topology(const STKAdapter& mesh) const;
 
-    template<class MeshType>
+    template<MeshClass MeshType>
     SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle orthogonal_vtu_topology(const MeshType& mesh) const;
 
     SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle semi_structured_vtu_topology(const SemiStructured& mesh) const;
@@ -986,7 +987,7 @@ private:
             visit_indexed_face(id));
     }
 
-    template<class MeshType>
+    template<MeshClass MeshType>
     SIMPLEFLUID_LOCAL void initialize_orthogonal(
         SP<const MeshType> mesh, DistributionOptions options);
 
@@ -1005,7 +1006,7 @@ private:
 
     SIMPLEFLUID_LOCAL void initialize_stk(STKAdapterPtr adapter);
 
-    template<class MeshType>
+    template<MeshClass MeshType>
     SIMPLEFLUID_LOCAL void initialize_serial(const MeshType& mesh);
 
     SIMPLEFLUID_LOCAL void initialize_cells(

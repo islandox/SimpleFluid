@@ -1,6 +1,7 @@
 /** @file testVariableDensityMomentumEquation.cc
  * @brief Independent density-weighted momentum storage, force and rejection checks.
  */
+#include "geometry/MeshConcepts.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -28,7 +29,7 @@ SP<Handle> mesh()
     return std::make_shared<Handle>(geometry, distribution);
 }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void momentum_balance(SP<const MeshType> grid)
 {
     using Traits = MeshFieldTraits<Pack, MeshType>;

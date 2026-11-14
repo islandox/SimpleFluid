@@ -9,6 +9,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalConvergenceOptions.hh"
@@ -28,7 +29,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** Validate every rank before field synchronization, assembly, or a linear solve. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void validate_steady_diffusion_controls(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     bool solution_matches_mesh, NonOrthogonalTreatment treatment, int correctors,
     const LinearSolverOptions& linear_options, const NonOrthogonalConvergenceOptions& correction_options)
@@ -83,7 +84,7 @@ void validate_steady_diffusion_controls(const MeshType& mesh, typename Pack::sca
  * with lagged nonzero partition gradients additionally requires a global update
  * check. Every successful return checks a freshly rebuilt full equation.
  */
-template<TpetraTypePack Pack, class MeshType, class Field, class Assemble, class Synchronize>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Field, class Assemble, class Synchronize>
 bool solve_implicit_diffusion_corrections(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     Field& solution, Assemble assemble, Synchronize synchronize, const LinearSolverOptions& linear_options,
     const NonOrthogonalConvergenceOptions& correction_options)
@@ -156,7 +157,7 @@ bool solve_implicit_diffusion_corrections(const MeshType& mesh, typename Pack::s
 }
 
 /** Solve mapped steady non-orthogonal diffusion using FieldStored data. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
     ScalarCellFieldStored<Pack, MeshType>& solution, NonOrthogonalTreatment treatment, int nNonOrthogonalCorrectors,

@@ -3,6 +3,7 @@
  * @brief Accuracy, boundedness, and backend-parity tests for scalar schemes.
  */
 
+#include "geometry/MeshConcepts.hh"
 #include <gtest/gtest.h>
 
 #include "FVM/TransportSystemFactory.hh"
@@ -155,7 +156,8 @@ template<class Field> void set_cell_values(Field& field, const std::array<double
     field.sync_ghosts();
 }
 
-template<class MeshType, class FaceField> void set_positive_x_flux(const MeshType& mesh, FaceField& flux)
+template<SimpleFluid::MeshType MeshType, class FaceField>
+void set_positive_x_flux(const MeshType& mesh, FaceField& flux)
 {
     for (const auto face_lid : flux.owned_face_ids())
     {
@@ -218,7 +220,7 @@ TEST(ScalarTransportDiscretizationTest, WeightedPacksConserveIndependentStorageS
 {
     using namespace SimpleFluid;
     using namespace SimpleFluid::FVM;
-    auto check = []<class MeshType>(SP<MeshType> mesh)
+    auto check = []<SimpleFluid::MeshType MeshType>(SP<MeshType> mesh)
     {
         using Factory = TransportSystemFactory<Pack, std::remove_const_t<MeshType>>;
         using Field = typename Factory::WeightedScalarTerms::Field;
@@ -284,7 +286,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedPacksMatchAnalyticalRowsAndRebui
 {
     using namespace SimpleFluid;
     using namespace SimpleFluid::FVM;
-    auto check = []<class MeshType>(SP<MeshType> mesh)
+    auto check = []<SimpleFluid::MeshType MeshType>(SP<MeshType> mesh)
     {
         using Backend = std::remove_const_t<MeshType>;
         using Factory = TransportSystemFactory<Pack, Backend>;
@@ -346,7 +348,7 @@ TEST(ScalarTransportDiscretizationTest, TemperatureRhsRefreshRequiresOperatorAnd
 {
     using namespace SimpleFluid;
     using namespace SimpleFluid::FVM;
-    auto check = []<class MeshType>(SP<MeshType> mesh)
+    auto check = []<SimpleFluid::MeshType MeshType>(SP<MeshType> mesh)
     {
         using Backend = std::remove_const_t<MeshType>;
         using Factory = TransportSystemFactory<Pack, Backend>;

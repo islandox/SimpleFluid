@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "BoussinesqMomentumEquation.hh"
 
 #include <cmath>
@@ -25,7 +26,7 @@ namespace SimpleFluid
  * @return Selected viscosity field.
  * @throws std::invalid_argument if the override is mismatched or invalid.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::select_dynamic_viscosity(
     const material_type& material, const field_type* dynamic_viscosity_override) const -> const field_type&
 {
@@ -54,7 +55,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::select_dynamic_viscosity(
  * @param mesh Computational mesh.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 BoussinesqMomentumEquation<Pack, MeshType>::BoussinesqMomentumEquation(SP<const mesh_type> mesh)
     : base_type(std::move(mesh))
 {
@@ -74,7 +75,7 @@ BoussinesqMomentumEquation<Pack, MeshType>::BoussinesqMomentumEquation(SP<const 
  * @throws std::invalid_argument if input fields or options are inconsistent.
  * @throws std::runtime_error if a velocity solve fails.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -84,7 +85,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity
         linear_options, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -108,7 +109,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if input fields or options are inconsistent.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -118,7 +119,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_
         old_velocity, face_fluxes, temperature, velocity_boundary_cache, options, correction_field, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -142,7 +143,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if input fields or options are inconsistent.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -164,7 +165,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_
         old_velocity, face_fluxes, velocity_boundary_cache, options, combined_source, correction_field, ale);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -189,7 +190,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_system(const velocity_
  * @throws std::invalid_argument if input fields or options are inconsistent.
  * @throws std::runtime_error if a velocity solve fails.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -200,7 +201,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity
         right_hand_source, linear_options, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -240,7 +241,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity(const velocity
  * @return Assembled physical momentum system.
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_physical_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -254,7 +255,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_physical_system(const 
         dynamic_viscosity_override, boundary_dynamic_viscosity, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_physical_system(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -312,7 +313,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::assemble_physical_system(const 
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a velocity solve fails.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity_physical(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,
@@ -326,7 +327,7 @@ auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity_physical(const
         dynamic_viscosity_override, boundary_dynamic_viscosity, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto BoussinesqMomentumEquation<Pack, MeshType>::advance_velocity_physical(const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes, const field_type& temperature,
     const velocity_boundary_cache_type& velocity_boundary_cache, const TimeStepperOptions& options,

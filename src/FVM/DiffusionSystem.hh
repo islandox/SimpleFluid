@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
 #include "FVM/details/DiffusionSystemImpl.hh"
 #include "FVM/details/OperatorDetails.hh"
@@ -380,7 +381,7 @@ vector_diffusion_system(const Mesh<Pack>& mesh,
  *        semi-structured, or runtime mesh interface.
  */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider,
          class SourceProvider>
     requires (!std::same_as<
@@ -401,7 +402,7 @@ diffusion_system(
 
 /** @brief Assemble mapped scalar diffusion with a zero source. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)
@@ -426,7 +427,7 @@ diffusion_system(
 
 /** @brief Assemble vector diffusion on a mapped mesh interface. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider,
          class SourceProvider>
     requires (!std::same_as<
@@ -447,7 +448,7 @@ vector_diffusion_system(
 
 /** @brief Assemble mapped vector diffusion with a zero source. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider>
     requires (!std::same_as<
         std::remove_cv_t<MeshType>, Mesh<Pack>>)

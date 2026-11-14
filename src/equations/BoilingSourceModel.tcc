@@ -4,12 +4,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoilingSourceModel.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::configure(const BoilingSourceOptions& options)
 {
     validate_boiling_source_options(options);
@@ -37,7 +38,7 @@ void BoilingSourceModel<Pack, MeshType>::configure(const BoilingSourceOptions& o
     register_output_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::update(
     scalar_type time_step,
     const field_type& temperature,
@@ -106,7 +107,7 @@ void BoilingSourceModel<Pack, MeshType>::update(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::complete_void_fraction_update(
     scalar_type time_step, const void_model_type& void_model, bool track_phase_inventory)
 {
@@ -273,7 +274,7 @@ void BoilingSourceModel<Pack, MeshType>::complete_void_fraction_update(
     d_completion_pending = false;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::validate_void_inputs(const void_model_type& void_model, const field_type* reserved_alpha_source) const
 {
     const auto& alpha_g = void_model.alpha_g();
@@ -306,7 +307,7 @@ void BoilingSourceModel<Pack, MeshType>::validate_void_inputs(const void_model_t
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::limit_to_available_void(
     scalar_type time_step, const void_model_type& void_model, const field_type* reserved_alpha_source)
 {
@@ -414,7 +415,7 @@ void BoilingSourceModel<Pack, MeshType>::limit_to_available_void(
     d_completion_pending = true;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::add_bulk_boiling(scalar_type time_step, const field_type& temperature, const material_type& material)
 {
     const auto threshold = d_options.saturation_temperature + d_options.boiling_activation_delta_t;
@@ -436,7 +437,7 @@ void BoilingSourceModel<Pack, MeshType>::add_bulk_boiling(scalar_type time_step,
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void BoilingSourceModel<Pack, MeshType>::add_wall_boiling()
 {
     if (d_options.wall_boiling_patches.empty()

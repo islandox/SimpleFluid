@@ -22,7 +22,7 @@ inline FieldStored<Descriptor, Pack, MeshT>::FieldStored(
 {
 }
 
-template<class Pack, MeshType MeshT, class Location>
+template<TpetraTypePack Pack, MeshType MeshT, class Location>
 template<class MakeIds>
 inline auto detail::StoredFieldLayout<Pack, MeshT, Location>::acquire(const MeshT& mesh,
     const Teuchos::RCP<const map_type>& owned, const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids)

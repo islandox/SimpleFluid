@@ -2,6 +2,7 @@
  * @file testRegionTransportAssembly.cc
  * @brief  Region CFD transport/reference parity.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
 #include <type_traits>
@@ -44,7 +45,7 @@ struct Systems
     VectorTransportSystem<Pack> momentum;
 };
 
-template<class MeshType> struct AssemblyState
+template<SimpleFluid::MeshType MeshType> struct AssemblyState
 {
     SP<const MeshType> mesh;
     ScalarCellFieldStored<Pack, MeshType> old, storage, diffusion;

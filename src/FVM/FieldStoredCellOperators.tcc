@@ -1,27 +1,28 @@
 /** @brief Compiled mapped cell operators and custom-provider opt-in. */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/details/FieldStoredCellOperators.tcc"
 
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field, VectorCellFieldStored<Pack, MeshType>& gradients)
 {
     detail::stored_scalar_cell_gradient(field, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients, const CellGradientCache<Pack, MeshType>& cache)
 {
     detail::stored_cached_scalar_cell_gradient(field, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -36,7 +37,7 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, Mesh
     detail::stored_scalar_cell_gradient(field, boundary_condition, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients,
     const CellGradientCache<Pack, MeshType>& cache)
@@ -52,21 +53,21 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, Mesh
     detail::stored_cached_scalar_cell_gradient(field, boundary_condition, boundary_value, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const VectorCellFieldStored<Pack, MeshType>& field, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
     detail::stored_vector_cell_gradient(field, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     TensorCellFieldStored<Pack, MeshType>& gradients, const CellGradientCache<Pack, MeshType>& cache)
 {
     detail::stored_cached_vector_cell_gradient(field, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -81,7 +82,7 @@ SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(const ScalarCellFieldStor
     detail::stored_gauss_linear_cell_gradient(field, boundary_condition, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field, VectorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -90,7 +91,7 @@ SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(
     detail::stored_gauss_linear_cell_gradient(field, boundary_condition, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients,
     const CellGradientCache<Pack, MeshType>& cache, CellGradientScheme scheme)
@@ -103,7 +104,7 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(const ScalarCellFieldStored<Pack, Mesh
     cell_gradient(field, boundary_conditions, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT std::vector<typename Pack::scalar_type> cell_divergence_from_fluxes(
     const MeshType& mesh, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes)
 {

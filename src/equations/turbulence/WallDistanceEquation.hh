@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "dataclass/typedefs.hh"
@@ -67,7 +68,7 @@ SIMPLEFLUID_EQUATIONS_EXPORT void validate_wall_distance_equation_options(
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT PoissonWallDistanceEquation
 {
 public:

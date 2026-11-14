@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/TransportSystem.hh"
@@ -84,7 +85,7 @@ template<class Scalar> struct ReactingGasStepStatistics
  * @tparam Pack Tpetra type pack used for mesh, field, and communicator types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT ReactingGasModel
 {
 public:

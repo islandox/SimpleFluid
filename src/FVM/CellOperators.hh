@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/CellGradientScheme.hh"
@@ -57,7 +58,7 @@ namespace SimpleFluid::FVM
  * @tparam Pack Tpetra type pack used by the mesh and fields.
  * @tparam MeshType Runtime or statically dispatched mesh interface.
  */
-template<TpetraTypePack Pack, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_FVM_EXPORT CellGradientCache
 {
 public:
@@ -1571,7 +1572,8 @@ void gauss_linear_cell_gradient(const VectorCellField<Pack>& field,
 }
 
 /** @brief Reconstruct a scalar Gauss gradient with retained geometry and live boundaries. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients, const GaussLinearGradientCache<Pack, MeshType>& cache)
@@ -1581,7 +1583,7 @@ void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fie
 }
 
 /** @brief Reconstruct a cached Gauss gradient using a boundary map. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions, VectorCellFieldStored<Pack, MeshType>& gradients,
     const GaussLinearGradientCache<Pack, MeshType>& cache)
@@ -1600,7 +1602,7 @@ void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fie
 }
 
 /** @brief Reconstruct a cached Gauss gradient with zero-normal walls. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients, const GaussLinearGradientCache<Pack, MeshType>& cache)
 {
@@ -1609,7 +1611,7 @@ void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fie
 }
 
 /** @brief Reconstruct a vector Gauss gradient with retained geometry and live boundaries. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients,
     const GaussLinearGradientCache<Pack, MeshType>& cache)
@@ -1701,27 +1703,27 @@ cell_divergence_from_fluxes(
  * This overload covers `MeshHandle` fields backed by orthogonal or
  * semi-structured meshes as well as statically typed partitioned meshes.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Reconstruct a stored scalar gradient from cached mesh geometry. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients,
     const CellGradientCache<Pack, MeshType>& cache);
 
 /** @brief Reconstruct a boundary-aware stored scalar gradient. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions,
     VectorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Reconstruct a cached boundary-aware stored scalar gradient. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions,
@@ -1730,7 +1732,7 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(
 
 /** @brief Reconstruct a stored scalar gradient from dynamic boundary data. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider,
          class BoundaryValueProvider>
     requires requires(BoundaryConditionProvider condition,
@@ -1751,7 +1753,7 @@ void cell_gradient(
 
 /** @brief Reconstruct a cached stored scalar gradient from boundary data. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider,
          class BoundaryValueProvider>
     requires requires(BoundaryConditionProvider condition,
@@ -1772,13 +1774,13 @@ void cell_gradient(
     const CellGradientCache<Pack, MeshType>& cache);
 
 /** @brief Reconstruct component gradients into a stored tensor field. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const VectorCellFieldStored<Pack, MeshType>& field,
     TensorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Reconstruct cached component gradients into tensor storage. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const VectorCellFieldStored<Pack, MeshType>& field,
     TensorCellFieldStored<Pack, MeshType>& gradients,
@@ -1786,7 +1788,7 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(
 
 /** @brief Reconstruct boundary-aware vector gradients into tensor storage. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryValueProvider>
     requires requires(BoundaryValueProvider provider,
                       int batch_id,
@@ -1803,7 +1805,7 @@ void cell_gradient(
 
 /** @brief Reconstruct cached boundary-aware vector gradients. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryValueProvider>
     requires requires(BoundaryValueProvider provider,
                       int batch_id,
@@ -1821,7 +1823,7 @@ void cell_gradient(
 
 /** @brief Compute a Gauss-linear stored scalar gradient. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider,
          class BoundaryValueProvider>
 void gauss_linear_cell_gradient(
@@ -1831,21 +1833,21 @@ void gauss_linear_cell_gradient(
     VectorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Compute a Gauss-linear stored scalar gradient from a boundary map. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions,
     VectorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Compute a zero-normal-boundary Gauss-linear scalar gradient. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void gauss_linear_cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Compute a Gauss-linear stored vector gradient. */
 template<TpetraTypePack Pack,
-         class MeshType,
+         SimpleFluid::MeshType MeshType,
          class BoundaryValueProvider>
 void gauss_linear_cell_gradient(
     const VectorCellFieldStored<Pack, MeshType>& field,
@@ -1853,7 +1855,7 @@ void gauss_linear_cell_gradient(
     TensorCellFieldStored<Pack, MeshType>& gradients);
 
 /** @brief Select the stored scalar gradient reconstruction scheme. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field,
     const BoundaryConditionMap& boundary_conditions,
@@ -1862,7 +1864,7 @@ SIMPLEFLUID_FVM_EXPORT void cell_gradient(
     CellGradientScheme scheme);
 
 /** @brief Compute one stored face field's net flux around a cell. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto cell_flux_balance(
     const MeshType& mesh,
     const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
@@ -1882,7 +1884,7 @@ auto cell_flux_balance(
  * @brief Compute a stored balance from a cached overlap or owned face view.
  * An owned-only view uses the field's published overlap values for remote faces.
  */
-template<TpetraTypePack Pack, class MeshType, class View>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class View>
 auto cell_flux_balance(
     const MeshType& mesh,
     const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
@@ -1910,7 +1912,7 @@ auto face_flux_balance_read_view(const FaceField& field)
  * Geometry motion leaves these topology-only slots valid; topology replacement
  * requires a new cache. Views are scoped by callers and never retained here.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 class CellFluxBalanceCache
 {
 public:
@@ -1963,7 +1965,7 @@ private:
 };
 
 /** @brief Compute volume-normalized divergence from stored face fluxes. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT std::vector<typename Pack::scalar_type>
 cell_divergence_from_fluxes(
     const MeshType& mesh,

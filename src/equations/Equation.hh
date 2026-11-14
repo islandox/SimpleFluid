@@ -11,11 +11,13 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/EquationOperators.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "equations/AssembledEquation.hh"
 #include "equations/BoundaryConditions.hh"
 #include "fields/FieldStored.hh"
+#include "fields/FieldConcepts.hh"
 
 #include <Teuchos_Array.hpp>
 
@@ -40,7 +42,7 @@ namespace SimpleFluid
  * @tparam StoredField Scalar or vector cell field storage type.
  * @tparam Pack Tpetra type pack used by the field and linear system.
  */
-template<class StoredField, TpetraTypePack Pack = DefaultTpetraTypes>
+template<SimpleFluid::FieldType StoredField, TpetraTypePack Pack = DefaultTpetraTypes>
 class Equation
 {
 public:
@@ -231,7 +233,7 @@ private:
     }
 
     /** @brief Accumulate one matrix row from a sequence of operator terms. */
-    template<class MeshType>
+    template<SimpleFluid::MeshType MeshType>
     void assemble_cell_terms(
         const MeshType& mesh,
         local_ordinal_type cell_lid,

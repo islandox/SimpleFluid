@@ -336,7 +336,7 @@ MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
  * requested partitioning cannot be represented by the mesh.
  */
 template<TpetraTypePack Pack>
-template<class MeshType>
+template<MeshClass MeshType>
 void MeshHandle<Pack>::initialize_orthogonal(SP<const MeshType> mesh, DistributionOptions options)
 {
     const auto comm = Tpetra::getDefaultComm();
@@ -1022,7 +1022,7 @@ void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
  * @param mesh Mesh whose complete geometry is locally available.
  */
 template<TpetraTypePack Pack>
-template<class MeshType>
+template<MeshClass MeshType>
 void MeshHandle<Pack>::initialize_serial(const MeshType& mesh)
 {
     checked_local(mesh.num_cells());
@@ -1422,7 +1422,7 @@ void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
  * @return Point coordinates in mesh-local node order.
  */
 template<TpetraTypePack Pack>
-template<class MeshType>
+template<MeshClass MeshType>
 VTUWriter::VectorData MeshHandle<Pack>::collect_vtu_points(
     const MeshType& mesh) const
 {
@@ -1511,7 +1511,7 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::legacy_vtu_topology(
  * @param filename Requested output filename.
  */
 template<TpetraTypePack Pack>
-template<class MeshType>
+template<MeshClass MeshType>
 VTUWriter::TopologyHandle MeshHandle<Pack>::orthogonal_vtu_topology(
     const MeshType& mesh) const
 {

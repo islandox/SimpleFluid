@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include <gtest/gtest.h>
 
 #include "equations/BoussinesqMomentumEquation.hh"
@@ -65,14 +66,14 @@ struct TransportEquationTestAccess
 template<TpetraTypePack Pack>
 struct PressureProjectionEquationTestAccess
 {
-    template<class MeshType>
+    template<SimpleFluid::MeshType MeshType>
     static Teuchos::RCP<const typename Pack::matrix_type> pressure_matrix(
         const PressureProjectionEquation<Pack, MeshType>& equation)
     {
         return equation.d_cached_pressure_matrix;
     }
 
-    template<class MeshType>
+    template<SimpleFluid::MeshType MeshType>
     static std::size_t preconditioner_setup_count(
         const PressureProjectionEquation<Pack, MeshType>& equation) noexcept
     {
@@ -951,7 +952,7 @@ TEST(PhysicalEquationsTest, PressureProjectionUsesMueLuByDefault)
 namespace
 {
 
-template<class TestMeshType>
+template<SimpleFluid::MeshType TestMeshType>
 void expect_cg_pressure_projection_matches_gmres(SimpleFluid::SP<const TestMeshType> mesh)
 {
     using Equation = SimpleFluid::PressureProjectionEquation<Pack, TestMeshType>;

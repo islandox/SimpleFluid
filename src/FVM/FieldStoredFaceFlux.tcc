@@ -1,6 +1,7 @@
 /** @brief Compiled mapped face operators, workspace setup and custom-provider opt-in. */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/FaceFlux.hh"
 #include "FVM/details/FieldStoredFaceFlux.tcc"
 #include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
@@ -9,7 +10,7 @@
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::SharedGeometry::SharedGeometry(SP<const mesh_type> mesh,
     std::shared_ptr<const topology_type> topology, std::shared_ptr<const traverse_plan_type> gradient_traverse)
     : d_mesh(require_mesh(std::move(mesh))), d_topology(std::move(topology)),
@@ -38,14 +39,14 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::SharedGeometry::Sh
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressureWeightedFaceFluxWorkspace(
     SP<const mesh_type> mesh)
     : FieldStoredPressureWeightedFaceFluxWorkspace(mesh, std::make_shared<SharedGeometry>(mesh))
 {
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressureWeightedFaceFluxWorkspace(
     SP<const mesh_type> mesh, shared_geometry_type geometry)
     : d_mesh(require_mesh(std::move(mesh))), d_geometry(require_geometry(d_mesh, std::move(geometry))),
@@ -53,7 +54,7 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressur
 {
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const std::vector<typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry_type>&
 FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry() const
 {
@@ -67,7 +68,7 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry() co
     return d_geometry->d_legacy_geometry;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 const typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FaceBatches&
 FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_batches() const
 {
@@ -102,7 +103,7 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_batches() con
     return d_geometry->d_legacy_batches;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geometry()
 {
     require_ready_geometry(*d_geometry);
@@ -116,7 +117,7 @@ void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geome
     d_geometry = std::move(next);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geometry(shared_geometry_type geometry)
 {
     auto next = require_geometry(d_mesh, std::move(geometry));
@@ -125,7 +126,7 @@ void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geome
     d_geometry = std::move(next);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
     requires(!std::same_as<std::remove_cv_t<MeshType>, Mesh<Pack>>)
 SIMPLEFLUID_FVM_EXPORT FieldStoredVelocityBoundaryCache<Pack, MeshType> cache_velocity_boundary_conditions(
     SP<const MeshType> mesh, const BoundaryConditionSet& boundary_conditions)
@@ -135,7 +136,7 @@ SIMPLEFLUID_FVM_EXPORT FieldStoredVelocityBoundaryCache<Pack, MeshType> cache_ve
         std::move(mesh), boundary_conditions);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_velocities(
     const VectorCellFieldStored<Pack, MeshType>& velocity, VectorFaceFieldStored<Pack, MeshType>& face_velocity)
 {
@@ -143,7 +144,7 @@ SIMPLEFLUID_FVM_EXPORT void face_velocities(
     detail::assemble_stored_face_velocities<Pack, MeshType, cache_type>(velocity, nullptr, face_velocity);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_velocities(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
     VectorFaceFieldStored<Pack, MeshType>& face_velocity)
@@ -151,14 +152,14 @@ SIMPLEFLUID_FVM_EXPORT void face_velocities(const VectorCellFieldStored<Pack, Me
     detail::assemble_stored_face_velocities(velocity, &boundary_cache, face_velocity);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void normal_face_fluxes(
     const VectorFaceFieldStored<Pack, MeshType>& face_velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
 {
     detail::stored_normal_face_fluxes(face_velocity, fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_fluxes(
     const VectorCellFieldStored<Pack, MeshType>& velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
 {
@@ -166,7 +167,7 @@ SIMPLEFLUID_FVM_EXPORT void face_fluxes(
     detail::assemble_stored_normal_face_fluxes<Pack, MeshType, cache_type>(velocity, nullptr, fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
     ScalarFaceFieldStored<Pack, MeshType>& fluxes)
@@ -174,14 +175,14 @@ SIMPLEFLUID_FVM_EXPORT void face_fluxes(const VectorCellFieldStored<Pack, MeshTy
     detail::assemble_stored_normal_face_fluxes(velocity, &boundary_cache, fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void mesh_relative_face_fluxes(const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
     const ALEControlVolumeState& ale, ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes)
 {
     detail::stored_mesh_relative_face_fluxes(absolute_fluxes, ale, relative_fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
@@ -192,7 +193,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
         workspace, static_cast<VectorCellFieldStored<Pack, MeshType>*>(nullptr), fluxes, gradient_scheme);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
@@ -202,7 +203,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
     pressure_weighted_face_fluxes(velocity, pressure, pressure_coefficient, boundary_cache, workspace, fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
@@ -215,7 +216,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
         gradient_scheme);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_flux_components(
     const VectorCellFieldStored<Pack, MeshType>& velocity, const ScalarCellFieldStored<Pack, MeshType>& pressure,
     typename Pack::scalar_type pressure_coefficient,
@@ -230,7 +231,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_flux_components(
         gradient_scheme, &velocity_component, &pressure_component);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, VectorCellFieldStored<Pack, MeshType>& pressure_gradient,
     typename Pack::scalar_type pressure_coefficient,
@@ -243,7 +244,7 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
         &pressure_boundary_conditions, workspace, &pressure_gradient, fluxes);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,

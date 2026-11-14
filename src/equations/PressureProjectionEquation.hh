@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/Operators.hh"
 #include "SimpleFluidExport.hh"
@@ -77,7 +78,7 @@ inline LinearSolverOptions pressure_projection_linear_solver_options()
  *
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT PressureProjectionEquation
 {
 public:

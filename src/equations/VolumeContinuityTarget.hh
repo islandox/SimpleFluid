@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -46,7 +47,8 @@ template<class Scalar> struct VolumeContinuityResiduals
  * state for predictor-cache validation; callers must change it whenever any
  * target value changes.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class VolumeContinuityTarget
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+class VolumeContinuityTarget
 {
 public:
     using scalar_type = typename Pack::scalar_type;

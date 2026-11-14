@@ -1,10 +1,13 @@
 /** @brief Caller-defined mapped gradient callbacks. */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
     requires requires(
         BoundaryConditionProvider condition, BoundaryValueProvider value, int batch_id, size_t in_batch_id) {
         { condition(batch_id, in_batch_id) } -> std::convertible_to<BoundaryCondition>;
@@ -16,7 +19,8 @@ void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field, BoundaryC
     detail::stored_scalar_cell_gradient(field, boundary_condition, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
     requires requires(
         BoundaryConditionProvider condition, BoundaryValueProvider value, int batch_id, size_t in_batch_id) {
         { condition(batch_id, in_batch_id) } -> std::convertible_to<BoundaryCondition>;
@@ -29,7 +33,7 @@ void cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field, BoundaryC
     detail::stored_cached_scalar_cell_gradient(field, boundary_condition, boundary_value, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
     requires requires(BoundaryValueProvider provider, int batch_id, size_t in_batch_id) {
         {
             provider(batch_id, in_batch_id)
@@ -41,7 +45,7 @@ void cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field, BoundaryV
     detail::stored_vector_cell_gradient(field, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
     requires requires(BoundaryValueProvider provider, int batch_id, size_t in_batch_id) {
         {
             provider(batch_id, in_batch_id)
@@ -53,7 +57,8 @@ void cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field, BoundaryV
     detail::stored_cached_vector_cell_gradient(field, boundary_value, gradients, cache);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients)
@@ -61,7 +66,7 @@ void gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fie
     detail::stored_gauss_linear_cell_gradient(field, boundary_condition, boundary_value, gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients)
 {

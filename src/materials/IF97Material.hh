@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoussinesqModel.hh"
 #include "materials/IF97Water.hh"
 
@@ -37,7 +38,7 @@ inline BoussinesqModelOptions if97_liquid_model_options(double temperature, doub
  * are evaluated before publishing any values on this rank.
  * The current planarALE solver rejects user callbacks, including this one.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
 auto make_if97_liquid_material_updater(double absolute_pressure) ->
     typename MaterialPropertyFields<Pack, MeshType>::updater_type
 {

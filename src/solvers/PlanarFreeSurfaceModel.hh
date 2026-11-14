@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
 #include "SimpleFluidExport.hh"
 #include "dataclass/Database.hh"
@@ -646,7 +647,8 @@ template<class Scalar> struct LiquidMassInventoryDiagnostics
  * accepted-old and trial-new volumes are never applied twice. Mixture density
  * and void fraction are intentionally absent from both paths.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class SIMPLEFLUID_SOLVERS_EXPORT LiquidMassInventory
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+class SIMPLEFLUID_SOLVERS_EXPORT LiquidMassInventory
 {
 public:
     using scalar_type = typename Pack::scalar_type;

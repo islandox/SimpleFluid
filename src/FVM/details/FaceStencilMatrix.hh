@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "dataclass/TpetraTypes.hh"
 #include <Teuchos_Array.hpp>
@@ -25,7 +26,7 @@ namespace SimpleFluid::FVM::detail
  * collective callers to propagate failures before constructing a matrix.
  * @return Per-row capacity bound in owned-cell order.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Teuchos::Array<size_t> face_stencil_capacities(const MeshType& mesh)
 {
     Teuchos::Array<size_t> capacities(mesh.num_owned_cells());
@@ -54,7 +55,7 @@ Teuchos::Array<size_t> face_stencil_capacities(const MeshType& mesh)
 }
 
 /** @brief Allocate a fill-active matrix with topology-sized row capacity. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Teuchos::RCP<typename Pack::matrix_type> make_face_stencil_matrix(const MeshType& mesh)
 {
     const auto execution = acquire_mesh_execution(mesh);

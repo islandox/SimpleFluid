@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/PrescribedFluxResponse.hh"
 #include "FVM/TransportSystem.hh"
 
@@ -17,7 +18,7 @@
 
 namespace SimpleFluid::FVM::detail
 {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PrescribedFluxResponsePlan<Pack, MeshType>::PrescribedFluxResponsePlan(SP<const MeshType> mesh, const Cache& support,
     const TransportGeometryCache<MeshType>& geometry, TransportCoefficientView<Pack> conductivity,
     const MeshBoundaryCache<Pack, MeshType>* boundary_conductivity,
@@ -178,7 +179,7 @@ PrescribedFluxResponsePlan<Pack, MeshType>::PrescribedFluxResponsePlan(SP<const 
 }
 
 /** Normalize increments during the caller's collective local validation. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void PrescribedFluxResponsePlan<Pack, MeshType>::validate_increment(const Cache& increment) const
 {
     for (size_t i = 0; i < d_inputs.size(); ++i)
@@ -195,7 +196,7 @@ void PrescribedFluxResponsePlan<Pack, MeshType>::validate_increment(const Cache&
 }
 
 /** Apply validated increments without cell-face or matrix assembly. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 Teuchos::RCP<const typename Pack::vector_type> PrescribedFluxResponsePlan<Pack, MeshType>::response() const
 {
     auto result = Teuchos::rcp(new typename Pack::vector_type(d_mesh->owned_cell_map(), true));

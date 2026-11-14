@@ -2,9 +2,12 @@
  * @brief Compiled accepted event accounting; never advances chemistry or transport.
  */
 #pragma once
+
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 std::size_t ReactingGasModel<Pack, MeshType>::species_compartment_index(
     Reacting::SpeciesId species, Reacting::SpeciesPhase phase, std::string_view population) const
 {
@@ -20,7 +23,7 @@ std::size_t ReactingGasModel<Pack, MeshType>::species_compartment_index(
     return (4 + static_cast<std::size_t>(found - d_options.population_ids.begin())) * ns + s;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::publish_species_history(std::span<const Reacting::CellSpeciesState> states,
     species_step_sums step, bool initialize, std::span<const Reacting::ReactionLocalReceipt> chemical_receipts)
 {

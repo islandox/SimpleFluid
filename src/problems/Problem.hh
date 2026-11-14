@@ -14,6 +14,7 @@
 #include "equations/BoundaryConditions.hh"
 #include "equations/TimeStepperOptions.hh"
 #include "fields/FieldStored.hh"
+#include "fields/FieldConcepts.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
 
@@ -183,7 +184,7 @@ public:
      * @brief Retrieve a field and verify that it belongs to this mesh.
      * @throws std::invalid_argument If the field belongs to another mesh.
      */
-    template<class StoredField>
+    template<FieldType StoredField>
     StoredField& field(const std::string& name)
     {
         auto& result = object<StoredField>(name);
@@ -251,7 +252,7 @@ private:
         return mesh;
     }
 
-    template<class StoredField>
+    template<FieldType StoredField>
     StoredField& add_field_impl(
         const std::string& name,
         SP<StoredField> field)

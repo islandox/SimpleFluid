@@ -1,13 +1,14 @@
 /** @brief Compiled mapped nonorthogonal diffusion and custom-provider opt-in. */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/details/FieldStoredNonOrthogonalDiffusion.tcc"
 
 namespace SimpleFluid::FVM
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(const MeshType& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
@@ -17,7 +18,7 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(con
         mesh, diffusivity, std::move(boundary_condition), std::move(right_hand_source), treatment, correction_field);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const MeshType& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type implicit_weight,

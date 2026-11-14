@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/CellGradientScheme.hh"
@@ -36,7 +37,7 @@ template<TpetraTypePack Pack> struct StoredPressureFaceGeometry
 };
 
 /** @brief Rebuild numeric geometry without retaining field or boundary values. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL auto stored_pressure_face_geometry(const MeshType& mesh)
     -> std::vector<StoredPressureFaceGeometry<Pack>>;
 
@@ -56,7 +57,7 @@ SIMPLEFLUID_LOCAL void validate_pressure_velocity_boundary_compatibility(
  * @tparam VelocityBoundaryCacheType Stored-field velocity boundary cache.
  * @tparam Workspace Stored-field pressure-flux workspace.
  */
-template<TpetraTypePack Pack, class MeshType, class VelocityBoundaryCacheType, class Workspace>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class VelocityBoundaryCacheType, class Workspace>
 SIMPLEFLUID_LOCAL void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
     const VelocityBoundaryCacheType& boundary_cache, const BoundaryConditionMap* pressure_boundary_conditions,

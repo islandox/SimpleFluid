@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "IncompressibleMomentumEquation.hh"
 
@@ -25,7 +26,7 @@ namespace SimpleFluid
  * @param mesh Computational mesh.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
     SP<const mesh_type> mesh)
     : d_mesh(EquationValidation::require_non_null_mesh(
@@ -37,14 +38,14 @@ IncompressibleMomentumEquation<Pack, MeshType>::IncompressibleMomentumEquation(
 }
 
 /** Refresh geometry-dependent transport data after fixed-topology motion. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry()
 {
     refresh_geometry({});
 }
 
 /** Refresh transport data using an optional shared geometry snapshot. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
@@ -66,7 +67,7 @@ void IncompressibleMomentumEquation<Pack, MeshType>::refresh_geometry(
  * @param correction_field Optional lagged correction field.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -124,7 +125,7 @@ void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -137,7 +138,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
         correction_field, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -168,7 +169,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
  * @return Assembled vector transport system.
  * @throws std::invalid_argument if an input violates the transport contract.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -182,7 +183,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
         right_hand_source, correction_field, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -303,7 +304,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
  * @throws std::invalid_argument if an input violates the transport contract.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -317,7 +318,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
         velocity, linear_options, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -351,7 +352,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
  * @throws std::invalid_argument if an input violates the transport contract.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -366,7 +367,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
         velocity, right_hand_source, linear_options, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -486,7 +487,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
  * @return Assembled physical momentum system.
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -505,7 +506,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
         correction_field, boundary_dynamic_viscosity, nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -526,7 +527,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
         FVM::AssemblyMode::Transient);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -695,7 +696,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a velocity solve fails or is non-finite.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,
@@ -716,7 +717,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
         nullptr);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
     const velocity_field_type& old_velocity,
     const face_flux_field_type& face_fluxes,

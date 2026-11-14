@@ -3,12 +3,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/FieldStoredCellOperators.hh"
 
 namespace SimpleFluid::FVM::detail
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void stored_scalar_cell_gradient(
     const ScalarCellFieldStored<Pack, MeshType>& field, VectorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -28,7 +29,7 @@ void stored_scalar_cell_gradient(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class Cache>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Cache>
 void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     VectorCellFieldStored<Pack, MeshType>& gradients, const Cache& cache)
 {
@@ -55,7 +56,7 @@ void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshTy
         });
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void stored_vector_cell_gradient(
     const VectorCellFieldStored<Pack, MeshType>& field, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -88,7 +89,7 @@ void stored_vector_cell_gradient(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class Cache>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Cache>
 void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     TensorCellFieldStored<Pack, MeshType>& gradients, const Cache& cache)
 {

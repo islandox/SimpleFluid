@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportAssemblyPacks.hh"
 #include "FVM/TransportSystem.hh"
 
@@ -11,7 +12,7 @@ namespace SimpleFluid::FVM
 /** Stateless assembly. Packs are consumed synchronously and never retained.
  * Include TransportSystemFactory.tcc to provide custom mesh/type instantiations.
  */
-template<TpetraTypePack Pack, class MeshType = Mesh<Pack>> class TransportSystemFactory
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>> class TransportSystemFactory
 {
 public:
     using ScalarTerms = FVM::ScalarTerms<Pack, MeshType>;

@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/DatabaseOptionReader.hh"
 #include "equations/CollectiveValidation.hh"
@@ -40,7 +41,8 @@ namespace SimpleFluid
  * @brief Forward declaration of the specialized prescribed_heat heat source.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class PrescribedHeatSource;
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+class PrescribedHeatSource;
 
 /**
  * @brief Uniform initial values for the physical Boussinesq material fields.
@@ -196,15 +198,17 @@ inline BoussinesqModelOptions boussinesq_model_options_from_database(
  * @brief Forward declaration of updateable material-property fields.
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> struct MaterialPropertyFields;
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+struct MaterialPropertyFields;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class TemperatureSourceRegistry;
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+class TemperatureSourceRegistry;
 
 /**
  * @brief Read-only physical state passed to material and source updaters.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack, class MeshType = Mesh<Pack>> struct BoussinesqUpdateContext
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>> struct BoussinesqUpdateContext
 {
     using scalar_type = typename Pack::scalar_type;
     using mesh_type = MeshType;
@@ -275,7 +279,8 @@ void initialize_cell_field(
  * @brief Named physical heat-source field in W/m^3.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = Mesh<Pack>> class VolumetricScalarSource
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+class VolumetricScalarSource
 {
 public:
     using scalar_type = typename Pack::scalar_type;
@@ -359,9 +364,9 @@ public:
     }
 
 private:
-    template<TpetraTypePack, class> friend class TemperatureSourceRegistry;
+    template<TpetraTypePack, SimpleFluid::MeshType> friend class TemperatureSourceRegistry;
 
-    template<TpetraTypePack, class> friend class PrescribedHeatSource;
+    template<TpetraTypePack, SimpleFluid::MeshType> friend class PrescribedHeatSource;
 
     bool requires_dynamic_update() const noexcept { return d_enabled && static_cast<bool>(d_updater); }
 
@@ -402,7 +407,7 @@ private:
  * @brief Deterministic registry of named temperature heat-source fields.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack, class MeshType> class TemperatureSourceRegistry
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class TemperatureSourceRegistry
 {
 public:
     using mesh_type = MeshType;
@@ -533,7 +538,7 @@ public:
     }
 
 private:
-    template<TpetraTypePack, class> friend class PrescribedHeatSource;
+    template<TpetraTypePack, SimpleFluid::MeshType> friend class PrescribedHeatSource;
 
     source_type& add_reserved(std::string name, scalar_type initial_value = {})
     {
@@ -667,7 +672,7 @@ private:
  * @brief Updateable physical material-property fields.
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MaterialPropertyFields
 {
     using scalar_type = typename Pack::scalar_type;
     using mesh_type = MeshType;

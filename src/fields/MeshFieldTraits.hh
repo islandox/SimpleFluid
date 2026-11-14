@@ -12,6 +12,7 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "geometry/Mesh.hh"
+#include "geometry/MeshConcepts.hh"
 
 namespace SimpleFluid
 {
@@ -23,7 +24,7 @@ namespace SimpleFluid
  * the legacy STK Mesh preserves the established field API for callers that
  * construct equations directly on that backend.
  */
-template<TpetraTypePack Pack, class MeshType> struct MeshFieldTraits
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MeshFieldTraits
 {
     using scalar_cell_type = ScalarCellFieldStored<Pack, MeshType>;
     using vector_cell_type = VectorCellFieldStored<Pack, MeshType>;

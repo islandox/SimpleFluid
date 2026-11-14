@@ -3,12 +3,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/FieldStoredFaceFlux.hh"
 
 namespace SimpleFluid::FVM::detail
 {
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCache>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryCache>
 void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const BoundaryCache* boundary_cache, VectorFaceFieldStored<Pack, MeshType>& face_velocity)
 {
@@ -67,7 +68,7 @@ void assemble_stored_face_velocities(const VectorCellFieldStored<Pack, MeshType>
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void stored_normal_face_fluxes(
     const VectorFaceFieldStored<Pack, MeshType>& face_velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
 {
@@ -91,7 +92,7 @@ void stored_normal_face_fluxes(
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCache>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryCache>
 void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshType>& velocity,
     const BoundaryCache* boundary_cache, ScalarFaceFieldStored<Pack, MeshType>& fluxes)
 {
@@ -156,7 +157,7 @@ void assemble_stored_normal_face_fluxes(const VectorCellFieldStored<Pack, MeshTy
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void stored_mesh_relative_face_fluxes(const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
     const ALEControlVolumeState& ale, ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes)
 {

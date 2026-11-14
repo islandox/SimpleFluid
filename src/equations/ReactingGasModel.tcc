@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/BoussFiniteVapor.hh"
 #include "equations/BubblePopulationKinetics.hh"
@@ -45,7 +46,7 @@ namespace SimpleFluid
  * @return The validated mesh pointer.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SP<const typename ReactingGasModel<Pack, MeshType>::mesh_type>
 ReactingGasModel<Pack, MeshType>::require_mesh(SP<const mesh_type> mesh)
 {
@@ -57,7 +58,7 @@ ReactingGasModel<Pack, MeshType>::require_mesh(SP<const mesh_type> mesh)
     return mesh;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 ReactingGasModel<Pack, MeshType>::ReactingGasModel(SP<const mesh_type> mesh, ReactingGasOptions options)
     : d_mesh(require_mesh(std::move(mesh))), d_transport_geometry_cache(*d_mesh),
       d_options(require_options(d_mesh, std::move(options))),
@@ -85,7 +86,7 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(SP<const mesh_type> mesh, Rea
     configure_species_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::configure(const ReactingGasOptions& options)
 {
     d_options = require_options(d_mesh, options);
@@ -97,7 +98,7 @@ void ReactingGasModel<Pack, MeshType>::configure(const ReactingGasOptions& optio
     configure_species_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(LinearSolverOptions options)
 {
     constexpr auto context = "Reacting transport linear solver options";
@@ -125,7 +126,8 @@ void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(Linea
     d_options.transport_solver_tolerance = d_transport_linear_options.tolerance;
 }
 
-template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::register_output_fields()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+void ReactingGasModel<Pack, MeshType>::register_output_fields()
 {
     d_output_fields = {{"alpha_g", &d_alpha_g}, {"alpha_l", &d_alpha_l}, {"S_alpha_reaction", &d_source_alpha_reaction},
         {"p_abs", &d_absolute_pressure}, {"N_micro", &d_micro_number}, {"M_micro", &d_micro_moles},
@@ -134,7 +136,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
         {"alpha_g_raw", &d_alpha_g_raw}, {"alpha_g_excess", &d_alpha_g_excess}};
 }
 
-template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::initialize_fields()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> void ReactingGasModel<Pack, MeshType>::initialize_fields()
 {
     d_history_initialized = false;
     d_initial_state_initialized = false;
@@ -161,7 +163,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::initialize_state(scalar_type time, const field_type& temperature,
     const field_type& gauge_pressure, const velocity_field_type& velocity, const material_type& material, bool force)
 {
@@ -210,7 +212,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(scalar_type time, const 
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_sum(scalar_type local_value) const -> scalar_type
 {
     scalar_type global_value{};
@@ -224,7 +226,7 @@ auto ReactingGasModel<Pack, MeshType>::global_sum(scalar_type local_value) const
     return global_value;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_min(scalar_type local_value) const -> scalar_type
 {
     scalar_type global_value{};
@@ -238,7 +240,8 @@ auto ReactingGasModel<Pack, MeshType>::global_min(scalar_type local_value) const
     return global_value;
 }
 
-template<TpetraTypePack Pack, class MeshType> int ReactingGasModel<Pack, MeshType>::global_max(int local_value) const
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+int ReactingGasModel<Pack, MeshType>::global_max(int local_value) const
 {
     int global_value{};
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -251,7 +254,7 @@ template<TpetraTypePack Pack, class MeshType> int ReactingGasModel<Pack, MeshTyp
     return global_value;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_integral(
     const field_type& field, std::span<const real_t> cell_volumes) const -> scalar_type
 {
@@ -274,7 +277,7 @@ auto ReactingGasModel<Pack, MeshType>::global_integral(
     return global_sum(static_cast<scalar_type>(local_integral.value()));
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_submerged_bubble_volume() const -> scalar_type
 {
     // Species reconstruction validates total Resolved + Dispersed occupancy.
@@ -282,13 +285,13 @@ auto ReactingGasModel<Pack, MeshType>::global_submerged_bubble_volume() const ->
     return global_integral(d_alpha_g);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_unrepresented_bubble_volume() const -> scalar_type
 {
     return global_integral(d_alpha_g_excess);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::minimum_valid_absolute_pressure_offset() const -> scalar_type
 {
     if (d_options.pressure_mode != ReactingPressureMode::Constant
@@ -344,14 +347,14 @@ auto ReactingGasModel<Pack, MeshType>::minimum_valid_absolute_pressure_offset() 
     return minimum_offset;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::evaluate_submerged_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
     return evaluate_species_bubble_volume(candidate_absolute_pressure_offset);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(scalar_type pressure_offset)
 {
     if (d_options.pressure_mode != ReactingPressureMode::Constant &&
@@ -399,7 +402,7 @@ void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(scalar_type 
     d_absolute_pressure.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::prescribed_pressure(scalar_type time) const -> scalar_type
 {
     const auto& times = d_options.pressure_history_times;
@@ -422,7 +425,7 @@ auto ReactingGasModel<Pack, MeshType>::prescribed_pressure(scalar_type time) con
          + fraction * (values[high] - values[low]);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(scalar_type time, const field_type& gauge_pressure)
 {
     if (d_options.pressure_mode == ReactingPressureMode::Constant ||
@@ -472,7 +475,7 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(scalar_type
     d_absolute_pressure.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scalar_type time_step,
     const face_flux_field_type& liquid_face_flux, field_type* slip_velocity, scalar_type diffusivity, bool diffuse,
     bool liquid_weighted, field_type& escape_rate, const FVM::ALEControlVolumeState* ale, Dimension slip_axis,
@@ -943,7 +946,7 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
     work.total_seconds += elapsed(started);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::advance(scalar_type time, scalar_type time_step, const field_type& temperature,
     const field_type& gauge_pressure, const velocity_field_type& velocity, const face_flux_field_type& liquid_face_flux,
     const material_type& material, const FVM::ALEControlVolumeState* ale, Dimension slip_axis)
@@ -958,7 +961,7 @@ void ReactingGasModel<Pack, MeshType>::advance(scalar_type time, scalar_type tim
         slip_axis, d_active_bouss_wall_heat);
 }
 
-template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::sync_all_fields()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> void ReactingGasModel<Pack, MeshType>::sync_all_fields()
 {
     const auto fields = mutable_state_fields();
     if (d_state_sync_owned.is_null() || d_state_sync_owned->getNumVectors() != fields.size())
@@ -991,7 +994,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     }
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 std::vector<typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::mutable_state_fields()
 {
@@ -1003,7 +1006,7 @@ ReactingGasModel<Pack, MeshType>::mutable_state_fields()
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 std::vector<const typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::state_fields() const
 {
@@ -1015,7 +1018,7 @@ ReactingGasModel<Pack, MeshType>::state_fields() const
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     StateSnapshot result;
@@ -1065,25 +1068,25 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
     restore_state(snapshot, true);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::restore_for_ale_replay(const StateSnapshot& snapshot)
 {
     restore_state(snapshot, false);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::restore_for_initialization_rollback(const StateSnapshot& snapshot)
 {
     restore_state(snapshot, true, true);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::restore_state(
     const StateSnapshot& snapshot, bool refresh_metrics, bool restore_initialization_authority)
 {
@@ -1184,12 +1187,12 @@ void ReactingGasModel<Pack, MeshType>::restore_state(
     else invalidate_transport_operator();
 }
 
-template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::refresh_geometry()
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> void ReactingGasModel<Pack, MeshType>::refresh_geometry()
 {
     refresh_geometry({});
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
@@ -1197,7 +1200,7 @@ void ReactingGasModel<Pack, MeshType>::refresh_geometry(
     invalidate_transport_operator();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ReactingGasModel<Pack, MeshType>::invalidate_transport_operator()
 {
     d_transport_solver.notify_operator_values_changed();

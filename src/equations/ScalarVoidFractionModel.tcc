@@ -4,13 +4,14 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 
 namespace SimpleFluid
 {
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ScalarVoidFractionModel<Pack, MeshType>::bounded_collapse_rate(
     local_ordinal_type cell_lid,
     scalar_type time_step) const -> scalar_type
@@ -32,7 +33,7 @@ auto ScalarVoidFractionModel<Pack, MeshType>::bounded_collapse_rate(
         available_alpha / time_step);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto ScalarVoidFractionModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     StateSnapshot result;
@@ -50,19 +51,19 @@ auto ScalarVoidFractionModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     return result;
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
     restore_state(snapshot, true);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::restore_for_ale_replay(const StateSnapshot& snapshot)
 {
     restore_state(snapshot, false);
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::restore_state(const StateSnapshot& snapshot, bool refresh_metrics)
 {
     const int local_invalid = snapshot.d_owner != this ||
@@ -88,7 +89,7 @@ void ScalarVoidFractionModel<Pack, MeshType>::restore_state(const StateSnapshot&
     else d_diffusion_solver.reset();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::initialize_from(const field_type& alpha_g)
 {
     check_source(&alpha_g, "alpha_g");
@@ -108,7 +109,7 @@ void ScalarVoidFractionModel<Pack, MeshType>::initialize_from(const field_type& 
     sync_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::update_explicit(
     scalar_type time_step,
     const field_type* source_alpha_reaction,
@@ -146,7 +147,7 @@ void ScalarVoidFractionModel<Pack, MeshType>::update_explicit(
     sync_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::mirror(
     const field_type& alpha_g,
     scalar_type time_step)
@@ -174,7 +175,7 @@ void ScalarVoidFractionModel<Pack, MeshType>::mirror(
     sync_fields();
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::diffuse(scalar_type time_step)
 {
     if (d_options.alpha_diffusivity == scalar_type{})

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/FaceStencilMatrix.hh"
 #include "FVM/details/ResolvedDiffusionGeometry.hh"
@@ -30,7 +31,7 @@ namespace SimpleFluid::FVM::detail
 {
 
 /** @brief Assemble scalar orthogonal diffusion for any mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack> diffusion_system_reference_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
@@ -122,7 +123,7 @@ DiffusionSystem<Pack> diffusion_system_reference_impl(const MeshType& mesh, type
 }
 
 /** @brief Assemble scalar diffusion with typed region traversal and resolved face metrics. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack> region_diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
@@ -205,7 +206,7 @@ DiffusionSystem<Pack> region_diffusion_system_impl(const MeshType& mesh, typenam
 }
 
 /** @brief Select region execution when available, retaining the existing generic reference. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider, class SourceProvider>
 DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {
@@ -218,7 +219,7 @@ DiffusionSystem<Pack> diffusion_system_impl(const MeshType& mesh, typename Pack:
 }
 
 /** @brief Assemble vector orthogonal diffusion for any mapped mesh. */
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class SourceProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider, class SourceProvider>
 VectorDiffusionSystem<Pack> vector_diffusion_system_impl(const MeshType& mesh, typename Pack::scalar_type diffusivity,
     BoundaryConditionProvider boundary_condition, SourceProvider right_hand_source)
 {

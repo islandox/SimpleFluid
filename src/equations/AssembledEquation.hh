@@ -12,6 +12,7 @@
 #pragma once
 
 #include "solvers/BelosLinearSolver.hh"
+#include "fields/FieldConcepts.hh"
 
 #include <Teuchos_RCP.hpp>
 
@@ -27,7 +28,7 @@ namespace SimpleFluid
  * Owns the matrix and right-hand side while sharing the solution field.
  * solve() refreshes overlap storage after updating owned solution values.
  */
-template<class StoredField, TpetraTypePack Pack = DefaultTpetraTypes>
+template<FieldType StoredField, TpetraTypePack Pack = DefaultTpetraTypes>
 class AssembledEquation
 {
 public:

@@ -3,14 +3,16 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid::FVM::detail
 {
 
-template<class MeshType, class LocalOrdinal>
-auto stored_interior_face_linear_weights(const MeshType& mesh, LocalOrdinal face_lid, LocalOrdinal owner_lid,
-    LocalOrdinal neighbor_lid) -> std::pair<typename MeshType::scalar_type, typename MeshType::scalar_type>
+template<class FaceGeometry, class LocalOrdinal>
+auto stored_interior_face_linear_weights(const FaceGeometry& mesh, LocalOrdinal face_lid, LocalOrdinal owner_lid,
+    LocalOrdinal neighbor_lid) -> std::pair<typename FaceGeometry::scalar_type, typename FaceGeometry::scalar_type>
 {
-    using scalar_type = typename MeshType::scalar_type;
+    using scalar_type = typename FaceGeometry::scalar_type;
     const auto face_id = query_face_id(mesh, face_lid);
     const auto owner_id = query_cell_id(mesh, owner_lid);
     const auto neighbor_id = query_cell_id(mesh, neighbor_lid);
@@ -24,7 +26,7 @@ auto stored_interior_face_linear_weights(const MeshType& mesh, LocalOrdinal face
     return {neighbor_distance / total_distance, owner_distance / total_distance};
 }
 
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto stored_slip_face_velocity(const VectorCellFieldStored<Pack, MeshType>& velocity,
     typename Pack::local_ordinal_type face_lid) -> typename VectorCellFieldStored<Pack, MeshType>::value_type
 {

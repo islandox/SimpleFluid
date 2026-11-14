@@ -4,12 +4,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 
 namespace SimpleFluid::FVM
 {
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 void ALEControlVolumeState::validate(const MeshType& mesh) const
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;

@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "TurbulenceScalarTransportEquation.hh"
 #include "equations/CollectiveValidation.hh"
@@ -28,7 +29,7 @@ namespace SimpleFluid
  * @param boundary_conditions Configured scalar boundary conditions.
  * @throws std::invalid_argument if @p mesh is null.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 TurbulenceScalarTransportEquation<Pack, MeshType>::TurbulenceScalarTransportEquation(
     SP<const mesh_type> mesh, BoundaryConditionMap boundary_conditions)
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh),
@@ -58,7 +59,7 @@ TurbulenceScalarTransportEquation<Pack, MeshType>::TurbulenceScalarTransportEqua
  * @throws std::invalid_argument if any transport input is invalid.
  * @throws std::runtime_error if the solve fails or produces non-finite data.
  */
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
     const field_type& effective_diffusivity, field_type& state,
@@ -74,7 +75,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
                boundary_overrides, coefficient_interpolation, nullptr, false);
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceScalarTransportEquation<Pack, MeshType>::evaluate_diagnostics(
     const field_type& values, const face_field_type& face_fluxes,
     const field_type& effective_diffusivity, const scalar_provider_type& explicit_source,
@@ -91,7 +92,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::evaluate_diagnostics(
     return result;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TurbulenceScalarTransportEquation<Pack, MeshType>::run(
     const field_type& old_state, const face_field_type& face_fluxes, scalar_type time_step,
     const field_type& effective_diffusivity, field_type& state,
@@ -506,7 +507,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::run(
     return statistics;
 }
 
-template <TpetraTypePack Pack, class MeshType>
+template <TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 PositivityClippingStatistics TurbulenceScalarTransportEquation<Pack, MeshType>::clipping_statistics() const
 {
     real_t local[] = {static_cast<real_t>(d_clipping.count), d_clipping.volume_integral};

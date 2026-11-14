@@ -3,10 +3,13 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
+
 namespace SimpleFluid::FVM::detail
 {
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void stored_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients)
@@ -30,7 +33,8 @@ void stored_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& fi
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class Cache, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Cache, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients, const Cache& cache)
@@ -81,7 +85,7 @@ void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshTy
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void stored_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -114,7 +118,7 @@ void stored_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& fi
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class Cache, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class Cache, class BoundaryValueProvider>
 void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients, const Cache& cache)
 {
@@ -160,7 +164,8 @@ void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshTy
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void stored_gauss_linear_cell_gradient_reference(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients)
@@ -229,7 +234,7 @@ void stored_gauss_linear_cell_gradient_reference(const ScalarCellFieldStored<Pac
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void stored_gauss_linear_cell_gradient_reference(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -296,7 +301,8 @@ void stored_gauss_linear_cell_gradient_reference(const VectorCellFieldStored<Pac
     }
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void stored_region_gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients)
@@ -366,7 +372,7 @@ void stored_region_gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, 
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void stored_region_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -428,7 +434,8 @@ void stored_region_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, 
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryConditionProvider,
+    class BoundaryValueProvider>
 void stored_gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshType>& field,
     BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value,
     VectorCellFieldStored<Pack, MeshType>& gradients)
@@ -441,7 +448,7 @@ void stored_gauss_linear_cell_gradient(const ScalarCellFieldStored<Pack, MeshTyp
         field, std::move(boundary_condition), std::move(boundary_value), gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValueProvider>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class BoundaryValueProvider>
 void stored_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshType>& field,
     BoundaryValueProvider boundary_value, TensorCellFieldStored<Pack, MeshType>& gradients)
 {
@@ -451,7 +458,7 @@ void stored_gauss_linear_cell_gradient(const VectorCellFieldStored<Pack, MeshTyp
     stored_gauss_linear_cell_gradient_reference(field, std::move(boundary_value), gradients);
 }
 
-template<TpetraTypePack Pack, class MeshType, class View>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType, class View>
 auto stored_cell_flux_balance(const MeshType& mesh, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
     const View& face_values, typename Pack::local_ordinal_type cell_lid) -> typename Pack::scalar_type
 {

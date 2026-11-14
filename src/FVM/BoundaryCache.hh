@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
 #include "FVM/details/BoundaryCache.hh"
 #include "fields/CellField.hh"
@@ -45,7 +46,7 @@ struct BoundaryCache
  * symbol spelling unchanged while supporting MeshHandle and specialized mesh
  * implementations directly.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 struct FieldStoredBoundaryCache
 {
     using value_type = typename Pack::scalar_type;
@@ -108,7 +109,7 @@ BoundaryCache<Pack> cache_boundary_conditions(
  * The overload is constrained away from the legacy Mesh specialization so
  * existing calls keep returning the ABI-stable BoundaryCache<Pack> type.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 requires (!std::is_same_v<std::remove_cv_t<MeshType>, Mesh<Pack>>)
 FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
     SP<const MeshType> mesh,
@@ -120,7 +121,7 @@ FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
 }
 
 /** @brief Forward a mutable mapped mesh pointer to the const cache builder. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 requires (!std::is_const_v<MeshType>
           && !std::is_same_v<MeshType, Mesh<Pack>>)
 FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
@@ -150,7 +151,7 @@ using BoundaryCache = ::SimpleFluid::BoundaryCache<Pack>;
  * This mirrors FieldStoredVelocityBoundaryCache while BoundaryCache<Pack>
  * remains the concise legacy spelling.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 using FieldStoredBoundaryCache =
     ::SimpleFluid::FieldStoredBoundaryCache<Pack, MeshType>;
 
@@ -161,7 +162,7 @@ using FieldStoredBoundaryCache =
  * legacy Mesh.  The Mesh<Pack> specialization remains exactly
  * FVM::BoundaryCache<Pack>.
  */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 using MeshBoundaryCache = std::conditional_t<
     std::is_same_v<std::remove_cv_t<MeshType>, Mesh<Pack>>,
     BoundaryCache<Pack>,
@@ -189,7 +190,7 @@ void validate_boundary_coefficient_cache(
 }
 
 /** @brief Validate a mapped-mesh sparse boundary coefficient cache. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void validate_boundary_coefficient_cache(
     const MeshType& mesh,
     const FieldStoredBoundaryCache<Pack, MeshType>* cache,
@@ -214,7 +215,7 @@ typename Pack::scalar_type boundary_coefficient(
 }
 
 /** @brief Return a mapped-mesh cached coefficient or owner-cell fallback. */
-template<TpetraTypePack Pack, class MeshType>
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 typename Pack::scalar_type boundary_coefficient(
     const FieldStoredBoundaryCache<Pack, MeshType>* cache,
     int batch_id,

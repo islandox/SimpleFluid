@@ -2,6 +2,7 @@
  * @file testSteadyDiffusionConvergence.cc
  * @brief  Actual steady-helper correction and MPI contracts.
  */
+#include "geometry/MeshConcepts.hh"
 #include "FVM/Operators.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -86,7 +87,7 @@ SP<const Handle> coarse_fine_grid()
 
 real_t boundary_value(Vec p) { return 1 + p.x * p.x + 0.7 * p.x * p.y + 0.3 * std::sin(2 * p.y) + 0.2 * p.z; }
 
-template<class MeshType>
+template<SimpleFluid::MeshType MeshType>
 auto conditions(const MeshType& mesh)
 {
     return [&mesh](int batch, size_t index)

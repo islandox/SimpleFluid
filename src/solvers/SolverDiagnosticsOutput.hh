@@ -1,5 +1,6 @@
 /** @file SolverDiagnosticsOutput.hh Collective, opt-in JSON/CSV diagnostic output. */
 #pragma once
+#include "geometry/MeshConcepts.hh"
 #include "solvers/SolverDiagnostics.hh"
 #include "equations/CollectiveValidation.hh"
 #include <algorithm>
@@ -74,7 +75,7 @@ template<class T> void integrated_cell_values(std::ostream& out, const FVM::Stea
 }
 
 /** All ranks call with matching prefix. Each file contains owned entities only. */
-template<class MeshType, class Scalar>
+template<SimpleFluid::MeshType MeshType, class Scalar>
 void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, const std::string& prefix,
     const std::string& secondary_units = "m^2/s^4")
 {

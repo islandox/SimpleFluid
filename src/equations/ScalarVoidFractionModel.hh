@@ -10,6 +10,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 
 #include "FVM/TransportSystem.hh"
@@ -128,7 +129,7 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         class MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT ScalarVoidFractionModel
 {
 public:

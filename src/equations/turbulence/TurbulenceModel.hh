@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/FaceFlux.hh"
@@ -173,7 +174,7 @@ turbulence_model_options_from_database(const Database& database);
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 struct TurbulenceBuoyancyContext
 {
     using scalar_type = typename Pack::scalar_type;
@@ -203,7 +204,7 @@ struct TurbulenceBuoyancyContext
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          class MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = Mesh<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModel
 {
     struct SnapshotData;

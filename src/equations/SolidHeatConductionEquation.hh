@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
 #include "SimpleFluidExport.hh"
@@ -38,7 +39,7 @@ namespace SimpleFluid
  * @tparam Pack Tpetra type pack used for distributed storage.
  * @tparam MeshType Solid mesh view; defaults to SolidSubdomain.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = SolidSubdomain<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = SolidSubdomain<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT SolidHeatConductionEquation
 {
 public:
