@@ -54,4 +54,43 @@ public:
     SIMPLEFLUID_FVM_EXPORT static VectorTransportSystem<Pack> assemble(
         MomentumTerms terms, MomentumBoundary boundary, MomentumOptions options, MomentumContext context = {});
 };
+
+// Export supported static-mesh entry points explicitly: Clang otherwise propagates
+// the hidden mesh argument visibility to implicit/explicit instantiations.
+template<>
+SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
+    ScalarTerms, ScalarBoundary, ScalarOptions, ScalarContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
+    VectorTerms, VelocityBoundary, VectorOptions, VectorContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
+    WeightedScalarTerms, WeightedScalarBoundary, WeightedScalarOptions, WeightedScalarContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
+    TemperatureTerms, TemperatureBoundary, TemperatureOptions, TemperatureContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT TransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::refresh_temperature_rhs(
+    TemperatureTerms, TemperatureBoundary, TemperatureOptions, TemperatureContext);
+
+template<>
+SIMPLEFLUID_FVM_EXPORT VectorTransportSystem<DefaultTpetraTypes>
+TransportSystemFactory<DefaultTpetraTypes,
+    Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>::assemble(
+    MomentumTerms, MomentumBoundary, MomentumOptions, MomentumContext);
+
 } // namespace SimpleFluid::FVM
