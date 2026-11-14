@@ -2,21 +2,22 @@
  * @brief Ordered transport traversal, live inputs, and retained geometry contracts.
  */
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
-#include <gtest/gtest.h>
 #include <Teuchos_CommHelpers.hpp>
+#include <gtest/gtest.h>
+#include <type_traits>
 
 #include <array>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,8 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::FVM;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using Local = Pack::local_ordinal_type;
 using Vec = MeshUtils::Vec3;
@@ -249,67 +252,86 @@ template<class MeshType> struct Assembly
         Matrix matrix = Teuchos::null)
     {
         callbacks.clear();
-        return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, MeshType>{
-            .old_values = scalar,
-            .face_fluxes = flux,
-            .time_step = 0.3,
-            .storage_weight = weight,
-            .advection_weight = weight,
-            .diffusivity = diffusion,
-            .boundary_condition = [&](int batch, size_t index)
-            {
-                callbacks.emplace_back('c', batch, index);
-                return BoundaryCondition{(batch + generation) % 2 ? BoundaryConditionType::Dirichlet
-                                                                 : BoundaryConditionType::Neumann, 0.125};
-            },
-            .boundary_value = [&](int batch, size_t index)
-            {
-                callbacks.emplace_back('v', batch, index);
-                return 0.75 + generation;
-            },
-            .source = [&](Local cell)
-            {
-                callbacks.emplace_back('s', cell, 0);
-                return invalid_source && Tpetra::getDefaultComm()->getRank() == 0
-                    ? std::numeric_limits<double>::quiet_NaN() : 0.2;
-            },
-            .treatment = treatment,
-            .discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
-            .correction_field = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &scalar,
-            .cached_matrix = std::move(matrix),
-            .implicit_sink = [](Local) { return 0.1; },
-            .fixed_cell_value = [&](Local cell) -> std::optional<double>
-            {
-                return mesh->owned_cell_map()->getGlobalElement(cell) % 3 == 0
-                    ? std::optional<double>{1.25 + generation} : std::nullopt;
-            },
-            .geometry_cache = &geometry,
-            .coefficient_interpolation = generation % 2 ? FaceCoefficientInterpolation::Linear
-                                                       : FaceCoefficientInterpolation::Harmonic});
+        return TransportFactory<decltype(scalar)>::assemble(
+            typename TransportFactory<decltype(scalar)>::WeightedScalarTerms{
+                .history = {.old_values = scalar, .time_step = 0.3},
+                .face_fluxes = flux,
+                .coefficients = {.storage_weight = weight, .advection_weight = weight, .diffusivity = diffusion},
+                .sources = {.source =
+                                [&](Local cell)
+                            {
+                                callbacks.emplace_back('s', cell, 0);
+                                return invalid_source && Tpetra::getDefaultComm()->getRank() == 0
+                                           ? std::numeric_limits<double>::quiet_NaN()
+                                           : 0.2;
+                            },
+                    .implicit_sink = [](Local) { return 0.1; }},
+                .constraints = {.fixed_cell_value = [&](Local cell) -> std::optional<double>
+                    {
+                        return mesh->owned_cell_map()->getGlobalElement(cell) % 3 == 0
+                                   ? std::optional<double>{1.25 + generation}
+                                   : std::nullopt;
+                    }}},
+            {.condition =
+                    [&](int batch, size_t index)
+                {
+                    callbacks.emplace_back('c', batch, index);
+                    return BoundaryCondition{
+                        (batch + generation) % 2 ? BoundaryConditionType::Dirichlet : BoundaryConditionType::Neumann,
+                        0.125};
+                },
+                .value =
+                    [&](int batch, size_t index)
+                {
+                    callbacks.emplace_back('v', batch, index);
+                    return 0.75 + generation;
+                }},
+            {.discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
+                .correction = {.treatment = treatment,
+                    .lagged_field = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &scalar},
+                .coefficient_interpolation =
+                    generation % 2 ? FaceCoefficientInterpolation::Linear : FaceCoefficientInterpolation::Harmonic},
+            {.cached_matrix = std::move(matrix), .geometry_cache = &geometry});
     }
 
     auto temperature(const TransportGeometryCache<MeshType>& geometry, NonOrthogonalTreatment treatment,
         Matrix matrix = Teuchos::null)
     {
-        return physical_temperature_transport_system<Pack>(scalar, flux, 0.3, weight, weight, diffusion,
-            [&](int batch, size_t)
-            {
-                return BoundaryCondition{(batch + generation) % 2 ? BoundaryConditionType::Robin
-                                                                 : BoundaryConditionType::Dirichlet,
-                    2.0 + generation, 0.4 + 0.1 * generation};
-            },
-            [&](int, size_t) { return 2.0 + generation; }, [](Local) { return 0.2; }, treatment,
-            treatment == NonOrthogonalTreatment::Implicit ? nullptr : &scalar, std::move(matrix), nullptr, &geometry);
+        return TransportFactory<decltype(scalar)>::assemble(
+            typename TransportFactory<decltype(scalar)>::TemperatureTerms{
+                .history = {.old_values = scalar, .time_step = 0.3},
+                .face_fluxes = flux,
+                .material = {.density = weight, .specific_heat_capacity = weight, .thermal_conductivity = diffusion},
+                .power_density = [](Local) { return 0.2; }},
+            {.condition =
+                    [&](int batch, size_t)
+                {
+                    return BoundaryCondition{
+                        (batch + generation) % 2 ? BoundaryConditionType::Robin : BoundaryConditionType::Dirichlet,
+                        2.0 + generation, 0.4 + 0.1 * generation};
+                },
+                .value = [&](int, size_t) { return 2.0 + generation; },
+                .coefficients = nullptr},
+            {.correction = {.treatment = treatment,
+                 .lagged_field = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &scalar}},
+            {.cached_matrix = std::move(matrix), .geometry_cache = &geometry});
     }
 
     auto momentum(const TransportGeometryCache<MeshType>& geometry, NonOrthogonalTreatment treatment,
         Matrix matrix = Teuchos::null)
     {
-        return physical_momentum_transport_system<Pack>(velocity, flux, 0.3, diffusion, 1.75,
-            [&](int, size_t) { return Vec{0.2 + generation, -0.3, 0.4}; },
-            [](Local) { return Vec{0.01, -0.02, 0.03}; }, treatment,
-            treatment == NonOrthogonalTreatment::Implicit ? nullptr : &velocity, std::move(matrix),
-            FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &geometry);
+        return TransportFactory<decltype(velocity)>::assemble(
+            typename TransportFactory<decltype(velocity)>::MomentumTerms{
+                .history = {.old_values = velocity, .time_step = 0.3},
+                .face_fluxes = flux,
+                .material = {.dynamic_viscosity = diffusion, .reference_density = 1.75},
+                .acceleration_source = [](Local) { return Vec{0.01, -0.02, 0.03}; }},
+            {.value = [&](int, size_t) { return Vec{0.2 + generation, -0.3, 0.4}; },
+                .diffusion = FVM::detail::AlwaysDiffuseBoundary{},
+                .coefficients = nullptr},
+            {.correction = {.treatment = treatment,
+                 .lagged_field = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &velocity}},
+            {.cached_matrix = std::move(matrix), .geometry_cache = &geometry});
     }
 };
 
@@ -492,12 +514,24 @@ TEST(TransportTraverseTest, RepeatedPeriodicNeighbourAccumulatesBothUniformDiffu
     scalar.sync_ghosts(); velocity.sync_ghosts(); flux.sync_ghosts();
     TransportGeometryCache<Handle> cache(*mesh);
     expect_canonical_geometry(*mesh, cache);
-    const auto scalar_system = transport_system<Pack>(scalar, flux, 0.25, 0.5,
-        [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0.0}; },
-        [](int, size_t) { return 0.0; }, [](Local) { return 0.0; });
-    const auto vector_system = non_orthogonal_transport_system<Pack>(velocity, flux, 0.25, 0.5,
-        [](int, size_t) { return Vec{}; }, [](Local) { return Vec{}; }, NonOrthogonalTreatment::Explicit,
-        nullptr, Teuchos::null, [](int, size_t) { return false; }, &cache);
+    const auto scalar_system = TransportFactory<decltype(scalar)>::assemble(
+        typename TransportFactory<decltype(scalar)>::ScalarTerms{.history = {.old_values = scalar, .time_step = 0.25},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.5},
+            .source = [](Local) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0.0}; },
+            .value = [](int, size_t) { return 0.0; }},
+        {}, {});
+    const auto vector_system = TransportFactory<decltype(velocity)>::assemble(
+        typename TransportFactory<decltype(velocity)>::VectorTerms{
+            .history = {.old_values = velocity, .time_step = 0.25},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.5},
+            .source = [](Local) { return Vec{}; }},
+        typename TransportFactory<decltype(velocity)>::VelocityBoundary{
+            .value = [](int, size_t) { return Vec{}; }, .diffusion = [](int, size_t) { return false; }},
+        {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr}},
+        {.cached_matrix = Teuchos::null, .geometry_cache = &cache});
     const auto check = [&](const auto& system)
     {
         const auto values = snapshot(system);

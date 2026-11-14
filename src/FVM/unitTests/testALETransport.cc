@@ -3,7 +3,9 @@
  * @brief Conservative old/new-volume and relative-flux ALE operator tests.
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
+#include <type_traits>
 
 #include "FVM/FaceFlux.hh"
 #include "FVM/TransportSystem.hh"
@@ -26,6 +28,8 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = SimpleFluid::MeshHandle<Pack>;
 using ScalarField = SimpleFluid::ScalarCellFieldStored<Pack>;
 using VectorField = SimpleFluid::VectorCellFieldStored<Pack>;
@@ -163,34 +167,45 @@ void expect_constant_preservation(SimpleFluid::real_t target_elevation)
     ScalarField old_scalar(mesh, scalar_value, "old_scalar");
     ScalarField unit(mesh, 1.0, "unit");
     ScalarField zero(mesh, 0.0, "zero");
-    const auto scalar_system = SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-        SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old_scalar,
+    const auto scalar_system = TransportFactory<decltype(old_scalar)>::assemble(
+        typename TransportFactory<decltype(old_scalar)>::WeightedScalarTerms{
+            .history = {.old_values = old_scalar, .time_step = time_step},
             .face_fluxes = relative_flux,
-            .time_step = time_step,
-            .storage_weight = unit,
-            .advection_weight = unit,
-            .diffusivity = zero,
-            .boundary_condition = dirichlet_condition(),
-            .boundary_value = [](int, size_t) { return scalar_value; },
-            .source = zero_source(),
-            .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-            .ale = &ale});
+            .coefficients = {.storage_weight = unit, .advection_weight = unit, .diffusivity = zero},
+            .sources = {.source = zero_source()},
+            .constraints = {}},
+        {.condition = dirichlet_condition(), .value = [](int, size_t) { return scalar_value; }},
+        {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit}}, {.ale = &ale});
     expect_scalar_residual(scalar_system, std::vector<scalar_type>(mesh->num_owned_cells(), scalar_value), 2.0e-12);
 
     const Handle::Vec3 vector_value{1.25, -0.75, 0.5};
     VectorField old_vector(mesh, vector_value, "old_vector");
-    const auto vector_system = SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
-        old_vector, relative_flux, time_step, scalar_type{}, [=](int, size_t) { return vector_value; },
-        zero_vector_source(), SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr, Teuchos::null,
-        SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &ale);
+    const auto vector_system = TransportFactory<decltype(old_vector)>::assemble(
+        typename TransportFactory<decltype(old_vector)>::VectorTerms{
+            .history = {.old_values = old_vector, .time_step = time_step},
+            .face_fluxes = relative_flux,
+            .coefficients = {.diffusivity = scalar_type{}},
+            .source = zero_vector_source()},
+        typename TransportFactory<decltype(old_vector)>::VelocityBoundary{
+            .value = [=](int, size_t) { return vector_value; },
+            .diffusion = SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}},
+        {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, .lagged_field = nullptr}},
+        {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
     expect_vector_residual(vector_system, vector_value, 2.0e-12);
 
     ScalarField viscosity(mesh, 0.0, "viscosity");
-    const auto momentum_system = SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
-        old_vector, relative_flux, time_step, viscosity, scalar_type{1}, [=](int, size_t) { return vector_value; },
-        zero_vector_source(), SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr, Teuchos::null,
-        SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, nullptr,
-        SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic, &ale);
+    const auto momentum_system = TransportFactory<decltype(old_vector)>::assemble(
+        typename TransportFactory<decltype(old_vector)>::MomentumTerms{
+            .history = {.old_values = old_vector, .time_step = time_step},
+            .face_fluxes = relative_flux,
+            .material = {.dynamic_viscosity = viscosity, .reference_density = scalar_type{1}},
+            .acceleration_source = zero_vector_source()},
+        {.value = [=](int, size_t) { return vector_value; },
+            .diffusion = SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{},
+            .coefficients = nullptr},
+        {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+            .coefficient_interpolation = SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic},
+        {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
     expect_vector_residual(momentum_system, vector_value, 2.0e-12);
 }
 
@@ -282,18 +297,16 @@ TEST(ALETransportTest, StationaryTrialExactlyMatchesFixedGridWeightedAssembly)
     constexpr scalar_type time_step = 0.25;
     auto assemble = [&](const FaceField& flux, const SimpleFluid::FVM::ALEControlVolumeState* ale)
     {
-        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-            SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old_values,
+        return TransportFactory<decltype(old_values)>::assemble(
+            typename TransportFactory<decltype(old_values)>::WeightedScalarTerms{
+                .history = {.old_values = old_values, .time_step = time_step},
                 .face_fluxes = flux,
-                .time_step = time_step,
-                .storage_weight = storage,
-                .advection_weight = advection,
-                .diffusivity = diffusion,
-                .boundary_condition = dirichlet_condition(),
-                .boundary_value = [](int, size_t) { return 0.0; },
-                .source = [](local_ordinal_type cell) { return 0.125 * static_cast<scalar_type>(cell + 1); },
-                .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-                .ale = ale});
+                .coefficients = {.storage_weight = storage, .advection_weight = advection, .diffusivity = diffusion},
+                .sources = {.source = [](local_ordinal_type cell)
+                            { return 0.125 * static_cast<scalar_type>(cell + 1); }},
+                .constraints = {}},
+            {.condition = dirichlet_condition(), .value = [](int, size_t) { return 0.0; }},
+            {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit}}, {.ale = ale});
     };
     const auto fixed = assemble(absolute_flux, nullptr);
 
@@ -339,19 +352,18 @@ TEST(ALETransportTest, DistinctOldScalarAndTemperatureCapacityConserveStoredInve
     }
     old_temperature.sync_ghosts();
 
-    const auto scalar_system = SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-        SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old_temperature,
+    const auto scalar_system = TransportFactory<decltype(old_temperature)>::assemble(
+        typename TransportFactory<decltype(old_temperature)>::WeightedScalarTerms{
+            .history = {.old_values = old_temperature, .time_step = time_step},
             .face_fluxes = relative_flux,
-            .time_step = time_step,
-            .storage_weight = scalar_storage,
-            .advection_weight = unit,
-            .diffusivity = conductivity,
-            .boundary_condition = dirichlet_condition(),
-            .boundary_value = [](int, size_t) { return 0.0; },
-            .source = zero_source(),
-            .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-            .old_storage_weight = &old_scalar_storage,
-            .ale = &ale});
+            .coefficients = {.storage_weight = scalar_storage,
+                .advection_weight = unit,
+                .diffusivity = conductivity,
+                .old_storage_weight = &old_scalar_storage},
+            .sources = {.source = zero_source()},
+            .constraints = {}},
+        {.condition = dirichlet_condition(), .value = [](int, size_t) { return 0.0; }},
+        {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit}}, {.ale = &ale});
     std::vector<scalar_type> expected_scalar(mesh->num_owned_cells());
     for (size_t owned = 0; owned < expected_scalar.size(); ++owned)
     {
@@ -361,11 +373,20 @@ TEST(ALETransportTest, DistinctOldScalarAndTemperatureCapacityConserveStoredInve
     }
     expect_scalar_residual(scalar_system, expected_scalar, 2.0e-12);
 
-    const auto system = SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
-        old_temperature, relative_flux, time_step, density, heat_capacity, conductivity, dirichlet_condition(),
-        [](int, size_t) { return 0.0; }, zero_source(), SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, nullptr,
-        Teuchos::null, nullptr, nullptr, SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic, &ale, &old_density,
-        &old_heat_capacity);
+    const auto system = TransportFactory<decltype(old_temperature)>::assemble(
+        typename TransportFactory<decltype(old_temperature)>::TemperatureTerms{
+            .history = {.old_values = old_temperature, .time_step = time_step},
+            .face_fluxes = relative_flux,
+            .material = {.density = density,
+                .specific_heat_capacity = heat_capacity,
+                .thermal_conductivity = conductivity,
+                .old_density = &old_density,
+                .old_specific_heat_capacity = &old_heat_capacity},
+            .power_density = zero_source()},
+        {.condition = dirichlet_condition(), .value = [](int, size_t) { return 0.0; }, .coefficients = nullptr},
+        {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+            .coefficient_interpolation = SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic},
+        {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
 
     std::vector<scalar_type> expected(mesh->num_owned_cells());
     scalar_type old_energy{};
@@ -401,18 +422,15 @@ TEST(ALETransportTest, ClosedRelativeFluxConservesInventoryAndRoundTripsGeometry
     auto assemble =
         [&](const ScalarField& old_values, const FaceField& flux, const SimpleFluid::FVM::ALEControlVolumeState& ale)
     {
-        return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-            SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old_values,
+        return TransportFactory<decltype(old_values)>::assemble(
+            typename TransportFactory<decltype(old_values)>::WeightedScalarTerms{
+                .history = {.old_values = old_values, .time_step = time_step},
                 .face_fluxes = flux,
-                .time_step = time_step,
-                .storage_weight = unit,
-                .advection_weight = unit,
-                .diffusivity = zero,
-                .boundary_condition = dirichlet_condition(),
-                .boundary_value = [](int, size_t) { return 0.0; },
-                .source = zero_source(),
-                .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-                .ale = &ale});
+                .coefficients = {.storage_weight = unit, .advection_weight = unit, .diffusivity = zero},
+                .sources = {.source = zero_source()},
+                .constraints = {}},
+            {.condition = dirichlet_condition(), .value = [](int, size_t) { return 0.0; }},
+            {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit}}, {.ale = &ale});
     };
 
     motion.begin_trial(3.0, time_step);
@@ -474,21 +492,18 @@ TEST(ALETransportTest, RejectsWrongGclFluxMismatchedTimestepAndBdf2)
     ScalarField unit(mesh, 1.0, "unit");
     ScalarField zero(mesh, 0.0, "zero");
     FaceField relative_flux(mesh, 0.0, "relative_flux");
-    EXPECT_THROW(SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-                     SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old_values,
+    EXPECT_THROW(TransportFactory<decltype(old_values)>::assemble(
+                     typename TransportFactory<decltype(old_values)>::WeightedScalarTerms{
+                         .history = {.old_values = old_values, .time_step = 1.0, .older_values = &older_values},
                          .face_fluxes = relative_flux,
-                         .time_step = 1.0,
-                         .storage_weight = unit,
-                         .advection_weight = unit,
-                         .diffusivity = zero,
-                         .boundary_condition = dirichlet_condition(),
-                         .boundary_value = [](int, size_t) { return 1.0; },
-                         .source = zero_source(),
-                         .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-                         .discretization = {SimpleFluid::FVM::ScalarTimeScheme::BDF2,
-                             SimpleFluid::FVM::ScalarConvectionScheme::Upwind},
-                         .older_values = &older_values,
-                         .ale = &ale}),
+                         .coefficients = {.storage_weight = unit, .advection_weight = unit, .diffusivity = zero},
+                         .sources = {.source = zero_source()},
+                         .constraints = {}},
+                     {.condition = dirichlet_condition(), .value = [](int, size_t) { return 1.0; }},
+                     {.discretization = {SimpleFluid::FVM::ScalarTimeScheme::BDF2,
+                          SimpleFluid::FVM::ScalarConvectionScheme::Upwind},
+                         .correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Explicit}},
+                     {.ale = &ale}),
         std::invalid_argument);
 }
 
@@ -537,39 +552,70 @@ TEST(ALETransportTest, ValidatedPlanarSnapshotExactlyMatchesBorrowedAssemblies)
         old.sync_ghosts();
         const auto scalar = [&](const auto& ale)
         {
-            return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-                SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old,
-                    .face_fluxes = relative, .time_step = dt, .storage_weight = storage,
-                    .advection_weight = advection, .diffusivity = diffusion,
-                    .boundary_condition = dirichlet_condition(), .boundary_value = [](int, size_t) { return 2.; },
-                    .source = zero_source(), .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
-                    .correction_field = &old, .old_storage_weight = &old_storage, .ale = &ale});
+            return TransportFactory<decltype(old)>::assemble(
+                typename TransportFactory<decltype(old)>::WeightedScalarTerms{
+                    .history = {.old_values = old, .time_step = dt},
+                    .face_fluxes = relative,
+                    .coefficients = {.storage_weight = storage,
+                        .advection_weight = advection,
+                        .diffusivity = diffusion,
+                        .old_storage_weight = &old_storage},
+                    .sources = {.source = zero_source()},
+                    .constraints = {}},
+                {.condition = dirichlet_condition(), .value = [](int, size_t) { return 2.; }},
+                {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, .lagged_field = &old}},
+                {.ale = &ale});
         };
         expect_systems_equal(scalar(borrowed), scalar(owned), mesh->num_owned_cells(), true);
         const auto vector = [&](const auto& ale)
         {
-            return SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
-                old_vector, relative, dt, .03, [=](int, size_t) { return vector_value; }, zero_vector_source(),
-                SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &old_vector, Teuchos::null,
-                SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &ale);
+            return TransportFactory<decltype(old_vector)>::assemble(
+                typename TransportFactory<decltype(old_vector)>::VectorTerms{
+                    .history = {.old_values = old_vector, .time_step = dt},
+                    .face_fluxes = relative,
+                    .coefficients = {.diffusivity = .03},
+                    .source = zero_vector_source()},
+                typename TransportFactory<decltype(old_vector)>::VelocityBoundary{
+                    .value = [=](int, size_t) { return vector_value; },
+                    .diffusion = SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}},
+                {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+                     .lagged_field = &old_vector}},
+                {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
         };
         expect_systems_equal(vector(borrowed), vector(owned), mesh->num_owned_cells(), true);
         const auto momentum = [&](const auto& ale)
         {
-            return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
-                old_vector, relative, dt, diffusion, 2., [=](int, size_t) { return vector_value; }, zero_vector_source(),
-                SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &old_vector, Teuchos::null,
-                SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, nullptr,
-                SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic, &ale);
+            return TransportFactory<decltype(old_vector)>::assemble(
+                typename TransportFactory<decltype(old_vector)>::MomentumTerms{
+                    .history = {.old_values = old_vector, .time_step = dt},
+                    .face_fluxes = relative,
+                    .material = {.dynamic_viscosity = diffusion, .reference_density = 2.},
+                    .acceleration_source = zero_vector_source()},
+                {.value = [=](int, size_t) { return vector_value; },
+                    .diffusion = SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{},
+                    .coefficients = nullptr},
+                {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+                     .lagged_field = &old_vector},
+                    .coefficient_interpolation = SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic},
+                {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
         };
         expect_systems_equal(momentum(borrowed), momentum(owned), mesh->num_owned_cells(), true);
         const auto temperature = [&](const auto& ale)
         {
-            return SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
-                old, relative, dt, density, heat_capacity, diffusion, dirichlet_condition(),
-                [](int, size_t) { return 2.; }, zero_source(), SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
-                &old, Teuchos::null, nullptr, nullptr, SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic,
-                &ale, &old_density, &old_heat_capacity);
+            return TransportFactory<decltype(old)>::assemble(
+                typename TransportFactory<decltype(old)>::TemperatureTerms{
+                    .history = {.old_values = old, .time_step = dt},
+                    .face_fluxes = relative,
+                    .material = {.density = density,
+                        .specific_heat_capacity = heat_capacity,
+                        .thermal_conductivity = diffusion,
+                        .old_density = &old_density,
+                        .old_specific_heat_capacity = &old_heat_capacity},
+                    .power_density = zero_source()},
+                {.condition = dirichlet_condition(), .value = [](int, size_t) { return 2.; }, .coefficients = nullptr},
+                {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, .lagged_field = &old},
+                    .coefficient_interpolation = SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic},
+                {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = &ale});
         };
         expect_systems_equal(temperature(borrowed), temperature(owned), mesh->num_owned_cells(), true);
         motion.rollback_trial();

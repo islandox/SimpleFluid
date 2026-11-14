@@ -4,6 +4,7 @@
 #pragma once
 
 #include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
+#include "FVM/details/ResolvedTransportGeometry.hh"
 #include "geometry/MeshTraverse.hh"
 
 #include <algorithm>

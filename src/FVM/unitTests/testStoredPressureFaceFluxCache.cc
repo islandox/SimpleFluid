@@ -3,6 +3,8 @@
  * @brief Analytic pressure-flux checks across workspace reuse and ALE epochs.
  */
 
+// This implementation owns direct diagnostic/custom-cache pressure-kernel instantiations.
+#include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
 #include <gtest/gtest.h>
 
 #include "FVM/FaceFlux.hh"

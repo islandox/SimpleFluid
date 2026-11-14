@@ -330,8 +330,10 @@ an application chemistry or turbulent bubbly-flow model is physically validated.
 ### FVM Operators
 
 - `DiffusionSystem` — scalar/vector orthogonal diffusion assembly
-- `TransportSystem` — semi-implicit scalar/vector, weighted, temperature, and
-  physical-momentum convection–diffusion assembly
+- [`TransportSystemFactory`](docs/architecture/transport_system_factory.md) —
+  typed scalar/vector, weighted, temperature, and physical-momentum
+  convection–diffusion assembly; grouped inputs return `TransportSystem` or
+  `VectorTransportSystem` matrix/RHS handles
 - `NonOrthogonalCorrection` — cross-diffusion flux decomposition ($S_f = E_f + T_f$)
 - `CellOperators` — cached scalar/vector gradient, divergence, and Laplacian
   reconstruction for legacy and stored fields
@@ -844,6 +846,7 @@ example and storage accounting](docs/region_meshes.md).
 | Topic | Guide |
 | --- | --- |
 | Development, builds, tests, and ABI boundaries | [Maintainer guide](MAINTENANCE.md) and [CMake guide](cmake/README.md) |
+| Typed FVM transport assembly and source migration | [Transport factory contract](docs/architecture/transport_system_factory.md) |
 | External material providers and C ABI | [Material provider guide](docs/material-c-api.md) |
 | Implementation status and remaining acceptance gates | [Roadmap](TODO.md) |
 | Annular wall layers and swept corners | [Annular mesh guide](docs/annular_meshes.md) |

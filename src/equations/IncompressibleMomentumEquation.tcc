@@ -9,6 +9,7 @@
  *
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include "IncompressibleMomentumEquation.hh"
 
 #include <algorithm>
@@ -253,23 +254,21 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
         {
             if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
             {
-                return FVM::non_orthogonal_transport_system<Pack>(
-                    old_velocity, face_fluxes, options.time_step,
-                    options.kinematic_viscosity, boundary_value,
-                    right_hand_source,
-                    options.non_orthogonal_treatment, correction_field,
-                    d_cached_transport_matrix, boundary_diffusion,
-                    &d_transport_geometry_cache);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                return Factory::assemble(typename Factory::VectorTerms{{old_velocity, options.time_step}, face_fluxes,
+                                             {options.kinematic_viscosity}, right_hand_source},
+                    typename Factory::VelocityBoundary{boundary_value, boundary_diffusion},
+                    typename Factory::VectorOptions{{options.non_orthogonal_treatment, correction_field}},
+                    typename Factory::VectorContext{d_cached_transport_matrix, &d_transport_geometry_cache});
             }
             else
             {
-                return FVM::non_orthogonal_transport_system<Pack>(
-                    old_velocity, face_fluxes, options.time_step,
-                    options.kinematic_viscosity, boundary_value,
-                    right_hand_source,
-                    options.non_orthogonal_treatment, correction_field,
-                    d_cached_transport_matrix, boundary_diffusion,
-                    &d_transport_geometry_cache, ale);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                return Factory::assemble(typename Factory::VectorTerms{{old_velocity, options.time_step}, face_fluxes,
+                                             {options.kinematic_viscosity}, right_hand_source},
+                    typename Factory::VelocityBoundary{boundary_value, boundary_diffusion},
+                    typename Factory::VectorOptions{{options.non_orthogonal_treatment, correction_field}},
+                    typename Factory::VectorContext{d_cached_transport_matrix, &d_transport_geometry_cache, ale});
             }
         }
         catch (...)
@@ -638,14 +637,13 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
         {
             if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
             {
-                return FVM::physical_momentum_transport_system<Pack>(
-                    old_velocity, face_fluxes, options.time_step,
-                    dynamic_viscosity, reference_density, boundary_value,
-                    acceleration_source, options.non_orthogonal_treatment,
-                    correction_field, d_cached_physical_transport_matrix,
-                    boundary_diffusion, boundary_dynamic_viscosity,
-                    &d_transport_geometry_cache,
-                    options.coefficient_interpolation, mode);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                return Factory::assemble(typename Factory::MomentumTerms{{old_velocity, options.time_step}, face_fluxes,
+                                             {dynamic_viscosity, reference_density}, acceleration_source},
+                    typename Factory::MomentumBoundary{boundary_value, boundary_diffusion, boundary_dynamic_viscosity},
+                    typename Factory::MomentumOptions{
+                        {options.non_orthogonal_treatment, correction_field}, options.coefficient_interpolation, mode},
+                    typename Factory::MomentumContext{d_cached_physical_transport_matrix, &d_transport_geometry_cache});
             }
             else
             {
@@ -653,14 +651,15 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
                 {
                     d_stress_gradients.emplace(d_mesh, "momentum_transpose_stress_gradients");
                 }
-                return FVM::physical_momentum_transport_system<Pack>(
-                    old_velocity, face_fluxes, options.time_step,
-                    dynamic_viscosity, reference_density, boundary_value,
-                    acceleration_source, options.non_orthogonal_treatment,
-                    correction_field, d_cached_physical_transport_matrix,
-                    boundary_diffusion, boundary_dynamic_viscosity,
-                    &d_transport_geometry_cache,
-                    options.coefficient_interpolation, ale, &*d_stress_gradients, zero_gradient_stress, mode);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                return Factory::assemble(typename Factory::MomentumTerms{{old_velocity, options.time_step}, face_fluxes,
+                                             {dynamic_viscosity, reference_density}, acceleration_source},
+                    typename Factory::MomentumBoundary{
+                        boundary_value, boundary_diffusion, boundary_dynamic_viscosity, zero_gradient_stress},
+                    typename Factory::MomentumOptions{
+                        {options.non_orthogonal_treatment, correction_field}, options.coefficient_interpolation, mode},
+                    typename Factory::MomentumContext{
+                        d_cached_physical_transport_matrix, &d_transport_geometry_cache, ale, &*d_stress_gradients});
             }
         }
         catch (...)

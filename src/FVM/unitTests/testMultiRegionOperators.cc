@@ -6,17 +6,21 @@
  * @date 2026-09-09
  * @copyright Copyright (c) 2026
  */
-#include <gtest/gtest.h>
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
+#include <gtest/gtest.h>
+#include <type_traits>
 
 namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<>;
 using Scalar = ScalarCellFieldStored<Pack>;
 using Flux = ScalarFaceFieldStored<Pack>;
@@ -67,8 +71,15 @@ TEST(MultiRegionOperatorsTest, NonOrthogonalMixedMeshMatchesExplicitReference)
     auto boundary = [&](int b,size_t i) { return linear(mesh->face_centroid(mesh->boundary_face_batch(b).face_lids[i])); };
         auto condition = [&](int b,size_t i) { return BoundaryCondition{BoundaryConditionType::Dirichlet,boundary(b,i)}; };
         FVM::TransportGeometryCache<Handle> cache(*mesh);
-        const auto system = FVM::non_orthogonal_transport_system<Pack>(scalar,flux,0.2,0.5,condition,boundary,
-            [](int){return 0.0;},FVM::NonOrthogonalTreatment::Implicit,nullptr,Teuchos::null,&cache);
+        const auto system = TransportFactory<decltype(scalar)>::assemble(
+            typename TransportFactory<decltype(scalar)>::ScalarTerms{
+                .history = {.old_values = scalar, .time_step = 0.2},
+                .face_fluxes = flux,
+                .coefficients = {.diffusivity = 0.5},
+                .source = [](int) { return 0.0; }},
+            {.condition = condition, .value = boundary},
+            {.correction = {{.treatment = FVM::NonOrthogonalTreatment::Implicit, .lagged_field = nullptr}}},
+            {.cached_matrix = Teuchos::null, .geometry_cache = &cache});
         solutions.push_back(solve(system,mesh));
         for (size_t c=0;c<mesh->num_cells();++c) EXPECT_NEAR(solutions.back()[c],linear(mesh->cell_centroid(c)),2e-10);
         expect_compact(*mesh);
@@ -94,9 +105,14 @@ TEST(MultiRegionOperatorsTest, CanonicalFluxAndTransportConserveVolumeWeightedIn
     const auto divergence = FVM::cell_divergence_from_fluxes(*mesh,flux);
     real_t balance = 0; for (size_t c=0;c<mesh->num_cells();++c) balance += divergence[c]*mesh->cell_volume(c);
     EXPECT_NEAR(balance,0,1e-14);
-    const auto system = FVM::transport_system<Pack>(old,flux,0.1,0.0,
-        [](int,size_t){return BoundaryCondition{BoundaryConditionType::Neumann,0};},
-        [](int,size_t){return 0.0;},[](int){return 0.0;});
+    const auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.1},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.0},
+            .source = [](int) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+            .value = [](int, size_t) { return 0.0; }},
+        {}, {});
     const auto result = solve(system,mesh);
     real_t before=0,after=0;
     for (size_t c=0;c<mesh->num_cells();++c)
@@ -112,9 +128,14 @@ TEST(MultiRegionOperatorsTest, ConstantFieldAndUniformVelocityRemainConstant)
     Scalar old(mesh,3.0,"constant"); Flux flux(mesh,"flux");
     for (size_t f=0;f<mesh->num_faces();++f) flux.set_owned_value(f,mesh->face_area_vector(f).x);
     old.sync_ghosts(); flux.sync_ghosts();
-    const auto system=FVM::transport_system<Pack>(old,flux,0.1,0.2,
-        [](int,size_t){return BoundaryCondition{BoundaryConditionType::Dirichlet,3};},
-        [](int,size_t){return 3.0;},[](int){return 0.0;});
+    const auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.1},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.2},
+            .source = [](int) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Dirichlet, 3}; },
+            .value = [](int, size_t) { return 3.0; }},
+        {}, {});
     const auto values=solve(system,mesh);
     for (const auto x:values) EXPECT_NEAR(x,3,2e-11);
     expect_compact(*mesh);
@@ -141,8 +162,13 @@ TEST(MultiRegionOperatorsTest, NonconformingDiffusionPreservesLinearManufactured
     auto condition=[&](int b,size_t i){return BoundaryCondition{BoundaryConditionType::Dirichlet,boundary(b,i)};};
     for(auto treatment:{FVM::NonOrthogonalTreatment::Explicit,FVM::NonOrthogonalTreatment::Implicit,FVM::NonOrthogonalTreatment::Hybrid})
     {
-        auto system=FVM::non_orthogonal_transport_system<Pack>(old,flux,0.2,0.5,condition,boundary,
-            [](int){return 0.0;},treatment,&old);
+        auto system = TransportFactory<decltype(old)>::assemble(
+            typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.2},
+                .face_fluxes = flux,
+                .coefficients = {.diffusivity = 0.5},
+                .source = [](int) { return 0.0; }},
+            {.condition = condition, .value = boundary},
+            {.correction = {{.treatment = treatment, .lagged_field = &old}}}, {});
         const auto values=solve(system,mesh);
         for(size_t c=0;c<mesh->num_cells();++c) EXPECT_NEAR(values[c],linear(mesh->cell_centroid(c)),3e-10);
     }

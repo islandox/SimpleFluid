@@ -2,12 +2,14 @@
  * @brief Native distributed XY/Z field, traversal and conservative FVM integration.
  */
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/DirectBatchRange.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/MeshTraverse.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
+#include <type_traits>
 
 #include <Teuchos_CommHelpers.hpp>
 #include <gtest/gtest.h>
@@ -20,13 +22,14 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
-#include <type_traits>
 #include <vector>
 
 namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using Native = Meshes::SemiStructuredXY_Z;
 using Local = Pack::local_ordinal_type;
@@ -729,10 +732,16 @@ TEST(SemiStructuredDistributedOperatorsTest, LinearGradientAndNonorthogonalDiffu
         for (const auto treatment : {FVM::NonOrthogonalTreatment::Explicit, FVM::NonOrthogonalTreatment::Implicit,
                  FVM::NonOrthogonalTreatment::Hybrid})
         {
-            const auto system = FVM::non_orthogonal_transport_system<Pack>(
-                scalar, zero_flux, .03, .7, boundary, boundary_value, [](Local) { return 0.; }, treatment,
-                treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &scalar, Teuchos::null,
-                &transport_geometry);
+            const auto system = TransportFactory<decltype(scalar)>::assemble(
+                typename TransportFactory<decltype(scalar)>::ScalarTerms{
+                    .history = {.old_values = scalar, .time_step = .03},
+                    .face_fluxes = zero_flux,
+                    .coefficients = {.diffusivity = .7},
+                    .source = [](Local) { return 0.; }},
+                {.condition = boundary, .value = boundary_value},
+                {.correction = {{.treatment = treatment,
+                     .lagged_field = treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &scalar}}},
+                {.cached_matrix = Teuchos::null, .geometry_cache = &transport_geometry});
             const auto rhs = system.rhs->getData();
             for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
             {
@@ -776,9 +785,14 @@ TEST(SemiStructuredDistributedOperatorsTest, PartitionUpwindRowsAndTransportCons
         }
         flux.sync_ghosts();
         constexpr double dt = .03;
-        const auto system = FVM::transport_system<Pack>(
-            old, flux, dt, 0., [](int, std::size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
-            [](int, std::size_t) { return 0.; }, [](Local) { return 0.; });
+        const auto system = TransportFactory<decltype(old)>::assemble(
+            typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = dt},
+                .face_fluxes = flux,
+                .coefficients = {.diffusivity = 0.},
+                .source = [](Local) { return 0.; }},
+            {.condition = [](int, std::size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+                .value = [](int, std::size_t) { return 0.; }},
+            {}, {});
         for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
         {
             const Global canonical = mesh.cell_geometry_global_id(Local(c));

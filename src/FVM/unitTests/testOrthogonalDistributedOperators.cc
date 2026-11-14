@@ -1,5 +1,6 @@
 /** Orthogonal MPI field imports and independent conservative transport-row oracles. */
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "FVM/details/VectorLaplacian.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -17,6 +18,8 @@ namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using LO = Pack::local_ordinal_type;
 using GO = Pack::global_ordinal_type;
@@ -146,9 +149,14 @@ template<class Native> void verify(const std::shared_ptr<Native>& native)
     }
     flux.sync_ghosts();
     constexpr double dt = .03;
-    const auto system = FVM::transport_system<Pack>(
-        scalar, flux, dt, 0., [](int, std::size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0.}; },
-        [](int, std::size_t) { return 0.; }, [](LO) { return 0.; });
+    const auto system = TransportFactory<decltype(scalar)>::assemble(
+        typename TransportFactory<decltype(scalar)>::ScalarTerms{.history = {.old_values = scalar, .time_step = dt},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.},
+            .source = [](LO) { return 0.; }},
+        {.condition = [](int, std::size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0.}; },
+            .value = [](int, std::size_t) { return 0.; }},
+        {}, {});
     for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
     {
         const auto lid = LO(c);

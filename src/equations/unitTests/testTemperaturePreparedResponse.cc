@@ -1,6 +1,7 @@
 /** @file testTemperaturePreparedResponse.cc
  * @brief Native temperature response parity and direct coefficient-view contracts.
  */
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -138,11 +139,15 @@ TEST(TemperaturePreparedResponseTest, NativeResponseMatchesPowerAndHomogeneousSk
                         result.value = 0.0;
                         return result;
                     };
-                    const auto reference = physical_temperature_transport_system<Pack>(
-                        zero, flux, 0.1, material.density, material.specific_heat_capacity,
-                        material.thermal_conductivity, condition, [](int, size_t) { return 0.0; }, source, treatment,
-                        treatment == NonOrthogonalTreatment::Implicit ? nullptr : &zero, Teuchos::null,
-                        &frozen_boundary_k, &geometry, interpolation);
+                    using Factory = TransportSystemFactory<Pack, Handle>;
+                    const auto reference = Factory::assemble(
+                        Factory::TemperatureTerms{{zero, 0.1}, flux,
+                            {material.density, material.specific_heat_capacity, material.thermal_conductivity}, source},
+                        Factory::TemperatureBoundary{condition, [](int, size_t) { return 0.0; }, &frozen_boundary_k},
+                        Factory::TemperatureOptions{{},
+                            {treatment, treatment == NonOrthogonalTreatment::Implicit ? nullptr : &zero},
+                            interpolation},
+                        Factory::TemperatureContext{Teuchos::null, &geometry});
                     Pack::vector_type error(*response, Teuchos::Copy);
                     error.update(-1.0, *reference.rhs, 1.0);
                     EXPECT_LT(error.normInf(), 1e-11);

@@ -1,17 +1,21 @@
-#include <gtest/gtest.h>
-#include "FVM/SteadyDiagnostics.hh"
 #include "FVM/FaceFlux.hh"
+#include "FVM/SteadyDiagnostics.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
-#include "utils/testing_environment.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
-#include <limits>
 #include <cfenv>
+#include <gtest/gtest.h>
+#include <limits>
+#include <type_traits>
 #if defined(__SSE__)
 #include <xmmintrin.h>
 #endif
 namespace {
 using Pack = SimpleFluid::DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Scalar = SimpleFluid::ScalarCellFieldStored<Pack>;
 using Vector = SimpleFluid::VectorCellFieldStored<Pack>;
@@ -29,14 +33,20 @@ TEST(SteadyDiagnostics, NativeBalancePerturbationAndTimeStepIndependence)
  auto m=mesh(); Scalar q(m,"q"), storage(m,"storage"), adv(m,"adv"), diffusion(m,"diffusion");
  Flux flux(m,"flux"); q.put_value(2.); storage.put_value(3.); adv.put_value(1.); diffusion.put_value(0.); flux.put_value(0.);
  q.sync_ghosts();storage.sync_ghosts();adv.sync_ghosts();diffusion.sync_ghosts();flux.sync_ghosts();
- auto assemble=[&](double dt) {
-  FieldStoredWeightedScalarTransportRequest<Pack,Mesh> request{
-    .old_values=q,.face_fluxes=flux,.time_step=dt,.storage_weight=storage,.advection_weight=adv,.diffusivity=diffusion,
-    .boundary_condition=[](int,size_t){return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann,0.};},
-    .boundary_value=[](int,size_t){return 0.;},.source=[](auto){return 4.;},
-    .treatment=NonOrthogonalTreatment::Explicit,
-    .discretization={.mode=AssemblyMode::Steady},.implicit_sink=[](auto){return 2.;}};
-  return weighted_scalar_transport_system<Pack>(request);
+ auto assemble = [&](double dt)
+ {
+     return TransportFactory<decltype(q)>::assemble(
+         typename TransportFactory<decltype(q)>::WeightedScalarTerms{.history = {.old_values = q, .time_step = dt},
+             .face_fluxes = flux,
+             .coefficients = {.storage_weight = storage, .advection_weight = adv, .diffusivity = diffusion},
+             .sources = {.source = [](auto) { return 4.; }, .implicit_sink = [](auto) { return 2.; }},
+             .constraints = {}},
+         {.condition = [](int, size_t)
+             { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+             .value = [](int, size_t) { return 0.; }},
+         {.discretization = {.mode = AssemblyMode::Steady},
+             .correction = {.treatment = NonOrthogonalTreatment::Explicit}},
+         {});
  };
  auto a=assemble(0.01), b=assemble(100.);
  std::vector<double> volumes(m->num_owned_cells(),1.);
@@ -55,13 +65,21 @@ TEST(SteadyDiagnostics, LegacyScalarBalanceAndTimeStepIndependence)
 {
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
  SimpleFluid::CellField<Pack> q(m,2.),storage(m,3.),adv(m,1.),diffusion(m,0.);SimpleFluid::FaceField<Pack> flux(m,0.);
- auto assemble=[&](double dt){
- WeightedScalarTransportRequest<Pack> request{.old_values=q,.face_fluxes=flux,.time_step=dt,
- .storage_weight=storage,.advection_weight=adv,.diffusivity=diffusion,
- .boundary_condition=[](int,size_t){return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann,0.};},
- .boundary_value=[](int,size_t){return 0.;},.source=[](auto){return 4.;},.treatment=NonOrthogonalTreatment::Explicit,
- .discretization={.mode=AssemblyMode::Steady},.implicit_sink=[](auto){return 2.;}};
- return weighted_scalar_transport_system<Pack>(request);};
+ auto assemble = [&](double dt)
+ {
+     return TransportFactory<decltype(q)>::assemble(
+         typename TransportFactory<decltype(q)>::WeightedScalarTerms{.history = {.old_values = q, .time_step = dt},
+             .face_fluxes = flux,
+             .coefficients = {.storage_weight = storage, .advection_weight = adv, .diffusivity = diffusion},
+             .sources = {.source = [](auto) { return 4.; }, .implicit_sink = [](auto) { return 2.; }},
+             .constraints = {}},
+         {.condition = [](int, size_t)
+             { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+             .value = [](int, size_t) { return 0.; }},
+         {.discretization = {.mode = AssemblyMode::Steady},
+             .correction = {.treatment = NonOrthogonalTreatment::Explicit}},
+         {});
+ };
  auto a=assemble(0.01),b=assemble(10.);std::vector<double> volumes;
  for(size_t i=0;i<m->num_owned_cells();++i)volumes.push_back(m->cell_volume(static_cast<Pack::local_ordinal_type>(i)));
  auto ra=steady_residual_report<Pack>(*a.matrix,*a.rhs,q.vector(),volumes);
@@ -73,14 +91,38 @@ TEST(SteadyDiagnostics, LegacyPhysicalMomentumAndThermalOmitStorage)
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
  SimpleFluid::VectorCellField<Pack> u(m,SimpleFluid::vec3<double>{2.,3.,4.});
  SimpleFluid::CellField<Pack> temperature(m,2.),rho(m,3.),cp(m,4.),zero(m,0.);SimpleFluid::FaceField<Pack> flux(m,0.);
- auto momentum=[&](double dt){return physical_momentum_transport_system<Pack>(u,flux,dt,zero,1.,
-  [](int,size_t){return SimpleFluid::vec3<double>{2.,3.,4.};},[](auto){return SimpleFluid::vec3<double>{1.,2.,3.};},
-  NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,detail::AlwaysDiffuseBoundary{},nullptr,nullptr,
-  FaceCoefficientInterpolation::Harmonic,AssemblyMode::Steady);};
- auto thermal=[&](double dt){return physical_temperature_transport_system<Pack>(temperature,flux,dt,rho,cp,zero,
-  [](int,size_t){return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann,0.};},
-  [](int,size_t){return 0.;},[](auto){return 4.;},NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,
-  nullptr,nullptr,FaceCoefficientInterpolation::Harmonic,AssemblyMode::Steady);};
+ auto momentum = [&](double dt)
+ {
+     return TransportFactory<decltype(u)>::assemble(
+         typename TransportFactory<decltype(u)>::MomentumTerms{.history = {.old_values = u, .time_step = dt},
+             .face_fluxes = flux,
+             .material = {.dynamic_viscosity = zero, .reference_density = 1.},
+             .acceleration_source = [](auto) { return SimpleFluid::vec3<double>{1., 2., 3.}; }},
+         {.value = [](int, size_t) { return SimpleFluid::vec3<double>{2., 3., 4.}; },
+             .diffusion = detail::AlwaysDiffuseBoundary{},
+             .coefficients = nullptr},
+         {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+             .mode = AssemblyMode::Steady},
+         {.cached_matrix = Teuchos::null, .geometry_cache = nullptr});
+ };
+ auto thermal = [&](double dt)
+ {
+     return TransportFactory<decltype(temperature)>::assemble(
+         typename TransportFactory<decltype(temperature)>::TemperatureTerms{
+             .history = {.old_values = temperature, .time_step = dt},
+             .face_fluxes = flux,
+             .material = {.density = rho, .specific_heat_capacity = cp, .thermal_conductivity = zero},
+             .power_density = [](auto) { return 4.; }},
+         {.condition = [](int, size_t)
+             { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+             .value = [](int, size_t) { return 0.; },
+             .coefficients = nullptr},
+         {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+             .mode = AssemblyMode::Steady},
+         {.cached_matrix = Teuchos::null, .geometry_cache = nullptr});
+ };
  auto a=momentum(0.01),b=momentum(10.);auto ta=thermal(0.01),tb=thermal(10.);std::vector<double> volumes;
  for(size_t i=0;i<m->num_owned_cells();++i)volumes.push_back(m->cell_volume(static_cast<Pack::local_ordinal_type>(i)));
  for(int c=0;c<3;++c){
@@ -97,14 +139,43 @@ TEST(SteadyDiagnostics, PhysicalMomentumAndThermalOmitStorage)
  auto m=mesh();Vector u(m,"u"); Scalar temperature(m,"T"),rho(m,"rho"),cp(m,"cp"),zero(m,"zero");Flux flux(m,"flux");
  u.put_value({2.,3.,4.});temperature.put_value(2.);rho.put_value(3.);cp.put_value(4.);zero.put_value(0.);flux.put_value(0.);
  u.sync_ghosts();temperature.sync_ghosts();rho.sync_ghosts();cp.sync_ghosts();zero.sync_ghosts();flux.sync_ghosts();
- auto momentum=[&](double dt){return physical_momentum_transport_system<Pack>(u,flux,dt,zero,1.,
-  [](int,size_t){return SimpleFluid::vec3<double>{2.,3.,4.};},[](auto){return SimpleFluid::vec3<double>{1.,2.,3.};},
-  NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,detail::AlwaysDiffuseBoundary{},nullptr,nullptr,
-  FaceCoefficientInterpolation::Harmonic,nullptr,nullptr,{},AssemblyMode::Steady);};
- auto thermal=[&](double dt){return physical_temperature_transport_system<Pack>(temperature,flux,dt,rho,cp,zero,
-  [](int,size_t){return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann,0.};},
-  [](int,size_t){return 0.;},[](auto){return 4.;},NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,
-  nullptr,nullptr,FaceCoefficientInterpolation::Harmonic,nullptr,nullptr,nullptr,false,AssemblyMode::Steady);};
+ auto momentum = [&](double dt)
+ {
+     return TransportFactory<decltype(u)>::assemble(
+         typename TransportFactory<decltype(u)>::MomentumTerms{.history = {.old_values = u, .time_step = dt},
+             .face_fluxes = flux,
+             .material = {.dynamic_viscosity = zero, .reference_density = 1.},
+             .acceleration_source = [](auto) { return SimpleFluid::vec3<double>{1., 2., 3.}; }},
+         {.value = [](int, size_t) { return SimpleFluid::vec3<double>{2., 3., 4.}; },
+             .diffusion = detail::AlwaysDiffuseBoundary{},
+             .coefficients = nullptr,
+             .zero_gradient_stress = {}},
+         {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
+             .mode = AssemblyMode::Steady},
+         {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = nullptr, .gradient_workspace = nullptr});
+ };
+ auto thermal = [&](double dt)
+ {
+     return TransportFactory<decltype(temperature)>::assemble(
+         typename TransportFactory<decltype(temperature)>::TemperatureTerms{
+             .history = {.old_values = temperature, .time_step = dt},
+             .face_fluxes = flux,
+             .material = {.density = rho,
+                 .specific_heat_capacity = cp,
+                 .thermal_conductivity = zero,
+                 .old_density = nullptr,
+                 .old_specific_heat_capacity = nullptr},
+             .power_density = [](auto) { return 4.; }},
+         {.condition = [](int, size_t)
+             { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+             .value = [](int, size_t) { return 0.; },
+             .coefficients = nullptr},
+         {.discretization = {.mode = AssemblyMode::Steady},
+             .correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic},
+         {.cached_matrix = Teuchos::null, .geometry_cache = nullptr, .ale = nullptr});
+ };
  const auto a=momentum(0.01),b=momentum(10.);const auto ta=thermal(0.01),tb=thermal(10.);
  std::vector<double> volumes(m->num_owned_cells(),1.);
  for(int c=0;c<3;++c){

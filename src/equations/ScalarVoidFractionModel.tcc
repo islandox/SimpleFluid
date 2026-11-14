@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 
 namespace SimpleFluid
@@ -207,18 +208,16 @@ void ScalarVoidFractionModel<Pack, MeshType>::diffuse(scalar_type time_step)
         return scalar_type{};
     };
 
-    auto system = FVM::weighted_scalar_transport_system<Pack>(
-        FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
-            .old_values = d_alpha_g,
+    auto system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{.history = {d_alpha_g, time_step},
             .face_fluxes = zero_flux,
-            .time_step = time_step,
-            .storage_weight = unit_weight,
-            .advection_weight = unit_weight,
-            .diffusivity = diffusivity,
-            .boundary_condition = zero_neumann,
-            .boundary_value = zero_boundary_value,
-            .source = zero_source,
-            .treatment = FVM::NonOrthogonalTreatment::Explicit,
+            .coefficients = {unit_weight, unit_weight, diffusivity},
+            .sources = {.source = zero_source}},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarBoundary{
+            .condition = zero_neumann, .value = zero_boundary_value},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
+            .correction = {FVM::NonOrthogonalTreatment::Explicit, nullptr}},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext{
             .geometry_cache = &*d_transport_geometry_cache});
     field_type solution(d_mesh, "alpha_diffusion_solution");
     const auto statistics =

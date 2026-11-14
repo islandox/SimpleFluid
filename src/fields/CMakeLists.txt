@@ -1,5 +1,8 @@
 add_library(SimpleFluidFields STATIC
     explicit_instantiation/MeshToMeshTransfer.cc
+    explicit_instantiation/FieldStored.cc
+    explicit_instantiation/FieldStoredPartitionedCartesian.cc
+    explicit_instantiation/FieldStoredSolidSubdomain.cc
 )
 add_library(SimpleFluid::Fields ALIAS SimpleFluidFields)
 simplefluid_configure_component(SimpleFluidFields)

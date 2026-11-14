@@ -9,8 +9,9 @@
  *
  */
 
-#include "solvers/IncompressibleIsothermalSolver.hh"
 #include "FVM/TransportSystem.hh"
+#include "FVM/TransportSystemFactory.hh"
+#include "solvers/IncompressibleIsothermalSolver.hh"
 
 #include "solvers/unitTests/CoupledBackendTestSupport.hh"
 #include <gtest/gtest.h>
@@ -355,10 +356,9 @@ TEST(IncompressibleIsothermalSolverTest, ZeroGradientOutletStressMatchesManufact
         {
             SimpleFluid::FVM::BoundaryFaceSelector selector;
             if (enabled) selector=is_x_face;
-            return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(velocity,flux,0.1,viscosity,1.0,
-                boundary,zero,SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,nullptr,Teuchos::null,
-                diffusion,nullptr,nullptr,SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic,
-                nullptr,nullptr,selector);
+            using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, SimpleFluid::MeshHandle<Pack>>;
+            return Factory::assemble(Factory::MomentumTerms{{velocity, 0.1}, flux, {viscosity, 1.0}, zero},
+                Factory::MomentumBoundary{boundary, diffusion, nullptr, selector}, Factory::MomentumOptions{});
         };
         const auto traction_free=assemble(false);
         const auto zero_gradient=assemble(true);

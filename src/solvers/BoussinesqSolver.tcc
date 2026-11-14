@@ -9,6 +9,8 @@
  *
  */
 
+// This implementation owns direct diagnostic/custom-cache pressure-kernel instantiations.
+#include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
 #include "BoussinesqSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 #include "solvers/FieldStateTransaction.hh"

@@ -13,7 +13,7 @@
 #include "FVM/DiffusionSystem.hh"
 #include "FVM/NonOrthogonalConvergenceOptions.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
-#include "FVM/details/FieldStoredNonOrthogonalDiffusion.hh"
+#include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "fields/FieldStored.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -179,7 +179,7 @@ bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::
     if (treatment == NonOrthogonalTreatment::Implicit)
     {
         return solve_implicit_diffusion_corrections<Pack>(mesh, diffusivity, solution,
-            [&](const auto& correction) { return stored_non_orthogonal_diffusion_system<Pack>(
+            [&](const auto& correction) { return ::SimpleFluid::FVM::non_orthogonal_diffusion_system<Pack>(
                 mesh, diffusivity, boundary_condition, right_hand_source, treatment, &correction); },
             [&] { solution.sync_ghosts(); }, linear_options, correction_options);
     }
@@ -193,17 +193,17 @@ bool solve_stored_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::
         DiffusionSystem<Pack> system;
         if (treatment == NonOrthogonalTreatment::Explicit)
         {
-            system = stored_non_orthogonal_diffusion_system<Pack>(mesh, diffusivity, boundary_condition,
+            system = ::SimpleFluid::FVM::non_orthogonal_diffusion_system<Pack>(mesh, diffusivity, boundary_condition,
                 right_hand_source, treatment, corrector == 0 ? nullptr : &solution);
         }
         else if (corrector == 0)
         {
-            system = stored_implicit_diffusion_system<Pack>(
+            system = ::SimpleFluid::FVM::implicit_non_orthogonal_diffusion_system<Pack>(
                 mesh, diffusivity, boundary_condition, right_hand_source, scalar_type{0.5}, &solution);
         }
         else
         {
-            system = stored_non_orthogonal_diffusion_system<Pack>(
+            system = ::SimpleFluid::FVM::non_orthogonal_diffusion_system<Pack>(
                 mesh, diffusivity, boundary_condition, right_hand_source, treatment, &solution);
         }
         if (!solve_system(std::move(system)))

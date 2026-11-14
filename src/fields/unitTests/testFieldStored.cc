@@ -284,3 +284,64 @@ TEST(FieldStoredTest, SnapshotRestoresLogicalNonconstantStrideColumns)
         EXPECT_DOUBLE_EQ(backing.getData(3)[row], 19.0);
     }
 }
+
+namespace
+{
+template<class Stored>
+void expect_compiled_field_constructors(
+    const SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>& mesh, const typename Stored::value_type& initial,
+    const std::array<double, Stored::num_components>& expected)
+{
+    using Descriptor = typename Stored::descriptor_type;
+    Stored descriptor_zero(Descriptor{"descriptor_zero"}, mesh, true);
+    Stored mesh_zero(mesh, "mesh_zero", true);
+    Stored descriptor_initial(Descriptor{"descriptor_initial"}, mesh, initial);
+    Stored mesh_initial(mesh, initial, "mesh_initial");
+    EXPECT_EQ(descriptor_zero.mesh_ptr().get(), mesh.get());
+    EXPECT_EQ(mesh_initial.mesh_ptr().get(), mesh.get());
+    EXPECT_NE(descriptor_zero.id(), mesh_zero.id());
+    EXPECT_NE(descriptor_initial.id(), mesh_initial.id());
+    for (const auto* field : {&descriptor_zero, &mesh_zero})
+    {
+        const auto owned = field->owned_read_view();
+        const auto overlap = field->local_read_view();
+        for (size_t component = 0; component < Stored::num_components; ++component)
+        {
+            for (size_t row = 0; row < field->num_owned_entries(); ++row)
+                EXPECT_DOUBLE_EQ(owned(row, component), 0.0);
+            for (size_t row = 0; row < field->num_local_entries(); ++row)
+                EXPECT_DOUBLE_EQ(overlap(row, component), 0.0);
+        }
+    }
+    descriptor_zero.put_value(initial);
+    mesh_zero.put_scalar(initial);
+    for (const auto* field : {&descriptor_zero, &mesh_zero, &descriptor_initial, &mesh_initial})
+    {
+        const auto owned = field->owned_read_view();
+        const auto overlap = field->local_read_view();
+        for (size_t component = 0; component < Stored::num_components; ++component)
+        {
+            for (size_t row = 0; row < field->num_owned_entries(); ++row)
+                EXPECT_DOUBLE_EQ(owned(row, component), expected[component]);
+            for (size_t row = 0; row < field->num_local_entries(); ++row)
+                EXPECT_DOUBLE_EQ(overlap(row, component), expected[component]);
+        }
+    }
+}
+} // namespace
+
+TEST(FieldStoredTest, CompiledProvidersCoverEveryDefaultAliasAndConstructor)
+{
+    const auto mesh = make_handle();
+    using namespace SimpleFluid;
+    expect_compiled_field_constructors<ScalarCellFieldStored<>>(mesh, 5.0, {5.0});
+    expect_compiled_field_constructors<VectorCellFieldStored<>>(mesh, {2.0, 3.0, 5.0}, {2.0, 3.0, 5.0});
+    expect_compiled_field_constructors<TensorCellFieldStored<>>(mesh,
+        {{{2.0, 3.0, 5.0}, {7.0, 11.0, 13.0}, {17.0, 19.0, 23.0}}},
+        {2.0, 3.0, 5.0, 7.0, 11.0, 13.0, 17.0, 19.0, 23.0});
+    expect_compiled_field_constructors<ScalarFaceFieldStored<>>(mesh, 7.0, {7.0});
+    expect_compiled_field_constructors<VectorFaceFieldStored<>>(mesh, {7.0, 11.0, 13.0}, {7.0, 11.0, 13.0});
+    expect_compiled_field_constructors<ScalarBoundaryFaceFieldStored<>>(mesh, 11.0, {11.0});
+    expect_compiled_field_constructors<VectorBoundaryFaceFieldStored<>>(
+        mesh, {17.0, 19.0, 23.0}, {17.0, 19.0, 23.0});
+}

@@ -2,9 +2,12 @@
  * @file testStoredTransportReuse.cc
  * @brief  Repeated mapped transport and immutable graph contracts.
  */
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
+#include <type_traits>
 
 #include "FVM/Operators.hh"
+#include "transport_providers/TestMeshes.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
@@ -22,6 +25,8 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::FVM;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using Scalar = ScalarCellFieldStored<Pack>;
 using Flux = ScalarFaceFieldStored<Pack>;
@@ -106,27 +111,26 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
         const auto assemble = [&](Teuchos::RCP<Pack::matrix_type> cached, Plan* selected_plan,
                                   Teuchos::RCP<Pack::vector_type> cached_rhs = Teuchos::null)
         {
-            return weighted_scalar_transport_system<Pack>(MeshWeightedScalarTransportRequest<Pack, Handle>{
-                .old_values = values,
-                .face_fluxes = flux,
-                .time_step = 0.5,
-                .storage_weight = storage,
-                .advection_weight = storage,
-                .diffusivity = diffusion,
-                .boundary_condition = [&](int batch, size_t)
-                {
-                    return BoundaryCondition{(batch + generation) % 2 ? BoundaryConditionType::Dirichlet
-                                                                                     : BoundaryConditionType::Neumann,
-                        0.125 * generation};
-                },
-                .boundary_value = [&](int, size_t) { return 0.75 + generation; },
-                .source = [](LO) { return 0.125; },
-                .treatment = NonOrthogonalTreatment::Hybrid,
-                .correction_field = &values,
-                .cached_matrix = std::move(cached),
-                .geometry_cache = &geometry,
-                .symbolic_plan = selected_plan,
-                .cached_rhs = std::move(cached_rhs)});
+            return TransportFactory<decltype(values)>::assemble(
+                typename TransportFactory<decltype(values)>::WeightedScalarTerms{
+                    .history = {.old_values = values, .time_step = 0.5},
+                    .face_fluxes = flux,
+                    .coefficients = {.storage_weight = storage, .advection_weight = storage, .diffusivity = diffusion},
+                    .sources = {.source = [](LO) { return 0.125; }},
+                    .constraints = {}},
+                {.condition =
+                        [&](int batch, size_t)
+                    {
+                        return BoundaryCondition{(batch + generation) % 2 ? BoundaryConditionType::Dirichlet
+                                                                          : BoundaryConditionType::Neumann,
+                            0.125 * generation};
+                    },
+                    .value = [&](int, size_t) { return 0.75 + generation; }},
+                {.correction = {.treatment = NonOrthogonalTreatment::Hybrid, .lagged_field = &values}},
+                {.cached_matrix = std::move(cached),
+                    .geometry_cache = &geometry,
+                    .symbolic_plan = selected_plan,
+                    .cached_rhs = std::move(cached_rhs)});
         };
         const auto fresh = assemble(Teuchos::null, nullptr);
         const auto reused = assemble(matrix, &plan, rhs);
@@ -153,15 +157,7 @@ TEST(StoredTransportReuseTest, FrozenGraphRefreshesNumericAndBoundaryInputs)
 TEST(StoredTransportReuseTest, SymbolicPlanValidatesChangedGraphsEpochsAndRankCategories)
 {
     const auto mesh = make_mesh();
-    struct EpochMesh
-    {
-        const Handle& mesh;
-        std::uint64_t epoch = 0;
-        auto owned_cell_map() const { return mesh.owned_cell_map(); }
-        auto overlap_cell_map() const { return mesh.overlap_cell_map(); }
-        auto num_owned_cells() const { return mesh.num_owned_cells(); }
-        auto geometry_epoch() const { return epoch; }
-    } epoch_mesh{*mesh};
+    test::transport_providers::EpochMesh epoch_mesh{*mesh};
     std::vector<Row> rows(mesh->num_owned_cells());
     for (size_t row = 0; row < rows.size(); ++row)
     {
@@ -246,14 +242,22 @@ TEST(StoredTransportReuseTest, MomentumScratchRecomputesGradientsAndRejectsForei
         viscosity.sync_ghosts();
         const auto assemble = [&](Tensor* workspace)
         {
-            return physical_momentum_transport_system<Pack>(velocity, flux, 0.5, viscosity, 2.0,
-                [&](int batch, size_t face)
-                {
-                    return velocity_at(mesh->face_centroid(mesh->boundary_face_batch(batch).face_lids[face]));
-                },
-                [](LO) { return Handle::Vec3{}; }, NonOrthogonalTreatment::Hybrid, &velocity, Teuchos::null,
-                [](int batch, size_t) { return batch % 2 == 0; }, nullptr, &geometry,
-                FaceCoefficientInterpolation::Linear, nullptr, workspace);
+            return TransportFactory<decltype(velocity)>::assemble(
+                typename TransportFactory<decltype(velocity)>::MomentumTerms{
+                    .history = {.old_values = velocity, .time_step = 0.5},
+                    .face_fluxes = flux,
+                    .material = {.dynamic_viscosity = viscosity, .reference_density = 2.0},
+                    .acceleration_source = [](LO) { return Handle::Vec3{}; }},
+                {.value = [&](int batch, size_t face)
+                    { return velocity_at(mesh->face_centroid(mesh->boundary_face_batch(batch).face_lids[face])); },
+                    .diffusion = [](int batch, size_t) { return batch % 2 == 0; },
+                    .coefficients = nullptr},
+                {.correction = {.treatment = NonOrthogonalTreatment::Hybrid, .lagged_field = &velocity},
+                    .coefficient_interpolation = FaceCoefficientInterpolation::Linear},
+                {.cached_matrix = Teuchos::null,
+                    .geometry_cache = &geometry,
+                    .ale = nullptr,
+                    .gradient_workspace = workspace});
         };
         const auto fresh = assemble(nullptr);
         const auto retained = assemble(&scratch);
@@ -278,11 +282,21 @@ TEST(StoredTransportReuseTest, MomentumScratchRecomputesGradientsAndRejectsForei
     const auto foreign_mesh = make_mesh();
     Tensor foreign(foreign_mesh, "foreign");
     const auto rank = mesh->owned_cell_map()->getComm()->getRank();
-    EXPECT_THROW(physical_momentum_transport_system<Pack>(velocity, flux, 0.5, viscosity, 2.0,
-                     [](int, size_t) { return Handle::Vec3{}; }, [](LO) { return Handle::Vec3{}; },
-                     NonOrthogonalTreatment::Explicit, nullptr, Teuchos::null,
-                     FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &geometry,
-                     FaceCoefficientInterpolation::Linear, nullptr, rank == 0 ? &foreign : &scratch),
+    EXPECT_THROW(TransportFactory<decltype(velocity)>::assemble(
+                     typename TransportFactory<decltype(velocity)>::MomentumTerms{
+                         .history = {.old_values = velocity, .time_step = 0.5},
+                         .face_fluxes = flux,
+                         .material = {.dynamic_viscosity = viscosity, .reference_density = 2.0},
+                         .acceleration_source = [](LO) { return Handle::Vec3{}; }},
+                     {.value = [](int, size_t) { return Handle::Vec3{}; },
+                         .diffusion = FVM::detail::AlwaysDiffuseBoundary{},
+                         .coefficients = nullptr},
+                     {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+                         .coefficient_interpolation = FaceCoefficientInterpolation::Linear},
+                     {.cached_matrix = Teuchos::null,
+                         .geometry_cache = &geometry,
+                         .ale = nullptr,
+                         .gradient_workspace = rank == 0 ? &foreign : &scratch}),
         std::invalid_argument);
 }
 
@@ -336,9 +350,20 @@ TEST(StoredTransportReuseTest, PhysicalCapacitySharesWeightedAlgebraAndIndepende
         // each individual accepted-property fallback.
         flux.data().putScalar(0.0);
         flux.sync_ghosts();
-        const auto storage = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp, zero, boundary,
-            boundary_value, source, NonOrthogonalTreatment::Implicit, nullptr, Teuchos::null, nullptr, &geometry,
-            FaceCoefficientInterpolation::Harmonic, nullptr, accepted_density, accepted_cp);
+        const auto storage = TransportFactory<decltype(values)>::assemble(
+            typename TransportFactory<decltype(values)>::TemperatureTerms{
+                .history = {.old_values = values, .time_step = dt},
+                .face_fluxes = flux,
+                .material = {.density = density,
+                    .specific_heat_capacity = cp,
+                    .thermal_conductivity = zero,
+                    .old_density = accepted_density,
+                    .old_specific_heat_capacity = accepted_cp},
+                .power_density = source},
+            {.condition = boundary, .value = boundary_value, .coefficients = nullptr},
+            {.correction = {.treatment = NonOrthogonalTreatment::Implicit, .lagged_field = nullptr},
+                .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic},
+            {.cached_matrix = Teuchos::null, .geometry_cache = &geometry, .ale = nullptr});
         for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
         {
             const auto cell = static_cast<LO>(row);
@@ -371,29 +396,50 @@ TEST(StoredTransportReuseTest, PhysicalCapacitySharesWeightedAlgebraAndIndepende
                 {NonOrthogonalTreatment::Explicit, NonOrthogonalTreatment::Implicit, NonOrthogonalTreatment::Hybrid})
             {
                 const auto* correction = treatment == NonOrthogonalTreatment::Implicit ? nullptr : &values;
-                const auto weighted = weighted_scalar_transport_system<Pack>(
-                    MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = values,
+                const auto weighted = TransportFactory<decltype(values)>::assemble(
+                    typename TransportFactory<decltype(values)>::WeightedScalarTerms{
+                        .history = {.old_values = values, .time_step = dt},
                         .face_fluxes = flux,
-                        .time_step = dt,
-                        .storage_weight = capacity,
-                        .advection_weight = capacity,
-                        .diffusivity = diffusion,
-                        .boundary_condition = boundary,
-                        .boundary_value = boundary_value,
-                        .source = source,
-                        .treatment = treatment,
-                        .correction_field = correction,
-                        .geometry_cache = &geometry,
-                        .coefficient_interpolation = interpolation,
-                        .old_storage_weight = selection == 0 ? nullptr : &old_capacity});
-                const auto physical = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp,
-                    diffusion, boundary, boundary_value, source, treatment, correction, Teuchos::null, nullptr,
-                    &geometry, interpolation, nullptr, accepted_density, accepted_cp);
+                        .coefficients = {.storage_weight = capacity,
+                            .advection_weight = capacity,
+                            .diffusivity = diffusion,
+                            .old_storage_weight = selection == 0 ? nullptr : &old_capacity},
+                        .sources = {.source = source},
+                        .constraints = {}},
+                    {.condition = boundary, .value = boundary_value},
+                    {.correction = {.treatment = treatment, .lagged_field = correction},
+                        .coefficient_interpolation = interpolation},
+                    {.geometry_cache = &geometry});
+                const auto physical = TransportFactory<decltype(values)>::assemble(
+                    typename TransportFactory<decltype(values)>::TemperatureTerms{
+                        .history = {.old_values = values, .time_step = dt},
+                        .face_fluxes = flux,
+                        .material = {.density = density,
+                            .specific_heat_capacity = cp,
+                            .thermal_conductivity = diffusion,
+                            .old_density = accepted_density,
+                            .old_specific_heat_capacity = accepted_cp},
+                        .power_density = source},
+                    {.condition = boundary, .value = boundary_value, .coefficients = nullptr},
+                    {.correction = {.treatment = treatment, .lagged_field = correction},
+                        .coefficient_interpolation = interpolation},
+                    {.cached_matrix = Teuchos::null, .geometry_cache = &geometry, .ale = nullptr});
                 expect_same_system(physical, weighted);
                 physical.matrix->setAllToScalar(7.0);
-                const auto rhs_only = physical_temperature_transport_system<Pack>(values, flux, dt, density, cp,
-                    diffusion, boundary, boundary_value, source, treatment, correction, physical.matrix, nullptr,
-                    &geometry, interpolation, nullptr, accepted_density, accepted_cp, true);
+                const auto rhs_only = TransportFactory<decltype(values)>::refresh_temperature_rhs(
+                    typename TransportFactory<decltype(values)>::TemperatureTerms{
+                        .history = {.old_values = values, .time_step = dt},
+                        .face_fluxes = flux,
+                        .material = {.density = density,
+                            .specific_heat_capacity = cp,
+                            .thermal_conductivity = diffusion,
+                            .old_density = accepted_density,
+                            .old_specific_heat_capacity = accepted_cp},
+                        .power_density = source},
+                    {.condition = boundary, .value = boundary_value, .coefficients = nullptr},
+                    {.correction = {.treatment = treatment, .lagged_field = correction},
+                        .coefficient_interpolation = interpolation},
+                    {.cached_matrix = physical.matrix, .geometry_cache = &geometry, .ale = nullptr});
                 EXPECT_EQ(rhs_only.matrix.get(), physical.matrix.get());
                 for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
                 {

@@ -20,6 +20,7 @@ endif()
 # shared Kokkos/Teuchos/Tpetra runtime bridges out of embedded static archives.
 set(api_symbols)
 set(api_symbol_types)
+set(api_symbol_addresses)
 set(shared_trilinos_rtti_symbols)
 set(kokkos_count 0)
 set(tpetra_count 0)
@@ -34,9 +35,10 @@ foreach(symbol IN LISTS symbol_lines)
     if(symbol MATCHES "^[0-9A-Fa-f]+[ \t]+[^ \t]+[ \t]+(.+)@@SIMPLEFLUID_TRILINOS_RTTI_1[.]0$")
         list(APPEND shared_trilinos_rtti_symbols "${CMAKE_MATCH_1}")
     endif()
-    if(symbol MATCHES "^[0-9A-Fa-f]+[ \t]+([^ \t]+)[ \t]+(.+)@@SIMPLEFLUID_1[.]0$")
-        list(APPEND api_symbol_types "${CMAKE_MATCH_1}")
-        list(APPEND api_symbols "${CMAKE_MATCH_2}")
+    if(symbol MATCHES "^([0-9A-Fa-f]+)[ \t]+([^ \t]+)[ \t]+(.+)@@SIMPLEFLUID_1[.]0$")
+        list(APPEND api_symbol_addresses "${CMAKE_MATCH_1}")
+        list(APPEND api_symbol_types "${CMAKE_MATCH_2}")
+        list(APPEND api_symbols "${CMAKE_MATCH_3}")
     endif()
     if(symbol MATCHES "@@SIMPLEFLUID_KOKKOS_RUNTIME_1\\.0$")
         math(EXPR kokkos_count "${kokkos_count} + 1")
@@ -115,15 +117,73 @@ foreach(api IN ITEMS
         implicit_non_orthogonal_diffusion_system
         fully_implicit_non_orthogonal_diffusion_system
         non_orthogonal_diffusion_system
-        full_diffusion_residual
-        transport_system
-        non_orthogonal_transport_system
-        weighted_scalar_transport_system
-        physical_temperature_transport_system
-        physical_momentum_transport_system)
+        full_diffusion_residual)
     if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::FVM::${api}<")
         message(FATAL_ERROR "Missing versioned FVM export: ${api}")
     endif()
+endforeach()
+
+# The factory intentionally replaces all public positional/request transport APIs.
+foreach(retired IN ITEMS transport_system non_orthogonal_transport_system
+        weighted_scalar_transport_system physical_temperature_transport_system physical_momentum_transport_system)
+    if(demangled_names MATCHES "(^|\n)SimpleFluid::FVM::${retired}<")
+        message(FATAL_ERROR "Retired transport API remains exported: ${retired}")
+    endif()
+endforeach()
+
+# Require each exact family/backend entry point, including the two vector
+# boundary contracts and the separate temperature RHS refresh. Merely finding
+# one assemble symbol cannot establish the compiled overload inventory.
+string(REPLACE "\n" ";" factory_signatures "${demangled_full}")
+foreach(backend IN ITEMS Mesh MeshHandle PartitionedCartesian SolidSubdomain)
+    if(backend STREQUAL "PartitionedCartesian")
+        set(mesh_pattern "SimpleFluid::Meshes::PartitionedMesh<SimpleFluid::Meshes::OrthogonalCartesian3D,")
+    else()
+        set(mesh_pattern "SimpleFluid::${backend}<")
+    endif()
+    set(families Scalar Temperature RefreshTemperature)
+    if(NOT backend STREQUAL "SolidSubdomain")
+        list(APPEND families WeightedScalar Vector Momentum)
+    endif()
+    if(backend STREQUAL "Mesh")
+        list(APPEND families BasicVector)
+    endif()
+    foreach(family IN LISTS families)
+        set(method assemble)
+        set(terms "${family}Terms")
+        set(boundary "")
+        if(family STREQUAL "RefreshTemperature")
+            set(method refresh_temperature_rhs)
+            set(terms TemperatureTerms)
+        elseif(family STREQUAL "BasicVector")
+            set(terms VectorTerms)
+            set(boundary "BasicVectorTransportBoundary<")
+        elseif(family STREQUAL "Vector")
+            set(boundary "VelocityTransportBoundary<")
+        endif()
+        set(matched_addresses)
+        set(matched_signatures)
+        string(CONCAT overload_pattern
+            "^SimpleFluid::FVM::TransportSystemFactory<[^\n]+, ${mesh_pattern}"
+            "[^\n]+[ ]*::${method}[(]SimpleFluid::FVM::${terms}<")
+        foreach(index RANGE ${last_symbol})
+            list(GET factory_signatures ${index} signature)
+            if(signature MATCHES "${overload_pattern}"
+               AND (boundary STREQUAL "" OR signature MATCHES "${boundary}"))
+                list(GET api_symbol_addresses ${index} address)
+                list(APPEND matched_addresses "${address}")
+                list(APPEND matched_signatures "${signature}")
+            endif()
+        endforeach()
+        # GCC can export both current and compatibility manglings for a
+        # constrained member. They must resolve to the same compiled address.
+        list(REMOVE_DUPLICATES matched_addresses)
+        list(LENGTH matched_addresses matches)
+        if(NOT matches EQUAL 1)
+            message(FATAL_ERROR
+                "Expected one compiled factory ${family}/${backend}, found ${matches}: ${matched_signatures}")
+        endif()
+    endforeach()
 endforeach()
 
 # The iterative solves and the compiled preconditioner belong to the solver

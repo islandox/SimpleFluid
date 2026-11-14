@@ -6,17 +6,21 @@
  * @date 2026-09-10
  * @copyright Copyright (c) 2026
  */
-#include <gtest/gtest.h>
 #include "FVM/Operators.hh"
-#include "geometry/unitTests/region_mesh_helpers.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
+#include <gtest/gtest.h>
+#include <type_traits>
 namespace
 {
 using namespace SimpleFluid;
 using Pack=DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle=MeshHandle<>;
 testing::Environment* const environment=testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 real_t analytic(MeshUtils::Vec3 p) { return 1+p.x+2*p.y-0.5*p.z; }
@@ -50,9 +54,14 @@ TEST(MultiRegionTransportMultiRankTest, SeamFluxPreservesGlobalScalarInventory)
     for(size_t f=0;f<mesh->num_owned_faces();++f)
         if(std::abs(mesh->face_centroid(f).x-1)<1e-12 && std::abs(mesh->face_normal(f).x)>0.5) flux.set_owned_value(f,0.125);
     old.sync_ghosts(); flux.sync_ghosts();
-    auto system=FVM::transport_system<Pack>(old,flux,0.1,0.0,
-        [](int,size_t){return BoundaryCondition{BoundaryConditionType::Neumann,0};},
-        [](int,size_t){return 0.0;},[](int){return 0.0;});
+    auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.1},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.0},
+            .source = [](int) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+            .value = [](int, size_t) { return 0.0; }},
+        {}, {});
     Pack::vector_type result(mesh->owned_cell_map(),true); BelosLinearSolver<> solver;
     LinearSolverOptions options; options.tolerance=1e-12;
     ASSERT_TRUE(solver.solve(system.matrix,*system.rhs,result,options));
@@ -106,9 +115,14 @@ TEST(MultiRegionTransportMultiRankTest, NonconformingSeamTransportConservesInven
         if(std::abs(mesh->face_centroid(f).x-1)<1e-12 && std::abs(mesh->face_normal(f).x)>0.5)
             flux.set_owned_value(f,0.25*mesh->face_area_vector(f).x);
     old.sync_ghosts(); flux.sync_ghosts();
-    auto system=FVM::transport_system<Pack>(old,flux,0.1,0.0,
-        [](int,size_t){return BoundaryCondition{BoundaryConditionType::Neumann,0};},
-        [](int,size_t){return 0.0;},[](int){return 0.0;});
+    auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.1},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.0},
+            .source = [](int) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+            .value = [](int, size_t) { return 0.0; }},
+        {}, {});
     Pack::vector_type result(mesh->owned_cell_map(),true); BelosLinearSolver<> solver;
     ASSERT_TRUE(solver.solve(system.matrix,*system.rhs,result));
     const auto values=result.getData(); real_t local[3]{},global[3]{};

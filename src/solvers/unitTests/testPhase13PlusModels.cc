@@ -9,6 +9,7 @@
  *
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include "FiniteBoussMixtureTestSupport.hh"
 #include <gtest/gtest.h>
 #include <memory>
@@ -2032,31 +2033,13 @@ TEST(ScalarSourceDecayTransportTest,
         return 0.0;
     };
     constexpr double time_step = 0.05;
-    const auto corrected_system =
-        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-            old_concentration,
-            zero_flux,
-            time_step,
-            alpha_l,
-            alpha_l,
-            diffusion_weight,
-            boundary_condition,
-            boundary_value,
-            zero_source,
-            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
-            &old_concentration);
-    const auto orthogonal_system =
-        SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
-            old_concentration,
-            zero_flux,
-            time_step,
-            alpha_l,
-            alpha_l,
-            diffusion_weight,
-            boundary_condition,
-            boundary_value,
-            zero_source,
-            SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
+    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, MeshType>;
+    const Factory::WeightedScalarTerms terms{
+        {old_concentration, time_step}, zero_flux, {alpha_l, alpha_l, diffusion_weight}, {zero_source}};
+    const Factory::WeightedScalarBoundary boundary{boundary_condition, boundary_value};
+    const auto corrected_system = Factory::assemble(terms, boundary,
+        Factory::WeightedScalarOptions{{}, {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &old_concentration}});
+    const auto orthogonal_system = Factory::assemble(terms, boundary, Factory::WeightedScalarOptions{});
     FieldType corrected_solution(mesh, "corrected_solution");
     FieldType orthogonal_solution(mesh, "orthogonal_solution");
     SimpleFluid::BelosLinearSolver<Pack> transport_solver;

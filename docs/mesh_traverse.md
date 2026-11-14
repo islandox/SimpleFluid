@@ -520,9 +520,12 @@ The follow-up removal of duplicate adjacency storage is recorded in
 
 ## Transport system construction
 
-Scalar and vector transport, weighted scalar transport, physical temperature,
-and physical momentum builders use the same ordered row/face traversal for
-legacy and stored fields. Each row's retained incidence is split into contiguous
+`FVM::TransportSystemFactory<Pack, MeshType>` assembles scalar, vector,
+weighted-scalar, physical-temperature, and physical-momentum systems from
+by-value terms, boundary, options, and context packs. Its supported legacy and
+stored paths use the same ordered row/face traversal. See the
+[factory contract](architecture/transport_system_factory.md) for pack lifetimes,
+backend/family availability, defaults, examples, and downstream migration. Each row's retained incidence is split into contiguous
 runs by interior/physical-boundary/untagged-exterior category and owner
 orientation. Category and orientation dispatch occurs once per run; numerical
 face callbacks see compile-time flags. Upwind, coefficient, boundary-condition,
@@ -574,13 +577,12 @@ Consequences:
   This turns a stale-index bug into a failed assembly instead of silently
   reading another face's metrics.
 
-The supported mapped `weighted_scalar_transport_system` request entry point
-(`FVM::weighted_scalar_transport_system<DefaultTpetraTypes,
-MeshHandle<DefaultTpetraTypes>>`)
-is explicitly instantiated in the FVM library and declared `extern template` in
-`FVM/TransportSystem.hh`. Equation translation units therefore link the one
-compiled assembly body instead of instantiating it per consumer and per geometry
-backend. Caller-defined mesh types and Tpetra packs keep the inline template.
+The supported mapped weighted-scalar factory overload for
+`TransportSystemFactory<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>`
+is explicitly instantiated in the FVM library. The factory declaration header
+does not expose its assembly implementation, so equation translation units
+reference the compiled body. Custom mesh/type-pack providers opt into
+`FVM/TransportSystemFactory.tcc` and instantiate the required member overloads.
 
 The legacy uniform scalar/vector builders still apply boundary conditions
 after the row pass. Their preclassified boundary descriptors preserve the
@@ -609,41 +611,67 @@ ALE/rollback and two-rank collective tests cover the migration.
 
 ## Transport assembly providers
 
-The default transport providers in `FVM/explicit_instantiation/` compile
-geometry caches, mapped weighted transport, legacy weighted transport,
-physical temperature, physical momentum, and basic scalar/vector assembly in
-separate translation units. The existing public entry points and supported
-type packs are unchanged. Custom packs continue to provide their own
-instantiations by including `FVM/TransportSystem.tcc`.
+The default providers in `FVM/explicit_instantiation/` compile individual
+`TransportSystemFactory` overloads in the owning family/backend groups, with
+geometry-cache providers kept separate. Ordinary consumers include
+`FVM/TransportSystemFactory.hh`; both legacy custom packs and mapped custom
+mesh/type-pack providers include `FVM/TransportSystemFactory.tcc`. The public
+transport free functions and flat weighted requests have been removed; source
+consumers must migrate and rebuild. The
+[factory contract](architecture/transport_system_factory.md#providers-exports-and-source-migration)
+lists the compiled overload matrix and provider examples.
 
-The default legacy weighted overloads and mapped named-request overload have
-`extern template` declarations in the public header. Their dedicated providers
-own the assembly bodies; compatibility wrappers and other providers must
-reference those bodies without emitting additional implicit instantiations.
+Declaration-only factory headers do not enumerate redundant `extern template`
+declarations. The default legacy weighted-scalar suppression stays in
+`TransportSystem.tcc`, where other implementation providers can otherwise emit
+competing bodies under ThinLTO. Static Cartesian overloads retain targeted
+public export visibility despite hidden geometry template arguments.
+Class/struct suppressions with reachable inline definitions and explicit
+specialization declarations retain their separate ownership roles.
 
 Ninja serializes compilation of the FVM target through its dedicated compile
 pool. The split bounds the instantiation work in each process; it does not
 remove repeated parsing or establish a compile-time or memory speedup.
 
-Basic legacy scalar and vector transport use one compiled matrix/traversal
-kernel per type pack. A concrete RHS adapter selects scalar or vector work
-once per cell or physical boundary; the interior face loop is shared. Vector
-transport builds the matrix once and fills its three RHS components together.
-Source and boundary callback order, cache validation and boundary policies
-retain their existing contracts.
+Basic legacy scalar and vector transport use typed RHS adapters around a
+shared face-row matrix kernel. Scalar/vector selection occurs at the public
+entry point, so cell and boundary RHS work has no access-mode check. The
+numerical face kernel is compiled once per type pack; the small outer
+traversals have scalar and vector specializations. Vector transport builds the
+matrix once and fills its three RHS components together. Source and boundary
+callback order, cache validation and boundary policies retain their contracts.
 
-Mapped weighted and physical-temperature assembly pass the same concrete
-coefficient-access type to their shared kernel. Each channel borrows an
-overlap view and reads either one field or a product of two fields through
-inline control flow. Temperature uses density times heat capacity for current
-storage and advection, independent accepted-old factors for old storage, and
-conductivity for diffusion. No coefficient fields are materialized.
+The scalar/vector RHS adapters have their own `FVM/details/TransportRhs`
+file group: `.hh` declarations/layout, `.ipp` inline cell/boundary updates and
+caller-dependent Neumann definitions, and `.tcc` allocation/view-acquisition
+and error paths. `FVM/explicit_instantiation/TransportRhs.cc` provides both
+default-pack adapters inside the FVM DSO, without exporting detail symbols.
+Hot updates remain inline-visible. The factory implementation include reaches
+`TransportSystem.tcc` and its RHS `.tcc`, so custom type-pack providers retain
+the complete implementation route.
 
-Both default mapped temperature overloads are compiled alongside the mapped
-weighted request in `MappedWeightedTransportSystem.cc`, sharing one kernel
-specialization. Generic mesh/type-pack wrappers remain available. Boundary
-policies, collective validation, accepted-old fallback and RHS-only matrix
-preservation retain their existing contracts.
+Mapped weighted and physical-temperature assembly share validation, callback
+staging, geometry preparation, correction and matrix finalization. Coefficient
+validation and numerical row traversal dispatch outside their loops to exactly
+two policies: independent direct weights, or physical temperature capacity.
+Direct and product views have separate accessor types with no per-read mode
+selection. Physical cell advection reuses the current storage capacity;
+accepted-old density and heat-capacity factors still fall back independently.
+Diffusion is a direct view shared by both policies, including explicit
+correction and prepared temperature response setup. No coefficient fields are
+materialized and no indirect per-face coefficient calls are introduced.
+
+The default mapped temperature assembly and RHS-refresh members compile
+alongside the mapped weighted-scalar factory overload in
+`MappedWeightedTransportSystem.cc`. The preparation kernel
+remains one specialization, while only its validation and numerical traversals
+have two policy specializations. This bounds code duplication without making
+four independent channel choices into a specialization matrix. Generic
+mesh/type-pack factory definitions remain available through the opt-in `.tcc`.
+Boundary policies, collective validation, accepted-old fallback and RHS-only
+matrix preservation retain their
+existing contracts. Runtime and compiler-memory improvements require matched
+measurements; source-level dispatch placement alone does not establish them.
 
 The default `TemperatureDiffusionEquation` providers separately instantiate
 legacy `Mesh` and mapped `MeshHandle` in the equations source inventory. Both
@@ -674,3 +702,47 @@ providers reference these compiled methods instead of instantiating them.
 The temperature `.tcc` includes the response `.tcc` for generic mesh/type-pack
 providers, including the existing solid-subdomain path. This retains generic
 support and repeated parsing while isolating default instantiation work.
+
+`fields/FieldStored.hh` retains descriptor traits, class layout, aliases and
+short storage queries. Generic location-layout acquisition and longer hot
+indexed operations live in `.ipp`; mesh-first constructor forwarding also
+stays inline so descriptor creation retains its caller context. The two
+descriptor-first constructors, bulk initialization and allocation helpers live
+in `.tcc`. The static Fields target provides those cold members for all seven
+default `MeshHandle` aliases, the five used Cartesian aliases, and scalar/vector
+cells plus scalar faces on `SolidSubdomain`. Other descriptors, meshes or type
+packs supply their own provider by including `fields/FieldStored.tcc`.
+Location-based weak layout caches, collective hit/miss decisions, owned/overlap
+maps, implicit copy/move behavior and field object layout remain unchanged.
+
+Mapped internal assembly declarations and symbolic-plan layout live in
+`details/FieldStoredTransportSystem.hh`; its `.ipp` retains the generic
+read-only nonorthogonality query and its `.tcc` contains heavy builders.
+The public factory definitions live in `FVM/TransportSystemFactory.tcc`, outside
+the declaration include graph, and carry grouped inputs into those builders.
+Default providers cover runtime handles, the supported static Cartesian
+partition wrapper, and solid scalar/temperature paths. Custom meshes own a
+provider including the factory `.tcc`, plus `fields/FieldStored.tcc` when custom
+storage has no compiled provider. Detail builders remain local to the owning
+image; public APIs retain targeted export visibility.
+
+The remaining stored-field FVM declarations use matching implementation groups.
+Cell operators retain arbitrary boundary callbacks and hot per-cell/view
+queries in `.ipp`; fixed gradient and divergence entry points compile through
+public `.tcc` providers. Face interpolation, velocity boundary caches, pressure
+fluxes/workspace setup and nonorthogonal diffusion keep their heavy kernels in
+`.tcc`. The mapped fractional-implicit diffusion entry preserves the solver's
+first half-implicit Hybrid sweep through the public FVM boundary.
+`FVM/FieldStoredOperators.tcc` is the aggregate opt-in implementation for custom
+mesh/type-pack providers. Implementation-owned diagnostics may include their
+private `.tcc`; declaration headers and `.ipp` files never include it.
+
+Pressure-workspace providers own cold construction, refresh and legacy
+materialization only. Runtime-handle cold members use explicit instantiations;
+static Cartesian cold members use targeted exported specializations so hidden
+geometry arguments do not hide their public entry points. Hot `Execution`
+construction, destruction and acquisition remain header-defined and local to
+the consuming image: their composite view tracks an image-local TLS stack.
+Whole-class extern suppression must not move that lease lifetime across DSOs.
+The object layout, immutable snapshot lifetime and field/geometry leases retain
+their established contracts.

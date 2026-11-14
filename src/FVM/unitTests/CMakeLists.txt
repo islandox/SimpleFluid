@@ -1,5 +1,8 @@
 # Unit tests for FVM
 
+# This consumer must compile against declarations without the shared PCH.
+set_source_files_properties(testFvmLibrary.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
@@ -202,3 +205,27 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;fvm;transport;legacy"
     TIMEOUT 120)
+
+# Custom meshes own their implementation providers outside public headers.
+target_sources(testStoredTransportReuse PRIVATE transport_providers/EpochMatrix.cc)
+target_sources(testRegionTransportAssembly PRIVATE
+    transport_providers/ReferenceGeometry.cc
+    transport_providers/ReferenceWeightedScalar.cc
+    transport_providers/ReferenceMomentum.cc
+    transport_providers/ReferencePressureGeometry.cc)
+
+# Test-owned generic providers have the same private visibility boundary as
+# library implementation units. Bypass the executable PCH with different flags.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set(_stored_transport_test_providers
+        transport_providers/EpochMatrix.cc
+        transport_providers/ReferenceGeometry.cc
+        transport_providers/ReferenceWeightedScalar.cc
+        transport_providers/ReferenceMomentum.cc
+        transport_providers/ReferencePressureGeometry.cc)
+    set_source_files_properties(${_stored_transport_test_providers}
+        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+    set_property(SOURCE ${_stored_transport_test_providers} APPEND PROPERTY
+        COMPILE_OPTIONS -fvisibility=hidden -fvisibility-inlines-hidden)
+    unset(_stored_transport_test_providers)
+endif()

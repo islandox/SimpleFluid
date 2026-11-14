@@ -9,6 +9,7 @@
  *
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
 
 #include "equations/BoussinesqMomentumEquation.hh"
@@ -480,10 +481,12 @@ double solve_taylor_green_error(int n_cells)
             mesh->cell_centroid(cell_lid), viscosity);
     };
 
-    const auto system =
-        SimpleFluid::FVM::transport_system<Pack>(
-            old_velocity, face_fluxes, 0.1, viscosity,
-            boundary_value, source);
+    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, MeshType>;
+    const auto system = Factory::assemble(Factory::VectorTerms{{old_velocity, 0.1}, face_fluxes, {viscosity}, source},
+        Factory::BasicVectorBoundary{[](int, size_t)
+            { return SimpleFluid::VectorBoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet}; },
+            boundary_value},
+        Factory::BasicVectorOptions{});
     VectorFieldType numerical(mesh, "manufactured_velocity");
     SimpleFluid::LinearSolverOptions options;
     options.tolerance = 1.0e-12;

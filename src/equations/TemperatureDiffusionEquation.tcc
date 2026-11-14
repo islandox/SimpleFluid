@@ -9,8 +9,9 @@
  *
  */
 
-#include "TemperatureDiffusionEquation.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "FVM/details/PrescribedFluxResponse.tcc"
+#include "TemperatureDiffusionEquation.hh"
 #include "equations/CollectiveValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -451,12 +452,18 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
             {
                 const auto* correction_field =
                     *treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &old_temperature;
-                return FVM::non_orthogonal_transport_system<Pack>(old_temperature, face_fluxes, time_step,
-                    thermal_diffusivity, boundary_condition, boundary_value, right_hand_source, *treatment,
-                    correction_field, d_cached_transport_matrix, &d_transport_geometry_cache);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                return Factory::assemble(typename Factory::ScalarTerms{{old_temperature, time_step}, face_fluxes,
+                                             {thermal_diffusivity}, right_hand_source},
+                    typename Factory::ScalarBoundary{boundary_condition, boundary_value},
+                    typename Factory::ScalarOptions{FVM::TransportCorrection<field_type>{*treatment, correction_field}},
+                    typename Factory::ScalarContext{d_cached_transport_matrix, &d_transport_geometry_cache});
             }
-            return FVM::transport_system<Pack>(old_temperature, face_fluxes, time_step, thermal_diffusivity,
-                boundary_condition, boundary_value, right_hand_source, d_cached_transport_matrix);
+            using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+            return Factory::assemble(typename Factory::ScalarTerms{{old_temperature, time_step}, face_fluxes,
+                                         {thermal_diffusivity}, right_hand_source},
+                typename Factory::ScalarBoundary{boundary_condition, boundary_value}, typename Factory::ScalarOptions{},
+                typename Factory::ScalarContext{d_cached_transport_matrix});
         }
         catch (...)
         {
@@ -776,18 +783,35 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         {
             if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
             {
-                return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
-                    transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
-                    boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
-                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation, retain_operator, d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                const typename Factory::TemperatureTerms terms{{old_temperature, time_step}, face_fluxes,
+                    {transport_density, material.specific_heat_capacity, thermal_conductivity}, power_density};
+                const typename Factory::TemperatureBoundary boundary{
+                    boundary_condition, boundary_value, boundary_thermal_conductivity};
+                const typename Factory::TemperatureOptions options{{treatment, correction_field},
+                    coefficient_interpolation,
+                    d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient};
+                const typename Factory::TemperatureContext context{
+                    d_cached_physical_transport_matrix, &d_transport_geometry_cache};
+                return retain_operator ? Factory::refresh_temperature_rhs(terms, boundary, options, context)
+                                       : Factory::assemble(terms, boundary, options, context);
             }
             else
             {
-                return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
-                    transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
-                    boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
-                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation,
-                    ale, old_density, old_specific_heat_capacity, retain_operator, d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient);
+                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
+                const typename Factory::TemperatureTerms terms{{old_temperature, time_step}, face_fluxes,
+                    {transport_density, material.specific_heat_capacity, thermal_conductivity, old_density,
+                        old_specific_heat_capacity},
+                    power_density};
+                const typename Factory::TemperatureBoundary boundary{
+                    boundary_condition, boundary_value, boundary_thermal_conductivity};
+                const typename Factory::TemperatureOptions options{
+                    {.mode = d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient},
+                    {treatment, correction_field}, coefficient_interpolation};
+                const typename Factory::TemperatureContext context{
+                    d_cached_physical_transport_matrix, &d_transport_geometry_cache, ale};
+                return retain_operator ? Factory::refresh_temperature_rhs(terms, boundary, options, context)
+                                       : Factory::assemble(terms, boundary, options, context);
             }
         }
         catch (...)
