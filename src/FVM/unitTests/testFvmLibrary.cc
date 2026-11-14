@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/ALEControlVolumeState.hh"
+#include "FVM/FaceFlux.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "geometry/SolidSubdomain.hh"
@@ -82,5 +83,13 @@ TEST(FvmLibraryTest, ExportedFvmApiLinksWithoutSolverDso)
         Legacy::VectorTerms, Legacy::BasicVectorBoundary, Legacy::BasicVectorOptions, Legacy::BasicVectorContext);
     BasicVector volatile basic_vector = &Legacy::assemble;
     EXPECT_TRUE(basic_vector != nullptr);
+}
+
+TEST(FvmLibraryTest, PressureWorkspaceConstructorLinksWithoutSolverDso)
+{
+    // A declaration-only consumer must resolve the cold constructor in FVM,
+    // not accidentally obtain an instantiation from another solver/test DSO.
+    using Workspace = FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshHandle<Pack>>;
+    EXPECT_THROW((Workspace(SP<const MeshHandle<Pack>>{})), std::invalid_argument);
 }
 } // namespace

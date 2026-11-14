@@ -135,6 +135,31 @@ endforeach()
 # boundary contracts and the separate temperature RHS refresh. Merely finding
 # one assemble symbol cannot establish the compiled overload inventory.
 string(REPLACE "\n" ";" factory_signatures "${demangled_full}")
+# GCC 15 emits a constrained BasicVector symbol and may also emit an older ABI
+# alias. LTO can discard that alias. GNU c++filt 2.46 decodes the constrained
+# owner with --no-params, but leaves its full signature mangled. Normalize only
+# this known requires(is_same_v<MeshType, Mesh<Pack>>) suffix for inspection;
+# the actual exported symbol/address and the exact overload checks stay intact.
+foreach(index RANGE ${last_symbol})
+    list(GET factory_signatures ${index} signature)
+    list(GET api_names ${index} factory_name)
+    if(signature MATCHES "^_ZN11SimpleFluid3FVM22TransportSystemFactory"
+       AND signature MATCHES "BasicVectorTransportBoundary.*Q9is_same_vIT0_NSB_IT_EEE$"
+       AND factory_name MATCHES
+           "^SimpleFluid::FVM::TransportSystemFactory<[^\n]+, SimpleFluid::Mesh<[^\n]+[ ]*::assemble$")
+        string(REGEX REPLACE "Q9is_same_vIT0_NSB_IT_EEE$" "" unconstrained_symbol "${signature}")
+        execute_process(
+            COMMAND "${SIMPLEFLUID_CXXFILT}" "${unconstrained_symbol}"
+            RESULT_VARIABLE fallback_result
+            OUTPUT_VARIABLE fallback_signature
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT fallback_result EQUAL 0 OR fallback_signature MATCHES "^_Z")
+            message(FATAL_ERROR "Cannot decode constrained BasicVector export: ${signature}")
+        endif()
+        list(REMOVE_AT factory_signatures ${index})
+        list(INSERT factory_signatures ${index} "${fallback_signature}")
+    endif()
+endforeach()
 foreach(backend IN ITEMS Mesh MeshHandle PartitionedCartesian SolidSubdomain)
     if(backend STREQUAL "PartitionedCartesian")
         set(mesh_pattern "SimpleFluid::Meshes::PartitionedMesh<SimpleFluid::Meshes::OrthogonalCartesian3D,")

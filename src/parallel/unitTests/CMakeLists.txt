@@ -1,7 +1,7 @@
 
 # Multi-rank MetisPartitioner tests
 add_executable(testMeshPartitioner testMeshPartitioner.cc)
-target_link_libraries(testMeshPartitioner SimpleFluid::Fields GTest::gtest_main)
+target_link_libraries(testMeshPartitioner SimpleFluid::Mesh GTest::gtest_main)
 simplefluid_configure_test_executable(testMeshPartitioner)
 simplefluid_add_mpi_test(
   NAME MeshPartitioner_2procs

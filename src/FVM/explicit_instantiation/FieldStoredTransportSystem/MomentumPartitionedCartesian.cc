@@ -1,14 +1,7 @@
-/** @brief Individual compiled transport factory overloads. */
+/** @brief Exported static-Cartesian transport factory specializations. */
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
-
-// Static mesh types are hidden; export the supported public overloads individually.
-#if defined(__GNUC__) || defined(__clang__)
-#define SIMPLEFLUID_STATIC_TRANSPORT_EXPORT __attribute__((visibility("default")))
-#else
-#define SIMPLEFLUID_STATIC_TRANSPORT_EXPORT
-#endif
 
 namespace SimpleFluid::FVM
 {
@@ -19,9 +12,12 @@ using MeshType = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
 using Factory = TransportSystemFactory<Pack, MeshType>;
 } // namespace
 
-template SIMPLEFLUID_STATIC_TRANSPORT_EXPORT VectorTransportSystem<Pack> Factory::assemble(
-    Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
+template<>
+VectorTransportSystem<Pack> Factory::assemble(
+    MomentumTerms terms, MomentumBoundary boundary, MomentumOptions options, MomentumContext context)
+{
+    return detail::assemble_factory_momentum<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context));
+}
 
 } // namespace SimpleFluid::FVM
-
-#undef SIMPLEFLUID_STATIC_TRANSPORT_EXPORT

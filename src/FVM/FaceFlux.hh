@@ -397,6 +397,12 @@ private:
     VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
 };
 
+// Give the runtime constructor one exported, non-COMDAT owner. It is called
+// across the FVM/solver DSO boundary, including optimized Darwin builds.
+template<>
+SIMPLEFLUID_FVM_EXPORT FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
+    MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh);
+
 // Explicit cold specializations override hidden static-mesh argument visibility
 // without suppressing header-owned execution/lease methods.
 template<>
