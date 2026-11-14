@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/ScalarSourceDecayTransport.hh"
 
 namespace SimpleFluid
@@ -545,19 +546,17 @@ void ScalarSourceDecayTransport<Pack, MeshType>::transport(
         old_concentration.sync_ghosts();
         concentration_scale = global_maximum(concentration_scale);
 
-        auto system = FVM::weighted_scalar_transport_system<Pack>(
-            FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
-                .old_values = old_concentration,
+        auto system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
+                .history = {old_concentration, time_step},
                 .face_fluxes = face_flux,
-                .time_step = time_step,
-                .storage_weight = storage_weight,
-                .advection_weight = advection_weight,
-                .diffusivity = diffusion_weight,
-                .boundary_condition = boundary_condition,
-                .boundary_value = boundary_value,
-                .source = zero_source,
-                .treatment = FVM::NonOrthogonalTreatment::Explicit,
-                .correction_field = &old_concentration,
+                .coefficients = {storage_weight, advection_weight, diffusion_weight},
+                .sources = {.source = zero_source}},
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarBoundary{
+                .condition = boundary_condition, .value = boundary_value},
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
+                .correction = {FVM::NonOrthogonalTreatment::Explicit, &old_concentration}},
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext{
                 .geometry_cache = &*d_transport_geometry_cache});
         field_type solution(d_mesh, "scalar_group_diffusion_solution");
         const auto statistics =

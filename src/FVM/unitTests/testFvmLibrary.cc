@@ -1,69 +1,86 @@
-/**
- * @file FVM/unitTests/testFvmLibrary.cc
- * @brief Link guard for the FVM shared library's exported API.
- *
- * This target links `SimpleFluid::FVM` alone. It takes the addresses of
- * FVM-exported symbols so the executable link fails if `libSimpleFluidFVM`
- * ever again needs a symbol that only `libSimpleFluidSolvers` defines. GNU ld
- * reports undefined shared-library symbols when it creates an executable, so
- * the regression fails on Linux too; macOS `ld64` rejects the dylib outright.
- * FVM-side export coverage is enforced separately by
- * `simplefluid_fvm_elf_export_boundary`.
+/** @file FVM/unitTests/testFvmLibrary.cc
+ * @brief Declaration-only link guard for every compiled transport factory overload.
  */
-
 #include <gtest/gtest.h>
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
-#include "FVM/TransportSystem.hh"
-#include "geometry/Mesh.hh"
+#include "FVM/TransportSystemFactory.hh"
+#include "geometry/SolidSubdomain.hh"
+#include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "utils/testing_environment.hh"
 
 namespace
 {
-using Pack = SimpleFluid::DefaultTpetraTypes;
-testing::Environment* const environment =
-    testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+using namespace SimpleFluid;
+using namespace SimpleFluid::FVM;
+using Pack = DefaultTpetraTypes;
+testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+
+// Volatile function pointers retain real provider relocations under LTO.
+// Exact signatures distinguish every supported family from other assemble overloads.
+template<class Factory> void scalar_links()
+{
+    using Function = TransportSystem<Pack> (*)(typename Factory::ScalarTerms, typename Factory::ScalarBoundary,
+        typename Factory::ScalarOptions, typename Factory::ScalarContext);
+    Function volatile assemble = &Factory::assemble;
+    EXPECT_TRUE(assemble != nullptr);
+}
+template<class Factory> void temperature_links()
+{
+    using Function =
+        TransportSystem<Pack> (*)(typename Factory::TemperatureTerms, typename Factory::TemperatureBoundary,
+            typename Factory::TemperatureOptions, typename Factory::TemperatureContext);
+    Function volatile assemble = &Factory::assemble;
+    Function volatile refresh = &Factory::refresh_temperature_rhs;
+    EXPECT_TRUE(assemble != nullptr);
+    EXPECT_TRUE(refresh != nullptr);
+}
+template<class Factory> void flow_links()
+{
+    using Weighted =
+        TransportSystem<Pack> (*)(typename Factory::WeightedScalarTerms, typename Factory::WeightedScalarBoundary,
+            typename Factory::WeightedScalarOptions, typename Factory::WeightedScalarContext);
+    using Vector = VectorTransportSystem<Pack> (*)(typename Factory::VectorTerms, typename Factory::VelocityBoundary,
+        typename Factory::VectorOptions, typename Factory::VectorContext);
+    using Momentum = VectorTransportSystem<Pack> (*)(typename Factory::MomentumTerms,
+        typename Factory::MomentumBoundary, typename Factory::MomentumOptions, typename Factory::MomentumContext);
+    Weighted volatile weighted = &Factory::assemble;
+    Vector volatile vector = &Factory::assemble;
+    Momentum volatile momentum = &Factory::assemble;
+    EXPECT_TRUE(weighted != nullptr);
+    EXPECT_TRUE(vector != nullptr);
+    EXPECT_TRUE(momentum != nullptr);
+}
 
 TEST(FvmLibraryTest, ExportedFvmApiLinksWithoutSolverDso)
 {
-    using MeshType = SimpleFluid::Mesh<Pack>;
-    using ValidateMember = void (SimpleFluid::FVM::ALEControlVolumeState::*)(const MeshType&) const;
-    ValidateMember validate = &SimpleFluid::FVM::ALEControlVolumeState::validate<MeshType>;
-    auto* residual = &SimpleFluid::FVM::full_diffusion_residual<Pack>;
+    using ValidateMember = void (ALEControlVolumeState::*)(const Mesh<Pack>&) const;
+    ValidateMember volatile validate = &ALEControlVolumeState::validate<Mesh<Pack>>;
+    auto* volatile residual = &full_diffusion_residual<Pack>;
     EXPECT_TRUE(validate != nullptr);
     EXPECT_TRUE(residual != nullptr);
 
-    // Keep a relocation to the named-request provider even under Release LTO.
-    // Equation DSOs call this overload directly; positional wrappers alone can
-    // inline it and therefore do not prove that it is exported.
-    using WeightedAssembler = SimpleFluid::FVM::TransportSystem<Pack> (*)(
-        SimpleFluid::FVM::WeightedScalarTransportRequest<Pack>);
-    WeightedAssembler volatile weighted = &SimpleFluid::FVM::weighted_scalar_transport_system<Pack>;
-    EXPECT_TRUE(weighted != nullptr);
+    using Legacy = TransportSystemFactory<Pack, Mesh<Pack>>;
+    using Native = TransportSystemFactory<Pack, MeshHandle<Pack>>;
+    using Cartesian = TransportSystemFactory<Pack, Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>>;
+    using Solid = TransportSystemFactory<Pack, SolidSubdomain<Pack>>;
+    scalar_links<Legacy>();
+    scalar_links<Native>();
+    scalar_links<Cartesian>();
+    scalar_links<Solid>();
+    temperature_links<Legacy>();
+    temperature_links<Native>();
+    temperature_links<Cartesian>();
+    temperature_links<Solid>();
+    flow_links<Legacy>();
+    flow_links<Native>();
+    flow_links<Cartesian>();
 
-    using namespace SimpleFluid;
-    using namespace SimpleFluid::FVM;
-    using Scalar = Pack::scalar_type;
-    using LocalOrdinal = Pack::local_ordinal_type;
-    using ScalarField = CellField<Pack>;
-    using FluxField = FaceField<Pack>;
-    using GeometryCache = TransportGeometryCache<Mesh<Pack>>;
-    using Sink = std::function<Scalar(LocalOrdinal)>;
-    using FixedValue = std::function<std::optional<Scalar>(LocalOrdinal)>;
-    using HistoricalAssembler = TransportSystem<Pack> (*)(const ScalarField&, const FluxField&, Scalar,
-        const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
-        ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
-        Teuchos::RCP<Pack::matrix_type>, Sink, FixedValue, const SimpleFluid::BoundaryCache<Pack>*, const GeometryCache*,
-        FaceCoefficientInterpolation);
-    using AdvancedAssembler = TransportSystem<Pack> (*)(const ScalarField&, const FluxField&, Scalar,
-        const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
-        ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, ScalarTransportDiscretization,
-        NonOrthogonalTreatment, const ScalarField*, const ScalarField*, Teuchos::RCP<Pack::matrix_type>, Sink,
-        FixedValue, const SimpleFluid::BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation);
-    HistoricalAssembler volatile historical = &weighted_scalar_transport_system<Pack>;
-    AdvancedAssembler volatile advanced = &weighted_scalar_transport_system<Pack>;
-    EXPECT_TRUE(historical != nullptr);
-    EXPECT_TRUE(advanced != nullptr);
+    using BasicVector = VectorTransportSystem<Pack> (*)(
+        Legacy::VectorTerms, Legacy::BasicVectorBoundary, Legacy::BasicVectorOptions, Legacy::BasicVectorContext);
+    BasicVector volatile basic_vector = &Legacy::assemble;
+    EXPECT_TRUE(basic_vector != nullptr);
 }
 } // namespace

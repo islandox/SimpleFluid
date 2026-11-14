@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/BoussFiniteVapor.hh"
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactingGasModel.hh"
@@ -608,25 +609,35 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
             [](int, size_t) -> scalar_type { return 0.0; };
         auto source =
             [](local_ordinal_type) -> scalar_type { return 0.0; };
-        system = FVM::weighted_scalar_transport_system<Pack>(
-            FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
-                .old_values = old_values,
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext context{
+            .cached_matrix = system.matrix, .geometry_cache = &d_transport_geometry_cache};
+        if constexpr (!std::is_same_v<mesh_type, Mesh<Pack>>)
+        {
+            context.ale = ale;
+            context.symbolic_plan = &workspace.symbolic_plans.at(operator_slot);
+            context.cached_rhs = system.rhs;
+        }
+        else
+        {
+            collective_detail::collective_local_validation(*d_mesh, "Legacy reacting transport ALE selection",
+                [&]
+                {
+                    if (ale != nullptr)
+                        throw std::invalid_argument("Legacy weighted transport does not support ALE state.");
+                });
+        }
+        system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
+                .history = {old_values, time_step},
                 .face_fluxes = transport_flux,
-                .time_step = time_step,
-                .storage_weight = storage_weight,
                 // Storage and advection use the same frozen liquid fraction.
-                .advection_weight = storage_weight,
-                .diffusivity = diffusion_weight,
-                .boundary_condition = boundary_condition,
-                .boundary_value = boundary_value,
-                .source = source,
-                .treatment = FVM::NonOrthogonalTreatment::Hybrid,
-                .correction_field = &old_values,
-                .cached_matrix = system.matrix,
-                .geometry_cache = &d_transport_geometry_cache,
-                .ale = ale,
-                .symbolic_plan = &workspace.symbolic_plans.at(operator_slot),
-                .cached_rhs = system.rhs});
+                .coefficients = {storage_weight, storage_weight, diffusion_weight},
+                .sources = {.source = source}},
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarBoundary{
+                .condition = boundary_condition, .value = boundary_value},
+            typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
+                .correction = {FVM::NonOrthogonalTreatment::Hybrid, &old_values}},
+            context);
         workspace.operator_ready.at(operator_slot) = true;
         ++work.assemblies;
     }

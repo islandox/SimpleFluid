@@ -163,7 +163,7 @@ SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(
  * @brief Add the explicit deviatoric transpose-gradient part of a symmetric
  *        viscous stress to a momentum RHS.
  *
- * The component Laplacian in physical_momentum_transport_system() supplies
+ * The component Laplacian in TransportSystemFactory momentum assembly supplies
  * @f$\nabla\cdot(\mu\nabla\mathbf{u})/\rho@f$ implicitly.  A Newtonian/RANS
  * stress is symmetric and deviatoric, so this routine adds the remaining
  * lagged term

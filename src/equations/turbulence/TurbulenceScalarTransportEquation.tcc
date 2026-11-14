@@ -9,8 +9,9 @@
  *
  */
 
-#include "equations/CollectiveValidation.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "TurbulenceScalarTransportEquation.hh"
+#include "equations/CollectiveValidation.hh"
 
 #include <cmath>
 #include <stdexcept>
@@ -398,29 +399,23 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::run(
     {
         try
         {
-            return FVM::weighted_scalar_transport_system<Pack>(
-                FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{
-                    .old_values = old_state,
+            return FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
+                typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
+                    .history = {old_state, time_step},
                     .face_fluxes = face_fluxes,
-                    .time_step = time_step,
-                    .storage_weight = d_unit_weight,
-                    .advection_weight = d_unit_weight,
-                    .diffusivity = effective_diffusivity,
-                    .boundary_condition = boundary_condition,
-                    .boundary_value = boundary_value,
-                    .source = source,
-                    .treatment = treatment,
+                    .coefficients = {d_unit_weight, d_unit_weight, effective_diffusivity},
+                    .sources = {.source = source, .implicit_sink = std::move(sink)},
+                    .constraints = {.fixed_cell_value = std::move(fixed_cell_value)}},
+                typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarBoundary{
+                    .condition = boundary_condition,
+                    .value = boundary_value,
+                    .coefficients = boundary_overrides != nullptr ? boundary_overrides->boundary_diffusivity : nullptr},
+                typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
                     .discretization = discretization,
-                    .correction_field = correction_field,
-                    .cached_matrix = d_cached_transport_matrix,
-                    .implicit_sink = std::move(sink),
-                    .fixed_cell_value = std::move(fixed_cell_value),
-                    .boundary_diffusivity =
-                        boundary_overrides != nullptr
-                            ? boundary_overrides->boundary_diffusivity
-                            : nullptr,
-                    .geometry_cache = &d_transport_geometry_cache,
-                    .coefficient_interpolation = coefficient_interpolation});
+                    .correction = {treatment, correction_field},
+                    .coefficient_interpolation = coefficient_interpolation},
+                typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext{
+                    .cached_matrix = d_cached_transport_matrix, .geometry_cache = &d_transport_geometry_cache});
         }
         catch (...)
         {

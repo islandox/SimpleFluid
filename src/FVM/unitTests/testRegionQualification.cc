@@ -4,23 +4,27 @@
  */
 #include "FVM/FaceFlux.hh"
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
-#include <gtest/gtest.h>
 #include <algorithm>
 #include <array>
 #include <complex>
+#include <gtest/gtest.h>
 #include <iomanip>
 #include <iostream>
 #include <numbers>
+#include <type_traits>
 
 namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using Scalar = ScalarCellFieldStored<Pack>;
 using Flux = ScalarFaceFieldStored<Pack>;
@@ -151,8 +155,14 @@ ErrorNorms nonlinear_error(int n, RefinementCase test)
     int corrections = 0;
     for (; corrections < 40; ++corrections)
     {
-        const auto system = FVM::non_orthogonal_transport_system<Pack>(exact, zero_flux, 0.2, 1.0, condition, boundary,
-            source, FVM::NonOrthogonalTreatment::Implicit, &correction, matrix, &geometry);
+        const auto system = TransportFactory<decltype(exact)>::assemble(
+            typename TransportFactory<decltype(exact)>::ScalarTerms{.history = {.old_values = exact, .time_step = 0.2},
+                .face_fluxes = zero_flux,
+                .coefficients = {.diffusivity = 1.0},
+                .source = source},
+            {.condition = condition, .value = boundary},
+            {.correction = {{.treatment = FVM::NonOrthogonalTreatment::Implicit, .lagged_field = &correction}}},
+            {.cached_matrix = matrix, .geometry_cache = &geometry});
         matrix = system.matrix;
         values = solve(system, mesh);
         real_t local_update = 0, global_update = 0;
@@ -173,8 +183,14 @@ ErrorNorms nonlinear_error(int n, RefinementCase test)
     EXPECT_TRUE(converged) << "Partition-gradient corrections must converge before measuring spatial accuracy.";
     // Rebuild the RHS from the final remote gradients before checking the
     // residual: the last linear solve alone only verifies a lagged equation.
-    const auto final_system = FVM::non_orthogonal_transport_system<Pack>(exact, zero_flux, 0.2, 1.0, condition, boundary,
-        source, FVM::NonOrthogonalTreatment::Implicit, &correction, matrix, &geometry);
+    const auto final_system = TransportFactory<decltype(exact)>::assemble(
+        typename TransportFactory<decltype(exact)>::ScalarTerms{.history = {.old_values = exact, .time_step = 0.2},
+            .face_fluxes = zero_flux,
+            .coefficients = {.diffusivity = 1.0},
+            .source = source},
+        {.condition = condition, .value = boundary},
+        {.correction = {{.treatment = FVM::NonOrthogonalTreatment::Implicit, .lagged_field = &correction}}},
+        {.cached_matrix = matrix, .geometry_cache = &geometry});
     Pack::vector_type final_values(mesh->owned_cell_map(), true), residual(mesh->owned_cell_map(), true);
     {
         auto data = final_values.getDataNonConst();
@@ -246,9 +262,14 @@ AdvectionErrors periodic_advection(int n)
     Pack::vector_type result(mesh->owned_cell_map(), true);
     for (int step = 0; step < steps; ++step)
     {
-        const auto system = FVM::transport_system<Pack>(old, flux, dt, 0.0,
-            [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
-            [](int, size_t) { return 0.0; }, [](int) { return 0.0; }, cached_matrix);
+        const auto system = TransportFactory<decltype(old)>::assemble(
+            typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = dt},
+                .face_fluxes = flux,
+                .coefficients = {.diffusivity = 0.0},
+                .source = [](int) { return 0.0; }},
+            {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+                .value = [](int, size_t) { return 0.0; }},
+            {}, {.cached_matrix = cached_matrix});
         cached_matrix = system.matrix;
         EXPECT_TRUE(solver.solve(system.matrix, *system.rhs, result, options));
         const auto values = result.getData();
@@ -321,8 +342,12 @@ DecompositionResult fixed_grid_result(int regions)
     old.sync_ghosts();
     velocity.sync_ghosts();
     zero_flux.sync_ghosts();
-    const auto system = FVM::transport_system<Pack>(old, zero_flux, 0.2, 1.0, condition, boundary,
-        [&](int c) { return 2 * pi * pi * (manufactured(mesh->cell_centroid(c)) - 1); });
+    const auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.2},
+            .face_fluxes = zero_flux,
+            .coefficients = {.diffusivity = 1.0},
+            .source = [&](int c) { return 2 * pi * pi * (manufactured(mesh->cell_centroid(c)) - 1); }},
+        {.condition = condition, .value = boundary}, {}, {});
     system.matrix->apply(analytic, action);
     const auto solution = solve(system, mesh);
     for (size_t c = 0; c < mesh->num_owned_cells(); ++c) pressure.set_owned_value(c, solution[c]);

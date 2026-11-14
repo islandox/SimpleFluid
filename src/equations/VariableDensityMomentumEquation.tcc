@@ -2,6 +2,7 @@
  * @brief Compiled conservative variable-density momentum implementation.
  */
 #pragma once
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
 
 #include <cmath>
@@ -88,27 +89,29 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
         }
         d_old_component.sync_ghosts();
         d_component.owned_data().update(scalar_type{1}, d_old_component.owned_data(), scalar_type{});
-        auto system = FVM::weighted_scalar_transport_system<Pack>(
-            FVM::MeshWeightedScalarTransportRequest<Pack, MeshType>{.old_values = d_old_component,
+        typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarContext context{
+            .geometry_cache = &d_geometry};
+        if constexpr (!std::is_same_v<MeshType, Mesh<Pack>>)
+            context.ale = ale;
+        auto system = FVM::TransportSystemFactory<Pack, MeshType>::assemble(
+            typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarTerms{
+                .history = {d_old_component, time_step},
                 .face_fluxes = mass_flux,
-                .time_step = time_step,
-                .storage_weight = density,
-                .advection_weight = d_unit,
-                .diffusivity = dynamic_viscosity,
-                .boundary_condition =
+                .coefficients = {density, d_unit, dynamic_viscosity, &old_density},
+                .sources = {.source = [&](local_ordinal_type cell)
+                            { return d_force.value(cell).component(component); }}},
+            typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarBoundary{
+                .condition =
                     [&](int patch, size_t face)
                 {
                     return boundary ? boundary(patch, face, component)
                                     : BoundaryCondition{BoundaryConditionType::Neumann, 0};
                 },
-                .boundary_value = [&](int patch, size_t face)
-                { return boundary_value ? boundary_value(patch, face, component) : scalar_type{}; },
-                .source = [&](local_ordinal_type cell) { return d_force.value(cell).component(component); },
-                .treatment = treatment,
-                .correction_field = &d_old_component,
-                .geometry_cache = &d_geometry,
-                .old_storage_weight = &old_density,
-                .ale = ale});
+                .value = [&](int patch, size_t face)
+                { return boundary_value ? boundary_value(patch, face, component) : scalar_type{}; }},
+            typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarOptions{
+                .correction = {treatment, &d_old_component}},
+            context);
         d_solver.notify_operator_values_changed();
         const auto statistics =
             d_solver.solve_with_statistics(system.matrix, *system.rhs, d_component.owned_data(), linear);

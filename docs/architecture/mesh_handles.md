@@ -64,13 +64,14 @@ than once per concrete geometry backend, while run/category dispatch, ordering,
 boundary slots, orientation specialization, and every provider metric formula
 are preserved. See [mesh traversal](../mesh_traverse.md#stable-assembly-metrics).
 
-## Measured effect
+## Compiled transport entry points
 
-Measured on the GCC Debug/Release Ninja Multi-Config tree with identical flags
-and PCH: `VariableDensityMomentumEquation.cc` drops from 78.3 s / 8.2 GB peak RSS
-/ 10851 symbols to 8.0 s / 1.1 GB / 2121 symbols (Debug), and the supported
-mapped `weighted_scalar_transport_system` body now compiles once in the FVM
-library instead of in eight equation translation units. The receiving
-`FVM/.../TransportSystem.cc` grows correspondingly; net measured compile cost
-for the two units falls by about 30%. Full numbers and the reproduction recipe
-live in the local `build/analysis/measurements.md` artifact.
+`FVM::TransportSystemFactory<Pack, MeshType>` receives grouped by-value inputs
+and selects legacy or stored field types through `MeshFieldTraits`. It obtains
+the mesh from the transported field and preserves that object's identity.
+Default providers compile each supported factory overload once for its public
+mesh type; the runtime geometry variant stays outside the numerical assembly
+callback type. Individual overloads, rather than whole factory classes, own the
+public linkage boundary. See the [factory contract](transport_system_factory.md)
+for the backend/family matrix, borrowed lifetimes, custom providers, and required
+source migration/rebuilding.

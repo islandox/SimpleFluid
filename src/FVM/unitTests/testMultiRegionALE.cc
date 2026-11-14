@@ -6,21 +6,25 @@
  * @date 2026-09-10
  * @copyright Copyright (c) 2026
  */
-#include <gtest/gtest.h>
 #include "FVM/ALEControlVolumeState.tcc"
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <array>
+#include <gtest/gtest.h>
 #include <limits>
+#include <type_traits>
 #include <utility>
 namespace
 {
 using namespace SimpleFluid;
 using Pack=DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle=MeshHandle<>;
 testing::Environment* const environment=testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
@@ -161,11 +165,15 @@ TEST(MultiRegionALETest, AffineMotionPreservesConstantsAndCanonicalGcl)
     auto ale=FVM::make_ale_control_volume_state(*mesh,motion);
     ScalarFaceFieldStored<Pack> absolute(mesh,0.0,"absolute"), relative(mesh,"relative");
     FVM::mesh_relative_face_fluxes(absolute,ale,relative);
-    const auto system=FVM::weighted_scalar_transport_system<Pack>(FVM::MeshWeightedScalarTransportRequest<Pack,Handle>{
-        .old_values=old,.face_fluxes=relative,.time_step=0.2,.storage_weight=unit,.advection_weight=unit,.diffusivity=zero,
-        .boundary_condition=[](int,size_t){return BoundaryCondition{BoundaryConditionType::Dirichlet,2.75};},
-        .boundary_value=[](int,size_t){return 2.75;},.source=[](int){return 0.0;},
-        .treatment=FVM::NonOrthogonalTreatment::Explicit,.ale=&ale});
+    const auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::WeightedScalarTerms{.history = {.old_values = old, .time_step = 0.2},
+            .face_fluxes = relative,
+            .coefficients = {.storage_weight = unit, .advection_weight = unit, .diffusivity = zero},
+            .sources = {.source = [](int) { return 0.0; }},
+            .constraints = {}},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Dirichlet, 2.75}; },
+            .value = [](int, size_t) { return 2.75; }},
+        {.correction = {.treatment = FVM::NonOrthogonalTreatment::Explicit}}, {.ale = &ale});
     Pack::vector_type result(mesh->owned_cell_map(),true); BelosLinearSolver<> solver;
     LinearSolverOptions options; options.tolerance=1e-12;
     EXPECT_TRUE(solver.solve(system.matrix,*system.rhs,result,options));

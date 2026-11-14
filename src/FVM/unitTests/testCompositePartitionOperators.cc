@@ -1,20 +1,24 @@
 /** @file testCompositePartitionOperators.cc
  * @brief Numerical parity and conservation for native mixed-region partitions.
  */
-#include <gtest/gtest.h>
 #include "FVM/Operators.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/composite_partition_helpers.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
+#include <gtest/gtest.h>
 #include <map>
+#include <type_traits>
 
 namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<>;
 using Partitioner = MeshPartitioner<Pack>;
 using Policy = CompositePartitionOptions::Policy;
@@ -119,9 +123,14 @@ TEST(CompositePartitionOperatorsTest, MixedRegionSeamTransportConservesInventory
             flux.set_owned_value(face, 0.125 * mesh->face_area_vector(face).x);
     }
     old.sync_ghosts(); flux.sync_ghosts();
-    const auto system = FVM::transport_system<Pack>(old, flux, 0.03, 0.0,
-        [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
-        [](int, size_t) { return 0.0; }, [](int) { return 0.0; });
+    const auto system = TransportFactory<decltype(old)>::assemble(
+        typename TransportFactory<decltype(old)>::ScalarTerms{.history = {.old_values = old, .time_step = 0.03},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.0},
+            .source = [](int) { return 0.0; }},
+        {.condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+            .value = [](int, size_t) { return 0.0; }},
+        {}, {});
     Pack::vector_type result(mesh->owned_cell_map(), true);
     BelosLinearSolver<> solver; LinearSolverOptions options; options.tolerance = 1e-12;
     ASSERT_TRUE(solver.solve(system.matrix, *system.rhs, result, options));

@@ -2,8 +2,10 @@
  * @brief Basic scalar/vector assembly parity and callback contracts.
  */
 #include "FVM/TransportSystem.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
+#include <type_traits>
 
 #include <gtest/gtest.h>
 
@@ -13,6 +15,8 @@
 namespace
 {
 using Pack = SimpleFluid::DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
@@ -74,30 +78,37 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
         std::vector<LO> source_calls;
         std::vector<std::pair<int, size_t>> value_calls, condition_calls;
         bool awaiting_condition = false;
-        const auto vector = transport_system<Pack>(
-            velocity, flux, 0.25, diffusion,
-            [&](int batch, size_t face)
-            {
-                EXPECT_TRUE(awaiting_condition);
-                if (!value_calls.empty())
-                    EXPECT_EQ(value_calls.back(), (std::pair{batch, face}));
-                awaiting_condition = false;
-                condition_calls.emplace_back(batch, face);
-                return VectorBoundaryCondition{boundary_type(batch), gradient};
-            },
-            [&](int batch, size_t face)
-            {
-                EXPECT_FALSE(awaiting_condition);
-                awaiting_condition = true;
-                value_calls.emplace_back(batch, face);
-                return boundary_value(batch, face);
-            },
-            [&](LO cell)
-            {
-                source_calls.push_back(cell);
-                return source_value(cell);
-            },
-            cached);
+        const auto vector = TransportFactory<decltype(velocity)>::assemble(
+            typename TransportFactory<decltype(velocity)>::VectorTerms{
+                .history = {.old_values = velocity, .time_step = 0.25},
+                .face_fluxes = flux,
+                .coefficients = {.diffusivity = diffusion},
+                .source =
+                    [&](LO cell)
+                {
+                    source_calls.push_back(cell);
+                    return source_value(cell);
+                }},
+            typename TransportFactory<decltype(velocity)>::BasicVectorBoundary{
+                .condition =
+                    [&](int batch, size_t face)
+                {
+                    EXPECT_TRUE(awaiting_condition);
+                    if (!value_calls.empty())
+                        EXPECT_EQ(value_calls.back(), (std::pair{batch, face}));
+                    awaiting_condition = false;
+                    condition_calls.emplace_back(batch, face);
+                    return VectorBoundaryCondition{boundary_type(batch), gradient};
+                },
+                .value =
+                    [&](int batch, size_t face)
+                {
+                    EXPECT_FALSE(awaiting_condition);
+                    awaiting_condition = true;
+                    value_calls.emplace_back(batch, face);
+                    return boundary_value(batch, face);
+                }},
+            {}, {.cached_matrix = cached});
         EXPECT_FALSE(awaiting_condition);
         ASSERT_EQ(source_calls.size(), mesh->num_owned_cells());
         for (size_t cell = 0; cell < source_calls.size(); ++cell)
@@ -115,17 +126,22 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
         for (size_t component = 0; component < 3; ++component)
         {
             FieldType scalar(mesh, Vec{1.25, -2.5, 4.0}.component(component), "scalar");
-            const auto reference = transport_system<Pack>(
-                scalar, flux, 0.25, diffusion,
-                [&](int batch, size_t)
-                {
-                    const auto type = boundary_type(batch);
-                    return BoundaryCondition{
-                        type == BoundaryConditionType::NoSlip ? BoundaryConditionType::Dirichlet : type,
-                        gradient.component(component)};
-                },
-                [&](int batch, size_t face) { return boundary_value(batch, face).component(component); },
-                [&](LO cell) { return source_value(cell).component(component); });
+            const auto reference = TransportFactory<decltype(scalar)>::assemble(
+                typename TransportFactory<decltype(scalar)>::ScalarTerms{
+                    .history = {.old_values = scalar, .time_step = 0.25},
+                    .face_fluxes = flux,
+                    .coefficients = {.diffusivity = diffusion},
+                    .source = [&](LO cell) { return source_value(cell).component(component); }},
+                {.condition =
+                        [&](int batch, size_t)
+                    {
+                        const auto type = boundary_type(batch);
+                        return BoundaryCondition{
+                            type == BoundaryConditionType::NoSlip ? BoundaryConditionType::Dirichlet : type,
+                            gradient.component(component)};
+                    },
+                    .value = [&](int batch, size_t face) { return boundary_value(batch, face).component(component); }},
+                {}, {});
             for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
             {
                 const auto cell = static_cast<LO>(row);
@@ -139,8 +155,17 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
     // Independent transient/source oracle: the shared matrix must not be
     // accumulated once for each RHS component.
     flux.data().putScalar(0.0);
-    const auto transient =
-        transport_system<Pack>(velocity, flux, 0.25, 0.0, [](int, size_t) { return Vec{}; }, source_value);
+    const auto transient = TransportFactory<decltype(velocity)>::assemble(
+        typename TransportFactory<decltype(velocity)>::VectorTerms{
+            .history = {.old_values = velocity, .time_step = 0.25},
+            .face_fluxes = flux,
+            .coefficients = {.diffusivity = 0.0},
+            .source = source_value},
+        typename TransportFactory<decltype(velocity)>::BasicVectorBoundary{
+            .condition = [](int, size_t)
+            { return SimpleFluid::VectorBoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = [](int, size_t) { return Vec{}; }},
+        {}, {});
     for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
     {
         const auto cell = static_cast<LO>(row);

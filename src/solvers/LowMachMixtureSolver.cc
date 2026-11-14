@@ -4,6 +4,7 @@
 #include "solvers/LowMachMixtureSolver.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
@@ -456,21 +457,20 @@ struct LowMachMixtureSolver::Implementation
             });
         old_scalar.sync_ghosts();
         scalar.owned_data().update(1.0, old_scalar.owned_data(), 0.0);
-        auto system = FVM::weighted_scalar_transport_system<Pack>(
-            FVM::MeshWeightedScalarTransportRequest<Pack, Mesh>{.old_values = old_scalar,
+        auto system = FVM::TransportSystemFactory<Pack, Mesh>::assemble(
+            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarTerms{.history = {old_scalar, dt},
                 .face_fluxes = phase_flux,
-                .time_step = dt,
-                .storage_weight = unit,
-                .advection_weight = unit,
-                .diffusivity = zero,
-                .boundary_condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
-                .boundary_value = [](int, size_t) { return 0.0; },
-                .source = [](LO) { return 0.0; },
-                .treatment = FVM::NonOrthogonalTreatment::Implicit,
+                .coefficients = {unit, unit, zero},
+                .sources = {.source = [](LO) { return 0.0; }}},
+            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarBoundary{
+                .condition = [](int, size_t) { return BoundaryCondition{BoundaryConditionType::Neumann, 0}; },
+                .value = [](int, size_t) { return 0.0; }},
+            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarOptions{
                 .discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
                     .convection = FVM::ScalarConvectionScheme::Upwind},
-                .geometry_cache = &geometry,
-                .ale = ale});
+                .correction = {FVM::NonOrthogonalTreatment::Implicit, nullptr}},
+            typename FVM::TransportSystemFactory<Pack, Mesh>::WeightedScalarContext{
+                .geometry_cache = &geometry, .ale = ale});
         transport_solver.notify_operator_values_changed();
         const auto result =
             transport_solver.solve_with_statistics(system.matrix, *system.rhs, scalar.owned_data(), options.linear);

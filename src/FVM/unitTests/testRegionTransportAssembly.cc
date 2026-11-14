@@ -2,7 +2,9 @@
  * @file testRegionTransportAssembly.cc
  * @brief  Region CFD transport/reference parity.
  */
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
+#include <type_traits>
 
 #include "FVM/Operators.hh"
 #include "transport_providers/TestMeshes.hh"
@@ -23,6 +25,8 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::FVM;
 using Pack = DefaultTpetraTypes;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using Handle = MeshHandle<Pack>;
 using LO = Pack::local_ordinal_type;
 using Vec = MeshUtils::Vec3;
@@ -75,34 +79,43 @@ template<class MeshType> struct AssemblyState
         flux.sync_ghosts();
         boundary_calls.clear();
         source_calls.clear();
-        const auto scalar = weighted_scalar_transport_system<Pack>(
-            FieldStoredWeightedScalarTransportRequest<Pack, MeshType>{
-                .old_values = old,
+        const auto scalar = TransportFactory<decltype(old)>::assemble(
+            typename TransportFactory<decltype(old)>::WeightedScalarTerms{
+                .history = {.old_values = old, .time_step = 0.25},
                 .face_fluxes = flux,
-                .time_step = 0.25,
-                .storage_weight = storage,
-                .advection_weight = storage,
-                .diffusivity = diffusion,
-                .boundary_condition = [&](int batch, size_t in_batch)
+                .coefficients = {.storage_weight = storage, .advection_weight = storage, .diffusivity = diffusion},
+                .sources = {.source =
+                                [&](LO cell)
+                            {
+                                source_calls.push_back(cell);
+                                return 0.17;
+                            },
+                    .implicit_sink = [](LO) { return 0.025; }},
+                .constraints = {}},
+            {.condition =
+                    [&](int batch, size_t in_batch)
                 {
                     boundary_calls.emplace_back(batch, in_batch);
                     return BoundaryCondition{batch % 2 ? BoundaryConditionType::Dirichlet
                                                       : BoundaryConditionType::Neumann, 0.13};
                 },
-                .boundary_value = [generation](int, size_t) { return 0.75 + generation; },
-                .source = [&](LO cell) { source_calls.push_back(cell); return 0.17; },
-                .treatment = NonOrthogonalTreatment::Hybrid,
-                .discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
-                .correction_field = &old,
-                .cached_matrix = scalar_matrix,
-                .implicit_sink = [](LO) { return 0.025; },
-                .geometry_cache = &geometry,
-                .coefficient_interpolation = interpolation,
-                .symbolic_plan = &plan});
-        const auto momentum = physical_momentum_transport_system<Pack>(velocity, flux, 0.25, diffusion, 2.3,
-            [](int, size_t) { return Vec{0.3, -0.2, 0.1}; },
-            [](LO) { return Vec{0.01, 0.02, -0.03}; }, NonOrthogonalTreatment::Hybrid,
-            &velocity, momentum_matrix, FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &geometry, interpolation);
+                .value = [generation](int, size_t) { return 0.75 + generation; }},
+            {.discretization = {ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind},
+                .correction = {.treatment = NonOrthogonalTreatment::Hybrid, .lagged_field = &old},
+                .coefficient_interpolation = interpolation},
+            {.cached_matrix = scalar_matrix, .geometry_cache = &geometry, .symbolic_plan = &plan});
+        const auto momentum = TransportFactory<decltype(velocity)>::assemble(
+            typename TransportFactory<decltype(velocity)>::MomentumTerms{
+                .history = {.old_values = velocity, .time_step = 0.25},
+                .face_fluxes = flux,
+                .material = {.dynamic_viscosity = diffusion, .reference_density = 2.3},
+                .acceleration_source = [](LO) { return Vec{0.01, 0.02, -0.03}; }},
+            {.value = [](int, size_t) { return Vec{0.3, -0.2, 0.1}; },
+                .diffusion = FVM::detail::AlwaysDiffuseBoundary{},
+                .coefficients = nullptr},
+            {.correction = {.treatment = NonOrthogonalTreatment::Hybrid, .lagged_field = &velocity},
+                .coefficient_interpolation = interpolation},
+            {.cached_matrix = momentum_matrix, .geometry_cache = &geometry});
         if (!scalar_matrix.is_null()) EXPECT_EQ(scalar.matrix.get(), scalar_matrix.get());
         if (!momentum_matrix.is_null()) EXPECT_EQ(momentum.matrix.get(), momentum_matrix.get());
         scalar_matrix = scalar.matrix;

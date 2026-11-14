@@ -369,8 +369,10 @@ Important entry points for a manual review are:
   synthetic solid-interface boundaries.
 - `src/fields/FieldStored.hh` for mesh-aware distributed field storage.
 - `src/fields/MeshFieldTraits.hh` for native-versus-legacy field selection.
-- `src/FVM/Operators.hh` and `src/FVM/TransportSystem.hh` for the public FVM
-  operator surface.
+- `src/FVM/Operators.hh`, `src/FVM/TransportSystemFactory.hh`, and
+  `src/FVM/TransportAssemblyPacks.hh` for the public FVM operators and typed
+  transport input groups; `src/FVM/TransportSystem.hh` retains result/cache types.
+  See the [transport factory contract](docs/architecture/transport_system_factory.md).
 - `src/solvers/PlanarFreeSurfaceModel.hh` for vessel/headspace closure and the
   global or cellwise liquid-mass inventory contracts.
 - `src/FVM/details` for mapped-mesh implementations and reusable geometry,
@@ -394,8 +396,14 @@ FVM's compiled gradient caches cover `DefaultTpetraTypes` with `Mesh` and
 (including `PartitionedMesh`) include `FVM/CellGradientCache.tcc` or
 `FVM/GaussLinearGradientCache.tcc` for the caches they instantiate. Likewise,
 custom mesh views include `FVM/ALEControlVolumeState.tcc` for ALE validation.
-Custom gradient and transport caches also construct a traversal plan for their
-mesh type, so their implementation provider includes `geometry/MeshTraverse.tcc`.
+Custom transport assembly providers include `FVM/TransportSystemFactory.tcc`
+and instantiate the required member overloads individually; ordinary consumers
+include only the factory declaration header. The old free-function and flat
+weighted-request APIs are removed, so downstream consumers must migrate and
+rebuild. Custom stored fields additionally need `fields/FieldStored.tcc` when no
+compiled storage provider exists. Custom gradient and transport caches also
+construct a traversal plan for their mesh type, so their implementation provider
+includes `geometry/MeshTraverse.tcc`.
 For a translation-unit-local mesh wrapper, that provider must be in the same
 translation unit as the wrapper definition.
 Keep those definitions in the consumer's translation unit for local mesh types.
@@ -648,11 +656,14 @@ as the default public behavior. The opt-in `ScalarTransportDiscretization`
 path supports constant-step BDF2, which requires an older field on the same
 mesh, and bounded linear-upwind convection, which retains the implicit upwind
 matrix and applies a conservative limited deferred correction. Keep new scalar
-policies in the shared legacy/mapped implementation seam, retain
-default-overload compatibility, validate policy and optional-field selections
-collectively, and add weighted-scalar parity tests across legacy `CellField`
-and native `FieldStored` paths. A higher-order policy for scalar transport does
-not by itself extend vector or momentum transport.
+policies in the shared legacy/mapped implementation seam, preserve the default
+pack selections, validate policy and optional-field selections collectively,
+and add weighted-scalar parity tests across legacy `CellField` and native
+`FieldStored` paths. Group history, material/coefficient inputs, sources,
+constraints, boundary callbacks, options, and optional resources through
+`TransportSystemFactory`; keep basic scalar two-point assembly distinct from a
+present explicit non-orthogonal correction group. A higher-order policy for
+scalar transport does not by itself extend vector or momentum transport.
 Explicit compatible choices protect existing callers while keeping higher-order state
 and conservation requirements testable.
 

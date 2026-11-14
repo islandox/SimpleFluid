@@ -9,6 +9,7 @@
  *
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
 
 #include "FVM/Operators.hh"
@@ -653,11 +654,15 @@ TEST(BoussinesqSolverTest, NativeSemiStructuredTemperatureUsesConfiguredNonOrtho
     };
     auto zero_source = [](Pack::local_ordinal_type) { return 0.0; };
     SimpleFluid::FVM::TransportGeometryCache<SimpleFluid::MeshHandle<Pack>> geometry_cache(*mesh);
-    const auto expected_system = SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(old_temperature, zero_fluxes,
-        time_options.time_step, time_options.thermal_diffusivity, boundary_condition, boundary_value, zero_source,
-        time_options.non_orthogonal_treatment, &old_temperature, Teuchos::null, &geometry_cache);
-    const auto orthogonal_system = SimpleFluid::FVM::transport_system<Pack>(old_temperature, zero_fluxes,
-        time_options.time_step, time_options.thermal_diffusivity, boundary_condition, boundary_value, zero_source);
+    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, SimpleFluid::MeshHandle<Pack>>;
+    const Factory::ScalarTerms terms{
+        {old_temperature, time_options.time_step}, zero_fluxes, {time_options.thermal_diffusivity}, zero_source};
+    const Factory::ScalarBoundary boundary{boundary_condition, boundary_value};
+    const auto expected_system = Factory::assemble(terms, boundary,
+        Factory::ScalarOptions{SimpleFluid::FVM::TransportCorrection<SimpleFluid::ScalarCellFieldStored<Pack>>{
+            time_options.non_orthogonal_treatment, &old_temperature}},
+        Factory::ScalarContext{Teuchos::null, &geometry_cache});
+    const auto orthogonal_system = Factory::assemble(terms, boundary, Factory::ScalarOptions{});
 
     SimpleFluid::ScalarCellFieldStored<Pack> expected_temperature(
         SimpleFluid::ScalarCellFieldDescriptor<Pack>("expected_temperature"), mesh);

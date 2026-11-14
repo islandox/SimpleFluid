@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "FVM/TransportSystemFactory.hh"
 #include "equations/CollectiveValidation.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
 
@@ -429,19 +430,23 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
             condensation_mass_rate == nullptr ? scalar_type{} : condensation_mass_rate->value(cell);
         return condensation - evaporation;
     };
-    auto system = FVM::weighted_scalar_transport_system<Pack>(
-        FVM::MeshWeightedScalarTransportRequest<Pack, mesh_type>{.old_values = d_cell_mass_inventory,
+    typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext context{
+        .cached_matrix = d_transport_matrix};
+    if constexpr (!std::is_same_v<mesh_type, Mesh<Pack>>)
+        context.ale = ale;
+    else if (ale != nullptr)
+        throw std::invalid_argument("Legacy weighted transport does not support ALE state.");
+    auto system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
+            .history = {d_cell_mass_inventory, time_step},
             .face_fluxes = liquid_face_flux,
-            .time_step = time_step,
-            .storage_weight = d_unit_transport_weight,
-            .advection_weight = d_unit_transport_weight,
-            .diffusivity = d_zero_diffusivity,
-            .boundary_condition = zero_neumann,
-            .boundary_value = zero_boundary_value,
-            .source = phase_change_source,
-            .treatment = FVM::NonOrthogonalTreatment::Explicit,
-            .cached_matrix = d_transport_matrix,
-            .ale = ale});
+            .coefficients = {d_unit_transport_weight, d_unit_transport_weight, d_zero_diffusivity},
+            .sources = {.source = phase_change_source}},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarBoundary{
+            .condition = zero_neumann, .value = zero_boundary_value},
+        typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarOptions{
+            .correction = {FVM::NonOrthogonalTreatment::Explicit, nullptr}},
+        context);
     d_transport_matrix = system.matrix;
     auto transport_linear_options = linear_options;
     // The cached graph is refilled with new transient/flux/source values;

@@ -9,7 +9,9 @@
  *
  */
 
+#include "FVM/TransportSystemFactory.hh"
 #include <gtest/gtest.h>
+#include <type_traits>
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -39,6 +41,8 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
+template<class Field>
+using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using STKMeshType = SimpleFluid::STKMesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
@@ -516,8 +520,15 @@ FieldType solve_burgers_semi_implicit(const FieldType& old_solution,
         return 0.0;
     };
 
-    const auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_solution, fluxes, time_step, 0.0, boundary_value);
+    const auto system = TransportFactory<decltype(old_solution)>::assemble(
+        typename TransportFactory<decltype(old_solution)>::ScalarTerms{
+            .history = {.old_values = old_solution, .time_step = time_step},
+            .face_fluxes = fluxes,
+            .coefficients = {.diffusivity = 0.0}},
+        {.condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     FieldType new_solution(old_solution.mesh_ptr(), "burgers_semi_implicit");
     SimpleFluid::LinearSolverOptions options;
@@ -553,8 +564,15 @@ FieldType solve_viscous_burgers_semi_implicit(
                                      viscosity);
     };
 
-    const auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_solution, fluxes, time_step, viscosity, boundary_value);
+    const auto system = TransportFactory<decltype(old_solution)>::assemble(
+        typename TransportFactory<decltype(old_solution)>::ScalarTerms{
+            .history = {.old_values = old_solution, .time_step = time_step},
+            .face_fluxes = fluxes,
+            .coefficients = {.diffusivity = viscosity}},
+        {.condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     FieldType new_solution(old_solution.mesh_ptr(), "viscous_burgers_next");
     SimpleFluid::LinearSolverOptions options;
@@ -733,8 +751,15 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
         return affine_scalar(mesh->face_centroid(face_lid));
     };
 
-    auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_values, zero_fluxes, 0.25, 0.7, boundary_value);
+    auto system = TransportFactory<decltype(old_values)>::assemble(
+        typename TransportFactory<decltype(old_values)>::ScalarTerms{
+            .history = {.old_values = old_values, .time_step = 0.25},
+            .face_fluxes = zero_fluxes,
+            .coefficients = {.diffusivity = 0.7}},
+        {.condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     Pack::vector_type solution(mesh->owned_cell_map(), true);
     SimpleFluid::LinearSolverOptions options;
@@ -789,9 +814,16 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
         return scalar_source(mesh->cell_centroid(cell_lid));
     };
 
-    auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_values, zero_fluxes, time_step, diffusivity,
-        boundary_value, source);
+    auto system = TransportFactory<decltype(old_values)>::assemble(
+        typename TransportFactory<decltype(old_values)>::ScalarTerms{
+            .history = {.old_values = old_values, .time_step = time_step},
+            .face_fluxes = zero_fluxes,
+            .coefficients = {.diffusivity = diffusivity},
+            .source = source},
+        {.condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     FieldType numerical(mesh, "forced_scalar");
     SimpleFluid::LinearSolverOptions options;
@@ -860,9 +892,16 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
         return source_value;
     };
 
-    auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_values, zero_fluxes, time_step, diffusivity,
-        boundary_value, source);
+    auto system = TransportFactory<decltype(old_values)>::assemble(
+        typename TransportFactory<decltype(old_values)>::ScalarTerms{
+            .history = {.old_values = old_values, .time_step = time_step},
+            .face_fluxes = zero_fluxes,
+            .coefficients = {.diffusivity = diffusivity},
+            .source = source},
+        {.condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     FieldType numerical(mesh, "constant_source_solution");
     SimpleFluid::LinearSolverOptions options;
@@ -1160,9 +1199,17 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
         return vector_source(mesh->cell_centroid(cell_lid));
     };
 
-    auto system = SimpleFluid::FVM::transport_system<Pack>(
-        old_values, zero_fluxes, time_step, diffusivity,
-        boundary_value, source);
+    auto system = TransportFactory<decltype(old_values)>::assemble(
+        typename TransportFactory<decltype(old_values)>::VectorTerms{
+            .history = {.old_values = old_values, .time_step = time_step},
+            .face_fluxes = zero_fluxes,
+            .coefficients = {.diffusivity = diffusivity},
+            .source = source},
+        typename TransportFactory<decltype(old_values)>::BasicVectorBoundary{
+            .condition = [](int, size_t)
+            { return SimpleFluid::VectorBoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, {}}; },
+            .value = boundary_value},
+        {}, {});
 
     VectorFieldType numerical(mesh, "forced_vector");
     SimpleFluid::LinearSolverOptions options;

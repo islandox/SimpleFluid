@@ -355,12 +355,21 @@ void evaluate_stored_scalar_gradients(const ScalarCellFieldStored<Pack, MeshType
     gradients.sync_ghosts();
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryType, class BoundaryValue, class Source>
-TransportSystem<Pack> stored_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    typename Pack::scalar_type diffusivity, BoundaryType boundary_type, BoundaryValue boundary_value, Source source,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar(ScalarTerms<Pack, MeshType> terms,
+    ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType>,
+    ScalarAssemblyContext<Pack, MeshType> resources)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    auto boundary_value = std::move(boundary.value);
+    auto boundary_condition = std::move(boundary.condition);
+    auto& boundary_type = boundary_condition;
+    const auto diffusivity = terms.coefficients.diffusivity;
+    auto source = std::move(terms.source);
+
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -609,15 +618,23 @@ void add_stored_scalar_explicit_non_orthogonal_correction(const ScalarCellFieldS
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class BoundaryValue, class Source,
-    class GeometryCache>
-TransportSystem<Pack> stored_scalar_non_orthogonal_transport_system(
-    const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::scalar_type time_step, typename Pack::scalar_type diffusivity, BoundaryCondition boundary_condition,
-    BoundaryValue boundary_value, Source source, NonOrthogonalTreatment treatment,
-    const ScalarCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix, const GeometryCache* geometry_cache)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_corrected_scalar(ScalarTerms<Pack, MeshType> terms,
+    ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType> options,
+    ScalarAssemblyContext<Pack, MeshType> resources)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    auto boundary_condition = std::move(boundary.condition);
+    const auto diffusivity = terms.coefficients.diffusivity;
+    auto source = std::move(terms.source);
+    const auto treatment = (*options.correction).treatment;
+    const auto* correction_field = (*options.correction).lagged_field;
+
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -907,22 +924,38 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class BoundaryValue, class Source,
-    class BoundaryCache, class GeometryCache>
-TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
-    const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::scalar_type time_step, const ScalarTransportCoefficientAccess<Pack>& coefficients,
-    bool has_distinct_old_storage, BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source,
-    NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
-    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
-    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
-    const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
-    ScalarTransportDiscretization discretization, const ScalarCellFieldStored<Pack, MeshType>* older_values,
-    const ALEControlVolumeState* ale, StoredTransportSymbolicPlan<Pack>* symbolic_plan,
-    Teuchos::RCP<typename Pack::vector_type> cached_rhs, bool allow_robin, bool rhs_only)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar_coefficients(
+    StoredScalarAssemblyTerms<Pack, MeshType> terms, CoefficientTransportBoundary<Pack, MeshType> boundary,
+    WeightedScalarAssemblyOptions<Pack, MeshType> options, WeightedScalarAssemblyContext<Pack, MeshType> resources,
+    StoredScalarAssemblyMetadata metadata)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    auto boundary_condition = std::move(boundary.condition);
+    const auto treatment = (options.correction).treatment;
+    const auto* correction_field = (options.correction).lagged_field;
+    const auto coefficient_interpolation = options.coefficient_interpolation;
+    const auto* ale = resources.ale;
+    const auto discretization = options.discretization;
+    const auto* older_values = terms.history.older_values;
+    auto source = std::move(terms.sources.source);
+    auto implicit_sink = std::move(terms.sources.implicit_sink);
+    auto fixed_cell_value = std::move(terms.constraints.fixed_cell_value);
+    const auto* boundary_diffusivity = boundary.coefficients;
+    auto* symbolic_plan = resources.symbolic_plan;
+    auto cached_rhs = std::move(resources.cached_rhs);
+    const auto& coefficients = terms.coefficients;
+    const auto has_distinct_old_storage = metadata.has_distinct_old_storage;
+    const auto incompatible_fields = metadata.incompatible_fields;
+    const auto context = metadata.diagnostic;
+    const auto allow_robin = metadata.allow_robin;
+    const auto rhs_only = metadata.rhs_only;
+
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -946,6 +979,12 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     report_scalar_transport_discretization_state({global_preflight[0], global_preflight[1], global_preflight[2],
                                                      global_preflight[3], global_preflight[4], global_preflight[5]},
         context);
+    if (rhs_only && (discretization.time != ScalarTimeScheme::BackwardEuler ||
+                        discretization.convection != ScalarConvectionScheme::Upwind))
+    {
+        throw std::invalid_argument(
+            "Temperature RHS refresh requires Backward Euler and first-order upwind discretization.");
+    }
     const std::array<int, 5> optional_state{
         global_preflight[6], global_preflight[7], global_preflight[8], global_preflight[9], global_preflight[10]};
     if (optional_state[4] != 0)
@@ -1512,24 +1551,31 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     return {matrix, rhs};
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class BoundaryValue, class Source,
-    class BoundaryCache, class GeometryCache>
-TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFieldStored<Pack, MeshType>& old_values,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    const ScalarCellFieldStored<Pack, MeshType>& storage_weight,
-    const ScalarCellFieldStored<Pack, MeshType>& advection_weight,
-    const ScalarCellFieldStored<Pack, MeshType>& diffusivity, BoundaryCondition boundary_condition,
-    BoundaryValue boundary_value, Source source, NonOrthogonalTreatment treatment,
-    const ScalarCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
-    std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
-    std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
-    const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, ScalarTransportDiscretization discretization,
-    const ScalarCellFieldStored<Pack, MeshType>* older_values,
-    const ScalarCellFieldStored<Pack, MeshType>* old_storage_weight, const ALEControlVolumeState* ale,
-    StoredTransportSymbolicPlan<Pack>* symbolic_plan, Teuchos::RCP<typename Pack::vector_type> cached_rhs)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_weighted(WeightedScalarTerms<Pack, MeshType> terms,
+    CoefficientTransportBoundary<Pack, MeshType> boundary, WeightedScalarAssemblyOptions<Pack, MeshType> options,
+    WeightedScalarAssemblyContext<Pack, MeshType> resources)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    auto boundary_condition = std::move(boundary.condition);
+    const auto* ale = resources.ale;
+    const auto* older_values = terms.history.older_values;
+    auto source = std::move(terms.sources.source);
+    auto implicit_sink = std::move(terms.sources.implicit_sink);
+    auto fixed_cell_value = std::move(terms.constraints.fixed_cell_value);
+    const auto* boundary_diffusivity = boundary.coefficients;
+    auto* symbolic_plan = resources.symbolic_plan;
+    auto cached_rhs = std::move(resources.cached_rhs);
+    const auto& storage_weight = terms.coefficients.storage_weight;
+    const auto& advection_weight = terms.coefficients.advection_weight;
+    const auto& diffusivity = terms.coefficients.diffusivity;
+    const auto* old_storage_weight = terms.coefficients.old_storage_weight;
+
     const auto incompatible_fields =
         old_values.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
                 old_values.mesh_ptr().get() != storage_weight.mesh_ptr().get() ||
@@ -1546,37 +1592,56 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system(const ScalarCellFi
         WeightedScalarTransportWeights<Pack>{TransportCoefficientView<Pack>{storage_data},
             TransportCoefficientView<Pack>{old_storage_data}, TransportCoefficientView<Pack>{advection_data}},
         TransportCoefficientView<Pack>{diffusion_data}};
-    return stored_weighted_scalar_transport_system_impl<Pack>(old_values, face_fluxes, time_step, coefficients,
-        old_storage_weight != nullptr, std::move(boundary_condition), std::move(boundary_value), std::move(source),
-        treatment, correction_field, std::move(cached_matrix), std::move(implicit_sink), std::move(fixed_cell_value),
-        boundary_diffusivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "weighted_scalar_transport_system", discretization, older_values, ale, symbolic_plan, std::move(cached_rhs));
+    return assemble_stored_scalar_coefficients<Pack, MeshType>(
+        {.history = {old_values, time_step, older_values},
+            .face_fluxes = face_fluxes,
+            .coefficients = coefficients,
+            .sources = {std::move(source), std::move(implicit_sink)},
+            .constraints = {std::move(fixed_cell_value)}},
+        {std::move(boundary_condition), std::move(boundary_value), boundary_diffusivity}, options,
+        {.cached_matrix = std::move(cached_matrix),
+            .geometry_cache = geometry_cache,
+            .ale = ale,
+            .symbolic_plan = symbolic_plan,
+            .cached_rhs = std::move(cached_rhs)},
+        {.has_distinct_old_storage = old_storage_weight != nullptr,
+            .incompatible_fields = incompatible_fields,
+            .diagnostic = "weighted_scalar_transport_system"});
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryCondition, class BoundaryValue, class Source,
-    class BoundaryCache, class GeometryCache>
-TransportSystem<Pack> stored_physical_temperature_transport_system(
-    const ScalarCellFieldStored<Pack, MeshType>& old_temperature,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    const ScalarCellFieldStored<Pack, MeshType>& density,
-    const ScalarCellFieldStored<Pack, MeshType>& specific_heat_capacity,
-    const ScalarCellFieldStored<Pack, MeshType>& thermal_conductivity, BoundaryCondition boundary_condition,
-    BoundaryValue boundary_value, Source power_density, NonOrthogonalTreatment treatment,
-    const ScalarCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix, const BoundaryCache* boundary_thermal_conductivity,
-    const GeometryCache* geometry_cache, FaceCoefficientInterpolation coefficient_interpolation,
-    ScalarTransportDiscretization discretization, const ScalarCellFieldStored<Pack, MeshType>* older_temperature,
-    const ScalarCellFieldStored<Pack, MeshType>* old_density,
-    const ScalarCellFieldStored<Pack, MeshType>* old_specific_heat_capacity, const ALEControlVolumeState* ale,
-    bool rhs_only)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_temperature(TemperatureTerms<Pack, MeshType> terms,
+    CoefficientTransportBoundary<Pack, MeshType> boundary, TemperatureAssemblyOptions<Pack, MeshType> options,
+    TemperatureAssemblyContext<Pack, MeshType> resources, bool rhs_only)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    auto boundary_condition = std::move(boundary.condition);
+    const auto coefficient_interpolation = options.coefficient_interpolation;
+    const auto* ale = resources.ale;
+    const auto discretization = options.discretization;
+    const auto* older_values = terms.history.older_values;
+    const auto& old_temperature = old_values;
+    const auto* older_temperature = older_values;
+    const auto& density = terms.material.density;
+    const auto& specific_heat_capacity = terms.material.specific_heat_capacity;
+    const auto& thermal_conductivity = terms.material.thermal_conductivity;
+    const auto* old_density = terms.material.old_density;
+    const auto* old_specific_heat_capacity = terms.material.old_specific_heat_capacity;
+    auto power_density = std::move(terms.power_density);
+    const auto* boundary_thermal_conductivity = boundary.coefficients;
+
     const std::array<int, 4> local_old_property_state{old_density == nullptr ? 0 : 1, old_density == nullptr ? 0 : -1,
         old_specific_heat_capacity == nullptr ? 0 : 1, old_specific_heat_capacity == nullptr ? 0 : -1};
     const auto old_property_state = reduce_transport_validation_state(old_temperature.mesh(), local_old_property_state);
     if (old_property_state[0] != -old_property_state[1] || old_property_state[2] != -old_property_state[3])
     {
-        throw std::invalid_argument(
-            "physical_temperature_transport_system requires every rank to select the same accepted-old property fields.");
+        throw std::invalid_argument("physical_temperature_transport_system requires every rank to select the same "
+                                    "accepted-old property fields.");
     }
     const auto incompatible_fields =
         old_temperature.mesh_ptr().get() != face_fluxes.mesh_ptr().get() ||
@@ -1601,12 +1666,21 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
             TransportProductCoefficientView<Pack>{density_data, specific_heat_capacity_data},
             TransportProductCoefficientView<Pack>{accepted_density_data, accepted_specific_heat_capacity_data}},
         TransportCoefficientView<Pack>{conductivity_data}};
-    return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, coefficients,
-        old_density != nullptr || old_specific_heat_capacity != nullptr, std::move(boundary_condition),
-        std::move(boundary_value), std::move(power_density), treatment, correction_field, std::move(cached_matrix), {},
-        {}, boundary_thermal_conductivity, geometry_cache, coefficient_interpolation, incompatible_fields,
-        "physical_temperature_transport_system", discretization, older_temperature, ale, nullptr, Teuchos::null, true,
-        rhs_only);
+    return assemble_stored_scalar_coefficients<Pack, MeshType>(
+        {.history = {old_temperature, time_step, older_temperature},
+            .face_fluxes = face_fluxes,
+            .coefficients = coefficients,
+            .sources = {.source = std::move(power_density)}},
+        {std::move(boundary_condition), std::move(boundary_value), boundary_thermal_conductivity},
+        {.discretization = discretization,
+            .correction = options.correction,
+            .coefficient_interpolation = coefficient_interpolation},
+        {.cached_matrix = std::move(cached_matrix), .geometry_cache = geometry_cache, .ale = ale},
+        {.has_distinct_old_storage = old_density != nullptr || old_specific_heat_capacity != nullptr,
+            .incompatible_fields = incompatible_fields,
+            .diagnostic = "physical_temperature_transport_system",
+            .allow_robin = true,
+            .rhs_only = rhs_only});
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>
@@ -1678,15 +1752,24 @@ void add_stored_explicit_non_orthogonal_correction(const VectorCellFieldStored<P
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValue, class Source, class BoundaryDiffusion,
-    class GeometryCache>
-VectorTransportSystem<Pack> stored_vector_transport_system(const VectorCellFieldStored<Pack, MeshType>& old_values,
-    const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes, typename Pack::scalar_type time_step,
-    typename Pack::scalar_type diffusivity, BoundaryValue boundary_value, Source source,
-    NonOrthogonalTreatment treatment, const VectorCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix, BoundaryDiffusion boundary_diffusion,
-    const GeometryCache* geometry_cache, const ALEControlVolumeState* ale)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_vector(VectorTerms<Pack, MeshType> terms,
+    VelocityTransportBoundary<Pack> boundary, VectorAssemblyOptions<Pack, MeshType> options,
+    VectorAssemblyContext<Pack, MeshType> resources)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    const auto diffusivity = terms.coefficients.diffusivity;
+    auto source = std::move(terms.source);
+    const auto treatment = (options.correction).treatment;
+    const auto* correction_field = (options.correction).lagged_field;
+    const auto* ale = resources.ale;
+    auto boundary_diffusion = std::move(boundary.diffusion);
+
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = 3;
@@ -2159,19 +2242,31 @@ void add_stored_deviatoric_transpose_gradient_stress(const VectorCellFieldStored
         });
 }
 
-template<TpetraTypePack Pack, class MeshType, class BoundaryValue, class Source, class BoundaryDiffusion,
-    class BoundaryCache, class GeometryCache>
-VectorTransportSystem<Pack> stored_physical_momentum_transport_system(
-    const VectorCellFieldStored<Pack, MeshType>& old_velocity, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
-    typename Pack::scalar_type time_step, const ScalarCellFieldStored<Pack, MeshType>& dynamic_viscosity,
-    typename Pack::scalar_type reference_density, BoundaryValue boundary_value, Source source,
-    NonOrthogonalTreatment treatment, const VectorCellFieldStored<Pack, MeshType>* correction_field,
-    Teuchos::RCP<typename Pack::matrix_type> cached_matrix, BoundaryDiffusion boundary_diffusion,
-    const BoundaryCache* boundary_dynamic_viscosity, const GeometryCache* geometry_cache,
-    FaceCoefficientInterpolation coefficient_interpolation, const ALEControlVolumeState* ale,
-    TensorCellFieldStored<Pack, MeshType>* gradient_workspace, BoundaryFaceSelector zero_gradient_stress,
-    AssemblyMode mode)
+template<TpetraTypePack Pack, class MeshType>
+SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_momentum(MomentumTerms<Pack, MeshType> terms,
+    MomentumTransportBoundary<Pack, MeshType> boundary, MomentumAssemblyOptions<Pack, MeshType> options,
+    MomentumAssemblyContext<Pack, MeshType> resources)
 {
+    const auto& old_values = terms.history.old_values;
+    const auto& face_fluxes = terms.face_fluxes;
+    const auto time_step = terms.history.time_step;
+    auto cached_matrix = std::move(resources.cached_matrix);
+    const auto* geometry_cache = resources.geometry_cache;
+    auto boundary_value = std::move(boundary.value);
+    const auto treatment = (options.correction).treatment;
+    const auto* correction_field = (options.correction).lagged_field;
+    const auto coefficient_interpolation = options.coefficient_interpolation;
+    const auto* ale = resources.ale;
+    auto boundary_diffusion = std::move(boundary.diffusion);
+    const auto& old_velocity = old_values;
+    const auto& dynamic_viscosity = terms.material.dynamic_viscosity;
+    const auto reference_density = terms.material.reference_density;
+    auto source = std::move(terms.acceleration_source);
+    const auto* boundary_dynamic_viscosity = boundary.coefficients;
+    auto* gradient_workspace = resources.gradient_workspace;
+    auto zero_gradient_stress = std::move(boundary.zero_gradient_stress);
+    const auto mode = options.mode;
+
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     constexpr size_t components = 3;

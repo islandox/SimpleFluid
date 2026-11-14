@@ -1,5 +1,8 @@
 # Unit tests for FVM
 
+# This consumer must compile against declarations without the shared PCH.
+set_source_files_properties(testFvmLibrary.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
