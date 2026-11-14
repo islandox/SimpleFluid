@@ -4,6 +4,8 @@
 #include "solvers/VolumeContinuityModel.hh"
 #include "solvers/VolumeContinuityModel.tcc"
 #include "FVM/ALEControlVolumeState.tcc"
+// ObservedMesh is test-local: its field constructors cannot come from a DSO.
+#include "fields/FieldStored.tcc"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "utils/testing_environment.hh"
