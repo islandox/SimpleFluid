@@ -6,6 +6,7 @@
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_unstructured_mesh_helpers.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
@@ -96,6 +97,21 @@ TEST(PartitionedFieldSyncTest, NativeUnstructuredFieldSyncAfterPartitioning)
             static_cast<double>(partitioned->cell_global_id(local_id)));
     }
 
+}
+
+TEST(PartitionedFieldSyncTest, MultiRegionOwnershipHalosPreserveFieldValues)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() == 1)
+        GTEST_SKIP() << "Requires MPI ranks.";
+    const auto geometry = SimpleFluid::test::two_regions(2);
+    SimpleFluid::SP<const Handle> mesh = std::make_shared<Handle>(geometry);
+    SimpleFluid::ScalarCellFieldStored<Pack> field(mesh, "gid");
+    for (std::size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        field.set_owned_value(local(cell), mesh->cell_global_id(local(cell)) + 0.5);
+    field.sync_ghosts();
+    for (std::size_t cell = 0; cell < mesh->num_cells(); ++cell)
+        EXPECT_DOUBLE_EQ(field.local_value(local(cell)), mesh->cell_global_id(local(cell)) + 0.5);
 }
 
 TEST(PartitionedFieldSyncTest, SemiStructuredSelectedFirstPreservesGhostImports)
