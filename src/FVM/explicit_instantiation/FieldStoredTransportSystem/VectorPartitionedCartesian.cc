@@ -16,9 +16,7 @@ template<>
 VectorTransportSystem<Pack> Factory::assemble(
     VectorTerms terms, VelocityBoundary boundary, VectorOptions options, VectorContext context)
 {
-    if (!terms.source)
-        terms.source = [](typename Pack::local_ordinal_type) { return typename VectorCellField<Pack>::vec_type{}; };
-    return detail::assemble_stored_vector<Pack, MeshType>(
+    return detail::assemble_factory_vector<Pack, MeshType>(
         std::move(terms), std::move(boundary), options, std::move(context));
 }
 
