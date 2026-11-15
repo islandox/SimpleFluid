@@ -103,4 +103,62 @@ inline void BasicVectorTransportRhs<Pack>::add_neumann(
     }
 }
 
+
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline StoredBasicVectorTransportRhs<Pack, MeshType>::StoredBasicVectorTransportRhs(
+    const VectorCellFieldStored<Pack, MeshType>& field,
+    const VectorBoundaryConditionProvider<Pack>& condition, const VectorBoundaryValueProvider<Pack>& boundary_value,
+    const VectorCellValueProvider<Pack>& source)
+    : field(field), condition_provider(condition), boundary_provider(boundary_value), source_provider(source)
+{
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void StoredBasicVectorTransportRhs<Pack, MeshType>::begin_cell(local_ordinal_type cell, scalar_type, scalar_type)
+{
+    cell_source = source_provider(cell);
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void StoredBasicVectorTransportRhs<Pack, MeshType>::finish_cell(
+    local_ordinal_type cell, scalar_type transient, scalar_type volume) const
+{
+    for (size_t comp = 0; comp < num_components; ++comp)
+    {
+        values->replaceLocalValue(
+            cell, comp, transient * (*old_data)(cell, comp) + volume * cell_source.component(comp));
+    }
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline BoundaryConditionType StoredBasicVectorTransportRhs<Pack, MeshType>::begin_boundary(int batch, size_t face)
+{
+    boundary_value = boundary_provider(batch, face);
+    condition = condition_provider(batch, face);
+    return condition.type;
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+inline void StoredBasicVectorTransportRhs<Pack, MeshType>::add_boundary_value(
+    local_ordinal_type owner, scalar_type factor) const
+{
+    for (size_t comp = 0; comp < num_components; ++comp)
+    {
+        values->sumIntoLocalValue(owner, comp, factor * boundary_value.component(comp));
+    }
+}
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+template<class Metrics>
+inline void StoredBasicVectorTransportRhs<Pack, MeshType>::add_neumann(
+    local_ordinal_type owner, scalar_type diffusivity, const Metrics& metrics, local_ordinal_type face) const
+{
+    for (size_t comp = 0; comp < num_components; ++comp)
+    {
+        values->sumIntoLocalValue(owner, comp, diffusivity * condition.value.component(comp) * metrics.face_area(face));
+    }
+}
+
+
 } // namespace SimpleFluid::FVM::detail

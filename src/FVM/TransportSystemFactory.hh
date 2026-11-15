@@ -46,8 +46,7 @@ public:
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> assemble(
         ScalarTerms terms, ScalarBoundary boundary, ScalarOptions options, ScalarContext context = {});
     SIMPLEFLUID_FVM_EXPORT static VectorTransportSystem<Pack> assemble(
-        VectorTerms terms, BasicVectorBoundary boundary, BasicVectorOptions options, BasicVectorContext context = {})
-        requires std::is_same_v<MeshType, Mesh<Pack>>;
+        VectorTerms terms, BasicVectorBoundary boundary, BasicVectorOptions options, BasicVectorContext context = {});
     SIMPLEFLUID_FVM_EXPORT static VectorTransportSystem<Pack> assemble(
         VectorTerms terms, VelocityBoundary boundary, VectorOptions options, VectorContext context = {});
     SIMPLEFLUID_FVM_EXPORT static TransportSystem<Pack> assemble(WeightedScalarTerms terms,

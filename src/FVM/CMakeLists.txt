@@ -7,6 +7,7 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/TransportGeometryCache.cc
     explicit_instantiation/MappedWeightedTransportSystem.cc
     explicit_instantiation/FieldStoredTransportSystem/ScalarMeshHandle.cc
+    explicit_instantiation/FieldStoredTransportSystem/BasicVectorMeshHandle.cc
     explicit_instantiation/FieldStoredTransportSystem/VectorMeshHandle.cc
     explicit_instantiation/FieldStoredTransportSystem/MomentumMeshHandle.cc
     explicit_instantiation/FieldStoredTransportSystem/ScalarPartitionedCartesian.cc

@@ -22,12 +22,15 @@ TransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     VectorTerms terms, BasicVectorBoundary boundary, BasicVectorOptions options, BasicVectorContext context)
-    requires std::is_same_v<MeshType, Mesh<Pack>>
 {
     if (!terms.source)
         terms.source = [](typename Pack::local_ordinal_type) { return typename VectorCellField<Pack>::vec_type{}; };
-    return detail::assemble_legacy_basic_vector<Pack>(
-        std::move(terms), std::move(boundary), options, std::move(context));
+    if constexpr (std::is_same_v<MeshType, Mesh<Pack>>)
+        return detail::assemble_legacy_basic_vector<Pack>(
+            std::move(terms), std::move(boundary), options, std::move(context));
+    else
+        return detail::assemble_stored_basic_vector<Pack, MeshType>(
+            std::move(terms), std::move(boundary), options, std::move(context));
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>

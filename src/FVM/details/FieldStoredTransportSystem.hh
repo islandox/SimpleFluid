@@ -42,6 +42,12 @@ namespace detail
 
 template<SimpleFluid::MeshType MeshType> struct TransportAssemblyGeometry;
 
+/** Single-matrix vector assembly with full condition/value boundary callbacks. */
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_basic_vector(VectorTerms<Pack, MeshType> terms,
+    BasicVectorTransportBoundary<Pack> boundary, BasicVectorAssemblyOptions options,
+    BasicVectorAssemblyContext<Pack> context);
+
 /** Typed entry points supplied by stored-field implementation providers. */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar(ScalarTerms<Pack, MeshType> terms,
