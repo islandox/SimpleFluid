@@ -234,8 +234,10 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                 flux_values(face_lid, 0) = face_velocity.dot(metrics.normal) * metrics.area;
                 if (decompose)
                     velocity_parts[face_lid] = flux_values(face_lid, 0);
-                if (pressure_coefficient == scalar_type{} || !face.owned_owner ||
-                    metrics.distance_squared <= scalar_type{})
+                // Owned mapped face rows include partition copies whose
+                // canonical owner cell is a ghost. Each copy must carry the
+                // same complete correction before overlap synchronization.
+                if (pressure_coefficient == scalar_type{} || metrics.distance_squared <= scalar_type{})
                     return;
 
                 const auto direct_gradient_flux = (pressure_values(neighbor_lid, 0) - pressure_values(owner_lid, 0)) *
