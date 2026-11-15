@@ -679,11 +679,8 @@ TEST(MeshPartitionerTest, PartitionsRootOnlySourceGeometry)
     }
 }
 
-/**
- * @brief Confirms MeshFactory releases its root-only STK construction source
- *        after exposing a distributed finite-volume mesh.
- */
-TEST(MeshPartitionerTest, FactoryReleasesRootOnlySTKSourceAfterPartition)
+/** @brief Factory geometry stays native after root construction and distribution. */
+TEST(MeshPartitionerTest, FactoryBuildsDistributedNativeGeometry)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -691,15 +688,17 @@ TEST(MeshPartitionerTest, FactoryReleasesRootOnlySTKSourceAfterPartition)
         GTEST_SKIP() << "This test requires at least two MPI ranks.";
     }
 
-    const auto mesh = make_4x4x4_box_mesh();
-    const auto stk_mesh =
-        std::dynamic_pointer_cast<SimpleFluid::STKMesh<Pack>>(mesh);
-    ASSERT_NE(stk_mesh, nullptr);
-
-    EXPECT_EQ(stk_mesh->meta(), nullptr);
-    EXPECT_EQ(stk_mesh->bulk(), nullptr);
+    SimpleFluid::MeshFactory factory(SimpleFluid::test::make_4x4x4_database());
+    const auto mesh = factory.build_handle<Pack>();
+    ASSERT_NE(mesh, nullptr);
+    EXPECT_FALSE(mesh->is_stk());
+    EXPECT_TRUE(mesh->visit([](const auto& geometry)
+        { return std::is_same_v<std::remove_cvref_t<decltype(geometry)>, UnstructuredMesh>; }));
+    EXPECT_EQ(mesh->owned_cell_map()->getGlobalNumElements(), 64U);
     EXPECT_GT(mesh->num_owned_cells(), 0U);
     EXPECT_LT(mesh->num_owned_cells(), 64U);
+    for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        EXPECT_DOUBLE_EQ(mesh->cell_volume(static_cast<Pack::local_ordinal_type>(cell)), 1.0);
 }
 
 /** @brief Keeps owner resolution collective when only some ranks have ghosts. */

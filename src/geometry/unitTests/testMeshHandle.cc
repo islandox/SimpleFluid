@@ -17,13 +17,19 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
+#include <stk_mesh/base/FEMHelpers.hpp>
+#include <stk_mesh/base/Field.hpp>
 
 #include <algorithm>
+#include <array>
+#include <exception>
 #include <filesystem>
 #include <memory>
 #include <numbers>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -43,6 +49,71 @@ using PartitionedUnstructured =
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+
+/** Build the frozen derived-class oracle independently of the native factory. */
+SimpleFluid::SP<ConcreteSTK> make_frozen_two_hex_fixture()
+{
+    auto mesh = std::make_shared<ConcreteSTK>();
+    const auto comm = Tpetra::getDefaultComm();
+    auto meta = mesh->meta();
+    auto bulk = mesh->bulk();
+    auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
+    stk::mesh::put_field_on_mesh(coordinates, meta->universal_part(), 3, nullptr);
+    meta->set_coordinate_field(&coordinates);
+    auto& hexes = meta->declare_part_with_topology("hexes", stk::topology::HEX_8);
+    const std::array<const char*, 6> names{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
+    std::array<stk::mesh::Part*, 6> boundaries{};
+    for (size_t b = 0; b < boundaries.size(); ++b)
+        boundaries[b] = &meta->declare_part(names[b], meta->side_rank());
+    meta->commit();
+    std::exception_ptr error;
+    bulk->modification_begin();
+    if (comm->getRank() == 0)
+    {
+        try
+        {
+            const auto first = stk::mesh::declare_element(*bulk, hexes, 1, {1, 2, 3, 4, 5, 6, 7, 8});
+            const auto second = stk::mesh::declare_element(*bulk, hexes, 2, {2, 9, 10, 3, 6, 11, 12, 7});
+            const auto side = [&](stk::mesh::Entity cell, unsigned ordinal, size_t boundary)
+            { bulk->declare_element_side(cell, ordinal, stk::mesh::PartVector{boundaries[boundary]}); };
+            side(first, 3, 0);
+            side(second, 1, 1);
+            for (const auto cell : {first, second})
+            {
+                side(cell, 0, 2);
+                side(cell, 2, 3);
+                side(cell, 4, 4);
+                side(cell, 5, 5);
+            }
+            const std::array<std::array<double, 3>, 12> points{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1},
+                {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}}};
+            for (size_t n = 0; n < points.size(); ++n)
+            {
+                const auto node = bulk->get_entity(stk::topology::NODE_RANK, n + 1);
+                auto* values = stk::mesh::field_data(coordinates, node);
+                if (!values)
+                    throw std::runtime_error("Frozen two-HEX fixture has no coordinate storage.");
+                std::copy(points[n].begin(), points[n].end(), values);
+            }
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+    }
+    bulk->modification_end();
+    const int failed = error ? 1 : 0;
+    int any_failed = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+    if (any_failed)
+    {
+        if (error)
+            std::rethrow_exception(error);
+        throw std::runtime_error("Frozen two-HEX fixture population failed on rank zero.");
+    }
+    mesh->assemble();
+    return mesh;
+}
 
 } // namespace
 
@@ -363,10 +434,8 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
  */
 TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
 {
-    auto legacy = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_two_hex_database());
-    auto concrete_legacy =
-        std::dynamic_pointer_cast<ConcreteSTK>(legacy);
+    const auto concrete_legacy = make_frozen_two_hex_fixture();
+    SimpleFluid::SP<SimpleFluid::Mesh<Pack>> legacy = concrete_legacy;
     ASSERT_TRUE(concrete_legacy);
     Handle handle(legacy);
     Handle derived_handle(concrete_legacy);

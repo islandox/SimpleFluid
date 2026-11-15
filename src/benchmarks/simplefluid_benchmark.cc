@@ -8,28 +8,30 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "FVM/Operators.hh"
+#include "benchmarks/BenchmarkMesh.hh"
 #include "benchmarks/BenchmarkSupport.hh"
 #include "equations/BoundaryConditions.hh"
-#include "FVM/Operators.hh"
+#include "fields/FieldStored.hh"
 #include "geometry/MeshFactory.hh"
-#include "geometry/STKMesh.hh"
+#include "parallel/CollectiveConstruction.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <unistd.h>
-#include <stk_io/IossBridge.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <sstream>
@@ -55,9 +57,8 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
-using FieldType = SimpleFluid::CellField<Pack>;
-using STKMeshType = SimpleFluid::STKMesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
+using FieldType = SimpleFluid::ScalarCellFieldStored<Pack>;
 using Comm = Teuchos::Comm<int>;
 
 constexpr std::string_view lid_driven_cavity_case_name =
@@ -485,7 +486,7 @@ make_box_database(const Dimensions& dimensions)
 }
 
 /**
- * @brief Build a sheared hexahedral BOX mesh directly via STK.
+ * @brief Build a sheared hexahedral BOX mesh with native geometry.
  *
  * Applies a shear displacement in the x-direction proportional to y.
  *
@@ -493,113 +494,34 @@ make_box_database(const Dimensions& dimensions)
  * @param shear Shear factor applied to node x-coordinates.
  * @return Shared pointer to the assembled sheared mesh.
  */
-std::shared_ptr<MeshType>
-make_sheared_box_mesh(const Dimensions& dimensions, double shear)
+std::shared_ptr<MeshType> make_sheared_box_mesh(const Dimensions& dimensions, double shear)
 {
-    auto mesh = std::make_shared<STKMeshType>();
-    auto meta = mesh->meta();
-    auto bulk = mesh->bulk();
-    auto& coordinates =
-        meta->declare_field<double>(
-            stk::topology::NODE_RANK, "coordinates");
-    stk::mesh::put_field_on_mesh(
-        coordinates, meta->universal_part(), 3, nullptr);
-    meta->set_coordinate_field(&coordinates);
-
-    auto& hex_part =
-        meta->declare_part_with_topology(
-            "benchmark_hexes", stk::topology::HEX_8);
-    stk::io::put_io_part_attribute(hex_part);
-
-    std::array<stk::mesh::Part*, 6> boundary_parts{};
-    const std::array<const char*, 6> boundary_names{
-        "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
-    for (size_t index = 0; index < boundary_parts.size(); ++index)
+    using Data = SimpleFluid::Meshes::UnstructuredMeshData;
+    const auto comm = Tpetra::getDefaultComm();
+    Data data;
+    std::exception_ptr generation_error;
+    if (comm->getRank() == 0)
     {
-        auto& part =
-            meta->declare_part(boundary_names[index], meta->side_rank());
-        stk::io::put_io_part_attribute(part);
-        boundary_parts[index] = &part;
-    }
-
-    const auto nx = static_cast<size_t>(dimensions.nx);
-    const auto ny = static_cast<size_t>(dimensions.ny);
-    const auto nz = static_cast<size_t>(dimensions.nz);
-    auto node_id =
-        [=](size_t i, size_t j, size_t k)
+        try
         {
-            return static_cast<stk::mesh::EntityId>(
-                1 + i + (nx + 1) * (j + (ny + 1) * k));
-        };
-    auto element_id =
-        [=](size_t i, size_t j, size_t k)
+            data = SimpleFluid::detail::benchmark_mesh::generate({dimensions.nx, dimensions.ny, dimensions.nz}, shear);
+        }
+        catch (...)
         {
-            return static_cast<stk::mesh::EntityId>(
-                1 + i + nx * (j + ny * k));
-        };
-    auto declare_boundary_side =
-        [&](stk::mesh::Entity element,
-            unsigned side,
-            stk::mesh::Part* part)
-        {
-            stk::mesh::PartVector parts{part};
-            bulk->declare_element_side(element, side, parts);
-        };
-
-    bulk->modification_begin();
-    for (size_t k = 0; k < nz; ++k)
-    {
-        for (size_t j = 0; j < ny; ++j)
-        {
-            for (size_t i = 0; i < nx; ++i)
-            {
-                const stk::mesh::EntityIdVector nodes{
-                    node_id(i, j, k),
-                    node_id(i + 1, j, k),
-                    node_id(i + 1, j + 1, k),
-                    node_id(i, j + 1, k),
-                    node_id(i, j, k + 1),
-                    node_id(i + 1, j, k + 1),
-                    node_id(i + 1, j + 1, k + 1),
-                    node_id(i, j + 1, k + 1)};
-                const auto element =
-                    stk::mesh::declare_element(
-                        *bulk, hex_part, element_id(i, j, k), nodes);
-                if (i == 0) declare_boundary_side(element, 3, boundary_parts[0]);
-                if (i + 1 == nx) declare_boundary_side(element, 1, boundary_parts[1]);
-                if (j == 0) declare_boundary_side(element, 0, boundary_parts[2]);
-                if (j + 1 == ny) declare_boundary_side(element, 2, boundary_parts[3]);
-                if (k == 0) declare_boundary_side(element, 4, boundary_parts[4]);
-                if (k + 1 == nz) declare_boundary_side(element, 5, boundary_parts[5]);
-            }
+            generation_error = std::current_exception();
         }
     }
-
-    for (size_t k = 0; k <= nz; ++k)
+    const int local_failed = generation_error ? 1 : 0;
+    int any_failed = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_failed, &any_failed);
+    if (any_failed)
     {
-        for (size_t j = 0; j <= ny; ++j)
-        {
-            for (size_t i = 0; i <= nx; ++i)
-            {
-                const auto x =
-                    static_cast<double>(i) / static_cast<double>(nx);
-                const auto y =
-                    static_cast<double>(j) / static_cast<double>(ny);
-                const auto z =
-                    static_cast<double>(k) / static_cast<double>(nz);
-                const auto node =
-                    bulk->get_entity(
-                        stk::topology::NODE_RANK, node_id(i, j, k));
-                auto* data = stk::mesh::field_data(coordinates, node);
-                data[0] = x + shear * y;
-                data[1] = y;
-                data[2] = z;
-            }
-        }
+        if (generation_error)
+            std::rethrow_exception(generation_error);
+        throw std::runtime_error("Benchmark mesh generation failed on rank zero.");
     }
-    bulk->modification_end();
-    mesh->assemble();
-    return mesh;
+    auto partition = SimpleFluid::MeshPartitioner<Pack>::partition_native(std::move(data), comm, 1, true);
+    return SimpleFluid::detail::collective_make_shared<MeshType>(*comm, partition.geometry, partition.indexer, comm);
 }
 
 /**
@@ -823,9 +745,9 @@ SimpleFluid::Benchmark::Record run_diffusion(
     {
         solve_system(
             SimpleFluid::FVM::
-                fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                non_orthogonal_diffusion_system<Pack>(
                     *mesh, diffusivity, boundary_condition, source,
-                    &solution));
+                    SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, &solution));
     }
     else
     {
@@ -847,9 +769,9 @@ SimpleFluid::Benchmark::Record run_diffusion(
                 {
                     solve_system(
                         SimpleFluid::FVM::
-                            explicit_non_orthogonal_diffusion_system<Pack>(
-                                *mesh, diffusivity,
-                                boundary_condition, source, solution));
+                            non_orthogonal_diffusion_system<Pack>(
+                                *mesh, diffusivity, boundary_condition, source,
+                                SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, &solution));
                 }
             }
             else
@@ -962,7 +884,7 @@ SimpleFluid::Benchmark::Record run_lid_driven_cavity(
     const auto setup_start = total_start;
     SimpleFluid::MeshFactory factory(
         make_box_database(options.lid_driven_cavity));
-    auto mesh = factory.build<Pack>();
+    auto mesh = factory.build_handle<Pack>();
     long long local_lid_faces = 0;
     long long local_owned_lid_faces = 0;
     double local_lid_area = 0.0;
@@ -1025,7 +947,7 @@ SimpleFluid::Benchmark::Record run_lid_driven_cavity(
     const auto boundary_conditions =
         lid_driven_cavity_boundary_conditions();
     const auto boundary_cache =
-        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack, MeshType>(
             mesh, boundary_conditions);
     double local_lid_velocity = 0.0;
     for (const auto& [batch_id, values] : boundary_cache.value)

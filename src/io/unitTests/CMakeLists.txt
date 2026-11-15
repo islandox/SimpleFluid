@@ -14,3 +14,9 @@ foreach(_input_ranks IN ITEMS 2 4)
         TARGET testSTKFaceAuthority PROCS ${_input_ranks}
         LABELS "mpi;io;unstructured;source_authority" TIMEOUT 120)
 endforeach()
+
+foreach(_input_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME STKMeshInput_${_input_ranks}procs
+        TARGET testSTKMeshInput PROCS ${_input_ranks}
+        LABELS "mpi;io;unstructured;import;empty_rank" TIMEOUT 120)
+endforeach()

@@ -11,6 +11,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     explicit_instantiation/SolidSubdomain.cc
     explicit_instantiation/STKMesh.cc
     details/NativeMeshAssembly.cc
+    details/NativeMeshGenerators.cc
+    explicit_instantiation/LegacyMeshSnapshot.cc
     MeshFactory.cc
     explicit_instantiation/LocalGlobalIndexer.cc
     explicit_instantiation/OrthogonalLocalGlobalIndexer.cc

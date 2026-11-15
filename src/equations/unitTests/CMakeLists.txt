@@ -17,6 +17,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testNativeMeshFactory")
+    target_link_libraries(${TEST_NAME} SimpleFluid::Solvers)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAnalyticalConvergence")
     simplefluid_discover_tests(
@@ -178,3 +181,9 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;temperature;cache;non_orthogonal"
     TIMEOUT 120)
+
+foreach(_factory_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME NativeMeshFactory_${_factory_ranks}procs
+        TARGET testNativeMeshFactory PROCS ${_factory_ranks}
+        LABELS "mpi;factory;native;equations;empty_rank" TIMEOUT 120)
+endforeach()
