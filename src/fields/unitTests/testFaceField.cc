@@ -10,10 +10,12 @@
  */
 
 #include <gtest/gtest.h>
+#include <Teuchos_CommHelpers.hpp>
 #include "utils/testing_environment.hh"
 #include "fields/FaceField.hh"
 
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "NativeFieldOwnershipFixture.hh"
 
 #include <stdexcept>
 #include <string>
@@ -22,7 +24,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::FaceField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -36,40 +38,6 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
 }
-
-/**
- * @brief Minimal test mesh subclass that pre-populates connectivity for face ownership tests.
- */
-class MinimalFaceOwnershipMesh : public MeshType
-{
-public:
-    void populate()
-    {
-        d_cells.resize(2);
-        d_cells[0].owned = true;
-        d_cells[1].owned = false;
-
-        d_owned_cell_ids = {0};
-        d_owned_cell_global_ids = {1};
-        d_cell_gid_to_lid = {{1, 0}, {2, 1}};
-
-        d_faces.resize(2);
-        d_faces[0].owner = 0;
-        d_faces[1].owner = 1;
-
-        create_maps();
-    }
-
-    void assemble() override
-    {
-        // No-op since this mesh is already in an assembled state.
-    }
-
-    void export_vtu(const std::string& filename) const override
-    {
-        throw std::runtime_error("export_to_vtk not implemented for MinimalFaceOwnershipMesh");
-    }
-};
 
 } // namespace
 
@@ -165,34 +133,47 @@ TEST(FaceFieldTest, ExposesOwnedRowsAndBulkHostViews)
  */
 TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 {
-    auto mesh = std::make_shared<MinimalFaceOwnershipMesh>();
-    mesh->populate();
-
+    auto mesh = SimpleFluid::test::native_field_ownership_mesh<Pack>();
     FieldType flux(mesh, "owned_flux");
-
-    ASSERT_EQ(flux.num_owned_faces(), 1u);
-    ASSERT_EQ(flux.owned_face_ids().size(), 1u);
-    EXPECT_EQ(flux.owned_face_ids()[0], 0);
-    EXPECT_TRUE(flux.is_owned_face(0));
-    EXPECT_FALSE(flux.is_owned_face(1));
-    EXPECT_THROW(flux.owned_row(1), std::out_of_range);
-    EXPECT_THROW(flux.face_global_id(1), std::out_of_range);
-    EXPECT_EQ(flux.map()->getLocalNumElements(), 1u);
-
-    flux.set_value(0, 7.0);
-
-    EXPECT_DOUBLE_EQ(flux.value(0), 7.0);
-#ifndef NDEBUG
-    EXPECT_THROW(flux.value(1), std::out_of_range);
-#endif
+    size_t expected_owned = 0;
+    size_t nonowned = 0;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto fid = static_cast<Pack::local_ordinal_type>(face);
+        const bool owned = mesh->is_owned_cell(mesh->owner_cell(fid));
+        EXPECT_EQ(flux.is_owned_face(fid), owned);
+        EXPECT_TRUE(flux.is_local_face(fid));
+        if (owned)
+        {
+            ++expected_owned;
+            const auto row = flux.owned_row(fid);
+            EXPECT_EQ(flux.map()->getGlobalElement(row), mesh->face_global_id(fid));
+            flux.set_value(fid, 7.0);
+            EXPECT_DOUBLE_EQ(flux.value(fid), 7.0);
+            EXPECT_DOUBLE_EQ(flux.local_value(fid), 7.0);
+        }
+        else
+        {
+            ++nonowned;
+            EXPECT_THROW(flux.owned_row(fid), std::out_of_range);
+            EXPECT_THROW(flux.face_global_id(fid), std::out_of_range);
+            EXPECT_THROW(flux.value(fid), std::out_of_range);
+        }
+    }
+    EXPECT_EQ(flux.num_owned_faces(), expected_owned);
+    EXPECT_EQ(flux.owned_face_ids().size(), expected_owned);
+    EXPECT_EQ(flux.map()->getLocalNumElements(), expected_owned);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    int local_owned = static_cast<int>(expected_owned), global_owned = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owned, &global_owned);
+    EXPECT_EQ(global_owned, 11);
+    if (comm->getSize() > 1 && mesh->num_owned_cells() > 0) EXPECT_GT(nonowned, 0u);
 }
 
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
-
-/** @brief Ensures construction rejects a mesh without assembled maps. */
-TEST(FaceFieldTest, RequiresAssembledMesh)
+/** @brief Ensures null mesh and empty descriptor names fail independently. */
+TEST(FaceFieldTest, RejectsNullMeshAndEmptyDescriptorName)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<>>();
-
-    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+    EXPECT_THROW(FieldType(nullptr, "flux"), std::invalid_argument);
+    const auto mesh = make_two_hex_mesh();
+    EXPECT_THROW(FieldType(mesh, ""), std::invalid_argument);
 }

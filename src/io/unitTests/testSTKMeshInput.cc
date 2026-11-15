@@ -231,8 +231,6 @@ private:
 
 void expect_native(const Handle& mesh, const Teuchos::RCP<const Comm>& comm, size_t total)
 {
-    EXPECT_FALSE(mesh.is_stk());
-    EXPECT_FALSE(mesh.legacy_mesh());
     EXPECT_TRUE(mesh.visit(
         [](const auto& geometry) { return std::is_same_v<std::remove_cvref_t<decltype(geometry)>, Geometry>; }));
     EXPECT_EQ(mesh.owned_cell_map()->getComm()->getSize(), comm->getSize());

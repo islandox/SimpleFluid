@@ -29,7 +29,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
+SimpleFluid::SP<SimpleFluid::MeshHandle<Pack>> make_single_cell_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);
@@ -40,7 +40,7 @@ SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
     database->set("Z", SimpleFluid::ArrReal{0.0, 1.0});
     database->set("domain_exterior_face_types",
                   SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-    return SimpleFluid::MeshFactory(database).build<Pack>();
+    return SimpleFluid::MeshFactory(database).build_handle<Pack>();
 }
 
 class ExposedFluidSolver : public SimpleFluid::FluidSolver<Pack>
@@ -264,10 +264,9 @@ TEST(SteadyStateFieldMonitorTest, ComputesVolumeWeightedRelativeUpdateRates)
 }
 
 TEST(SteadyStateFieldMonitorTest,
-     SupportsMeshHandleFieldsWithLegacyAdditionalScalars)
+     SupportsNativeFieldAliasesWithAdditionalScalars)
 {
-    auto legacy_mesh = make_single_cell_mesh();
-    auto mesh = std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy_mesh);
+    auto mesh = make_single_cell_mesh();
     SimpleFluid::VectorCellFieldStored<Pack> velocity(
         mesh, SimpleFluid::vec3<double>{0.0, 0.0, 0.0}, "velocity");
     SimpleFluid::ScalarCellFieldStored<Pack> temperature(
@@ -275,7 +274,7 @@ TEST(SteadyStateFieldMonitorTest,
     SimpleFluid::ScalarCellFieldStored<Pack> stored_turbulence(
         mesh, 2.0, "stored_turbulence");
     SimpleFluid::CellField<Pack> turbulence(
-        legacy_mesh, 1.0, "turbulence");
+        mesh, 1.0, "turbulence");
 
     SimpleFluid::SteadyStateUpdateScales scales;
     scales.velocity = 1.0;
@@ -303,11 +302,10 @@ TEST(SteadyStateFieldMonitorTest,
 
 TEST(SteadyStateFieldMonitorTest, SupportsIsothermalVelocityAndTurbulenceFields)
 {
-    auto legacy_mesh = make_single_cell_mesh();
-    auto mesh = std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy_mesh);
+    auto mesh = make_single_cell_mesh();
     SimpleFluid::VectorCellFieldStored<Pack> velocity(mesh, SimpleFluid::vec3<double>{0.0, 0.0, 0.0}, "velocity");
     SimpleFluid::ScalarCellFieldStored<Pack> turbulent_kinetic_energy(mesh, 1.0, "k");
-    SimpleFluid::CellField<Pack> dissipation_rate(legacy_mesh, 2.0, "epsilon");
+    SimpleFluid::CellField<Pack> dissipation_rate(mesh, 2.0, "epsilon");
 
     SimpleFluid::SteadyStateUpdateScales scales;
     scales.velocity = 1.0;

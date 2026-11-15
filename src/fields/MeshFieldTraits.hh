@@ -1,32 +1,15 @@
-/**
- * @file MeshFieldTraits.hh
- * @brief Select field storage for legacy and mapped mesh interfaces.
+/** @file MeshFieldTraits.hh
+ * @brief Select native stored-field descriptors for a mesh interface.
  */
-
 #pragma once
-#include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
-
-#include "fields/CellField.hh"
-#include "fields/FaceField.hh"
 #include "fields/FieldStored.hh"
-#include "fields/TensorCellField.hh"
-#include "fields/VectorCellField.hh"
-#include "fields/VectorFaceField.hh"
-#include "geometry/Mesh.hh"
 #include "geometry/MeshConcepts.hh"
 
 namespace SimpleFluid
 {
 
-/**
- * @brief Field family associated with an FVM mesh interface.
- *
- * Mapped CRTP meshes and MeshHandle use FieldStored.  The specialization for
- * the legacy STK Mesh preserves the established field API for callers that
- * construct equations directly on that backend.
- */
+/** @brief Native field family associated with an FVM mesh interface. */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MeshFieldTraits
 {
     using scalar_cell_type = ScalarCellFieldStored<Pack, MeshType>;
@@ -36,15 +19,4 @@ template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MeshFieldTr
     using vector_face_type = VectorFaceFieldStored<Pack, MeshType>;
 };
 
-template<TpetraTypePack Pack> struct MeshFieldTraits<Pack, Mesh<Pack>>
-{
-    using scalar_cell_type = CellField<Pack>;
-    using vector_cell_type = VectorCellField<Pack>;
-    using tensor_cell_type = TensorCellField<Pack>;
-    using scalar_face_type = FaceField<Pack>;
-    using vector_face_type = VectorFaceField<Pack>;
-};
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

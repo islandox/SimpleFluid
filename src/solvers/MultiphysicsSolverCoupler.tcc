@@ -138,7 +138,7 @@ namespace
     const LinearSolverOptions& linear, const LinearSolverOptions& pressure_linear,
     const LinearSolverOptions& momentum_linear, const BoussinesqModelOptions& model,
     const MaterialFeedbackOptions* feedback, const ReactingGasOptions* gas, const BoundaryConditionSet& boundaries,
-    const std::vector<std::pair<std::string, bool>>& temperature_sources, bool mutable_mesh, bool legacy_backend,
+    const std::vector<std::pair<std::string, bool>>& temperature_sources, bool mutable_mesh,
     bool physical_transport, bool turbulence_enabled, bool boiling_enabled,
     bool scalar_void_explicit, bool material_updater, bool dynamic_temperature_sources)
 {
@@ -368,7 +368,7 @@ namespace
         scalar(enabled);
     }
     scalar(mutable_mesh);
-    scalar(legacy_backend);
+    scalar(false); // Fixed native backend slot in the transaction configuration encoding.
     scalar(physical_transport);
     scalar(turbulence_enabled);
     scalar(boiling_enabled);
@@ -1830,7 +1830,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_pla
         d_solver->d_problem.linear_options(), d_solver->pressure_linear_solver_options(),
         d_solver->momentum_linear_solver_options(), d_solver->d_model_options, feedback_options, gas_options,
         d_solver->d_problem.boundary_conditions(), temperature_sources, d_solver->has_mutable_mesh_handle(),
-        d_solver->uses_legacy_backend(), d_solver->physical_transport_enabled(),
+        d_solver->physical_transport_enabled(),
         d_solver->stored_turbulence_model().enabled(), d_boiling_source_model && d_boiling_source_model->enabled(),
         d_scalar_void_fraction_explicitly_configured,
         d_solver->stored_material_properties().has_updater(),
@@ -1868,10 +1868,10 @@ template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurfaceOptions& options) const
 {
     validate_planar_ale_runtime_parity();
-    if (!d_solver->has_mutable_mesh_handle() || d_solver->uses_legacy_backend())
+    if (!d_solver->has_mutable_mesh_handle())
     {
         throw std::invalid_argument(
-            std::string(planar_ale_unavailable_diagnostic) + " A const-only or legacy solver mesh cannot be moved.");
+            std::string(planar_ale_unavailable_diagnostic) + " A const-only solver mesh cannot be moved.");
     }
     if (!d_solver->physical_transport_enabled())
     {
@@ -2267,10 +2267,7 @@ void MultiphysicsSolverCoupler<Pack>::configure_ale_pressure_boundary(std::uint6
 /** @brief Restore ordinary physical-pressure boundary behavior. */
 template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::clear_ale_pressure_boundary() noexcept
 {
-    if (d_solver->uses_legacy_backend())
-    {
-        return;
-    }
+
     try
     {
         d_solver->native_pressure_projection().clear_fixed_boundary_flux_provider();
@@ -3167,7 +3164,7 @@ void MultiphysicsSolverCoupler<Pack>::set_thermal_step_participant(SP<thermal_pa
             if (!d_active_coupling_checkpoint.expired() || d_active_ale ||
                 (d_ale_motion && d_ale_motion->has_active_trial()))
                 throw std::logic_error("Cannot replace thermal participant during a live coupling transaction.");
-            if (participant && (d_solver->uses_legacy_backend() || !d_solver->physical_transport_enabled()))
+            if (participant && (!d_solver->physical_transport_enabled()))
                 throw std::invalid_argument("Thermal participant requires mapped physical temperature transport.");
         });
     int local = participant ? 1 : 0, low = 0, high = 0;
@@ -3220,7 +3217,7 @@ template<TpetraTypePack Pack> std::string MultiphysicsSolverCoupler<Pack>::coupl
                d_solver->d_model_options, d_material_feedback_model ? &d_material_feedback_model->options() : nullptr,
                d_reacting_gas_model ? &d_reacting_gas_model->options() : nullptr,
                d_solver->d_problem.boundary_conditions(), sources, d_solver->has_mutable_mesh_handle(),
-               d_solver->uses_legacy_backend(), d_solver->physical_transport_enabled(),
+               d_solver->physical_transport_enabled(),
                d_solver->stored_turbulence_model().enabled(),
                d_boiling_source_model && d_boiling_source_model->enabled(),
                d_scalar_void_fraction_explicitly_configured, d_solver->stored_material_properties().has_updater(),
@@ -3616,10 +3613,6 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
             source.sync_ghosts();
         }
 
-        if (d_solver->uses_legacy_backend())
-        {
-            d_solver->sync_temperature_to_legacy();
-        }
         d_solver->finish_step();
         if (d_free_surface_model)
         {
@@ -3645,11 +3638,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         if (transactional_physics)
         {
             physics_rollback.restore();
-            if (d_solver->uses_legacy_backend())
-            {
-                d_solver->sync_primary_fields_to_legacy();
-                d_solver->sync_temperature_to_legacy();
-            }
+
         }
         if (!transactional_physics && (free_surface_active || (nonlinear_flow && flow_accepted)))
         {

@@ -290,10 +290,10 @@ TEST(MeshReorderingFactoryTest, BoxSelectionIsStableAndPreservesMeshIdentity)
     }
 }
 
-TEST(MeshReorderingFactoryTest, ReordersLegacyStorageWithoutChangingGeometryIdentity)
+TEST(MeshReorderingFactoryTest, ReordersFactoryStorageWithoutChangingGeometryIdentity)
 {
-    const auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto parent = std::make_shared<Handle>(legacy);
+    const auto factory_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    auto parent = std::make_shared<Handle>(*factory_mesh);
     const auto* parent_address = parent.get();
     const auto before = capture_cells(*parent);
 
@@ -303,7 +303,7 @@ TEST(MeshReorderingFactoryTest, ReordersLegacyStorageWithoutChangingGeometryIden
     ASSERT_TRUE(layout.mesh);
     EXPECT_FALSE(parent);
     EXPECT_EQ(layout.mesh.get(), parent_address);
-    EXPECT_TRUE(layout.mesh->is_stk());
+    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(layout.mesh->variant()));
     EXPECT_EQ(layout.selected_owned_cells, 1U);
     EXPECT_EQ(layout.selected_ghost_cells, 0U);
     EXPECT_GT(layout.mesh->cell_centroid(0).x, 1.0);
@@ -312,7 +312,7 @@ TEST(MeshReorderingFactoryTest, ReordersLegacyStorageWithoutChangingGeometryIden
     const Subdomain solid(layout);
     ASSERT_EQ(solid.num_owned_cells(), 1U);
     EXPECT_EQ(solid.parent_cell_lid(0), 0);
-    EXPECT_EQ(solid.cell_geometry_global_id(0), legacy->cell_global_id(1));
+    EXPECT_EQ(solid.cell_geometry_global_id(0), factory_mesh->cell_geometry_global_id(1));
     ASSERT_EQ(solid.interface_faces().size(), 1U);
     EXPECT_DOUBLE_EQ(solid.face_normal(solid.interface_faces().front().face_lid).x, -1.0);
 }
@@ -331,7 +331,7 @@ TEST(MeshReorderingFactoryTest, ReordersUnstructuredStorageAndIndexerTogether)
     ASSERT_TRUE(layout.mesh);
     EXPECT_FALSE(parent);
     EXPECT_EQ(layout.mesh.get(), parent_address);
-    EXPECT_FALSE(layout.mesh->is_stk());
+    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(layout.mesh->variant()));
     EXPECT_EQ(layout.selected_owned_cells, 1U);
     EXPECT_GT(layout.mesh->cell_centroid(0).x, 1.0);
     expect_cells_preserved(before, *layout.mesh);
@@ -677,7 +677,6 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
             const auto layout = Factory::selected_cells_first(std::move(input),
                 [selected](GlobalOrdinal canonical, const Vec3&) { return selected[std::size_t(canonical)] != 0; });
             EXPECT_EQ(layout.mesh.get(), identity);
-            EXPECT_FALSE(layout.mesh->legacy_mesh());
             EXPECT_EQ(layout.selected_owned_cells, expected_selected);
             expect_cells_preserved(before, *layout.mesh);
             EXPECT_TRUE(layout.mesh->owned_cell_map()->isOneToOne());
@@ -784,7 +783,6 @@ TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometr
             const auto first = Factory::selected_cells_first(std::move(parent), selected);
             EXPECT_EQ(first.mesh.get(), original_address);
             EXPECT_FALSE(parent);
-            EXPECT_FALSE(first.mesh->legacy_mesh());
             expect_cells_preserved(before, *first.mesh);
             double local_changed = 0., changed = 0.;
             for (std::size_t c = 0; c < first.mesh->num_owned_cells(); ++c)

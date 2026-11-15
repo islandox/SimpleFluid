@@ -27,7 +27,7 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Mesh = SimpleFluid::Mesh<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Field = SimpleFluid::CellField<Pack>;
 using Velocity = SimpleFluid::VectorCellField<Pack>;
 using Material = SimpleFluid::MaterialPropertyFields<Pack>;
@@ -176,8 +176,8 @@ TEST(TurbulenceWallTreatmentTest,
         1.0e-18);
 }
 
-/** @brief Verifies resolved SST treatment with skewed STK wall geometry. */
-TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesSkewedSTKWallGeometry)
+/** @brief Verifies resolved SST treatment with native skewed-prism wall geometry. */
+TEST(TurbulenceWallTreatmentTest, ResolvedSSTUsesNativeSkewedPrismWallGeometry)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     auto boundaries = wall_boundaries();

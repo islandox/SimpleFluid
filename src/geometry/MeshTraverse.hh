@@ -3,9 +3,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
-
 #include "utils/export_helper.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/details/MeshTraverseAccess.hh"
@@ -675,18 +672,14 @@ void make_mesh_traverse_plan(Mesh&&, MeshTraverseEntities = MeshTraverseEntities
 
 /** Compiled plans for the supported native meshes and default Tpetra pack. */
 extern template class MeshTraversePlan<MeshHandle<DefaultTpetraTypes>>;
-extern template class MeshTraversePlan<Mesh<DefaultTpetraTypes>>;
 extern template class MeshTraversePlan<Meshes::OrthogonalCartesian3D>;
 extern template class MeshTraversePlan<Meshes::OrthogonalCylindrial3D>;
 extern template class MeshTraversePlan<Meshes::SemiStructuredXY_Z>;
 extern template class MeshTraversePlan<Meshes::UnstructuredMesh>;
 extern template class MeshTraversePlan<Meshes::MultiRegionMesh>;
-extern template class MeshTraversePlan<Meshes::STKMeshAdapter<DefaultTpetraTypes>>;
 extern template class MeshTraversePlan<Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, DefaultTpetraTypes>>;
 extern template class MeshTraversePlan<Meshes::PartitionedMesh<Meshes::UnstructuredMesh, DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
 
 #include "geometry/MeshTraverse.ipp"
-
-SIMPLEFLUID_LEGACY_API_END

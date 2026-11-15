@@ -27,16 +27,6 @@
 namespace SimpleFluid
 {
 
-/** @brief Wrap a legacy mesh without reconstructing it. */
-template<TpetraTypePack Pack>
-IncompressibleIsothermalSolver<Pack>::IncompressibleIsothermalSolver(SP<const legacy_mesh_type> mesh,
-    BoundaryConditionSet boundary_conditions, TimeStepperOptions time_options, LinearSolverOptions linear_options,
-    scalar_type reference_density)
-    : IncompressibleIsothermalSolver(std::make_shared<mesh_type>(require_mesh(std::move(mesh))),
-          std::move(boundary_conditions), time_options, linear_options, reference_density)
-{
-}
-
 /** @brief Initialize constant molecular properties and optional-RANS storage. */
 template<TpetraTypePack Pack>
 IncompressibleIsothermalSolver<Pack>::IncompressibleIsothermalSolver(SP<const mesh_type> mesh,
@@ -64,31 +54,15 @@ IncompressibleIsothermalSolver<Pack>::IncompressibleIsothermalSolver(SP<const me
     d_problem.template emplace_object<turbulence_model_type>(
         "turbulence_model", d_mesh, d_problem.boundary_conditions());
 
-    // FluidSolver's legacy objects use CellField storage. RANS is natively
-    // MeshHandle/FieldStored-based, so retain the established public fields and
-    // add only the canonical handle-backed workspaces needed by its momentum
-    // hook. The supplied legacy mesh remains the MeshHandle's exact backend.
-    if (uses_legacy_backend())
-    {
-        d_problem.template emplace_object<momentum_equation_type>("isothermal_momentum_equation", d_mesh);
-        d_problem.template emplace_object<canonical_velocity_boundary_cache_type>("isothermal_velocity_boundary_cache",
-            FVM::cache_velocity_boundary_conditions<Pack>(d_mesh, d_problem.boundary_conditions()));
-        d_problem.template emplace_object<canonical_face_flux_workspace_type>(
-            "isothermal_pressure_face_flux_workspace", d_mesh);
-        d_problem.template emplace_object<canonical_coupled_solver_type>(
-            "isothermal_coupled_pressure_velocity_solver", d_mesh);
-    }
 }
 
 /** @brief Return the handle-backed momentum equation on either backend. */
 template<TpetraTypePack Pack>
 auto IncompressibleIsothermalSolver<Pack>::isothermal_momentum_equation() -> momentum_equation_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_momentum_equation();
     }
-    return d_problem.template object<momentum_equation_type>("isothermal_momentum_equation");
 }
 
 /** @brief Return the handle-backed velocity boundary cache. */
@@ -96,11 +70,9 @@ template<TpetraTypePack Pack>
 auto IncompressibleIsothermalSolver<Pack>::isothermal_velocity_boundary_cache()
     -> canonical_velocity_boundary_cache_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_velocity_boundary_cache();
     }
-    return d_problem.template object<canonical_velocity_boundary_cache_type>("isothermal_velocity_boundary_cache");
 }
 
 /** @brief Return the handle-backed pressure-flux workspace. */
@@ -108,11 +80,9 @@ template<TpetraTypePack Pack>
 auto IncompressibleIsothermalSolver<Pack>::isothermal_pressure_face_flux_workspace()
     -> canonical_face_flux_workspace_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_pressure_face_flux_workspace();
     }
-    return d_problem.template object<canonical_face_flux_workspace_type>("isothermal_pressure_face_flux_workspace");
 }
 
 /** @brief Return the handle-backed coupled assembler. */
@@ -120,11 +90,9 @@ template<TpetraTypePack Pack>
 auto IncompressibleIsothermalSolver<Pack>::isothermal_coupled_pressure_velocity_solver()
     -> canonical_coupled_solver_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_coupled_pressure_velocity_solver();
     }
-    return d_problem.template object<canonical_coupled_solver_type>("isothermal_coupled_pressure_velocity_solver");
 }
 
 /** @brief Return mutable molecular material fields. */
@@ -353,7 +321,7 @@ template<TpetraTypePack Pack> void IncompressibleIsothermalSolver<Pack>::step()
         if (transactional)
         {
             sas_rollback.restore();
-            if (uses_legacy_backend()) this->sync_primary_fields_to_legacy();
+
         }
         throw;
     }

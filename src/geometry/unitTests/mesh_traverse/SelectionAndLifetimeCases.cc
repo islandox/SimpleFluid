@@ -10,7 +10,7 @@
 
 TEST(MeshTraverseTest, SelectionsCoverCellsAndFacesAndDeduplicateBoundaryCorners)
 {
-    Handle mesh(cartesian(3, 3, 3));
+    Mesh mesh(cartesian(3, 3, 3));
     expect_handle_selections(mesh);
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
@@ -22,7 +22,7 @@ TEST(MeshTraverseTest, SelectionsCoverCellsAndFacesAndDeduplicateBoundaryCorners
 
 TEST(MeshTraverseTest, DefaultOrderPreservesReadsOfEarlierWritesAcrossCategoryChanges)
 {
-    Handle mesh(cartesian(3, 3, 3));
+    Mesh mesh(cartesian(3, 3, 3));
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
     std::vector<double> cells(mesh.num_owned_cells(), -1.0);
@@ -43,7 +43,7 @@ TEST(MeshTraverseTest, DefaultOrderPreservesReadsOfEarlierWritesAcrossCategoryCh
 
 TEST(MeshTraverseTest, SupportsMoveOnlyOperationsAndBatchVisitors)
 {
-    Handle mesh(cartesian(3, 3, 3));
+    Mesh mesh(cartesian(3, 3, 3));
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
     size_t visited = 0;
@@ -86,7 +86,7 @@ TEST(MeshTraverseTest, SupportsMoveOnlyOperationsAndBatchVisitors)
 
 TEST(MeshTraverseTest, BoundAccessPreservesCellFaceOrderCategoriesAndGeometry)
 {
-    Handle mesh(cartesian(3, 3, 3));
+    Mesh mesh(cartesian(3, 3, 3));
     const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     const auto traverse = plan.acquire();
     traverse.cells().apply([&](const auto& cell)
@@ -120,7 +120,7 @@ TEST(MeshTraverseTest, BoundAccessPreservesCellFaceOrderCategoriesAndGeometry)
 TEST(MeshTraverseTest, BoundAccessRejectsForeignMeshAndInvalidatedPlanBeforeCallbacks)
 {
     const auto geometry = cartesian(1, 1, 1);
-    Handle mesh(geometry), other(geometry);
+    Mesh mesh(geometry), other(geometry);
     auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     const auto other_plan = make_mesh_traverse_plan(other);
     const auto traverse = plan.acquire();
@@ -173,13 +173,13 @@ TEST(MeshTraverseTest, InvalidatedOrCountChangedPlansRejectAcquisition)
 
 TEST(MeshTraverseTest, SameCountBackendReplacementRejectsThePreviousPlan)
 {
-    Handle mesh(cartesian(1, 1, 1));
+    Mesh mesh(cartesian(1, 1, 1));
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto replacement = cartesian(1, 1, 1);
     {
         const auto traverse = plan.acquire();
         const auto faces = traverse.faces().all();
-        mesh = Handle(replacement);
+        mesh = Mesh(replacement);
         EXPECT_THROW(static_cast<void>(traverse.faces()), std::logic_error);
         EXPECT_THROW(static_cast<void>(faces.size()), std::logic_error);
         size_t callbacks = 0;
@@ -195,7 +195,7 @@ TEST(MeshTraverseTest, SameCountBackendReplacementRejectsThePreviousPlan)
 TEST(MeshTraverseTest, ReplacedCompositeBackendOutlivesItsActiveExecutionLease)
 {
     std::weak_ptr<Meshes::MultiRegionMesh> previous_backend;
-    Handle mesh([&]
+    Mesh mesh([&]
     {
         auto geometry = test::two_regions();
         previous_backend = geometry;
@@ -206,7 +206,7 @@ TEST(MeshTraverseTest, ReplacedCompositeBackendOutlivesItsActiveExecutionLease)
     {
         const auto traverse = plan.acquire();
         const auto faces = traverse.faces().all();
-        mesh = Handle(test::two_regions());
+        mesh = Mesh(test::two_regions());
         EXPECT_FALSE(previous_backend.expired());
         EXPECT_THROW(static_cast<void>(traverse.faces()), std::logic_error);
         EXPECT_THROW(static_cast<void>(faces.size()), std::logic_error);
@@ -225,7 +225,7 @@ TEST(MeshTraverseTest, ThinAndSingleCellMeshesHaveNoInteriorCells)
 {
     for (const auto& geometry : {cartesian(1, 1, 1), cartesian(4, 1, 2)})
     {
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         expect_handle_selections(mesh);
         const auto plan = make_mesh_traverse_plan(mesh);
         const auto traverse = plan.acquire();
@@ -263,9 +263,9 @@ TEST(MeshTraverseTest, NativeMeshesPreserveLocalOrdinalsAndAcceptAnEmptyPartitio
     EXPECT_EQ(batches, 0U);
 }
 
-TEST(MeshTraverseTest, LegacyAndPartitionedWrappersExposeFieldOrdinalsAndGeometry)
+TEST(MeshTraverseTest, FactoryAndPartitionedWrappersExposeFieldOrdinalsAndGeometry)
 {
-    const auto legacy = test::build_mesh<Pack>(test::make_two_hex_database());
+    const auto factory_mesh = test::build_mesh<Pack>(test::make_two_hex_database());
     auto check = [](const auto& mesh)
     {
         const auto plan = make_mesh_traverse_plan(mesh);
@@ -288,7 +288,7 @@ TEST(MeshTraverseTest, LegacyAndPartitionedWrappersExposeFieldOrdinalsAndGeometr
                 EXPECT_EQ(face.neighbor(), mesh.neighbor_cell(face.id()));
         });
     };
-    check(*legacy);
+    check(*factory_mesh);
 
     const auto native = test::make_unstructured_hex_line(2);
     using Partitioned = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
@@ -310,11 +310,7 @@ TEST(MeshTraverseTest, ConcurrentValidationPreservesMapOwnership)
     {
         // Keep owning references on the calling thread. Concurrent validation
         // must neither copy these non-atomic owners nor change their counts.
-        const auto& map_mesh = [&]() -> const auto&
-        {
-            if constexpr (requires { mesh.owned_cell_map(); }) return mesh;
-            else return mesh.mesh(); // STK adapter delegates to a legacy mesh.
-        }();
+        const auto& map_mesh = mesh;
         const std::array<Teuchos::RCP<const Pack::map_type>, 3> maps{
             map_mesh.owned_cell_map(), map_mesh.overlap_cell_map(), map_mesh.owned_face_map()};
         const auto counts = [&]
@@ -339,16 +335,12 @@ TEST(MeshTraverseTest, ConcurrentValidationPreservesMapOwnership)
         for (auto& reader : readers) EXPECT_TRUE(reader.get());
         EXPECT_EQ(counts(), before);
     };
-    Handle native(cartesian(3, 3, 3));
+    Mesh native(cartesian(3, 3, 3));
     check(native);
-    const auto legacy = test::build_mesh<Pack>(test::make_two_hex_database());
-    check(*legacy);
-    Handle legacy_handle(legacy);
-    check(legacy_handle);
-    // The adapter has no map getters; its owned-face count still needs to
-    // borrow the legacy map during validation.
-    const Meshes::STKMeshAdapter<Pack> adapter(legacy);
-    check(adapter);
+    const auto factory_mesh = test::build_mesh<Pack>(test::make_two_hex_database());
+    check(*factory_mesh);
+    Mesh copied_handle(*factory_mesh);
+    check(copied_handle);
 
     using Partitioned = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
     using Indexer = Partitioned::indexer_type;
@@ -361,8 +353,8 @@ TEST(MeshTraverseTest, ConcurrentValidationPreservesMapOwnership)
     for (size_t n = 0; n < geometry->num_nodes(); ++n) nodes.push_back(geometry->node_id(n));
     const Partitioned partition(geometry, Indexer(std::move(cells), {}, std::move(faces), {}, std::move(nodes)));
     check(partition);
-    const SolidSubdomain<Pack> solid(std::make_shared<Handle>(cartesian(3, 3, 3)),
-        [](auto, const Handle::Vec3&) { return true; });
+    const SolidSubdomain<Pack> solid(std::make_shared<Mesh>(cartesian(3, 3, 3)),
+        [](auto, const Mesh::Vec3&) { return true; });
     check(solid);
 }
 
@@ -373,7 +365,7 @@ TEST(MeshTraverseTest, UntaggedPhysicalExteriorStillBelongsToBoundarySelection)
         Arr<U::Vec3>{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                      {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}},
         Arr<U::CellDefinition>{{U::CellType::HEXAHEDRON, {0, 1, 2, 3, 4, 5, 6, 7}}});
-    Handle mesh(geometry);
+    Mesh mesh(geometry);
     expect_handle_selections(mesh);
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
@@ -381,7 +373,7 @@ TEST(MeshTraverseTest, UntaggedPhysicalExteriorStillBelongsToBoundarySelection)
     EXPECT_TRUE(selected_ids(traverse.faces().interior()).empty());
     traverse.faces().boundary().apply([](const auto& face)
     {
-        EXPECT_EQ(face.boundary_id(), Handle::invalid_boundary_id);
+        EXPECT_EQ(face.boundary_id(), Mesh::invalid_boundary_id);
     });
 }
 
@@ -390,7 +382,7 @@ TEST(MeshTraverseTest, FullyPeriodicMeshHasOnlyInteriorCellsAndFaces)
     auto geometry = std::make_shared<Cartesian>(
         Vec3D<ArrReal>{{{0, 1, 2, 3}, {0, 1, 2, 3}, {0, 1, 2, 3}}},
         Vec3D<bool>{{true, true, true}});
-    Handle mesh(geometry);
+    Mesh mesh(geometry);
     expect_handle_selections(mesh);
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
@@ -402,7 +394,7 @@ TEST(MeshTraverseTest, FullyPeriodicMeshHasOnlyInteriorCellsAndFaces)
 
 TEST(MeshTraverseTest, ReorderedCellsUseFieldOrdinalsForSelectionsAndFaceAdjacency)
 {
-    auto parent = std::make_shared<Handle>(cartesian(3, 3, 3));
+    auto parent = std::make_shared<Mesh>(cartesian(3, 3, 3));
     const auto old_plan = make_mesh_traverse_plan(*parent);
     auto layout = MeshReorderingFactory<Pack>::selected_cells_first(
         std::move(parent), [](auto, const auto& center)
@@ -421,7 +413,7 @@ TEST(MeshTraverseTest, CompositeInterfacesUseCanonicalFacesWithoutConnectivityMa
     for (const auto& geometry :
          {test::coarse_fine_regions(), test::periodic_regions(), test::independent_extruded_regions()})
     {
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         expect_handle_selections(mesh);
         const auto plan = make_mesh_traverse_plan(mesh);
         EXPECT_FALSE(plan.uses_structured_ranges());
@@ -441,7 +433,7 @@ TEST(MeshTraverseTest, CompositeInterfacesUseCanonicalFacesWithoutConnectivityMa
 
 TEST(MeshTraverseTest, ReusedPlanRefreshesGeometryAcrossALETrialAndRollback)
 {
-    auto mesh = std::make_shared<Handle>(test::two_regions());
+    auto mesh = std::make_shared<Mesh>(test::two_regions());
     const auto plan = make_mesh_traverse_plan(*mesh);
     PlanarALEMeshMotion<Pack> motion(mesh);
     auto capture = [&]
@@ -477,7 +469,7 @@ TEST(MeshTraverseTest, ReusedPlanRefreshesGeometryAcrossALETrialAndRollback)
 
 TEST(MeshTraverseTest, OptionalCellFaceBatchesPreserveCanonicalFineSubfaceIncidence)
 {
-    Handle mesh(test::coarse_fine_regions());
+    Mesh mesh(test::coarse_fine_regions());
     {
         const auto plan = make_mesh_traverse_plan(mesh);
         const auto traverse = plan.acquire();

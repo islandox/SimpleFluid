@@ -10,14 +10,11 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/details/OperatorDetails.hh"
-#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/CoupledOperatorBackend.hh"
 #include "equations/EquationForward.hh"
@@ -58,8 +55,6 @@ namespace FVM
 struct ALEControlVolumeState;
 
 template<TpetraTypePack Pack> struct VectorTransportSystem;
-
-template<TpetraTypePack Pack> struct VelocityBoundaryCache;
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct FieldStoredVelocityBoundaryCache;
 } // namespace FVM
@@ -387,7 +382,7 @@ template<TpetraTypePack Pack> class CoupledSchurPreconditioner;
  *
  * @tparam Pack Tpetra type pack defining distributed algebra types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_SOLVERS_EXPORT CoupledPressureVelocitySolver
 {
 public:
@@ -399,8 +394,7 @@ public:
     using momentum_equation_type = IncompressibleMomentumEquation<Pack, mesh_type>;
     using boussinesq_momentum_equation_type = BoussinesqMomentumEquation<Pack, mesh_type>;
     using material_property_fields_type = MaterialPropertyFields<Pack, mesh_type>;
-    using velocity_boundary_cache_type = std::conditional_t<std::same_as<mesh_type, Mesh<Pack>>,
-        FVM::VelocityBoundaryCache<Pack>, FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -727,9 +721,6 @@ private:
  * Additional Tpetra packs require a deliberate explicit instantiation in the
  * solver implementation target.
  */
-extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

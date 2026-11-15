@@ -9,11 +9,11 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "FVM/CellOperators.hh"
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
+#include "FVM/details/FieldStoredNonOrthogonalDiffusion.tcc"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -28,7 +28,7 @@ namespace detail
 
 template<TpetraTypePack Pack>
 void evaluate_scalar_affine_gradients(const CellField<Pack>& field,
-    const std::vector<AffineLeastSquaresGradientStencil<Mesh<Pack>>>& stencils, VectorCellField<Pack>& gradients)
+    const std::vector<AffineLeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, VectorCellField<Pack>& gradients)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
     if (stencils.size() != field.mesh().num_owned_cells())
@@ -56,7 +56,7 @@ void evaluate_scalar_affine_gradients(const CellField<Pack>& field,
 
 template<TpetraTypePack Pack>
 void evaluate_vector_affine_gradients(const VectorCellField<Pack>& field,
-    const std::vector<VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>& stencils, TensorCellField<Pack>& gradients)
+    const std::vector<VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, TensorCellField<Pack>& gradients)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
     if (stencils.size() != field.mesh().num_owned_cells())
@@ -87,7 +87,7 @@ void evaluate_vector_affine_gradients(const VectorCellField<Pack>& field,
 
 template<TpetraTypePack Pack>
 void evaluate_vector_interior_gradients(const VectorCellField<Pack>& field,
-    const std::vector<LeastSquaresGradientStencil<Mesh<Pack>>>& stencils, TensorCellField<Pack>& gradients)
+    const std::vector<LeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, TensorCellField<Pack>& gradients)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -124,83 +124,15 @@ void add_explicit_non_orthogonal_correction(const CellField<Pack>& correction_fi
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     typename Pack::vector_type& rhs, typename Pack::scalar_type correction_weight)
 {
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    const auto& mesh = correction_field.mesh();
-    if (diffusivity <= scalar_type{0})
-    {
-        return;
-    }
-    if (rhs.getMap().get() != mesh.owned_cell_map().get())
-    {
-        throw std::invalid_argument("add_explicit_non_orthogonal_correction requires an owned-cell RHS.");
-    }
-
-    VectorCellField<Pack> gradients(correction_field.mesh_ptr(), "non_orthogonal_gradient");
-    cell_gradient(correction_field, gradients);
-    gradients.sync_ghosts();
-    const auto gradient_values = gradients.local_read_view();
-
-    auto gradient_for_face = [&](local_ordinal_type cell_lid, local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
-    {
-        return (detail::vector_view_value<Pack>(gradient_values, cell_lid) +
-                   detail::vector_view_value<Pack>(gradient_values, other_lid)) /
-               scalar_type{2};
-    };
-
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            if (!mesh.is_interior_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-            const auto area_vector = mesh.face_area_vector_outward(face_lid, cell_lid);
-            const auto d = mesh.cell_center_vector(face_lid, cell_lid);
-            const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
-            const auto gradient = gradient_for_face(cell_lid, other);
-
-            rhs.sumIntoLocalValue(cell_lid, correction_weight * diffusivity * gradient.dot(tangential_area));
-        }
-    }
-
-    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
-    {
-        for (size_t in_batch_id = 0; in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
-        {
-            const auto face_lid = boundary_batch.face_lids[in_batch_id];
-            if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto bc = boundary_condition(batch_id, in_batch_id);
-            if (bc.type != BoundaryConditionType::Dirichlet)
-            {
-                continue;
-            }
-
-            const auto owner = mesh.owner_cell(face_lid);
-            const auto area_vector = mesh.face_area_vector_outward(face_lid, owner);
-            const auto d = mesh.face_centroid(face_lid) - mesh.cell_centroid(owner);
-            const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
-            const auto gradient = detail::vector_view_value<Pack>(gradient_values, owner);
-
-            rhs.sumIntoLocalValue(owner, correction_weight * diffusivity * gradient.dot(tangential_area));
-        }
-    }
+    detail::add_stored_explicit_diffusion_correction<Pack>(
+        correction_field, diffusivity, std::move(boundary_condition), rhs, correction_weight);
 }
 
 template<TpetraTypePack Pack>
 void add_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correction_field,
     typename Pack::scalar_type diffusivity, typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight, BoundaryFaceSelector boundary_diffusion,
-    const std::vector<detail::LeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils)
+    const std::vector<detail::LeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -208,6 +140,7 @@ void add_explicit_non_orthogonal_correction(const VectorCellField<Pack>& correct
     constexpr size_t num_components = VectorCellField<Pack>::num_components;
 
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (diffusivity <= scalar_type{0} || correction_weight == scalar_type{0})
     {
         return;
@@ -303,7 +236,7 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
     const CellField<Pack>& coefficient_field, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarBoundaryValueProvider<Pack> boundary_value, typename Pack::vector_type& rhs,
     typename Pack::scalar_type correction_weight, BoundaryCoefficientProvider<Pack> boundary_coefficient,
-    const std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils,
+    const std::vector<detail::AffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
     using scalar_type = typename Pack::scalar_type;
@@ -315,6 +248,7 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
     }
 
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (&coefficient_field.mesh() != &mesh)
     {
         throw std::invalid_argument("Variable non-orthogonal correction requires coefficient and "
@@ -405,8 +339,8 @@ void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>
     const CellField<Pack>& coefficient_field, VectorBoundaryValueProvider<Pack> boundary_value,
     typename Pack::multi_vector_type& rhs, typename Pack::scalar_type correction_weight,
     BoundaryFaceSelector boundary_diffusion, BoundaryCoefficientProvider<Pack> boundary_coefficient,
-    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils,
-    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>* cached_boundary_locations,
+    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils,
+    const std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>>* cached_boundary_locations,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
     using scalar_type = typename Pack::scalar_type;
@@ -419,6 +353,7 @@ void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>
     }
 
     const auto& mesh = correction_field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (&coefficient_field.mesh() != &mesh)
     {
         throw std::invalid_argument("Variable vector non-orthogonal correction requires coefficient "
@@ -447,7 +382,7 @@ void add_variable_explicit_non_orthogonal_correction(const VectorCellField<Pack>
     const auto gradient_values = gradients.local_read_view();
     const auto coefficient_values = coefficient_field.local_read_view();
 
-    std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>> local_boundary_locations;
+    std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>> local_boundary_locations;
     if (cached_boundary_locations == nullptr)
     {
         local_boundary_locations = detail::boundary_face_locations(mesh);
@@ -520,8 +455,8 @@ void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pac
     const CellField<Pack>& dynamic_viscosity, typename Pack::scalar_type reference_density,
     VectorBoundaryValueProvider<Pack> boundary_value, typename Pack::multi_vector_type& rhs,
     BoundaryFaceSelector boundary_stress, BoundaryCoefficientProvider<Pack> boundary_coefficient,
-    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils,
-    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>* cached_boundary_locations,
+    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils,
+    const std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>>* cached_boundary_locations,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
     using scalar_type = typename Pack::scalar_type;
@@ -534,6 +469,7 @@ void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pac
     }
 
     const auto& mesh = old_velocity.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     if (&dynamic_viscosity.mesh() != &mesh)
     {
         throw std::invalid_argument("Explicit transpose-gradient stress requires velocity and "
@@ -563,7 +499,7 @@ void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pac
     const auto gradient_values = gradients.local_read_view();
     const auto viscosity_values = dynamic_viscosity.local_read_view();
 
-    std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>> local_boundary_locations;
+    std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>> local_boundary_locations;
     if (cached_boundary_locations == nullptr)
     {
         local_boundary_locations = detail::boundary_face_locations(mesh);
@@ -637,276 +573,21 @@ void add_explicit_deviatoric_transpose_gradient_stress(const VectorCellField<Pac
 }
 
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const MeshHandle<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>& correction_field)
 {
-    if (&correction_field.mesh() != &mesh)
-    {
-        throw std::invalid_argument(
-            "explicit_non_orthogonal_diffusion_system requires correction field on the target mesh.");
-    }
-
-    auto system = diffusion_system<Pack>(mesh, diffusivity, boundary_condition, right_hand_source);
-    add_explicit_non_orthogonal_correction<Pack>(correction_field, diffusivity, boundary_condition, *system.rhs);
-    return system;
+    return non_orthogonal_diffusion_system<Pack, MeshHandle<Pack>>(mesh, diffusivity,
+        std::move(boundary_condition), std::move(right_hand_source), NonOrthogonalTreatment::Explicit, &correction_field);
 }
 
 template<TpetraTypePack Pack>
-DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
-    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
-    ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type non_orthogonal_implicit_weight,
-    const CellField<Pack>* partition_correction_field)
-{
-    using matrix_type = typename Pack::matrix_type;
-    using scalar_type = typename Pack::scalar_type;
-    using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    const auto communicator = mesh.owned_cell_map()->getComm();
-    const int local_maximum_state[] = {!std::isfinite(diffusivity) || diffusivity < scalar_type{0},
-        !std::isfinite(non_orthogonal_implicit_weight) || non_orthogonal_implicit_weight < scalar_type{0} ||
-            non_orthogonal_implicit_weight > scalar_type{1},
-        non_orthogonal_implicit_weight > scalar_type{} ? 1 : 0,
-        partition_correction_field == nullptr ? 0 : (&partition_correction_field->mesh() == &mesh ? 1 : 2)};
-    int global_maximum_state[4] = {};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 4, local_maximum_state, global_maximum_state);
-
-    const int local_minimum_state[] = {local_maximum_state[2], local_maximum_state[3]};
-    int global_minimum_state[2] = {};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, 2, local_minimum_state, global_minimum_state);
-
-    if (global_maximum_state[0] != 0)
-    {
-        throw std::invalid_argument("implicit_non_orthogonal_diffusion_system requires finite "
-                                    "non-negative diffusivity.");
-    }
-    if (global_maximum_state[1] != 0)
-    {
-        throw std::invalid_argument("non-orthogonal implicit weight must be finite and in [0, 1].");
-    }
-    if (global_minimum_state[0] != global_maximum_state[2])
-    {
-        throw std::invalid_argument("Ranks must agree whether implicit non-orthogonal correction "
-                                    "is active.");
-    }
-    if (global_minimum_state[1] != global_maximum_state[3])
-    {
-        throw std::invalid_argument("Ranks must supply a consistent partition correction field.");
-    }
-    if (global_maximum_state[3] == 2)
-    {
-        throw std::invalid_argument("implicit_non_orthogonal_diffusion_system requires its "
-                                    "partition correction field on the target mesh.");
-    }
-    if (non_orthogonal_implicit_weight > scalar_type{} && partition_correction_field == nullptr)
-    {
-        int local_partition_face = 0;
-        for (size_t owned = 0; owned < mesh.num_owned_cells() && local_partition_face == 0; ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            for (const auto face_lid : mesh.faces(cell_lid))
-            {
-                if (!mesh.is_interior_face(face_lid))
-                {
-                    continue;
-                }
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                if (!mesh.is_owned_cell(other))
-                {
-                    local_partition_face = 1;
-                    break;
-                }
-            }
-        }
-        int global_partition_face = 0;
-        Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 1, &local_partition_face, &global_partition_face);
-        if (global_partition_face != 0)
-        {
-            throw std::invalid_argument("Distributed implicit non-orthogonal diffusion requires "
-                                        "a synchronized partition correction field.");
-        }
-    }
-
-    const auto gradient_stencils = detail::least_squares_gradient_stencils(mesh);
-    const auto boundary_locations = detail::boundary_face_locations(mesh);
-    std::unique_ptr<VectorCellField<Pack>> partition_gradients;
-    if (non_orthogonal_implicit_weight > scalar_type{} && partition_correction_field != nullptr)
-    {
-        partition_gradients = std::make_unique<VectorCellField<Pack>>(
-            partition_correction_field->mesh_ptr(), "partition_diffusion_non_orthogonal_gradient");
-        cell_gradient(*partition_correction_field, *partition_gradients);
-        partition_gradients->sync_ghosts();
-    }
-
-    auto matrix = Teuchos::rcp(new matrix_type(mesh.owned_cell_map(), mesh.overlap_cell_map(), 32));
-    auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
-
-    Teuchos::Array<local_ordinal_type> cols;
-    Teuchos::Array<scalar_type> vals;
-    cols.reserve(64);
-    vals.reserve(64);
-
-    std::unordered_map<local_ordinal_type, scalar_type> row_values;
-    row_values.reserve(64);
-
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-
-        row_values.clear();
-        auto rhs_value = mesh.cell_volume(cell_lid) * right_hand_source(cell_lid);
-
-        auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type face_gradient_weight,
-                                              const typename Mesh<Pack>::Vec3& tangential_area)
-        {
-            if (non_orthogonal_implicit_weight == scalar_type{0} || face_gradient_weight == scalar_type{0} ||
-                !mesh.is_owned_cell(gradient_cell_lid) ||
-                static_cast<size_t>(gradient_cell_lid) >= gradient_stencils.size())
-            {
-                return;
-            }
-
-            const auto scale = -non_orthogonal_implicit_weight * diffusivity * face_gradient_weight;
-            for (const auto& entry : gradient_stencils[static_cast<size_t>(gradient_cell_lid)])
-            {
-                detail::add_matrix_entry(row_values, entry.cell_lid, scale * entry.coefficient.dot(tangential_area));
-            }
-        };
-
-        for (const auto face_lid : mesh.faces(cell_lid))
-        {
-            if (mesh.is_interior_face(face_lid))
-            {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
-                const auto coeff = detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
-                detail::add_matrix_entry(row_values, cell_lid, coeff);
-                detail::add_matrix_entry(row_values, other, -coeff);
-
-                const auto area_vector = mesh.face_area_vector_outward(face_lid, cell_lid);
-                const auto d = mesh.cell_center_vector(face_lid, cell_lid);
-                const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
-
-                if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
-                    add_non_orthogonal_stencil(other, scalar_type{0.5}, tangential_area);
-                }
-                else
-                {
-                    add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, tangential_area);
-                    if (partition_gradients == nullptr)
-                    {
-                        throw std::logic_error("Partition-face correction validation lost its "
-                                               "synchronized gradient field.");
-                    }
-                    rhs_value += non_orthogonal_implicit_weight * diffusivity * scalar_type{0.5} *
-                                 partition_gradients->local_value(other).dot(tangential_area);
-                }
-                continue;
-            }
-
-            if (!mesh.is_boundary_face(face_lid) || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
-                !boundary_locations[static_cast<size_t>(face_lid)].active)
-            {
-                continue;
-            }
-
-            const auto location = boundary_locations[static_cast<size_t>(face_lid)];
-            const auto bc = boundary_condition(location.batch_id, location.in_batch_id);
-            if (bc.type == BoundaryConditionType::Dirichlet)
-            {
-                const auto coeff = detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, diffusivity);
-                if (coeff > scalar_type{0})
-                {
-                    detail::add_matrix_entry(row_values, cell_lid, coeff);
-                    rhs_value += coeff * bc.value;
-                }
-
-                const auto area_vector = mesh.face_area_vector_outward(face_lid, cell_lid);
-                const auto d = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
-                const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
-                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
-            }
-            else if (bc.type == BoundaryConditionType::Neumann)
-            {
-                rhs_value += diffusivity * bc.value * mesh.face_area(face_lid);
-            }
-            else if (bc.type == BoundaryConditionType::Robin)
-            {
-                throw std::runtime_error(
-                    "Robin boundary conditions are not yet implemented in implicit_non_orthogonal_diffusion_system.");
-            }
-        }
-
-        if (row_values.find(cell_lid) == row_values.end())
-        {
-            row_values[cell_lid] = scalar_type{};
-        }
-
-        cols.clear();
-        vals.clear();
-        cols.reserve(row_values.size());
-        vals.reserve(row_values.size());
-        for (const auto& [column, value] : row_values)
-        {
-            cols.push_back(column);
-            vals.push_back(value);
-        }
-
-        matrix->insertLocalValues(cell_lid, cols(), vals());
-        rhs->replaceLocalValue(cell_lid, rhs_value);
-    }
-
-    matrix->fillComplete();
-    return {matrix, rhs};
-}
-
-template<TpetraTypePack Pack>
-DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const MeshHandle<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>* partition_correction_field)
 {
-    return implicit_non_orthogonal_diffusion_system<Pack>(
+    return implicit_non_orthogonal_diffusion_system<Pack, MeshHandle<Pack>>(
         mesh, diffusivity, boundary_condition, right_hand_source, 1.0, partition_correction_field);
-}
-
-template<TpetraTypePack Pack>
-DiffusionSystem<Pack> non_orthogonal_diffusion_system(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity,
-    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarCellValueProvider<Pack> right_hand_source,
-    NonOrthogonalTreatment treatment, const CellField<Pack>* correction_field)
-{
-    if (correction_field != nullptr && &correction_field->mesh() != &mesh)
-    {
-        throw std::invalid_argument("non_orthogonal_diffusion_system requires correction field on the target mesh.");
-    }
-
-    switch (treatment)
-    {
-        case NonOrthogonalTreatment::Explicit:
-            if (correction_field == nullptr)
-            {
-                return diffusion_system<Pack>(mesh, diffusivity, boundary_condition, right_hand_source);
-            }
-            return explicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, *correction_field);
-
-        case NonOrthogonalTreatment::Implicit:
-            return fully_implicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, correction_field);
-
-        case NonOrthogonalTreatment::Hybrid: {
-            auto system = implicit_non_orthogonal_diffusion_system<Pack>(
-                mesh, diffusivity, boundary_condition, right_hand_source, 0.5, correction_field);
-            if (correction_field != nullptr)
-            {
-                add_explicit_non_orthogonal_correction<Pack>(
-                    *correction_field, diffusivity, boundary_condition, *system.rhs, 0.5);
-            }
-            return system;
-        }
-    }
-
-    throw std::invalid_argument("Unknown NonOrthogonalTreatment value.");
 }
 
 template<TpetraTypePack Pack>
@@ -922,6 +603,7 @@ Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField
     }
 
     const auto& mesh = field.mesh();
+    const auto execution = acquire_mesh_execution(mesh);
     auto residual = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
     const auto boundary_locations = detail::boundary_face_locations(mesh);
 
@@ -931,7 +613,7 @@ Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField
     const auto field_values = field.local_read_view();
     const auto gradient_values = gradients.local_read_view();
 
-    auto gradient_for_face = [&](local_ordinal_type cell_lid, local_ordinal_type other_lid) -> typename Mesh<Pack>::Vec3
+    auto gradient_for_face = [&](local_ordinal_type cell_lid, local_ordinal_type other_lid) -> typename MeshHandle<Pack>::Vec3
     {
         return (detail::vector_view_value<Pack>(gradient_values, cell_lid) +
                    detail::vector_view_value<Pack>(gradient_values, other_lid)) /
@@ -995,5 +677,3 @@ Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField
 }
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

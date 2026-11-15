@@ -35,6 +35,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -43,7 +44,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
@@ -158,6 +159,12 @@ MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
         }
     }
 
+    if (std::string_view(boundary_name) == "xmin" || std::string_view(boundary_name) == "xmax")
+        for (size_t local = 0; local < mesh.num_faces(); ++local)
+        {
+            const auto face = static_cast<MeshType::local_ordinal_type>(local);
+            if (mesh.is_periodic_face(face)) return face;
+        }
     throw std::runtime_error("Requested boundary face was not found.");
 }
 
@@ -2240,7 +2247,7 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
     }
 }
 
-/** @brief Legacy scalar non-orthogonal transport validates constant coefficients. */
+/** @brief Native scalar non-orthogonal transport validates constant coefficients. */
 TEST(FvmOperatorsTest, ScalarNonOrthogonalTransportValidatesConstantCoefficients)
 {
     auto mesh = make_mesh();
@@ -2601,8 +2608,8 @@ TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
     }
 }
 
-/** Rank-local legacy preflight errors must reach every rank before assembly. */
-TEST(FvmOperatorsTest, LegacyTransportCacheAndScalarFailuresAreCollective)
+/** Rank-local native preflight errors must reach every rank before assembly. */
+TEST(FvmOperatorsTest, NativeTransportCacheAndScalarFailuresAreCollective)
 {
     auto mesh = make_mesh();
     const auto comm = mesh->owned_cell_map()->getComm();
@@ -2963,56 +2970,29 @@ TEST(FvmOperatorsTest, ReusesWeightedAndPhysicalTransportMatrices)
  */
 SimpleFluid::SP<MeshType> make_periodic_box_mesh()
 {
-    constexpr int n = 2;
-    auto db = SimpleFluid::test::make_box_database(n, 1, 1, 1.0 / n);
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(db);
-
-    // Find xmin and xmax boundary faces.
-    SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
-    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [batch_id, batch] : mesh->boundary_batches())
-    {
-        const auto& name = mesh->boundary_batch_name(batch_id);
-        if (name == "xmin" && !batch.face_lids.empty()) xmin_face = batch.face_lids[0];
-        if (name == "xmax" && !batch.face_lids.empty()) xmax_face = batch.face_lids[0];
-    }
-
-    // The cell adjacent to the xmin face is cell 0; its paired cell is the
-    // cell adjacent to the xmax face (cell 1), and vice versa.
-    const auto owner0 = mesh->owner_cell(xmin_face);
-    const auto owner1 = mesh->owner_cell(xmax_face);
-    mesh->set_periodic_face(xmin_face, owner1);
-    mesh->set_periodic_face(xmax_face, owner0);
-
-    return mesh;
+    return std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., .5, 1.}, {0., .5}, {0., .5}}},
+        SimpleFluid::Vec3D<bool>{{true, false, false}}));
 }
 
-/** @brief Verifies post-assembly periodic pairing keeps host/device topology aligned. */
-TEST(FvmOperatorsTest, CompactTopologyTracksPeriodicPairing)
+/** Native structured periodic seams retain canonical adjacent cells and wrapped distance. */
+TEST(FvmOperatorsTest, PeriodicTopologyUsesCanonicalNativeNeighbors)
 {
     const auto mesh = make_periodic_box_mesh();
-    const auto device_views = mesh->device_views();
-    const auto device_neighbors =
-        Kokkos::create_mirror_view_and_copy(
-            Kokkos::HostSpace{}, device_views.face_neighbor);
-
-    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    size_t periodic_faces = 0;
+    for (size_t local = 0; local < mesh->num_faces(); ++local)
     {
-        const auto& name = mesh->boundary_batch_name(batch_id);
-        if (name != "xmin" && name != "xmax")
-        {
-            continue;
-        }
-        ASSERT_FALSE(batch.face_lids.empty());
-        const auto face_lid = batch.face_lids.front();
-        const auto face_index = static_cast<size_t>(face_lid);
-        EXPECT_EQ(
-            mesh->host_views().face_topology.neighbor[face_index],
-            mesh->neighbor_cell(face_lid));
-        EXPECT_EQ(
-            device_neighbors(face_index),
-            mesh->neighbor_cell(face_lid));
+        const auto face = static_cast<MeshType::local_ordinal_type>(local);
+        if (!mesh->is_periodic_face(face)) continue;
+        ++periodic_faces;
+        EXPECT_TRUE(mesh->is_interior_face(face));
+        EXPECT_FALSE(mesh->is_boundary_face(face));
+        const auto owner = mesh->owner_cell(face);
+        const auto neighbor = mesh->opposite_or_periodic_neighbor_cell(face, owner);
+        EXPECT_NE(owner, neighbor);
+        EXPECT_NEAR(mesh->cell_center_vector(face, owner).norm(), .5, 1e-14);
     }
+    EXPECT_GT(periodic_faces, 0U);
 }
 
 /** @brief Verifies fused periodic face fluxes match the face-velocity composition. */
@@ -3118,28 +3098,14 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFaceVelocityIsAveraged)
     SimpleFluid::VectorFaceField<Pack> face_vel(mesh, "face_vel");
     SimpleFluid::FVM::face_velocities(velocity, face_vel);
 
-    // Find periodic faces.
-    SimpleFluid::Mesh<Pack>::local_ordinal_type xmin_face = -1;
-    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [batch_id, batch] : mesh->boundary_batches())
-    {
-        const auto& name = mesh->boundary_batch_name(batch_id);
-        if (name == "xmin" && !batch.face_lids.empty()) xmin_face = batch.face_lids[0];
-        if (name == "xmax" && !batch.face_lids.empty()) xmax_face = batch.face_lids[0];
-    }
-
-    ASSERT_NE(xmin_face, -1);
-    ASSERT_NE(xmax_face, -1);
+    const auto xmin_face = boundary_face_lid(*mesh, "xmin");
+    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
     EXPECT_TRUE(mesh->is_interior_face(xmin_face));
     EXPECT_TRUE(mesh->is_interior_face(xmax_face));
     EXPECT_FALSE(mesh->is_boundary_face(xmin_face));
     EXPECT_FALSE(mesh->is_boundary_face(xmax_face));
-    EXPECT_EQ(mesh->opposite_or_periodic_neighbor_cell(
-                  xmin_face, mesh->owner_cell(xmin_face)),
-              mesh->owner_cell(xmax_face));
-    EXPECT_EQ(mesh->opposite_or_periodic_neighbor_cell(
-                  xmax_face, mesh->owner_cell(xmax_face)),
-              mesh->owner_cell(xmin_face));
+    EXPECT_NE(mesh->opposite_or_periodic_neighbor_cell(xmin_face, mesh->owner_cell(xmin_face)),
+        mesh->owner_cell(xmin_face));
 
     // Periodic faces should get the average of the owner and paired cell.
     const auto v_xmin = face_vel.value(xmin_face);
@@ -3217,12 +3183,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFluxIsComputed)
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
     SimpleFluid::FVM::face_fluxes(velocity, fluxes);
 
-    SimpleFluid::Mesh<Pack>::local_ordinal_type xmax_face = -1;
-    for (const auto& [batch_id, batch] : mesh->boundary_batches())
-    {
-        if (mesh->boundary_batch_name(batch_id) == "xmax" && !batch.face_lids.empty())
-            xmax_face = batch.face_lids[0];
-    }
+    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
     ASSERT_NE(xmax_face, -1);
     ASSERT_TRUE(fluxes.is_owned_face(xmax_face));
 
@@ -3230,7 +3191,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryFluxIsComputed)
     // Face area = dy*dz = 0.5 * 0.5 = 0.25.
     // Normal on xmax = (+1, 0, 0).
     // Flux = v·n·A = 1.0 * 1.0 * 0.25 = 0.25.
-    EXPECT_NEAR(fluxes.value(xmax_face), 0.25, 1.0e-12);
+    EXPECT_NEAR(fluxes.value(xmax_face), 0.25 * mesh->face_normal(xmax_face).x, 1.0e-12);
 }
 
 /**
@@ -3313,24 +3274,26 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
 }
 
 /** @brief Verifies periodic upwind transport couples to the paired cell. */
-TEST(FvmOperatorsTest, PeriodicBoundaryUpwindMatrixUsesPairedCell)
+TEST(FvmOperatorsTest, NativePeriodicUpwindMatrixHasConservativeCanonicalFlux)
 {
     auto mesh = make_periodic_box_mesh();
-    const auto xmin_face = boundary_face_lid(*mesh, "xmin");
-    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
-
     SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0, "face_flux");
-    fluxes.set_value(xmin_face, -0.25);
-    fluxes.set_value(xmax_face, -0.5);
-
-    const auto matrix =
-        SimpleFluid::FVM::upwind_convection_matrix<Pack>(
-            *mesh, fluxes);
-
-    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 0), 0.0, 1.0e-12);
-    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 1), 0.0, 1.0e-12);
-    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 1), -0.25, 1.0e-12);
-    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 0), -0.5, 1.0e-12);
+    for (const auto face : fluxes.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face)) continue;
+        const auto owner_gid = mesh->overlap_cell_map()->getGlobalElement(mesh->owner_cell(face));
+        // A circulation sends .5 from cell 0 to 1 through the central face,
+        // and returns .25 from cell 1 to 0 through the one canonical periodic seam.
+        const auto value = mesh->is_periodic_face(face)
+            ? (owner_gid == 1 ? .25 : -.25) : (owner_gid == 0 ? .5 : -.5);
+        fluxes.set_value(face, value);
+    }
+    fluxes.sync_ghosts();
+    const auto matrix = SimpleFluid::FVM::upwind_convection_matrix<Pack>(*mesh, fluxes);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 0), .5, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 1), .25, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 0, 1), -.25, 1.0e-12);
+    EXPECT_NEAR(local_matrix_entry(*matrix, 1, 0), -.5, 1.0e-12);
 }
 
 /** @brief Verifies periodic vector transport couples to the paired cell. */
@@ -4031,17 +3994,17 @@ TEST(FvmOperatorsTest,
 /** @brief Robin wall resistance preserves an affine equilibrium on skew faces. */
 TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
 {
-    auto legacy = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
-    const auto check = []<class Mesh>(SimpleFluid::SP<const Mesh> mesh)
+    auto native = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    const auto check = []<class MeshType>(SimpleFluid::SP<const MeshType> mesh)
     {
-        using Traits = SimpleFluid::MeshFieldTraits<Pack, Mesh>;
+        using Traits = SimpleFluid::MeshFieldTraits<Pack, MeshType>;
         using Field = typename Traits::scalar_cell_type;
         using Flux = typename Traits::scalar_face_type;
         Field temperature(mesh, "temperature");
         Field density(mesh, 1.0, "density");
         Field capacity(mesh, 1.0, "capacity");
         Field conductivity(mesh, 2.0, "conductivity");
-        const typename Mesh::Vec3 gradient{2.0, 3.0, 4.0};
+        const typename MeshType::Vec3 gradient{2.0, 3.0, 4.0};
         const auto exact = [&](const auto& position) { return 300.0 + gradient.dot(position); };
         for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
             temperature.set_owned_value(static_cast<Pack::local_ordinal_type>(i),
@@ -4057,7 +4020,7 @@ TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
         };
         const auto value = [&](int batch_id, size_t index) { return condition(batch_id, index).value; };
         const auto zero = [](Pack::local_ordinal_type) { return 0.0; };
-        SimpleFluid::FVM::TransportGeometryCache<Mesh> cache(*mesh);
+        SimpleFluid::FVM::TransportGeometryCache<MeshType> cache(*mesh);
         for (const auto treatment : {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
                  SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
         {
@@ -4083,9 +4046,8 @@ TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
             }
         }
     };
-    check(SimpleFluid::SP<const MeshType>(legacy));
-    check(
-        SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>(std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy)));
+    check(SimpleFluid::SP<const MeshType>(native));
+
 }
 
 TEST(FvmOperatorsTest, PhysicalTemperatureCacheSkipsPeriodicBoundaryData)

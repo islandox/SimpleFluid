@@ -29,7 +29,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using FeedbackCell = SimpleFluid::FeedbackMap::FeedbackCell<Pack>;
 using CouplingDriver =

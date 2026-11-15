@@ -35,7 +35,7 @@ using NativeSolver = SimpleFluid::CoupledPressureVelocitySolver<Pack, Handle>;
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-static_assert(std::is_same_v<SimpleFluid::CoupledPressureVelocitySolver<Pack>::mesh_type, SimpleFluid::Mesh<Pack>>);
+static_assert(std::is_same_v<SimpleFluid::CoupledPressureVelocitySolver<Pack>::mesh_type, SimpleFluid::MeshHandle<Pack>>);
 static_assert(std::is_same_v<NativeSolver::field_type, SimpleFluid::ScalarCellFieldStored<Pack, Handle>>);
 
 SimpleFluid::SP<const Handle> make_native_mesh()
@@ -50,7 +50,7 @@ SimpleFluid::SP<const Handle> make_native_mesh()
 TEST(CoupledPressureVelocitySolverTest, AssemblesDirectlyOnNativeMeshHandleFields)
 {
     const auto mesh = make_native_mesh();
-    ASSERT_FALSE(mesh->legacy_mesh());
+
 
     SimpleFluid::VectorCellFieldStored<Pack, Handle> velocity(
         SimpleFluid::VectorCellFieldDescriptor<Pack>("velocity"), mesh, SimpleFluid::vec3<double>{});

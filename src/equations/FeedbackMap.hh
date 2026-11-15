@@ -53,7 +53,7 @@ struct FeedbackCell
 namespace detail
 {
 
-/** @brief Scalar cell field interface shared by legacy and mapped storage. */
+/** @brief Scalar cell field interface for native mapped storage. */
 template<class Field, class Pack>
 concept ScalarFeedbackField =
     std::same_as<typename Field::scalar_type,
@@ -670,7 +670,7 @@ private:
 /**
  * @brief Type-erased registry of scalar fields exported to external-source.
  *
- * Registration accepts either legacy CellField or native FieldStored scalar
+ * Registration accepts native FieldStored scalar
  * cell fields. Registered fields are referenced, not owned, and therefore must
  * outlive the registry and every snapshot operation.
  */

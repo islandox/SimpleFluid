@@ -10,13 +10,10 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/Operators.hh"
-#include "utils/export_helper.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/VolumeContinuityTarget.hh"
 #include "fields/CellField.hh"
@@ -81,7 +78,7 @@ inline LinearSolverOptions pressure_projection_linear_solver_options()
  *
  * @tparam Pack Tpetra type pack used for matrix/vector storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT PressureProjectionEquation
 {
 public:
@@ -91,11 +88,9 @@ public:
     using velocity_field_type = typename field_traits::vector_cell_type;
     using face_flux_field_type = typename field_traits::scalar_face_type;
     using face_velocity_field_type = typename field_traits::vector_face_type;
-    using velocity_boundary_cache_type = std::conditional_t<std::same_as<mesh_type, Mesh<Pack>>,
-        FVM::VelocityBoundaryCache<Pack>, FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using face_flux_workspace_type =
-        std::conditional_t<std::same_as<mesh_type, Mesh<Pack>>, FVM::PressureWeightedFaceFluxWorkspace<Pack>,
-            FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, mesh_type>>;
+        FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack, mesh_type>;
     using map_type = typename Pack::map_type;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -274,9 +269,6 @@ private:
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
-extern template class PressureProjectionEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class PressureProjectionEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

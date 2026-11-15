@@ -131,7 +131,6 @@ void record_coupled_result(
 } // namespace fluid_solver_detail
 } // namespace
 
-
 // Keep the caller API out of line: explicit instantiation supplies new DSO
 // symbols, preventing new timing headers from silently using an old layout.
 template<TpetraTypePack Pack>
@@ -153,22 +152,6 @@ void FluidSolver<Pack>::reset_solver_phase_timings()
 }
 
 /**
- * @brief Validate and return a legacy mesh pointer.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Candidate mesh pointer.
- * @return Validated non-null mesh.
- * @throws std::invalid_argument if @p mesh is null.
- */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::require_mesh(SP<const legacy_mesh_type> mesh)
-    -> SP<const legacy_mesh_type>
-{
-    return EquationValidation::require_non_null_mesh(
-        std::move(mesh), "FluidSolver");
-}
-
-/**
  * @brief Validate and return a runtime mesh handle.
  *
  * @tparam Pack Tpetra type pack.
@@ -182,31 +165,6 @@ auto FluidSolver<Pack>::require_mesh_handle(
 {
     return EquationValidation::require_non_null_mesh(
         std::move(mesh), "FluidSolver");
-}
-
-/**
- * @brief Construct a fluid solver from a legacy mesh.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Computational mesh.
- * @param boundary_conditions Velocity and pressure boundary conditions.
- * @param time_options Time-stepping and coupling options.
- * @param linear_options Linear solver options.
- * @throws std::invalid_argument if the mesh or time-step options are invalid.
- */
-template<TpetraTypePack Pack>
-FluidSolver<Pack>::FluidSolver(
-    SP<const legacy_mesh_type> mesh,
-    BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options,
-    LinearSolverOptions linear_options)
-    : FluidSolver(
-          SP<const mesh_type>(std::make_shared<MeshHandle<Pack>>(
-              require_mesh(std::move(mesh)))),
-          std::move(boundary_conditions),
-          time_options,
-          linear_options)
-{
 }
 
 /** Construct on a retained mutable native runtime handle. */
@@ -316,7 +274,6 @@ FluidSolver<Pack>::FluidSolver(
     bool register_momentum_equation,
     SP<mesh_type> mutable_mesh)
     : d_mesh(require_mesh_handle(std::move(mesh))),
-      d_legacy_mesh(d_mesh->legacy_mesh()),
       d_problem(d_mesh,
                 std::move(boundary_conditions),
                 time_options,
@@ -325,13 +282,7 @@ FluidSolver<Pack>::FluidSolver(
     retain_mutable_mesh_handle(std::move(mutable_mesh));
     d_has_base_momentum_equation = register_momentum_equation;
     d_nonlinear_geometry_epoch = mesh_geometry_epoch(*d_mesh);
-    if (d_legacy_mesh && d_mesh->has_reordered_cells())
-    {
-        throw std::invalid_argument(
-            "FluidSolver legacy compatibility fields do not support a "
-            "reordered MeshHandle; use the layout through SolidSubdomain "
-            "or a native mesh backend.");
-    }
+
     if (d_problem.time_options().time_step <= 0.0)
     {
         throw std::invalid_argument(
@@ -356,49 +307,6 @@ FluidSolver<Pack>::FluidSolver(
     d_problem.add_field(
         ScalarFaceFieldDescriptor<Pack>("projected_face_flux"));
 
-    if (d_legacy_mesh)
-    {
-        d_problem.template emplace_object<FVM::VelocityBoundaryCache<Pack>>(
-            "velocity_boundary_cache",
-            FVM::cache_velocity_boundary_conditions<Pack>(
-                d_legacy_mesh, d_problem.boundary_conditions()));
-        d_problem.template emplace_object<legacy_face_flux_workspace_type>(
-            "pressure_face_flux_workspace", d_legacy_mesh);
-        if (register_momentum_equation)
-        {
-            d_problem.template emplace_object<
-                IncompressibleMomentumEquation<Pack>>(
-                    "momentum_equation", d_legacy_mesh);
-        }
-        d_problem.template emplace_object<PressureProjectionEquation<Pack>>(
-            "pressure_projection",
-            d_legacy_mesh,
-            pressure_linear_options,
-            d_problem.boundary_conditions().pressure,
-            d_problem.time_options().pressure_gradient_scheme);
-        d_problem.template emplace_object<
-            CoupledPressureVelocitySolver<Pack>>(
-                "coupled_pressure_velocity_solver", d_legacy_mesh);
-        d_problem.template emplace_object<legacy_field_type>(
-            "legacy_pressure", d_legacy_mesh, "pressure");
-        d_problem.template emplace_object<legacy_field_type>(
-            "legacy_pressure_correction", d_legacy_mesh,
-            "pressure_correction");
-        d_problem.template emplace_object<legacy_velocity_field_type>(
-            "legacy_velocity", d_legacy_mesh, "velocity");
-        d_problem.template emplace_object<legacy_velocity_field_type>(
-            "legacy_predictor_pressure_gradient", d_legacy_mesh,
-            "predictor_pressure_gradient");
-        d_problem.template emplace_object<legacy_velocity_field_type>(
-            "legacy_pressure_velocity_predictor", d_legacy_mesh,
-            "pressure_velocity_predictor");
-        d_problem.template emplace_object<legacy_face_flux_field_type>(
-            "legacy_old_face_flux", d_legacy_mesh, "old_face_flux");
-        d_problem.template emplace_object<legacy_face_flux_field_type>(
-            "legacy_projected_face_flux", d_legacy_mesh,
-            "projected_face_flux");
-    }
-    else
     {
         d_problem.template emplace_object<velocity_boundary_cache_type>(
             "velocity_boundary_cache",
@@ -440,9 +348,9 @@ void FluidSolver<Pack>::retain_mutable_mesh_handle(SP<mesh_type> mesh)
     }
 
     // A mutable shared_ptr to the handle object alone is not a geometry-
-    // mutation capability. Preserve historical const/legacy behavior unless
+    // mutation capability. Preserve const observer behavior unless
     // the handle retains an actual mutable native concrete mesh.
-    if (!d_legacy_mesh && mesh->has_mutable_geometry())
+    if (mesh->has_mutable_geometry())
     {
         d_mutable_mesh = std::move(mesh);
     }
@@ -452,11 +360,6 @@ void FluidSolver<Pack>::retain_mutable_mesh_handle(SP<mesh_type> mesh)
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::refresh_geometry_dependent_state()
 {
-    if (uses_legacy_backend())
-    {
-        momentum_equation().refresh_geometry();
-    }
-    else
     {
         native_momentum_equation().refresh_geometry();
     }
@@ -467,15 +370,6 @@ void FluidSolver<Pack>::refresh_geometry_dependent_state()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::refresh_pressure_velocity_geometry_state()
 {
-    if (uses_legacy_backend())
-    {
-        velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
-            d_legacy_mesh, d_problem.boundary_conditions());
-        pressure_face_flux_workspace().refresh_geometry();
-        pressure_projection().refresh_geometry();
-        coupled_pressure_velocity_solver().clear_cache();
-    }
-    else
     {
         native_velocity_boundary_cache() = FVM::cache_velocity_boundary_conditions<Pack>(
             d_mesh, d_problem.boundary_conditions());
@@ -559,12 +453,7 @@ template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::pressure_linear_solver_options() const noexcept
     -> const LinearSolverOptions&
 {
-    if (uses_legacy_backend())
-    {
-        return d_problem.template object<
-            PressureProjectionEquation<Pack>>(
-                "pressure_projection").linear_solver_options();
-    }
+
     return d_problem.template object<pressure_projection_type>(
         "pressure_projection").linear_solver_options();
 }
@@ -604,12 +493,6 @@ template<TpetraTypePack Pack>
 void FluidSolver<Pack>::set_pressure_linear_solver_options(
     LinearSolverOptions options)
 {
-    if (uses_legacy_backend())
-    {
-        pressure_projection().set_linear_solver_options(
-            std::move(options));
-    }
-    else
     {
         native_pressure_projection().set_linear_solver_options(
             std::move(options));
@@ -620,9 +503,7 @@ void FluidSolver<Pack>::set_pressure_linear_solver_options(
 template<TpetraTypePack Pack>
 PressureProjectionMethod FluidSolver<Pack>::pressure_projection_method() const noexcept
 {
-    if (uses_legacy_backend())
-        return d_problem.template object<PressureProjectionEquation<Pack>>(
-            "pressure_projection").projection_method();
+
     return d_problem.template object<pressure_projection_type>(
         "pressure_projection").projection_method();
 }
@@ -631,24 +512,7 @@ PressureProjectionMethod FluidSolver<Pack>::pressure_projection_method() const n
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::set_pressure_projection_method(PressureProjectionMethod method)
 {
-    if (uses_legacy_backend())
-        pressure_projection().set_projection_method(method);
-    else
-        native_pressure_projection().set_projection_method(method);
-}
-
-/**
- * @brief Return the Problem-owned base momentum equation.
- *
- * @tparam Pack Tpetra type pack.
- * @return Stored incompressible momentum equation.
- */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::momentum_equation()
-    -> IncompressibleMomentumEquation<Pack>&
-{
-    return d_problem.template object<
-        IncompressibleMomentumEquation<Pack>>("momentum_equation");
+    native_pressure_projection().set_projection_method(method);
 }
 
 /** @brief Return the mapped-mesh momentum equation. */
@@ -660,20 +524,6 @@ auto FluidSolver<Pack>::native_momentum_equation()
         "momentum_equation");
 }
 
-/**
- * @brief Return the Problem-owned pressure projection equation.
- *
- * @tparam Pack Tpetra type pack.
- * @return Stored pressure projection equation.
- */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::pressure_projection()
-    -> PressureProjectionEquation<Pack>&
-{
-    return d_problem.template object<
-        PressureProjectionEquation<Pack>>("pressure_projection");
-}
-
 /** @brief Return the mapped-mesh pressure projection equation. */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::native_pressure_projection()
@@ -683,35 +533,11 @@ auto FluidSolver<Pack>::native_pressure_projection()
         "pressure_projection");
 }
 
-/**
- * @brief Return the monolithic pressure-velocity solver.
- *
- * @tparam Pack Tpetra type pack.
- * @return Problem-owned coupled solver.
- */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::coupled_pressure_velocity_solver() -> CoupledPressureVelocitySolver<Pack>&
-{
-    return d_problem.template object<CoupledPressureVelocitySolver<Pack>>("coupled_pressure_velocity_solver");
-}
-
 /** @brief Return the mapped-mesh monolithic pressure-velocity solver. */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::native_coupled_pressure_velocity_solver() -> native_coupled_solver_type&
 {
     return d_problem.template object<native_coupled_solver_type>("coupled_pressure_velocity_solver");
-}
-
-/**
- * @brief Return cached velocity boundary values and metadata.
- *
- * @tparam Pack Tpetra type pack.
- * @return Problem-owned velocity boundary cache.
- */
-template<TpetraTypePack Pack> auto FluidSolver<Pack>::velocity_boundary_cache() -> FVM::VelocityBoundaryCache<Pack>&
-{
-    return d_problem.template object<
-        FVM::VelocityBoundaryCache<Pack>>("velocity_boundary_cache");
 }
 
 /** @brief Return cached boundary data for stored velocity fields. */
@@ -723,35 +549,12 @@ auto FluidSolver<Pack>::native_velocity_boundary_cache()
         "velocity_boundary_cache");
 }
 
-/**
- * @brief Return reusable pressure-weighted face-flux workspace.
- *
- * @tparam Pack Tpetra type pack.
- * @return Problem-owned face-flux workspace.
- */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::pressure_face_flux_workspace()
-    -> face_flux_workspace_type&
-{
-    return d_problem.template object<face_flux_workspace_type>(
-        "pressure_face_flux_workspace");
-}
-
 /** @brief Return the mapped-mesh Rhie-Chow workspace. */
 template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::native_pressure_face_flux_workspace()
     -> native_face_flux_workspace_type&
 {
     return d_problem.template object<native_face_flux_workspace_type>(
-        "pressure_face_flux_workspace");
-}
-
-/** @brief Return the legacy Rhie-Chow workspace. */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_pressure_face_flux_workspace()
-    -> legacy_face_flux_workspace_type&
-{
-    return d_problem.template object<legacy_face_flux_workspace_type>(
         "pressure_face_flux_workspace");
 }
 
@@ -828,113 +631,6 @@ auto FluidSolver<Pack>::projected_face_fluxes() -> face_flux_field_type&
         "projected_face_flux");
 }
 
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_pressure() -> legacy_field_type&
-{
-    return d_problem.template object<legacy_field_type>(
-        "legacy_pressure");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_pressure_correction()
-    -> legacy_field_type&
-{
-    return d_problem.template object<legacy_field_type>(
-        "legacy_pressure_correction");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_velocity()
-    -> legacy_velocity_field_type&
-{
-    return d_problem.template object<legacy_velocity_field_type>(
-        "legacy_velocity");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_predictor_pressure_gradient()
-    -> legacy_velocity_field_type&
-{
-    return d_problem.template object<legacy_velocity_field_type>(
-        "legacy_predictor_pressure_gradient");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_predictor_velocity()
-    -> legacy_velocity_field_type&
-{
-    return d_problem.template object<legacy_velocity_field_type>(
-        "legacy_pressure_velocity_predictor");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_old_face_fluxes()
-    -> legacy_face_flux_field_type&
-{
-    return d_problem.template object<legacy_face_flux_field_type>(
-        "legacy_old_face_flux");
-}
-
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::legacy_projected_face_fluxes()
-    -> legacy_face_flux_field_type&
-{
-    return d_problem.template object<legacy_face_flux_field_type>(
-        "legacy_projected_face_flux");
-}
-
-/** @brief Publish runtime-handle primary fields to the legacy backend. */
-template<TpetraTypePack Pack>
-void FluidSolver<Pack>::sync_primary_fields_to_legacy()
-{
-    if (!uses_legacy_backend())
-    {
-        return;
-    }
-    legacy_pressure().owned_data().update(
-        scalar_type{1}, pressure().owned_data(), scalar_type{0});
-    legacy_pressure_correction().owned_data().update(
-        scalar_type{1}, pressure_correction().owned_data(),
-        scalar_type{0});
-    legacy_velocity().owned_data().update(
-        scalar_type{1}, velocity().owned_data(), scalar_type{0});
-    legacy_old_face_fluxes().data().update(
-        scalar_type{1}, old_face_fluxes().data(), scalar_type{0});
-    legacy_projected_face_fluxes().data().update(
-        scalar_type{1}, projected_face_fluxes().data(), scalar_type{0});
-    d_legacy_mesh->sync_periodic_boundaries(legacy_pressure());
-    d_legacy_mesh->sync_periodic_boundaries(
-        legacy_pressure_correction());
-    d_legacy_mesh->sync_periodic_boundaries(legacy_velocity());
-}
-
-/** @brief Publish accepted legacy state back to runtime-handle fields. */
-template<TpetraTypePack Pack>
-void FluidSolver<Pack>::sync_primary_fields_from_legacy()
-{
-    if (!uses_legacy_backend())
-    {
-        return;
-    }
-    pressure().owned_data().update(
-        scalar_type{1}, legacy_pressure().owned_data(), scalar_type{0});
-    pressure_correction().owned_data().update(
-        scalar_type{1}, legacy_pressure_correction().owned_data(),
-        scalar_type{0});
-    velocity().owned_data().update(
-        scalar_type{1}, legacy_velocity().owned_data(), scalar_type{0});
-    old_face_fluxes().data().update(
-        scalar_type{1}, legacy_old_face_fluxes().data(), scalar_type{0});
-    projected_face_fluxes().data().update(
-        scalar_type{1}, legacy_projected_face_fluxes().data(),
-        scalar_type{0});
-    pressure().sync_ghosts();
-    pressure_correction().sync_ghosts();
-    velocity().sync_ghosts();
-    old_face_fluxes().sync_ghosts();
-    projected_face_fluxes().sync_ghosts();
-}
-
 /**
  * @brief Return mutable pressure-velocity residual storage.
  *
@@ -983,20 +679,6 @@ auto FluidSolver<Pack>::velocity_update_norm(
         { return global_sum(local_value); });
 }
 
-/** @brief Compute the legacy backend's volume-weighted velocity update. */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::velocity_update_norm(
-    const legacy_velocity_field_type& before,
-    const legacy_velocity_field_type& after) const -> scalar_type
-{
-    return fluid_solver_detail::volume_weighted_velocity_update_norm(
-        *d_legacy_mesh,
-        before,
-        after,
-        [this](scalar_type local_value)
-        { return global_sum(local_value); });
-}
-
 /**
  * @brief Sum a scalar contribution across the mesh communicator.
  *
@@ -1029,41 +711,6 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
 {
     const auto inverse_reference_density =
         scalar_type{1} / pressure_reference_density();
-
-    if (uses_legacy_backend())
-    {
-        sync_primary_fields_to_legacy();
-        FVM::cell_gradient(
-            legacy_pressure(),
-            d_problem.boundary_conditions().pressure,
-            legacy_predictor_pressure_gradient(),
-            legacy_pressure_face_flux_workspace().gradient_cache(),
-            d_problem.time_options().pressure_gradient_scheme);
-        const auto pressure_gradient_values =
-            legacy_predictor_pressure_gradient().owned_read_view();
-        auto pressure_source =
-            [&](local_ordinal_type cell_lid) -> vec_type
-        {
-            return {
-                pressure_gradient_values(cell_lid, 0)
-                    * (-inverse_reference_density),
-                pressure_gradient_values(cell_lid, 1)
-                    * (-inverse_reference_density),
-                pressure_gradient_values(cell_lid, 2)
-                    * (-inverse_reference_density)};
-        };
-
-        const auto result = momentum_equation().advance_velocity(
-            legacy_velocity(),
-            legacy_old_face_fluxes(),
-            velocity_boundary_cache(),
-            d_problem.time_options(),
-            legacy_velocity(),
-            pressure_source,
-            momentum_linear_solver_options());
-        sync_primary_fields_from_legacy();
-        return result;
-    }
 
     FVM::cell_gradient(
         pressure(),
@@ -1122,31 +769,6 @@ auto FluidSolver<Pack>::run_momentum_predictor() -> LinearSolveSummary
     }
     d_mesh->sync_periodic_boundaries(predictor_velocity());
 
-    if (uses_legacy_backend())
-    {
-        sync_primary_fields_to_legacy();
-        FVM::pressure_weighted_face_fluxes(
-            legacy_velocity(), legacy_pressure(),
-            d_problem.time_options().time_step
-                / pressure_reference_density(),
-            velocity_boundary_cache(),
-            d_problem.boundary_conditions().pressure,
-            legacy_pressure_face_flux_workspace(),
-            legacy_old_face_fluxes(),
-            d_problem.time_options().pressure_gradient_scheme);
-        // Keep the public handle-backed state authoritative between virtual
-        // momentum hooks and outer pressure-correction iterations.
-        sync_primary_fields_from_legacy();
-        const auto linear_summary = advance_momentum();
-        // The virtual hook's public contract is the handle-backed velocity.
-        // Refresh legacy mirrors for pressure projection without overwriting
-        // updates made by a derived solver through velocity().
-        sync_primary_fields_to_legacy();
-        pressure_velocity_residuals().momentum =
-            velocity_update_norm(predictor_velocity(), velocity());
-        return linear_summary;
-    }
-
     auto& projection = native_pressure_projection();
     const auto predictor_boundary_cache =
         projection.pressure_flux_boundary_cache(native_velocity_boundary_cache());
@@ -1183,36 +805,6 @@ auto FluidSolver<Pack>::run_pressure_correction(
     -> typename PressureProjectionEquation<Pack>::ProjectionResult
 {
     const auto phase_timing = this->d_solver_timings.scope(SolverPhase::PressureProjection);
-    if (uses_legacy_backend())
-    {
-        sync_primary_fields_to_legacy();
-        auto& projection = pressure_projection();
-        const auto result =
-            reuse_cached_predictor_flux
-          ? projection.project_reusing_cached_predictor(
-                legacy_pressure(),
-                legacy_pressure_correction(),
-                d_problem.time_options().time_step,
-                pressure_reference_density(),
-                velocity_boundary_cache(),
-                legacy_velocity())
-          : projection.project(
-                legacy_pressure(),
-                legacy_pressure_correction(),
-                d_problem.time_options().time_step,
-                pressure_reference_density(),
-                velocity_boundary_cache(),
-                legacy_velocity());
-        // Downstream transport must use the same conservative face-flux field
-        // whose balance produced result.continuity.
-        legacy_projected_face_fluxes().data().update(
-            scalar_type{1},
-            projection.corrected_face_fluxes().data(),
-            scalar_type{0});
-        sync_primary_fields_from_legacy();
-        record_diagnostic_pressure_correction();
-        return result;
-    }
 
     auto& projection = native_pressure_projection();
     const auto* target = volume_continuity_target();
@@ -1251,7 +843,6 @@ auto FluidSolver<Pack>::run_pressure_correction(
  */
 template<TpetraTypePack Pack> auto FluidSolver<Pack>::assemble_coupled_system() -> coupled_system_type
 {
-    if (!uses_legacy_backend())
     {
         if (const auto* target = volume_continuity_target())
         {
@@ -1264,11 +855,6 @@ template<TpetraTypePack Pack> auto FluidSolver<Pack>::assemble_coupled_system() 
             old_face_fluxes(), native_velocity_boundary_cache(), d_problem.boundary_conditions(),
             d_problem.time_options(), zero_target, pressure_reference_density());
     }
-    sync_primary_fields_to_legacy();
-    const VolumeContinuityTarget<Pack, legacy_mesh_type> zero_target(d_legacy_mesh);
-    return coupled_pressure_velocity_solver().assemble(momentum_equation(), legacy_velocity(), legacy_pressure(),
-        legacy_old_face_fluxes(), velocity_boundary_cache(), d_problem.boundary_conditions(), d_problem.time_options(),
-        zero_target, pressure_reference_density());
 }
 
 /**
@@ -1279,7 +865,6 @@ template<TpetraTypePack Pack> auto FluidSolver<Pack>::assemble_coupled_system() 
  */
 template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
 {
-    if (!uses_legacy_backend())
     {
         predictor_velocity().owned_data().update(scalar_type{1}, velocity().owned_data(), scalar_type{0});
         predictor_velocity().sync_ghosts();
@@ -1343,71 +928,6 @@ template<TpetraTypePack Pack> void FluidSolver<Pack>::solve_coupled_krylov()
         pressure_velocity_residuals().continuity = l2;
         return;
     }
-    sync_primary_fields_to_legacy();
-    {
-        const auto velocity_values = legacy_velocity().owned_read_view();
-        auto predictor_values = legacy_predictor_velocity().owned_write_view();
-        for (size_t owned = 0; owned < d_legacy_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid = static_cast<local_ordinal_type>(owned);
-            predictor_values(cell_lid, 0) = velocity_values(cell_lid, 0);
-            predictor_values(cell_lid, 1) = velocity_values(cell_lid, 1);
-            predictor_values(cell_lid, 2) = velocity_values(cell_lid, 2);
-        }
-    }
-    d_legacy_mesh->sync_periodic_boundaries(legacy_predictor_velocity());
-
-    FVM::pressure_weighted_face_fluxes(legacy_velocity(), legacy_pressure(),
-        d_problem.time_options().time_step / pressure_reference_density(), velocity_boundary_cache(),
-        d_problem.boundary_conditions().pressure, legacy_pressure_face_flux_workspace(), legacy_old_face_fluxes(),
-        d_problem.time_options().pressure_gradient_scheme);
-    sync_primary_fields_from_legacy();
-    const auto system = assemble_coupled_system();
-    const auto result =
-        coupled_pressure_velocity_solver().solve(
-            system,
-            legacy_velocity(),
-            legacy_pressure(),
-            d_problem.linear_options());
-    if (!result.converged)
-    {
-        throw std::runtime_error(
-            "FluidSolver coupled Krylov solve did not converge.");
-    }
-
-    const auto momentum_norm = velocity_update_norm(
-        legacy_predictor_velocity(), legacy_velocity());
-    fluid_solver_detail::record_coupled_result(
-        result,
-        momentum_norm,
-        pressure_velocity_residuals(),
-        d_last_step_statistics);
-
-    FVM::pressure_weighted_face_fluxes(
-        legacy_velocity(), legacy_pressure(),
-        d_problem.time_options().time_step
-            / pressure_reference_density(),
-        velocity_boundary_cache(),
-        d_problem.boundary_conditions().pressure,
-        legacy_pressure_face_flux_workspace(),
-        legacy_projected_face_fluxes(),
-        d_problem.time_options().pressure_gradient_scheme);
-    const auto projected_flux_values =
-        legacy_projected_face_fluxes().owned_read_view();
-    pressure_velocity_residuals().continuity =
-        fluid_solver_detail::global_cell_metric_norm(
-            *d_legacy_mesh,
-            [this, projected_flux_values](local_ordinal_type cell_lid)
-            {
-                return FVM::cell_flux_balance<Pack>(
-                    *d_legacy_mesh,
-                    legacy_projected_face_fluxes(),
-                    projected_flux_values,
-                    cell_lid);
-            },
-            [this](scalar_type local_value)
-            { return global_sum(local_value); });
-    sync_primary_fields_from_legacy();
 }
 
 /** Validate mode selection before rank-dependent control flow or mutation. */
@@ -1429,7 +949,7 @@ void FluidSolver<Pack>::validate_pressure_velocity_selection() const
 #ifndef SIMPLEFLUID_ENABLE_NOX
     throw std::invalid_argument("coupledNonlinear requires SIMPLEFLUID_ENABLE_NOX=ON.");
 #else
-    const int local_unsupported = !supports_coupled_nonlinear() || uses_legacy_backend() ||
+    const int local_unsupported = !supports_coupled_nonlinear() ||
         mesh_geometry_epoch(*d_mesh) != d_nonlinear_geometry_epoch ||
         !std::same_as<Pack, DefaultTpetraTypes>;
     int unsupported = 0;
@@ -1437,7 +957,7 @@ void FluidSolver<Pack>::validate_pressure_velocity_selection() const
     if (unsupported)
     {
         throw std::invalid_argument("coupledNonlinear requires an explicitly supported native driver on "
-            "unchanged geometry; custom momentum, legacy, free-surface, boiling, and scalar source-decay paths are not supported.");
+            "unchanged geometry; custom momentum, free-surface, boiling, and scalar source-decay paths are not supported.");
     }
 #endif
 }
@@ -1597,11 +1117,7 @@ void FluidSolver<Pack>::solve_pressure_velocity_coupling()
     }
     if (const auto* target = volume_continuity_target())
     {
-        if (uses_legacy_backend())
-        {
-            throw std::invalid_argument(
-                "A generalized volume-continuity target requires the native MeshHandle backend.");
-        }
+
         target->validate(*d_mesh, "FluidSolver volume-continuity target");
     }
     pressure_velocity_residuals() = {};
@@ -1664,7 +1180,7 @@ template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::refine_volume_continuity(int maximum_corrections,
     scalar_type maximum_residual) -> continuity_residual_type
 {
-    if (uses_legacy_backend() || volume_continuity_target() == nullptr)
+    if (volume_continuity_target() == nullptr)
     {
         throw std::logic_error(
             "Strict volume-continuity refinement requires a native active target.");
@@ -1709,17 +1225,7 @@ void FluidSolver<Pack>::begin_step()
     }
     d_last_step_statistics = {};
     d_last_volume_continuity_residuals = {};
-    if (uses_legacy_backend())
-    {
-        sync_primary_fields_to_legacy();
-        if (d_step_index == 0)
-        {
-            d_legacy_mesh->sync_periodic_boundaries(
-                legacy_velocity());
-            sync_primary_fields_from_legacy();
-        }
-    }
-    else if (d_step_index == 0)
+    if (d_step_index == 0)
     {
         d_mesh->sync_periodic_boundaries(velocity());
     }
@@ -1729,11 +1235,7 @@ void FluidSolver<Pack>::begin_step()
 template<TpetraTypePack Pack>
 void FluidSolver<Pack>::set_volume_continuity_target(const continuity_target_type& target)
 {
-    if (uses_legacy_backend())
-    {
-        throw std::invalid_argument(
-            "A generalized volume-continuity target requires the native MeshHandle backend.");
-    }
+
     target.validate(*d_mesh, "FluidSolver volume-continuity target");
     d_volume_continuity_target = target;
 }
@@ -1758,13 +1260,6 @@ void FluidSolver<Pack>::finish_step()
         pressure_velocity_residuals().pressure;
     d_last_step_statistics.continuity =
         pressure_velocity_residuals().continuity;
-    if (uses_legacy_backend())
-    {
-        d_legacy_mesh->sync_periodic_boundaries(
-            legacy_velocity());
-        sync_primary_fields_from_legacy();
-    }
-    else
     {
         d_mesh->sync_periodic_boundaries(velocity());
     }
@@ -1977,21 +1472,6 @@ auto FluidSolver<Pack>::collect_scalar_field(
 {
     return fluid_solver_detail::collect_owned_scalar_values(
         *d_mesh, field);
-}
-
-/** @brief Gather a legacy backend scalar field into VTU cell-data order. */
-template<TpetraTypePack Pack>
-auto FluidSolver<Pack>::collect_scalar_field(
-    const legacy_field_type& field) const -> VTUWriter::ScalarData
-{
-    if (!d_legacy_mesh)
-    {
-        throw std::invalid_argument(
-            "FluidSolver cannot collect a legacy field without a legacy "
-            "mesh backend.");
-    }
-    return fluid_solver_detail::collect_owned_scalar_values(
-        *d_legacy_mesh, field);
 }
 
 /**

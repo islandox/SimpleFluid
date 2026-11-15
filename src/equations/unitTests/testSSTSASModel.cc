@@ -20,7 +20,7 @@ namespace
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
 using Native = MeshHandle<Pack>;
-using Legacy = Mesh<Pack>;
+using FactoryMesh = MeshHandle<Pack>;
 auto* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 SP<const Native> native_mesh(size_t n = 4)
@@ -156,9 +156,9 @@ void model_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=FVM::CellGr
 }
 
 TEST(SSTSASModelTest, NativeTransactionsActivationAndDisabledEquivalence) { model_contract(native_mesh()); }
-TEST(SSTSASModelTest, LegacyTransactionsActivationAndDisabledEquivalence)
+TEST(SSTSASModelTest, FactoryTransactionsActivationAndDisabledEquivalence)
 {
-    model_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4, 4, 4, 0.25)));
+    model_contract<FactoryMesh>(test::build_mesh<Pack>(test::make_box_database(4, 4, 4, 0.25)));
 }
 
 TEST(SSTSASModelTest, RankLocalInvalidStateIsCollective)
@@ -187,7 +187,7 @@ TEST(SSTSASModelTest, OneCellSourceUnitsVolumeAndDensity)
         for (const auto rho : {1., 1000.})
           for (const double dt : {.001, 1.0})
         {
-            SP<const Legacy> mesh = test::build_mesh<Pack>(test::make_box_database(1, 1, 1, size));
+            SP<const FactoryMesh> mesh = test::build_mesh<Pack>(test::make_box_database(1, 1, 1, size));
             auto mat = material(mesh, rho); auto bc = prescribed_boundaries();
             TurbulenceModel<Pack> model(mesh, bc); model.configure(options(), mat, rho);
             VectorCellField<Pack> u(mesh, "u"); u.set_owned_value(0, {0.25, 0, 0}); u.sync_ghosts();
@@ -277,14 +277,14 @@ template<SimpleFluid::MeshType M> void derivative_contract(SP<const M> mesh, boo
 }
 
 TEST(SSTSASDerivativesTest, NativeOrthogonalPartitionFaces) { derivative_contract(native_mesh()); }
-TEST(SSTSASDerivativesTest, LegacyOrthogonalPartitionFaces)
-{ derivative_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25))); }
+TEST(SSTSASDerivativesTest, FactoryOrthogonalPartitionFaces)
+{ derivative_contract<FactoryMesh>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25))); }
 TEST(SSTSASDerivativesTest, SkewedPrismAffineAndScalarGradients)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Serial skew fixture";
     auto mesh = test::make_skewed_prism_mesh<Pack>();
-    derivative_contract<Legacy>(mesh);
-    derivative_contract<Native>(std::make_shared<Native>(mesh));
+    derivative_contract<FactoryMesh>(mesh);
+    derivative_contract<Native>(std::make_shared<Native>(*mesh));
 }
 } // namespace
 
@@ -347,13 +347,13 @@ TEST(SSTSASDerivativesTest, SkewedQuadraticCurvatureRefines)
     double previous = 0;
     for (const size_t n : {4, 8})
     {
-        SP<const Legacy> mesh = test::make_skewed_prism_mesh<Pack>(n, n, n);
+        SP<const FactoryMesh> mesh = test::make_skewed_prism_mesh<Pack>(n, n, n);
         VectorCellField<Pack> u(mesh, "u"), lap(mesh, "lap"); TensorCellField<Pack> g(mesh, "g");
         auto value = [](auto p) -> vec3<double> { return {p.y*p.y, 2*p.z*p.z, -3*p.x*p.x}; };
         for (size_t i = 0; i < mesh->num_owned_cells(); ++i) u.set_owned_value(i, value(mesh->cell_centroid(i)));
         u.sync_ghosts();
         auto boundary = [&](int b, size_t i) { return value(mesh->face_centroid(mesh->boundary_batches().at(b).face_lids[i])); };
-        FVM::CellGradientCache<Pack> gc(mesh); FVM::TransportGeometryCache<Legacy> geometry(*mesh);
+        FVM::CellGradientCache<Pack> gc(mesh); FVM::TransportGeometryCache<FactoryMesh> geometry(*mesh);
         FVM::cell_gradient(u, boundary, g, gc); g.sync_ghosts();
         FVM::unit_vector_laplacian(u, g, lap, geometry, boundary, [](int, size_t) { return BoundaryConditionType::Dirichlet; });
         double error = 0, volume = 0;
@@ -389,7 +389,6 @@ TEST(SSTSASDerivativesTest, NativePartitionedUnstructuredSkewedFaces)
     auto partition = MeshPartitioner<Pack>::partition(*geometry, comm);
     auto distributed = std::make_shared<Partitioned>(geometry, std::move(partition.indexer), comm);
     SP<const Native> mesh = std::make_shared<Native>(distributed);
-    ASSERT_FALSE(mesh->legacy_mesh());
     derivative_contract(mesh);
     model_contract(mesh);
 }
@@ -460,7 +459,6 @@ TEST(SSTSASDerivativesTest, CylindricalSectorsAndClosedAnnuli)
     for (bool closed : {false,true})
     {
         auto mesh=cylindrical_mesh(4,closed);
-        ASSERT_FALSE(mesh->legacy_mesh());
         derivative_contract(mesh); // Uniform, affine, rotation and scalar gradient checks.
         const auto coarse=quadratic_laplacian_error(mesh);
         const auto fine=quadratic_laplacian_error(cylindrical_mesh(8,closed));
@@ -495,7 +493,6 @@ TEST(SSTSASDerivativesTest, SemiStructuredSkewedExtrusion)
 {
     if (Tpetra::getDefaultComm()->getSize()!=1) GTEST_SKIP()<<"MeshHandle semi-structured ownership remains serial-only";
     const auto mesh=semi_structured_mesh(4);
-    ASSERT_FALSE(mesh->legacy_mesh());
     derivative_contract(mesh);
     const auto coarse=quadratic_laplacian_error(mesh);
     const auto fine=quadratic_laplacian_error(semi_structured_mesh(8));
@@ -535,12 +532,12 @@ void slip_derivative_contract(SP<const M> mesh, FVM::CellGradientScheme scheme=F
 TEST(SSTSASDerivativesTest, SlipMixedConditionPreservesAffineShearAndNormalFlux)
 {
     slip_derivative_contract(native_mesh());
-    slip_derivative_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)));
+    slip_derivative_contract<FactoryMesh>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)));
     if (Tpetra::getDefaultComm()->getSize()==1)
     {
         auto skew=test::make_skewed_prism_mesh<Pack>();
-        slip_derivative_contract<Legacy>(skew);
-        slip_derivative_contract<Native>(std::make_shared<Native>(skew));
+        slip_derivative_contract<FactoryMesh>(skew);
+        slip_derivative_contract<Native>(std::make_shared<Native>(*skew));
     }
 }
 
@@ -614,43 +611,13 @@ TEST(SSTSASDerivativesTest, NativePeriodicFourierSeamsAndOutputImages)
     EXPECT_GT(model.sas_statistics().max_source,1e-4);
 }
 
-TEST(SSTSASDerivativesTest, LegacyPairedPeriodicImages)
-{
-    if (Tpetra::getDefaultComm()->getSize()!=1) GTEST_SKIP()<<"Paired legacy fixture supplies partners locally";
-    auto mesh=test::build_mesh<Pack>(test::make_box_database(8,2,2,.125));
-    std::vector<Pack::local_ordinal_type> left,right;
-    for (const auto& [batch,faces] : mesh->boundary_batches())
-    {
-        if (mesh->boundary_batch_name(batch)=="xmin") left=faces.face_lids;
-        if (mesh->boundary_batch_name(batch)=="xmax") right=faces.face_lids;
-    }
-    for (auto a:left) for(auto b:right)
-    {
-        const auto ca=mesh->face_centroid(a),cb=mesh->face_centroid(b);
-        if (std::hypot(ca.y-cb.y,ca.z-cb.z)<1e-12)
-        {
-            auto oa=mesh->owner_cell(a),ob=mesh->owner_cell(b);
-            mesh->set_periodic_face(a,ob); mesh->set_periodic_face(b,oa);
-        }
-    }
-    const auto legacy_error=periodic_laplacian_error<Legacy>(mesh);
-    const auto stored_error=periodic_laplacian_error<Native>(std::make_shared<Native>(mesh));
-    EXPECT_NEAR(legacy_error,stored_error,1e-12);
-    EXPECT_LT(legacy_error,5.0);
-    auto bc=prescribed_boundaries(*mesh);
-    bc.velocity["xmin"].type=BoundaryConditionType::Periodic;
-    bc.velocity["xmax"].type=BoundaryConditionType::Periodic;
-    auto mat=material<Legacy>(mesh); TurbulenceModel<Pack> model(mesh,bc);
-    EXPECT_NO_THROW(model.configure(options(),mat,1));
-}
-
 TEST(SSTSASDerivativesTest, GaussLinearCoordinateMomentsPreserveGeometryInvariants)
 {
     const auto scheme=FVM::CellGradientScheme::GaussLinear;
     EXPECT_LT(periodic_laplacian_error(periodic_mesh(16),true),.3*periodic_laplacian_error(periodic_mesh(8),true));
     auto box=native_mesh();
     derivative_contract(box,true); model_contract(box,scheme); slip_derivative_contract(box,scheme);
-    derivative_contract<Legacy>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)),true);
+    derivative_contract<FactoryMesh>(test::build_mesh<Pack>(test::make_box_database(4,4,4,.25)),true);
     auto cylinder=cylindrical_mesh(4,true);
     derivative_contract(cylinder,true); model_contract(cylinder,scheme);
     EXPECT_LT(quadratic_laplacian_error(cylindrical_mesh(8,true),true),.8*quadratic_laplacian_error(cylinder,true));
@@ -659,6 +626,6 @@ TEST(SSTSASDerivativesTest, GaussLinearCoordinateMomentsPreserveGeometryInvarian
         auto semi=semi_structured_mesh(4);
         derivative_contract(semi,true); model_contract(semi,scheme);
         EXPECT_LT(quadratic_laplacian_error(semi_structured_mesh(8),true),.8*quadratic_laplacian_error(semi,true));
-        slip_derivative_contract<Legacy>(test::make_skewed_prism_mesh<Pack>(),scheme);
+        slip_derivative_contract<FactoryMesh>(test::make_skewed_prism_mesh<Pack>(),scheme);
     }
 }

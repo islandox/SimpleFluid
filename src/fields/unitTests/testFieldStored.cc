@@ -152,13 +152,11 @@ TEST(FieldStoredTest, SupportsFaceAndBoundaryFaceLocations)
     }
 }
 
-/** @brief Confirms runtime STK-backed fields preserve mesh global IDs. */
-TEST(FieldStoredTest, UsesSTKStorageGlobalIds)
+/** @brief Confirms factory-native fields preserve algebraic mesh global IDs. */
+TEST(FieldStoredTest, UsesFactoryNativeStorageGlobalIds)
 {
-    auto legacy = SimpleFluid::test::build_mesh<Pack>(
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
-    auto mesh =
-        std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy);
     SimpleFluid::ScalarCellFieldStored<Pack> cells(
         SimpleFluid::ScalarCellFieldDescriptor<Pack>("temperature"),
         mesh);

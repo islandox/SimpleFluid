@@ -160,7 +160,7 @@ SIMPLEFLUID_LOCAL void add_basic_vector_transport_values(const StoredPreparedTra
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-using StoredBasicTransportRowFaces = TransportAssemblyRowFaces<TransportAssemblyGeometry<MeshType>,
+using BasicTransportRowFaces = TransportAssemblyRowFaces<TransportAssemblyGeometry<MeshType>,
     AssemblyFaceRow<typename Pack::local_ordinal_type, typename Pack::scalar_type>>;
 
 // Concrete native face/flux views avoid function-pointer dispatch inside face loops.
@@ -168,7 +168,7 @@ template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_LOCAL void accumulate_basic_vector_transport_face_row(
     const decltype(std::declval<const ScalarFaceFieldStored<Pack, MeshType>&>().local_read_view())& face_flux_data,
     typename Pack::scalar_type diffusivity, typename Pack::local_ordinal_type cell_lid,
-    const StoredBasicTransportRowFaces<Pack, MeshType>& visit_faces,
+    const BasicTransportRowFaces<Pack, MeshType>& visit_faces,
     FlatMatrixRow<typename Pack::local_ordinal_type, typename Pack::scalar_type>& row_values)
 {
     using scalar_type = typename Pack::scalar_type;
@@ -378,7 +378,7 @@ VectorTransportSystem<Pack> assemble_stored_basic_vector(VectorTerms<Pack, MeshT
     auto boundary_value = std::move(boundary.value);
     auto right_hand_source = std::move(terms.source);
 
-    StoredBasicVectorTransportRhs<Pack, MeshType> rhs(old_values, boundary_condition, boundary_value, right_hand_source);
+    BasicVectorTransportRhs<Pack, MeshType> rhs(old_values, boundary_condition, boundary_value, right_hand_source);
     const auto matrix = assemble_basic_vector_transport_system<Pack, MeshType>(terms, rhs, std::move(context));
     return {matrix, rhs.values};
 }

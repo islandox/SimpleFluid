@@ -11,11 +11,8 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 #include "FVM/TransportSystem.hh"
 #include "FVM/SteadyDiagnostics.hh"
 #include "equations/BoundaryConditions.hh"
@@ -61,7 +58,7 @@ template<TpetraTypePack Pack> struct TransportEquationTestAccess;
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 struct TurbulenceScalarBoundaryOverrides
 {
     using scalar_type = typename Pack::scalar_type;
@@ -96,7 +93,7 @@ struct TurbulenceScalarBoundaryOverrides
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceScalarTransportEquation
 {
 public:
@@ -181,12 +178,7 @@ private:
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
-extern template class
-    TurbulenceScalarTransportEquation<DefaultTpetraTypes>;
-
 extern template class TurbulenceScalarTransportEquation<
     DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

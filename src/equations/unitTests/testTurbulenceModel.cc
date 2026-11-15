@@ -28,7 +28,7 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using MaterialType = SimpleFluid::MaterialPropertyFields<Pack>;
@@ -121,7 +121,6 @@ TEST(TurbulenceModelTest, AdvancesStandardKEpsilonOnNativeMeshHandle)
             {0.0, 1.0}}});
     SimpleFluid::SP<const NativeMesh> mesh =
         std::make_shared<NativeMesh>(cartesian);
-    ASSERT_FALSE(mesh->legacy_mesh());
 
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     SimpleFluid::TimeStepperOptions time_options;
@@ -156,7 +155,7 @@ TEST(TurbulenceModelTest, AdvancesStandardKEpsilonOnNativeMeshHandle)
         0.1, material, reference_density, SimpleFluid::FVM::NonOrthogonalTreatment::Explicit);
     EXPECT_EQ(diagnostic.k.pde.included_count, mesh->num_owned_cells());
     EXPECT_TRUE(std::isfinite(diagnostic.k.pde.dimensionless));
-    EXPECT_FALSE(diagnostic.model->turbulent_kinetic_energy().mesh().legacy_mesh());
+    EXPECT_EQ(diagnostic.model->turbulent_kinetic_energy().mesh_ptr().get(), mesh.get());
 
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {

@@ -3,12 +3,9 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 #include "dataclass/Database.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/BoundaryLayerMeshFactory.hh"
-#include "geometry/Mesh.hh"
 #include "geometry/MeshHandle.hh"
 #include "io/STKMeshInput.hh"
 
@@ -32,8 +29,6 @@ public:
     };
     MeshFactory(SP<const Database> db);
 
-    /** Explicit legacy materialization retained during the deprecation period. */
-    template<TpetraTypePack Pack = DefaultTpetraTypes> SIMPLEFLUID_LEGACY_MESH_DEPRECATED SP<Mesh<Pack>> build();
 
     template<TpetraTypePack Pack = DefaultTpetraTypes> SP<MeshHandle<Pack>> build_handle();
 
@@ -45,8 +40,6 @@ public:
     static SP<MeshHandle<Pack>> from_stk_file(const std::string& filename, const STKMeshInputOptions& options = {},
         Teuchos::RCP<const typename Pack::comm_type> comm = Teuchos::null);
 
-    template<TpetraTypePack Pack = DefaultTpetraTypes>
-    SIMPLEFLUID_LEGACY_MESH_DEPRECATED static SP<Mesh<Pack>> build_empty_mesh();
 
 private:
     using BoundaryLayerSpec = BoundaryLayerMeshFactory::BoundaryLayerSpec;
@@ -68,5 +61,3 @@ private:
     Arr<BoundaryLayerSpec> d_boundary_layer_specs;
 };
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

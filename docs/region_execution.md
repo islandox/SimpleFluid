@@ -33,8 +33,8 @@ handling before map creation. A read lease held on any rank rejects a collective
 ALE trial or rollback on all ranks.
 
 MeshHandle setup, gradient geometry construction, transport assembly, face-flux
-kernels, and composite VTU topology generation enter this boundary. Native and
-legacy mesh paths continue through their existing implementations. These views
+kernels, and composite VTU topology generation enter this boundary. Native
+mesh paths retain their geometry-family implementations. These views
 do not build dense per-cell or per-face native lookup tables.
 
 `execution.visit_regions(visitor)` also dispatches once per region, passing its
@@ -56,7 +56,7 @@ Snapshots do not follow subsequent motion or extend the execution lease.
 Scalar `FVM::diffusion_system()` now uses this traversal for composite handles
 whose owned cells retain canonical order. The existing field maps, ghost IDs,
 two-point coefficient formulas, CRS insertion order and boundary callback order
-are retained. Reordered and other native/legacy handles use the generic path.
+are retained. Reordered and other native handles use the generic path.
 The generic scalar kernel remains available as an internal reference for parity
 tests and same-binary performance comparisons. No global resolved-face or
 connectivity table is stored. See [region_production.md](region_production.md)

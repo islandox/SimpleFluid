@@ -16,12 +16,12 @@ TEST(GradientTraverseTest, CompositeCacheBuildsAndRefreshesMatchOrderedPointGeom
     }
 }
 
-TEST(GradientTraverseTest, NativeMappedReorderedAndLegacyCachesMatchPointGeometry)
+TEST(GradientTraverseTest, NativeMappedReorderedAndFactoryCachesMatchPointGeometry)
 {
     auto native = std::make_shared<Meshes::OrthogonalCartesian3D>(
         Vec3D<ArrReal>{{{0, 0.5, 1, 1.5, 2}, {0, 0.5, 1}, {0, 0.5, 1}}});
     compare_caches<Handle>(std::make_shared<Handle>(native));
-    compare_caches<Mesh<Pack>>(test::build_mesh<Pack>(test::make_3x3x3_database()));
+    compare_caches<MeshHandle<Pack>>(test::build_mesh<Pack>(test::make_3x3x3_database()));
     auto mesh = std::make_shared<Handle>(native);
     auto reordered = MeshReorderingFactory<>::selected_cells_first(
         std::move(mesh), [](auto, const Vec& point) { return point.y > 0.5; });

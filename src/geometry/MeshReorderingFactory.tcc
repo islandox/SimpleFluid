@@ -272,7 +272,6 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
         {
             parent->d_cells_reordered = true;
             parent->d_indexer = typename mesh_type::indexer_type{};
-            parent->d_legacy_indexer_materialized = false;
             if (!parent->d_cell_face_offsets.empty())
                 parent->initialize_cell_faces();
             // The compact topology keeps its construction order; the local
@@ -296,7 +295,7 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     // assumed identity cell ordinals and therefore need one composed
     // permutation in each direction.
     const bool uses_identity_geometry_ordinals =
-        parent->is_stk() || std::holds_alternative<typename mesh_type::UnstructuredPtr>(parent->d_mesh);
+        std::holds_alternative<typename mesh_type::UnstructuredPtr>(parent->d_mesh);
     std::vector<global_ordinal_type> reordered_geometry_lids;
     if (!local_identity && uses_identity_geometry_ordinals)
     {
@@ -322,7 +321,7 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     }
     std::vector<global_ordinal_type> owned_ids;
     std::vector<global_ordinal_type> ghost_ids;
-    if (!parent->is_stk() && !unstructured)
+    if (!unstructured)
     {
         owned_ids.reserve(owned_count);
         ghost_ids.reserve(selected.size() - owned_count);
@@ -350,20 +349,12 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
 
     if (unstructured)
         reordered->d_indexer.set_cells(std::move(owned_mappings), std::move(ghost_mappings));
-    else if (!reordered->is_stk())
+    else
         reordered->d_indexer.set_cells(std::move(owned_ids), std::move(ghost_ids));
 
-    if (!local_identity && reordered->is_stk())
-    {
-        // A legacy indexer is an on-demand compatibility object. Invalidate a
-        // copied materialization so the next request observes the new order.
-        reordered->d_indexer = typename mesh_type::indexer_type{};
-        reordered->d_legacy_indexer_materialized = false;
-    }
 
-    // Preserve the legacy zero-copy cell-face path whenever the face order is
-    // already identity. Other backends and the rare legacy face permutation
-    // need their compact connectivity rows rebuilt in the new cell order.
+
+    // Materialized connectivity rows must follow the new cell order.
     if (!local_identity && !reordered->d_cell_face_offsets.empty())
     {
         reordered->initialize_cell_faces();

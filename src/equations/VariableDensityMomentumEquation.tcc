@@ -3,7 +3,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -43,9 +42,7 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
             if (!std::isfinite(time_step) || time_step <= 0)
                 throw std::invalid_argument("Variable-density momentum requires a positive finite timestep.");
             BelosLinearSolver<Pack>::validate_options(linear);
-            if constexpr (std::is_same_v<MeshType, Mesh<Pack>>)
-                if (ale)
-                    throw std::invalid_argument("Legacy variable-density momentum does not own ALE geometry.");
+
             const auto same_mesh = [&](const auto& field)
             { EquationValidation::require_mesh_match(*d_mesh, field, "VariableDensityMomentumEquation"); };
             same_mesh(old_velocity);
@@ -96,8 +93,7 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
         d_component.owned_data().update(scalar_type{1}, d_old_component.owned_data(), scalar_type{});
         typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarContext context{
             .geometry_cache = &d_geometry};
-        if constexpr (!std::is_same_v<MeshType, Mesh<Pack>>)
-            context.ale = ale;
+        context.ale = ale;
         auto system = FVM::TransportSystemFactory<Pack, MeshType>::assemble(
             typename FVM::TransportSystemFactory<Pack, MeshType>::WeightedScalarTerms{
                 .history = {d_old_component, time_step},
@@ -142,5 +138,3 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
     return summary;
 }
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

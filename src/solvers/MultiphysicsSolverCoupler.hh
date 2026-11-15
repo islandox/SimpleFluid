@@ -226,9 +226,6 @@ public:
      * :advance_pre_temperature_models(time_step);
      * :advance_temperature_transport(time_step);
      * :advance_post_temperature_models(time_step);
-     * if (legacy backend?) then (yes)
-     *   :Publish temperature to legacy storage;
-     * endif
      * :finish_step();
      * if (free surface configured?) then (yes)
      *   :Record accepted free-surface history;

@@ -323,14 +323,13 @@ TEST(MeshToMeshTransferTest, NonconstantStrideViewsIgnoreUnselectedColumns)
     EXPECT_NEAR(values(0, 2), 3.0, 1.0e-14);
 }
 
-TEST(MeshToMeshTransferTest, InterpolatesNativeUnstructuredAndStkIntoCartesian)
+TEST(MeshToMeshTransferTest, InterpolatesNativeUnstructuredAndFactoryIntoCartesian)
 {
     auto unstructured = std::make_shared<Handle>(
         SimpleFluid::test::make_unstructured_hex_line(2));
-    auto stk = std::make_shared<Handle>(SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_two_hex_database()));
+    auto factory = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
     auto target_mesh = make_cartesian({0.5, 1.0});
-    for (const auto& source_mesh : {unstructured, stk})
+    for (const auto& source_mesh : {unstructured, factory})
     {
         ScalarField source(source_mesh, "source");
         ScalarField target(target_mesh, "target");

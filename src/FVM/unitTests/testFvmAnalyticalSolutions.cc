@@ -18,7 +18,7 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/Operators.hh"
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
+#include "geometry/mesh/UnstructuredMesh.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -26,9 +26,6 @@
 #include "utils/ErrorNorms.hh"
 #include "utils/testing_environment.hh"
 
-#include <stk_io/IossBridge.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
 
 #include <array>
 #include <cmath>
@@ -43,8 +40,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::Mesh<Pack>;
-using STKMeshType = SimpleFluid::test::LegacySTKFixture<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -71,156 +67,50 @@ SimpleFluid::SP<MeshType> make_taylor_green_mesh()
         SimpleFluid::test::make_box_database(n_cells, n_cells, 1, mesh_size));
 }
 
-MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
-                                               const char* boundary_name)
-{
-    for (const auto& [batch_id, batch] : mesh.boundary_batches())
-    {
-        if (mesh.boundary_batch_name(batch_id) == boundary_name
-            && !batch.face_lids.empty())
-        {
-            return batch.face_lids.front();
-        }
-    }
-
-    throw std::runtime_error("Requested boundary face was not found.");
-}
-
 SimpleFluid::SP<MeshType> make_periodic_line_mesh(int n_cells)
 {
     const auto dx = 1.0 / static_cast<double>(n_cells);
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(n_cells, 1, 1, dx));
-
-    const auto xmin_face = boundary_face_lid(*mesh, "xmin");
-    const auto xmax_face = boundary_face_lid(*mesh, "xmax");
-    const auto xmin_owner = mesh->owner_cell(xmin_face);
-    const auto xmax_owner = mesh->owner_cell(xmax_face);
-    mesh->set_periodic_face(xmin_face, xmax_owner);
-    mesh->set_periodic_face(xmax_face, xmin_owner);
-
-    return mesh;
+    SimpleFluid::ArrReal x(static_cast<size_t>(n_cells) + 1);
+    for (size_t i = 0; i < x.size(); ++i) x[i] = static_cast<double>(i) * dx;
+    return std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{std::move(x), {0., dx}, {0., dx}}},
+        SimpleFluid::Vec3D<bool>{{true, false, false}}));
 }
 
-stk::mesh::Field<double>& declare_coordinate_field(STKMeshType& mesh)
+SimpleFluid::SP<MeshType> make_sheared_box_mesh(size_t n_cells, double shear)
 {
-    auto meta = mesh.meta();
-    auto& coord_field =
-        meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
-    stk::mesh::put_field_on_mesh(coord_field, meta->universal_part(), 3, nullptr);
-    meta->set_coordinate_field(&coord_field);
-    return coord_field;
-}
-
-void set_node_coord(stk::mesh::Field<double>& coord_field,
-                    stk::mesh::Entity node,
-                    const SimpleFluid::vec3<>& coord)
-{
-    auto* data = stk::mesh::field_data(coord_field, node);
-    data[0] = coord.x;
-    data[1] = coord.y;
-    data[2] = coord.z;
-}
-
-SimpleFluid::SP<MeshType> make_sheared_box_mesh(size_t n_cells,
-                                                double shear)
-{
-    auto mesh = std::make_shared<STKMeshType>();
-    auto& coord_field = declare_coordinate_field(*mesh);
-    auto meta = mesh->meta();
-    auto bulk = mesh->bulk();
-
-    auto& hex_part =
-        meta->declare_part_with_topology("sheared_hexes", stk::topology::HEX_8);
-    stk::io::put_io_part_attribute(hex_part);
-
-    std::array<stk::mesh::Part*, 6> boundary_parts{};
-    const std::array<const char*, 6> boundary_names{
-        "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
-    for (size_t i = 0; i < boundary_parts.size(); ++i)
-    {
-        auto& part = meta->declare_part(boundary_names[i], meta->side_rank());
-        stk::io::put_io_part_attribute(part);
-        boundary_parts[i] = &part;
-    }
-
-    auto node_id = [=](size_t i, size_t j, size_t k)
-        -> stk::mesh::EntityId
-    {
-        return static_cast<stk::mesh::EntityId>(
-            1 + i + (n_cells + 1) * (j + (n_cells + 1) * k));
-    };
-
-    auto element_id = [=](size_t i, size_t j, size_t k)
-        -> stk::mesh::EntityId
-    {
-        return static_cast<stk::mesh::EntityId>(
-            1 + i + n_cells * (j + n_cells * k));
-    };
-
-    auto declare_boundary_side =
-        [&](stk::mesh::Entity elem,
-            unsigned side_ordinal,
-            stk::mesh::Part* part)
-    {
-        stk::mesh::PartVector parts{part};
-        bulk->declare_element_side(elem, side_ordinal, parts);
-    };
-
-    bulk->modification_begin();
-
-    for (size_t k = 0; k < n_cells; ++k)
-    {
-        for (size_t j = 0; j < n_cells; ++j)
-        {
-            for (size_t i = 0; i < n_cells; ++i)
-            {
-                const stk::mesh::EntityIdVector hex_nodes{
-                    node_id(i,     j,     k),
-                    node_id(i + 1, j,     k),
-                    node_id(i + 1, j + 1, k),
-                    node_id(i,     j + 1, k),
-                    node_id(i,     j,     k + 1),
-                    node_id(i + 1, j,     k + 1),
-                    node_id(i + 1, j + 1, k + 1),
-                    node_id(i,     j + 1, k + 1)
-                };
-
-                const auto elem = stk::mesh::declare_element(
-                    *bulk, hex_part, element_id(i, j, k), hex_nodes);
-
-                if (i == 0)               declare_boundary_side(elem, 3, boundary_parts[0]);
-                if (i + 1 == n_cells)     declare_boundary_side(elem, 1, boundary_parts[1]);
-                if (j == 0)               declare_boundary_side(elem, 0, boundary_parts[2]);
-                if (j + 1 == n_cells)     declare_boundary_side(elem, 2, boundary_parts[3]);
-                if (k == 0)               declare_boundary_side(elem, 4, boundary_parts[4]);
-                if (k + 1 == n_cells)     declare_boundary_side(elem, 5, boundary_parts[5]);
-            }
-        }
-    }
-
+    using Native = SimpleFluid::Meshes::UnstructuredMesh;
+    const auto node_id = [=](size_t i, size_t j, size_t k)
+    { return static_cast<Native::NodeID>(i + (n_cells + 1) * (j + (n_cells + 1) * k)); };
     const auto h = 1.0 / static_cast<double>(n_cells);
+    SimpleFluid::Arr<Native::Vec3> nodes;
     for (size_t k = 0; k <= n_cells; ++k)
-    {
         for (size_t j = 0; j <= n_cells; ++j)
-        {
             for (size_t i = 0; i <= n_cells; ++i)
             {
                 const auto x = static_cast<double>(i) * h;
                 const auto y = static_cast<double>(j) * h;
                 const auto z = static_cast<double>(k) * h;
-                const auto node =
-                    bulk->get_entity(stk::topology::NODE_RANK,
-                                     node_id(i, j, k));
-                set_node_coord(coord_field, node,
-                               {x + shear * y, y, z});
+                nodes.push_back({x + shear * y, y, z});
             }
-        }
-    }
-
-    bulk->modification_end();
-    mesh->assemble();
-    return mesh;
+    SimpleFluid::Arr<Native::CellDefinition> cells;
+    SimpleFluid::Arr<Native::BoundaryFaceDefinition> boundaries;
+    for (size_t k = 0; k < n_cells; ++k)
+        for (size_t j = 0; j < n_cells; ++j)
+            for (size_t i = 0; i < n_cells; ++i)
+            {
+                const std::array ids{node_id(i,j,k), node_id(i+1,j,k), node_id(i+1,j+1,k), node_id(i,j+1,k),
+                    node_id(i,j,k+1), node_id(i+1,j,k+1), node_id(i+1,j+1,k+1), node_id(i,j+1,k+1)};
+                cells.push_back({Native::CellType::HEXAHEDRON, {ids.begin(), ids.end()}});
+                if (i == 0) boundaries.push_back({{ids[3],ids[7],ids[4],ids[0]}, 1, "xmin"});
+                if (i+1 == n_cells) boundaries.push_back({{ids[1],ids[5],ids[6],ids[2]}, 2, "xmax"});
+                if (j == 0) boundaries.push_back({{ids[0],ids[4],ids[5],ids[1]}, 3, "ymin"});
+                if (j+1 == n_cells) boundaries.push_back({{ids[2],ids[6],ids[7],ids[3]}, 4, "ymax"});
+                if (k == 0) boundaries.push_back({{ids[0],ids[1],ids[2],ids[3]}, 5, "zmin"});
+                if (k+1 == n_cells) boundaries.push_back({{ids[4],ids[7],ids[6],ids[5]}, 6, "zmax"});
+            }
+    return std::make_shared<MeshType>(std::make_shared<Native>(
+        std::move(nodes), std::move(cells), std::move(boundaries)));
 }
 
 double affine_scalar(const SimpleFluid::vec3<>& point)
@@ -396,6 +286,7 @@ SimpleFluid::FaceField<Pack> burgers_fluxes(const FieldType& solution)
                        * mesh.face_area(fid));
     }
 
+    fluxes.sync_ghosts();
     return fluxes;
 }
 
@@ -432,6 +323,7 @@ SimpleFluid::FaceField<Pack> burgers_transport_fluxes(
                          normal_x * 0.5 * left_value * mesh.face_area(fid));
     }
 
+    fluxes.sync_ghosts();
     return fluxes;
 }
 
@@ -483,6 +375,7 @@ SimpleFluid::FaceField<Pack> viscous_burgers_transport_fluxes(
                          normal_x * 0.5 * left_value * mesh.face_area(fid));
     }
 
+    fluxes.sync_ghosts();
     return fluxes;
 }
 

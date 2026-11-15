@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "geometry/Mesh.hh"
+#include "LegacyMesh.hh"
 
 #include <stk_io/StkMeshIoBroker.hpp>
 #include <stk_mesh/base/BulkData.hpp>
@@ -110,10 +110,10 @@ struct LegacySTKFixtureContainer
  *
  * @tparam Pack Tpetra type pack used for map and vector types.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes> class LegacySTKFixture : public Mesh<Pack>
+template<TpetraTypePack Pack = DefaultTpetraTypes> class LegacySTKFixture : public LegacyMesh<Pack>
 {
 public:
-    using Base = Mesh<Pack>;
+    using Base = LegacyMesh<Pack>;
     using typename Base::comm_type;
     using typename Base::global_ordinal_type;
     using typename Base::local_ordinal_type;

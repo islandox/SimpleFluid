@@ -300,6 +300,10 @@ component-tested and solver-regression-tested. Recorded GCC and LLVM Debug
 campaigns cover the independent Decimal pointwise source oracle, manufactured
 derivatives, native/legacy paths, serial/MPI parity, source-disabled parent
 equivalence, diagnostics, restart, stale geometry and rejection/retry.
+Those native/legacy records predate production `Mesh` retirement. The migrated
+native defaults require their own focused evidence. Arbitrary manually paired
+imported periodic faces are retired; native Cartesian and composite periodic
+contracts remain available.
 The active-SAS NOX extension has enabled GCC coverage; its LLVM checks used
 NOX disabled and do not establish enabled LLVM NOX support qualification.
 

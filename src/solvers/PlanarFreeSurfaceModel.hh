@@ -4,17 +4,14 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
-#include "utils/export_helper.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "dataclass/typedefs.hh"
 #include "fields/MeshFieldTraits.hh"
-#include "geometry/Mesh.hh"
+#include "geometry/MeshHandle.hh"
 #include "geometry/MeshQuality.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/CompensatedSum.hh"
@@ -650,7 +647,7 @@ template<class Scalar> struct LiquidMassInventoryDiagnostics
  * accepted-old and trial-new volumes are never applied twice. Mixture density
  * and void fraction are intentionally absent from both paths.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_SOLVERS_EXPORT LiquidMassInventory
 {
 public:
@@ -967,10 +964,6 @@ private:
     bool d_species_bound = false;
     detail::CompensatedSum<long double> d_species_change_sum, d_species_outflow_sum;
 };
-extern template class LiquidMassInventory<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class LiquidMassInventory<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

@@ -10,11 +10,8 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 
 #include "FVM/TransportSystem.hh"
 #include "equations/BoussFiniteVapor.hh"
@@ -88,7 +85,7 @@ template<class Scalar> struct ReactingGasStepStatistics
  * @tparam Pack Tpetra type pack used for mesh, field, and communicator types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         SimpleFluid::MeshType MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT ReactingGasModel
 {
 public:
@@ -629,9 +626,6 @@ private:
     std::map<std::string, const field_type*> d_output_fields;
 };
 
-extern template class ReactingGasModel<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class ReactingGasModel<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

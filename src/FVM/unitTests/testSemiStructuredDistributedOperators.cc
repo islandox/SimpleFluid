@@ -288,7 +288,6 @@ double global_sum(double value)
 }
 void expect_native(const Fixture& fixture)
 {
-    EXPECT_FALSE(fixture.mesh->legacy_mesh());
     EXPECT_TRUE(fixture.mesh->visit(
         [&](const auto& provider)
         {

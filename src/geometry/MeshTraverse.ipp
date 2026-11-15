@@ -411,14 +411,7 @@ struct SIMPLEFLUID_LOCAL MeshTraverseBinding
 
     template<class Mesh> static size_t owned_faces(const Mesh& mesh)
     {
-        if constexpr (traverse_is_stk_adapter<Mesh>)
-            return owned_faces(mesh.mesh());
-        else if constexpr (requires { mesh.legacy_mesh(); })
-        {
-            if (const auto legacy = mesh.legacy_mesh()) return owned_faces(*legacy);
-            return mesh.num_owned_faces();
-        }
-        else if constexpr (requires { mesh.num_owned_faces(); })
+        if constexpr (requires { mesh.num_owned_faces(); })
             return mesh.num_owned_faces();
         else if constexpr (requires { mesh.d_owned_face_map.getRawPtr(); })
         {

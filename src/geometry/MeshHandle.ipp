@@ -467,11 +467,8 @@ inline void MeshHandle<Pack>::visit_cell_faces(
         const auto to_local_cell = [&](auto native_cell) -> local_ordinal_type
         {
             using mesh_type = std::remove_cvref_t<decltype(mesh)>;
-            if constexpr (std::is_same_v<mesh_type, STKAdapter>)
-            {
-                if (native_cell == invalid_id<local_ordinal_type>()) return invalid_local_id();
-            }
-            else if (native_cell == mesh_type::invalid_cell_id()) return invalid_local_id();
+
+            if (native_cell == mesh_type::invalid_cell_id()) return invalid_local_id();
             return geometry_to_local_cell(mesh.cell_local_id(native_cell));
         };
         for (const auto face : mesh.faces(cell))
@@ -517,16 +514,8 @@ MeshHandle<Pack>::adjacent_cell(local_ordinal_type face_lid, bool owner) const
                 ? mesh.owner_cell(face)
                 : mesh.neighbor_cell(face);
             // Different mesh backends encode "invalid cell" differently.
-            if constexpr (std::is_same_v<
-                              std::decay_t<decltype(mesh)>,
-                              STKAdapter>)
-            {
-                if (cell == invalid_id<local_ordinal_type>())
-                {
-                    return std::numeric_limits<size_t>::max();
-                }
-            }
-            else if (cell == std::decay_t<decltype(mesh)>::invalid_cell_id())
+
+            if (cell == std::decay_t<decltype(mesh)>::invalid_cell_id())
             {
                 return std::numeric_limits<size_t>::max();
             }

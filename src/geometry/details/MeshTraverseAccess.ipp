@@ -35,11 +35,8 @@ inline real_t TraverseAccess<PublicMesh, GeometryMesh>::cell_to_face_distance(si
 {
     if constexpr (traverse_is_handle<PublicMesh>)
     {
-        // Match MeshHandle's public distance arithmetic, including the
-        // wrapped legacy and Cartesian periodic-face distances.
-        if constexpr (traverse_is_stk_adapter<GeometryMesh>)
-            return d_geometry.mesh().cell_to_face_distance(face_id(face), cell_id(cell));
-        else if constexpr (std::is_same_v<GeometryMesh, Meshes::OrthogonalCartesian3D>)
+        // Match MeshHandle's Cartesian periodic-face distance arithmetic.
+        if constexpr (std::is_same_v<GeometryMesh, Meshes::OrthogonalCartesian3D>)
             return d_geometry.cell_to_face_distance(face_id(face), cell_id(cell));
         else
             return face_center_vector(face, cell).norm();
@@ -59,7 +56,7 @@ inline size_t TraverseAccess<PublicMesh, GeometryMesh>::geometry_cell(size_t cel
     {
         if (!d_mesh.d_cell_geometry_lids.empty())
             return static_cast<size_t>(d_mesh.d_cell_geometry_lids[cell]);
-        if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh> || traverse_is_stk_adapter<GeometryMesh>)
+        if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh>)
             return cell;
         if (d_mesh.d_serial_identity)
             return cell;
@@ -79,10 +76,6 @@ inline size_t TraverseAccess<PublicMesh, GeometryMesh>::geometry_face(size_t fac
         throw std::out_of_range("Mesh traverse face ordinal is out of range.");
     if constexpr (traverse_is_handle<PublicMesh>)
     {
-        if constexpr (traverse_is_stk_adapter<GeometryMesh>)
-            return d_mesh.d_legacy_face_geometry_lids.empty()
-                       ? face
-                       : static_cast<size_t>(d_mesh.d_legacy_face_geometry_lids[face]);
         if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh>)
             return face;
         if (d_mesh.d_serial_identity)
@@ -115,7 +108,7 @@ TraverseAccess<PublicMesh, GeometryMesh>::field_cell(Cell cell) const
         if (!d_mesh.d_cell_local_lids_by_geometry.empty())
             return ordinal < d_mesh.d_cell_local_lids_by_geometry.size() ? d_mesh.d_cell_local_lids_by_geometry[ordinal]
                                                                          : invalid_local_id();
-        if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh> || traverse_is_stk_adapter<GeometryMesh>)
+        if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh>)
             return ordinal < num_cells() ? local(ordinal) : invalid_local_id();
         if (d_mesh.d_serial_identity)
             return ordinal < num_cells() ? local(ordinal) : invalid_local_id();
@@ -144,12 +137,7 @@ TraverseAccess<PublicMesh, GeometryMesh>::field_face(Face face) const
     }();
     if constexpr (traverse_is_handle<PublicMesh>)
     {
-        if constexpr (traverse_is_stk_adapter<GeometryMesh>)
-        {
-            if (ordinal >= num_faces())
-                return invalid_local_id();
-            return d_mesh.d_legacy_face_local_lids.empty() ? local(ordinal) : d_mesh.d_legacy_face_local_lids[ordinal];
-        }
+
         if constexpr (std::is_same_v<GeometryMesh, Meshes::UnstructuredMesh>)
             return ordinal < num_faces() ? local(ordinal) : invalid_local_id();
         if (d_mesh.d_serial_identity)

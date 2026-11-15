@@ -10,11 +10,8 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 
 #include "dataclass/Database.hh"
 #include "dataclass/DatabaseOptionReader.hh"
@@ -504,10 +501,6 @@ private:
     scalar_type d_interval_start = {};
     scalar_type d_interval_duration = {};
 };
-extern template class PrescribedHeatSource<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class PrescribedHeatSource<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

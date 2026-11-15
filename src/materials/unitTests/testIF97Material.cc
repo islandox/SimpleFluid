@@ -103,7 +103,6 @@ TEST(IF97MaterialTest, UpdatesNativeFieldsWithoutLegacyMeshConversion)
     const auto updater = SimpleFluid::make_if97_liquid_material_updater<Pack, Mesh>(101325.0);
     material.set_updater(updater);
     material.update(UpdateContext{0.0, 0, *mesh, temperature, pressure, velocity});
-    EXPECT_FALSE(mesh->legacy_mesh());
     const auto expected = SimpleFluid::IF97Water::liquid(330.0, 101325.0);
     EXPECT_DOUBLE_EQ(material.density.value(0), expected.density);
     EXPECT_DOUBLE_EQ(material.specific_heat_capacity.value(1), expected.specific_heat_capacity);

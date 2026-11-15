@@ -12,7 +12,7 @@ TEST(MeshTraverseTest, StructuredCartesianRangesPreserveAllPeriodicMasks)
         auto geometry = std::make_shared<Cartesian>(
             Vec3D<ArrReal>{{{0, 0.5, 2, 4}, {0, 0.25, 1, 2, 5}, {0, 2, 7}}},
             Vec3D<bool>{{bool(mask & 1U), bool(mask & 2U), bool(mask & 4U)}});
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         expect_structured_plan(*geometry, mesh);
         expect_structured_plan(mesh, mesh);
     }
@@ -25,7 +25,7 @@ TEST(MeshTraverseTest, StructuredCartesianRangesPreserveThinAndSingleCellAxes)
     {
         SCOPED_TRACE(::testing::PrintToString(shape));
         auto geometry = cartesian(shape[0], shape[1], shape[2]);
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         expect_structured_plan(*geometry, mesh);
         expect_structured_plan(mesh, mesh);
     }
@@ -43,7 +43,7 @@ TEST(MeshTraverseTest, StructuredCylindricalRangesPreserveSectorsAndPeriodicThet
     {
         auto geometry = std::make_shared<Cylindrical>(edges);
         SCOPED_TRACE(geometry->is_theta_periodic());
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         expect_structured_plan(*geometry, mesh);
         expect_structured_plan(mesh, mesh);
     }
@@ -53,7 +53,7 @@ TEST(MeshTraverseTest, StructuredPlanStorageDoesNotGrowWithCellOrFaceCount)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial identity maps.";
     const auto small = cartesian(3, 3, 3), large = cartesian(24, 24, 24);
-    Handle small_handle(small), large_handle(large);
+    Mesh small_handle(small), large_handle(large);
     for (const auto entities : {MeshTraverseEntities::Cells, MeshTraverseEntities::Faces,
                                MeshTraverseEntities::All, MeshTraverseEntities::AllWithCellFaces})
     {
@@ -75,7 +75,7 @@ TEST(MeshTraverseTest, StructuredPlansRetainTopologyAndRefreshGeometryAcrossALE)
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial identity maps.";
     const auto check = [](const auto& geometry)
     {
-        auto mesh = std::make_shared<Handle>(geometry);
+        auto mesh = std::make_shared<Mesh>(geometry);
         const auto plan = make_mesh_traverse_plan(*mesh, MeshTraverseEntities::AllWithCellFaces);
         const auto native_plan = make_mesh_traverse_plan(*geometry, MeshTraverseEntities::AllWithCellFaces);
         ASSERT_TRUE(plan.uses_structured_ranges());

@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using Mesh = SimpleFluid::Mesh<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Field = SimpleFluid::CellField<Pack>;
 using VectorField = SimpleFluid::VectorCellField<Pack>;
 using Material = SimpleFluid::MaterialPropertyFields<Pack>;

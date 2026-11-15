@@ -105,7 +105,7 @@ public:
      * Borrowed views always repeat the full finite-data/GCL validation. Owned
      * planar snapshots reuse it only when every rank has a validated snapshot;
      * mixed owned/borrowed calls repeat the full checks on every rank.
-     * Mesh, MeshHandle and SolidSubdomain with DefaultTpetraTypes are compiled
+     * MeshHandle and SolidSubdomain with DefaultTpetraTypes are compiled
      * into FVM. Other mesh types must include FVM/ALEControlVolumeState.tcc.
      */
     template<SimpleFluid::MeshType MeshType>

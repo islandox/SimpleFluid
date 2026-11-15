@@ -218,8 +218,8 @@ void expect_handle_selections(const Handle& mesh)
 }
 
 /** The public point queries are independent of the structured range generator. */
-template<class Mesh>
-void expect_structured_plan(const Mesh& mesh, const Handle& reference)
+template<class NativeMesh>
+void expect_structured_plan(const NativeMesh& mesh, const Handle& reference)
 {
     const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     ASSERT_TRUE(plan.uses_structured_ranges());

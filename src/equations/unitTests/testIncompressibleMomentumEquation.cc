@@ -48,7 +48,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -103,7 +103,7 @@ TEST(IncompressibleMomentumEquationTest, AdvancesVelocityFromSource)
 {
     auto mesh = make_single_hex_mesh();
     VectorFieldType velocity(mesh, "velocity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -137,7 +137,7 @@ TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
     auto mesh = make_single_hex_mesh();
     VectorFieldType velocity(mesh, "velocity");
     FieldType dynamic_viscosity(mesh, 0.0, "dynamic_viscosity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -175,7 +175,7 @@ TEST(IncompressibleMomentumEquationTest,
     VectorFieldType velocity(
         mesh, VectorFieldType::vec_type{9.0, 8.0, 7.0}, "velocity");
     FieldType dynamic_viscosity(mesh, 0.0, "dynamic_viscosity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -216,7 +216,7 @@ TEST(IncompressibleMomentumEquationTest,
     const VectorFieldType::vec_type accepted{1.0, 2.0, 3.0};
     VectorFieldType velocity(mesh, accepted, "velocity");
     FieldType dynamic_viscosity(mesh, 0.0, "dynamic_viscosity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -276,7 +276,7 @@ TEST(IncompressibleMomentumEquationTest,
     }
 
     FieldType dynamic_viscosity(mesh, 1.0, "dynamic_viscosity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -321,7 +321,7 @@ TEST(IncompressibleMomentumEquationTest,
         "slip_velocity");
     velocity.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     for (const auto* name :
          {"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"})
@@ -384,7 +384,7 @@ TEST(IncompressibleMomentumEquationTest,
              center.x - 0.5 * center.z});
     }
     velocity.sync_ghosts();
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
@@ -497,7 +497,7 @@ TEST(IncompressibleMomentumEquationTest,
 {
     auto mesh = make_single_hex_mesh();
     VectorFieldType velocity(mesh, "recovery_velocity");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
@@ -555,7 +555,7 @@ TEST(IncompressibleMomentumEquationTest, MixedRankViscosityAndChangedTimeStepMat
     if (mesh->owned_cell_map()->getComm()->getRank() == 0 && mesh->num_owned_cells() > 0)
         viscosity.set_owned_value(0, 0.0);
     viscosity.sync_ghosts();
-    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "zero_flux");
     SimpleFluid::BoundaryConditionSet boundaries;
     const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
     SimpleFluid::TimeStepperOptions options;
@@ -598,7 +598,7 @@ TEST(IncompressibleMomentumEquationTest, EmptyOwnedRanksParticipateInImplicitCoe
         SimpleFluid::test::make_box_database(1, 1, 1, 1.0));
     VectorFieldType old_velocity(mesh, "old_velocity"), velocity(mesh, "velocity");
     FieldType viscosity(mesh, 0.0, "viscosity");
-    SimpleFluid::FaceField<Pack> flux(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
     SimpleFluid::BoundaryConditionSet boundaries;
     const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
     SimpleFluid::TimeStepperOptions options;

@@ -43,7 +43,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using Handle = SimpleFluid::MeshHandle<Pack>;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
 using PartitionedUnstructured =
@@ -66,7 +66,7 @@ SimpleFluid::SP<MeshType> make_box_mesh()
     db->set("domain_exterior_face_types", SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Build the 4-by-4-by-4 checkerboard test mesh. @return Assembled mesh. */
@@ -82,7 +82,7 @@ SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
     db->set("domain_exterior_face_types", SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Build a single-cell box test mesh. @return Assembled mesh. */
@@ -98,7 +98,7 @@ SimpleFluid::SP<MeshType> make_single_cell_box_mesh()
     db->set("domain_exterior_face_types", SimpleFluid::ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_native_skewed_semi_structured_handle()
@@ -178,7 +178,7 @@ SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
     db->set("boundary_layer_growth_ratios", SimpleFluid::ArrReal{1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Build the baseline cylindrical test mesh. @return Assembled mesh. */
@@ -193,7 +193,7 @@ SimpleFluid::SP<MeshType> make_cylinder_mesh()
     db->set("domain_exterior_face_types", SimpleFluid::ArrString{"radial", "zmin", "zmax"});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Build a cylinder with boundary-layer refinement. @return Assembled mesh. */
@@ -212,7 +212,7 @@ SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
     db->set("boundary_layer_growth_ratios", SimpleFluid::ArrReal{1.0, 1.0, 1.0});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Build a sphere split into upper and lower boundary patches. @return Assembled mesh. */
@@ -226,7 +226,7 @@ SimpleFluid::SP<MeshType> make_split_sphere_mesh()
     db->set("domain_exterior_face_types", SimpleFluid::ArrString{"lower_surface", "upper_surface"});
 
     SimpleFluid::MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 /** @brief Expose the transport face flux for solver-state regressions. */
@@ -342,17 +342,17 @@ Pack::scalar_type continuity_imbalance_norm(const SimpleFluid::VectorCellFieldSt
 
 } // namespace
 
-/** @brief The legacy constructor retains one exact mesh through all fields. */
-TEST(BoussinesqSolverTest, ReusesExactLegacyMeshWithoutConversion)
+/** @brief Native construction retains one exact mesh through all fields. */
+TEST(BoussinesqSolverTest, ReusesExactNativeMeshAcrossFields)
 {
-    auto legacy = make_box_mesh();
-    auto solver_shared = std::make_shared<InspectableBoussinesqSolver>(legacy, SimpleFluid::BoundaryConditionSet{});
+    auto mesh = make_box_mesh();
+    auto solver_shared = std::make_shared<InspectableBoussinesqSolver>(mesh, SimpleFluid::BoundaryConditionSet{});
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
     const auto handle = solver.temperature().mesh_ptr();
     ASSERT_TRUE(handle);
-    EXPECT_EQ(handle->legacy_mesh(), legacy);
+    EXPECT_EQ(handle, mesh);
     EXPECT_EQ(solver.pressure().mesh_ptr(), handle);
     EXPECT_EQ(solver.velocity().mesh_ptr(), handle);
 }
@@ -584,7 +584,7 @@ TEST(BoussinesqSolverTest, RunsCartesianCRTPMeshSmokeCase)
     EXPECT_EQ(solver.temperature().mesh_ptr(), mesh);
     EXPECT_EQ(solver.pressure().mesh_ptr(), mesh);
     EXPECT_EQ(solver.velocity().mesh_ptr(), mesh);
-    EXPECT_FALSE(mesh->legacy_mesh());
+
     EXPECT_TRUE(std::isfinite(solver.temperature().value(0)));
     EXPECT_TRUE(std::isfinite(solver.pressure().value(0)));
     const auto velocity = solver.velocity().value(0);
@@ -731,7 +731,6 @@ TEST(BoussinesqSolverTest, RunsPhysicalModelsOnNativeMeshHandle)
     solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
     auto& heat_source = solver.add_temperature_source("native_heat", 24.0);
 
-    EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
     EXPECT_EQ(heat_source.field().mesh_ptr(), mesh);
 
@@ -791,7 +790,6 @@ TEST(BoussinesqSolverTest,
         EXPECT_EQ(solver->step_index(), 1);
     }
 
-    ASSERT_FALSE(unstructured_mesh->legacy_mesh());
     EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
         unstructured_mesh->variant()));
     EXPECT_EQ(
@@ -844,7 +842,6 @@ TEST(BoussinesqSolverTest, NativePhysicalModelsRunCoupledKrylovOnDistributedCart
         GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
     }
 
-    ASSERT_FALSE(mesh->legacy_mesh());
     ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
 
     SimpleFluid::TimeStepperOptions time_options;
@@ -913,7 +910,6 @@ TEST(BoussinesqSolverTest,
         GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
     }
 
-    ASSERT_FALSE(mesh->legacy_mesh());
     ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
         mesh->variant()));
     ASSERT_EQ(
@@ -1043,7 +1039,6 @@ TEST(BoussinesqSolverTest,
         GTEST_SKIP() << "This regression requires exactly two MPI ranks.";
     }
 
-    EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(
         mesh->variant()));
     EXPECT_GT(mesh->num_local_cells(), mesh->num_owned_cells());

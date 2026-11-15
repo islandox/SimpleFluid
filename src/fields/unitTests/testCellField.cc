@@ -22,7 +22,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -55,17 +55,21 @@ TEST(CellFieldTest, StoresValuesOnOwnedCellMap)
     EXPECT_DOUBLE_EQ(temperature.value(0), 0.0);
     EXPECT_DOUBLE_EQ(temperature.value(1), 0.0);
 
+    const auto first_gid = mesh->cell_global_id(0);
+    const auto second_gid = mesh->cell_global_id(1);
+    EXPECT_EQ(temperature.map()->getGlobalElement(0), first_gid);
+    EXPECT_EQ(temperature.map()->getGlobalElement(1), second_gid);
     temperature.set_value(0, 2.5);
-    temperature.set_global_value(2, 4.0);
+    temperature.set_global_value(second_gid, 4.0);
     temperature.sum_into_value(0, 0.5);
-    temperature.sum_into_global_value(2, 1.0);
+    temperature.sum_into_global_value(second_gid, 1.0);
 
     EXPECT_DOUBLE_EQ(temperature.value(0), 3.0);
-    EXPECT_DOUBLE_EQ(temperature.global_value(1), 3.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(first_gid), 3.0);
     EXPECT_DOUBLE_EQ(temperature.value(1), 5.0);
-    EXPECT_DOUBLE_EQ(temperature.global_value(2), 5.0);
+    EXPECT_DOUBLE_EQ(temperature.global_value(second_gid), 5.0);
     EXPECT_TRUE(temperature.is_owned_cell(0));
-    EXPECT_TRUE(temperature.is_owned_global_cell(2));
+    EXPECT_TRUE(temperature.is_owned_global_cell(second_gid));
     EXPECT_FALSE(temperature.is_owned_global_cell(77));
 }
 
@@ -99,7 +103,7 @@ TEST(CellFieldTest, SynchronizesOwnedValuesIntoOverlapStorage)
     temperature.sync_ghosts();
 
     EXPECT_TRUE(temperature.is_local_cell(0));
-    EXPECT_TRUE(temperature.is_local_global_cell(1));
+    EXPECT_TRUE(temperature.is_local_global_cell(mesh->cell_global_id(0)));
     EXPECT_DOUBLE_EQ(temperature.local_value(0), 10.0);
     EXPECT_DOUBLE_EQ(temperature.local_value(1), 20.0);
 }
@@ -157,12 +161,10 @@ TEST(CellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
     EXPECT_DOUBLE_EQ(temperature.local_value(1), 22.0);
 }
 
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
-
-/** @brief Ensures construction rejects a mesh without assembled maps. */
-TEST(CellFieldTest, RequiresAssembledMesh)
+/** @brief Ensures null mesh and empty descriptor names fail independently. */
+TEST(CellFieldTest, RejectsNullMeshAndEmptyDescriptorName)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
-
-    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+    EXPECT_THROW(FieldType(nullptr, "temperature"), std::invalid_argument);
+    const auto mesh = make_two_hex_mesh();
+    EXPECT_THROW(FieldType(mesh, ""), std::invalid_argument);
 }

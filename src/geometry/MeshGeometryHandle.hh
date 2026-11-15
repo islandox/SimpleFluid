@@ -34,8 +34,7 @@ class MeshHandle;
  * visitation, the geometry epoch/identity, and every coordinate-derived metric
  * (volume, centroid, area, normal, area vector, and image-aware displacements).
  * It stores no geometry: every query forwards to the owning handle, preserving
- * the established periodic-image arithmetic, composite region resolution, and
- * legacy branches byte-for-byte.
+ * the established periodic-image arithmetic and composite region resolution.
  *
  * Lifetime: the view borrows the MeshHandle it was constructed from. The handle
  * must outlive the view and every result borrowed from it. Construct a view on

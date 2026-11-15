@@ -11,8 +11,6 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -617,20 +615,10 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
             [](local_ordinal_type) -> scalar_type { return 0.0; };
         typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext context{
             .cached_matrix = system.matrix, .geometry_cache = &d_transport_geometry_cache};
-        if constexpr (!std::is_same_v<mesh_type, Mesh<Pack>>)
         {
             context.ale = ale;
             context.symbolic_plan = &workspace.symbolic_plans.at(operator_slot);
             context.cached_rhs = system.rhs;
-        }
-        else
-        {
-            collective_detail::collective_local_validation(*d_mesh, "Legacy reacting transport ALE selection",
-                [&]
-                {
-                    if (ale != nullptr)
-                        throw std::invalid_argument("Legacy weighted transport does not support ALE state.");
-                });
         }
         system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
             typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
@@ -1219,5 +1207,3 @@ void ReactingGasModel<Pack, MeshType>::invalidate_transport_operator()
 } // namespace SimpleFluid
 
 #include "equations/ReactingGasSpecies.ipp"
-
-SIMPLEFLUID_LEGACY_API_END

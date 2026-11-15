@@ -17,10 +17,11 @@ Factory::refresh_temperature_rhs(terms, boundary, options, context);
 The terms determine the family; the factory exposes corresponding aliases such
 as `Factory::WeightedScalarTerms`, `Factory::WeightedScalarBoundary`,
 `Factory::WeightedScalarOptions`, and `Factory::WeightedScalarContext`.
-Concrete overloads preserve the supported combinations. Mesh identity comes
-from `terms.history.old_values`; `MeshFieldTraits<Pack, MeshType>` selects the
-legacy or stored field family. Assembly does not adapt a native field to a
-legacy mesh or replace a caller's mesh object.
+The default `MeshType` is `MeshHandle<Pack>`. Mesh identity comes from
+`terms.history.old_values`; `MeshFieldTraits<Pack, MeshType>` selects native
+`FieldStored` types for that mesh. Assembly retains the caller's exact mesh
+object. The production `Mesh` class and its mirror-field solver path are
+removed; there is no public `SimpleFluid::Mesh` type alias.
 
 ## Ownership and collective execution
 
@@ -45,7 +46,10 @@ compatible policy/optional-field categories and participate in the established
 collectives. Fields, caches, correction histories, and workspaces retain their
 existing exact mesh-identity and map requirements. Geometry epochs, execution
 leases, cache invalidation, boundary-face ownership, and owner-oriented flux
-signs remain part of assembly's contract.
+signs remain part of assembly's contract. Supported native structured and
+composite periodic faces remain interior, so physical-boundary callbacks do
+not run on those seams. Manual post-construction pairing of imported exterior
+faces is retired.
 
 ## Compiled backends and families
 
@@ -54,26 +58,25 @@ The following overloads have individual compiled providers for
 qualification of every geometry, physics combination, or MPI decomposition
 represented by that backend.
 
-| Factory member and boundary contract | `Mesh` | `MeshHandle` | Cartesian `PartitionedMesh` | `SolidSubdomain` |
-| --- | --- | --- | --- | --- |
-| Scalar `assemble`, `ScalarBoundary` | Yes | Yes | Yes | Yes |
-| Vector `assemble`, `BasicVectorBoundary` | Yes | Unavailable | Unavailable | Unavailable |
-| Vector `assemble`, `VelocityBoundary` | Yes | Yes | Yes | Custom provider |
-| Weighted-scalar `assemble` | Yes | Yes | Yes | Custom provider |
-| Temperature `assemble` | Yes | Yes | Yes | Yes |
-| `refresh_temperature_rhs` | Yes | Yes | Yes | Yes |
-| Momentum `assemble` | Yes | Yes | Yes | Custom provider |
+| Factory member and boundary contract | `MeshHandle` | Cartesian `PartitionedMesh` | `SolidSubdomain` |
+| --- | --- | --- | --- |
+| Scalar `assemble`, `ScalarBoundary` | Yes | Yes | Yes |
+| Vector `assemble`, `BasicVectorBoundary` | Yes | Custom provider | Custom provider |
+| Vector `assemble`, `VelocityBoundary` | Yes | Yes | Custom provider |
+| Weighted-scalar `assemble` | Yes | Yes | Custom provider |
+| Temperature `assemble` | Yes | Yes | Yes |
+| `refresh_temperature_rhs` | Yes | Yes | Yes |
+| Momentum `assemble` | Yes | Yes | Custom provider |
 
-The declaration-only link guard and exact ELF factory inventory cover the three
-native backend columns. Deprecated `Mesh` entry points remain compatibility
-providers and are excluded from that inventory.
-
-Here Cartesian means
-`Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>`. The complete
-basic-vector condition/value overload is constrained to `Mesh<Pack>` even when
-an implementation provider is supplied. Other unlisted mesh/type-pack
-combinations require their own providers and must satisfy the existing
-geometry and numerical support contracts.
+These are seven compiled public entries for `MeshHandle`, six for Cartesian,
+and three for `SolidSubdomain`. The declaration-only link guard and exact ELF
+factory inventory cover these entries. Here Cartesian means
+`Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>`. The full
+basic-vector condition/value overload is available to generic native providers;
+its default compiled provider is
+`FVM/explicit_instantiation/FieldStoredTransportSystem/BasicVectorMeshHandle.cc`.
+Other mesh/type-pack combinations require their own providers and must satisfy
+the existing geometry and numerical support contracts.
 
 The public packs also restrict resources by family and backend:
 
@@ -81,20 +84,19 @@ The public packs also restrict resources by family and backend:
 | --- | --- | --- |
 | Scalar | Optional non-orthogonal correction | Geometry cache |
 | Basic vector with full conditions | Two-point diffusion | None |
-| Vector with velocity selector | Non-orthogonal treatment | Geometry; native ALE |
-| Weighted scalar | Scalar discretization, non-orthogonal treatment, coefficient interpolation | Geometry; native ALE, symbolic plan, cached scalar RHS |
-| Temperature | Non-orthogonal treatment, coefficient interpolation; native scalar discretization; legacy assembly mode | Geometry; native ALE |
-| Momentum | Non-orthogonal treatment, coefficient interpolation, assembly mode | Geometry; native ALE and tensor gradient workspace |
+| Vector with velocity selector | Non-orthogonal treatment | Geometry; ALE |
+| Weighted scalar | Scalar discretization, non-orthogonal treatment, coefficient interpolation | Geometry; ALE, symbolic plan, cached scalar RHS |
+| Temperature | Scalar discretization, non-orthogonal treatment, coefficient interpolation | Geometry; ALE |
+| Momentum | Non-orthogonal treatment, coefficient interpolation, assembly mode | Geometry; ALE and tensor gradient workspace |
 
-All contexts hold `cached_matrix` by value. Native resources are absent from
-legacy packs. Temperature does not expose the weighted-scalar symbolic-plan or
-cached-RHS resources. The native momentum boundary additionally exposes its
-existing optional `zero_gradient_stress` selector; the legacy boundary does not.
+All contexts hold `cached_matrix` by value. Temperature does not expose the
+weighted-scalar symbolic-plan or cached-RHS resources. The momentum boundary
+also exposes its optional `zero_gradient_stress` selector.
 
 ## Terms, boundaries, and defaults
 
 Scalar and vector histories group the old field and time step. Weighted scalar
-and native temperature histories also permit an `older_values` field. Basic
+and temperature histories also permit an `older_values` field. Basic
 scalar/vector `coefficients.diffusivity` is a constant. Weighted coefficients
 retain independent current `storage_weight`, `advection_weight`, and
 `diffusivity` fields, plus optional accepted-old `old_storage_weight`.
@@ -105,7 +107,7 @@ remain disabled.
 
 Temperature `material` contains density, specific heat capacity, and thermal
 conductivity; `power_density` is a volumetric heat source. Current storage and
-advection use the product `rho * cp`. Native accepted-old `old_density` and
+advection use the product `rho * cp`. Accepted-old `old_density` and
 `old_specific_heat_capacity` fall back to their respective current fields
 independently. Weighted accepted-old storage falls back to current storage
 when its pointer is null. Momentum retains dynamic viscosity and reference
@@ -122,14 +124,33 @@ normalized Robin law
 assembly retains its existing boundary restrictions; packing the inputs adds
 no Robin support.
 
-`BasicVectorBoundary` supplies full vector condition/value callbacks for the
-legacy basic-vector path. `VelocityBoundary` instead supplies velocity values
+`BasicVectorBoundary` supplies full vector condition/value callbacks for native
+basic-vector assembly. `VelocityBoundary` instead supplies velocity values
 and a selector for boundary diffusion, with selectable non-orthogonal
 correction. Momentum has the velocity-selector contract plus boundary viscosity
 and its supported stress selector. These overloads retain separate boundary
 semantics. A migrated value-only basic caller must supply an explicit
 Dirichlet condition; it must not choose the velocity-selector overload merely
 to omit a condition callback.
+
+Basic-vector assembly builds one matrix shared by its three RHS components.
+The source callback runs once per owned cell. On each owned tagged physical
+boundary face, the value callback runs once followed by the condition callback, including
+when diffusion is zero. Dirichlet/NoSlip and Neumann retain their distinct
+condition/value contributions; Robin remains unsupported. Matrix reuse retains
+the validated matrix object, while each call allocates one fresh three-column
+RHS. Physical boundary advection is applied once in the ordered boundary pass:
+positive outflow adds once to the owner diagonal, and negative inflow adds the
+prescribed vector to the RHS. This corrects the former double-counted positive
+boundary outflow. Partition-face advection reads synchronized native overlap
+fluxes.
+
+Basic-vector assembly stages callbacks, numeric rows, RHS values and ordered
+boundary increments before changing a cached matrix. All ranks, including empty
+owners, collectively agree local callback, allocation, boundary-policy and
+non-finite-contribution failures before reset. Rejection leaves the cached
+matrix fill-complete with its original values; successful publication consumes
+the staged values without rerunning callbacks.
 
 Basic scalar options default to an absent `correction`, which selects the
 existing two-point assembly. A present `TransportCorrection<Field>` selects
@@ -140,13 +161,13 @@ always carry a correction group whose default treatment is `Explicit`.
 
 Where exposed, discretization defaults remain Backward Euler, first-order
 upwind, and transient assembly. Coefficient interpolation defaults to harmonic.
-Weighted scalar on both backends and native temperature support constant-step
-BDF2 and bounded linear-upwind convection. BDF2 requires an older field on the
+Weighted scalar and temperature support constant-step BDF2 and bounded
+linear-upwind convection. BDF2 requires an older field on the
 same mesh and uses the current storage coefficient for the complete derivative.
 A distinct accepted-old coefficient/property selection requires Backward Euler.
 Bounded linear upwind retains the implicit upwind matrix and adds its existing
 limited conservative deferred correction to the RHS. These scalar schemes do
-not extend basic scalar, vector, legacy temperature, or momentum support.
+not extend basic scalar, vector, or momentum support.
 
 Native ALE accepts a validated active control-volume state. Storage uses
 conservative accepted-old/new volumes and the corresponding old/current
@@ -157,7 +178,7 @@ retains the caller's dimensionally consistent flux and advection coefficients:
 kg/s with unit advection weight and density storage; density must not multiply
 that mass flux again. Absolute pressure/continuity flux remains separate. ALE
 retains its Backward-Euler-only restriction and the existing geometry, time-step,
-and GCL checks. Legacy contexts do not expose ALE. See the
+and GCL checks. See the
 [planar ALE model](../modeling/planar_free_surface_volume_budget.md).
 
 ## Storage reuse and temperature RHS refresh
@@ -182,7 +203,7 @@ must reassemble whenever the matrix would change.
 
 ## Grouped examples
 
-For legacy or native scalar fields selected by `MeshType`, two-point scalar
+For native scalar fields selected by `MeshType`, two-point scalar
 assembly with an explicit Dirichlet contract is:
 
 ```cpp
@@ -258,15 +279,14 @@ Default providers under `src/FVM/explicit_instantiation/` instantiate supported
 factory member overloads individually. Geometry-cache providers stay separate.
 Public entry points retain targeted export annotations, including the static
 Cartesian visibility handling. The declaration-only factory header does not
-enumerate redundant `extern template` declarations. `TransportSystem.tcc` retains
-the default legacy weighted-scalar suppression needed when other implementation
-providers reach that overload, including under ThinLTO. Private assembly helpers
-remain local to their owning image; finding a single `assemble` export does not
-establish all families.
+enumerate redundant `extern template` declarations. The retired
+`TransportSystem.tcc` and its legacy factory providers are removed. Private
+assembly helpers remain local to their owning image; finding a single
+`assemble` export does not establish all families.
 
 `FVM/details/TransportSystemFactory.hh` declares the shared private factory
-helpers and the legacy builder entry points. Their matching `.tcc` includes
-builder declarations, not the heavy legacy or stored assembly definitions.
+helpers. Its matching `.tcc` includes builder declarations, not heavy assembly
+definitions.
 Stored builder declarations reuse `FVM/details/FieldStoredTransportSystem.hh`.
 The owning factory provider units include the appropriate builder implementation
 and explicitly instantiate the private entries they require. Including a detail
@@ -275,7 +295,8 @@ callable across shared-library boundaries.
 
 A custom stored mesh or type pack supplies the required overload definitions
 through `FVM/FieldStoredTransportSystem.tcc` in a provider translation unit.
-This aggregate includes factory definitions and stored builder definitions;
+This aggregate includes factory definitions, stored builders and the native
+basic-vector builder in `FVM/details/BasicVectorTransportSystem.tcc`;
 `FVM/TransportSystemFactory.tcc` alone supplies only the factory layer. Explicitly
 instantiate the private builder entries and public overloads needed by that
 provider. Do not instantiate the whole factory class to claim unsupported
@@ -304,10 +325,12 @@ template TransportSystem<DefaultTpetraTypes> CustomFactory::assemble(
 }
 ```
 
-Legacy custom type-pack providers include `FVM/TransportSystem.tcc` for their
-private builder definitions and `FVM/details/TransportRhs.tcc` when supplying
-their own scalar/vector RHS adapters. The default-pack RHS adapters remain in
-their existing dedicated provider.
+The native basic-vector provider includes
+`FVM/details/BasicVectorTransportSystem.tcc` and instantiates
+`assemble_stored_basic_vector<Pack, MeshType>` plus the corresponding public
+`assemble` overload. Its generic vector RHS adapter retains `.hh` layout,
+`.ipp` callback-dependent updates and `.tcc` allocation/error definitions.
+There is no separate legacy RHS provider.
 
 Custom assembly/cache paths that construct traversal plans also need their
 mesh's provider through `geometry/MeshTraverse.tcc`; custom ALE validation uses
@@ -329,7 +352,7 @@ make old function symbols or pack layouts ABI-compatible.
 | Previous source form | Factory form |
 | --- | --- |
 | Scalar `transport_system(...)` | `assemble(ScalarTerms, ScalarBoundary, ScalarOptions, ScalarContext)` |
-| Vector `transport_system(...)` | Legacy `assemble(VectorTerms, BasicVectorBoundary, BasicVectorOptions, BasicVectorContext)` |
+| Vector `transport_system(...)` | `assemble(VectorTerms, BasicVectorBoundary, BasicVectorOptions, BasicVectorContext)` |
 | Scalar `non_orthogonal_transport_system(...)` | Scalar `assemble` with a present correction group |
 | Vector `non_orthogonal_transport_system(...)` | `assemble(VectorTerms, VelocityBoundary, VectorOptions, VectorContext)` |
 | `weighted_scalar_transport_system(request)` or positional overload | `assemble(WeightedScalarTerms, WeightedScalarBoundary, WeightedScalarOptions, WeightedScalarContext)` |
@@ -342,6 +365,10 @@ Move time/history fields into `history`, coefficients into `coefficients` or
 selection and lagged field together into `options.correction`, and cache/ALE
 resources into `context`. Preserve each old non-orthogonal selection explicitly.
 Value-only basic calls add a Dirichlet condition callback, and omitted explicit
-sources use the zero default. A former native temperature `AssemblyMode` choice
-moves to `options.discretization.mode`; legacy temperature and momentum use
-`options.mode`.
+sources use the zero default. Temperature assembly mode belongs to
+`options.discretization.mode`; momentum uses `options.mode`. Replace removed
+`Mesh` types with explicit `MeshHandle<Pack>` types or local aliases, and
+rebuild consumers against the native field aliases. `CellField`,
+`VectorCellField`, `TensorCellField`, `FaceField`, `VectorFaceField` and
+`BoundaryFaceField` now name default native stored fields; descriptor names
+must be nonempty and global field operations use native algebraic global IDs.

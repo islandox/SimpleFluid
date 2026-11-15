@@ -170,8 +170,6 @@ void write(const MeshType& mesh, const SolverDiagnosticsResult<Scalar>& result, 
                 // Geometry identity survives repartitioning. cell_id stores the algebraic map ID.
                 if constexpr (requires { mesh.cell_geometry_global_id(lid); })
                     out<<mesh.cell_geometry_global_id(lid);
-                else if constexpr (requires { mesh.mesh_gid_to_tpetra_gid(mesh.cell_global_id(lid)); })
-                    out<<mesh.cell_global_id(lid); // Legacy Mesh stores geometry IDs separately from Tpetra IDs.
                 for(const auto& m:result.momentum)
                 {out<<',';algebraic_scale_density(out,m,i,result.cell_volume[i]);}
                 out<<',';algebraic_scale_density(out,result.reconstructed_continuity,i,result.cell_volume[i]);

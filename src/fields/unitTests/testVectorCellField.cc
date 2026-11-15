@@ -9,7 +9,6 @@
  *
  */
 
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include <gtest/gtest.h>
 
 #include "fields/VectorCellField.hh"
@@ -23,7 +22,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::VectorCellField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -110,11 +109,10 @@ TEST(VectorCellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
     EXPECT_EQ(velocity.local_value(1), (SimpleFluid::vec3{4.0, 5.0, 6.0}));
 }
 
-/** @brief Ensures construction rejects a mesh without assembled maps. */
-TEST(VectorCellFieldTest, RequiresAssembledMesh)
+/** @brief Ensures null mesh and empty descriptor names fail independently. */
+TEST(VectorCellFieldTest, RejectsNullMeshAndEmptyDescriptorName)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh =
-        std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
-
-    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+    EXPECT_THROW(FieldType(nullptr, "velocity"), std::invalid_argument);
+    const auto mesh = make_two_hex_mesh();
+    EXPECT_THROW(FieldType(mesh, ""), std::invalid_argument);
 }

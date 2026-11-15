@@ -186,7 +186,7 @@ void populate_two_adjacent_hexes(MeshType& mesh)
 /**
  * @brief Verifies that assembling a two-hex mesh yields correct cell counts, volumes, and face count.
  */
-TEST(STKMeshTest, AssembleMeshWithoutThrowing)
+TEST(LegacySTKGeometryOracleTest, AssembleMeshWithoutThrowing)
 {
     MeshType mesh;
     populate_two_adjacent_hexes(mesh);
@@ -208,7 +208,7 @@ TEST(STKMeshTest, AssembleMeshWithoutThrowing)
 /**
  * @brief Verifies unsupported populated STK element topologies are rejected.
  */
-TEST(STKMeshTest, AssembleRejectsUnsupportedVolumeTopology)
+TEST(LegacySTKGeometryOracleTest, AssembleRejectsUnsupportedVolumeTopology)
 {
     MeshType mesh;
     populate_single_tet(mesh);
@@ -228,7 +228,7 @@ TEST(STKMeshTest, AssembleRejectsUnsupportedVolumeTopology)
 /**
  * @brief Exports a single-hex mesh to VTU and validates key XML elements and cell data arrays.
  */
-TEST(STKMeshTest, ExportVtuWritesUnstructuredGrid)
+TEST(LegacySTKGeometryOracleTest, ExportVtuWritesUnstructuredGrid)
 {
     MeshType mesh;
     populate_single_hex(mesh, 42);

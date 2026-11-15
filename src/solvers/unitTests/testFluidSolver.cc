@@ -36,7 +36,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -59,7 +59,7 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
         "domain_exterior_face_types",
         SimpleFluid::ArrString{
             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-    return SimpleFluid::MeshFactory(database).template build<Pack>();
+    return SimpleFluid::MeshFactory(database).template build_handle<Pack>();
 }
 
 /** @brief Build a two-cell line mesh along x. @return Assembled mesh. */
@@ -78,7 +78,7 @@ SimpleFluid::SP<MeshType> make_two_cell_line_mesh()
         "domain_exterior_face_types",
         SimpleFluid::ArrString{
             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-    return SimpleFluid::MeshFactory(database).template build<Pack>();
+    return SimpleFluid::MeshFactory(database).template build_handle<Pack>();
 }
 
 /** @brief Expose protected FluidSolver hooks for focused unit tests. */
@@ -94,7 +94,7 @@ public:
 
     bool pressure_preconditioner_reuse_enabled()
     {
-        return pressure_projection()
+        return native_pressure_projection()
             .linear_solver_options().reuse_preconditioner;
     }
 
@@ -113,12 +113,7 @@ public:
         return velocity().mesh_ptr();
     }
 
-    auto wrapped_legacy_mesh() const
-    {
-        return d_legacy_mesh;
-    }
-
-    bool has_legacy_backend() const { return uses_legacy_backend(); }
+    auto momentum_mesh_handle() { return native_momentum_equation().mesh_ptr(); }
 
     auto mutable_runtime_mesh_handle() const { return mutable_mesh_handle(); }
 
@@ -128,9 +123,7 @@ public:
 
     const auto& final_face_fluxes() { return projected_face_fluxes(); }
 
-    auto* historical_pressure_flux_workspace() { return &pressure_face_flux_workspace(); }
-
-    auto* explicit_legacy_pressure_flux_workspace() { return &legacy_pressure_face_flux_workspace(); }
+    auto pressure_flux_mesh_handle() { return native_pressure_face_flux_workspace().mesh_ptr(); }
 };
 
 /** @brief Override pressure normalization to represent water-density scaling. */
@@ -192,17 +185,14 @@ static_assert(std::is_base_of_v<
 /** @brief A supplied runtime handle is shared rather than reconstructed. */
 TEST(FluidSolverTest, ReusesProvidedRuntimeMeshHandle)
 {
-    auto legacy = make_single_cell_mesh();
-    auto handle =
-        std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy);
+    auto handle = make_single_cell_mesh();
     TestFluidSolver solver(handle, {});
 
     EXPECT_EQ(solver.runtime_mesh_handle(), handle);
     EXPECT_EQ(solver.pressure_mesh_handle(), handle);
     EXPECT_EQ(solver.velocity_mesh_handle(), handle);
-    EXPECT_EQ(solver.wrapped_legacy_mesh(), legacy);
-    EXPECT_TRUE(solver.has_legacy_backend());
-    EXPECT_FALSE(solver.has_mutable_mesh_handle());
+    EXPECT_EQ(solver.momentum_mesh_handle(), handle);
+    EXPECT_EQ(solver.pressure_flux_mesh_handle(), handle);
 }
 
 /** @brief Mutable construction retains the exact native handle only. */
@@ -281,26 +271,25 @@ TEST(FluidSolverTest, CentralGeometryRefreshRestoresCoreCachesAndVtuPoints)
     EXPECT_DOUBLE_EQ(restored_max_z, 2.0);
 }
 
-/** @brief The legacy constructor wraps, but never rebuilds, its input mesh. */
-TEST(FluidSolverTest, ReusesExactLegacyMeshWithoutConversion)
+/** @brief Const construction shares one exact handle across equations and fields. */
+TEST(FluidSolverTest, ConstNativeConstructionPreservesFieldAndWorkspaceIdentity)
 {
-    auto legacy = make_single_cell_mesh();
-    TestFluidSolver solver(legacy, {});
+    SimpleFluid::SP<const MeshType> mesh = make_single_cell_mesh();
+    TestFluidSolver solver(mesh, {});
 
     ASSERT_TRUE(solver.runtime_mesh_handle());
-    EXPECT_EQ(solver.runtime_mesh_handle()->legacy_mesh(), legacy);
-    EXPECT_EQ(solver.wrapped_legacy_mesh(), legacy);
+    EXPECT_EQ(solver.runtime_mesh_handle(), mesh);
     EXPECT_EQ(solver.pressure_mesh_handle(), solver.runtime_mesh_handle());
     EXPECT_EQ(solver.velocity_mesh_handle(), solver.runtime_mesh_handle());
-    EXPECT_EQ(solver.historical_pressure_flux_workspace(),
-              solver.explicit_legacy_pressure_flux_workspace());
+    EXPECT_EQ(solver.momentum_mesh_handle(), mesh);
+    EXPECT_EQ(solver.pressure_flux_mesh_handle(), mesh);
+    EXPECT_FALSE(solver.has_mutable_mesh_handle());
 }
 
-/** @brief Reordered legacy handles cannot use ordinal-based field mirrors. */
-TEST(FluidSolverTest, RejectsReorderedLegacyCompatibilityHandle)
+/** @brief Native equations and fields preserve a selected-first local layout. */
+TEST(FluidSolverTest, PreservesReorderedNativeHandleAndLocalFieldRows)
 {
-    auto handle = std::make_shared<SimpleFluid::MeshHandle<Pack>>(
-        make_two_cell_line_mesh());
+    auto handle = make_two_cell_line_mesh();
     const auto layout =
         SimpleFluid::MeshReorderingFactory<Pack>::selected_cells_first(
             std::move(handle),
@@ -311,13 +300,22 @@ TEST(FluidSolverTest, RejectsReorderedLegacyCompatibilityHandle)
             });
 
     ASSERT_TRUE(layout.mesh->has_reordered_cells());
-    EXPECT_THROW(
-        static_cast<void>(TestFluidSolver(layout.mesh, {})),
-        std::invalid_argument);
+    TestFluidSolver solver(layout.mesh, {});
+    EXPECT_EQ(solver.runtime_mesh_handle(), layout.mesh);
+    EXPECT_EQ(solver.momentum_mesh_handle(), layout.mesh);
+    EXPECT_EQ(solver.pressure_flux_mesh_handle(), layout.mesh);
+    for (size_t owned = 0; owned < layout.mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const auto x = layout.mesh->cell_centroid(cell).x;
+        solver.pressure().set_value(cell, x);
+        EXPECT_DOUBLE_EQ(solver.pressure().value(cell), x);
+        EXPECT_DOUBLE_EQ(solver.pressure().local_value(cell), x);
+    }
 }
 
-/** @brief Legacy mirrors do not overwrite a derived public momentum update. */
-TEST(FluidSolverTest, PreservesPublicMomentumHookUpdatesOnLegacyMesh)
+/** @brief Pressure correction preserves a derived public momentum update. */
+TEST(FluidSolverTest, PreservesPublicMomentumHookUpdatesOnNativeMesh)
 {
     PublicMomentumHookFluidSolver solver(make_single_cell_mesh(), {});
     solver.step();
@@ -328,8 +326,8 @@ TEST(FluidSolverTest, PreservesPublicMomentumHookUpdatesOnLegacyMesh)
     EXPECT_NEAR(updated.z, 0.0, 1.0e-12);
 }
 
-/** @brief Native mesh handles run without constructing a legacy mesh. */
-TEST(FluidSolverTest, RunsNativeMeshHandlesWithoutLegacyConversion)
+/** @brief Native runtime handles advance each supported geometry family. */
+TEST(FluidSolverTest, RunsNativeMeshFamilies)
 {
     using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
     using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
@@ -370,13 +368,11 @@ TEST(FluidSolverTest, RunsNativeMeshHandlesWithoutLegacyConversion)
     {
         SCOPED_TRACE(mesh_index);
         const auto& mesh = meshes[mesh_index];
-        ASSERT_FALSE(mesh->legacy_mesh());
+
         TestFluidSolver solver(mesh, {}, time_options);
         EXPECT_EQ(solver.runtime_mesh_handle(), mesh);
         EXPECT_EQ(solver.pressure_mesh_handle(), mesh);
         EXPECT_EQ(solver.velocity_mesh_handle(), mesh);
-        EXPECT_FALSE(solver.wrapped_legacy_mesh());
-        EXPECT_FALSE(solver.has_legacy_backend());
 
         solver.run();
         EXPECT_EQ(solver.step_index(), 1);
@@ -429,7 +425,7 @@ TEST(FluidSolverTest, RunsCoupledKrylovOnNativeMeshHandle)
     {
         SCOPED_TRACE(mesh_index);
         const auto& mesh = meshes[mesh_index];
-        ASSERT_FALSE(mesh->legacy_mesh());
+
         TestFluidSolver solver(mesh, {}, time_options);
 
         EXPECT_NO_THROW(solver.step());

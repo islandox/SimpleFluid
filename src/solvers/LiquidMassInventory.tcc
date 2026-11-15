@@ -4,8 +4,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -436,10 +434,7 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     };
     typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarContext context{
         .cached_matrix = d_transport_matrix};
-    if constexpr (!std::is_same_v<mesh_type, Mesh<Pack>>)
-        context.ale = ale;
-    else if (ale != nullptr)
-        throw std::invalid_argument("Legacy weighted transport does not support ALE state.");
+    context.ale = ale;
     auto system = FVM::TransportSystemFactory<Pack, mesh_type>::assemble(
         typename FVM::TransportSystemFactory<Pack, mesh_type>::WeightedScalarTerms{
             .history = {d_cell_mass_inventory, time_step},
@@ -933,7 +928,6 @@ void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& di
     }
 }
 
-
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void LiquidMassInventory<Pack, MeshType>::initialize_impl(scalar_type initial_liquid_volume, const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density)
 {
@@ -1131,5 +1125,3 @@ void LiquidMassInventory<Pack, MeshType>::update_pure_liquid_density_impl(const 
 }
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

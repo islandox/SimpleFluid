@@ -37,7 +37,6 @@ public:
     using typename base_type::coupled_system_type;
     using typename base_type::face_flux_field_type;
     using typename base_type::field_type;
-    using typename base_type::legacy_mesh_type;
     using typename base_type::local_ordinal_type;
     using typename base_type::mesh_type;
     using typename base_type::momentum_equation_type;
@@ -49,10 +48,6 @@ public:
     using canonical_coupled_solver_type = typename base_type::native_coupled_solver_type;
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using turbulence_model_type = TurbulenceModel<Pack, mesh_type>;
-
-    IncompressibleIsothermalSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {},
-        scalar_type reference_density = scalar_type{1});
 
     /** @brief Construct directly on a runtime mesh handle. */
     IncompressibleIsothermalSolver(SP<const mesh_type> mesh, BoundaryConditionSet boundary_conditions,
@@ -159,9 +154,7 @@ private:
     using base_type::predictor_pressure_gradient;
     using base_type::pressure_velocity_residuals;
     using base_type::projected_face_fluxes;
-    using base_type::require_mesh;
     using base_type::solve_pressure_velocity_coupling;
-    using base_type::uses_legacy_backend;
 
     SIMPLEFLUID_SOLVERS_LOCAL
     momentum_equation_type& isothermal_momentum_equation();

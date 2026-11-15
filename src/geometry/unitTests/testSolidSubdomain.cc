@@ -138,12 +138,12 @@ TEST(SolidSubdomainTest, ReorientsCutFaceFromSelectedParentNeighbor)
     EXPECT_TRUE(retained_xmax);
 }
 
-/** A legacy STK mesh works through the established MeshHandle adapter. */
-TEST(SolidSubdomainTest, SelectsCellsOnLegacyBackedMeshHandle)
+/** A native factory mesh retains source identity through selected-cell reordering. */
+TEST(SolidSubdomainTest, SelectsCellsOnFactoryMeshHandle)
 {
-    const auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto parent = std::make_shared<Handle>(legacy);
-    ASSERT_TRUE(parent->is_stk());
+    const auto factory_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    auto parent = std::make_shared<Handle>(*factory_mesh);
+    ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(parent->variant()));
     const auto selected_field_gid = parent->cell_global_id(1);
 
     const Subdomain solid(
@@ -152,7 +152,7 @@ TEST(SolidSubdomainTest, SelectsCellsOnLegacyBackedMeshHandle)
     ASSERT_EQ(solid.num_owned_cells(), 1U);
     EXPECT_FALSE(parent);
     EXPECT_EQ(solid.parent_cell_lid(0), 0);
-    EXPECT_EQ(solid.cell_geometry_global_id(0), legacy->cell_global_id(1));
+    EXPECT_EQ(solid.cell_geometry_global_id(0), factory_mesh->cell_geometry_global_id(1));
     EXPECT_EQ(solid.cell_global_id(0), selected_field_gid);
 
     const auto& interface = only_interface(solid);

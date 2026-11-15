@@ -14,7 +14,6 @@
 
 namespace SimpleFluid
 {
-template class PressureProjectionEquation<DefaultTpetraTypes>;
 template class PressureProjectionEquation<
     DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 }

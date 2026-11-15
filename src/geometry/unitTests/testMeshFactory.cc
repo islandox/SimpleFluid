@@ -24,7 +24,15 @@
 namespace
 {
 
-using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
+using MeshType = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
+
+SimpleFluid::MeshUtils::CellType factory_cell_type(const MeshType& mesh, MeshType::local_ordinal_type cell)
+{
+    const auto& geometry = *std::get<MeshType::UnstructuredPtr>(mesh.variant());
+    const auto native = mesh.indexer().global_to_local_cell_id(mesh.cell_geometry_global_id(cell));
+    return geometry.cell_type(geometry.cell_id(static_cast<size_t>(native)));
+}
+
 
 using utils_test::KokkosEnvironment;
 
@@ -210,23 +218,23 @@ SimpleFluid::SP<const SimpleFluid::Database> make_split_sphere_database()
 /**
  * @brief Verifies a structured 27-hex BOX mesh has correct cell counts, types, centroids, and boundary faces.
  */
-TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
+TEST(MeshFactoryTest, BoxBuildsStructuredNativeHexMesh)
 {
     auto db = make_27_hex_box_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->spatial_dimension(), 3u);
     EXPECT_EQ(mesh->num_local_cells(), 27u);
     EXPECT_EQ(mesh->num_owned_cells(), 27u);
     EXPECT_EQ(mesh->num_faces(), 108u);
-    EXPECT_EQ(mesh->global_to_local_cell(1), 0);
-    EXPECT_EQ(mesh->global_to_local_cell(2), 1);
+    EXPECT_EQ(mesh->indexer().cell_local_id(1), 0);
+    EXPECT_EQ(mesh->indexer().cell_local_id(2), 1);
 
-    EXPECT_EQ(mesh->cell(0).type, MeshType::CellType::HEXAHEDRON);
-    EXPECT_EQ(mesh->cell(1).type, MeshType::CellType::HEXAHEDRON);
+    EXPECT_EQ(factory_cell_type(*mesh, 0), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
+    EXPECT_EQ(factory_cell_type(*mesh, 1), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
     EXPECT_DOUBLE_EQ(mesh->cell_volume(0), 1.0);
     EXPECT_DOUBLE_EQ(mesh->cell_volume(1), 1.0);
     const auto expect_centroid_near =
@@ -267,7 +275,7 @@ TEST(MeshFactoryTest, BoxBuildsStructuredHex8STKMesh)
     {
         if (mesh->is_boundary_face(fid))
         {
-            const auto& name = mesh->boundary_name(fid);
+            const auto& name = mesh->boundary_batch_name(mesh->boundary_id(fid));
             const auto& center = mesh->face_centroid(fid);
             ++boundary_counts[name];
 
@@ -296,7 +304,7 @@ TEST(MeshFactoryTest, BoxBoundaryLayersRegenerateSelectedAxisEdges)
     auto db = make_boundary_layer_box_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_local_cells(), 4u);
@@ -321,7 +329,7 @@ TEST(MeshFactoryTest, BoundaryLayersRejectOverlappingOppositeSides)
     db->set("boundary_layer_counts", SimpleFluid::ArrInt{2, 2});
 
     SimpleFluid::MeshFactory factory(db);
-    EXPECT_THROW(factory.template build<>(), std::runtime_error);
+    EXPECT_THROW(factory.template build_handle<>(), std::runtime_error);
 }
 
 /**
@@ -384,7 +392,7 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     auto db = make_cylinder_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->spatial_dimension(), 3u);
@@ -395,7 +403,7 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::TRIPRISM);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 
@@ -406,7 +414,7 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     {
         if (mesh->is_boundary_face(fid))
         {
-            ++boundary_counts[mesh->boundary_name(fid)];
+            ++boundary_counts[mesh->boundary_batch_name(mesh->boundary_id(fid))];
         }
     }
 
@@ -427,7 +435,7 @@ TEST(MeshFactoryTest, CylinderAcceptsIndependentCircumferentialSpacing)
         "cylinder_circumferential_mesh_size",
         SimpleFluid::real_t{0.5});
 
-    auto mesh = SimpleFluid::MeshFactory(db).template build<>();
+    auto mesh = SimpleFluid::MeshFactory(db).template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     // One radial ring has ceil(2 pi / 0.5) = 13 triangles and the height has
@@ -438,7 +446,7 @@ TEST(MeshFactoryTest, CylinderAcceptsIndependentCircumferentialSpacing)
                    mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::TRIPRISM);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 }
@@ -450,7 +458,7 @@ TEST(MeshFactoryTest, CylinderAcceptsIndependentCircumferentialSpacing)
 TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
 {
     SimpleFluid::MeshFactory factory(make_annulus_database());
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_owned_cells(), 16u);
@@ -459,7 +467,7 @@ TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
     for (MeshType::local_ordinal_type fid = 0;
@@ -467,7 +475,7 @@ TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
-            ++boundary_counts[mesh->boundary_name(fid)];
+            ++boundary_counts[mesh->boundary_batch_name(mesh->boundary_id(fid))];
     }
     EXPECT_EQ(boundary_counts.size(), 4u);
     EXPECT_EQ(boundary_counts["rmin"], 8u);
@@ -483,7 +491,7 @@ TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
 TEST(MeshFactoryTest, AnnulusSectorBuildsThetaBoundaryPlanes)
 {
     SimpleFluid::MeshFactory factory(make_annulus_sector_database());
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_owned_cells(), 12u);
@@ -493,7 +501,7 @@ TEST(MeshFactoryTest, AnnulusSectorBuildsThetaBoundaryPlanes)
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
-            ++boundary_counts[mesh->boundary_name(fid)];
+            ++boundary_counts[mesh->boundary_batch_name(mesh->boundary_id(fid))];
     }
     EXPECT_EQ(boundary_counts.size(), 6u);
     EXPECT_EQ(boundary_counts["rmin"], 6u);
@@ -512,7 +520,7 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
     auto db = make_boundary_layer_cylinder_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     // Circular point fronts follow physical arc length, giving 37 Delaunay
@@ -522,7 +530,7 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::TRIPRISM);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::TRIPRISM);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 }
@@ -535,7 +543,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
     auto db = make_sphere_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->spatial_dimension(), 3u);
@@ -546,7 +554,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 
@@ -557,7 +565,7 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
     {
         if (mesh->is_boundary_face(fid))
         {
-            EXPECT_EQ(mesh->boundary_name(fid), "surface");
+            EXPECT_EQ(mesh->boundary_batch_name(mesh->boundary_id(fid)), "surface");
             ++surface_faces;
         }
     }
@@ -573,7 +581,7 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfaceBatches)
     auto db = make_split_sphere_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
 
@@ -585,7 +593,7 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfaceBatches)
     {
         if (mesh->is_boundary_face(fid))
         {
-            const auto& name = mesh->boundary_name(fid);
+            const auto& name = mesh->boundary_batch_name(mesh->boundary_id(fid));
             EXPECT_TRUE(name == "lower_surface" || name == "upper_surface");
             ++boundary_counts[name];
             ++boundary_faces;
@@ -605,7 +613,7 @@ TEST(MeshFactoryTest, SphereBoundaryLayersBuildPositiveSplitSurfaceMesh)
     auto db = make_boundary_layer_sphere_database();
     SimpleFluid::MeshFactory factory(db);
 
-    auto mesh = factory.template build<>();
+    auto mesh = factory.template build_handle<>();
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_local_cells(), 64u);
@@ -613,7 +621,7 @@ TEST(MeshFactoryTest, SphereBoundaryLayersBuildPositiveSplitSurfaceMesh)
          lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, MeshType::CellType::HEXAHEDRON);
+        EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
 }

@@ -1,8 +1,6 @@
 /** @brief Compiled mapped face operators, workspace setup and custom-provider opt-in. */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/FaceFlux.hh"
@@ -130,7 +128,6 @@ void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geome
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-    requires(!std::same_as<std::remove_cv_t<MeshType>, Mesh<Pack>>)
 SIMPLEFLUID_FVM_EXPORT FieldStoredVelocityBoundaryCache<Pack, MeshType> cache_velocity_boundary_conditions(
     SP<const MeshType> mesh, const BoundaryConditionSet& boundary_conditions)
 {
@@ -259,5 +256,3 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
 }
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

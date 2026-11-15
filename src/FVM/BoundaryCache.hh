@@ -11,8 +11,6 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
@@ -29,25 +27,9 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Pre-computed boundary condition values cached per batch for FVM operator assembly.
- *
- * @tparam Pack Tpetra type pack providing scalar and mesh types.
- */
-template<TpetraTypePack Pack>
-struct BoundaryCache
-{
-    using value_type = typename Pack::scalar_type;
-
-    std::unordered_map<int, Arr<value_type>> value;
-    SP<const Mesh<Pack>> mesh;
-};
-
-/**
  * @brief Scalar boundary cache for a mapped mesh used by stored fields.
  *
- * This parallel type keeps the established BoundaryCache<Pack> layout and
- * symbol spelling unchanged while supporting MeshHandle and specialized mesh
- * implementations directly.
+ * Stores sampled values against the native MeshHandle or specialized mesh.
  */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 struct FieldStoredBoundaryCache
@@ -59,61 +41,16 @@ struct FieldStoredBoundaryCache
     SP<const mesh_type> mesh;
 };
 
-/**
- * @brief Build a boundary-condition value cache from a shared mesh pointer
- *        and a boundary-condition map.
- *
- * Caches Dirichlet boundary values per batch; other condition types are
- * ignored.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Shared pointer to the computational mesh.
- * @param boundary_conditions Map from batch name to boundary condition.
- * @return BoundaryCache populated with the Dirichlet values of owned
- *         boundary faces.
- */
+/** Scalar boundary-cache spelling for the default native mesh. */
 template<TpetraTypePack Pack>
-BoundaryCache<Pack> cache_boundary_conditions(
-    SP<const Mesh<Pack>> mesh,
-    const BoundaryConditionMap& boundary_conditions)
-{
-    using value_type = typename Pack::scalar_type;
-    if (!mesh)
-    {
-        throw std::invalid_argument(
-            "cache_boundary_conditions requires a non-null mesh.");
-    }
-    BoundaryCache<Pack> cache{ {}, mesh };
-
-    for (const auto& [batch_id, boundary_batch] : mesh->boundary_batches())
-    {
-        const auto& boundary_name = mesh->boundary_batch_name(batch_id);
-        const auto& bc_it = boundary_conditions.find(boundary_name);
-        if (bc_it == boundary_conditions.end())
-        {
-            continue;
-        }
-
-        const auto& bc = bc_it->second;
-        if (bc.type == BoundaryConditionType::Dirichlet)
-        {
-            Arr<value_type> batch_values(boundary_batch.face_lids.size(),
-                                        static_cast<value_type>(bc.value));
-            cache.value[batch_id] = std::move(batch_values);
-        }
-    }
-
-    return cache;
-}
+using BoundaryCache = FieldStoredBoundaryCache<Pack, MeshHandle<Pack>>;
 
 /**
  * @brief Build a boundary-condition value cache for a mapped mesh.
  *
- * The overload is constrained away from the legacy Mesh specialization so
- * existing calls keep returning the ABI-stable BoundaryCache<Pack> type.
+ * The cache retains the exact supplied native mesh identity.
  */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-requires (!std::is_same_v<std::remove_cv_t<MeshType>, Mesh<Pack>>)
 FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
     SP<const MeshType> mesh,
     const BoundaryConditionMap& boundary_conditions)
@@ -125,8 +62,7 @@ FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
 
 /** @brief Forward a mutable mapped mesh pointer to the const cache builder. */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-requires (!std::is_const_v<MeshType>
-          && !std::is_same_v<MeshType, Mesh<Pack>>)
+requires (!std::is_const_v<MeshType>)
 FieldStoredBoundaryCache<Pack, MeshType> cache_boundary_conditions(
     SP<MeshType> mesh,
     const BoundaryConditionMap& boundary_conditions)
@@ -152,24 +88,15 @@ using BoundaryCache = ::SimpleFluid::BoundaryCache<Pack>;
  * @brief Explicit name for a scalar cache paired with mesh-aware stored fields.
  *
  * This mirrors FieldStoredVelocityBoundaryCache while BoundaryCache<Pack>
- * remains the concise legacy spelling.
+ * provides the concise default-mesh spelling.
  */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 using FieldStoredBoundaryCache =
     ::SimpleFluid::FieldStoredBoundaryCache<Pack, MeshType>;
 
-/**
- * @brief Select the ABI-stable legacy cache or the mapped-mesh cache.
- *
- * Solver templates can use this alias without converting a MeshHandle to a
- * legacy Mesh.  The Mesh<Pack> specialization remains exactly
- * FVM::BoundaryCache<Pack>.
- */
+/** Scalar cache paired directly with its native mesh interface. */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-using MeshBoundaryCache = std::conditional_t<
-    std::is_same_v<std::remove_cv_t<MeshType>, Mesh<Pack>>,
-    BoundaryCache<Pack>,
-    FieldStoredBoundaryCache<Pack, std::remove_cv_t<MeshType>>>;
+using MeshBoundaryCache = FieldStoredBoundaryCache<Pack, std::remove_cv_t<MeshType>>;
 
 /**
  * @brief Validate an optional sparse boundary transport-coefficient cache.
@@ -184,7 +111,7 @@ using MeshBoundaryCache = std::conditional_t<
  */
 template<TpetraTypePack Pack>
 void validate_boundary_coefficient_cache(
-    const Mesh<Pack>& mesh,
+    const MeshHandle<Pack>& mesh,
     const BoundaryCache<Pack>* cache,
     const std::string& context)
 {
@@ -232,5 +159,3 @@ typename Pack::scalar_type boundary_coefficient(
 } // namespace FVM
 
 }
-
-SIMPLEFLUID_LEGACY_API_END

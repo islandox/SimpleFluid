@@ -16,6 +16,7 @@
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
+#include "FVM/details/FieldStoredFaceFlux.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "geometry/MeshHandle.hh"
@@ -61,7 +62,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using TestScalarField = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using global_ordinal_type = Pack::global_ordinal_type;
@@ -141,6 +142,22 @@ TEST(PressureProjectionMultiRankTest, CgEliminatesRemoteGaugeColumnAndMatchesGmr
     EXPECT_NEAR(cg_pressure.value(0), gmres_pressure.value(0), 1.0e-12);
     EXPECT_NEAR(cg.continuity, gmres.continuity, 1.0e-12);
     EXPECT_NEAR(cg.continuity, 0.0, 1.0e-12);
+
+    int local_interior_rows = 0, local_ghost_owner_rows = 0;
+    const auto& corrected_flux = equation.corrected_face_fluxes();
+    for (const auto face : corrected_flux.owned_face_ids())
+    {
+        if (!mesh->is_interior_face(face)) continue;
+        const auto owner = mesh->owner_cell(face);
+        const auto expected = mesh->cell_global_id(owner) == gauge ? scalar_type{0.125} : scalar_type{-0.125};
+        EXPECT_NEAR(corrected_flux.value(face), expected, 1.0e-12);
+        EXPECT_NEAR(corrected_flux.local_value(face), expected, 1.0e-12);
+        ++local_interior_rows;
+        if (!mesh->is_owned_cell(owner)) ++local_ghost_owner_rows;
+    }
+    EXPECT_EQ(global_sum(*comm, local_interior_rows), 2);
+    EXPECT_EQ(global_sum(*comm, local_ghost_owner_rows), 1);
+    EXPECT_NEAR(SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh, corrected_flux, 0), rates[0], 1.0e-12);
 
     Pack::vector_type unit_gauge(row_map, true);
     Pack::vector_type gauge_column(row_map, true);
@@ -737,7 +754,6 @@ TEST(PressureProjectionMultiRankTest, NativeSkewOutletProjectionIsConservativeAc
     auto distributed=std::make_shared<Partitioned>(geometry,std::move(partition.indexer),comm);
     SP<const Native> mesh=std::make_shared<Native>(distributed);
     ASSERT_GT(global_min(*comm,int(mesh->num_owned_cells())),0);
-    ASSERT_FALSE(mesh->legacy_mesh());
     for (const auto method : {SimpleFluid::PressureProjectionMethod::Anderson,
              SimpleFluid::PressureProjectionMethod::FullOperator})
     {
@@ -863,7 +879,7 @@ TEST(PressureProjectionMultiRankTest, NonAffineCorrectionMatchesFluxAndFullPress
             {
                 const auto neighbor = mesh->opposite_or_periodic_neighbor_cell(face, owner);
                 d = mesh->cell_center_vector(face, owner);
-                const auto weights = FVM::detail::interior_face_linear_weights(*mesh, face, owner, neighbor);
+                const auto weights = FVM::detail::stored_interior_face_linear_weights(*mesh, face, owner, neighbor);
                 interpolated = gradient.local_value(owner)*weights.first + gradient.local_value(neighbor)*weights.second;
                 jump = correction.local_value(neighbor) - correction.local_value(owner);
             }

@@ -16,11 +16,60 @@
 #include "utils/debug_check.hh"
 
 #include <array>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <type_traits>
 #include <stdexcept>
 #include <vector>
 
 namespace SimpleFluid
 {
+
+/**
+ * @brief Return the invalid sentinel for an integral identifier type.
+ * @tparam ID Signed or unsigned integral identifier type.
+ * @return Minus one for signed IDs, otherwise the maximum value.
+ */
+template <typename ID>
+constexpr ID invalid_id() noexcept
+{
+    if constexpr (std::is_signed_v<ID>)
+    {
+        return static_cast<ID>(-1);
+    }
+    else
+    {
+        return std::numeric_limits<ID>::max();
+    }
+}
+
+
+namespace detail
+{
+
+/**
+ * @brief Safely convert a size_t to an ordinal type with overflow checking.
+ *
+ * @tparam Ordinal Target ordinal type.
+ * @param value Size value to convert.
+ * @param label Descriptive label used in error messages.
+ * @return The value cast to the ordinal type.
+ * @throws std::overflow_error if the value exceeds the ordinal type's maximum.
+ */
+template <class Ordinal>
+inline Ordinal checked_size_to_ordinal(size_t value, std::string_view label)
+{
+    CHECK(value < static_cast<size_t>(std::numeric_limits<Ordinal>::max()),
+          "Value for " + std::string(label)
+          + " exceeds maximum representable by ordinal type.",
+          std::overflow_error);
+
+    return static_cast<Ordinal>(value);
+}
+
+} // namespace detail
+
 
 namespace MeshUtils
 {

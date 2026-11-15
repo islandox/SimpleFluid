@@ -217,6 +217,11 @@ string(REPLACE "\n" ";"
        simplefluid_demangled_symbols "${simplefluid_demangled_symbols}")
 
 set(simplefluid_forbidden_api_patterns
+    # Native aliases have FieldStored signatures; the old mesh/storage classes
+    # and STK adapter must not survive as public definitions or argument types.
+    "(^|[ ,<(])SimpleFluid::(Mesh|CellField|VectorCellField|TensorCellField|FaceField|VectorFaceField|BoundaryFaceField)<"
+    "SimpleFluid::Meshes::STKMeshAdapter<"
+    "^SimpleFluid::MeshHandle<.*>[ ]*::(legacy_mesh|is_stk)[(]"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
     # Removed source-specific APIs have no compatibility/export aliases.
     "^SimpleFluid::(FissionPowerSource|RadiolyticGasModel|RadiolyticBubbleKinetics|DelayedNeutronPrecursorModel)(<|::)"
@@ -326,13 +331,10 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::TurbulenceModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project[(]"
-    "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::Mesh<.*>[ ]*::project[(]"
     "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::project[(]"
     "^SimpleFluid::IncompressibleMomentumEquation<.*>[ ]*::advance_velocity[(]"
-    "^SimpleFluid::IncompressibleMomentumEquation<.*SimpleFluid::Mesh<.*>[ ]*::advance_velocity[(]"
     "^SimpleFluid::IncompressibleMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity[(]"
     "^SimpleFluid::CoupledPressureVelocitySolver<.*>[ ]*::solve[(]"
-    "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::Mesh<.*>[ ]*::solve[(]"
     "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::MeshHandle<.*>[ ]*::solve[(]"
     "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
     "^SimpleFluid::SolidHeatConductionEquation<.*SimpleFluid::SolidSubdomain<.*>[ ]*::advance[(]"
@@ -501,53 +503,50 @@ set(simplefluid_raw_amount_span
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::preview_species_diffusion[(]SimpleFluid::Reacting::SpeciesCatalog const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, SimpleFluid::Reacting::SpeciesDiffusionBinding const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CanonicalDiffusionFace const, [0-9]+u?l*>, ${simplefluid_raw_amount_span}[)]$" 1)
 
-# Sixteen public field-model operations for each of the two supported meshes,
-# three inventory-follower operations for each mesh and one pure multispecies
-# population kernel: exactly 39 additional definitions.
-set(simplefluid_species_adapters_public_symbol_budget 39)
+# Sixteen native field-model operations, three native inventory-follower
+# operations and one pure multispecies population kernel: exactly 20 definitions.
+set(simplefluid_species_adapters_public_symbol_budget 20)
 foreach(simplefluid_model_query IN ITEMS species_enabled source_ledgers population_ledgers escape_ledgers
         thermal_source material_volume_source liquid_mass_density pure_liquid_density)
     simplefluid_require_exact_api(
-        "^SimpleFluid::ReactingGasModel<.*>[ ]*::${simplefluid_model_query}[(][)] const$" 2)
+        "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::${simplefluid_model_query}[(][)] const$" 1)
 endforeach()
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::initialize_species[(]std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, std::(__[0-9]+::)?span<std::(__[0-9]+::)?vector<double, .* const, [0-9]+u?l*>[)]$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::initialize_species[(]std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, std::(__[0-9]+::)?span<std::(__[0-9]+::)?vector<double, .* const, [0-9]+u?l*>[)]$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::species_field[(]unsigned int, SimpleFluid::Reacting::SpeciesPhase, ${simplefluid_reacting_string_view_pattern}[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::species_field[(]unsigned int, SimpleFluid::Reacting::SpeciesPhase, ${simplefluid_reacting_string_view_pattern}[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::cell_species_state[(]int[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::cell_species_state[(]int[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::cell_species_state[(]int, double[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::cell_species_state[(]int, double[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::population_number_field[(]${simplefluid_reacting_string_view_pattern}[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::population_number_field[(]${simplefluid_reacting_string_view_pattern}[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::global_species_moles[(]unsigned int[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::global_species_moles[(]unsigned int[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::refresh_species_thermodynamics[(]double, .* const&, .* const&, .* const&, SimpleFluid::MaterialPropertyFields<.*>[ ]*const&[)]$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::refresh_species_thermodynamics[(]double, .* const&, .* const&, .* const&, SimpleFluid::MaterialPropertyFields<.*>[ ]*const&[)]$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::ReactingGasModel<.*>[ ]*::liquid_volume[(]int[)] const$" 2)
+    "^SimpleFluid::ReactingGasModel<.*SimpleFluid::MeshHandle<.*>[ ]*::liquid_volume[(]int[)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesBound[(][)] const$" 2)
+    "^SimpleFluid::LiquidMassInventory<.*SimpleFluid::MeshHandle<.*>[ ]*::speciesBound[(][)] const$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::initializeFromSpecies[(].* const&, .* const&[)]$" 2)
+    "^SimpleFluid::LiquidMassInventory<.*SimpleFluid::MeshHandle<.*>[ ]*::initializeFromSpecies[(].* const&, .* const&[)]$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::previewSpeciesMass[(].* const&, .* const&, double, double, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 2)
+    "^SimpleFluid::LiquidMassInventory<.*SimpleFluid::MeshHandle<.*>[ ]*::previewSpeciesMass[(].* const&, .* const&, double, double, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 1)
 simplefluid_require_exact_api(
     "^SimpleFluid::BubbleGasPhysics::advance_multispecies_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::CellSpeciesState const&, std::(__[0-9]+::)?vector<SimpleFluid::BubbleGasPhysics::PopulationNumberState, .* const&, SimpleFluid::Reacting::ReactionEnvironment const&, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
 
-# Stage 3 adds exactly 51 public definitions, without changing any existing
-# signature: LowMachMixtureSolver (19) plus its move-only ControllerLease (5),
+# Stage 3 retains exactly 47 public definitions after mesh retirement:
+# LowMachMixtureSolver (19) plus its move-only ControllerLease (5),
 # LowMachPressureEquation (5), ReactingMixtureCoupler including Trial queries
-# (14), and VariableDensityMomentumEquation (4 per native/legacy mesh).
+# (14), and VariableDensityMomentumEquation (4 for the native mesh).
 # Complete/base constructors and nonvirtual destructors each have two entries.
 # Inline trial/checkpoint storage and private implementation helpers are not API.
-set(simplefluid_low_mach_public_symbol_budget 51)
+set(simplefluid_low_mach_public_symbol_budget 47)
 set(simplefluid_stage3_std "std::(__[0-9]+::)?")
 set(simplefluid_stage3_size "(unsigned long|unsigned long long)")
 set(simplefluid_stage3_native_mesh
     "SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<.*>[ ]*>")
-set(simplefluid_stage3_legacy_mesh
-    "SimpleFluid::Mesh<SimpleFluid::TpetraTypes<.*>[ ]*>")
 set(simplefluid_stage3_eos_pointer
     "${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::MixtureThermodynamics const>")
 set(simplefluid_stage3_eos_vector
@@ -633,18 +632,11 @@ set(simplefluid_stage3_boundary
     "${simplefluid_stage3_std}function<SimpleFluid::BoundaryCondition [(]int, ${simplefluid_stage3_size}, ${simplefluid_stage3_size}[)]>")
 set(simplefluid_stage3_boundary_value
     "${simplefluid_stage3_std}function<double [(]int, ${simplefluid_stage3_size}, ${simplefluid_stage3_size}[)]>")
-foreach(simplefluid_stage3_mesh_kind IN ITEMS native legacy)
-    if(simplefluid_stage3_mesh_kind STREQUAL "native")
-        set(simplefluid_stage3_momentum_mesh "${simplefluid_stage3_native_mesh}")
-        set(simplefluid_stage3_momentum_scalar "${simplefluid_stage3_scalar_cell}")
-        set(simplefluid_stage3_momentum_vector "${simplefluid_stage3_vector_cell}")
-        set(simplefluid_stage3_momentum_face "${simplefluid_stage3_scalar_face}")
-    else()
-        set(simplefluid_stage3_momentum_mesh "${simplefluid_stage3_legacy_mesh}")
-        set(simplefluid_stage3_momentum_scalar "SimpleFluid::CellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-        set(simplefluid_stage3_momentum_vector "SimpleFluid::VectorCellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-        set(simplefluid_stage3_momentum_face "SimpleFluid::FaceField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-    endif()
+foreach(simplefluid_stage3_mesh_kind IN ITEMS native)
+    set(simplefluid_stage3_momentum_mesh "${simplefluid_stage3_native_mesh}")
+    set(simplefluid_stage3_momentum_scalar "${simplefluid_stage3_scalar_cell}")
+    set(simplefluid_stage3_momentum_vector "${simplefluid_stage3_vector_cell}")
+    set(simplefluid_stage3_momentum_face "${simplefluid_stage3_scalar_face}")
     set(simplefluid_stage3_momentum_class
         "SimpleFluid::VariableDensityMomentumEquation<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_momentum_mesh}[ ]*>")
     simplefluid_require_variable_density_api(
@@ -656,14 +648,14 @@ foreach(simplefluid_stage3_mesh_kind IN ITEMS native legacy)
 endforeach()
 
 # Transport-first source evaluation and accepted species-history reporting add
-# exactly twelve definitions: four concrete trial/provider/pressure methods and
-# four queries for each native/legacy field model. No Stage 3 signatures were removed.
+# exactly eight definitions: four concrete trial/provider/pressure methods and
+# four queries for the native field model.
 # Explicit dispersed-count ownership adds only its accepted event receipt query.
 set(simplefluid_population_events_public_symbol_budget 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::local_population_events[(][)] const$" 1)
 
-set(simplefluid_source_history_public_symbol_budget 12)
+set(simplefluid_source_history_public_symbol_budget 8)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachMixtureSolver::preview_with_sources[(]double, ${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::LowMachMixtureSolver::SourceStageProvider const>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
 simplefluid_require_reacting_api(
@@ -672,7 +664,7 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
-foreach(simplefluid_stage4_mesh_kind IN ITEMS native legacy)
+foreach(simplefluid_stage4_mesh_kind IN ITEMS native)
     set(simplefluid_stage4_model
         "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_stage4_mesh_kind}_mesh}[ ]*>")
     foreach(simplefluid_stage4_query IN ITEMS species_histories species_step_events physical_escape_events)
@@ -688,13 +680,7 @@ endforeach()
 set(simplefluid_final_species_native_cell "${simplefluid_stage3_scalar_cell}")
 set(simplefluid_final_species_native_face "${simplefluid_stage3_scalar_face}")
 set(simplefluid_final_species_native_velocity "${simplefluid_stage3_vector_cell}")
-set(simplefluid_final_species_legacy_cell
-    "SimpleFluid::CellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-set(simplefluid_final_species_legacy_face
-    "SimpleFluid::FaceField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-set(simplefluid_final_species_legacy_velocity
-    "SimpleFluid::VectorCellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
-foreach(simplefluid_final_mesh_kind IN ITEMS native legacy)
+foreach(simplefluid_final_mesh_kind IN ITEMS native)
     set(simplefluid_final_model
         "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_final_mesh_kind}_mesh}[ ]*>")
     set(simplefluid_final_cell "${simplefluid_final_species_${simplefluid_final_mesh_kind}_cell}")
@@ -707,7 +693,7 @@ foreach(simplefluid_final_mesh_kind IN ITEMS native legacy)
     simplefluid_require_exact_api(
         "^${simplefluid_final_model}::population_escape_receipt[(][)] const$" 1)
 endforeach()
-simplefluid_require_exact_api("^SimpleFluid::ReactingGasModel<.*>[ ]*::advance[(].*[)]$" 2)
+simplefluid_require_exact_api("^SimpleFluid::ReactingGasModel<.*>[ ]*::advance[(].*[)]$" 1)
 
 # This preexisting facade has the same eleven definitions in NOX-OFF stubs and
 # NOX-ON implementations. Configuration alone grants no additional API budget.
@@ -781,9 +767,9 @@ foreach(simplefluid_thermal_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vt
 endforeach()
 
 # Fixed-reference finite vapor: seven pure functions, one controller entry point,
-# and one accepted-receipt query for each supported field mesh. No private wall
+# and one accepted-receipt query for the native field mesh. No private wall
 # certificate or orchestration helper is part of the dynamic API.
-set(simplefluid_bouss_vapor_public_symbol_budget 10)
+set(simplefluid_bouss_vapor_public_symbol_budget 9)
 set(simplefluid_bouss_number_span
     "${simplefluid_stage3_std}span<SimpleFluid::BubbleGasPhysics::PopulationNumberState const, [0-9]+u?l*>")
 simplefluid_require_reacting_api(
@@ -802,15 +788,15 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::advance_bouss_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::CellSpeciesState const&, ${simplefluid_bouss_number_span}, SimpleFluid::Reacting::ReactionEnvironment const&, double, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
 simplefluid_require_exact_api(
     "^SimpleFluid::MultiphysicsSolverCoupler<SimpleFluid::TpetraTypes<.*>[ ]*>::configure_bouss_sources[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::BoussCoordinatedSources const>[)]$" 1)
-foreach(simplefluid_bouss_mesh_kind IN ITEMS native legacy)
+foreach(simplefluid_bouss_mesh_kind IN ITEMS native)
     simplefluid_require_exact_api(
         "^SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_bouss_mesh_kind}_mesh}[ ]*>::bouss_receipts[(][)] const$" 1)
 endforeach()
 
-# Typed surface receipts (8), supplied headspace configuration (1), base metadata
-# constructor/query (3), and closed-mixture headspace methods/RTTI (13): exactly 25.
-set(simplefluid_species_surface_public_symbol_budget 25)
-foreach(simplefluid_surface_mesh_kind IN ITEMS native legacy)
+# Typed native surface receipts (4), supplied headspace configuration (1), base metadata
+# constructor/query (3), and closed-mixture headspace methods/RTTI (13): exactly 21.
+set(simplefluid_species_surface_public_symbol_budget 21)
+foreach(simplefluid_surface_mesh_kind IN ITEMS native)
     set(simplefluid_surface_model
         "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_surface_mesh_kind}_mesh}[ ]*>")
     foreach(simplefluid_surface_query IN ITEMS species_event_receipt species_subset_source_changes
@@ -874,22 +860,13 @@ simplefluid_require_exact_api(
 simplefluid_require_exact_api(
     "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::make_coupled_nonlinear_problem[(][)]$" 1)
 
-# Preserve all seven established FluidSolver/BoussinesqSolver constructor
-# signatures and the four mutable-MeshHandle additions.
-simplefluid_require_exact_api(
-    "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
-    2)
+# Preserve all four const-MeshHandle and four mutable-MeshHandle solver
+# constructor signatures, including deferred and physical-model overloads.
 simplefluid_require_exact_api(
     "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
     2)
 simplefluid_require_exact_api(
     "^SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::FluidSolver<.*>::DeferredMomentumEquationTag[)]$"
-    2)
-simplefluid_require_exact_api(
-    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
-    2)
-simplefluid_require_exact_api(
-    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::Mesh<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::BoussinesqModelOptions[)]$"
     2)
 simplefluid_require_exact_api(
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> const>, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions[)]$"
@@ -910,24 +887,16 @@ simplefluid_require_exact_api(
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::BoussinesqSolver[(].*shared_ptr<SimpleFluid::MeshHandle<.*> >, SimpleFluid::BoundaryConditionSet, SimpleFluid::TimeStepperOptions, SimpleFluid::LinearSolverOptions, SimpleFluid::BoussinesqModelOptions[)]$"
     2)
 
-# ALE adds overloads; it does not replace either explicitly instantiated Mesh
-# family. Anchor every pre-ALE endpoint and its ALEControlVolumeState peer.
+# Anchor every native pre-ALE endpoint and its ALEControlVolumeState peer.
+# The retired Mesh specialization is forbidden above.
 set(simplefluid_exact_mesh_specialization_patterns
-    "SimpleFluid::Mesh<.*>"
     "SimpleFluid::MeshHandle<.*>")
 foreach(simplefluid_exact_mesh_specialization_pattern
         IN LISTS simplefluid_exact_mesh_specialization_patterns)
-    if(simplefluid_exact_mesh_specialization_pattern MATCHES "MeshHandle")
-        set(simplefluid_legacy_vector_pointer_pattern
-            "SimpleFluid::MeshHandle<.*> > const[*]")
-        set(simplefluid_legacy_boundary_pointer_pattern
-            "SimpleFluid::MeshHandle<.*> > const[*]")
-    else()
-        set(simplefluid_legacy_vector_pointer_pattern
-            "SimpleFluid::VectorCellField<.*> const[*]")
-        set(simplefluid_legacy_boundary_pointer_pattern
-            "SimpleFluid::BoundaryCache<.*> const[*]")
-    endif()
+    set(simplefluid_native_vector_pointer_pattern
+        "${simplefluid_stage3_vector_cell} const[*]")
+    set(simplefluid_native_boundary_pointer_pattern
+        "SimpleFluid::FieldStoredBoundaryCache<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_native_mesh}[ ]*> const[*]")
 
     foreach(simplefluid_momentum_equation
             IN ITEMS IncompressibleMomentumEquation BoussinesqMomentumEquation)
@@ -938,19 +907,19 @@ foreach(simplefluid_exact_mesh_specialization_pattern
             "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity[(].*SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
             2)
         simplefluid_require_exact_api(
-            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_system[(].*, ${simplefluid_legacy_vector_pointer_pattern}[)] const$"
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_system[(].*, ${simplefluid_native_vector_pointer_pattern}[)] const$"
             2)
         simplefluid_require_exact_api(
             "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_system[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
             2)
         simplefluid_require_exact_api(
-            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity_physical[(].*, ${simplefluid_legacy_boundary_pointer_pattern}[)] const$"
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity_physical[(].*, ${simplefluid_native_boundary_pointer_pattern}[)] const$"
             1)
         simplefluid_require_exact_api(
             "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::advance_velocity_physical[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
             1)
         simplefluid_require_exact_api(
-            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_physical_system[(].*, ${simplefluid_legacy_boundary_pointer_pattern}[)] const$"
+            "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_physical_system[(].*, ${simplefluid_native_boundary_pointer_pattern}[)] const$"
             1)
         simplefluid_require_exact_api(
             "^SimpleFluid::${simplefluid_momentum_equation}<.*${simplefluid_exact_mesh_specialization_pattern}[ ]*::assemble_physical_system[(].*SimpleFluid::FVM::ALEControlVolumeState const[*][)] const$"
@@ -965,7 +934,7 @@ foreach(simplefluid_exact_mesh_specialization_pattern
         1)
 
     # Geometry refresh, continuity-target projection/assembly, and fixed-flux
-    # control are public for both explicit mesh specializations.
+    # control remain public for the native mesh specialization.
     foreach(simplefluid_geometry_equation
             IN ITEMS IncompressibleMomentumEquation PressureProjectionEquation TemperatureDiffusionEquation
                      ReactingGasModel ScalarVoidFractionModel)
@@ -1055,15 +1024,15 @@ simplefluid_require_exact_api(
     "^SimpleFluid::PlanarFreeSurfaceModel::restore[(]SimpleFluid::PlanarFreeSurfaceModel::StateSnapshot const&[)]$" 1)
 
 # Intentional private test seam: testPhysicalEquations calls these two member
-# overloads from a separate executable, so the explicit Mesh and MeshHandle
-# instantiations must remain dynamically linkable. Keep exactly four exports;
+# overloads from a separate executable, so the explicit MeshHandle
+# instantiation must remain dynamically linkable. Keep exactly two exports;
 # do not treat this as permission to export other private equation helpers.
 simplefluid_require_exact_api(
-    "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::(VectorCellField|FieldStored)<.*>[ ]*&[)]$"
-    2)
+    "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::project_reusing_cached_predictor[(].*, ${simplefluid_stage3_vector_cell}&[)]$"
+    1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
-    2)
+    "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
+    1)
 
 set(simplefluid_missing_exact_api_patterns)
 list(LENGTH simplefluid_required_exact_api_patterns
@@ -1212,20 +1181,11 @@ if(simplefluid_missing_api_patterns)
         "${simplefluid_missing_api_patterns}")
 endif()
 
-# Clang encodes a constrained function template's constraint in the symbol
-# (`ITk`), and GNU c++filt leaves those names undecoded. These two families are
-# therefore matched on the mangled prefix, which both compilers share up to the
-# template argument list.
-foreach(simplefluid_solve_family IN ITEMS
-        solve_explicit_non_orthogonal_diffusion
-        solve_non_orthogonal_diffusion)
-    if(NOT simplefluid_dynamic_symbols MATCHES
-       "_ZN11SimpleFluid3FVM[0-9]+${simplefluid_solve_family}I")
-        message(FATAL_ERROR
-            "${SIMPLEFLUID_LIBRARY} does not export the steady diffusion "
-            "solve family ${simplefluid_solve_family}")
-    endif()
-endforeach()
+# Native steady-diffusion solve wrappers are inline in
+# NonOrthogonalDiffusionSolve.hh/.ipp. The six retired Mesh-only compiled
+# endpoints have no native declared/compiled export counterpart. Their native
+# assembly providers remain checked by the FVM export audit; DIC's compiled
+# public interface remains anchored above.
 
 if(simplefluid_missing_exact_api_patterns)
     list(JOIN simplefluid_missing_exact_api_patterns "\n  "
@@ -1316,18 +1276,27 @@ endforeach()
 # The preexisting substrate excludes the 142 definitions maintained on the
 # separate VoF branch. Exact API anchors and private-family guards above remain
 # authoritative; the ceiling never depends on the inspected library.
-set(simplefluid_api_symbol_lower_bound 1250)
+set(simplefluid_pre_retirement_api_symbol_lower_bound 1250)
 set(simplefluid_final_species_cleanup_symbol_delta -35)
 set(simplefluid_preexisting_api_symbol_upper_bound 1408)
-# The compiled DIC preconditioner (two constructors, apply, getDomainMap,
-# getRangeMap, RTTI and its vtable/VTT) and the six steady non-orthogonal
-# diffusion solve entry points moved from libSimpleFluidFVM into this DSO so the
-# FVM library no longer references a symbol only Solvers defines. They are
-# already-reviewed definitions, not new public API; budget them explicitly
-# instead of consuming the ten-percent headroom.
-set(simplefluid_relocated_fvm_solve_symbol_budget 15)
+# The compiled DIC preconditioner retains nine reviewed definitions: two
+# constructors, apply, getDomainMap/getRangeMap, RTTI and its vtable/VTT.
+# The six former Mesh-only steady-solve exports retired with that mesh class.
+set(simplefluid_relocated_fvm_solve_symbol_budget 9)
+# Independently reviewed retirements outside the reacting budgets above:
+# 51 Mesh-specific ALE/equation definitions, six old solver constructor entries,
+# two private predictor seams, and two final species advance/receipt definitions.
+set(simplefluid_retired_mesh_exact_symbol_budget 61)
+# Carry the former mixed-backend floor forward by the independently reviewed
+# retirements: 19 adapters, 4 variable-density, 4 source-history, 1 vapor,
+# 4 surface receipts, the 61 exact entries above, and 6 Mesh-only steady solves.
+# This fixed policy delta is independent of the inspected library's count.
+math(EXPR simplefluid_retired_mesh_total_symbol_budget
+    "19 + 4 + 4 + 1 + 4 + ${simplefluid_retired_mesh_exact_symbol_budget} + 6")
+math(EXPR simplefluid_api_symbol_lower_bound
+    "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

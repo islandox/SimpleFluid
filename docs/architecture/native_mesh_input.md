@@ -113,30 +113,37 @@ reordering finish before fields/caches are bound. Reimport/repartition returns
 a new mesh identity; it does not mutate existing fields or caches in place.
 Geometry epochs and execution leases retain their existing responsibilities.
 General unstructured ALE and live repartition/remap are separate capabilities.
-Legacy manually paired translational periodicity is not silently translated
-into distant ordinary neighbors; native image geometry would be required.
+The former manually paired translational-periodic API is retired. Such pairs
+are not translated into distant ordinary neighbors; native image geometry
+would be required for a future imported-periodic contract. Existing native
+Cartesian axes and composite periodic interfaces retain their support.
 A closed annular seam sharing node IDs remains ordinary interior topology.
 
-`Mesh` remains a real deprecated class with its established layout, virtual
-interface, legacy fields and compiled providers. `MeshFactory::build()` is an
-explicit deprecated compatibility operation that materializes STK-free legacy
-storage from the common construction records. Ordinary `build_handle()` and
-file input never allocate that legacy snapshot or legacy solver workspaces.
-Consumers and compiled providers must be rebuilt together for this migration:
-`MeshFactory`, native geometry and handle internals gained construction/mapping
-state. The compatibility statement about retained layout applies to `Mesh`,
-not to all surrounding C++ classes.
-Legacy template defaults remain unchanged; native low-level equation clients
-can select `MeshHandle<Pack>` explicitly.
+Production `Mesh`, `LegacyMeshSnapshot`, `STKMeshAdapter`, and the handle's
+legacy alternatives/constructors are removed. `MeshFactory::build()` and
+`build_empty_mesh()` are removed; construct through `build_handle()` or the
+native input/assembly APIs. `MeshHandle::legacy_mesh()` and `is_stk()` are also
+retired. No new public `SimpleFluid::Mesh` alias replaces the class; consumers
+may use a local `using Mesh = MeshHandle<Pack>`.
 
-`SIMPLEFLUID_DISABLE_LEGACY_MESH_DEPRECATION` is a temporary diagnostic opt-out.
-Library-owned compatibility declarations use scoped diagnostic guards; direct
-client uses of the deprecated API still warn normally. The historical
-`STKMeshAdapter` name now describes only the generic adapter over legacy `Mesh`;
-it retains no STK dependency or source objects. Source files which constructed
-STK metadata/bulk data through the removed runtime class must migrate to native
-construction or the file reader. A frozen legacy STK geometry oracle exists
-only in the `BUILD_TESTING` fixture target.
+Equation, material and solver defaults use native handles. Historical field
+names (`CellField`, vector/tensor cell fields, face fields and boundary-face
+fields) alias native stored fields. Descriptor names must be nonempty; global
+field operations use native algebraic GIDs obtained from the mesh/maps rather
+than the former one-based source-cell convention. Native owned/overlap face
+semantics and boundary-map row ordering apply. Supply explicit field names and
+do not infer field rows from source IDs or unordered boundary iteration.
+
+This retirement breaks source and binary compatibility. Rebuild consumers,
+providers and shared libraries together. Legacy-only constructors, field
+mirrors, CRTP field bases, deprecation opt-outs and mesh-specific overloads
+are unavailable. The complete vector-boundary transport contract has a native
+provider; its conservative boundary outflow is counted once.
+
+A frozen `test::LegacyMesh`, STK geometry fixture and partition oracle exist
+only in the `BUILD_TESTING` fixture target. They supply independent geometric
+reference data; production fields, handles and solvers cannot wrap or execute
+that storage. Tests may compare authoritative oracle records with native data.
 
 STK/Ioss property construction stays inside the single static-Trilinos archive
 owner through a narrow versioned I/O bridge. Reusing an older backend without

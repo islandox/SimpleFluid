@@ -10,8 +10,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoussinesqModel.hh"
@@ -143,9 +141,6 @@ private:
         const material_type& material, const field_type* dynamic_viscosity_override) const;
 };
 
-extern template class BoussinesqMomentumEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class BoussinesqMomentumEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

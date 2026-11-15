@@ -9,8 +9,6 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "FVM/NonOrthogonalCorrection.tcc"
 
@@ -24,7 +22,7 @@ using MatrixVector = Pack::vector_type;
 using MatrixMultiVector = Pack::multi_vector_type;
 using ScalarField = CellField<Pack>;
 using VectorField = VectorCellField<Pack>;
-using MeshType = Mesh<Pack>;
+using MeshType = MeshHandle<Pack>;
 using ScalarAffineStencil = detail::AffineLeastSquaresGradientStencil<MeshType>;
 using VectorAffineStencil = detail::VectorAffineLeastSquaresGradientStencil<MeshType>;
 using InteriorStencil = detail::LeastSquaresGradientStencil<MeshType>;
@@ -59,18 +57,10 @@ template void add_explicit_deviatoric_transpose_gradient_stress<Pack>(const Vect
 template DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system<Pack>(
     const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField&);
 
-template DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system<Pack>(const MeshType&, Scalar,
-    ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, Scalar, const ScalarField*);
-
 template DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system<Pack>(
     const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField*);
-
-template DiffusionSystem<Pack> non_orthogonal_diffusion_system<Pack>(const MeshType&, Scalar,
-    ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*);
 
 template Teuchos::RCP<MatrixVector> full_diffusion_residual<Pack>(
     const ScalarField&, Scalar, ScalarBoundaryConditionProvider<Pack>);
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

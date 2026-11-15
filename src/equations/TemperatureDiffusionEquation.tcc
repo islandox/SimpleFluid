@@ -9,8 +9,6 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -575,17 +573,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                 EquationValidation::require_mesh_match(
                     *d_mesh, *transport_density_override, "TemperatureDiffusionEquation");
             }
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                if (ale != nullptr || old_density != nullptr
-                    || old_specific_heat_capacity != nullptr || transport_density_override != nullptr)
-                {
-                    throw std::invalid_argument(
-                        "TemperatureDiffusionEquation ALE transport and "
-                        "accepted-old properties require a native mapped "
-                        "mesh.");
-                }
-            }
+
             if (!std::isfinite(time_step) || time_step <= scalar_type{})
             {
                 throw std::invalid_argument("TemperatureDiffusionEquation requires a finite positive time step.");
@@ -786,22 +774,6 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     {
         try
         {
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
-                const typename Factory::TemperatureTerms terms{{old_temperature, time_step}, face_fluxes,
-                    {transport_density, material.specific_heat_capacity, thermal_conductivity}, power_density};
-                const typename Factory::TemperatureBoundary boundary{
-                    boundary_condition, boundary_value, boundary_thermal_conductivity};
-                const typename Factory::TemperatureOptions options{{treatment, correction_field},
-                    coefficient_interpolation,
-                    d_diagnostic_steady ? FVM::AssemblyMode::Steady : FVM::AssemblyMode::Transient};
-                const typename Factory::TemperatureContext context{
-                    d_cached_physical_transport_matrix, &d_transport_geometry_cache};
-                return retain_operator ? Factory::refresh_temperature_rhs(terms, boundary, options, context)
-                                       : Factory::assemble(terms, boundary, options, context);
-            }
-            else
             {
                 using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
                 const typename Factory::TemperatureTerms terms{{old_temperature, time_step}, face_fluxes,
@@ -834,7 +806,6 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
 
     d_prepared_rhs = system.rhs;
     if (d_diagnostic_steady) return {};
-    if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
     {
         if (d_using_prepared && !d_prepared_operator_ready)
         {
@@ -868,7 +839,6 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
 }
-
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
@@ -979,7 +949,6 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_rhs(const source_typ
     return d_prepared_rhs;
 }
 
-
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
     -> Teuchos::RCP<const typename Pack::vector_type>
@@ -999,11 +968,9 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(co
             for (const auto value : values)
                 if (!std::isfinite(value)) throw std::invalid_argument("Boundary response requires finite flux increments.");
         }
-        if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
-            if (d_prepared_flux_response) d_prepared_flux_response->validate_increment(increment);
+        if (d_prepared_flux_response) d_prepared_flux_response->validate_increment(increment);
     });
-    if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
-        if (d_prepared_flux_response) return d_prepared_flux_response->response();
+    if (d_prepared_flux_response) return d_prepared_flux_response->response();
     d_boundary_response = &increment;
     const auto saved_rhs = d_prepared_rhs;
     const auto saved_power = d_last_prescribed_boundary_power;
@@ -1043,5 +1010,3 @@ auto TemperatureDiffusionEquation<Pack,MeshType>::assemble_steady_physical(const
     return {scratch.d_cached_physical_transport_matrix,scratch.d_prepared_rhs};
 }
 }
-
-SIMPLEFLUID_LEGACY_API_END

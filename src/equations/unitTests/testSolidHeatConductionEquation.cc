@@ -40,8 +40,8 @@ template<class Selector>
 SimpleFluid::SP<const SolidMesh> make_solid_subdomain(
     const SimpleFluid::SP<const SimpleFluid::Database>& database, Selector&& selector)
 {
-    auto legacy_mesh = SimpleFluid::test::build_mesh<Pack>(database);
-    auto parent_mesh = std::make_shared<ParentMesh>(std::move(legacy_mesh));
+    auto source_mesh = SimpleFluid::test::build_mesh<Pack>(database);
+    auto parent_mesh = std::make_shared<ParentMesh>(*source_mesh);
     return std::make_shared<SolidMesh>(std::move(parent_mesh), std::forward<Selector>(selector));
 }
 
@@ -363,8 +363,8 @@ TEST(SolidHeatConductionEquationTest, SolvesCylindricalVesselWall)
 /** @brief Transient vessel boundary data can be replaced between advances. */
 TEST(SolidHeatConductionEquationTest, UpdatesBoundaryConditionsBetweenSteps)
 {
-    auto legacy_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    auto parent = std::make_shared<ParentMesh>(std::move(legacy_mesh));
+    auto source_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    auto parent = std::make_shared<ParentMesh>(*source_mesh);
     auto mesh = std::make_shared<SolidMesh>(std::move(parent));
     Field temperature(mesh, 300.0, "solid_temperature");
     auto material = make_material(mesh, 1.0, 1.0, 1.0);
@@ -685,8 +685,8 @@ TEST(SolidHeatConductionEquationTest, PreparedTemperatureCopyUsesItsOwnOwnerAfte
 {
     using TemperatureEquation = SimpleFluid::TemperatureDiffusionEquation<Pack, ParentMesh>;
     using TemperatureField = SimpleFluid::ScalarCellFieldStored<Pack, ParentMesh>;
-    auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(std::move(legacy));
+    auto source = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(*source);
     SimpleFluid::BoussinesqModelOptions material_options;
     material_options.density = 1.0;
     material_options.specific_heat_capacity = 1.0;
@@ -721,8 +721,8 @@ TEST(SolidHeatConductionEquationTest, PreparedTemperatureCopyDetachesPreviouslyA
 {
     using TemperatureEquation = SimpleFluid::TemperatureDiffusionEquation<Pack, ParentMesh>;
     using TemperatureField = SimpleFluid::ScalarCellFieldStored<Pack, ParentMesh>;
-    auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(std::move(legacy));
+    auto source = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(*source);
     SimpleFluid::BoussinesqModelOptions material_options;
     material_options.density = 1.0;
     material_options.specific_heat_capacity = 1.0;

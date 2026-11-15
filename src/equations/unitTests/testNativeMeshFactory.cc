@@ -38,15 +38,13 @@ class InspectFluidSolver : public FluidSolver<Pack>
 {
 public:
     using FluidSolver<Pack>::FluidSolver;
-    bool legacy_backend() const { return uses_legacy_backend(); }
+    const Handle* native_handle() const noexcept { return d_mesh.get(); }
 };
 } // namespace
 
 TEST(NativeMeshFactoryTest, FluidSolverKeepsFactoryHandleAndZeroFlowConservation)
 {
     const auto mesh = make_factory_box();
-    EXPECT_FALSE(mesh->is_stk());
-    EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_TRUE(mesh->visit([](const auto& geometry)
         { return std::is_same_v<std::remove_cvref_t<decltype(geometry)>, Meshes::UnstructuredMesh>; }));
     TimeStepperOptions time;
@@ -65,11 +63,11 @@ TEST(NativeMeshFactoryTest, FluidSolverKeepsFactoryHandleAndZeroFlowConservation
     auto pressure_options = solver.pressure_linear_solver_options();
     pressure_options.preconditioner = LinearPreconditioner::None;
     solver.set_pressure_linear_solver_options(pressure_options);
-    EXPECT_FALSE(solver.legacy_backend());
+    EXPECT_EQ(solver.native_handle(), mesh.get());
     EXPECT_EQ(solver.velocity().mesh_ptr().get(), mesh.get());
     EXPECT_EQ(solver.pressure().mesh_ptr().get(), mesh.get());
     solver.step();
-    EXPECT_FALSE(solver.legacy_backend());
+    EXPECT_EQ(solver.native_handle(), mesh.get());
     EXPECT_EQ(solver.velocity().mesh_ptr().get(), mesh.get());
     EXPECT_EQ(solver.pressure().mesh_ptr().get(), mesh.get());
     EXPECT_EQ(solver.step_index(), 1);
@@ -87,8 +85,8 @@ TEST(NativeMeshFactoryTest, FluidSolverKeepsFactoryHandleAndZeroFlowConservation
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_inventory, &global_inventory);
     EXPECT_DOUBLE_EQ(global_inventory, 24);
     const auto& flux = solver.pressure_corrected_face_fluxes();
-    for (size_t f = 0; f < mesh->num_owned_faces(); ++f)
-        EXPECT_NEAR(flux.value(static_cast<int>(f)), 0, 1e-14);
+    for (const auto face : flux.owned_face_ids())
+        EXPECT_NEAR(flux.value(face), 0, 1e-14);
     EXPECT_NEAR(solver.last_step_statistics().continuity, 0, 1e-14);
 }
 
@@ -115,7 +113,7 @@ TEST(NativeMeshFactoryTest, GenericTransientSourceEquationSolvesOnSameNativeFact
     EXPECT_NEAR(global_integral, 84, 3e-12);
 }
 
-TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUniformThroughFlow)
+TEST(NativeMeshFactoryTest, NativeHandleCopyPreservesIdentityAndNonzeroUniformThroughFlow)
 {
     auto db = std::make_shared<Database>();
     db->set("dimension", 3);
@@ -127,10 +125,9 @@ TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUnifor
     db->set("domain_exterior_face_types", ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
     MeshFactory factory(db);
     const auto native = factory.build_handle<Pack>();
-    SIMPLEFLUID_LEGACY_API_BEGIN
-    const auto legacy = factory.build<Pack>();
-    SIMPLEFLUID_LEGACY_API_END
-    EXPECT_FALSE(native->legacy_mesh());
+    const auto copy = std::make_shared<Handle>(*native);
+    EXPECT_NE(copy.get(), native.get());
+    EXPECT_EQ(copy->geometry_identity(), native->geometry_identity());
 
     TimeStepperOptions time;
     time.time_step = .1;
@@ -150,22 +147,22 @@ TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUnifor
     linear.tolerance = 1e-13;
     linear.max_iterations = 500;
     InspectFluidSolver native_solver(native, boundaries, time, linear);
-    InspectFluidSolver legacy_solver(legacy, boundaries, time, linear);
+    InspectFluidSolver copy_solver(copy, boundaries, time, linear);
 
-    const auto advance_and_check = [&](InspectFluidSolver& solver, bool legacy_backend)
+    const auto advance_and_check = [&](InspectFluidSolver& solver, const Handle* expected_handle, const char* context)
     {
-        SCOPED_TRACE(legacy_backend ? "explicit legacy backend" : "native factory backend");
+        SCOPED_TRACE(context);
         auto pressure_options = solver.pressure_linear_solver_options();
         pressure_options.preconditioner = LinearPreconditioner::None;
         pressure_options.tolerance = 1e-13;
         solver.set_pressure_linear_solver_options(pressure_options);
-        EXPECT_EQ(solver.legacy_backend(), legacy_backend);
+        EXPECT_EQ(solver.native_handle(), expected_handle);
         solver.velocity().put_value({1, 0, 0});
         solver.pressure().put_value(0);
         solver.step();
         EXPECT_EQ(solver.step_index(), 1);
         EXPECT_NEAR(solver.time(), .1, 1e-15);
-        EXPECT_EQ(solver.legacy_backend(), legacy_backend);
+        EXPECT_EQ(solver.native_handle(), expected_handle);
         const auto mesh = solver.velocity().mesh_ptr();
         EXPECT_EQ(solver.pressure().mesh_ptr().get(), mesh.get());
         const auto& flux = solver.pressure_corrected_face_fluxes();
@@ -191,7 +188,7 @@ TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUnifor
             double cell_balance = 0;
             for (const auto face : mesh->faces(cell))
             {
-                const auto outward = flux.value(face) * (mesh->owner_cell(face) == cell ? 1 : -1);
+                const auto outward = flux.local_value(face) * (mesh->owner_cell(face) == cell ? 1 : -1);
                 cell_balance += outward;
                 if (!mesh->is_boundary_face(face))
                     continue;
@@ -213,8 +210,8 @@ TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUnifor
             EXPECT_NEAR(global[i], exact[i], 1e-11);
         return global;
     };
-    const auto native_inventories = advance_and_check(native_solver, false);
-    const auto legacy_inventories = advance_and_check(legacy_solver, true);
+    const auto native_inventories = advance_and_check(native_solver, native.get(), "original native handle");
+    const auto copied_inventories = advance_and_check(copy_solver, copy.get(), "copied native handle");
     for (size_t i = 0; i < native_inventories.size(); ++i)
-        EXPECT_NEAR(native_inventories[i], legacy_inventories[i], 1e-11);
+        EXPECT_NEAR(native_inventories[i], copied_inventories[i], 1e-11);
 }

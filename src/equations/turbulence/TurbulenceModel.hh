@@ -11,11 +11,8 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 #include "FVM/CellGradientScheme.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/Database.hh"
@@ -177,7 +174,7 @@ turbulence_model_options_from_database(const Database& database);
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 struct TurbulenceBuoyancyContext
 {
     using scalar_type = typename Pack::scalar_type;
@@ -207,7 +204,7 @@ struct TurbulenceBuoyancyContext
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceModel
 {
     struct SnapshotData;
@@ -221,10 +218,7 @@ public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
-    using velocity_boundary_cache_type = std::conditional_t<
-        std::is_same_v<mesh_type, Mesh<Pack>>,
-        FVM::VelocityBoundaryCache<Pack>,
-        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
 
     TurbulenceModel(SP<const mesh_type> mesh, const BoundaryConditionSet& boundary_conditions);
@@ -421,10 +415,7 @@ private:
     Arr<WallYPlusStatistics> d_empty_wall_y_plus_statistics;
 };
 
-extern template class TurbulenceModel<DefaultTpetraTypes>;
 extern template class TurbulenceModel<
     DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

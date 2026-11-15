@@ -10,13 +10,10 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/NumericAssemblyLease.hh"
 
-#include "utils/export_helper.hh"
 #include "equations/EquationForward.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/MomentumSolveException.hh"
@@ -64,10 +61,7 @@ public:
     using field_type = typename field_traits::scalar_cell_type;
     using velocity_field_type = typename field_traits::vector_cell_type;
     using face_flux_field_type = typename field_traits::scalar_face_type;
-    using velocity_boundary_cache_type = std::conditional_t<
-        std::same_as<mesh_type, Mesh<Pack>>,
-        FVM::VelocityBoundaryCache<Pack>,
-        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -271,11 +265,6 @@ private:
 
 extern template class
     IncompressibleMomentumEquation<DefaultTpetraTypes,
-                                   Mesh<DefaultTpetraTypes>>;
-extern template class
-    IncompressibleMomentumEquation<DefaultTpetraTypes,
                                    MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

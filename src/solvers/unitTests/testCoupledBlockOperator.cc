@@ -600,7 +600,7 @@ TEST_P(CompositeMeshTest, GradientSchemeRefreshPreservesAffineFluxBalance)
 
 TEST(CoupledBlockOperatorTest, SkewPressureOperatorMatchesReconstructedFaceBalance)
 {
-    SP<const Handle> mesh = std::make_shared<Handle>(test::make_skewed_prism_mesh<Pack>());
+    SP<const Handle> mesh = test::make_skewed_prism_mesh<Pack>();
     VectorCellFieldStored<Pack> u(mesh, vec3<double>{}, "u");
     ScalarCellFieldStored<Pack> p(mesh, 0., "p");
     ScalarFaceFieldStored<Pack> flux(mesh, 0., "phi");

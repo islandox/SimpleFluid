@@ -19,11 +19,11 @@ implementation does not establish physical validation of a supplied closure.
 Remaining acceptance and multiphysics work is tracked in `TODO.md`.
 
 The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
-run directly on `MeshHandle`/`FieldStored` data for supported mapped meshes,
-without reconstructing a legacy mesh. Factory-created handles also execute natively.
-Existing callers that supply the deprecated legacy
-`Mesh` backend retain their established object identity and behavior through a
-separate compatibility path.
+run directly on `MeshHandle`/`FieldStored` data, retaining the exact native
+handle supplied by the caller. The production `Mesh` class, legacy mesh
+snapshots, `STKMeshAdapter` and mirrored solver path are removed. Independent geometry,
+storage and partition oracles remain confined to tests; there is no public
+`SimpleFluid::Mesh` type alias.
 
 The reacting stack has two distinct thermal owners: a weak Boussinesq field
 adapter, including an explicit finite-solvent/vapor reference approximation,
@@ -111,8 +111,7 @@ $$
 - **First-order upwind** convection (implicit) and **Backward Euler** time
   integration by default
 - Opt-in constant-step **BDF2** and bounded **linear-upwind** deferred
-  correction for legacy and native mapped weighted-scalar transport, plus the
-  native mapped physical-temperature path
+  correction for native weighted-scalar and physical-temperature transport
 - Gradient reconstruction via cached **least-squares** stencils, with a
   selectable **Gauss-linear** path for pressure and turbulence gradients
 
@@ -220,6 +219,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - Programmatic mesh generation for **box**, **cylinder**, and **sphere** domains
 - External `HEX_8` and `WEDGE_6` mesh loading through Trilinos/STK
 - Configuration-driven via the built-in typed key-value `Database`
+- `MeshFactory::build_handle()` and `from_stk_file()` return native handles;
+  the former `build()` and `build_empty()` APIs are removed
+- Periodicity uses supported native structured dimensions or declared composite
+  interfaces; manual post-construction pairing of imported exterior faces is retired
 - [`AnnularSemiStructuredMeshFactory`](docs/annular_meshes.md) — programmatic
   graded annular meshes with independent inner/outer wall rings, Delaunay
   triangular-prism bulk, hex wall layers, and optional swept bottom corners;
@@ -233,7 +236,10 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   and vector face/boundary-face storage
 - Mesh-aware owned/overlap maps, component and bulk host views, owned-face
   indexing, and ghosted data exchange
-- `BoundaryFaceField` compatibility storage for sideset-indexed boundary data
+- `CellField`, `VectorCellField`, `TensorCellField`, `FaceField`,
+  `VectorFaceField` and `BoundaryFaceField` alias default native stored fields;
+  field descriptor names must be nonempty, and global operations use native
+  algebraic global IDs
 - [`MeshToMeshTransfer`](docs/mesh_to_mesh_transfer.md) — reusable scalar,
   vector, and tensor cell transfer with centroid interpolation or conservative
   supported overlaps, explicit intensive/extensive quantities, partial-coverage
@@ -263,8 +269,6 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   velocity, temperature, turbulence, material, and optional-physics fields
 - Selected-first `MeshReorderingFactory` layouts for range-backed solid
   subdomains without parent-sized selection or reverse-index tables
-- Legacy `Mesh` execution through synchronized compatibility fields, without
-  replacing the mesh supplied by the caller
 - Runtime residual reporting for momentum, pressure, and continuity
 - Named volumetric heat sources and updateable physical material fields
 
@@ -335,14 +339,16 @@ an application chemistry or turbulent bubbly-flow model is physically validated.
 - [`TransportSystemFactory`](docs/architecture/transport_system_factory.md) —
   typed scalar/vector, weighted, temperature, and physical-momentum
   convection–diffusion assembly; grouped inputs return `TransportSystem` or
-  `VectorTransportSystem` matrix/RHS handles
+  `VectorTransportSystem` matrix/RHS handles. Native `BasicVectorBoundary`
+  retains full condition/value callbacks, one shared matrix, and once-counted
+  physical boundary advection
 - `NonOrthogonalCorrection` — cross-diffusion flux decomposition ($S_f = E_f + T_f$)
 - `CellOperators` — cached scalar/vector gradient, divergence, and Laplacian
-  reconstruction for legacy and stored fields
+  reconstruction for native stored fields
 - `FaceFlux` — face interpolation, normal fluxes, cell balances, and
-  FieldStored/legacy Rhie–Chow interpolation
+  native Rhie–Chow interpolation
 - `MatrixOperators` — sparse diffusion, upwind, and pressure-Poisson assembly
-  helpers for legacy and mapped meshes
+  helpers for native runtime and statically typed meshes
 - Mapped boundary and transport caches — reusable boundary locations,
   least-squares geometry, and compatible transport-matrix graphs
 
@@ -610,10 +616,8 @@ constructing fields or caches. Shared ownership is rejected when a permutation
 is needed. If every rank is already selected-first, the original ordering is
 retained.
 
-The reordered handle is intended to back the returned range layout and its
-subdomains. Reordered legacy/STK handles are rejected by `FluidSolver` because
-that compatibility path mirrors fields in the legacy mesh's original ordinal
-order. Native structured handles do not use that compatibility path.
+The reordered native handle backs the returned range layout and its
+subdomains. Fields and solvers retain that handle and its local ordering.
 
 `SolidSubdomain` consumes that range certificate and builds compact
 owned/overlap cell and face maps. Cell membership and parent/subdomain
@@ -621,14 +625,14 @@ translation are arithmetic; the subdomain retains no parent-sized selection,
 cell-reverse, or face-reverse arrays. Its only reverse face search is over the
 solid-sized face records. Native structured handles reuse their existing
 local/global indexer and add no persistent parent-sized permutation. Because
-explicit unstructured and STK storage cannot be physically reordered, those
+explicit native unstructured storage cannot be physically reordered, those
 parent handles retain one forward and one reverse local-cell permutation; the
 subdomain does not duplicate them. A face between selected and unselected
 cells becomes a boundary named `solid_interface` by default; the face owner
 and normal are oriented outward from the solid. Selection runs only on owned
 cells and is imported to ghosts, so the same API works when the solid crosses
-MPI partitions or the parent is a legacy mesh wrapped in `MeshHandle`. The
-parent must retain every face-neighbor of a selected owned cell (normally one
+MPI partitions on supported native parent meshes. The parent must retain every
+face-neighbor of a selected owned cell (normally one
 ghost layer); insufficient overlap is rejected.
 
 `SolidHeatConductionEquation` advances the physical solid energy balance with

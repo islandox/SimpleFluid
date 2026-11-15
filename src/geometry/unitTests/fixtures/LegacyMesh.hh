@@ -16,7 +16,6 @@
 #include "utils/debug_check.hh"
 
 #include "geometry/MeshUtils.hh"
-#include "geometry/Mesh.hh"
 
 #include <Teuchos_RCP.hpp>
 #include <Kokkos_Core.hpp>

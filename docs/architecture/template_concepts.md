@@ -20,8 +20,8 @@ checks matching layouts at construction and checks identity, layout and epoch
 at static validation. Ordinal incidence ranges with unrelated element types
 are rejected by the topology concept.
 
-`MeshType` covers the common interface exposed by legacy `Mesh`, native
-`MeshHandle`, `Meshes::PartitionedMesh` and `SolidSubdomain`. Raw geometry with
+`MeshType` covers the common interface exposed by native `MeshHandle`,
+`Meshes::PartitionedMesh` and `SolidSubdomain`. Raw geometry with
 family-specific structured entity IDs retains the existing `MeshClass`
 contract. Do not require `MeshType<Derived>` while forming an incomplete CRTP
 base. Maps, boundary metadata, execution leases, and geometry epochs remain
@@ -39,15 +39,16 @@ constraints so declarations and instantiated symbols remain consistent.
 Some generic parameters intentionally retain `class` because these concepts do
 not describe their inputs:
 
-- Traversal supports native geometry, mapped meshes and the legacy STK adapter;
-  the local-ordinal `MeshType` contract does not cover all three.
+- Traversal supports native geometry and mapped meshes; the local-ordinal
+  `MeshType` contract does not cover every raw geometry representation.
 - Epoch and execution-guard helpers preserve their optional-capability fallback.
 - Symbolic matrix plans, collective validation and identity checks may require
   only maps, a communicator or object identity.
 - `DirectBatchRange` topology/metric parameters are per-entity records; native
   region adapters receive geometry before it implements the region contracts.
-- Callbacks, views and legacy-compatible field helpers retain their own weaker
-  contracts. Legacy fields do not carry the descriptor aliases of `FieldType`.
+- Callbacks, views and geometry records retain their own weaker contracts.
+  Historical field spellings now alias native `FieldStored`; field metadata
+  constraints remain distinct from storage and implementation-provider needs.
 
 `FieldType` describes field metadata rather than numerical storage. Locations
 are `CellLocation`, `FaceLocation`, and `BoundaryFaceLocation`. Descriptors need

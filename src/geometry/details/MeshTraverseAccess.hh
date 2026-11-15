@@ -20,8 +20,6 @@ namespace SimpleFluid::detail
 template<class Mesh> inline constexpr bool traverse_is_handle = false;
 template<TpetraTypePack Pack> inline constexpr bool traverse_is_handle<MeshHandle<Pack>> = true;
 
-template<class Mesh> inline constexpr bool traverse_is_stk_adapter = false;
-template<TpetraTypePack Pack> inline constexpr bool traverse_is_stk_adapter<Meshes::STKMeshAdapter<Pack>> = true;
 
 /**
  * @brief Borrow a concrete provider while preserving public field ordinals.

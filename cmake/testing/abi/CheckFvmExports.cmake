@@ -115,6 +115,14 @@ foreach(index RANGE ${last_symbol})
     endif()
 endforeach()
 
+# A source-level alias cannot justify retaining a retired class in any dynamic
+# signature or RTTI record. Check full signatures, not only function owners.
+if(demangled_full MATCHES "(^|\n|[ ,<(])SimpleFluid::(Mesh|CellField|VectorCellField|TensorCellField|FaceField|VectorFaceField|BoundaryFaceField)<"
+   OR demangled_full MATCHES "SimpleFluid::Meshes::STKMeshAdapter<"
+   OR demangled_names MATCHES "(^|\n)SimpleFluid::MeshHandle<[^\n]+[ ]*::(legacy_mesh|is_stk)([(]|\n|$)")
+    message(FATAL_ERROR "Retired mesh/storage class or adapter API remains exported from FVM")
+endif()
+
 # These functions have declarations in public headers and definitions in the
 # compiled FVM library. A hidden instantiation breaks downstream linking.
 foreach(api IN ITEMS
@@ -140,7 +148,7 @@ foreach(retired IN ITEMS transport_system non_orthogonal_transport_system
 endforeach()
 
 # Require each exact native family/backend entry point, including the separate
-# temperature RHS refresh. Deprecated Mesh providers are outside this inventory.
+# temperature RHS refresh and native BasicVector assembly.
 # Merely finding one assemble symbol cannot establish the compiled overloads.
 string(REPLACE "\n" ";" factory_signatures "${demangled_full}")
 foreach(backend IN ITEMS MeshHandle PartitionedCartesian SolidSubdomain)
@@ -165,9 +173,9 @@ foreach(backend IN ITEMS MeshHandle PartitionedCartesian SolidSubdomain)
             set(terms TemperatureTerms)
         elseif(family STREQUAL "BasicVector")
             set(terms VectorTerms)
-            set(boundary "BasicVectorTransportBoundary<")
+            set(boundary ", SimpleFluid::FVM::BasicVectorTransportBoundary<")
         elseif(family STREQUAL "Vector")
-            set(boundary "VelocityTransportBoundary<")
+            set(boundary ", SimpleFluid::FVM::VelocityTransportBoundary<")
         endif()
         set(matched_addresses)
         set(matched_signatures)
@@ -206,7 +214,7 @@ foreach(solver_api IN ITEMS
     endif()
 endforeach()
 
-foreach(mesh IN ITEMS Mesh MeshHandle)
+foreach(mesh IN ITEMS MeshHandle)
     foreach(method IN ITEMS CellGradientCache refresh)
         if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::FVM::CellGradientCache<[^\n]+SimpleFluid::${mesh}<[^\n]+::${method}[(]")
             message(FATAL_ERROR "Missing compiled cell gradient cache ${method} for ${mesh}")

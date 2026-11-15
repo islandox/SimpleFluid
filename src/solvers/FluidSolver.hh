@@ -10,10 +10,7 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
-
-#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
 #include "equations/PressureProjectionEquation.hh"
@@ -52,19 +49,11 @@ template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_SOLVERS_EXPORT FluidSolver
 {
 public:
-    using legacy_mesh_type = Mesh<Pack>;
     using mesh_type = MeshHandle<Pack>;
     using field_type = ScalarCellFieldStored<Pack>;
     using velocity_field_type = VectorCellFieldStored<Pack>;
     using face_flux_field_type = ScalarFaceFieldStored<Pack>;
-    using legacy_field_type = CellField<Pack>;
-    using legacy_velocity_field_type = VectorCellField<Pack>;
-    using legacy_face_flux_field_type = FaceField<Pack>;
-    // Preserve the established protected workspace type for legacy-mesh
-    // derived solvers. Native MeshHandle solvers use the distinct stored-field
-    // workspace below.
-    using face_flux_workspace_type = FVM::PressureWeightedFaceFluxWorkspace<Pack>;
-    using legacy_face_flux_workspace_type = face_flux_workspace_type;
+    using face_flux_workspace_type = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack>;
     using native_face_flux_workspace_type = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack>;
     using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using momentum_equation_type = IncompressibleMomentumEquation<Pack, mesh_type>;
@@ -79,9 +68,6 @@ public:
     using coupled_system_type = CoupledPressureVelocitySystem<Pack>;
     using continuity_target_type = VolumeContinuityTarget<Pack, mesh_type>;
     using continuity_residual_type = VolumeContinuityResiduals<scalar_type>;
-
-    FluidSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
 
     /**
      * @brief Construct directly on a runtime mesh handle.
@@ -307,13 +293,9 @@ protected:
                 LinearSolverOptions linear_options,
                 DeferredMomentumEquationTag);
 
-    static SP<const legacy_mesh_type> require_mesh(
-        SP<const legacy_mesh_type> mesh);
     static SP<const mesh_type> require_mesh_handle(
         SP<const mesh_type> mesh);
 
-    /** @brief Return the momentum equation used by a wrapped legacy mesh. */
-    virtual IncompressibleMomentumEquation<Pack>& momentum_equation();
     /** @brief Return the momentum equation used by a native mesh handle. */
     virtual momentum_equation_type& native_momentum_equation();
     virtual LinearSolveSummary advance_momentum();
@@ -432,7 +414,7 @@ protected:
     /** Install one immutable integrated target for the next coupling solve. */
     void set_volume_continuity_target(const continuity_target_type& target);
 
-    /** Restore the legacy zero-target pressure/velocity path. */
+    /** Restore the fixed-grid zero-target pressure/velocity path. */
     void clear_volume_continuity_target() noexcept;
 
     /** Return the active target, or nullptr for the fixed incompressible path. */
@@ -450,15 +432,10 @@ protected:
     /** Retain a mutable view only when it is the exact native solver handle. */
     void retain_mutable_mesh_handle(SP<mesh_type> mesh);
 
-    PressureProjectionEquation<Pack>& pressure_projection();
     pressure_projection_type& native_pressure_projection();
-    CoupledPressureVelocitySolver<Pack>& coupled_pressure_velocity_solver();
     native_coupled_solver_type& native_coupled_pressure_velocity_solver();
-    FVM::VelocityBoundaryCache<Pack>& velocity_boundary_cache();
     velocity_boundary_cache_type& native_velocity_boundary_cache();
-    face_flux_workspace_type& pressure_face_flux_workspace();
     native_face_flux_workspace_type& native_pressure_face_flux_workspace();
-    legacy_face_flux_workspace_type& legacy_pressure_face_flux_workspace();
     field_type& pressure_correction();
     velocity_field_type& predictor_pressure_gradient();
     velocity_field_type& predictor_velocity();
@@ -467,20 +444,6 @@ protected:
     residual_type& pressure_velocity_residuals();
     const residual_type& pressure_velocity_residuals() const;
 
-    bool uses_legacy_backend() const noexcept
-    {
-        return static_cast<bool>(d_legacy_mesh);
-    }
-    legacy_field_type& legacy_pressure();
-    legacy_field_type& legacy_pressure_correction();
-    legacy_velocity_field_type& legacy_velocity();
-    legacy_velocity_field_type& legacy_predictor_pressure_gradient();
-    legacy_velocity_field_type& legacy_predictor_velocity();
-    legacy_face_flux_field_type& legacy_old_face_fluxes();
-    legacy_face_flux_field_type& legacy_projected_face_fluxes();
-    void sync_primary_fields_to_legacy();
-    void sync_primary_fields_from_legacy();
-
     /**
      * @brief Compute a global relative velocity update norm.
      * @return Communicator-wide relative L2 update norm.
@@ -488,17 +451,12 @@ protected:
     scalar_type velocity_update_norm(
         const velocity_field_type& before,
         const velocity_field_type& after) const;
-    scalar_type velocity_update_norm(
-        const legacy_velocity_field_type& before,
-        const legacy_velocity_field_type& after) const;
     VTUWriter fluid_solution_writer() const;
     /**
      * @return Owned scalar values in mesh order.
      */
     VTUWriter::ScalarData collect_scalar_field(
         const field_type& field) const;
-    VTUWriter::ScalarData collect_scalar_field(
-        const legacy_field_type& field) const;
 
     void validate_diagnostic_options(const SolverDiagnosticsOptions& options) const;
     SolverDiagnosticsResult<scalar_type> evaluate_flow_diagnostics(
@@ -519,7 +477,6 @@ protected:
     void record_diagnostic_pressure_correction();
     SP<const mesh_type> d_mesh;
     SP<mesh_type> d_mutable_mesh;
-    SP<const legacy_mesh_type> d_legacy_mesh;
     Problem<Pack> d_problem;
     std::optional<LinearSolverOptions> d_momentum_linear_options;
     SolverTimings d_solver_timings;
@@ -567,5 +524,3 @@ private:
 extern template class FluidSolver<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

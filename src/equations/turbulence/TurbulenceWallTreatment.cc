@@ -178,9 +178,6 @@ real_t openfoam_y_plus_lam(real_t kappa, real_t log_layer_e)
     return y_plus_lam;
 }
 
-template class TurbulenceWallTreatment<DefaultTpetraTypes, ResolvedLowReSSTWallPolicy>;
-template class TurbulenceWallTreatment<DefaultTpetraTypes, ResolvedLowReKEpsilonWallPolicy>;
-template class TurbulenceWallTreatment<DefaultTpetraTypes, StandardHighReKEpsilonWallPolicy>;
 template class TurbulenceWallTreatment<
     DefaultTpetraTypes, ResolvedLowReSSTWallPolicy,
     MeshHandle<DefaultTpetraTypes>>;

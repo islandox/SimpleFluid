@@ -45,7 +45,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -2281,7 +2281,7 @@ TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesFiniteSpeciesAndBoilingSta
     feedback.reference_dynamic_viscosity = feedback.min_viscosity = 0;
     auto& material = coupling.configure_material_feedback(feedback);
     coupling.step();
-    EXPECT_FALSE(mesh->legacy_mesh());
+
     EXPECT_EQ(solver->temperature().mesh_ptr(), mesh);
     EXPECT_EQ(solver->material_properties().density.mesh_ptr(), mesh);
     EXPECT_EQ(scalar.alpha_g().mesh_ptr(), mesh);
@@ -2326,7 +2326,7 @@ TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesSpeciesHeatAndFeedback)
     const double two_before = gas.global_species_moles(M::gas_two);
     const double extent = .001 * mesh->cell_volume(0) * .1;
     ASSERT_NO_THROW(coupling.step());
-    EXPECT_FALSE(mesh->legacy_mesh());
+
     EXPECT_EQ(solver->temperature().mesh_ptr(), mesh);
     EXPECT_EQ(solver->material_properties().density.mesh_ptr(), mesh);
     EXPECT_EQ(gas.species_field(M::gas_one, M::Phase::Dissolved).mesh_ptr(), mesh);
@@ -2409,8 +2409,8 @@ TEST(ScalarSourceDecayTransportTest, RejectsRetiredSourceControls)
     }
 }
 
-/** Original legacy Mesh input retains identity while mapped cp*T owns actual finite wall latent. */
-TEST(Phase13PlusCouplingTest, LegacyMeshInputAdvancesFiniteWallVaporWithOneBoundaryHeatOwner)
+/** Native input retains identity while cp*T owns actual finite wall latent. */
+TEST(Phase13PlusCouplingTest, NativeMeshInputAdvancesFiniteWallVaporWithOneBoundaryHeatOwner)
 {
     namespace F = SimpleFluid::Testing::FiniteBouss;
     namespace R = SimpleFluid::Reacting;
@@ -2432,7 +2432,7 @@ TEST(Phase13PlusCouplingTest, LegacyMeshInputAdvancesFiniteWallVaporWithOneBound
     auto& gas = coupling.configure_reacting_gas(options);
     coupling.initialize_heated_box(373, 373);
     coupling.step();
-    EXPECT_EQ(solver->temperature().mesh_ptr()->legacy_mesh(), mesh);
+    EXPECT_EQ(solver->temperature().mesh_ptr(), mesh);
     EXPECT_NEAR(gas.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0) * .018, .1, 1e-13);
     EXPECT_NEAR(gas.thermal_source().value(0), -10, 1e-12);
     EXPECT_NEAR(solver->temperature().value(0), 373.3, 1e-10);

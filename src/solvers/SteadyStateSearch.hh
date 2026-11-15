@@ -11,17 +11,14 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 #include "dataclass/typedefs.hh"
 #include "equations/PressureVelocityCoupling.hh"
 #include "fields/CellField.hh"
 #include "fields/FieldStored.hh"
 #include "fields/VectorCellField.hh"
-#include "geometry/Mesh.hh"
+#include "geometry/MeshHandle.hh"
 
 #include <iosfwd>
 #include <optional>
@@ -314,19 +311,16 @@ template <TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_SOLVERS_EXPORT SteadyStateFieldMonitor
 {
 public:
-    using mesh_type = Mesh<Pack>;
+    using mesh_type = MeshHandle<Pack>;
     using field_type = CellField<Pack>;
     using velocity_field_type = VectorCellField<Pack>;
     using stored_mesh_type = MeshHandle<Pack>;
     using stored_field_type = ScalarCellFieldStored<Pack>;
     using stored_velocity_field_type = VectorCellFieldStored<Pack>;
     using stored_additional_field_type =
-        std::variant<const field_type*, const stored_field_type*>;
+        std::variant<const stored_field_type*>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
-
-    SteadyStateFieldMonitor(SP<const mesh_type> mesh, scalar_type reference_temperature,
-                            SteadyStateUpdateScales scales = {});
 
     /** @brief Monitor fields stored directly on a runtime mesh handle. */
     SteadyStateFieldMonitor(SP<const stored_mesh_type> mesh,
@@ -334,25 +328,9 @@ public:
                             SteadyStateUpdateScales scales = {});
 
     /**
-     * @brief Capture the initial state before the first search step.
-     */
-    void initialize(const velocity_field_type& velocity, const field_type& temperature,
-                    std::vector<const field_type*> additional_scalar_fields = {});
-
-    /**
-     * @brief Capture an isothermal state with no transported temperature.
-     *
-     * The reported temperature update rate remains zero.
-     */
-    void initialize(
-        const velocity_field_type& velocity,
-        std::vector<const field_type*> additional_scalar_fields);
-
-    /**
      * @brief Capture MeshHandle-backed solver fields before the first step.
      *
-     * Additional transported scalars may use FieldStored or, for a handle
-     * adapting an existing STK mesh, the corresponding legacy CellField.
+     * Additional transported scalars use native FieldStored storage.
      */
     void initialize(
         const stored_velocity_field_type& velocity,
@@ -378,9 +356,6 @@ public:
     SteadyStateUpdateRates<scalar_type> observe(scalar_type time_step);
 
 private:
-    SIMPLEFLUID_SOLVERS_LOCAL
-    static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
-
     SIMPLEFLUID_SOLVERS_LOCAL
     static SP<const stored_mesh_type> require_mesh(
         SP<const stored_mesh_type> mesh);
@@ -415,13 +390,9 @@ private:
         const TemperatureField* temperature,
         const AdditionalFields& additional_scalar_fields);
 
-    SP<const mesh_type> d_mesh;
     SP<const stored_mesh_type> d_stored_mesh;
     scalar_type d_reference_temperature;
     SteadyStateUpdateScales d_scales;
-    const velocity_field_type* d_velocity = nullptr;
-    const field_type* d_temperature = nullptr;
-    std::vector<const field_type*> d_additional_scalar_fields;
     const stored_velocity_field_type* d_stored_velocity = nullptr;
     const stored_field_type* d_stored_temperature = nullptr;
     std::vector<stored_additional_field_type>
@@ -479,5 +450,3 @@ extern template class SteadyStateFieldMonitor<DefaultTpetraTypes>;
 extern template class SteadyStateProgressLineFormatter<real_t>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

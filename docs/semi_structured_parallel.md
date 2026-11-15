@@ -2,7 +2,7 @@
 
 `MeshHandle` distributes a polygonal XY mesh extruded through nonuniform Z
 layers. Construction retains the supplied geometry object. It does not convert
-the mesh to the legacy `Mesh` backend or expand its entire 3D connectivity.
+the mesh to replicated compatibility storage or expand its entire 3D connectivity.
 
 ## Ownership and configuration
 

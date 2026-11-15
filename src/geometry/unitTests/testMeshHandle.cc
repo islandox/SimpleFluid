@@ -27,6 +27,7 @@
 #include <exception>
 #include <filesystem>
 #include <memory>
+#include <map>
 #include <numbers>
 #include <span>
 #include <stdexcept>
@@ -229,24 +230,8 @@ TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
     static_assert(std::is_same_v<
                   Handle::MutableUnstructuredPtr,
                   SimpleFluid::SP<Unstructured>>);
-    static_assert(std::is_same_v<
-                  Handle::MutableSTKAdapterPtr,
-                  SimpleFluid::SP<Handle::STKAdapter>>);
-    static_assert(std::is_constructible_v<
-                  Handle,
-                  SimpleFluid::SP<ConcreteSTK>>);
-    static_assert(std::is_constructible_v<
-                  Handle,
-                  SimpleFluid::SP<const ConcreteSTK>>);
-    static_assert(std::is_constructible_v<
-                  Handle::STKAdapter,
-                  SimpleFluid::SP<ConcreteSTK>>);
-    static_assert(std::is_constructible_v<
-                  Handle::STKAdapter,
-                  SimpleFluid::SP<const ConcreteSTK>>);
-    static_assert(std::is_constructible_v<
-                  Handle::STKAdapter,
-                  std::nullptr_t>);
+    static_assert(!std::is_constructible_v<Handle, SimpleFluid::SP<ConcreteSTK>>);
+    static_assert(!std::is_constructible_v<Handle, SimpleFluid::SP<const ConcreteSTK>>);
     static_assert(std::is_constructible_v<
                   PartitionedUnstructured,
                   std::nullptr_t,
@@ -261,17 +246,17 @@ TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
 
     ASSERT_TRUE(handle.has_mutable_geometry());
     auto* mutable_address = handle.visit_mutable(
-        []<class Mesh>(Mesh& mesh) -> void*
+        []<class Handle>(Handle& mesh) -> void*
         {
-            static_assert(!std::is_const_v<Mesh>);
+            static_assert(!std::is_const_v<Handle>);
             return std::addressof(mesh);
         });
     EXPECT_EQ(mutable_address, cartesian.get());
 
     const auto* const_address = std::as_const(handle).visit(
-        []<class Mesh>(Mesh& mesh) -> const void*
+        []<class Handle>(Handle& mesh) -> const void*
         {
-            static_assert(std::is_const_v<Mesh>);
+            static_assert(std::is_const_v<Handle>);
             return std::addressof(mesh);
         });
     EXPECT_EQ(const_address, cartesian.get());
@@ -283,7 +268,7 @@ TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
         read_only_handle.visit_mutable([](auto&) {}),
         std::logic_error);
     EXPECT_THROW(
-        static_cast<void>(Handle::STKAdapter(nullptr)),
+        static_cast<void>(Handle(Handle::UnstructuredPtr{}, Handle::unstructured_indexer_type{})),
         std::invalid_argument);
     EXPECT_THROW(
         static_cast<void>(PartitionedUnstructured(
@@ -428,70 +413,54 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
     }
 }
 
-/**
- * @brief Verifies wrapping a legacy STK mesh preserves maps, connectivity,
- * and geometric queries.
- */
-TEST(MeshHandleTest, PreservesLegacySTKMapsAndGeometry)
+/** Native factories retain geometry, IDs and maps independently of the frozen STK oracle. */
+TEST(MeshHandleTest, NativeFactoryMatchesIndependentSTKGeometryOracle)
 {
-    const auto concrete_legacy = make_frozen_two_hex_fixture();
-    SimpleFluid::SP<SimpleFluid::Mesh<Pack>> legacy = concrete_legacy;
-    ASSERT_TRUE(concrete_legacy);
-    Handle handle(legacy);
-    Handle derived_handle(concrete_legacy);
-
-    EXPECT_TRUE(handle.is_stk());
-    EXPECT_TRUE(handle.has_mutable_geometry());
-    EXPECT_EQ(handle.legacy_mesh(), legacy);
-    EXPECT_EQ(
-        handle.visit_mutable(
-            [](auto& mesh) -> SimpleFluid::Mesh<Pack>*
-            {
-                using Mesh = std::remove_cvref_t<decltype(mesh)>;
-                if constexpr (std::is_same_v<Mesh, Handle::STKAdapter>)
-                {
-                    return mesh.mutable_mesh_ptr().get();
-                }
-                return nullptr;
-            }),
-        legacy.get());
-    SimpleFluid::SP<const SimpleFluid::Mesh<Pack>> read_only_legacy = legacy;
-    EXPECT_FALSE(Handle(read_only_legacy).has_mutable_geometry());
-    SimpleFluid::SP<const ConcreteSTK> read_only_concrete = concrete_legacy;
-    Handle read_only_derived_handle(read_only_concrete);
-    EXPECT_FALSE(read_only_derived_handle.has_mutable_geometry());
-    EXPECT_EQ(read_only_derived_handle.legacy_mesh().get(), legacy.get());
-    EXPECT_TRUE(derived_handle.has_mutable_geometry());
-    EXPECT_EQ(derived_handle.legacy_mesh().get(), legacy.get());
-    EXPECT_EQ(handle.owned_cell_map(), legacy->owned_cell_map());
-    EXPECT_EQ(handle.overlap_cell_map(), legacy->overlap_cell_map());
-    EXPECT_EQ(handle.owned_face_map(), legacy->owned_face_map());
-    EXPECT_EQ(handle.cell_global_id(0),
-              legacy->owned_cell_map()->getGlobalElement(0));
-    EXPECT_EQ(
-        handle.cell_geometry_global_id(0),
-        legacy->cell_global_id(0));
-    EXPECT_EQ(handle.face_global_id(0),
-              legacy->owned_face_map()->getGlobalElement(0));
-    EXPECT_EQ(handle.num_owned_cells(), legacy->num_owned_cells());
-    EXPECT_EQ(handle.cell_centroid(0), legacy->cell_centroid(0));
-    const auto topology = handle.vtu_topology();
+    const auto oracle = make_frozen_two_hex_fixture();
+    const auto handle = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    ASSERT_TRUE(oracle);
+    ASSERT_TRUE(handle);
+    ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(handle->variant()));
+    const auto geometry = std::get<Handle::UnstructuredPtr>(handle->variant());
+    EXPECT_TRUE(handle->has_mutable_geometry());
+    EXPECT_EQ(handle->visit_mutable([](auto& mesh) -> const void* { return &mesh; }), geometry.get());
+    EXPECT_EQ(handle->num_owned_cells(), oracle->num_owned_cells());
+    EXPECT_EQ(handle->num_faces(), oracle->num_faces());
+    for (size_t cell = 0; cell < handle->num_local_cells(); ++cell)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(cell);
+        const auto source = handle->cell_geometry_global_id(lid);
+        const auto reference = oracle->global_to_local_cell(source);
+        ASSERT_NE(reference, SimpleFluid::invalid_id<Pack::local_ordinal_type>());
+        EXPECT_EQ(handle->cell_centroid(lid), oracle->cell_centroid(reference));
+        EXPECT_EQ(handle->cell_volume(lid), oracle->cell_volume(reference));
+        EXPECT_EQ(handle->faces(lid).size(), oracle->faces(reference).size());
+        EXPECT_EQ(handle->cell_global_id(lid), handle->overlap_cell_map()->getGlobalElement(lid));
+        EXPECT_EQ(handle->indexer().cell_local_id(source), lid);
+    }
+    std::map<Pack::global_ordinal_type, Pack::local_ordinal_type> oracle_faces;
+    for (size_t face = 0; face < oracle->num_faces(); ++face)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(face);
+        oracle_faces.emplace(oracle->face_global_id(lid), lid);
+    }
+    for (size_t face = 0; face < handle->num_faces(); ++face)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(face);
+        const auto found = oracle_faces.find(handle->face_geometry_global_id(lid));
+        ASSERT_NE(found, oracle_faces.end());
+        const auto reference = found->second;
+        EXPECT_EQ(handle->face_centroid(lid), oracle->face_centroid(reference));
+        EXPECT_EQ(handle->face_area(lid), oracle->face_area(reference));
+        EXPECT_EQ(handle->is_boundary_face(lid), oracle->is_boundary_face(reference));
+        if (handle->is_boundary_face(lid))
+            EXPECT_EQ(handle->boundary_batch_name(handle->boundary_id(lid)), oracle->boundary_name(reference));
+    }
+    const auto topology = handle->vtu_topology();
     ASSERT_TRUE(topology);
-    EXPECT_EQ(topology->cell_offsets.size(), handle.num_owned_cells());
+    EXPECT_EQ(topology->cell_offsets.size(), handle->num_owned_cells());
     EXPECT_FALSE(topology->points.empty());
-    const auto handle_faces = handle.faces(0);
-    const auto& legacy_faces = legacy->faces(0);
-    EXPECT_EQ(handle_faces.size(), legacy_faces.size());
-    ASSERT_FALSE(handle_faces.empty());
-    EXPECT_TRUE(std::ranges::equal(handle_faces, legacy_faces));
-    EXPECT_EQ(handle.connectivity_storage_bytes(), 0U);
-
-    // The historical indexer API remains available, but is no longer needed
-    // by normal legacy geometry and field access.
-    EXPECT_EQ(
-        handle.indexer().num_local_cells(),
-        legacy->num_local_cells());
-    EXPECT_EQ(handle.indexer().num_local_faces(), legacy->num_faces());
+    EXPECT_EQ(handle->connectivity_storage_bytes(), 0U);
 }
 
 /**

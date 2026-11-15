@@ -11,15 +11,13 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
 #include "FVM/details/MatrixOperatorsImpl.hh"
 #include "fields/FaceField.hh"
 #include "fields/FieldStored.hh"
-#include "geometry/Mesh.hh"
+#include "geometry/MeshHandle.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
@@ -63,104 +61,6 @@ identity_matrix(const Teuchos::RCP<const typename Pack::map_type>& map,
 }
 
 /**
- * @brief Assemble the finite-volume diffusion matrix (negative Laplacian).
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param diffusivity Constant scalar diffusivity coefficient.
- * @return Fill-complete sparse matrix representing the diffusion operator.
- * @throws std::runtime_error if any interior face connects coincident
- *         cell centers.
- */
-template<TpetraTypePack Pack>
-Teuchos::RCP<typename Pack::matrix_type>
-diffusion_matrix(const Mesh<Pack>& mesh, typename Pack::scalar_type diffusivity)
-{
-    return detail::diffusion_matrix_impl<Pack>(mesh, diffusivity);
-}
-
-/**
- * @brief Assemble the first-order upwind convection matrix from
- *        pre-computed face fluxes stored in a FaceField.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param face_fluxes FaceField of scalar face fluxes.
- * @return Fill-complete sparse matrix representing the upwind convection
- *         operator.
- */
-template<TpetraTypePack Pack>
-Teuchos::RCP<typename Pack::matrix_type>
-upwind_convection_matrix(
-    const Mesh<Pack>& mesh,
-    const FaceField<Pack>& face_fluxes)
-{
-    return detail::upwind_convection_matrix_impl<Pack>(
-        mesh,
-        [&](typename Pack::local_ordinal_type face_lid)
-        {
-            return face_fluxes.is_owned_face(face_lid);
-        },
-        [&](typename Pack::local_ordinal_type face_lid)
-        {
-            return face_fluxes.value(face_lid);
-        });
-}
-
-/**
- * @brief Assemble the pressure Poisson matrix with pressure-correction
- *        boundary conditions and an optional gauge constraint.
- *
- * Dirichlet pressure boundaries add the homogeneous correction coefficient
- * to the owner diagonal. Neumann pressure boundaries require no matrix term.
- *
- * @tparam Pack The Tpetra type pack.
- * @tparam BoundaryConditionProvider Callable returning a pressure boundary
- *         condition for a batch ID and in-batch face index.
- * @param mesh The computational mesh.
- * @param gauge_cell_gid Optional global row-map ID used to fix the pressure
- *        level for an all-Neumann system.
- * @param boundary_condition Pressure-boundary provider.
- * @return Fill-complete sparse matrix representing the Poisson operator.
- * @throws std::invalid_argument for unsupported pressure boundary types.
- * @throws std::runtime_error if any interior face connects coincident
- *         cell centers.
- */
-template<TpetraTypePack Pack, class BoundaryConditionProvider>
-Teuchos::RCP<typename Pack::matrix_type>
-pressure_poisson_matrix(
-    const Mesh<Pack>& mesh,
-    std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
-    BoundaryConditionProvider boundary_condition)
-{
-    return detail::pressure_poisson_matrix_impl<Pack>(
-        mesh, gauge_cell_gid, std::move(boundary_condition));
-}
-
-/**
- * @brief Assemble an all-Neumann pressure Poisson matrix with one gauge row.
- *
- * @tparam Pack The Tpetra type pack.
- * @param mesh The computational mesh.
- * @param gauge_cell_gid Global row-map ID of the pressure gauge cell.
- * @return Fill-complete sparse matrix representing the Poisson operator.
- */
-template<TpetraTypePack Pack>
-Teuchos::RCP<typename Pack::matrix_type>
-pressure_poisson_matrix(
-    const Mesh<Pack>& mesh,
-    typename Pack::global_ordinal_type gauge_cell_gid)
-{
-    auto homogeneous_neumann =
-        [](int, size_t)
-    {
-        return BoundaryCondition{};
-    };
-    return pressure_poisson_matrix<Pack>(
-        mesh, gauge_cell_gid, homogeneous_neumann);
-}
-
-/**
  * @brief Assemble diffusion on a mapped orthogonal/semi-structured mesh
  *        interface.
  *
@@ -168,8 +68,6 @@ pressure_poisson_matrix(
  * `diffusion_matrix<Pack>(mesh, diffusivity)`.
  */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-    requires (!std::same_as<
-        std::remove_cv_t<MeshType>, Mesh<Pack>>)
 Teuchos::RCP<typename Pack::matrix_type>
 diffusion_matrix(
     const MeshType& mesh,
@@ -212,8 +110,6 @@ upwind_convection_matrix(
 template<TpetraTypePack Pack,
          SimpleFluid::MeshType MeshType,
          class BoundaryConditionProvider>
-    requires (!std::same_as<
-        std::remove_cv_t<MeshType>, Mesh<Pack>>)
 Teuchos::RCP<typename Pack::matrix_type>
 pressure_poisson_matrix(
     const MeshType& mesh,
@@ -226,8 +122,6 @@ pressure_poisson_matrix(
 
 /** @brief Assemble all-Neumann pressure Poisson on a mapped mesh. */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
-    requires (!std::same_as<
-        std::remove_cv_t<MeshType>, Mesh<Pack>>)
 Teuchos::RCP<typename Pack::matrix_type>
 pressure_poisson_matrix(
     const MeshType& mesh,
@@ -244,5 +138,3 @@ pressure_poisson_matrix(
 }
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

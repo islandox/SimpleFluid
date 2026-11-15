@@ -10,11 +10,8 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 
 #include "FVM/TransportSystem.hh"
 #include "dataclass/Database.hh"
@@ -132,7 +129,7 @@ inline ScalarVoidFractionOptions scalar_void_fraction_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         SimpleFluid::MeshType MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT ScalarVoidFractionModel
 {
 public:
@@ -326,10 +323,6 @@ private:
     std::map<std::string, const field_type*> d_output_fields;
     BelosLinearSolver<Pack> d_diffusion_solver;
 };
-extern template class ScalarVoidFractionModel<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class ScalarVoidFractionModel<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

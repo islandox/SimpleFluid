@@ -9,8 +9,6 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -96,15 +94,7 @@ void IncompressibleMomentumEquation<Pack, MeshType>::validate_transport_inputs(
         EquationValidation::require_mesh_match(
             *d_mesh, *correction_field, "IncompressibleMomentumEquation");
     }
-    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-    {
-        if (ale != nullptr)
-        {
-            throw std::invalid_argument(
-                "IncompressibleMomentumEquation ALE transport requires "
-                "a native mapped mesh.");
-        }
-    }
+
     if (velocity_boundary_cache.value.size()
             != d_mesh->boundary_batches().size()
         || velocity_boundary_cache.type.size()
@@ -210,12 +200,6 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                return FVM::detail::slip_face_velocity(
-                    old_velocity, face_lid);
-            }
-            else
             {
                 return FVM::detail::stored_slip_face_velocity(
                     old_velocity, face_lid);
@@ -256,16 +240,6 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_system(
     {
         try
         {
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
-                return Factory::assemble(typename Factory::VectorTerms{{old_velocity, options.time_step}, face_fluxes,
-                                             {options.kinematic_viscosity}, right_hand_source},
-                    typename Factory::VelocityBoundary{boundary_value, boundary_diffusion},
-                    typename Factory::VectorOptions{{options.non_orthogonal_treatment, correction_field}},
-                    typename Factory::VectorContext{d_cached_transport_matrix, &d_transport_geometry_cache});
-            }
-            else
             {
                 using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
                 return Factory::assemble(typename Factory::VectorTerms{{old_velocity, options.time_step}, face_fluxes,
@@ -567,12 +541,6 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
         {
             const auto face_lid =
                 d_mesh->boundary_face_batch(boundary_id).face_lids[face];
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                return FVM::detail::slip_face_velocity(
-                    old_velocity, face_lid);
-            }
-            else
             {
                 return FVM::detail::stored_slip_face_velocity(
                     old_velocity, face_lid);
@@ -604,10 +572,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     FVM::BoundaryFaceSelector zero_gradient_stress;
     if (options.velocity_neumann_zero_gradient_stress)
     {
-        if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-        {
-            throw std::invalid_argument("zero-gradient Neumann stress requires mapped momentum fields.");
-        }
+
         zero_gradient_stress = [&](int boundary_id, size_t)
         {
             return velocity_boundary_cache.type.at(boundary_id) == BoundaryConditionType::Neumann;
@@ -639,17 +604,6 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     {
         try
         {
-            if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-            {
-                using Factory = FVM::TransportSystemFactory<Pack, mesh_type>;
-                return Factory::assemble(typename Factory::MomentumTerms{{old_velocity, options.time_step}, face_fluxes,
-                                             {dynamic_viscosity, reference_density}, acceleration_source},
-                    typename Factory::MomentumBoundary{boundary_value, boundary_diffusion, boundary_dynamic_viscosity},
-                    typename Factory::MomentumOptions{
-                        {options.non_orthogonal_treatment, correction_field}, options.coefficient_interpolation, mode},
-                    typename Factory::MomentumContext{d_cached_physical_transport_matrix, &d_transport_geometry_cache});
-            }
-            else
             {
                 if (!d_stress_gradients)
                 {
@@ -785,5 +739,3 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
 }
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

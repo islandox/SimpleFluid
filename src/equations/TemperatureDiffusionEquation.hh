@@ -10,14 +10,11 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/Operators.hh"
-#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/EquationValidation.hh"
@@ -58,7 +55,7 @@ template<TpetraTypePack Pack> struct TransportEquationTestAccess;
  *
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TemperatureDiffusionEquation
 {
 public:
@@ -81,7 +78,6 @@ public:
         const field_type* conductivity = nullptr, const boundary_cache_type* boundary_conductivity = nullptr,
         FVM::FaceCoefficientInterpolation interpolation = FVM::FaceCoefficientInterpolation::Harmonic,
         const field_type* transport_density = nullptr) const;
-
 
     /** Replace per-face outward heat fluxes [W/m^2] for physical advances.
      * Cached batches override their temperature/convection patch conditions;
@@ -221,9 +217,6 @@ private:
     mutable BelosLinearSolver<Pack> d_linear_solver;
 };
 
-extern template class TemperatureDiffusionEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class TemperatureDiffusionEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

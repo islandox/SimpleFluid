@@ -32,7 +32,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
 using StoredFaceFieldType = SimpleFluid::ScalarFaceFieldStored<Pack>;
@@ -146,8 +146,8 @@ private:
  * @param local_value Local contribution.
  * @return Global sum across ranks.
  */
-template<class Mesh>
-double global_sum(const Mesh& mesh, double local_value)
+template<class MeshType>
+double global_sum(const MeshType& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(
@@ -222,7 +222,7 @@ SimpleFluid::SP<MeshType> graded_distributed_line_mesh()
         "domain_exterior_face_types",
         SimpleFluid::ArrString{
             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-    return SimpleFluid::MeshFactory(database).build<Pack>();
+    return SimpleFluid::MeshFactory(database).build_handle<Pack>();
 }
 
 /**
@@ -306,7 +306,7 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         std::max(1.0e-14, expected * 1.0e-12));
 }
 
-/** @brief Advance a distributed native handle without a legacy mesh. */
+/** @brief Advance native stored fields on a distributed handle. */
 TEST(FluidSolverMultiRankTest, NativeMeshHandleAdvancesOneStep)
 {
     auto mesh = native_distributed_line_mesh();
@@ -316,7 +316,6 @@ TEST(FluidSolverMultiRankTest, NativeMeshHandleAdvancesOneStep)
         GTEST_SKIP() << "This test requires exactly two MPI ranks.";
     }
 
-    ASSERT_FALSE(mesh->legacy_mesh());
     ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
 
     SimpleFluid::TimeStepperOptions time_options;
@@ -352,7 +351,6 @@ TEST(FluidSolverMultiRankTest, NativeMeshHandleRunsCoupledKrylov)
         GTEST_SKIP() << "This test requires exactly two MPI ranks.";
     }
 
-    ASSERT_FALSE(mesh->legacy_mesh());
     ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
 
     SimpleFluid::TimeStepperOptions time_options;

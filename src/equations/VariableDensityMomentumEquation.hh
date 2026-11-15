@@ -3,12 +3,9 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
-#include "utils/export_helper.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/MeshFieldTraits.hh"
@@ -54,8 +51,5 @@ private:
     FVM::TransportGeometryCache<MeshType> d_geometry;
     BelosLinearSolver<Pack> d_solver;
 };
-extern template class VariableDensityMomentumEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class VariableDensityMomentumEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

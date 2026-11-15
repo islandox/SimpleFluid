@@ -7,7 +7,7 @@
 
 #include "equations/Equation.hh"
 #include "fields/FieldStored.tcc"
-#include "geometry/Mesh.hh"
+#include "geometry/MeshHandle.hh"
 #include "geometry/SolidSubdomain.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
@@ -66,7 +66,6 @@ struct MutableMeshQuery : QueryMesh
 struct Incomplete;
 
 static_assert(MeshType<QueryMesh>);
-static_assert(MeshType<Mesh<Pack>>);
 static_assert(MeshType<MeshHandle<Pack>>);
 static_assert(MeshType<Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>>);
 static_assert(MeshType<SolidSubdomain<Pack>>);

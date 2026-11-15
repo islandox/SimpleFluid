@@ -10,8 +10,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "dataclass/Database.hh"
@@ -44,7 +42,7 @@ namespace SimpleFluid
  * @brief Forward declaration of the specialized prescribed_heat heat source.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class PrescribedHeatSource;
 
 /**
@@ -201,17 +199,17 @@ inline BoussinesqModelOptions boussinesq_model_options_from_database(
  * @brief Forward declaration of updateable material-property fields.
  * @tparam Pack Tpetra type pack used for field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 struct MaterialPropertyFields;
 
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class TemperatureSourceRegistry;
 
 /**
  * @brief Read-only physical state passed to material and source updaters.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>> struct BoussinesqUpdateContext
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = MeshHandle<Pack>> struct BoussinesqUpdateContext
 {
     using scalar_type = typename Pack::scalar_type;
     using mesh_type = MeshType;
@@ -282,7 +280,7 @@ void initialize_cell_field(
  * @brief Named physical heat-source field in W/m^3.
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class VolumetricScalarSource
 {
 public:
@@ -934,5 +932,3 @@ struct SolutionOutputOptions
 };
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

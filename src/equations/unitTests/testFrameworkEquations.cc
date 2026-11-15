@@ -173,10 +173,10 @@ TEST(FrameworkEquationTest, SolvesScalarDiffusionOnCartesianHandle)
 /** @brief Verifies that framework diffusion matches the established assembly path. */
 TEST(FrameworkEquationTest, MatchesExistingDiffusionAssembly)
 {
-    auto legacy = SimpleFluid::test::build_mesh<Pack>(
+    auto source_mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
     auto handle =
-        std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy);
+        std::make_shared<SimpleFluid::MeshHandle<Pack>>(*source_mesh);
     auto field = std::make_shared<ScalarStored>(
         SimpleFluid::ScalarCellFieldDescriptor<Pack>("phi"),
         handle);
@@ -187,7 +187,7 @@ TEST(FrameworkEquationTest, MatchesExistingDiffusionAssembly)
     auto generic = equation.assemble();
 
     auto existing = SimpleFluid::FVM::diffusion_system<Pack>(
-        *legacy,
+        *source_mesh,
         2.0,
         [](int, size_t)
         {

@@ -444,7 +444,7 @@ TEST(TransportTraverseTest, NonconformingAndPeriodicRowsReuseWithLivePhysicalInp
         compare_repeated_assemblies<Handle>(std::make_shared<Handle>(geometry));
 }
 
-TEST(TransportTraverseTest, NativeReorderedAndLegacyRowsReuseWithLivePhysicalInputs)
+TEST(TransportTraverseTest, NativeReorderedAndSkewRowsReuseWithLivePhysicalInputs)
 {
     auto native = std::make_shared<Meshes::OrthogonalCartesian3D>(
         Vec3D<ArrReal>{{{0, 0.5, 1, 1.5, 2}, {0, 0.5, 1}, {0, 0.5, 1}}});
@@ -452,7 +452,7 @@ TEST(TransportTraverseTest, NativeReorderedAndLegacyRowsReuseWithLivePhysicalInp
     auto reordered = MeshReorderingFactory<>::selected_cells_first(
         std::make_shared<Handle>(native), [](auto, const Vec& point) { return point.y > 0.5; });
     compare_repeated_assemblies(reordered.mesh);
-    compare_repeated_assemblies<Mesh<Pack>>(test::make_skewed_prism_mesh<Pack>());
+    compare_repeated_assemblies<MeshHandle<Pack>>(test::make_skewed_prism_mesh<Pack>());
 }
 
 TEST(TransportTraverseTest, MotionAndRollbackRefreshMetricsAndRetainTraversePlan)

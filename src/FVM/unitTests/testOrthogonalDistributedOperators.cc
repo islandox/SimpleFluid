@@ -226,7 +226,6 @@ template<class Native> void verify(const std::shared_ptr<Native>& native)
         expect_vector(gradient.value(LO(c)), Vec{0., 0., .4}, 2e-10);
     EXPECT_EQ(mesh->decomposed_orthogonal_topology().get(), compact.get());
     EXPECT_FALSE(mesh->has_materialized_indexer());
-    EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_FALSE(mesh->has_materialized_connectivity());
 }
 } // namespace

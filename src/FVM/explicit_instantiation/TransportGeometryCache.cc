@@ -9,8 +9,6 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "FVM/TransportSystem.hh"
 
@@ -25,13 +23,9 @@ using Matrix = Pack::matrix_type;
 using ScalarField = CellField<Pack>;
 using VectorField = VectorCellField<Pack>;
 using FluxField = FaceField<Pack>;
-using GeometryCache = TransportGeometryCache<Mesh<Pack>>;
 using MappedGeometryCache = TransportGeometryCache<MeshHandle<Pack>>;
 } // namespace
 
-template class TransportGeometryCache<Mesh<Pack>>;
 template class TransportGeometryCache<MeshHandle<Pack>>;
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

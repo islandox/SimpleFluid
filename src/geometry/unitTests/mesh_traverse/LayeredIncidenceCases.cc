@@ -18,8 +18,8 @@ auto layered_interior_fixture(unsigned layers)
     return std::make_shared<Layered>(nodes,cells,z);
 }
 
-template<class Mesh>
-void expect_layered_typed_cells(const Mesh& mesh)
+template<class NativeMesh>
+void expect_layered_typed_cells(const NativeMesh& mesh)
 {
     const auto plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto foreign_plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
@@ -101,7 +101,7 @@ TEST(MeshTraverseTest, LayeredTypedInteriorCellProofPreservesIncidenceContracts)
     for (unsigned layers : {1U,2U,3U,7U})
     {
         const auto native=layered_interior_fixture(layers);
-        const Handle handle(native);
+        const Mesh handle(native);
         expect_layered_typed_cells(*native);
         expect_layered_typed_cells(handle);
     }
@@ -111,7 +111,7 @@ TEST(MeshTraverseTest, LayeredTypedCellProofRejectsForeignMesh)
 {
     const auto native=layered_interior_fixture(3);
     const auto other_native=layered_interior_fixture(3);
-    const Handle mesh(native),other_mesh(other_native);
+    const Mesh mesh(native),other_mesh(other_native);
     const auto plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto other_plan=make_mesh_traverse_plan(other_mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto traversal=plan.acquire(),other=other_plan.acquire();
@@ -122,7 +122,7 @@ TEST(MeshTraverseTest, LayeredTypedCellProofRejectsForeignMesh)
 TEST(MeshTraverseTest, LayeredTypedInteriorRangeRejectsInvalidatedPlan)
 {
     const auto native=layered_interior_fixture(3);
-    const Handle mesh(native);
+    const Mesh mesh(native);
     auto plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto traversal=plan.acquire();
     traversal.cells().interior().apply([&](const auto& cell)
@@ -149,7 +149,7 @@ TEST(MeshTraverseTest, LayeredTypedInteriorRangeRejectsInvalidatedPlan)
 TEST(MeshTraverseTest, LayeredTypedInteriorRangeRejectsBackendReplacement)
 {
     const auto native=layered_interior_fixture(3);
-    Handle mesh(native);
+    Mesh mesh(native);
     const auto plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto traversal=plan.acquire();
     traversal.cells().interior().apply([&](const auto& cell)
@@ -158,7 +158,7 @@ TEST(MeshTraverseTest, LayeredTypedInteriorRangeRejectsBackendReplacement)
         if constexpr (detail::is_layered_traverse_access<Access>)
         {
             const auto range=traversal.cell_faces(cell);
-            mesh=Handle(layered_interior_fixture(3));
+            mesh=Mesh(layered_interior_fixture(3));
             EXPECT_THROW(static_cast<void>(range.size()),std::logic_error);
             EXPECT_THROW(range.require_local_adjacency(),std::logic_error);
             EXPECT_THROW(range.boundary().require_local_adjacency(),std::logic_error);
@@ -175,7 +175,7 @@ TEST(MeshTraverseTest, LayeredTypedInteriorRangeRejectsBackendReplacement)
 TEST(MeshTraverseTest, LayeredResolvedAdjacencyRetainsLiveGeometryAcrossAxialMotion)
 {
     auto native=layered_interior_fixture(3);
-    const Handle mesh(native);
+    const Mesh mesh(native);
     const auto plan=make_mesh_traverse_plan(mesh,MeshTraverseEntities::AllWithCellFaces);
     const auto layout=plan.layered_layout();
     const auto check=[&]
@@ -201,7 +201,7 @@ TEST(MeshTraverseTest, LayeredResolvedAdjacencyRetainsLiveGeometryAcrossAxialMot
         });
     };
     check();
-    PlanarALEMeshMotion<Pack> motion(std::make_shared<Handle>(mesh));
+    PlanarALEMeshMotion<Pack> motion(std::make_shared<Mesh>(mesh));
     motion.begin_trial(1.2, 0.2);
     EXPECT_EQ(plan.layered_layout().get(),layout.get());
     check();

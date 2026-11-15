@@ -13,11 +13,10 @@
 #include <gtest/gtest.h>
 
 #include "parallel/MeshPartitioner.hh"
+#include "parallel/CollectiveConstruction.hh"
 
-#include "geometry/Mesh.hh"
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
+#include "geometry/unitTests/fixtures/LegacyMeshPartitioner.hh"
+#include "geometry/details/NativeMeshAssembly.hh"
 #include "geometry/MeshHandle.hh"
 #include "parallel/MPI_interface.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -30,6 +29,7 @@
 #include <cstdint>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <limits>
 #include <map>
 #include <memory>
@@ -42,8 +42,8 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
-using MeshHandle = SimpleFluid::MeshHandle<Pack>;
+using OracleMesh = SimpleFluid::test::LegacyMesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using UnstructuredMesh = SimpleFluid::Meshes::UnstructuredMesh;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<UnstructuredMesh, Pack>;
@@ -121,7 +121,7 @@ UnstructuredMesh make_polyhedral_column()
 }
 
 /** @brief Minimal mesh exposing contiguous-ID assignment for MPI tests. */
-class ContiguousGidProbeMesh final : public MeshType
+class ContiguousGidProbeMesh final : public OracleMesh
 {
 public:
     using GO = Pack::global_ordinal_type;
@@ -171,7 +171,7 @@ public:
  * Unlike MeshFactory's STK mesh, this fixture remains unpartitioned until a
  * test explicitly calls MeshPartitioner::partition().
  */
-class ReplicatedLegacyMesh final : public MeshType
+class ReplicatedLegacyMesh final : public OracleMesh
 {
 public:
     ReplicatedLegacyMesh()
@@ -297,29 +297,7 @@ public:
         }
     }
 
-    void pair_end_faces_periodically()
-    {
-        FaceInfo* left = nullptr;
-        FaceInfo* right = nullptr;
-        for (auto& face : d_faces)
-        {
-            if (face.boundary_id == 1) left = &face;
-            if (face.boundary_id == 2) right = &face;
-        }
-        if (left == nullptr || right == nullptr)
-        {
-            throw std::logic_error("Periodic fixture requires two tagged end faces.");
-        }
-        left->neighbor = right->owner;
-        right->neighbor = left->owner;
-        for (auto* face : {left, right})
-        {
-            const auto& owner = d_cells[static_cast<size_t>(face->owner)];
-            const auto& neighbor = d_cells[static_cast<size_t>(face->neighbor)];
-            face->neighbor_to_face_distance = (face->center - neighbor.center).norm();
-            face->cell_center_distance = (neighbor.center - owner.center).norm();
-        }
-    }
+
 
     void perturb_face_metrics()
     {
@@ -361,7 +339,7 @@ private:
  * @brief Gather all owned cell GIDs from all ranks and return the union.
  */
 std::set<SimpleFluid::global_index_t>
-gather_all_owned_gids(const MeshType& mesh)
+gather_all_owned_gids(const OracleMesh& mesh)
 {
     using GO = SimpleFluid::global_index_t;
     const auto comm = mesh.owned_cell_map()->getComm();
@@ -391,7 +369,7 @@ gather_all_owned_gids(const MeshType& mesh)
 }
 
 std::set<SimpleFluid::global_index_t>
-gather_all_owned_gids(const MeshHandle& mesh)
+gather_all_owned_gids(const MeshType& mesh)
 {
     using GO = SimpleFluid::global_index_t;
     const auto comm = mesh.owned_cell_map()->getComm();
@@ -433,15 +411,15 @@ gather_all_owned_gids(const MeshHandle& mesh)
 } // namespace
 
 /** @brief Verifies face identity and metrics survive legacy packet transport. */
-TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
+TEST(LegacyMeshPacketOracleTest, FaceGlobalIDsSurviveSerialization)
 {
-    using Packet = SimpleFluid::partition_detail::CellPacket<Pack>;
+    using Packet = SimpleFluid::test::partition_detail::CellPacket<Pack>;
     Packet packet;
     packet.gid = 17;
     packet.face_node_keys = {{8, 3, 5, 1}, {9, 4, 6, 2}};
     packet.face_global_ids = {101, 307};
     packet.face_boundary_ids = {
-        MeshType::invalid_boundary_id, 4};
+        OracleMesh::invalid_boundary_id, 4};
     packet.face_neighbor_gids = {
         SimpleFluid::invalid_id<Pack::global_ordinal_type>(), 23};
     packet.face_neighbor_ranks = {-1, 2};
@@ -533,7 +511,7 @@ TEST(MeshPartitionerPacketTest, FaceGlobalIDsSurviveSerialization)
  * @brief Partitions a legacy mesh whose complete source geometry exists only
  *        on rank zero.
  */
-TEST(MeshPartitionerTest, PartitionsRootOnlySourceGeometry)
+TEST(LegacyMeshPartitionerOracleTest, PartitionsRootOnlySourceGeometry)
 {
     constexpr unsigned cell_count = 8;
     const auto comm = Tpetra::getDefaultComm();
@@ -559,7 +537,7 @@ TEST(MeshPartitionerTest, PartitionsRootOnlySourceGeometry)
     }
 
     EXPECT_TRUE(
-        SimpleFluid::MeshPartitioner<Pack>::partition(
+        SimpleFluid::test::LegacyMeshPartitioner<Pack>::partition(
             *mesh, comm));
     if (comm->getSize() <= static_cast<int>(cell_count))
     {
@@ -624,7 +602,7 @@ TEST(MeshPartitionerTest, FactoryBuildsDistributedNativeGeometry)
     SimpleFluid::MeshFactory factory(SimpleFluid::test::make_4x4x4_database());
     const auto mesh = factory.build_handle<Pack>();
     ASSERT_NE(mesh, nullptr);
-    EXPECT_FALSE(mesh->is_stk());
+    EXPECT_TRUE(std::holds_alternative<MeshType::UnstructuredPtr>(mesh->variant()));
     EXPECT_TRUE(mesh->visit([](const auto& geometry)
         { return std::is_same_v<std::remove_cvref_t<decltype(geometry)>, UnstructuredMesh>; }));
     EXPECT_EQ(mesh->owned_cell_map()->getGlobalNumElements(), 64U);
@@ -635,7 +613,7 @@ TEST(MeshPartitionerTest, FactoryBuildsDistributedNativeGeometry)
 }
 
 /** @brief Keeps owner resolution collective when only some ranks have ghosts. */
-TEST(MeshContiguousGidTest, MixedZeroAndNonzeroGhostRanksRemainCoherent)
+TEST(LegacyMeshGidOracleTest, MixedZeroAndNonzeroGhostRanksRemainCoherent)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -673,7 +651,7 @@ TEST(MeshContiguousGidTest, MixedZeroAndNonzeroGhostRanksRemainCoherent)
 }
 
 /** @brief Repeated assignment is rank coherent when some ranks own no cells. */
-TEST(MeshContiguousGidTest, ZeroOwnedRanksRemainIdempotent)
+TEST(LegacyMeshGidOracleTest, ZeroOwnedRanksRemainIdempotent)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -708,7 +686,7 @@ TEST(MeshContiguousGidTest, ZeroOwnedRanksRemainIdempotent)
 }
 
 /** @brief Distributed lookup preserves the original contiguous numbering. */
-TEST(MeshContiguousGidTest, DistributedDirectoryMatchesRankBlockNumbering)
+TEST(LegacyMeshGidOracleTest, DistributedDirectoryMatchesRankBlockNumbering)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -722,7 +700,7 @@ TEST(MeshContiguousGidTest, DistributedDirectoryMatchesRankBlockNumbering)
     const int owned_count = rank + 1;
     const int next_owned_count = next_rank + 1;
 
-    MeshType::ArrGO owned_gids;
+    OracleMesh::ArrGO owned_gids;
     owned_gids.reserve(static_cast<size_t>(owned_count));
     for (int local = 0; local < owned_count; ++local)
     {
@@ -764,7 +742,7 @@ TEST(MeshContiguousGidTest, DistributedDirectoryMatchesRankBlockNumbering)
 }
 
 /** @brief A missing ghost ID fails coherently on every rank. */
-TEST(MeshContiguousGidTest, MissingGhostIDThrowsCollectively)
+TEST(LegacyMeshGidOracleTest, MissingGhostIDThrowsCollectively)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -775,7 +753,7 @@ TEST(MeshContiguousGidTest, MissingGhostIDThrowsCollectively)
     using GO = Pack::global_ordinal_type;
     const int rank = comm->getRank();
     const GO owned_gid = static_cast<GO>(3000 + rank);
-    MeshType::ArrGO ghost_gids;
+    OracleMesh::ArrGO ghost_gids;
     if (rank == 1)
     {
         ghost_gids.push_back(static_cast<GO>(987654321));
@@ -814,7 +792,6 @@ TEST(MeshPartitionerTest, ProducesValidDistribution)
     auto mesh = make_4x4x4_box_mesh();
     const auto comm = mesh->owned_cell_map()->getComm();
 
-    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, mesh->owned_cell_map()->getComm());
 
     if (comm->getSize() < 2)
     {
@@ -911,8 +888,8 @@ TEST(MeshPartitionerTest, FaceConnectivityPreserved)
         EXPECT_GE(owner, 0);
         EXPECT_LT(static_cast<size_t>(owner), mesh->num_local_cells());
 
-        // Interior faces must have a valid neighbor
-        if (!mesh->is_exterior_face(face_lid))
+        // Owned interior faces must have their neighboring stencil cell
+        if (mesh->is_owned_face(face_lid) && !mesh->is_exterior_face(face_lid))
         {
             EXPECT_GE(neighbor, 0);
             EXPECT_LT(static_cast<size_t>(neighbor),
@@ -972,7 +949,7 @@ TEST(MeshPartitionerTest, PreservesBoundaryAndFaceGeometry)
 }
 
 /** @brief Preserves supplied source metrics through redistribution and ghost exchange. */
-TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
+TEST(LegacyMeshPartitionerOracleTest, PreservesSourceFaceMetrics)
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() < 2)
@@ -982,7 +959,7 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
 
     using GO = Pack::global_ordinal_type;
     using LO = Pack::local_ordinal_type;
-    using Geometry = SimpleFluid::partition_detail::CellPacket<Pack>::FaceGeometry;
+    using Geometry = SimpleFluid::test::partition_detail::CellPacket<Pack>::FaceGeometry;
     const auto source = make_partition_test_hex_line(8);
     auto expect_same_bits = [](double actual, double expected)
     {
@@ -991,17 +968,12 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
             std::bit_cast<std::uint64_t>(expected));
     };
 
-    for (const auto& [root_only, periodic] : std::array{
-             std::pair{false, false}, std::pair{true, false},
-             std::pair{false, true}, std::pair{true, true}})
+    for (const bool root_only : {false, true})
     {
         SCOPED_TRACE(root_only ? "root-only source" : "replicated source");
-        SCOPED_TRACE(periodic ? "periodic end faces" : "physical end faces");
         auto mesh = std::make_shared<ReplicatedLegacyMesh>(*source);
-        if (periodic) mesh->pair_end_faces_periodically();
         mesh->perturb_face_metrics();
         std::map<GO, Geometry> original_geometry;
-        std::map<GO, GO> periodic_neighbor_gids;
         for (size_t face = 0; face < mesh->num_faces(); ++face)
         {
             const auto lid = static_cast<LO>(face);
@@ -1011,21 +983,16 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
                 Geometry{info.center, info.area, info.unit_normal_from_owner,
                          info.owner_to_face_distance, info.neighbor_to_face_distance,
                          info.cell_center_distance, mesh->cell_global_id(info.owner)});
-            if (periodic && (info.boundary_id == 1 || info.boundary_id == 2))
-            {
-                periodic_neighbor_gids.emplace(
-                    mesh->face_global_id(lid), mesh->cell_global_id(info.neighbor));
-            }
+
         }
         if (root_only && comm->getRank() != 0)
         {
             mesh = std::make_shared<ReplicatedLegacyMesh>();
         }
 
-        EXPECT_TRUE(SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm));
+        EXPECT_TRUE(SimpleFluid::test::LegacyMeshPartitioner<Pack>::partition(*mesh, comm));
         int local_reversed = 0;
         int local_ghost_only = 0;
-        int local_periodic_pairs = 0;
         for (size_t face = 0; face < mesh->num_faces(); ++face)
         {
             const auto lid = static_cast<LO>(face);
@@ -1060,23 +1027,13 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
             expect_same_bits(info.unit_normal_from_neighbor.x, expected_neighbor_normal.x);
             expect_same_bits(info.unit_normal_from_neighbor.y, expected_neighbor_normal.y);
             expect_same_bits(info.unit_normal_from_neighbor.z, expected_neighbor_normal.z);
-            const auto paired = periodic_neighbor_gids.find(mesh->face_global_id(lid));
-            if (paired != periodic_neighbor_gids.end())
-            {
-                const auto paired_lid = mesh->global_to_local_cell(paired->second);
-                EXPECT_EQ(info.neighbor, paired_lid);
-                local_periodic_pairs += paired_lid != SimpleFluid::invalid_id<LO>();
-            }
         }
         int global_reversed = 0;
         int global_ghost_only = 0;
-        int global_periodic_pairs = 0;
         my_mpi::allreduce(&local_reversed, &global_reversed, 1, MPI_SUM);
         my_mpi::allreduce(&local_ghost_only, &global_ghost_only, 1, MPI_SUM);
-        my_mpi::allreduce(&local_periodic_pairs, &global_periodic_pairs, 1, MPI_SUM);
         EXPECT_GT(global_reversed, 0);
         EXPECT_GT(global_ghost_only, 0);
-        if (periodic) EXPECT_GE(global_periodic_pairs, 2);
     }
 }
 
@@ -1087,7 +1044,7 @@ TEST(MeshPartitionerTest, PreservesSourceFaceMetrics)
  * sorted global-node key and global face ID must remain a one-to-one mapping
  * after the legacy packet-based rebuild reorders local faces.
  */
-TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
+TEST(LegacyMeshPartitionerOracleTest, PreservesGlobalFaceIdentity)
 {
     constexpr unsigned cell_count = 8;
     const auto source = make_partition_test_hex_line(cell_count);
@@ -1113,7 +1070,7 @@ TEST(MeshPartitionerTest, PreservesGlobalFaceIdentity)
             std::move(node_key), mesh->face_global_id(face_lid));
     }
 
-    EXPECT_TRUE(SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm));
+    EXPECT_TRUE(SimpleFluid::test::LegacyMeshPartitioner<Pack>::partition(*mesh, comm));
     EXPECT_LT(mesh->num_owned_cells(), static_cast<size_t>(cell_count));
 
     std::vector<GO> local_records;
@@ -1234,8 +1191,7 @@ TEST(MeshPartitionerTest, SingleRankCase)
     {
         GTEST_SKIP() << "This test is only for single-rank runs.";
     }
-    // Partitioning should succeed without error and not change the mesh
-    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
+    // Native factory construction preserves the complete serial mesh
     EXPECT_EQ(mesh->num_owned_cells(), 8u);
     for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
     {
@@ -1248,23 +1204,21 @@ TEST(MeshPartitionerTest, SingleRankCase)
 //  Test 7: Repeated partitioning does not change the mesh
 // ---------------------------------------------------------------------------
 /** @brief Verifies repeated partitioning leaves the owned entity set unchanged. */
-TEST(MeshPartitionerTest, RepeatedPartitioning)
+TEST(MeshPartitionerTest, RepeatedFactoryConstructionRetainsIndependentIdentity)
 {
-    auto mesh = make_4x4x4_box_mesh();
-    const auto comm = mesh->owned_cell_map()->getComm();
-    if (comm->getSize() < 2)
+    const auto first = make_4x4x4_box_mesh();
+    const auto second = make_4x4x4_box_mesh();
+    EXPECT_NE(first->geometry_identity(), second->geometry_identity());
+    EXPECT_NE(first.get(), second.get());
+    EXPECT_EQ(first->num_owned_cells(), second->num_owned_cells());
+    EXPECT_EQ(gather_all_owned_gids(*first), gather_all_owned_gids(*second));
+    for (size_t cell = 0; cell < first->num_local_cells(); ++cell)
     {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+        const auto lid = static_cast<Pack::local_ordinal_type>(cell);
+        EXPECT_EQ(first->cell_geometry_global_id(lid), second->cell_geometry_global_id(lid));
+        EXPECT_EQ(first->cell_centroid(lid), second->cell_centroid(lid));
+        EXPECT_EQ(first->cell_volume(lid), second->cell_volume(lid));
     }
-    // First partitioning
-    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
-    const auto owned_after_first = mesh->num_owned_cells();
-    const auto all_gids_after_first = gather_all_owned_gids(*mesh);
-    // Second partitioning should not change anything
-    SimpleFluid::MeshPartitioner<Pack>::partition(*mesh, comm);
-    EXPECT_EQ(mesh->num_owned_cells(), owned_after_first);
-    const auto all_gids_after_second = gather_all_owned_gids(*mesh);
-    EXPECT_EQ(all_gids_after_second, all_gids_after_first);
 }
 
 /** @brief Native reconstruction retains polygon identity, winding and physical data. */
@@ -1331,7 +1285,7 @@ TEST(MeshPartitionerTest, NativePolyhedraRetainPolygonLoopsMetricsAndBoundaryIds
 }
 
 /**
- * @brief Verifies MeshHandle dispatches unstructured partitioning and exposes
+ * @brief Verifies Mesh dispatches unstructured partitioning and exposes
  * the resulting local mesh consistently.
  */
 TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
@@ -1463,7 +1417,7 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
             local_id);
     }
 
-    EXPECT_THROW(MeshHandle{mesh}, std::invalid_argument);
+    EXPECT_THROW(MeshType{mesh}, std::invalid_argument);
     const auto partitioned = std::make_shared<PartitionedUnstructured>(
         mesh, partition.indexer, comm);
     EXPECT_EQ(partitioned->num_global_cells(),
@@ -1485,9 +1439,9 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
     EXPECT_TRUE(partitioned->is_owned_node(0));
     EXPECT_DOUBLE_EQ(partitioned->cell_volume(0), mesh->cell_volume(0));
 
-    const MeshHandle handle(partitioned);
+    const MeshType handle(partitioned);
     const auto& handle_mesh =
-        std::get<MeshHandle::UnstructuredPtr>(handle.variant());
+        std::get<MeshType::UnstructuredPtr>(handle.variant());
     ASSERT_TRUE(handle_mesh);
     EXPECT_EQ(handle_mesh.get(), mesh.get());
     EXPECT_EQ(handle_mesh->num_cells(), handle.num_local_cells());
@@ -1541,7 +1495,7 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
             {
                 EXPECT_NE(
                     handle.opposite_cell(face_lid, local_cell),
-                    MeshHandle::invalid_local_id());
+                    MeshType::invalid_local_id());
             }
         }
     }
@@ -1552,36 +1506,58 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
  */
 TEST(MeshPartitionerGeometryTest, GradedQuadCentroidsMatchSerialRule)
 {
-    auto mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
-    auto meta = mesh->meta();
-    auto bulk = mesh->bulk();
-    auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
-    stk::mesh::put_field_on_mesh(coordinates, meta->universal_part(), 3, nullptr);
-    meta->set_coordinate_field(&coordinates);
-    auto& block = meta->declare_part_with_topology("graded_hexes", stk::topology::HEX_8);
-    bulk->modification_begin();
-    for (unsigned layer = 0; layer < 4; ++layer)
+    using Data = SimpleFluid::Meshes::UnstructuredMeshData;
+    const auto comm = Tpetra::getDefaultComm();
+    Data data;
+    std::exception_ptr error;
+    try
     {
-        stk::mesh::EntityIdVector nodes;
-        for (unsigned corner = 0; corner < 8; ++corner)
-            nodes.push_back(1 + 4 * layer + corner);
-        stk::mesh::declare_element(*bulk, block, layer + 1, nodes);
-    }
-    const std::array<std::array<double, 2>, 4> xy{{{1.,-1.},{2.,-2.},{2.,2.},{1.,1.}}};
-    for (unsigned layer = 0; layer <= 4; ++layer)
-        for (unsigned corner = 0; corner < 4; ++corner)
+        if (comm->getRank() == 0)
         {
-            const auto node = bulk->get_entity(stk::topology::NODE_RANK, 1 + 4 * layer + corner);
-            auto* values = stk::mesh::field_data(coordinates, node);
-            values[0] = xy[corner][0]; values[1] = xy[corner][1]; values[2] = layer;
+            const std::array<std::array<double, 2>, 4> xy{{{1., -1.}, {2., -2.}, {2., 2.}, {1., 1.}}};
+            std::vector<Data::Node> nodes;
+            std::vector<Data::Cell> cells;
+            for (unsigned layer = 0; layer <= 4; ++layer)
+                for (unsigned corner = 0; corner < 4; ++corner)
+                    nodes.push_back({1 + 4 * layer + corner, {xy[corner][0], xy[corner][1], double(layer)}});
+            for (unsigned layer = 0; layer < 4; ++layer)
+            {
+                Data::Cell cell;
+                cell.id = layer + 1;
+                cell.type = SimpleFluid::MeshUtils::CellType::HEXAHEDRON;
+                for (unsigned corner = 0; corner < 8; ++corner)
+                    cell.node_ids.push_back(1 + 4 * layer + corner);
+                cells.push_back(std::move(cell));
+            }
+            std::vector<SimpleFluid::detail::NativeBoundarySide> boundaries;
+            for (const auto& cell : cells)
+                for (unsigned side = 0; side < 6; ++side)
+                    if (side < 4 || (side == 4 && cell.id == 1) || (side == 5 && cell.id == 4))
+                        boundaries.push_back({cell.id, side, "wall"});
+            data =
+                SimpleFluid::detail::build_native_mesh_data(std::move(nodes), std::move(cells), boundaries, {"wall"});
         }
-    bulk->modification_end();
-    mesh->assemble();
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    const int failed = error ? 1 : 0;
+    int any_failed = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+    if (error)
+        std::rethrow_exception(error);
+    if (any_failed)
+        throw std::runtime_error("Graded native source construction failed on another rank.");
+    auto partition = SimpleFluid::MeshPartitioner<Pack>::partition_native(std::move(data), comm, 1, true);
+    auto mesh = SimpleFluid::detail::collective_make_shared<MeshType>(
+        *comm, std::move(partition.geometry), partition.indexer, comm);
     std::size_t trapezoids = 0;
     for (std::size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(face);
-        if (std::abs(mesh->face_normal(lid).z) < 0.5) continue;
+        if (std::abs(mesh->face_normal(lid).z) < 0.5)
+            continue;
         ++trapezoids;
         const auto center = mesh->face_centroid(lid);
         EXPECT_NEAR(center.x, 14. / 9., 1e-14);

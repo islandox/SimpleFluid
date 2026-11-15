@@ -621,7 +621,6 @@ TEST(FieldStoredOperatorsTest,
     const auto unstructured = make_unstructured_handle();
     const auto cartesian = make_cartesian_line_handle();
 
-    ASSERT_FALSE(unstructured->legacy_mesh());
     ASSERT_EQ(
         unstructured->num_owned_cells(),
         cartesian->num_owned_cells());

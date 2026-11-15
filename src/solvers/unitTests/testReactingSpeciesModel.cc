@@ -495,10 +495,10 @@ TEST(ReactingSpeciesModelTest, ALEUsesAcceptedOldAndTrialNewVolumesAndRestoresAc
     }
 }
 
-TEST(ReactingSpeciesModelTest, LegacyMeshExecutesTheSameSchemaIndexedSourcePath)
+TEST(ReactingSpeciesModelTest, FactoryNativeMeshExecutesTheSameSchemaIndexedSourcePath)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "Legacy mesh fixture is serial; native cases cover MPI.";
+        GTEST_SKIP() << "Factory reference fixture is serial; distributed cases cover MPI.";
     auto selected = options();
     selected.species_source = [](const R::ReactionContext& context, double)
     {

@@ -29,20 +29,20 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using LegacyMesh = SimpleFluid::Mesh<Pack>;
+using CartesianMesh = SimpleFluid::MeshHandle<Pack>;
 using MappedMesh = SimpleFluid::MeshHandle<Pack>;
-using LegacyScalar = SimpleFluid::CellField<Pack>;
-using LegacyFlux = SimpleFluid::FaceField<Pack>;
+using CartesianScalar = SimpleFluid::CellField<Pack>;
+using CartesianFlux = SimpleFluid::FaceField<Pack>;
 using MappedScalar = SimpleFluid::ScalarCellFieldStored<Pack, MappedMesh>;
 using MappedFlux = SimpleFluid::ScalarFaceFieldStored<Pack, MappedMesh>;
 using TransportSystem = SimpleFluid::FVM::TransportSystem<Pack>;
-using LegacyFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, LegacyMesh>;
+using CartesianFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, CartesianMesh>;
 using MappedFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, MappedMesh>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<LegacyMesh> make_legacy_line()
+SimpleFluid::SP<CartesianMesh> make_cartesian_line()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(3, 1, 1));
 }
@@ -59,26 +59,12 @@ SimpleFluid::SP<const MappedMesh> make_distributed_mapped_line()
     return std::make_shared<MappedMesh>(std::move(cartesian));
 }
 
-Pack::local_ordinal_type boundary_face(const LegacyMesh& mesh, std::string_view name)
+SimpleFluid::SP<CartesianMesh> make_periodic_cartesian_line()
 {
-    for (const auto& [batch_id, batch] : mesh.boundary_batches())
-    {
-        if (mesh.boundary_batch_name(batch_id) == name && !batch.face_lids.empty())
-        {
-            return batch.face_lids.front();
-        }
-    }
-    throw std::runtime_error("Requested boundary face was not found.");
-}
-
-SimpleFluid::SP<LegacyMesh> make_periodic_legacy_line()
-{
-    auto mesh = make_legacy_line();
-    const auto xmin = boundary_face(*mesh, "xmin");
-    const auto xmax = boundary_face(*mesh, "xmax");
-    mesh->set_periodic_face(xmin, mesh->owner_cell(xmax));
-    mesh->set_periodic_face(xmax, mesh->owner_cell(xmin));
-    return mesh;
+    auto geometry = std::make_shared<CartesianMesh::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1., 2., 3.}, {0., 1.}, {0., 1.}}},
+        SimpleFluid::Vec3D<bool>{{true, false, false}});
+    return std::make_shared<CartesianMesh>(std::move(geometry));
 }
 
 template<class MeshPtr> auto periodic_scalar_condition(MeshPtr mesh)
@@ -163,6 +149,7 @@ void set_positive_x_flux(const MeshType& mesh, FaceField& flux)
     {
         flux.set_value(face_lid, 0.2 * mesh.face_area_vector(face_lid).x);
     }
+    flux.sync_ghosts();
 }
 
 auto dirichlet_condition()
@@ -340,7 +327,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedPacksMatchAnalyticalRowsAndRebui
             }
         }
     };
-    check(make_legacy_line());
+    check(make_cartesian_line());
     check(make_mapped_line());
 }
 
@@ -377,7 +364,6 @@ TEST(ScalarTransportDiscretizationTest, TemperatureRhsRefreshRequiresOperatorAnd
         EXPECT_EQ(refreshed.matrix.get(), system.matrix.get());
         EXPECT_DOUBLE_EQ(matrix_entry(*refreshed.matrix, 0, 0), 29.0);
         EXPECT_DOUBLE_EQ(refreshed.rhs->getData()[0], 101.0);
-        if constexpr (!std::is_same_v<Backend, LegacyMesh>)
         {
             terms.history.older_values = &old;
             options.discretization.time = ScalarTimeScheme::BDF2;
@@ -394,20 +380,20 @@ TEST(ScalarTransportDiscretizationTest, TemperatureRhsRefreshRequiresOperatorAnd
     check(std::make_shared<const MappedMesh>(test::make_unstructured_hex_line(1)));
 }
 
-TEST(ScalarTransportDiscretizationTest, Bdf2RequiresACompatibleOlderFieldForLegacyAndMappedStorage)
+TEST(ScalarTransportDiscretizationTest, Bdf2RequiresACompatibleOlderFieldForCartesianAndMappedStorage)
 {
     using namespace SimpleFluid::FVM;
 
     const ScalarTransportDiscretization bdf2{ScalarTimeScheme::BDF2, ScalarConvectionScheme::Upwind};
 
-    auto legacy_mesh = make_legacy_line();
-    LegacyScalar old(legacy_mesh, 1.0, "old");
-    LegacyScalar storage(legacy_mesh, 2.0, "storage");
-    LegacyScalar advection(legacy_mesh, 2.0, "advection");
-    LegacyScalar diffusion(legacy_mesh, 0.25, "diffusion");
-    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    auto cartesian_mesh = make_cartesian_line();
+    CartesianScalar old(cartesian_mesh, 1.0, "old");
+    CartesianScalar storage(cartesian_mesh, 2.0, "storage");
+    CartesianScalar advection(cartesian_mesh, 2.0, "advection");
+    CartesianScalar diffusion(cartesian_mesh, 0.25, "diffusion");
+    CartesianFlux flux(cartesian_mesh, 0.0, "flux");
 
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {cell_source(), {}}},
@@ -415,9 +401,9 @@ TEST(ScalarTransportDiscretizationTest, Bdf2RequiresACompatibleOlderFieldForLega
                      {.discretization = bdf2, .correction = {NonOrthogonalTreatment::Explicit, nullptr}}),
         std::invalid_argument);
 
-    auto other_legacy_mesh = make_legacy_line();
-    LegacyScalar incompatible_older(other_legacy_mesh, 0.5, "incompatible_older");
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &incompatible_older},
+    auto other_cartesian_mesh = make_cartesian_line();
+    CartesianScalar incompatible_older(other_cartesian_mesh, 0.5, "incompatible_older");
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &incompatible_older},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {cell_source(), {}}},
@@ -449,29 +435,29 @@ TEST(ScalarTransportDiscretizationTest, Bdf2UsesCurrentStorageAsDerivativeCoeffi
     constexpr auto changed_storage = 5.0;
     constexpr auto storage_ratio = changed_storage / base_storage;
 
-    auto legacy_mesh = make_legacy_line();
-    LegacyScalar old(legacy_mesh, 3.0, "old");
-    LegacyScalar older(legacy_mesh, 1.0, "older");
-    LegacyScalar storage(legacy_mesh, base_storage, "storage");
-    LegacyScalar changed(legacy_mesh, changed_storage, "changed_storage");
-    LegacyScalar advection(legacy_mesh, 0.0, "advection");
-    LegacyScalar diffusion(legacy_mesh, 0.0, "diffusion");
-    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    auto cartesian_mesh = make_cartesian_line();
+    CartesianScalar old(cartesian_mesh, 3.0, "old");
+    CartesianScalar older(cartesian_mesh, 1.0, "older");
+    CartesianScalar storage(cartesian_mesh, base_storage, "storage");
+    CartesianScalar changed(cartesian_mesh, changed_storage, "changed_storage");
+    CartesianScalar advection(cartesian_mesh, 0.0, "advection");
+    CartesianScalar diffusion(cartesian_mesh, 0.0, "diffusion");
+    CartesianFlux flux(cartesian_mesh, 0.0, "flux");
 
-    const auto legacy_base = LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
+    const auto cartesian_base = CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
                                                          .face_fluxes = flux,
                                                          .coefficients = {storage, advection, diffusion},
                                                          .sources = {[](Pack::local_ordinal_type) { return 0.0; }, {}}},
         {dirichlet_condition(), zero_boundary_value()},
         {.discretization = bdf2, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
-    const auto legacy_changed =
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
+    const auto cartesian_changed =
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
                                     .face_fluxes = flux,
                                     .coefficients = {changed, advection, diffusion},
                                     .sources = {[](Pack::local_ordinal_type) { return 0.0; }, {}}},
             {dirichlet_condition(), zero_boundary_value()},
             {.discretization = bdf2, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
-    expect_system_scaled(legacy_changed, legacy_base, 3, storage_ratio);
+    expect_system_scaled(cartesian_changed, cartesian_base, 3, storage_ratio);
 
     auto mapped_mesh = make_mapped_line();
     MappedScalar mapped_old(mapped_mesh, 3.0, "old");
@@ -526,42 +512,46 @@ TEST(ScalarTransportDiscretizationTest, PeriodicBoundedLinearUpwindUsesWrappedCo
         ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::BoundedLinearUpwind};
     const ScalarTransportDiscretization upwind{ScalarTimeScheme::BackwardEuler, ScalarConvectionScheme::Upwind};
 
-    auto legacy_mesh = make_periodic_legacy_line();
-    LegacyScalar old(legacy_mesh, "old");
-    LegacyScalar storage(legacy_mesh, 1.0, "storage");
-    LegacyScalar advection(legacy_mesh, 1.0, "advection");
-    LegacyScalar diffusion(legacy_mesh, 0.0, "diffusion");
-    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    auto cartesian_mesh = make_periodic_cartesian_line();
+    CartesianScalar old(cartesian_mesh, "old");
+    CartesianScalar storage(cartesian_mesh, 1.0, "storage");
+    CartesianScalar advection(cartesian_mesh, 1.0, "advection");
+    CartesianScalar diffusion(cartesian_mesh, 0.0, "diffusion");
+    CartesianFlux flux(cartesian_mesh, 0.0, "flux");
     set_cell_values(old, {0.0, 0.0, 1.0});
-    flux.set_value(boundary_face(*legacy_mesh, "xmin"), -0.2);
-    flux.set_value(boundary_face(*legacy_mesh, "xmax"), 0.2);
-    const auto legacy_condition = periodic_scalar_condition(legacy_mesh);
+    for (const auto face : flux.owned_face_ids())
+        if (cartesian_mesh->is_periodic_face(face))
+            flux.set_value(face, 0.2 * cartesian_mesh->face_normal(face).x);
+    flux.sync_ghosts();
+    const auto cartesian_condition = periodic_scalar_condition(cartesian_mesh);
 
-    const auto legacy_advanced =
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    const auto cartesian_advanced =
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {[](Pack::local_ordinal_type) { return 0.0; }, {}}},
-            {legacy_condition, zero_boundary_value()},
+            {cartesian_condition, zero_boundary_value()},
             {.discretization = advanced, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
-    const auto legacy_upwind =
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    const auto cartesian_upwind =
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {[](Pack::local_ordinal_type) { return 0.0; }, {}}},
-            {legacy_condition, zero_boundary_value()},
+            {cartesian_condition, zero_boundary_value()},
             {.discretization = upwind, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
-    expect_systems_equal(legacy_advanced, legacy_upwind, 3);
+    expect_systems_equal(cartesian_advanced, cartesian_upwind, 3);
 
-    const auto mapped_mesh = std::make_shared<MappedMesh>(legacy_mesh);
+    const auto mapped_mesh = cartesian_mesh;
     MappedScalar mapped_old(mapped_mesh, "old");
     MappedScalar mapped_storage(mapped_mesh, 1.0, "storage");
     MappedScalar mapped_advection(mapped_mesh, 1.0, "advection");
     MappedScalar mapped_diffusion(mapped_mesh, 0.0, "diffusion");
     MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
     set_cell_values(mapped_old, {0.0, 0.0, 1.0});
-    mapped_flux.set_value(boundary_face(*legacy_mesh, "xmin"), -0.2);
-    mapped_flux.set_value(boundary_face(*legacy_mesh, "xmax"), 0.2);
+    for (const auto face : mapped_flux.owned_face_ids())
+        if (cartesian_mesh->is_periodic_face(face))
+            mapped_flux.set_value(face, 0.2 * cartesian_mesh->face_normal(face).x);
+    mapped_flux.sync_ghosts();
     const auto mapped_condition = periodic_scalar_condition(mapped_mesh);
 
     const auto mapped_advanced =
@@ -595,26 +585,26 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
 {
     using namespace SimpleFluid::FVM;
 
-    const auto legacy_mesh = make_legacy_line();
-    const auto communicator = legacy_mesh->owned_cell_map()->getComm();
+    const auto cartesian_mesh = make_cartesian_line();
+    const auto communicator = cartesian_mesh->owned_cell_map()->getComm();
     if (communicator->getSize() < 2)
     {
         GTEST_SKIP() << "Requires at least two MPI ranks.";
     }
 
-    LegacyScalar old(legacy_mesh, 1.0, "old");
-    LegacyScalar older(legacy_mesh, 0.5, "older");
-    LegacyScalar storage(legacy_mesh, 2.0, "storage");
-    LegacyScalar advection(legacy_mesh, 2.0, "advection");
-    LegacyScalar diffusion(legacy_mesh, 0.25, "diffusion");
-    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    CartesianScalar old(cartesian_mesh, 1.0, "old");
+    CartesianScalar older(cartesian_mesh, 0.5, "older");
+    CartesianScalar storage(cartesian_mesh, 2.0, "storage");
+    CartesianScalar advection(cartesian_mesh, 2.0, "advection");
+    CartesianScalar diffusion(cartesian_mesh, 0.25, "diffusion");
+    CartesianFlux flux(cartesian_mesh, 0.0, "flux");
     const ScalarCellValueProvider<Pack> finite_source = [](Pack::local_ordinal_type) { return 0.0; };
     // Every rank enters the same factory overload, but selects a different
     // correction category. Reject before choosing different collective paths.
-    LegacyFactory::ScalarOptions scalar_options{};
+    CartesianFactory::ScalarOptions scalar_options{};
     if (communicator->getRank() == 0)
-        scalar_options.correction = TransportCorrection<LegacyScalar>{NonOrthogonalTreatment::Explicit, &old};
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::ScalarTerms{{old, 0.25}, flux, {0.25}},
+        scalar_options.correction = TransportCorrection<CartesianScalar>{NonOrthogonalTreatment::Explicit, &old};
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::ScalarTerms{{old, 0.25}, flux, {0.25}},
                      {dirichlet_condition(), zero_boundary_value()}, scalar_options),
         std::invalid_argument);
 
@@ -622,7 +612,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         communicator->getRank() == 0 ? ScalarTimeScheme::BackwardEuler : ScalarTimeScheme::BDF2,
         ScalarConvectionScheme::Upwind};
     EXPECT_THROW(
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {finite_source, {}}},
@@ -632,7 +622,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
 
     const auto positive_rank_dependent_time_step = communicator->getRank() == 0 ? 0.25 : 0.5;
     EXPECT_THROW(
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, positive_rank_dependent_time_step},
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, positive_rank_dependent_time_step},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {finite_source, {}}},
@@ -642,7 +632,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         std::invalid_argument);
 
     const auto rank_dependent_time_step = communicator->getRank() == 0 ? -0.25 : 0.25;
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, rank_dependent_time_step},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, rank_dependent_time_step},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}}},
@@ -656,7 +646,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         storage.set_value(0, -1.0);
     }
     storage.sync_ghosts();
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}}},
@@ -672,7 +662,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
 
     const std::function<double(Pack::local_ordinal_type)> invalid_sink =
         [rank = communicator->getRank()](Pack::local_ordinal_type) { return rank == 0 ? -1.0 : 0.0; };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, nullptr},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, nullptr},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, invalid_sink}},
@@ -685,7 +675,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
     const std::function<std::optional<double>(Pack::local_ordinal_type)> invalid_fixed =
         [rank = communicator->getRank()](Pack::local_ordinal_type) -> std::optional<double>
     { return rank == 0 ? std::optional<double>{std::numeric_limits<double>::infinity()} : std::nullopt; };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, nullptr},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, nullptr},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}},
@@ -698,7 +688,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
 
     const ScalarCellValueProvider<Pack> invalid_source = [rank = communicator->getRank()](Pack::local_ordinal_type)
     { return rank == 0 ? std::numeric_limits<double>::quiet_NaN() : 0.0; };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {invalid_source, {}}},
@@ -716,7 +706,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         }
         return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
     };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}}},
@@ -733,7 +723,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         }
         return 0.0;
     };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}}},
@@ -747,7 +737,7 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         return SimpleFluid::BoundaryCondition{
             rank == 0 ? SimpleFluid::BoundaryConditionType::Robin : SimpleFluid::BoundaryConditionType::Dirichlet, 0.0};
     };
-    EXPECT_THROW(LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25},
+    EXPECT_THROW(CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25},
                                              .face_fluxes = flux,
                                              .coefficients = {storage, advection, diffusion},
                                              .sources = {finite_source, {}}},
@@ -835,33 +825,33 @@ TEST(ScalarTransportDiscretizationTest, AdvancedAssemblersRejectRankDivergentPre
         std::invalid_argument);
 }
 
-TEST(ScalarTransportDiscretizationTest, Bdf2BoundedLinearUpwindMatchesLegacyMappedAndPhysicalPaths)
+TEST(ScalarTransportDiscretizationTest, Bdf2BoundedLinearUpwindMatchesCartesianMappedAndPhysicalPaths)
 {
     using namespace SimpleFluid::FVM;
 
     const ScalarTransportDiscretization advanced{ScalarTimeScheme::BDF2, ScalarConvectionScheme::BoundedLinearUpwind};
     const ScalarTransportDiscretization bdf2_upwind{ScalarTimeScheme::BDF2, ScalarConvectionScheme::Upwind};
 
-    auto legacy_mesh = make_legacy_line();
-    LegacyScalar old(legacy_mesh, "old");
-    LegacyScalar older(legacy_mesh, "older");
-    LegacyScalar storage(legacy_mesh, 2.0, "storage");
-    LegacyScalar advection(legacy_mesh, 2.0, "advection");
-    LegacyScalar diffusion(legacy_mesh, 0.25, "diffusion");
-    LegacyFlux flux(legacy_mesh, 0.0, "flux");
+    auto cartesian_mesh = make_cartesian_line();
+    CartesianScalar old(cartesian_mesh, "old");
+    CartesianScalar older(cartesian_mesh, "older");
+    CartesianScalar storage(cartesian_mesh, 2.0, "storage");
+    CartesianScalar advection(cartesian_mesh, 2.0, "advection");
+    CartesianScalar diffusion(cartesian_mesh, 0.25, "diffusion");
+    CartesianFlux flux(cartesian_mesh, 0.0, "flux");
     set_cell_values(old, {0.0, 1.0, 0.25});
     set_cell_values(older, {0.25, 0.5, 0.75});
-    set_positive_x_flux(*legacy_mesh, flux);
+    set_positive_x_flux(*cartesian_mesh, flux);
 
-    const auto legacy_advanced =
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
+    const auto cartesian_advanced =
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {cell_source(), {}}},
             {dirichlet_condition(), zero_boundary_value()},
             {.discretization = advanced, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
-    const auto legacy_upwind =
-        LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
+    const auto cartesian_upwind =
+        CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, 0.25, &older},
                                     .face_fluxes = flux,
                                     .coefficients = {storage, advection, diffusion},
                                     .sources = {cell_source(), {}}},
@@ -897,26 +887,26 @@ TEST(ScalarTransportDiscretizationTest, Bdf2BoundedLinearUpwindMatchesLegacyMapp
             {dirichlet_condition(), zero_boundary_value()},
             {.discretization = advanced, .correction = {NonOrthogonalTreatment::Explicit, nullptr}});
 
-    expect_systems_equal(mapped_advanced, legacy_advanced, 3);
+    expect_systems_equal(mapped_advanced, cartesian_advanced, 3);
     expect_systems_equal(physical_advanced, mapped_advanced, 3);
 
     auto correction_norm = 0.0;
     for (size_t cell = 0; cell < 3; ++cell)
     {
         correction_norm = std::max(
-            correction_norm, std::abs(legacy_advanced.rhs->getData()[cell] - legacy_upwind.rhs->getData()[cell]));
+            correction_norm, std::abs(cartesian_advanced.rhs->getData()[cell] - cartesian_upwind.rhs->getData()[cell]));
     }
     EXPECT_GT(correction_norm, 1.0e-12);
 }
 
-TEST(ScalarTransportDiscretizationTest, LegacyAcceptedOldStorageAvoidsEndpointCancellation)
+TEST(ScalarTransportDiscretizationTest, CartesianAcceptedOldStorageAvoidsEndpointCancellation)
 {
     using namespace SimpleFluid::FVM;
-    const auto mesh = make_legacy_line();
-    LegacyScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 1e20, "trial_storage"),
+    const auto mesh = make_cartesian_line();
+    CartesianScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 1e20, "trial_storage"),
         unit(mesh, 1., "unit"), zero(mesh, 0., "zero");
-    LegacyFlux flux(mesh, 0., "flux");
-    const auto system = LegacyFactory::assemble(LegacyFactory::WeightedScalarTerms{.history = {old, .5},
+    CartesianFlux flux(mesh, 0., "flux");
+    const auto system = CartesianFactory::assemble(CartesianFactory::WeightedScalarTerms{.history = {old, .5},
                                                     .face_fluxes = flux,
                                                     .coefficients = {trial, unit, zero, &accepted},
                                                     .sources = {[](auto) { return 0.; }, {}}},
@@ -934,17 +924,17 @@ TEST(ScalarTransportDiscretizationTest, LegacyAcceptedOldStorageAvoidsEndpointCa
     }
 }
 
-TEST(ScalarTransportDiscretizationTest, LegacyAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively)
+TEST(ScalarTransportDiscretizationTest, CartesianAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively)
 {
     using namespace SimpleFluid::FVM;
-    const auto mesh = make_legacy_line();
-    LegacyScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 2., "trial_storage"),
+    const auto mesh = make_cartesian_line();
+    CartesianScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 2., "trial_storage"),
         unit(mesh, 1., "unit"), zero(mesh, 0., "zero");
-    LegacyFlux flux(mesh, 0., "flux");
-    const auto assemble = [&](const LegacyScalar* previous, ScalarTimeScheme scheme = ScalarTimeScheme::BackwardEuler)
+    CartesianFlux flux(mesh, 0., "flux");
+    const auto assemble = [&](const CartesianScalar* previous, ScalarTimeScheme scheme = ScalarTimeScheme::BackwardEuler)
     {
-        return LegacyFactory::assemble(
-            LegacyFactory::WeightedScalarTerms{.history = {old, .5, scheme == ScalarTimeScheme::BDF2 ? &old : nullptr},
+        return CartesianFactory::assemble(
+            CartesianFactory::WeightedScalarTerms{.history = {old, .5, scheme == ScalarTimeScheme::BDF2 ? &old : nullptr},
                 .face_fluxes = flux,
                 .coefficients = {trial, unit, zero, previous},
                 .sources = {[](auto) { return 0.; }, {}}},

@@ -7,7 +7,7 @@ TEST(MeshTraverseMultiRankTest, ZeroHaloDoesNotTurnPartitionInterfacesIntoPhysic
 {
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
-    Handle mesh(cartesian(4, 3, 3), Handle::DistributionOptions{.ghost_layers = 0});
+    Mesh mesh(cartesian(4, 3, 3), Mesh::DistributionOptions{.ghost_layers = 0});
     expect_handle_selections(mesh);
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
@@ -16,7 +16,7 @@ TEST(MeshTraverseMultiRankTest, ZeroHaloDoesNotTurnPartitionInterfacesIntoPhysic
     traverse.faces().interior().local().apply([&](const auto& face)
     {
         EXPECT_FALSE(mesh.is_geometry_exterior_face(face.id()));
-        if (face.owner() == Handle::invalid_local_id() || face.neighbor() == Handle::invalid_local_id())
+        if (face.owner() == Mesh::invalid_local_id() || face.neighbor() == Mesh::invalid_local_id())
             ++absent_adjacency;
     });
     int global_absent = 0;
@@ -53,7 +53,7 @@ TEST(MeshTraverseMultiRankTest, OwnedAndLocalSelectionsHandleGhostsAndEmptyRanks
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
     const auto geometry = cartesian(4, 3, 3);
-    Handle with_ghosts(geometry);
+    Mesh with_ghosts(geometry);
     expect_handle_selections(with_ghosts);
     EXPECT_GT(with_ghosts.num_local_cells(), with_ghosts.num_owned_cells());
     {
@@ -74,8 +74,8 @@ TEST(MeshTraverseMultiRankTest, OwnedAndLocalSelectionsHandleGhostsAndEmptyRanks
         EXPECT_EQ(selected_ids(traverse.cells().boundary().local()), boundary);
     }
 
-    Handle sparse(cartesian(1, 1, 1),
-                  Handle::DistributionOptions{.ghost_layers = 0, .allow_empty_partitions = true});
+    Mesh sparse(cartesian(1, 1, 1),
+                  Mesh::DistributionOptions{.ghost_layers = 0, .allow_empty_partitions = true});
     expect_handle_selections(sparse);
     int empty = sparse.num_owned_cells() == 0 ? 1 : 0;
     int empty_ranks = 0;

@@ -21,8 +21,7 @@ namespace
 using Pack = SimpleFluid::DefaultTpetraTypes;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::Mesh<Pack>;
-using NativeMesh = SimpleFluid::MeshHandle<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -80,6 +79,7 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
                                                  : (generation == 1 ? 0.2 : -0.3) *
                                                        mesh->face_area_vector(face).dot(Vec{1.0, -0.5, 0.25}));
         }
+        flux.sync_ghosts();
         std::vector<LO> source_calls;
         std::vector<std::pair<int, size_t>> value_calls, condition_calls;
         bool awaiting_condition = false;
@@ -100,7 +100,7 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
                 {
                     EXPECT_TRUE(awaiting_condition);
                     if (!value_calls.empty())
-                        EXPECT_EQ(value_calls.back(), (std::pair{batch, face}));
+                        if (!value_calls.empty()) EXPECT_EQ(value_calls.back(), (std::pair{batch, face}));
                     awaiting_condition = false;
                     condition_calls.emplace_back(batch, face);
                     return VectorBoundaryCondition{boundary_type(batch), gradient};
@@ -159,7 +159,8 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
     }
     // Independent transient/source oracle: the shared matrix must not be
     // accumulated once for each RHS component.
-    flux.data().putScalar(0.0);
+    flux.put_value(0.0);
+    flux.sync_ghosts();
     const auto transient = TransportFactory<decltype(velocity)>::assemble(
         typename TransportFactory<decltype(velocity)>::VectorTerms{
             .history = {.old_values = velocity, .time_step = 0.25},
@@ -183,18 +184,19 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
     }
 }
 
+
 /** One conservative unit-cell balance fixes the outflow coefficient independently. */
 TEST(BasicTransportAssemblyTest, NativeBoundaryOutflowContributesOnceAndRetainsCallbacks)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, NativeMesh>;
+    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<NativeMesh>(std::make_shared<NativeMesh::Cartesian>(
+    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
         Vec3D<ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
-        NativeMesh::DistributionOptions{.allow_empty_partitions = true});
-    SimpleFluid::VectorCellFieldStored<Pack, NativeMesh> old(mesh, Vec{1., -2., 3.}, "old");
-    ScalarFaceFieldStored<Pack, NativeMesh> flux(mesh, 0., "flux");
+        MeshType::DistributionOptions{.allow_empty_partitions = true});
+    VectorFieldType old(mesh, Vec{1., -2., 3.}, "old");
+    FaceField<Pack> flux(mesh, 0., "flux");
     for (const auto face : flux.owned_face_ids())
     {
         const auto center = mesh->face_centroid(face);
@@ -268,12 +270,12 @@ TEST(BasicTransportAssemblyTest, NativeBoundaryOutflowContributesOnceAndRetainsC
 TEST(BasicTransportAssemblyTest, NativePartitionFluxMatchesIndependentTwoCellBalance)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, NativeMesh>;
+    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<NativeMesh>(std::make_shared<NativeMesh::Cartesian>(
+    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
         Vec3D<ArrReal>{{{0., 1., 2.}, {0., 1.}, {0., 1.}}}));
-    SimpleFluid::VectorCellFieldStored<Pack, NativeMesh> old(mesh, "old");
+    VectorFieldType old(mesh, "old");
     for (size_t local = 0; local < mesh->num_owned_cells(); ++local)
     {
         const auto cell = static_cast<LO>(local);
@@ -282,7 +284,7 @@ TEST(BasicTransportAssemblyTest, NativePartitionFluxMatchesIndependentTwoCellBal
         old.set_value(cell, gid == 0 ? Vec{1., 2., 3.} : Vec{4., 5., 6.});
     }
     old.sync_ghosts();
-    ScalarFaceFieldStored<Pack, NativeMesh> flux(mesh, 0., "flux");
+    FaceField<Pack> flux(mesh, 0., "flux");
     for (const auto face : flux.owned_face_ids())
         flux.set_value(face, .5 * mesh->face_normal(face).x * mesh->face_area(face));
     flux.sync_ghosts();
@@ -323,19 +325,19 @@ TEST(BasicTransportAssemblyTest, NativePartitionFluxMatchesIndependentTwoCellBal
 TEST(BasicTransportAssemblyTest, NativeFailuresAreCollectiveAndPreserveCachedOperator)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, NativeMesh>;
+    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<NativeMesh>(std::make_shared<NativeMesh::Cartesian>(
+    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
         Vec3D<ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
-        NativeMesh::DistributionOptions{.allow_empty_partitions = true});
+        MeshType::DistributionOptions{.allow_empty_partitions = true});
     const auto comm = mesh->owned_cell_map()->getComm();
     const int local_owner = mesh->num_owned_cells() ? comm->getRank() : -1;
     int owner_rank = -1;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_owner, &owner_rank);
     ASSERT_EQ(owner_rank, 0);
-    SimpleFluid::VectorCellFieldStored<Pack, NativeMesh> old(mesh, Vec{1., -2., 3.}, "failure_old");
-    ScalarFaceFieldStored<Pack, NativeMesh> flux(mesh, 0., "failure_flux");
+    VectorFieldType old(mesh, Vec{1., -2., 3.}, "failure_old");
+    FaceField<Pack> flux(mesh, 0., "failure_flux");
     old.sync_ghosts();
     flux.sync_ghosts();
     enum class Fault { None, Source, BoundaryValue, BoundaryCondition, Robin, BoundaryOverflow };

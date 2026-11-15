@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using Solver = SimpleFluid::BoussinesqSolver<Pack>;
 namespace SurfaceGas = SimpleFluid::Testing::SurfaceGas;
 

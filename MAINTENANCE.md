@@ -28,16 +28,17 @@ for distributed execution and testing.
 These dependencies define the build and distributed-runtime assumptions needed to
 reproduce tests.
 
-The solver has two deliberate backend paths. Supported mapped meshes execute
-natively through `MeshHandle` and `FieldStored`; callers that provide the
-legacy `Mesh` use synchronized compatibility fields. Preserve that boundary
-instead of converting a supplied native mesh into a legacy mesh.
-This avoids hidden conversions and duplicated storage while preserving compatibility
-consumers.
+Production meshes execute through `MeshHandle` and native `FieldStored`.
+The former scalar/vector/tensor field spellings are aliases of native stored
+fields. Preserve exact caller handle identity, native maps and execution leases;
+do not introduce geometry snapshots or mirrored compatibility fields.
+Use `Mesh` for local mesh aliases and `MeshType` for the structural concept.
+There is no public `SimpleFluid::Mesh` alias or compatibility class.
 
 `MeshFactory` now constructs native unstructured handles from STK/Ioss input
-and STK-free programmatic generators. `Mesh` and `MeshFactory::build()` are
-deprecated compatibility interfaces. Preserve the source-ID, metric authority,
+and STK-free programmatic generators. Use `build_handle()` or `from_stk_file()`;
+the old `Mesh`, `build()` and `build_empty_mesh()` interfaces are retired.
+Preserve the source-ID, metric authority,
 input layout and collective-publication contracts in
 [native mesh input](docs/architecture/native_mesh_input.md).
 
@@ -501,9 +502,9 @@ change focused and reviewable.
 - Keep `SolidSubdomain` range-backed. Do not reintroduce parent-sized selection
   masks or dense parent-to-subdomain cell/face reverse arrays.
   This preserves compact selected-domain storage.
-- Select native and legacy field families through `MeshFieldTraits` rather
-  than adding another parallel equation implementation.
-  This keeps shared algebra and behavior from drifting between backends.
+- Select the native field descriptor/location family through `MeshFieldTraits`
+  rather than adding another parallel equation implementation.
+  This keeps shared algebra and behavior consistent across native mesh types.
 - Keep mapped FVM implementation bodies under `src/FVM/details` and preserve
   the stable public forwarding surface under `src/FVM`.
   This preserves the established source and template-inclusion boundary.
@@ -597,9 +598,8 @@ relevant to the change. An MPI launcher failure before a test body starts can
 be an environment/interface problem; reproduce it in a normal shell before
 classifying it as a solver regression.
 
-Changes to a shared operator, equation, or solver should exercise both the
-native `MeshHandle`/`FieldStored` path and the legacy `Mesh` compatibility path
-when both are applicable. Include Cartesian, cylindrical, semi-structured, or
+Changes to a shared operator, equation, or solver should exercise the affected
+native `MeshHandle`/`FieldStored` paths. Include Cartesian, cylindrical, semi-structured, or
 partitioned coverage according to the claimed mesh support; do not infer
 cross-backend parity from one smoke test.
 
@@ -654,23 +654,23 @@ and solver components may retain shared pointers to it.
 
 Reuse the shared operator helpers and boundary/geometry caches before adding
 another assembly path. Put mapped implementations under `src/FVM/details` and
-forward through the public header; use `MeshFieldTraits` when an equation must
-support both stored and legacy fields. Keep mesh traversal and coefficient
+forward through the public header; use `MeshFieldTraits` for native mesh-dependent
+field families. Keep mesh traversal and coefficient
 construction in FVM, the physical residual/source definition in equations,
 and time-step orchestration in solvers. Test the algebra on a minimal mesh,
-then add an analytical or conservation case and the relevant native/legacy
-parity test.
+then add an analytical or conservation case and the relevant native geometry,
+provider or scalar/vector parity test.
 
-Legacy/native mapped weighted-scalar transport and native mapped
+Native mapped weighted-scalar transport and
 physical-temperature transport preserve Backward Euler and first-order upwind
 as the default public behavior. The opt-in `ScalarTransportDiscretization`
 path supports constant-step BDF2, which requires an older field on the same
 mesh, and bounded linear-upwind convection, which retains the implicit upwind
 matrix and applies a conservative limited deferred correction. Keep new scalar
-policies in the shared legacy/mapped implementation seam, preserve the default
+policies in the shared native implementation seam, preserve the default
 pack selections, validate policy and optional-field selections collectively,
-and add weighted-scalar parity tests across legacy `CellField` and native
-`FieldStored` paths. Group history, material/coefficient inputs, sources,
+and add weighted-scalar parity tests across supported native geometry/provider
+paths. Group history, material/coefficient inputs, sources,
 constraints, boundary callbacks, options, and optional resources through
 `TransportSystemFactory`; keep basic scalar two-point assembly distinct from a
 present explicit non-orthogonal correction group. A higher-order policy for
@@ -689,8 +689,8 @@ those seams so optional models remain lazily
 allocated and disabled cases retain existing behavior. Publish diagnostics
 through existing output-field maps when possible instead of adding one getter
 per field. Template mesh-dependent models on their mesh type, select storage
-through `MeshFieldTraits`, and retain explicit native and legacy
-specializations at the shared-library boundary.
+through `MeshFieldTraits`, and retain explicit specializations for the supported
+native mesh/type-pack matrix at the shared-library boundary.
 See [the coupling ownership and transaction design](docs/architecture/multiphysics_solver_coupler.md).
 
 ### Add an executable
@@ -857,7 +857,8 @@ Then confirm:
 - the diff contains no unrelated cleanup or generated build products;
 - every new source is registered in the correct CMake target;
 - focused Debug tests and required MPI/integration tests pass;
-- native and legacy backend behavior is covered where a shared path changed;
+- supported native geometry, field-map and provider behavior is covered where
+  a shared path changed;
 - `simplefluid_elf_export_boundary` passes after shared-library, template
   instantiation, visibility, or toolchain changes;
 - numerical and performance comparisons are attached when applicable;

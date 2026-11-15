@@ -49,7 +49,6 @@ void validate_wall_distance_equation_options(
     static_cast<void>(to_string(options.linear_solver.preconditioner));
 }
 
-template class PoissonWallDistanceEquation<DefaultTpetraTypes>;
 template class PoissonWallDistanceEquation<
     DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid

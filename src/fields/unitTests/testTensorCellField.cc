@@ -9,7 +9,6 @@
  *
  */
 
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include <gtest/gtest.h>
 
 #include "fields/TensorCellField.hh"
@@ -23,7 +22,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::TensorCellField<Pack>;
 using TensorType = FieldType::tensor_type;
 
@@ -136,11 +135,10 @@ TEST(TensorCellFieldTest, RejectsOutOfRangeComponents)
                  std::out_of_range);
 }
 
-/** @brief Ensures construction rejects a mesh without assembled maps. */
-TEST(TensorCellFieldTest, RequiresAssembledMesh)
+/** @brief Ensures null mesh and empty descriptor names fail independently. */
+TEST(TensorCellFieldTest, RejectsNullMeshAndEmptyDescriptorName)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh =
-        std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
-
-    EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
+    EXPECT_THROW(FieldType(nullptr, "gradient"), std::invalid_argument);
+    const auto mesh = make_two_hex_mesh();
+    EXPECT_THROW(FieldType(mesh, ""), std::invalid_argument);
 }

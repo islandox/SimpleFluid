@@ -44,25 +44,3 @@
 #define SIMPLEFLUID_LOCAL
 #define SIMPLEFLUID_PUBLIC_TYPE
 #endif
-
-// Mesh remains a real compatibility class; the native path uses MeshHandle.
-#if defined(SIMPLEFLUID_DISABLE_LEGACY_MESH_DEPRECATION)
-#define SIMPLEFLUID_LEGACY_MESH_DEPRECATED
-#else
-#define SIMPLEFLUID_LEGACY_MESH_DEPRECATED                                                                             \
-    [[deprecated("Use MeshHandle and MeshFactory::build_handle() for native mesh execution.")]]
-#endif
-
-// Scope intentional compatibility declarations without disabling diagnostics
-// for client code which explicitly names the deprecated class/API.
-#if defined(_MSC_VER)
-#define SIMPLEFLUID_LEGACY_API_BEGIN __pragma(warning(push)) __pragma(warning(disable : 4996))
-#define SIMPLEFLUID_LEGACY_API_END __pragma(warning(pop))
-#elif defined(__GNUC__) || defined(__clang__)
-#define SIMPLEFLUID_LEGACY_API_BEGIN                                                                                   \
-    _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
-#define SIMPLEFLUID_LEGACY_API_END _Pragma("GCC diagnostic pop")
-#else
-#define SIMPLEFLUID_LEGACY_API_BEGIN
-#define SIMPLEFLUID_LEGACY_API_END
-#endif

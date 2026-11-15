@@ -36,7 +36,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 namespace GeneralGas = SimpleFluid::Testing::GeneralGasModel;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;

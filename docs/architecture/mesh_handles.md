@@ -29,7 +29,7 @@ rejects a view that predates a layout edit.
 Two independent validity tokens are preserved and must not be merged:
 
 - **Layout generation** changes on cell reordering, repartitioning, periodic
-  pairing, map/backend replacement, or coarse/fine identity changes. Traversal
+  layout selection, map/backend replacement, or coarse/fine identity changes. Traversal
   plans and geometry caches must be rebuilt.
 - **Geometry epoch** changes on coordinate/volume motion only. Fixed-topology
   traversal plans stay valid; metric caches refresh through their existing
@@ -37,12 +37,12 @@ Two independent validity tokens are preserved and must not be merged:
 
 ## Compatibility
 
-`MeshHandle` keeps its complete previous public API: every constructor,
-`variant()`, `visit()`, `visit_mutable()`, maps, boundary queries, metrics,
-region/execution accessors, and VTU export forward to the owning state or the
-borrowed views with unchanged behavior. The geometry metric bodies now live in
-`MeshGeometryHandle.ipp`; their periodic-image arithmetic, legacy STK branches,
-composite region resolution, and compact orthogonal paths are unchanged.
+The native `variant()`, `visit()`, `visit_mutable()`, maps, boundary queries,
+metrics, region/execution accessors and VTU export forward to the owning state
+or borrowed views. The production legacy adapter, constructors and storage
+queries are retired. The remaining geometry metric bodies live in
+`MeshGeometryHandle.ipp`; native periodic-image arithmetic, composite region
+resolution and compact orthogonal paths retain their contracts.
 
 Remaining migration work (tracked, not required for compatibility):
 
@@ -67,7 +67,7 @@ are preserved. See [mesh traversal](../mesh_traverse.md#stable-assembly-metrics)
 ## Compiled transport entry points
 
 `FVM::TransportSystemFactory<Pack, MeshType>` receives grouped by-value inputs
-and selects legacy or stored field types through `MeshFieldTraits`. It obtains
+and selects native stored field types through `MeshFieldTraits`. It obtains
 the mesh from the transported field and preserves that object's identity.
 Default providers compile each supported factory overload once for its public
 mesh type; the runtime geometry variant stays outside the numerical assembly

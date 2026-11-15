@@ -3,8 +3,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/details/TransportSystemFactory.tcc"
@@ -24,13 +22,9 @@ VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
     VectorTerms terms, BasicVectorBoundary boundary, BasicVectorOptions options, BasicVectorContext context)
 {
     if (!terms.source)
-        terms.source = [](typename Pack::local_ordinal_type) { return typename VectorCellField<Pack>::vec_type{}; };
-    if constexpr (std::is_same_v<MeshType, Mesh<Pack>>)
-        return detail::assemble_legacy_basic_vector<Pack>(
-            std::move(terms), std::move(boundary), options, std::move(context));
-    else
-        return detail::assemble_stored_basic_vector<Pack, MeshType>(
-            std::move(terms), std::move(boundary), options, std::move(context));
+        terms.source = [](typename Pack::local_ordinal_type) { return typename VectorCellFieldStored<Pack, MeshType>::value_type{}; };
+    return detail::assemble_stored_basic_vector<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context));
 }
 
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
@@ -73,5 +67,3 @@ VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
         std::move(terms), std::move(boundary), options, std::move(context));
 }
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

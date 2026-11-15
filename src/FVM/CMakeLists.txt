@@ -17,9 +17,6 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/FieldStoredTransportSystem/SupportPartitionedCartesian.cc
     explicit_instantiation/FieldStoredTransportSystem/ScalarSolidSubdomain.cc
     explicit_instantiation/FieldStoredTransportSystem/TemperatureSolidSubdomain.cc
-    explicit_instantiation/WeightedScalarTransportSystem.cc
-    explicit_instantiation/PhysicalTemperatureTransportSystem.cc
-    explicit_instantiation/PhysicalMomentumTransportSystem.cc
     explicit_instantiation/FieldStoredOperators/CellMeshHandle.cc
     explicit_instantiation/FieldStoredOperators/DiffusionMeshHandle.cc
     explicit_instantiation/FieldStoredOperators/FaceMeshHandle.cc
@@ -33,8 +30,6 @@ add_library(SimpleFluidFVM SHARED
     explicit_instantiation/FieldStoredOperators/SupportSolidSubdomain.cc
     explicit_instantiation/FieldStoredOperators/CellSolidSubdomain.cc
     explicit_instantiation/FieldStoredOperators/DiffusionSolidSubdomain.cc
-    explicit_instantiation/TransportRhs.cc
-    explicit_instantiation/TransportSystem.cc
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
 simplefluid_configure_component(SimpleFluidFVM)

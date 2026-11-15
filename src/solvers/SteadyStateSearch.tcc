@@ -28,21 +28,6 @@ namespace SimpleFluid
 {
 
 template <TpetraTypePack Pack>
-SteadyStateFieldMonitor<Pack>::SteadyStateFieldMonitor(SP<const mesh_type> mesh,
-                                                       scalar_type reference_temperature,
-                                                       SteadyStateUpdateScales scales)
-    : d_mesh(require_mesh(std::move(mesh))), d_reference_temperature(reference_temperature),
-      d_scales(scales)
-{
-    if (!std::isfinite(reference_temperature))
-    {
-        throw std::invalid_argument("Steady-state reference temperature must be finite.");
-    }
-    const SteadyStateSearchOptions validation_options{.update_scales = d_scales};
-    validate_steady_state_search_options(validation_options, validation_options.minimum_time_step);
-}
-
-template <TpetraTypePack Pack>
 SteadyStateFieldMonitor<Pack>::SteadyStateFieldMonitor(
     SP<const stored_mesh_type> mesh,
     scalar_type reference_temperature,
@@ -57,52 +42,6 @@ SteadyStateFieldMonitor<Pack>::SteadyStateFieldMonitor(
     const SteadyStateSearchOptions validation_options{.update_scales = d_scales};
     validate_steady_state_search_options(validation_options,
                                          validation_options.minimum_time_step);
-}
-
-template <TpetraTypePack Pack>
-void SteadyStateFieldMonitor<Pack>::initialize(
-    const velocity_field_type& velocity, const field_type& temperature,
-    std::vector<const field_type*> additional_scalar_fields)
-{
-    require_field_mesh(velocity, "velocity");
-    require_field_mesh(temperature, "temperature");
-    for (const auto* field : additional_scalar_fields)
-    {
-        if (field == nullptr)
-        {
-            throw std::invalid_argument("Steady-state additional field cannot be null.");
-        }
-        require_field_mesh(*field, "additional scalar field");
-    }
-
-    d_velocity = &velocity;
-    d_temperature = &temperature;
-    d_additional_scalar_fields = std::move(additional_scalar_fields);
-    capture_current_state();
-    d_initialized = true;
-}
-
-template <TpetraTypePack Pack>
-void SteadyStateFieldMonitor<Pack>::initialize(
-    const velocity_field_type& velocity,
-    std::vector<const field_type*> additional_scalar_fields)
-{
-    require_field_mesh(velocity, "velocity");
-    for (const auto* field : additional_scalar_fields)
-    {
-        if (field == nullptr)
-        {
-            throw std::invalid_argument(
-                "Steady-state additional field cannot be null.");
-        }
-        require_field_mesh(*field, "additional scalar field");
-    }
-
-    d_velocity = &velocity;
-    d_temperature = nullptr;
-    d_additional_scalar_fields = std::move(additional_scalar_fields);
-    capture_current_state();
-    d_initialized = true;
 }
 
 template <TpetraTypePack Pack>
@@ -169,14 +108,11 @@ SteadyStateFieldMonitor<Pack>::observe(scalar_type time_step)
                                     "step.");
     }
 
-    if (d_stored_mesh)
     {
         return observe_fields(
             time_step, *d_stored_mesh, *d_stored_velocity,
             d_stored_temperature, d_stored_additional_scalar_fields);
     }
-    return observe_fields(time_step, *d_mesh, *d_velocity, d_temperature,
-                          d_additional_scalar_fields);
 }
 
 template <TpetraTypePack Pack>
@@ -307,17 +243,6 @@ SteadyStateFieldMonitor<Pack>::observe_fields(
 }
 
 template <TpetraTypePack Pack>
-SP<const typename SteadyStateFieldMonitor<Pack>::mesh_type>
-SteadyStateFieldMonitor<Pack>::require_mesh(SP<const mesh_type> mesh)
-{
-    if (!mesh)
-    {
-        throw std::invalid_argument("Steady-state field monitor requires a non-null mesh.");
-    }
-    return mesh;
-}
-
-template <TpetraTypePack Pack>
 SP<const typename SteadyStateFieldMonitor<Pack>::stored_mesh_type>
 SteadyStateFieldMonitor<Pack>::require_mesh(SP<const stored_mesh_type> mesh)
 {
@@ -332,9 +257,7 @@ template <TpetraTypePack Pack>
 template <class Field>
 void SteadyStateFieldMonitor<Pack>::require_field_mesh(const Field& field, const char* name) const
 {
-    const auto expected_mesh = d_stored_mesh
-        ? static_cast<const void*>(d_stored_mesh.get())
-        : static_cast<const void*>(d_mesh.get());
+    const auto expected_mesh = static_cast<const void*>(d_stored_mesh.get());
     if (static_cast<const void*>(field.mesh_ptr().get()) != expected_mesh)
     {
         throw std::invalid_argument(std::string("Steady-state ") + name +
@@ -355,24 +278,7 @@ void SteadyStateFieldMonitor<Pack>::require_field_mesh(
                 throw std::invalid_argument(
                     "Steady-state additional field cannot be null.");
             }
-            using pointed_field_type = std::remove_cv_t<
-                std::remove_pointer_t<decltype(field_pointer)>>;
-            if constexpr (std::is_same_v<pointed_field_type,
-                                         stored_field_type>)
-            {
-                require_field_mesh(*field_pointer, name);
-            }
-            else
-            {
-                const auto legacy_mesh = d_stored_mesh->legacy_mesh();
-                if (!legacy_mesh ||
-                    field_pointer->mesh_ptr().get() != legacy_mesh.get())
-                {
-                    throw std::invalid_argument(
-                        std::string("Steady-state ") + name +
-                        " belongs to a different mesh.");
-                }
-            }
+            require_field_mesh(*field_pointer, name);
         },
         field);
 }
@@ -380,15 +286,12 @@ void SteadyStateFieldMonitor<Pack>::require_field_mesh(
 template <TpetraTypePack Pack>
 void SteadyStateFieldMonitor<Pack>::capture_current_state()
 {
-    if (d_stored_mesh)
     {
         capture_current_state(
             *d_stored_mesh, *d_stored_velocity, d_stored_temperature,
             d_stored_additional_scalar_fields);
         return;
     }
-    capture_current_state(*d_mesh, *d_velocity, d_temperature,
-                          d_additional_scalar_fields);
 }
 
 template <TpetraTypePack Pack>
@@ -529,7 +432,7 @@ void SteadyStateProgressStream::write_retry(int iteration, int retry, int maximu
                                             std::string_view reason)
 {
     d_output << SteadyStateProgressLineFormatter<Scalar>::format_retry
-                            (iteration, retry, maximum_retries, 
+                            (iteration, retry, maximum_retries,
                              time, time_step,
                              next_time_step, reason)
              << std::endl;

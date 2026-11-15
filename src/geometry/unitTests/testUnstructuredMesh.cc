@@ -26,17 +26,17 @@
 namespace
 {
 
-using Mesh = SimpleFluid::Meshes::UnstructuredMesh;
-using CellType = Mesh::CellType;
+using Handle = SimpleFluid::Meshes::UnstructuredMesh;
+using CellType = Handle::CellType;
 using Handle = SimpleFluid::MeshHandle<>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-Mesh make_two_hex_mesh()
+Handle make_two_hex_mesh()
 {
-    return Mesh(
+    return Handle(
         {
             {0.0, 0.0, 0.0},
             {1.0, 0.0, 0.0},
@@ -69,23 +69,23 @@ std::string read_file(const std::filesystem::path& path)
         std::istreambuf_iterator<char>()};
 }
 
-Mesh::PolyhedralTopology prism_topology(size_t sides)
+Handle::PolyhedralTopology prism_topology(size_t sides)
 {
-    Mesh::PolyhedralTopology topology{1, {}};
-    SimpleFluid::Arr<Mesh::NodeID> bottom, top;
+    Handle::PolyhedralTopology topology{1, {}};
+    SimpleFluid::Arr<Handle::NodeID> bottom, top;
     for (size_t i = 0; i < sides; ++i)
     {
         bottom.push_back(sides - 1 - i);
         top.push_back(sides + i);
     }
-    topology.faces.push_back({bottom, 0, Mesh::invalid_ordinal, 21, "bottom"});
-    topology.faces.push_back({top, 0, Mesh::invalid_ordinal, 22, "top"});
+    topology.faces.push_back({bottom, 0, Handle::invalid_ordinal, 21, "bottom"});
+    topology.faces.push_back({top, 0, Handle::invalid_ordinal, 22, "top"});
     for (size_t i = 0; i < sides; ++i)
         topology.faces.push_back({{i, (i + 1) % sides, (i + 1) % sides + sides, i + sides}, 0});
     return topology;
 }
 
-SimpleFluid::Arr<Mesh::Vec3> concave_prism_nodes()
+SimpleFluid::Arr<Handle::Vec3> concave_prism_nodes()
 {
     return {{0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {1, 1, 0}, {1, 2, 0}, {0, 2, 0},
             {0, 0, 2}, {2, 0, 2}, {2, 1, 2}, {1, 1, 2}, {1, 2, 2}, {0, 2, 2}};
@@ -96,8 +96,8 @@ SimpleFluid::Arr<Mesh::Vec3> concave_prism_nodes()
 /** @brief Verifies the unstructured mesh and indexer satisfy the mesh concepts. */
 TEST(UnstructuredMeshTest, SatisfiesMeshBaseConcept)
 {
-    static_assert(SimpleFluid::MeshIndexer<Mesh::Indexer>);
-    static_assert(SimpleFluid::MeshClass<Mesh>);
+    static_assert(SimpleFluid::MeshIndexer<Handle::Indexer>);
+    static_assert(SimpleFluid::MeshClass<Handle>);
 }
 
 /**
@@ -119,7 +119,7 @@ TEST(UnstructuredMeshTest, BuildsConnectivityGeometryAndBoundaryBatches)
     EXPECT_EQ(mesh.owner_cell(interior_face), 0U);
     EXPECT_EQ(mesh.neighbor_cell(interior_face), 1U);
     EXPECT_TRUE(mesh.is_interior_face(interior_face));
-    EXPECT_EQ(mesh.face_normal(interior_face), Mesh::Vec3(1.0, 0.0, 0.0));
+    EXPECT_EQ(mesh.face_normal(interior_face), Handle::Vec3(1.0, 0.0, 0.0));
 
     const auto inlet_face = mesh.faces(0U)[5];
     EXPECT_TRUE(mesh.is_boundary_face(inlet_face));
@@ -132,7 +132,7 @@ TEST(UnstructuredMeshTest, BuildsConnectivityGeometryAndBoundaryBatches)
 TEST(UnstructuredMeshTest, RejectsBoundaryTagsOnInteriorFaces)
 {
     EXPECT_THROW(
-        Mesh(
+        Handle(
             {
                 {0.0, 0.0, 0.0},
                 {1.0, 0.0, 0.0},
@@ -163,10 +163,10 @@ TEST(UnstructuredMeshTest, RejectsBoundaryTagsOnInteriorFaces)
  */
 TEST(UnstructuredMeshTest, MeshHandleWrapsAndExportsUnstructuredMesh)
 {
-    const auto mesh = std::make_shared<Mesh>(make_two_hex_mesh());
+    const auto mesh = std::make_shared<Handle>(make_two_hex_mesh());
     const Handle handle(mesh);
 
-    EXPECT_FALSE(handle.is_stk());
+    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(handle.variant()));
     EXPECT_EQ(handle.num_owned_cells(), 2U);
     EXPECT_EQ(handle.num_faces(), 11U);
     EXPECT_EQ(handle.owned_cell_map()->getLocalNumElements(), 2U);
@@ -199,7 +199,7 @@ TEST(UnstructuredMeshTest, MeshHandleWrapsAndExportsUnstructuredMesh)
 
 TEST(UnstructuredMeshTest, ConcavePolyhedronUsesSignedAreaAndVolumeMoments)
 {
-    const Mesh mesh(concave_prism_nodes(), prism_topology(6));
+    const Handle mesh(concave_prism_nodes(), prism_topology(6));
     EXPECT_EQ(mesh.cell_type(0), CellType::POLYHEDRON);
     EXPECT_EQ(mesh.num_faces(), 8U);
     EXPECT_EQ(mesh.face_nodes(0).size(), 6U);
@@ -210,13 +210,13 @@ TEST(UnstructuredMeshTest, ConcavePolyhedronUsesSignedAreaAndVolumeMoments)
     EXPECT_NEAR(mesh.face_area(0), 3.0, 1e-13);
     EXPECT_NEAR(mesh.face_centroid(0).x, 5.0 / 6.0, 1e-13);
     EXPECT_NEAR(mesh.face_centroid(0).y, 5.0 / 6.0, 1e-13);
-    EXPECT_EQ(mesh.face_normal(0), Mesh::Vec3(0, 0, -1));
+    EXPECT_EQ(mesh.face_normal(0), Handle::Vec3(0, 0, -1));
     EXPECT_EQ(mesh.boundary_name(0), "bottom");
     EXPECT_EQ(mesh.cell_face_orientation(0, 0), 1);
 
     auto shifted = concave_prism_nodes();
-    for (auto& node : shifted) node = node + Mesh::Vec3(1e8, -1e8, 1e8);
-    const Mesh translated(shifted, prism_topology(6));
+    for (auto& node : shifted) node = node + Handle::Vec3(1e8, -1e8, 1e8);
+    const Handle translated(shifted, prism_topology(6));
     EXPECT_NEAR(translated.cell_volume(0), 6.0, 1e-13);
     EXPECT_NEAR(translated.cell_centroid(0).x - 1e8, 5.0 / 6.0, 1e-8);
 }
@@ -225,11 +225,11 @@ TEST(UnstructuredMeshTest, PolyhedronSupportsLargeFacesAndCellStencils)
 {
     constexpr size_t n = 12;
     constexpr double pi = 3.14159265358979323846;
-    SimpleFluid::Arr<Mesh::Vec3> nodes;
+    SimpleFluid::Arr<Handle::Vec3> nodes;
     for (int z = 0; z < 2; ++z)
         for (size_t i = 0; i < n; ++i)
             nodes.push_back({std::cos(2 * pi * i / n), std::sin(2 * pi * i / n), static_cast<double>(z)});
-    const Mesh mesh(nodes, prism_topology(n));
+    const Handle mesh(nodes, prism_topology(n));
     EXPECT_EQ(mesh.faces(0).size(), n + 2);
     EXPECT_EQ(mesh.face_nodes(0).size(), n);
     EXPECT_NEAR(mesh.cell_volume(0), n * std::sin(2 * pi / n) / 2, 1e-13);
@@ -241,10 +241,10 @@ TEST(UnstructuredMeshTest, PolyhedronSupportsLargeFacesAndCellStencils)
 TEST(UnstructuredMeshTest, ExplicitFacesRetainOwnerOrderAndNeighborIncidence)
 {
     const auto source = make_two_hex_mesh();
-    Mesh::PolyhedralTopology topology{source.num_cells(), {}};
+    Handle::PolyhedralTopology topology{source.num_cells(), {}};
     for (size_t face = 0; face < source.num_faces(); ++face)
         topology.faces.push_back({source.face_nodes(face), source.owner_cell(face), source.neighbor_cell(face)});
-    const Mesh mesh(source.nodes(), topology, 1, 6);
+    const Handle mesh(source.nodes(), topology, 1, 6);
     EXPECT_EQ(mesh.num_owned_cells(), 1U);
     EXPECT_EQ(mesh.num_owned_faces(), 6U);
     for (size_t face = 0; face < source.num_faces(); ++face)
@@ -261,7 +261,7 @@ TEST(UnstructuredMeshTest, ExplicitFacesRetainOwnerOrderAndNeighborIncidence)
     EXPECT_NEAR(mesh.cell_volume(0), 1.0, 1e-14);
     EXPECT_NEAR(mesh.cell_volume(1), 1.0, 1e-14);
 
-    SimpleFluid::Arr<Mesh::CellDefinition> cells(2);
+    SimpleFluid::Arr<Handle::CellDefinition> cells(2);
     for (size_t cell = 0; cell < 2; ++cell)
     {
         cells[cell].type = CellType::POLYHEDRON;
@@ -272,7 +272,7 @@ TEST(UnstructuredMeshTest, ExplicitFacesRetainOwnerOrderAndNeighborIncidence)
             cells[cell].face_node_ids.push_back(std::move(loop));
         }
     }
-    const Mesh rebuilt(source.nodes(), cells);
+    const Handle rebuilt(source.nodes(), cells);
     EXPECT_EQ(rebuilt.num_faces(), 11U);
     EXPECT_NEAR(rebuilt.cell_volume(1), 1.0, 1e-14);
     EXPECT_THROW(mesh.cell_face_orientation(1, 0), std::invalid_argument);
@@ -282,11 +282,11 @@ TEST(UnstructuredMeshTest, PolyhedronOutputRetainsConcaveLoopsAndOutwardSharedFa
 {
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Serial topology export regression.";
     const auto source = make_two_hex_mesh();
-    Mesh::PolyhedralTopology cubes{source.num_cells(), {}};
+    Handle::PolyhedralTopology cubes{source.num_cells(), {}};
     for (size_t f = 0; f < source.num_faces(); ++f)
         cubes.faces.push_back({source.face_nodes(f), source.owner_cell(f), source.neighbor_cell(f)});
-    for (const auto& mesh : {std::make_shared<Mesh>(source.nodes(), cubes),
-             std::make_shared<Mesh>(concave_prism_nodes(), prism_topology(6))})
+    for (const auto& mesh : {std::make_shared<Handle>(source.nodes(), cubes),
+             std::make_shared<Handle>(concave_prism_nodes(), prism_topology(6))})
     {
         const Handle handle(mesh);
         const auto output = handle.vtu_topology();
@@ -301,7 +301,7 @@ TEST(UnstructuredMeshTest, PolyhedronOutputRetainsConcaveLoopsAndOutwardSharedFa
             {
                 const auto count = static_cast<size_t>(output->faces.at(cursor++));
                 ASSERT_EQ(count, mesh->face_nodes(f).size());
-                SimpleFluid::Arr<Mesh::Vec3> loop;
+                SimpleFluid::Arr<Handle::Vec3> loop;
                 for (size_t i = 0; i < count; ++i)
                     loop.push_back(output->points.at(output->faces.at(cursor++)));
                 const auto area = SimpleFluid::MeshUtils::face_area_vector(loop);
@@ -327,43 +327,43 @@ TEST(UnstructuredMeshTest, RejectsOpenMisOrientedAndDegeneratePolyhedra)
     auto nodes = concave_prism_nodes();
     auto topology = prism_topology(6);
     topology.faces.pop_back();
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     topology = prism_topology(6);
     std::ranges::reverse(topology.faces[0].node_ids);
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     topology = prism_topology(6);
     for (auto& face : topology.faces) std::ranges::reverse(face.node_ids);
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     topology = prism_topology(6);
     topology.faces.push_back(topology.faces[0]);
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     topology = prism_topology(6);
     topology.faces[0].node_ids[1] = topology.faces[0].node_ids[0];
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     topology = prism_topology(6);
     nodes[0].z = 0.2;
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     nodes = concave_prism_nodes();
     nodes[0] = nodes[1];
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
     nodes = concave_prism_nodes();
     std::swap(topology.faces[0].node_ids[1], topology.faces[0].node_ids[3]);
-    EXPECT_THROW(Mesh(nodes, topology), std::invalid_argument);
-    EXPECT_NO_THROW(Mesh(SimpleFluid::Arr<Mesh::Vec3>{}, Mesh::PolyhedralTopology{}));
-    EXPECT_THROW(Mesh(nodes, prism_topology(6), 2, 0), std::invalid_argument);
+    EXPECT_THROW(Handle(nodes, topology), std::invalid_argument);
+    EXPECT_NO_THROW(Handle(SimpleFluid::Arr<Handle::Vec3>{}, Handle::PolyhedralTopology{}));
+    EXPECT_THROW(Handle(nodes, prism_topology(6), 2, 0), std::invalid_argument);
 }
 
 /** Only the explicit partition seam permits a rank with no geometry. */
 TEST(UnstructuredMeshTest, EmptyPartitionDoesNotRelaxOrdinaryInputValidation)
 {
-    const auto empty = Mesh::empty_partition();
+    const auto empty = Handle::empty_partition();
     EXPECT_EQ(empty.num_cells(), 0U);
     EXPECT_EQ(empty.num_owned_cells(), 0U);
     EXPECT_EQ(empty.num_faces(), 0U);
     EXPECT_EQ(empty.num_nodes(), 0U);
     EXPECT_EQ(empty.indexer().cells, 0U);
-    const SimpleFluid::Arr<Mesh::Vec3> nodes;
-    const SimpleFluid::Arr<Mesh::CellDefinition> cells;
-    EXPECT_THROW((Mesh(nodes, cells)), std::invalid_argument);
-    EXPECT_THROW((Mesh(nodes, cells, {}, 0, 0)), std::invalid_argument);
+    const SimpleFluid::Arr<Handle::Vec3> nodes;
+    const SimpleFluid::Arr<Handle::CellDefinition> cells;
+    EXPECT_THROW((Handle(nodes, cells)), std::invalid_argument);
+    EXPECT_THROW((Handle(nodes, cells, {}, 0, 0)), std::invalid_argument);
 }

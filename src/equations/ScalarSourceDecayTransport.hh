@@ -10,11 +10,8 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 
 #include "FVM/TransportSystem.hh"
 #include "equations/CollectiveValidation.hh"
@@ -197,7 +194,7 @@ scalar_source_decay_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         SimpleFluid::MeshType MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT ScalarSourceDecayTransport
 {
 public:
@@ -497,10 +494,6 @@ private:
     BelosLinearSolver<Pack> d_transport_solver;
     bool d_inventory_initialized = false;
 };
-extern template class ScalarSourceDecayTransport<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class ScalarSourceDecayTransport<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

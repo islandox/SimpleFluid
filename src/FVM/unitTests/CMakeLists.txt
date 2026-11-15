@@ -65,18 +65,18 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
-    NAME LegacyTransportValidation_2procs
+    NAME NativeTransportValidation_2procs
     TARGET testFvmOperators
     PROCS 2
-    ARGS "--gtest_filter=FvmOperatorsTest.LegacyTransportCacheAndScalarFailuresAreCollective"
-    LABELS "mpi;transport;legacy"
+    ARGS "--gtest_filter=FvmOperatorsTest.NativeTransportCacheAndScalarFailuresAreCollective"
+    LABELS "mpi;transport;native"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
     NAME ScalarTransportDiscretizationValidation_2procs
     TARGET testScalarTransportDiscretization
     PROCS 2
-    ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively:ScalarTransportDiscretizationTest.LegacyAcceptedOldStorageAvoidsEndpointCancellation:ScalarTransportDiscretizationTest.LegacyAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively"
+    ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively:ScalarTransportDiscretizationTest.CartesianAcceptedOldStorageAvoidsEndpointCancellation:ScalarTransportDiscretizationTest.CartesianAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively"
     LABELS "mpi;scalar_transport"
     TIMEOUT 120)
 
@@ -207,7 +207,7 @@ simplefluid_add_mpi_test(
     NAME BasicTransportAssembly_2procs
     TARGET testBasicTransportAssembly
     PROCS 2
-    LABELS "mpi;fvm;transport;legacy"
+    LABELS "mpi;fvm;transport;native"
     TIMEOUT 120)
 
 # Custom meshes own their implementation providers outside public headers.

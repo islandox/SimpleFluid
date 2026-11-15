@@ -2,10 +2,7 @@
  * @brief Native factory publication and explicit legacy compatibility.
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 #include "geometry/MeshFactory.hh"
-#include "geometry/details/LegacyMeshSnapshot.hh"
 #include "geometry/details/NativeMeshGenerators.hh"
 #include "parallel/CollectiveConstruction.hh"
 #include "parallel/MeshPartitioner.hh"
@@ -175,10 +172,7 @@ Meshes::UnstructuredMeshData MeshFactory::build_source(const Teuchos::RCP<const 
     return source;
 }
 
-template<TpetraTypePack Pack> SP<Mesh<Pack>> MeshFactory::build()
-{
-    return detail::make_legacy_mesh_snapshot<Pack>(build_source(Tpetra::getDefaultComm()));
-}
+
 
 template<TpetraTypePack Pack> SP<MeshHandle<Pack>> MeshFactory::build_handle()
 {
@@ -205,18 +199,11 @@ SP<MeshHandle<Pack>> MeshFactory::from_stk_file(
         *comm, std::move(partition.geometry), partition.indexer, comm);
 }
 
-template<TpetraTypePack Pack> SP<Mesh<Pack>> MeshFactory::build_empty_mesh()
-{
-    return detail::make_legacy_mesh_snapshot<Pack>({});
-}
 
-template SP<Mesh<DefaultTpetraTypes>> MeshFactory::build<DefaultTpetraTypes>();
+
 template SP<MeshHandle<DefaultTpetraTypes>> MeshFactory::build_handle<DefaultTpetraTypes>();
 template SP<MeshHandle<DefaultTpetraTypes>> MeshFactory::build_handle<DefaultTpetraTypes>(
     Teuchos::RCP<const DefaultTpetraTypes::comm_type>);
 template SP<MeshHandle<DefaultTpetraTypes>> MeshFactory::from_stk_file<DefaultTpetraTypes>(
     const std::string&, const STKMeshInputOptions&, Teuchos::RCP<const DefaultTpetraTypes::comm_type>);
-template SP<Mesh<DefaultTpetraTypes>> MeshFactory::build_empty_mesh<DefaultTpetraTypes>();
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

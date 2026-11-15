@@ -71,10 +71,10 @@ inline SP<const Database> make_box_database(size_t n_x,
  * @return Shared pointer to the assembled mesh.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-SP<Mesh<Pack>> build_mesh(const SP<const Database>& db)
+SP<MeshHandle<Pack>> build_mesh(const SP<const Database>& db)
 {
     MeshFactory factory(db);
-    return factory.template build<Pack>();
+    return factory.template build_handle<Pack>();
 }
 
 // -- convenience aliases for common meshes --------------------------------

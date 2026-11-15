@@ -1,10 +1,8 @@
 /** @file FVM/TransportSystemFactory.hh
- * @brief Typed transport assembly for legacy and native mesh fields.
+ * @brief Typed transport assembly for native mesh fields.
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportAssemblyPacks.hh"
@@ -16,7 +14,7 @@ namespace SimpleFluid::FVM
  * Custom providers need factory and matching builder definitions; the stored
  * route is aggregated by FieldStoredTransportSystem.tcc.
  */
-template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>> class TransportSystemFactory
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = MeshHandle<Pack>> class TransportSystemFactory
 {
 public:
     using ScalarTerms = FVM::ScalarTerms<Pack, MeshType>;
@@ -98,5 +96,3 @@ TransportSystemFactory<DefaultTpetraTypes,
     MomentumTerms, MomentumBoundary, MomentumOptions, MomentumContext);
 
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

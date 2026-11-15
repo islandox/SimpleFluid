@@ -10,8 +10,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "dataclass/Database.hh"
@@ -190,7 +188,7 @@ inline MaterialFeedbackOptions material_feedback_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         SimpleFluid::MeshType MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class MaterialFeedbackModel
 {
 public:
@@ -464,5 +462,3 @@ private:
 };
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

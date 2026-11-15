@@ -79,9 +79,17 @@ VoF, AMR and their geometry/remap qualification are maintained on the separate
 
 ## Legacy mesh retirement
 
-- Deprecation preserves `Mesh`, its explicit compatibility factory and compiled
-  providers. Removing those interfaces and changing legacy template defaults
-  requires a separately announced compatibility change.
+- Production `Mesh`, compatibility factories, adapter variants and mirrored
+  solver fields are retired. Defaults and historical field spellings now use
+  native `MeshHandle`/`FieldStored`; consumers and providers require rebuilding.
+- The complete vector-boundary assembly contract remains available on the
+  native runtime handle. Arbitrary manually paired imported periodic faces
+  are retired; native Cartesian and composite periodicity remain supported.
+- The independent frozen geometry/storage/partition oracle is test-only.
+  It is not a production field or solver backend.
+- Earlier checked phases that mention native/legacy parity describe the
+  pre-retirement baseline. They do not qualify the migrated native defaults;
+  new build/runtime evidence belongs in the validation artifacts.
 - Native STK/Ioss input initially supports HEX_8/WEDGE_6. Additional element
   types, native translational-periodic import, general unstructured ALE and
   live repartition/remap require their own implementation and qualification.
@@ -158,8 +166,8 @@ verification items below mean the foundation as a whole is not yet complete.
         typed reacting source, boiling, void, material feedback, linear
         source/decay scalars, and steady-state search
         through the native field path
-  - [x] Preserve exact legacy `Mesh` identity, public solver hooks, and
-        established behavior through a distinct compatibility path
+  - [x] Preserve exact native handle identity and public native solver hooks;
+        the former mirrored `Mesh` compatibility path is retired
   - [x] Cover Cartesian and cylindrical serial/distributed execution with
         focused regressions
   - [x] Add count-balanced, width-aware Cartesian/cylindrical tensor partitioning

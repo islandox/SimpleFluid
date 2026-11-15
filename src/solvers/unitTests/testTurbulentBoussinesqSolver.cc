@@ -40,7 +40,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -200,7 +200,7 @@ void expect_positive_turbulence_fields(const SimpleFluid::BoussinesqSolver<Pack>
 }
 
 /** @brief Sum one rank-local scalar over the field communicator. */
-template<class Mesh> double global_sum(const Mesh& mesh, double local_value)
+template<class MeshType> double global_sum(const MeshType& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_value, &global_value);

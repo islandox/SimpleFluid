@@ -47,22 +47,6 @@ public:
     {
         auto& problem = this->FluidSolver<Pack>::d_problem;
         using Native = CoupledPressureVelocitySolver<Pack, Handle>;
-        for (const auto* name :
-            {"boussinesq_coupled_pressure_velocity_solver", "isothermal_coupled_pressure_velocity_solver"})
-            if (problem.contains(name))
-            {
-                auto result = problem.template object<Native>(name).cache_statistics();
-                // Legacy physical equations assemble on the canonical handle,
-                // while the compatibility solver owns the Belos solve state.
-                const auto& solve =
-                    problem.template object<CoupledPressureVelocitySolver<Pack>>("coupled_pressure_velocity_solver")
-                        .cache_statistics();
-                result.belos_solver_reuses = solve.belos_solver_reuses;
-                return result;
-            }
-        if (this->FluidSolver<Pack>::uses_legacy_backend())
-            return problem.template object<CoupledPressureVelocitySolver<Pack>>("coupled_pressure_velocity_solver")
-                .cache_statistics();
         return problem.template object<Native>("coupled_pressure_velocity_solver").cache_statistics();
     }
     void select(Selection choice)
@@ -296,13 +280,13 @@ TEST_P(CoupledSolverBackendsTest, ConfiguredGaussPressureGradient)
         exercise(native_mesh(kind), GetParam(), kind == 2, FVM::NonOrthogonalTreatment::Implicit,
             FVM::CellGradientScheme::GaussLinear);
 }
-TEST_P(CoupledSolverBackendsTest, LegacyCartesianPressureOutlet)
+TEST_P(CoupledSolverBackendsTest, FactoryCartesianPressureOutlet)
 {
     auto db = std::make_shared<Database>(*test::make_2x2x2_database());
     db->set("X", ArrReal{0., .25, .5, .75, 1.});
     db->set("Y", ArrReal{0., .25, .5, .75, 1.});
     db->set("Z", ArrReal{0., .25, .5, .75, 1.});
-    SP<const Mesh<Pack>> mesh = test::build_mesh<Pack>(db);
+    SP<const MeshHandle<Pack>> mesh = test::build_mesh<Pack>(db);
     exercise(mesh, GetParam(), true, FVM::NonOrthogonalTreatment::Explicit);
     exercise(mesh, GetParam(), true, FVM::NonOrthogonalTreatment::Implicit, FVM::CellGradientScheme::GaussLinear);
 }
@@ -315,7 +299,7 @@ TEST_P(CoupledSolverBackendsTest, NativePeriodicCylindrical)
         exercise(mesh, GetParam(), false, FVM::NonOrthogonalTreatment::Implicit, gradient);
     }
 }
-TEST_P(CoupledSolverBackendsTest, LegacyCurvedGeometry)
+TEST_P(CoupledSolverBackendsTest, FactoryCurvedGeometry)
 {
     for (const auto domain : {MeshFactory::DomainType::CYLINDER, MeshFactory::DomainType::SPHERE})
     {
@@ -329,7 +313,7 @@ TEST_P(CoupledSolverBackendsTest, LegacyCurvedGeometry)
         db->set("domain_exterior_face_types", domain == MeshFactory::DomainType::CYLINDER
                                                   ? ArrString{"radial", "zmin", "zmax"}
                                                   : ArrString{"lower_surface", "upper_surface"});
-        SP<const Mesh<Pack>> mesh = test::build_mesh<Pack>(db);
+        SP<const MeshHandle<Pack>> mesh = test::build_mesh<Pack>(db);
         exercise(mesh, GetParam(), false, FVM::NonOrthogonalTreatment::Implicit);
     }
 }

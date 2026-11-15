@@ -3,7 +3,6 @@
  * @brief  Explicit template instantiations.
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "FVM/CellGradientCache.tcc"
 
@@ -18,8 +17,5 @@ std::atomic<int>& pressure_gradient_build_depth() noexcept
 
 namespace SimpleFluid::FVM
 {
-template class CellGradientCache<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 template class CellGradientCache<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

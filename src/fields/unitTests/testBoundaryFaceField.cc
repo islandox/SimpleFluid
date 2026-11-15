@@ -10,9 +10,11 @@
  */
 
 #include <gtest/gtest.h>
+#include <Teuchos_CommHelpers.hpp>
 #include "utils/testing_environment.hh"
 #include "fields/BoundaryFaceField.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
+#include "NativeFieldOwnershipFixture.hh"
 
 #include <stdexcept>
 #include <string>
@@ -21,7 +23,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::BoundaryFaceField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -36,59 +38,11 @@ SimpleFluid::SP<MeshType> make_two_hex_mesh()
         SimpleFluid::test::make_two_hex_database());
 }
 
-/**
- * @brief Minimal test mesh subclass that pre-populates connectivity and
- *        boundary information for boundary-face ownership tests.
- *
- * Two faces: face 0 is a boundary face owned by cell 0 (owned);
- * face 1 is an interior face with no boundary ID.
- */
-class MinimalBoundaryFaceMesh : public MeshType
-{
-public:
-    void populate()
-    {
-        d_cells.resize(2);
-        d_cells[0].owned = true;
-        d_cells[1].owned = false;
-
-        d_owned_cell_ids = {0};
-        d_owned_cell_global_ids = {1};
-        d_cell_gid_to_lid = {{1, 0}, {2, 1}};
-
-        d_faces.resize(2);
-        // Face 0: boundary face owned by cell 0
-        d_faces[0].owner = 0;
-        d_faces[0].neighbor = SimpleFluid::invalid_id<MeshType::local_ordinal_type>();
-        d_faces[0].boundary_id = 1;
-        // Face 1: non-boundary face (neighbor exists, no boundary id)
-        d_faces[1].owner = 0;
-        d_faces[1].neighbor = 1;
-        d_faces[1].boundary_id = MeshType::invalid_boundary_id;
-
-        d_boundary_id_to_name = {{1, "wall"}};
-        d_boundary_name_to_id = {{"wall", 1}};
-
-        create_maps();
-    }
-
-    void assemble() override
-    {
-        // No-op since this mesh is already in an assembled state.
-    }
-
-    void export_vtu(const std::string& /*filename*/) const override
-    {
-        throw std::runtime_error(
-            "export_vtu not implemented for MinimalBoundaryFaceMesh");
-    }
-};
-
 } // namespace
 
 /**
  * @brief Exercises all constructors, accessors, and value operations on a
- *        real two-hex STK mesh.  Covers zero-out, initial-value, zero_out=false,
+ *        real native two-hex mesh.  Covers zero-out, initial-value, zero_out=false,
  *        name/mesh/map queries, per-face get/set, put_scalar, and
  *        boundary-vs-interior filtering.
  */
@@ -173,68 +127,68 @@ TEST(BoundaryFaceFieldTest, BasicOperationsOnRealMesh)
 
 /**
  * @brief Tests ownership filtering, map metadata, raw data access, value
- *        operations, and out-of-range/negative-LID throws on a hand-populated
- *        minimal mesh with one boundary and one interior face.
+ *        operations, and bounds checks on actual native boundary-map rows.
  */
-TEST(BoundaryFaceFieldTest, OwnershipAndMinimalMesh)
+TEST(BoundaryFaceFieldTest, OwnershipAndNativeMapRows)
 {
-    auto mesh = std::make_shared<MinimalBoundaryFaceMesh>();
-    mesh->populate();
-
+    auto mesh = SimpleFluid::test::native_field_ownership_mesh<Pack>();
     FieldType bc_field(mesh, "owned_bc");
-
-    // Ownership: only face 0 is a boundary face owned by an owned cell
-    ASSERT_EQ(bc_field.num_owned_boundary_faces(), 1u);
-    ASSERT_EQ(bc_field.owned_boundary_face_ids().size(), 1u);
-    EXPECT_EQ(bc_field.owned_boundary_face_ids()[0], 0);
-    EXPECT_TRUE(bc_field.is_owned_boundary_face(0));
-    EXPECT_FALSE(bc_field.is_owned_boundary_face(1));
-
-    // Map properties
     const auto map = bc_field.map();
-    EXPECT_EQ(map->getLocalNumElements(), 1u);
     EXPECT_EQ(map->getIndexBase(), 0);
     EXPECT_NE(map->getComm(), Teuchos::null);
-
-    // set_value / value
-    bc_field.set_value(0, 42.0);
-    EXPECT_DOUBLE_EQ(bc_field.value(0), 42.0);
-
-    // put_scalar overwrites
+    const auto& ids = bc_field.owned_boundary_face_ids();
+    EXPECT_EQ(ids.size(), map->getLocalNumElements());
+    size_t expected_owned = 0;
+    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    {
+        const auto fid = static_cast<Pack::local_ordinal_type>(face);
+        const bool owned_boundary = mesh->is_boundary_face(fid) && mesh->is_owned_cell(mesh->owner_cell(fid));
+        EXPECT_EQ(bc_field.is_owned_boundary_face(fid), owned_boundary);
+        if (owned_boundary)
+            ++expected_owned;
+        else
+            EXPECT_THROW(bc_field.value(fid), std::out_of_range);
+    }
+    EXPECT_EQ(bc_field.num_owned_boundary_faces(), expected_owned);
+    EXPECT_EQ(ids.size(), expected_owned);
+    for (size_t row = 0; row < ids.size(); ++row)
+    {
+        const auto fid = ids[row];
+        EXPECT_EQ(map->getGlobalElement(static_cast<Pack::local_ordinal_type>(row)), mesh->face_global_id(fid));
+        bc_field.set_value(fid, 42.0);
+        EXPECT_DOUBLE_EQ(bc_field.value(fid), 42.0);
+    }
     bc_field.put_scalar(-3.0);
-    EXPECT_DOUBLE_EQ(bc_field.value(0), -3.0);
-
-    // data() ↔ value()/set_value() bidirectional
-    bc_field.set_value(0, 99.0);
-    EXPECT_DOUBLE_EQ(bc_field.data().getData()[0], 99.0);
-    bc_field.data().replaceLocalValue(0, 77.0);
-    EXPECT_DOUBLE_EQ(bc_field.value(0), 77.0);
-
-    // Non-owned boundary face throws in debug
-#ifndef NDEBUG
-    EXPECT_THROW(bc_field.value(1), std::out_of_range);
-    EXPECT_THROW(bc_field.is_owned_boundary_face(2), std::out_of_range);
-    EXPECT_THROW(bc_field.set_value(2, 0.0), std::out_of_range);
-    EXPECT_THROW(bc_field.value(2), std::out_of_range);
-#endif
-
-    // Negative face LID (signed ordinals only)
+    for (const auto fid : ids) EXPECT_DOUBLE_EQ(bc_field.value(fid), -3.0);
+    if (!ids.empty())
+    {
+        const auto fid = ids.front();
+        bc_field.set_value(fid, 99.0);
+        EXPECT_DOUBLE_EQ(bc_field.data().getData()[0], 99.0);
+        bc_field.data().replaceLocalValue(0, 77.0);
+        EXPECT_DOUBLE_EQ(bc_field.value(fid), 77.0);
+    }
+    const auto invalid_face = static_cast<Pack::local_ordinal_type>(mesh->num_faces());
+    EXPECT_THROW(bc_field.is_owned_boundary_face(invalid_face), std::out_of_range);
+    EXPECT_THROW(bc_field.set_value(invalid_face, 0.0), std::out_of_range);
+    EXPECT_THROW(bc_field.value(invalid_face), std::out_of_range);
     if constexpr (std::is_signed_v<MeshType::local_ordinal_type>)
     {
         EXPECT_THROW(bc_field.is_owned_boundary_face(-1), std::out_of_range);
         EXPECT_THROW(bc_field.set_value(-1, 0.0), std::out_of_range);
         EXPECT_THROW(bc_field.value(-1), std::out_of_range);
     }
+    int local_owned = static_cast<int>(expected_owned), global_owned = 0;
+    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 1, &local_owned, &global_owned);
+    EXPECT_EQ(global_owned, 10);
 }
 
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
-
 /**
- * @brief Verifies construction errors: null mesh and unassembled mesh.
+ * @brief Verifies null mesh and empty descriptor names fail independently.
  */
 TEST(BoundaryFaceFieldTest, ConstructionErrors)
 {
-    EXPECT_THROW(FieldType(nullptr), std::invalid_argument);
-    EXPECT_THROW(FieldType(std::make_shared<SimpleFluid::test::LegacySTKFixture<>>()),
-                 std::runtime_error);
+    EXPECT_THROW(FieldType(nullptr, "boundary_flux"), std::invalid_argument);
+    const auto mesh = make_two_hex_mesh();
+    EXPECT_THROW(FieldType(mesh, ""), std::invalid_argument);
 }

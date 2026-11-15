@@ -5,8 +5,6 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "dataclass/TpetraTypes.hh"
@@ -50,7 +48,7 @@ template<class Scalar> struct VolumeContinuityResiduals
  * state for predictor-cache validation; callers must change it whenever any
  * target value changes.
  */
-template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = Mesh<Pack>>
+template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class VolumeContinuityTarget
 {
 public:
@@ -201,5 +199,3 @@ private:
 };
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

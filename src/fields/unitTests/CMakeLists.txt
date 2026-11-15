@@ -11,6 +11,15 @@ target_link_libraries(testFields SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testFields)
 simplefluid_discover_tests(testFields)
 
+# Use actual native partition ownership for scalar/vector and boundary face storage.
+simplefluid_add_mpi_test(
+  NAME NativeFaceFieldOwnership_2procs
+  TARGET testFields
+  PROCS 2
+  ARGS "--gtest_filter=FaceFieldTest.StoresOnlyFacesWhoseOwnerCellIsOwned:VectorFaceFieldTest.StoresOnlyFacesWhoseOwnerCellIsOwned:BoundaryFaceFieldTest.OwnershipAndNativeMapRows"
+  TIMEOUT 60
+  LABELS "mpi;fields;ownership;ghosts")
+
 simplefluid_add_mpi_test(
   NAME MeshToMeshTransferRZ_2procs
   TARGET testFields

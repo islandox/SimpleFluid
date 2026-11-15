@@ -5,8 +5,8 @@
 
 namespace
 {
-template<class Mesh>
-void expect_structured_typed_cells(const Mesh& mesh, const Handle& reference)
+template<class NativeMesh>
+void expect_structured_typed_cells(const NativeMesh& mesh, const Mesh& reference)
 {
     const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     const auto foreign_plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
@@ -116,7 +116,7 @@ TEST(MeshTraverseTest, StructuredTypedInteriorCellsPreservePeriodicThinAndSingle
                 continue;
             }
             const auto geometry = std::make_shared<Cartesian>(edges, periodic);
-            const Handle mesh(geometry);
+            const Mesh mesh(geometry);
             expect_structured_typed_cells(*geometry, mesh);
             expect_structured_typed_cells(mesh, mesh);
         }
@@ -151,7 +151,7 @@ TEST(MeshTraverseTest, StructuredTypedInteriorCellsPreserveCylindricalSectorAndP
     {
         const auto geometry = std::make_shared<Cylindrical>(
             Vec3D<ArrReal>{{{1, 2, 4, 7}, theta, {0, 0.5, 2, 3}}});
-        const Handle mesh(geometry);
+        const Mesh mesh(geometry);
         expect_structured_typed_cells(*geometry, mesh);
         expect_structured_typed_cells(mesh, mesh);
     }
@@ -192,7 +192,7 @@ TEST(MeshTraverseTest, StructuredTypedInteriorRangeRejectsInvalidationAndBackend
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial identity maps.";
     for (const bool replace_backend : {false, true})
     {
-        Handle mesh(cartesian(3, 3, 3));
+        Mesh mesh(cartesian(3, 3, 3));
         auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
         const auto traversal = plan.acquire();
         size_t checked = 0;
@@ -203,7 +203,7 @@ TEST(MeshTraverseTest, StructuredTypedInteriorRangeRejectsInvalidationAndBackend
             {
                 ++checked;
                 const auto range = traversal.cell_faces(cell);
-                if (replace_backend) mesh = Handle(cartesian(3, 3, 3));
+                if (replace_backend) mesh = Mesh(cartesian(3, 3, 3));
                 else plan.invalidate();
                 EXPECT_THROW(static_cast<void>(range.size()), std::logic_error);
                 EXPECT_THROW(static_cast<void>(range.empty()), std::logic_error);

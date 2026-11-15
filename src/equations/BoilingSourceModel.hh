@@ -10,11 +10,8 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 
 #include "dataclass/Database.hh"
 #include "dataclass/DatabaseOptionReader.hh"
@@ -186,7 +183,7 @@ inline BoilingSourceOptions boiling_source_options_from_database(
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes,
-         SimpleFluid::MeshType MeshType = Mesh<Pack>>
+         SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT BoilingSourceModel
 {
 public:
@@ -553,10 +550,6 @@ private:
     diagnostics_type d_last_phase_change_diagnostics;
     std::map<std::string, const field_type*> d_output_fields;
 };
-extern template class BoilingSourceModel<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class BoilingSourceModel<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
-
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

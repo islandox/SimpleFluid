@@ -141,7 +141,7 @@ endforeach()
 
 # Schema-indexed reacting fields and the liquid inventory follower.
 simplefluid_add_mpi_test(NAME ReactingSpeciesModel_2procs TARGET testReactingSpeciesModel PROCS 2
-    ARGS "--gtest_filter=-*LegacyMesh*"
+    ARGS "--gtest_filter=-*FactoryNativeMesh*"
     LABELS "mpi;reacting_gas;species;conservation;transaction" TIMEOUT 180)
 simplefluid_add_mpi_test(NAME ReactingSpeciesModel_EmptyRank_4procs TARGET testReactingSpeciesModel PROCS 4
     ARGS "--gtest_filter=*CollectiveInitialization*:*RankAsymmetric*"

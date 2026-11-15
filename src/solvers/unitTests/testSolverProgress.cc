@@ -33,7 +33,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 /** @brief Build a single-cell progress-test mesh. @return Assembled mesh. */
-SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
+SimpleFluid::SP<SimpleFluid::MeshHandle<Pack>> make_single_cell_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);
@@ -48,7 +48,7 @@ SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_single_cell_mesh()
         "domain_exterior_face_types",
         SimpleFluid::ArrString{
             "xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
-    return SimpleFluid::MeshFactory(database).build<Pack>();
+    return SimpleFluid::MeshFactory(database).build_handle<Pack>();
 }
 
 /**

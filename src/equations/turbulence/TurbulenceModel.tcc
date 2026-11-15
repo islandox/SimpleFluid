@@ -34,24 +34,15 @@ namespace SimpleFluid
 namespace turbulence_detail
 {
 
-/** @brief Select the matching slip projection for legacy or stored fields. */
+/** @brief Select the native stored-field slip projection. */
 template<class VelocityField>
 auto slip_face_velocity(
     const VelocityField& velocity,
     typename VelocityField::local_ordinal_type face_lid)
 {
-    if constexpr (requires
-                  {
-                      FVM::detail::stored_slip_face_velocity(
-                          velocity, face_lid);
-                  })
     {
         return FVM::detail::stored_slip_face_velocity(
             velocity, face_lid);
-    }
-    else
-    {
-        return FVM::detail::slip_face_velocity(velocity, face_lid);
     }
 }
 

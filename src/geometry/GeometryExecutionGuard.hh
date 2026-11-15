@@ -62,7 +62,7 @@ private:
     mutable std::atomic<size_t> d_readers{0};
 };
 
-/** @brief Enter a mesh's bulk execution boundary, or a no-op for legacy meshes. */
+/** @brief Enter a mesh's bulk execution boundary when it provides one. */
 template<class Mesh> [[nodiscard]] auto acquire_mesh_execution(const Mesh& mesh)
 {
     if constexpr (requires { mesh.acquire_execution_view(); })

@@ -11,7 +11,7 @@
 
 #include "LegacySTKFixture.hh"
 #include "io/VTUWriter.hh"
-#include "parallel/MeshPartitioner.hh"
+#include "LegacyMeshPartitioner.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -112,7 +112,7 @@ inline auto face_type_from_node_count(size_t node_count) -> typename LegacySTKFi
  *
  * Initializes STK metadata, bulk data, and coordinate I/O support.
  */
-template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture() : Mesh<Pack>()
+template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture() : LegacyMesh<Pack>()
 {
     d_stk.meta = legacy_stk_fixture_detail::make_stk_meta_data();
     d_stk.bulk = legacy_stk_fixture_detail::make_stk_bulk_data(d_stk.meta);
@@ -126,7 +126,7 @@ template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture() : Mesh<
  * @param options Boundary-name mapping and automatic-ID policy used during
  * assembly.
  */
-template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture(const Options& options) : Mesh<Pack>()
+template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture(const Options& options) : LegacyMesh<Pack>()
 {
     d_stk.options = options;
     d_stk.meta = legacy_stk_fixture_detail::make_stk_meta_data();
@@ -142,7 +142,7 @@ template<TpetraTypePack Pack> LegacySTKFixture<Pack>::LegacySTKFixture(const Opt
  * @param options Optional STK mesh reading options.
  */
 template<TpetraTypePack Pack>
-LegacySTKFixture<Pack>::LegacySTKFixture(const std::string& mesh_filename, const Options& options) : Mesh<Pack>()
+LegacySTKFixture<Pack>::LegacySTKFixture(const std::string& mesh_filename, const Options& options) : LegacyMesh<Pack>()
 {
     if (mesh_filename.empty())
     {
@@ -213,7 +213,7 @@ template<TpetraTypePack Pack> void LegacySTKFixture<Pack>::assemble()
 
     // Partition programmatic source geometry for parallel runs. MeshFactory
     // holds the complete source only on rank zero.
-    MeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
+    LegacyMeshPartitioner<Pack>::partition(*this, Tpetra::getDefaultComm());
     prefer_owned_face_owners();
     create_cell_face_distances();
     rebuild_boundary_face_batches();

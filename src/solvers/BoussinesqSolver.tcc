@@ -23,50 +23,6 @@
 namespace SimpleFluid
 {
 
-
-/**
- * @brief Construct a Boussinesq solver with mesh, boundary conditions, and solver options.
- *
- * Initialises all field and equation objects.  Validates that the time step is positive.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Computational mesh.
- * @param boundary_conditions Boundary condition set for velocity and temperature.
- * @param time_options Time-stepping parameters.
- * @param linear_options Linear solver parameters.
- * @throws std::invalid_argument If the time step is non-positive.
- */
-template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options, LinearSolverOptions linear_options)
-    : BoussinesqSolver(SP<const MeshHandle<Pack>>(
-          std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh)))),
-          std::move(boundary_conditions), time_options, linear_options,
-          BoussinesqModelOptions::legacy_defaults(time_options), false, PhysicalModelTag{})
-{
-}
-
-/**
- * @brief Construct a legacy-mesh solver with explicit physical model options.
- *
- * @tparam Pack Tpetra type pack.
- * @param mesh Computational mesh.
- * @param boundary_conditions Velocity and temperature boundary conditions.
- * @param time_options Time-stepping and transport options.
- * @param linear_options Linear solver options.
- * @param model_options Physical material model options.
- * @throws std::invalid_argument if the mesh or model options are invalid.
- */
-template<TpetraTypePack Pack>
-BoussinesqSolver<Pack>::BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-    TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options)
-    : BoussinesqSolver(SP<const MeshHandle<Pack>>(
-          std::make_shared<MeshHandle<Pack>>(require_mesh(std::move(mesh)))),
-          std::move(boundary_conditions), time_options, linear_options, std::move(model_options), true,
-          PhysicalModelTag{})
-{
-}
-
 /** Construct a legacy-property solver while retaining mutable native ownership. */
 template<TpetraTypePack Pack>
 BoussinesqSolver<Pack>::BoussinesqSolver(SP<MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
@@ -166,17 +122,7 @@ BoussinesqSolver<Pack>::BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, Bounda
     d_problem.template emplace_object<turbulence_model_type>(
         "turbulence_model", d_mesh, d_problem.boundary_conditions());
     auto& sources = d_problem.template emplace_object<temperature_source_registry_type>("temperature_sources", d_mesh);
-    if (uses_legacy_backend())
-    {
-        d_problem.template emplace_object<canonical_velocity_boundary_cache_type>("boussinesq_velocity_boundary_cache",
-            FVM::cache_velocity_boundary_conditions<Pack>(d_mesh, d_problem.boundary_conditions()));
-        d_problem.template emplace_object<canonical_face_flux_workspace_type>(
-            "boussinesq_pressure_face_flux_workspace", d_mesh);
-        d_problem.template emplace_object<canonical_coupled_solver_type>(
-            "boussinesq_coupled_pressure_velocity_solver", d_mesh);
-        d_problem.template emplace_object<BoussinesqMomentumEquation<Pack>>("momentum_equation", d_legacy_mesh);
-        d_problem.template emplace_object<legacy_field_type>("legacy_temperature", d_legacy_mesh, "temperature");
-    }
+
     for (size_t index = 0; index < d_model_options.temperature_source_names.size(); ++index)
     {
         sources.add(
@@ -204,29 +150,6 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature() const n
 template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature() noexcept -> field_type&
 {
     return d_problem.template object<field_type>("temperature");
-}
-
-/** @brief Return the legacy equation stack's temperature mirror. */
-template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::legacy_temperature() -> legacy_field_type&
-{
-    return d_problem.template object<legacy_field_type>("legacy_temperature");
-}
-
-/** @brief Return the immutable legacy temperature mirror. */
-template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::legacy_temperature() const -> const legacy_field_type&
-{
-    return d_problem.template object<legacy_field_type>("legacy_temperature");
-}
-
-/** @brief Publish the public stored temperature to the legacy equation field. */
-template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::sync_temperature_to_legacy()
-{
-    if (!uses_legacy_backend())
-    {
-        return;
-    }
-    legacy_temperature().owned_data().update(scalar_type{1}, temperature().owned_data(), scalar_type{0});
-    d_legacy_mesh->sync_periodic_boundaries(legacy_temperature());
 }
 
 /**
@@ -522,11 +445,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::refresh_geometry_depe
     const auto& geometry = d_shared_transport_geometry->shared_geometry();
     boussinesq_momentum_equation().refresh_geometry(geometry);
     temperature_equation().refresh_geometry(geometry);
-    if (uses_legacy_backend())
-    {
-        boussinesq_pressure_face_flux_workspace().refresh_geometry();
-        boussinesq_coupled_pressure_velocity_solver().clear_cache();
-    }
+
     this->refresh_pressure_velocity_geometry_state();
 }
 
@@ -541,44 +460,27 @@ auto BoussinesqSolver<Pack>::boussinesq_momentum_equation() -> boussinesq_moment
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::boussinesq_velocity_boundary_cache() -> canonical_velocity_boundary_cache_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_velocity_boundary_cache();
     }
-    return d_problem.template object<canonical_velocity_boundary_cache_type>("boussinesq_velocity_boundary_cache");
 }
 
 /** @brief Return the canonical pressure-flux workspace on either backend. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::boussinesq_pressure_face_flux_workspace() -> canonical_face_flux_workspace_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_pressure_face_flux_workspace();
     }
-    return d_problem.template object<canonical_face_flux_workspace_type>("boussinesq_pressure_face_flux_workspace");
 }
 
 /** @brief Return the canonical coupled assembler on either backend. */
 template<TpetraTypePack Pack>
 auto BoussinesqSolver<Pack>::boussinesq_coupled_pressure_velocity_solver() -> canonical_coupled_solver_type&
 {
-    if (!uses_legacy_backend())
     {
         return native_coupled_pressure_velocity_solver();
     }
-    return d_problem.template object<canonical_coupled_solver_type>("boussinesq_coupled_pressure_velocity_solver");
-}
-
-/**
- * @brief Return the Problem-owned Boussinesq momentum equation.
- *
- * @tparam Pack Tpetra type pack.
- * @return Stored momentum equation.
- */
-template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::momentum_equation() -> BoussinesqMomentumEquation<Pack>&
-{
-    return d_problem.template object<BoussinesqMomentumEquation<Pack>>("momentum_equation");
 }
 
 /**
@@ -757,11 +659,7 @@ void BoussinesqSolver<Pack>::initialize_linear_temperature(
     d_mesh->sync_periodic_boundaries(pressure());
     d_mesh->sync_periodic_boundaries(velocity());
     d_primary_fields_initialized = true;
-    if (uses_legacy_backend())
-    {
-        sync_primary_fields_to_legacy();
-        sync_temperature_to_legacy();
-    }
+
 }
 
 /**
@@ -982,8 +880,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         advance_temperature_transport(dt, {});
         if (turbulence)
             turbulence->refresh_effective_properties(stored_material_properties(), d_model_options.reference_density);
-        if (uses_legacy_backend())
-            sync_temperature_to_legacy();
+
         finish_step();
     }
     catch (...)
@@ -991,11 +888,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step()
         if (sas)
         {
             rollback.restore();
-            if (uses_legacy_backend())
-            {
-                sync_primary_fields_to_legacy();
-                sync_temperature_to_legacy();
-            }
+
         }
         else if (nonlinear && !flow_accepted)
         {

@@ -11,11 +11,8 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
-#include "utils/export_helper.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/typedefs.hh"
@@ -181,7 +178,7 @@ template <class Scalar> struct TurbulenceWallFaceEvaluation
  * @tparam MeshType Mesh and associated field-storage backend.
  */
 template <TpetraTypePack Pack, class Policy,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 class SIMPLEFLUID_EQUATIONS_EXPORT TurbulenceWallTreatment
 {
 public:
@@ -190,10 +187,7 @@ public:
     using field_type = typename field_traits::scalar_cell_type;
     using velocity_field_type = typename field_traits::vector_cell_type;
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
-    using velocity_boundary_cache_type = std::conditional_t<
-        std::is_same_v<mesh_type, Mesh<Pack>>,
-        FVM::VelocityBoundaryCache<Pack>,
-        FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>>;
+    using velocity_boundary_cache_type = FVM::FieldStoredVelocityBoundaryCache<Pack, mesh_type>;
     using boundary_cache_type = FVM::MeshBoundaryCache<Pack, mesh_type>;
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -319,26 +313,20 @@ private:
 };
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 using ResolvedLowReSSTWallTreatment =
     TurbulenceWallTreatment<Pack, ResolvedLowReSSTWallPolicy, MeshType>;
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 using ResolvedLowReKEpsilonWallTreatment =
     TurbulenceWallTreatment<Pack, ResolvedLowReKEpsilonWallPolicy, MeshType>;
 
 template <TpetraTypePack Pack = DefaultTpetraTypes,
-          SimpleFluid::MeshType MeshType = Mesh<Pack>>
+          SimpleFluid::MeshType MeshType = MeshHandle<Pack>>
 using StandardHighReKEpsilonWallTreatment =
     TurbulenceWallTreatment<Pack, StandardHighReKEpsilonWallPolicy, MeshType>;
 
-extern template class TurbulenceWallTreatment<
-    DefaultTpetraTypes, ResolvedLowReSSTWallPolicy>;
-extern template class TurbulenceWallTreatment<
-    DefaultTpetraTypes, ResolvedLowReKEpsilonWallPolicy>;
-extern template class TurbulenceWallTreatment<
-    DefaultTpetraTypes, StandardHighReKEpsilonWallPolicy>;
 extern template class TurbulenceWallTreatment<
     DefaultTpetraTypes, ResolvedLowReSSTWallPolicy,
     MeshHandle<DefaultTpetraTypes>>;
@@ -350,5 +338,3 @@ extern template class TurbulenceWallTreatment<
     MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

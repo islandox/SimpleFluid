@@ -27,7 +27,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using Mesh = SimpleFluid::Mesh<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Field = SimpleFluid::CellField<Pack>;
 using Equation = SimpleFluid::PoissonWallDistanceEquation<Pack>;
 
@@ -105,7 +105,6 @@ TEST(WallDistanceEquationTest, SolvesOnNativeMeshHandle)
             {0.0, 1.0},
             {0.0, 1.0}}});
     auto mesh = std::make_shared<NativeMesh>(cartesian);
-    ASSERT_FALSE(mesh->legacy_mesh());
 
     NativeField distance(mesh, -7.0, "wall_distance");
     NativeEquation equation(mesh);

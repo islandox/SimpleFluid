@@ -61,7 +61,7 @@ TEST(SteadyDiagnostics, NativeBalancePerturbationAndTimeStepIndependence)
  auto constraints=steady_residual_report<Pack>(*a.matrix,*a.rhs,q.owned_data(),volumes,excluded);
  EXPECT_EQ(constraints.included_count,0u); EXPECT_EQ(constraints.excluded_count,4u); EXPECT_EQ(constraints.volume_rms,0.);
 }
-TEST(SteadyDiagnostics, LegacyScalarBalanceAndTimeStepIndependence)
+TEST(SteadyDiagnostics, FactoryScalarBalanceAndTimeStepIndependence)
 {
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
  SimpleFluid::CellField<Pack> q(m,2.),storage(m,3.),adv(m,1.),diffusion(m,0.);SimpleFluid::FaceField<Pack> flux(m,0.);
@@ -86,7 +86,7 @@ TEST(SteadyDiagnostics, LegacyScalarBalanceAndTimeStepIndependence)
  auto rb=steady_residual_report<Pack>(*b.matrix,*b.rhs,q.vector(),volumes);
  EXPECT_NEAR(ra.volume_rms,0.,1e-14);EXPECT_DOUBLE_EQ(ra.scale,rb.scale);EXPECT_DOUBLE_EQ(ra.scale,8.);
 }
-TEST(SteadyDiagnostics, LegacyPhysicalMomentumAndThermalOmitStorage)
+TEST(SteadyDiagnostics, FactoryPhysicalMomentumAndThermalOmitStorage)
 {
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
  SimpleFluid::VectorCellField<Pack> u(m,SimpleFluid::vec3<double>{2.,3.,4.});
@@ -118,9 +118,9 @@ TEST(SteadyDiagnostics, LegacyPhysicalMomentumAndThermalOmitStorage)
              { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
              .value = [](int, size_t) { return 0.; },
              .coefficients = nullptr},
-         {.correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
-             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
-             .mode = AssemblyMode::Steady},
+         {.discretization = {.mode = AssemblyMode::Steady},
+             .correction = {.treatment = NonOrthogonalTreatment::Explicit, .lagged_field = nullptr},
+             .coefficient_interpolation = FaceCoefficientInterpolation::Harmonic},
          {.cached_matrix = Teuchos::null, .geometry_cache = nullptr});
  };
  auto a=momentum(0.01),b=momentum(10.);auto ta=thermal(0.01),tb=thermal(10.);std::vector<double> volumes;

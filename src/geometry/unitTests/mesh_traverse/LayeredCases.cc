@@ -9,7 +9,7 @@ using IncidenceRunKey = std::tuple<size_t, size_t, bool, int>;
 
 // Build the oracle only from public point queries. Retained XY runs and the
 // arithmetic layout are deliberately absent from this classification.
-std::vector<IncidenceRunKey> reference_incidence_runs(const Handle& reference,
+std::vector<IncidenceRunKey> reference_incidence_runs(const Mesh& reference,
     Local cell, detail::StructuredTraverseSelection selection, bool independent,
     std::optional<int> patch)
 {
@@ -45,7 +45,7 @@ std::vector<IncidenceRunKey> reference_incidence_runs(const Handle& reference,
 
 template<class Incidences, class Proxy>
 void expect_layered_incidence_runs(const Incidences& indexed, const Proxy& proxy,
-    const Handle& reference, Local cell)
+    const Mesh& reference, Local cell)
 {
     using Selection = detail::StructuredTraverseSelection;
     std::vector<Local> face_ids;
@@ -102,8 +102,8 @@ void expect_layered_incidence_runs(const Incidences& indexed, const Proxy& proxy
     }
 }
 
-template<class Mesh>
-void expect_layered_plan(const Mesh& mesh, const Handle& reference)
+template<class NativeMesh>
+void expect_layered_plan(const NativeMesh& mesh, const Mesh& reference)
 {
     const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     ASSERT_TRUE(plan.uses_layered_ranges());
@@ -176,7 +176,7 @@ void expect_layered_plan(const Mesh& mesh, const Handle& reference)
         }
         // Existing batch apply passes a temporary reference. A constrained
         // rvalue-only callable catches accidental lvalue dispatch for both
-        // native and canonical Handle layered incidence.
+        // native and canonical Mesh layered incidence.
         std::vector<Local> rvalue_faces;
         const auto rvalue_only = [&]<class Ref>(Ref&& face)
             requires (!std::is_lvalue_reference_v<Ref>)
@@ -207,11 +207,11 @@ void expect_layered_plan(const Mesh& mesh, const Handle& reference)
                 EXPECT_EQ(resolved.incidence.interior, !reference.is_geometry_exterior_face(face));
                 EXPECT_EQ(resolved.incidence.batch, resolved.incidence.interior ? -1 : reference.boundary_id(face));
                 EXPECT_EQ(resolved.owner, static_cast<size_t>(owner));
-                EXPECT_EQ(resolved.neighbor, neighbor == Handle::invalid_local_id()
+                EXPECT_EQ(resolved.neighbor, neighbor == Mesh::invalid_local_id()
                     ? std::numeric_limits<size_t>::max() : static_cast<size_t>(neighbor));
                 EXPECT_EQ(resolved.cell, indexer.cell_id(cell.id()));
                 const auto other = owner == cell.id() ? neighbor : owner;
-                EXPECT_EQ(resolved.other, other == Handle::invalid_local_id()
+                EXPECT_EQ(resolved.other, other == Mesh::invalid_local_id()
                     ? Meshes::SemiStructuredIndexer::CellID{} : indexer.cell_id(other));
             }
         }
@@ -260,7 +260,7 @@ TEST(MeshTraverseTest, LayeredPolygonIncidenceAndPatchOrder)
             }
             ArrReal z{0}; for (unsigned k=0;k<layers;++k) z.push_back(z.back()+0.5+k*0.125);
             auto native=std::make_shared<Layered>(nodes,Arr<Arr<unsigned>>{polygon},z,edges);
-            const Handle handle(native);
+            const Mesh handle(native);
             expect_layered_plan(*native,handle); expect_layered_plan(handle,handle);
         }
 }
@@ -275,7 +275,7 @@ TEST(MeshTraverseTest, LayeredMixedCellsAndStorageIndependentOfLayers)
     {
         ArrReal z{0}; for (unsigned k=0;k<layers;++k) z.push_back(z.back()+1.0+k*0.01);
         auto native=std::make_shared<Layered>(nodes,cells,z);
-        const Handle handle(native);
+        const Mesh handle(native);
         const auto plan=make_mesh_traverse_plan(*native,MeshTraverseEntities::AllWithCellFaces);
         if (storage==0) storage=plan.storage_bytes();
         EXPECT_EQ(plan.storage_bytes(),storage);
@@ -286,7 +286,7 @@ TEST(MeshTraverseTest, LayeredMixedCellsAndStorageIndependentOfLayers)
     for (unsigned j=0;j<4;++j) for (unsigned i=0;i<4;++i) grid.push_back({double(i),double(j),0});
     for (unsigned j=0;j<3;++j) for (unsigned i=0;i<3;++i) { auto b=i+4*j; quads.push_back({b,b+1,b+5,b+4}); }
     auto native=std::make_shared<Layered>(grid,quads,ArrReal{0,0.5,2,4});
-    const Handle handle(native); expect_layered_plan(*native,handle); expect_layered_plan(handle,handle);
+    const Mesh handle(native); expect_layered_plan(*native,handle); expect_layered_plan(handle,handle);
 }
 
 TEST(MeshTraverseTest, ReorderedLayeredHandleRetainsCanonicalFallback)
@@ -295,7 +295,7 @@ TEST(MeshTraverseTest, ReorderedLayeredHandleRetainsCanonicalFallback)
     auto native=std::make_shared<Layered>(
         Arr<Layered::Vec3>{{0,0,0},{1,0,0},{1,1,0},{0,1,0}},
         Arr<Arr<unsigned>>{{0,1,3},{1,2,3}},ArrReal{0,1,3});
-    auto handle=std::make_shared<Handle>(native);
+    auto handle=std::make_shared<Mesh>(native);
     auto reordered=MeshReorderingFactory<Pack>::selected_cells_first(
         std::move(handle),[](auto,const auto& center){return center.z>1;});
     const auto plan=make_mesh_traverse_plan(*reordered.mesh,MeshTraverseEntities::AllWithCellFaces);
@@ -323,7 +323,7 @@ TEST(MeshTraverseTest, LayeredIncidenceRunsMergeAxialPrefixWithFirstSideRun)
         ArrReal z{0};
         for (unsigned k = 0; k < layers; ++k) z.push_back(z.back() + 0.25 + k*0.03);
         auto native = std::make_shared<Layered>(nodes, cells, z);
-        const Handle reference(native);
+        const Mesh reference(native);
         const auto native_plan = make_mesh_traverse_plan(*native, MeshTraverseEntities::AllWithCellFaces);
         const auto handle_plan = make_mesh_traverse_plan(reference, MeshTraverseEntities::AllWithCellFaces);
         if (native_storage == 0)

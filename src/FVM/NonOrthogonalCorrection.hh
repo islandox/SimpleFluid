@@ -11,8 +11,6 @@
  */
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
@@ -22,6 +20,9 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "FVM/details/OperatorDetails.hh"
 #include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
+#include "fields/CellField.hh"
+#include "fields/TensorCellField.hh"
+#include "fields/VectorCellField.hh"
 
 #include <vector>
 
@@ -34,17 +35,17 @@ namespace detail
 /** @brief Evaluate cached scalar affine reconstruction coefficients. */
 template<TpetraTypePack Pack>
 void evaluate_scalar_affine_gradients(const CellField<Pack>& field,
-    const std::vector<AffineLeastSquaresGradientStencil<Mesh<Pack>>>& stencils, VectorCellField<Pack>& gradients);
+    const std::vector<AffineLeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, VectorCellField<Pack>& gradients);
 
 /** @brief Evaluate cached vector affine reconstruction coefficients. */
 template<TpetraTypePack Pack>
 void evaluate_vector_affine_gradients(const VectorCellField<Pack>& field,
-    const std::vector<VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>& stencils, TensorCellField<Pack>& gradients);
+    const std::vector<VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, TensorCellField<Pack>& gradients);
 
 /** @brief Evaluate cached interior-only vector reconstruction coefficients. */
 template<TpetraTypePack Pack>
 void evaluate_vector_interior_gradients(const VectorCellField<Pack>& field,
-    const std::vector<LeastSquaresGradientStencil<Mesh<Pack>>>& stencils, TensorCellField<Pack>& gradients);
+    const std::vector<LeastSquaresGradientStencil<MeshHandle<Pack>>>& stencils, TensorCellField<Pack>& gradients);
 
 } // namespace detail
 
@@ -92,7 +93,7 @@ SIMPLEFLUID_FVM_EXPORT void add_explicit_non_orthogonal_correction(const VectorC
     typename Pack::scalar_type diffusivity, typename Pack::multi_vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
-    const std::vector<detail::LeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils = nullptr);
+    const std::vector<detail::LeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils = nullptr);
 
 /**
  * @brief Add a scalar explicit non-orthogonal correction using a
@@ -116,7 +117,7 @@ SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(cons
     const CellField<Pack>& coefficient_field, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarBoundaryValueProvider<Pack> boundary_value, typename Pack::vector_type& rhs,
     typename Pack::scalar_type correction_weight = 1.0, BoundaryCoefficientProvider<Pack> boundary_coefficient = {},
-    const std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils = nullptr,
+    const std::vector<detail::AffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
 
 /** @brief Backward-compatible scalar overload omitting boundary samples. */
@@ -151,8 +152,8 @@ SIMPLEFLUID_FVM_EXPORT void add_variable_explicit_non_orthogonal_correction(
     typename Pack::scalar_type correction_weight = 1.0,
     BoundaryFaceSelector boundary_diffusion = detail::AlwaysDiffuseBoundary{},
     BoundaryCoefficientProvider<Pack> boundary_coefficient = {},
-    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils = nullptr,
-    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>* cached_boundary_locations = nullptr,
+    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils = nullptr,
+    const std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>>* cached_boundary_locations = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
 
 /** @brief Backward-compatible vector overload omitting boundary samples. */
@@ -195,8 +196,8 @@ SIMPLEFLUID_FVM_EXPORT void add_explicit_deviatoric_transpose_gradient_stress(co
     VectorBoundaryValueProvider<Pack> boundary_value, typename Pack::multi_vector_type& rhs,
     BoundaryFaceSelector boundary_stress = detail::AlwaysDiffuseBoundary{},
     BoundaryCoefficientProvider<Pack> boundary_coefficient = {},
-    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>>* gradient_stencils = nullptr,
-    const std::vector<detail::BoundaryFaceLocation<Mesh<Pack>>>* cached_boundary_locations = nullptr,
+    const std::vector<detail::VectorAffineLeastSquaresGradientStencil<MeshHandle<Pack>>>* gradient_stencils = nullptr,
+    const std::vector<detail::BoundaryFaceLocation<MeshHandle<Pack>>>* cached_boundary_locations = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
 
 /**
@@ -215,41 +216,9 @@ SIMPLEFLUID_FVM_EXPORT void add_explicit_deviatoric_transpose_gradient_stress(co
  *         target mesh.
  */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system(const MeshHandle<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>& correction_field);
-
-/**
- * @brief Assemble scalar diffusion with an implicit least-squares
- *        non-orthogonal contribution.
- *
- * The orthogonal two-point contribution is assembled exactly as in
- * diffusion_system(). The non-orthogonal part linearizes the same
- * least-squares gradient reconstruction used by cell_gradient().
- *
- * @param mesh Computational mesh.
- * @param diffusivity Non-negative constant scalar diffusivity.
- * @param boundary_condition Boundary condition for scalar diffusion.
- * @param right_hand_source Cell-centered source provider.
- * @param non_orthogonal_implicit_weight Fraction of the tangential term to
- *        place in the matrix. Use 1.0 for a fully implicit operator and
- *        0.5 for the built-in hybrid treatment.
- * @param partition_correction_field Lagged field used to reconstruct the
- *        remote half of a partition-face gradient. The owned half remains in
- *        the matrix. This field is required when a nonzero implicit weight is
- *        assembled on a distributed partition face because the remote
- *        cell's extended least-squares stencil is not locally addressable.
- * @throws std::invalid_argument if diffusivity is not finite and
- *         non-negative, the implicit weight is not finite or outside
- *         `[0, 1]`, ranks disagree about whether an implicit correction or
- *         correction field is present, the correction field uses another
- *         mesh, or a distributed partition face needs a missing field.
- */
-template<TpetraTypePack Pack>
-SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
-    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
-    ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type non_orthogonal_implicit_weight = 1.0,
-    const CellField<Pack>* partition_correction_field = nullptr);
 
 /**
  * @brief Assemble a fully implicit scalar non-orthogonal diffusion system.
@@ -258,28 +227,9 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_s
  * remote half of partition-face gradients.
  */
 template<TpetraTypePack Pack>
-SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
+SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system(const MeshHandle<Pack>& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
     ScalarCellValueProvider<Pack> right_hand_source, const CellField<Pack>* partition_correction_field = nullptr);
-
-/**
- * @brief Assemble a diffusion system selected by the runtime
- *        non-orthogonal treatment switch.
- *
- * Explicit and hybrid systems use @p correction_field for the explicit RHS
- * fraction when it is supplied. If no correction field is provided,
- * `explicit` falls back to the orthogonal matrix. A nonzero implicit fraction
- * additionally requires the field when the mesh has distributed partition
- * faces so their remote gradient half can be synchronized.
- *
- * @throws std::invalid_argument if @p correction_field uses another mesh or
- *         @p treatment is invalid.
- */
-template<TpetraTypePack Pack>
-SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(const Mesh<Pack>& mesh,
-    typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
-    ScalarCellValueProvider<Pack> right_hand_source, NonOrthogonalTreatment treatment,
-    const CellField<Pack>* correction_field = nullptr);
 
 /**
  * @brief Apply the full scalar non-orthogonal diffusion residual.
@@ -314,8 +264,6 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> non_orthogonal_diffusion_system(con
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
 SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_system(const MeshType& mesh,
     typename Pack::scalar_type diffusivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
-    ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type implicit_weight,
-    const ScalarCellFieldStored<Pack, MeshType>* partition_correction_field);
+    ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type implicit_weight = 1.0,
+    const ScalarCellFieldStored<Pack, MeshType>* partition_correction_field = nullptr);
 } // namespace SimpleFluid::FVM
-
-SIMPLEFLUID_LEGACY_API_END

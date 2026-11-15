@@ -30,7 +30,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using LegacyField = SimpleFluid::CellField<Pack>;
+using Field = SimpleFluid::CellField<Pack>;
 using NativeField = SimpleFluid::ScalarCellFieldStored<Pack>;
 using FeedbackCell = SimpleFluid::FeedbackMap::FeedbackCell<Pack>;
 
@@ -39,7 +39,7 @@ struct NonDefaultFeedbackPack : Pack
 {
 };
 
-/** @brief Associate a legacy test field with a non-default pack identity. */
+/** @brief Associate a native test field with a non-default pack identity. */
 class NonDefaultPackFieldAdapter
 {
 public:
@@ -47,7 +47,7 @@ public:
     using scalar_type = typename tpetra_type_pack::scalar_type;
     using local_ordinal_type = typename tpetra_type_pack::local_ordinal_type;
 
-    explicit NonDefaultPackFieldAdapter(LegacyField& field) : d_field(field) {}
+    explicit NonDefaultPackFieldAdapter(Field& field) : d_field(field) {}
 
     const auto& mesh() const noexcept { return d_field.mesh(); }
 
@@ -56,7 +56,7 @@ public:
     void sync_ghosts() { d_field.sync_ghosts(); }
 
 private:
-    LegacyField& d_field;
+    Field& d_field;
 };
 
 static_assert(SimpleFluid::TpetraTypePack<NonDefaultFeedbackPack>);
@@ -69,7 +69,7 @@ using utils_test::KokkosEnvironment;
 
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<SimpleFluid::Mesh<Pack>> make_legacy_mesh()
+SimpleFluid::SP<SimpleFluid::MeshHandle<Pack>> make_factory_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
 }
@@ -86,11 +86,11 @@ SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_native_mesh()
 /** @brief Registry exports canonical fields in deterministic name order. */
 TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
 {
-    const auto mesh = make_legacy_mesh();
-    LegacyField temperature(mesh, 0.0, "temperature");
-    LegacyField gas_fraction(mesh, 0.0, "alpha_g");
-    LegacyField density(mesh, 0.0, "rhoFeedback");
-    LegacyField scalar_group(mesh, 0.0, "scalar_1");
+    const auto mesh = make_factory_mesh();
+    Field temperature(mesh, 0.0, "temperature");
+    Field gas_fraction(mesh, 0.0, "alpha_g");
+    Field density(mesh, 0.0, "rhoFeedback");
+    Field scalar_group(mesh, 0.0, "scalar_1");
 
     const std::array<double, 2> temperature_values{300.0, 340.0};
     const std::array<double, 2> gas_values{0.1, 0.3};
@@ -120,7 +120,7 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
     EXPECT_EQ(snapshot.sequence_index(), 7u);
     EXPECT_EQ(snapshot.feedback_cell_names(), (std::vector<std::string>{"whole_core", "inlet_cell"}));
 
-    for (const auto& [name, field] : std::vector<std::pair<std::string, const LegacyField*>>{
+    for (const auto& [name, field] : std::vector<std::pair<std::string, const Field*>>{
              {"scalar_1", &scalar_group}, {"T_liquid", &temperature}, {"alpha_g", &gas_fraction}, {"rhoFeedback", &density}})
     {
         const auto expected = SimpleFluid::FeedbackMap::volume_weighted_average<Pack>(*field, feedback_cells);
@@ -132,12 +132,12 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
 /** @brief Optional planar free-surface fields use stable external names. */
 TEST(FeedbackFieldRegistryTest, ExportsPlanarFreeSurfaceFields)
 {
-    const auto mesh = make_legacy_mesh();
-    LegacyField liquid_density(mesh, 998.0, "rhoLiquid");
-    LegacyField clear_level(mesh, 0.7, "clearLevel");
-    LegacyField pool_level(mesh, 0.72, "poolLevel");
-    LegacyField headspace_pressure(mesh, 101325.0, "headspacePressure");
-    LegacyField pool_occupancy(mesh, 1.0, "poolOccupancy");
+    const auto mesh = make_factory_mesh();
+    Field liquid_density(mesh, 998.0, "rhoLiquid");
+    Field clear_level(mesh, 0.7, "clearLevel");
+    Field pool_level(mesh, 0.72, "poolLevel");
+    Field headspace_pressure(mesh, 101325.0, "headspacePressure");
+    Field pool_occupancy(mesh, 1.0, "poolOccupancy");
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_pure_liquid_density(liquid_density);
@@ -190,8 +190,8 @@ TEST(FeedbackFieldRegistryTest, SupportsNativeFieldStoredAndMeshHandle)
 /** @brief Snapshot export rejects non-finite mapped field input. */
 TEST(FeedbackFieldRegistryTest, RejectsNonFiniteMappedFieldValues)
 {
-    const auto mesh = make_legacy_mesh();
-    LegacyField temperature(mesh, 300.0, "temperature");
+    const auto mesh = make_factory_mesh();
+    Field temperature(mesh, 300.0, "temperature");
     temperature.set_value(1, std::numeric_limits<double>::quiet_NaN());
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
@@ -207,8 +207,8 @@ TEST(FeedbackFieldRegistryTest, RejectsNonFiniteMappedFieldValues)
 /** @brief Power import is field-deduced for a non-default pack identity. */
 TEST(FeedbackFieldRegistryTest, DeducesNonDefaultPackPowerImport)
 {
-    const auto mesh = make_legacy_mesh();
-    LegacyField power(mesh, 0.0, "qdot_external");
+    const auto mesh = make_factory_mesh();
+    Field power(mesh, 0.0, "qdot_external");
     NonDefaultPackFieldAdapter adapted_power(power);
 
     SimpleFluid::FeedbackMap::import_power_density(adapted_power, std::vector<double>{11.0, 13.0});
@@ -220,11 +220,11 @@ TEST(FeedbackFieldRegistryTest, DeducesNonDefaultPackPowerImport)
 TEST(PlaceholderOuterCouplingDriverTest, RunsDeterministicExchangeLoop)
 {
     const auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    LegacyField power(mesh, 0.0, "qdot_external");
-    LegacyField temperature(mesh, 0.0, "temperature");
-    LegacyField gas_fraction(mesh, 0.1, "alpha_g");
-    LegacyField density(mesh, 950.0, "rhoFeedback");
-    LegacyField scalar_group(mesh, 3.0, "scalar_1");
+    Field power(mesh, 0.0, "qdot_external");
+    Field temperature(mesh, 0.0, "temperature");
+    Field gas_fraction(mesh, 0.1, "alpha_g");
+    Field density(mesh, 950.0, "rhoFeedback");
+    Field scalar_group(mesh, 3.0, "scalar_1");
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_liquid_temperature(temperature);
@@ -277,7 +277,7 @@ TEST(PlaceholderOuterCouplingDriverTest, RunsDeterministicExchangeLoop)
 TEST(PlaceholderOuterCouplingDriverTest, RequiresCanonicalFeedbackFields)
 {
     const auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    LegacyField temperature(mesh, 300.0, "temperature");
+    Field temperature(mesh, 300.0, "temperature");
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_liquid_temperature(temperature);
 

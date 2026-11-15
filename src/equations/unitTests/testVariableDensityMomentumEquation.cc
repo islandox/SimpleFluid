@@ -103,11 +103,11 @@ TEST(VariableDensityMomentumTest, CanonicalFaceMassFluxIsNotMultipliedByDensityA
     EXPECT_NEAR(global_momentum, 2., 2e-12);
 }
 
-TEST(VariableDensityMomentumTest, LegacyStorageRetainsTheSameMomentumBalance)
+TEST(VariableDensityMomentumTest, FactoryStorageRetainsTheSameMomentumBalance)
 {
     auto grid = test::build_mesh<Pack>(test::make_single_hex_database());
-    if (grid->owned_cell_map()->getComm()->getSize() != 1) GTEST_SKIP() << "Legacy mesh fixture is serial.";
-    momentum_balance<Mesh<Pack>>(grid);
+    if (grid->owned_cell_map()->getComm()->getSize() != 1) GTEST_SKIP() << "Factory fixture is serial.";
+    momentum_balance<MeshHandle<Pack>>(grid);
 }
 
 TEST(VariableDensityMomentumTest, RejectsInvalidOwnedDensityCollectivelyWithoutPublishing)
@@ -289,18 +289,18 @@ TEST(VariableDensityMomentumTest, NativeALEFaceMassFluxConservesMomentumAfterLat
     motion.rollback_trial();
 }
 
-TEST(VariableDensityMomentumTest, LegacyStorageLargeDensityRatioRetainsSmallAcceptedMomentum)
+TEST(VariableDensityMomentumTest, FactoryStorageLargeDensityRatioRetainsSmallAcceptedMomentum)
 {
     auto grid = test::build_mesh<Pack>(test::make_single_hex_database());
     if (grid->owned_cell_map()->getComm()->getSize() != 1)
-        GTEST_SKIP() << "Legacy mesh fixture is serial.";
-    using Traits = MeshFieldTraits<Pack, Mesh<Pack>>;
-    Traits::scalar_cell_type old_density(grid, 1., "legacy_small_old_rho"),
-        density(grid, 1e20, "legacy_large_trial_rho"), viscosity(grid, 0., "legacy_mu");
-    Traits::scalar_face_type flux(grid, 0., "legacy_zero_mass_flux");
-    Traits::vector_cell_type old_velocity(grid, vec3<double>{1., -2., 3.}, "legacy_old_u"),
-        velocity(grid, vec3<double>{9., 8., 7.}, "legacy_u");
-    VariableDensityMomentumEquation<Pack, Mesh<Pack>> equation(grid);
+        GTEST_SKIP() << "Factory fixture is serial.";
+    using Traits = MeshFieldTraits<Pack, MeshHandle<Pack>>;
+    Traits::scalar_cell_type old_density(grid, 1., "factory_small_old_rho"),
+        density(grid, 1e20, "factory_large_trial_rho"), viscosity(grid, 0., "factory_mu");
+    Traits::scalar_face_type flux(grid, 0., "factory_zero_mass_flux");
+    Traits::vector_cell_type old_velocity(grid, vec3<double>{1., -2., 3.}, "factory_old_u"),
+        velocity(grid, vec3<double>{9., 8., 7.}, "factory_u");
+    VariableDensityMomentumEquation<Pack, MeshHandle<Pack>> equation(grid);
     LinearSolverOptions linear;
     linear.tolerance = 1e-12;
     EXPECT_TRUE(equation.advance(old_velocity, old_density, density, flux, viscosity, .25, velocity, {}, {}, {}, linear)

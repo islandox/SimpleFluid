@@ -141,7 +141,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -347,7 +347,7 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAdvancesAllVelocityComponents)
 
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
@@ -387,7 +387,7 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAddsCallerSourceTerm)
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     auto source =
         [](MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
     {
@@ -468,7 +468,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
     temperature.set_value(0, 2.0);
     temperature.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     auto source =
@@ -493,7 +493,7 @@ TEST(PhysicalEquationsTest,
     auto mesh = make_single_hex_mesh();
     FieldType old_temperature(mesh, 2.0, "old_temperature");
     FieldType temperature(mesh, 9.0, "temperature");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     SimpleFluid::LinearSolverOptions options;
@@ -518,7 +518,7 @@ TEST(PhysicalEquationsTest,
     auto mesh = make_single_hex_mesh();
     FieldType old_temperature(mesh, 275.0, "old_temperature");
     FieldType temperature(mesh, 9.0, "temperature");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     SimpleFluid::TimeStepperOptions time_options;
@@ -550,7 +550,7 @@ TEST(PhysicalEquationsTest, ExteriorForcedConvectionUsesPhysicalTemperaturePath)
     auto mesh = make_single_hex_mesh();
     FieldType old_temperature(mesh, 400.0, "old_temperature");
     FieldType temperature(mesh, 0.0, "temperature");
-    SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0, "fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     auto& boundary = bcs.convection["xmax"];
     boundary.correlation = SimpleFluid::ConvectionCorrelation::ChurchillBernsteinCylinder;
@@ -602,7 +602,7 @@ TEST(PhysicalEquationsTest,
     }
     temperature.sync_ghosts();
     const auto accepted_temperature = local_values(temperature);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     SimpleFluid::LinearSolverOptions options;
@@ -657,7 +657,7 @@ TEST(PhysicalEquationsTest,
     temperature.sync_ghosts();
     const auto accepted_temperature = local_values(temperature);
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     SimpleFluid::TimeStepperOptions time_options;
@@ -717,7 +717,7 @@ TEST(PhysicalEquationsTest,
     constexpr double initial_temperature = 275.0;
     FieldType temperature(
         mesh, initial_temperature, "recovery_temperature");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
 
@@ -785,7 +785,7 @@ TEST(PhysicalEquationsTest,
     constexpr double time_step = 1.0;
 
     FieldType temperature(mesh, initial_temperature, "temperature");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     bcs.temperature["zmax"] = {
         SimpleFluid::BoundaryConditionType::Neumann,
@@ -845,7 +845,7 @@ TEST(PhysicalEquationsTest,
     auto mesh = make_single_hex_mesh();
     FieldType molecular_temperature(mesh, 0.0, "molecular_temperature");
     FieldType effective_temperature(mesh, 0.0, "effective_temperature");
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     SimpleFluid::BoundaryConditionSet bcs;
     bcs.temperature["xmin"] = {
         SimpleFluid::BoundaryConditionType::Dirichlet, 1.0};
@@ -1043,7 +1043,7 @@ void expect_cg_pressure_projection_matches_gmres(SimpleFluid::SP<const TestMeshT
 
 } // namespace
 
-TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformLegacyMesh)
+TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformFactoryMesh)
 {
     auto database = std::make_shared<SimpleFluid::Database>(*SimpleFluid::test::make_box_database(4, 2, 1));
     database->set("X", SimpleFluid::ArrReal{0.0, 0.1, 0.3, 0.6, 1.0});
@@ -1907,7 +1907,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
     options.thermal_expansion = 0.0;
     options.reference_temperature = 0.5;
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
@@ -2062,7 +2062,7 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
     }
 
     SimpleFluid::BoussinesqMomentumEquation<Pack> equation(mesh);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
@@ -2183,7 +2183,7 @@ TEST(PhysicalEquationsTest,
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
 
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 0.1;
@@ -2298,7 +2298,7 @@ TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewe
     const auto cache =
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
 
     SimpleFluid::TimeStepperOptions orthogonal_options;
     orthogonal_options.time_step = 0.05;
@@ -2373,7 +2373,7 @@ TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWi
         old_temperature.set_owned_value(cell, 275.0 + 10.0 * mesh->cell_centroid(cell).x);
     }
     old_temperature.sync_ghosts();
-    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "zero_flux");
     SimpleFluid::BoundaryConditionSet boundaries;
     boundaries.temperature["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 290.0};
     SimpleFluid::TemperatureDiffusionEquation<Pack> reused_ordinary(mesh, boundaries), reused_physical(mesh, boundaries);

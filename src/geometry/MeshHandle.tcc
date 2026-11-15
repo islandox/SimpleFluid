@@ -11,9 +11,6 @@
 
 #pragma once
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
-
-
 #include "MeshHandle.hh"
 #include "geometry/details/SemiStructuredPartition.hh"
 #include "geometry/MeshReorderingFactory.hh"
@@ -319,51 +316,6 @@ MeshHandle<Pack>::MeshHandle(
     : MeshHandle(UnstructuredPtr(mesh), indexer, std::move(comm))
 {
     d_mutable_mesh.emplace(std::move(mesh));
-}
-
-/**
- * @brief Construct a handle from an existing STK mesh adapter.
- *
- * @param mesh STK adapter to wrap.
- */
-template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(STKAdapterPtr mesh)
-    : d_mesh(require_mesh(std::move(mesh)))
-{
-    initialize_stk(std::get<STKAdapterPtr>(d_mesh));
-}
-
-/** @brief Construct a mutable handle around a legacy STK adapter. */
-template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(MutableSTKAdapterPtr mesh)
-    : MeshHandle(STKAdapterPtr(mesh))
-{
-    if (!mesh->has_mutable_mesh())
-    {
-        throw std::invalid_argument(
-            "MeshHandle requires mutable legacy geometry when constructed "
-            "from a mutable STK adapter pointer.");
-    }
-    d_mutable_mesh.emplace(std::move(mesh));
-}
-
-/**
- * @brief Adapt a legacy distributed mesh and construct its handle.
- *
- * @param mesh Legacy mesh to adapt.
- */
-template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(SP<const SimpleFluid::Mesh<Pack>> mesh)
-    : MeshHandle(STKAdapterPtr(
-          std::make_shared<STKAdapter>(std::move(mesh))))
-{
-}
-
-/** @brief Adapt a mutable legacy distributed mesh and construct its handle. */
-template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
-    : MeshHandle(std::make_shared<STKAdapter>(std::move(mesh)))
-{
 }
 
 /**
@@ -1038,88 +990,6 @@ void MeshHandle<Pack>::create_unstructured_maps(
 }
 
 /**
- * @brief Import ownership, overlap, connectivity, and maps from an STK
- * adapter.
- *
- * @param adapter Adapter providing the legacy mesh interface.
- */
-template<TpetraTypePack Pack>
-void MeshHandle<Pack>::initialize_stk(STKAdapterPtr adapter)
-{
-    const auto& mesh = adapter->mesh();
-    bool identity_order = true;
-    bool saw_overlap_face = false;
-    for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
-    {
-        if (mesh.is_owned_face(checked_local(lid)))
-        {
-            if (saw_overlap_face)
-            {
-                identity_order = false;
-                break;
-            }
-        }
-        else
-        {
-            saw_overlap_face = true;
-        }
-    }
-    if (!identity_order)
-    {
-        d_legacy_face_geometry_lids.reserve(mesh.num_faces());
-        for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
-        {
-            if (mesh.is_owned_face(checked_local(lid)))
-            {
-                d_legacy_face_geometry_lids.push_back(
-                    checked_local(lid));
-            }
-        }
-        for (size_t lid = 0; lid < mesh.num_faces(); ++lid)
-        {
-            if (!mesh.is_owned_face(checked_local(lid)))
-            {
-                d_legacy_face_geometry_lids.push_back(
-                    checked_local(lid));
-            }
-        }
-        d_legacy_face_local_lids.resize(
-            d_legacy_face_geometry_lids.size());
-        for (size_t local = 0;
-             local < d_legacy_face_geometry_lids.size();
-             ++local)
-        {
-            d_legacy_face_local_lids[
-                static_cast<size_t>(
-                    d_legacy_face_geometry_lids[local])] =
-                checked_local(local);
-        }
-        // Interleaved ownership is uncommon. Preserve the established
-        // owned-first handle ordering with a compact permutation and
-        // materialize cell connectivity only for this fallback.
-        }
-    initialize_boundary_batches(*adapter);
-
-    d_owned_cell_map = mesh.owned_cell_map();
-    d_overlap_cell_map = mesh.overlap_cell_map();
-    d_owned_face_map = mesh.owned_face_map();
-    d_boundary_face_map = mesh.boundary_face_map();
-    std::vector<global_ordinal_type> overlap_face_gids;
-    overlap_face_gids.reserve(num_faces());
-    for (size_t face_lid = 0; face_lid < num_faces(); ++face_lid)
-    {
-        const auto geometry_lid =
-            geometry_face_lid(checked_local(face_lid));
-        overlap_face_gids.push_back(
-            mesh.face_global_id(
-                checked_local(static_cast<size_t>(geometry_lid))));
-    }
-    d_overlap_face_map = make_map(
-        Tpetra::getDefaultComm(), overlap_face_gids);
-    publish_binding();
-}
-
-/**
  * @brief Initialize all cells and faces as locally owned on one rank.
  *
  * @tparam MeshType Concrete mesh type.
@@ -1188,64 +1058,6 @@ void MeshHandle<Pack>::initialize_indexer(indexer_type indexer)
 }
 
 /**
- * @brief Lazily materialize legacy identity/permutation lookup tables.
- *
- * Production geometry and field paths use the wrapped mesh arrays directly;
- * this preserves the historical indexer() API only for callers that request
- * it explicitly.
- */
-template<TpetraTypePack Pack>
-void MeshHandle<Pack>::materialize_legacy_indexer() const
-{
-    if (d_legacy_indexer_materialized)
-    {
-        return;
-    }
-    const auto legacy = legacy_mesh();
-    if (!legacy)
-    {
-        return;
-    }
-
-    std::vector<size_t> owned_cells;
-    std::vector<size_t> ghost_cells;
-    owned_cells.reserve(legacy->num_owned_cells());
-    ghost_cells.reserve(
-        legacy->num_local_cells() - legacy->num_owned_cells());
-    for (size_t local = 0; local < legacy->num_local_cells(); ++local)
-    {
-        (local < legacy->num_owned_cells()
-             ? owned_cells
-             : ghost_cells)
-            .push_back(static_cast<size_t>(geometry_cell_lid(
-                checked_local(local))));
-    }
-
-    std::vector<size_t> owned_faces;
-    std::vector<size_t> overlap_faces;
-    const auto owned_face_count = num_owned_faces();
-    owned_faces.reserve(owned_face_count);
-    overlap_faces.reserve(num_faces() - owned_face_count);
-    for (size_t local = 0; local < num_faces(); ++local)
-    {
-        const auto geometry = static_cast<size_t>(
-            geometry_face_lid(checked_local(local)));
-        (local < owned_face_count
-             ? owned_faces
-             : overlap_faces)
-            .push_back(geometry);
-    }
-
-    d_indexer = indexer_type(
-        checked_global_ids(std::move(owned_cells)),
-        checked_global_ids(std::move(ghost_cells)),
-        checked_global_ids(std::move(owned_faces)),
-        checked_global_ids(std::move(overlap_faces)),
-        std::vector<global_ordinal_type>{});
-    d_legacy_indexer_materialized = true;
-}
-
-/**
  * @brief Materialize cell-to-face connectivity in MeshHandle local IDs.
  *
  * Faces not present in the local overlap are omitted.
@@ -1295,9 +1107,7 @@ void MeshHandle<Pack>::initialize_cell_faces()
 /**
  * @brief Materialize locally visible boundary batches.
  *
- * Supports both view-based and legacy materialized boundary-batch APIs.
- *
- * @tparam MeshType Concrete mesh or adapter type.
+ * @tparam MeshType Native concrete mesh type.
  * @param mesh Mesh providing boundary batch metadata and face IDs.
  */
 template<TpetraTypePack Pack>
@@ -1305,82 +1115,32 @@ template<class MeshType>
 void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
-    if constexpr (std::same_as<MeshType, MultiRegion> || std::same_as<MeshType, SemiStructured> ||
-                  std::same_as<MeshType, Cartesian> || std::same_as<MeshType, Cylindrical> ||
-                  std::same_as<MeshType, Unstructured>)
+    if constexpr (std::same_as<MeshType, SemiStructured> || std::same_as<MeshType, Cartesian> ||
+                  std::same_as<MeshType, Cylindrical> || std::same_as<MeshType, Unstructured>)
     {
-        if constexpr (std::same_as<MeshType, SemiStructured> || std::same_as<MeshType, Cartesian> ||
-                      std::same_as<MeshType, Cylindrical> || std::same_as<MeshType, Unstructured>)
+        // Boundary configuration is global even when this rank has no
+        // incident boundary faces (or owns no cells at all).
+        for (const auto id : mesh.boundary_batch_ids())
         {
-            // Boundary configuration is global even when this rank has no
-            // incident boundary faces (or owns no cells at all).
-            for (const auto id : mesh.boundary_batch_ids())
-            {
-                d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
-                d_boundary_batches[id].id = id;
-            }
-        }
-        for (size_t f = 0; f < num_faces(); ++f)
-        {
-            const auto local = checked_local(f);
-            const auto geometry = static_cast<size_t>(geometry_face_lid(local));
-            const int id = mesh.boundary_id(mesh.face_id(geometry));
-            if (id == invalid_boundary_id) continue;
             d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
-            auto& batch = d_boundary_batches[id]; batch.id = id; batch.face_lids.push_back(local);
-        }
-        return;
-    }
-
-    auto materialize_batch =
-        [&](int batch_id, auto&& source_faces)
-    {
-        BoundaryFaceBatch batch;
-        batch.id = batch_id;
-        for (const auto face : source_faces)
-        {
-            const auto geometry_lid =
-                static_cast<size_t>(mesh.face_local_id(face));
-            const auto local_face = geometry_to_local_face(geometry_lid);
-            if (local_face != invalid_local_id())
-            {
-                batch.face_lids.push_back(local_face);
-            }
-        }
-        if (!batch.face_lids.empty())
-        {
-            d_boundary_names.emplace(
-                batch_id, mesh.boundary_batch_name(batch_id));
-            d_boundary_batches.emplace(batch_id, std::move(batch));
-        }
-    };
-
-    if constexpr (std::ranges::range<
-                      decltype(mesh.boundary_face_batch(0))>)
-    {
-        // New view-based API: boundary_face_batch() returns a view
-        for (int batch_id : mesh.boundary_batch_ids())
-        {
-            materialize_batch(
-                batch_id, mesh.boundary_face_batch(batch_id));
+            d_boundary_batches[id].id = id;
         }
     }
-    else
+    for (size_t f = 0; f < num_faces(); ++f)
     {
-        // Legacy materialized-map API
-        for (const auto& [batch_id, source_batch] :
-             mesh.boundary_batches())
-        {
-            materialize_batch(batch_id, source_batch.face_lids);
-        }
+        const auto local = checked_local(f);
+        const auto geometry = static_cast<size_t>(geometry_face_lid(local));
+        const int id = mesh.boundary_id(mesh.face_id(geometry));
+        if (id == invalid_boundary_id) continue;
+        d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
+        auto& batch = d_boundary_batches[id]; batch.id = id; batch.face_lids.push_back(local);
     }
 }
 
 /**
  * @brief Export owned mesh cells to VTU.
  *
- * STK meshes delegate to their native exporter; other mesh families are
- * converted to VTU connectivity by this handle.
+ * Native mesh families are converted to VTU connectivity by this handle.
  *
  * @param filename Requested output filename.
  */
@@ -1391,11 +1151,8 @@ void MeshHandle<Pack>::export_vtu(const std::string& filename) const
         [&](const auto& mesh)
         {
             using mesh_type = std::decay_t<decltype(mesh)>;
-            if constexpr (std::is_same_v<mesh_type, STKAdapter>)
-            {
-                mesh.export_vtu(filename);
-            }
-            else if constexpr (std::is_same_v<mesh_type, SemiStructured>)
+
+            if constexpr (std::is_same_v<mesh_type, SemiStructured>)
             {
                 write_vtu(filename, semi_structured_vtu_topology(mesh));
             }
@@ -1435,11 +1192,8 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::vtu_topology() const
         [&](const auto& mesh) -> VTUWriter::TopologyHandle
         {
             using mesh_type = std::decay_t<decltype(mesh)>;
-            if constexpr (std::is_same_v<mesh_type, STKAdapter>)
-            {
-                return legacy_vtu_topology(mesh);
-            }
-            else if constexpr (std::is_same_v<mesh_type, SemiStructured>)
+
+            if constexpr (std::is_same_v<mesh_type, SemiStructured>)
             {
                 return semi_structured_vtu_topology(mesh);
             }
@@ -1562,55 +1316,6 @@ void MeshHandle<Pack>::write_vtu(
     VTUWriter writer(std::move(topology));
     add_geometry_cell_data(writer);
     writer.write(local_output_filename(filename));
-}
-
-/**
- * @brief Build topology for the exact legacy mesh wrapped by this handle.
- */
-template<TpetraTypePack Pack>
-VTUWriter::TopologyHandle MeshHandle<Pack>::legacy_vtu_topology(
-    const STKAdapter& mesh) const
-{
-    std::unordered_map<global_ordinal_type, global_index_t> node_lids;
-    VTUWriter::VectorData points;
-    VTUWriter::Int64Data connectivity;
-    VTUWriter::Int64Data offsets;
-    VTUWriter::UInt8Data cell_types;
-    offsets.reserve(num_owned_cells());
-    cell_types.reserve(num_owned_cells());
-
-    const auto& legacy = mesh.mesh();
-    auto append_node =
-        [&](global_ordinal_type node_gid) -> global_index_t
-    {
-        const auto [position, inserted] = node_lids.emplace(
-            node_gid, static_cast<global_index_t>(points.size()));
-        if (inserted)
-        {
-            points.push_back(legacy.node_coord(node_gid));
-        }
-        return position->second;
-    };
-
-    for (size_t lid = 0; lid < num_owned_cells(); ++lid)
-    {
-        const auto geometry_lid = geometry_cell_lid(checked_local(lid));
-        const auto& cell = legacy.cell(checked_local(
-            static_cast<size_t>(geometry_lid)));
-        for (const auto node_gid : cell.node_gids)
-        {
-            connectivity.push_back(append_node(node_gid));
-        }
-        offsets.push_back(static_cast<global_index_t>(connectivity.size()));
-        cell_types.push_back(static_cast<std::uint8_t>(
-            MeshUtils::vtu_cell_type_code(cell.type)));
-    }
-
-    return VTUWriter::make_topology(
-        std::move(points),
-        std::move(connectivity),
-        std::move(offsets),
-        std::move(cell_types));
 }
 
 /**
@@ -1843,5 +1548,3 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::unstructured_vtu_topology(
 }
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

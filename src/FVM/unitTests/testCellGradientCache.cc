@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::Mesh<Pack>;
+using MeshType = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
@@ -246,7 +246,7 @@ TEST(CellGradientCacheTest,
         cached_scalar_gradient, direct_scalar_gradient);
 }
 
-TEST(CellGradientCacheTest, GaussGeometryRetainsLiveLegacyBoundariesAndPublishedValues)
+TEST(CellGradientCacheTest, GaussGeometryRetainsLiveNativeBoundariesAndPublishedValues)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     SimpleFluid::FVM::GaussLinearGradientCache<Pack> cache(mesh);
@@ -282,30 +282,9 @@ TEST(CellGradientCacheTest, GaussGeometryRetainsLiveLegacyBoundariesAndPublished
 TEST(CellGradientCacheTest,
      MatchesRankDeficientPeriodicReconstruction)
 {
-    auto mesh =
-        SimpleFluid::test::build_mesh<Pack>(
-            SimpleFluid::test::make_box_database(
-                3, 1, 1, 1.0 / 3.0));
-    MeshType::local_ordinal_type xmin_face = -1;
-    MeshType::local_ordinal_type xmax_face = -1;
-    for (const auto& [batch_id, batch] : mesh->boundary_batches())
-    {
-        const auto& name = mesh->boundary_batch_name(batch_id);
-        if (name == "xmin")
-        {
-            xmin_face = batch.face_lids.front();
-        }
-        else if (name == "xmax")
-        {
-            xmax_face = batch.face_lids.front();
-        }
-    }
-    ASSERT_GE(xmin_face, 0);
-    ASSERT_GE(xmax_face, 0);
-    const auto xmin_owner = mesh->owner_cell(xmin_face);
-    const auto xmax_owner = mesh->owner_cell(xmax_face);
-    mesh->set_periodic_face(xmin_face, xmax_owner);
-    mesh->set_periodic_face(xmax_face, xmin_owner);
+    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1. / 3., 2. / 3., 1.},
+            {0., 1. / 3.}, {0., 1. / 3.}}}, SimpleFluid::Vec3D<bool>{{true, false, false}}));
 
     GradientCache cache(mesh);
     FieldType scalar(mesh, "periodic_scalar");

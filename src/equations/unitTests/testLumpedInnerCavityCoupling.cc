@@ -64,7 +64,7 @@ template<class Field> real_t energy(const Field& field)
     return global;
 }
 
-template<SimpleFluid::MeshType Mesh> MaterialPropertyFields<Pack, Mesh> material(SP<const Mesh> m)
+template<SimpleFluid::MeshType Grid> MaterialPropertyFields<Pack, Grid> material(SP<const Grid> m)
 {
     BoussinesqModelOptions o;
     o.reference_density = o.density = 1.0;
@@ -313,11 +313,11 @@ TEST(LumpedInnerCavityCouplingTest, RankMismatchAndEmptyOwningRankAreHandledColl
     EXPECT_DOUBLE_EQ(cavity.state().temperature, 300.0);
 }
 
-TEST(LumpedInnerCavityCouplingTest, LegacyScalarFieldsSupportBothLocations)
+TEST(LumpedInnerCavityCouplingTest, ConciseScalarFieldsSupportBothNativeLocations)
 {
     const auto m = test::build_mesh<Pack>(test::make_box_database(4, 1, 1));
-    CellField<Pack> cells(m, 310.0);
-    FaceField<Pack> faces(m, 310.0);
+    CellField<Pack> cells(m, 310.0, "cells");
+    FaceField<Pack> faces(m, 310.0, "faces");
     InnerCavityFieldInput batch(m->owned_cell_map()->getComm(),
         {Batch::from_field(cells, "ymin", properties("cells")),
             Batch::from_field(faces, "ymax", properties("faces"), InnerCavitySampling::AreaAverage)});

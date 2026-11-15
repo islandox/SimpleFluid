@@ -191,7 +191,7 @@ TEST(IncompressibleIsothermalSolverTest, DoesNotRegisterOrSolveTemperatureAndRes
     EXPECT_DOUBLE_EQ(solver.last_step_statistics().temperature, 0.0);
 }
 
-/** @brief RANS advances through both segregated and monolithic legacy paths. */
+/** @brief RANS advances through segregated and monolithic native paths. */
 TEST(IncompressibleIsothermalSolverTest, AdvancesStandardKEpsilonThroughPisoAndCoupledKrylov)
 {
     constexpr double reference_density = 2.0;
@@ -226,7 +226,7 @@ TEST(IncompressibleIsothermalSolverTest, AdvancesStandardKEpsilonOnNativeMeshHan
 {
     constexpr double reference_density = 2.0;
     auto mesh = make_native_cartesian_mesh();
-    ASSERT_FALSE(mesh->legacy_mesh());
+
 
     Solver solver(mesh, slip_box_boundaries(), stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO),
         focused_linear_options(), reference_density);

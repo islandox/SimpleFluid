@@ -9,7 +9,6 @@
  *
  */
 #include "utils/export_helper.hh"
-SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/MeshConcepts.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
@@ -303,7 +302,7 @@ SIMPLEFLUID_SOLVERS_LOCAL auto gauss_pressure_gradient_stencils(
             {
                 const auto other = mesh.opposite_or_periodic_neighbor_cell(face, cell);
                 // Gauss reconstruction uses cell-to-face distances, including
-                // its equal-weight fallback, in both legacy and stored fields.
+                // its equal-weight fallback for stored fields.
                 const auto distance = mesh.cell_to_face_distance(face, cell);
                 const auto other_distance = mesh.cell_to_face_distance(face, other);
                 const auto total = distance + other_distance;
@@ -1988,11 +1987,6 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 const auto other = d_coefficient_columns[coefficient_begin + other_slot];
                 const auto interpolation_weights = [&]() -> std::pair<scalar_type, scalar_type>
                 {
-                    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-                    {
-                        return FVM::detail::interior_face_linear_weights(*d_mesh, face_lid, cell_lid, other);
-                    }
-                    else
                     {
                         return FVM::detail::stored_interior_face_linear_weights(*d_mesh, face_lid, cell_lid, other);
                     }
@@ -2088,11 +2082,6 @@ CoupledPressureVelocitySolver<Pack, MeshType>::assemble_coupled_system(const mom
                 typename velocity_field_type::vec_type prescribed;
                 if (velocity_type == BoundaryConditionType::Slip)
                 {
-                    if constexpr (std::same_as<mesh_type, Mesh<Pack>>)
-                    {
-                        prescribed = FVM::detail::slip_face_velocity(velocity, face_lid);
-                    }
-                    else
                     {
                         prescribed = FVM::detail::stored_slip_face_velocity(velocity, face_lid);
                     }
@@ -2590,5 +2579,3 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
 }
 
 } // namespace SimpleFluid
-
-SIMPLEFLUID_LEGACY_API_END

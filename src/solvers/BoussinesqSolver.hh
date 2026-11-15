@@ -42,10 +42,6 @@ public:
     using typename base_type::face_flux_field_type;
     using typename base_type::field_type;
     using typename base_type::global_ordinal_type;
-    using typename base_type::legacy_face_flux_field_type;
-    using typename base_type::legacy_field_type;
-    using typename base_type::legacy_mesh_type;
-    using typename base_type::legacy_velocity_field_type;
     using typename base_type::local_ordinal_type;
     using typename base_type::mesh_type;
     using typename base_type::momentum_equation_type;
@@ -68,17 +64,8 @@ public:
     using continuity_target_type = typename base_type::continuity_target_type;
     using continuity_residual_type = typename base_type::continuity_residual_type;
 
-    // Retain the historical legacy cell alias for downstream code that uses
-    // it for STK-only model helpers.
-    using cell_type = typename legacy_mesh_type::CellType;
     using base_type::pressure;
     using base_type::velocity;
-
-    BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-        TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
-
-    BoussinesqSolver(SP<const legacy_mesh_type> mesh, BoundaryConditionSet boundary_conditions,
-        TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
 
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options = {}, LinearSolverOptions linear_options = {});
@@ -92,7 +79,7 @@ public:
      *
      * Physical material fields, heat sources, turbulence, and optional models
      * retain their native MeshHandle/FieldStored representation when @p mesh
-     * does not wrap a legacy mesh.
+     * retains the exact native handle.
      */
     BoussinesqSolver(SP<const MeshHandle<Pack>> mesh, BoundaryConditionSet boundary_conditions,
         TimeStepperOptions time_options, LinearSolverOptions linear_options, BoussinesqModelOptions model_options);
@@ -180,9 +167,7 @@ private:
     void begin_step();
     using base_type::clear_volume_continuity_target;
     using base_type::collect_scalar_field;
-    using base_type::coupled_pressure_velocity_solver;
     using base_type::d_last_step_statistics;
-    using base_type::d_legacy_mesh;
     using base_type::d_mesh;
     using base_type::d_problem;
     using base_type::d_step_index;
@@ -200,12 +185,6 @@ private:
     std::optional<DiagnosticALEState> d_pending_diagnostic_ale, d_accepted_diagnostic_ale;
     DiagnosticALEState d_diagnostic_old_state;
     using base_type::fluid_solution_writer;
-    using base_type::legacy_old_face_fluxes;
-    using base_type::legacy_predictor_pressure_gradient;
-    using base_type::legacy_pressure;
-    using base_type::legacy_pressure_face_flux_workspace;
-    using base_type::legacy_projected_face_fluxes;
-    using base_type::legacy_velocity;
     using base_type::native_coupled_pressure_velocity_solver;
     using base_type::native_momentum_equation;
     using base_type::native_pressure_face_flux_workspace;
@@ -213,17 +192,11 @@ private:
     using base_type::native_velocity_boundary_cache;
     using base_type::old_face_fluxes;
     using base_type::predictor_pressure_gradient;
-    using base_type::pressure_face_flux_workspace;
     using base_type::pressure_velocity_residuals;
     using base_type::projected_face_fluxes;
     using base_type::refine_volume_continuity;
-    using base_type::require_mesh;
     using base_type::set_volume_continuity_target;
     using base_type::solve_pressure_velocity_coupling;
-    using base_type::sync_primary_fields_from_legacy;
-    using base_type::sync_primary_fields_to_legacy;
-    using base_type::uses_legacy_backend;
-    using base_type::velocity_boundary_cache;
     using base_type::volume_continuity_target;
 
     /** @brief Tag selecting the physical-model constructor implementation. */
@@ -251,13 +224,6 @@ private:
     canonical_face_flux_workspace_type& boussinesq_pressure_face_flux_workspace();
     SIMPLEFLUID_SOLVERS_LOCAL
     canonical_coupled_solver_type& boussinesq_coupled_pressure_velocity_solver();
-    SIMPLEFLUID_SOLVERS_LOCAL
-    legacy_field_type& legacy_temperature();
-    SIMPLEFLUID_SOLVERS_LOCAL
-    const legacy_field_type& legacy_temperature() const;
-    SIMPLEFLUID_SOLVERS_LOCAL
-    void sync_temperature_to_legacy();
-    BoussinesqMomentumEquation<Pack>& momentum_equation() override;
     LinearSolveSummary advance_momentum() override;
     coupled_system_type assemble_coupled_system() override;
     bool supports_coupled_nonlinear() const noexcept override;

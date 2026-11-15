@@ -27,6 +27,14 @@ template<class Factory> void scalar_links()
     Function volatile assemble = &Factory::assemble;
     EXPECT_TRUE(assemble != nullptr);
 }
+template<class Factory> void basic_vector_links()
+{
+    using Function = VectorTransportSystem<Pack> (*)(typename Factory::VectorTerms,
+        typename Factory::BasicVectorBoundary, typename Factory::BasicVectorOptions,
+        typename Factory::BasicVectorContext);
+    Function volatile assemble = &Factory::assemble;
+    EXPECT_TRUE(assemble != nullptr);
+}
 template<class Factory> void temperature_links()
 {
     using Function =
@@ -64,6 +72,7 @@ TEST(FvmLibraryTest, ExportedNativeFvmApiLinksWithoutSolverDso)
     using Cartesian = TransportSystemFactory<Pack, Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>>;
     using Solid = TransportSystemFactory<Pack, SolidSubdomain<Pack>>;
     scalar_links<Native>();
+    basic_vector_links<Native>();
     scalar_links<Cartesian>();
     scalar_links<Solid>();
     temperature_links<Native>();

@@ -304,7 +304,7 @@ TEST(BoussFiniteVaporCouplingTest, NativeHeatGasVaporAndMechanicalFeedbackRemain
     feedback.reference_dynamic_viscosity = feedback.min_viscosity = 0;
     auto& material = f.coupling->configure_material_feedback(feedback);
     f.coupling->step();
-    EXPECT_FALSE(f.grid->legacy_mesh());
+
     EXPECT_EQ(f.solver->temperature().mesh_ptr(), f.grid);
     EXPECT_EQ(f.solver->material_properties().density.mesh_ptr(), f.grid);
     EXPECT_EQ(f.scalar->alpha_g().mesh_ptr(), f.grid);

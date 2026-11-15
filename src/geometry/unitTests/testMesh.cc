@@ -11,7 +11,7 @@
 
 #include <gtest/gtest.h>
 
-#include "geometry/Mesh.hh"
+#include "geometry/MeshHandle.hh"
 #include "geometry/MeshFactory.hh"
 #include "geometry/MeshUtils.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -30,7 +30,7 @@
 namespace
 {
 
-using MeshType = SimpleFluid::Mesh<SimpleFluid::TpetraTypes<>>;
+using MeshType = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
 using Pack = SimpleFluid::TpetraTypes<>;
 
 using utils_test::KokkosEnvironment;
@@ -75,7 +75,7 @@ TEST(MeshTest, InvalidIdAndVtuCellType)
 // Mesh class method tests — uses MeshFactory to build a concrete mesh
 // ===========================================================================
 
-/** @brief Fixture providing a built 2-by-2-by-2 legacy mesh. */
+/** @brief Fixture providing a built 2-by-2-by-2 native mesh. */
 class MeshMethodTest : public ::testing::Test
 {
 protected:
@@ -107,19 +107,19 @@ TEST_F(MeshMethodTest, CellAndFaceAccess)
 
     // Valid cell access
     for (size_t i = 0; i < mesh_->num_local_cells(); ++i)
-        EXPECT_NO_THROW(mesh_->cell(static_cast<lid_t>(i)));
+        EXPECT_NO_THROW(mesh_->faces(static_cast<lid_t>(i)));
 
     // Out-of-bounds / negative cell access
-    EXPECT_THROW_WHEN_DEBUG(mesh_->cell(static_cast<lid_t>(mesh_->num_local_cells() + 100)),
+    EXPECT_THROW_WHEN_DEBUG(mesh_->faces(static_cast<lid_t>(mesh_->num_local_cells() + 100)),
                  std::out_of_range);
-    EXPECT_THROW_WHEN_DEBUG(mesh_->cell(-1), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(mesh_->faces(-1), std::out_of_range);
 
     // Valid face access
     for (size_t i = 0; i < mesh_->num_faces(); ++i)
-        EXPECT_NO_THROW(mesh_->face(static_cast<lid_t>(i)));
+        EXPECT_NO_THROW(mesh_->owner_cell(static_cast<lid_t>(i)));
 
     // Out-of-bounds face access
-    EXPECT_THROW_WHEN_DEBUG(mesh_->face(static_cast<lid_t>(mesh_->num_faces() + 100)),
+    EXPECT_THROW_WHEN_DEBUG(mesh_->owner_cell(static_cast<lid_t>(mesh_->num_faces() + 100)),
                  std::out_of_range);
 
     // is_owned_cell matches owned range
@@ -220,12 +220,12 @@ TEST_F(MeshMethodTest, FaceTopology)
         {
             ++boundary_count;
             EXPECT_NE(mesh_->boundary_id(fid), MeshType::invalid_boundary_id);
-            EXPECT_NO_THROW(mesh_->boundary_name(fid));
+            EXPECT_NO_THROW(mesh_->boundary_batch_name(mesh_->boundary_id(fid)));
             EXPECT_TRUE(mesh_->is_exterior_face(fid));
         }
         else
         {
-            EXPECT_THROW(mesh_->boundary_name(fid), std::out_of_range);
+            EXPECT_THROW(mesh_->boundary_batch_name(mesh_->boundary_id(fid)), std::out_of_range);
         }
     }
 
@@ -264,42 +264,24 @@ TEST_F(MeshMethodTest, IdentifierMapping)
     for (size_t i = 0; i < mesh_->num_owned_cells(); ++i)
     {
         const auto lid = static_cast<lid_t>(i);
-        EXPECT_EQ(mesh_->global_to_local_cell(mesh_->cell_global_id(lid)), lid);
+        EXPECT_EQ(mesh_->owned_cell_map()->getLocalElement(mesh_->cell_global_id(lid)), lid);
     }
 
     // Unknown GID → invalid
-    EXPECT_EQ(mesh_->global_to_local_cell(999999999),
+    EXPECT_EQ(mesh_->owned_cell_map()->getLocalElement(999999999),
               SimpleFluid::invalid_id<lid_t>());
 
-    // Maps and compact host/device views
     EXPECT_FALSE(mesh_->owned_cell_map().is_null());
     EXPECT_FALSE(mesh_->overlap_cell_map().is_null());
-    const auto& host_views = mesh_->host_views();
-    EXPECT_EQ(
-        host_views.cell_geometry.volume.size(),
-        mesh_->num_local_cells());
-    EXPECT_EQ(
-        host_views.face_topology.owner.size(),
-        mesh_->num_faces());
-    EXPECT_EQ(
-        host_views.face_geometry.area_vector.size(),
-        mesh_->num_faces());
-    for (size_t face = 0; face < mesh_->num_faces(); ++face)
+    for (size_t cell = 0; cell < mesh_->num_local_cells(); ++cell)
     {
-        const auto face_lid = static_cast<lid_t>(face);
-        EXPECT_EQ(
-            host_views.face_topology.owner[face],
-            mesh_->face(face_lid).owner);
-        EXPECT_EQ(
-            host_views.face_topology.neighbor[face],
-            mesh_->face(face_lid).neighbor);
-        EXPECT_EQ(
-            host_views.face_geometry.area_vector[face],
-            mesh_->face(face_lid).unit_normal_from_owner
-                * mesh_->face(face_lid).area);
+        const auto lid = static_cast<lid_t>(cell);
+        EXPECT_EQ(mesh_->indexer().cell_local_id(mesh_->cell_geometry_global_id(lid)), lid);
     }
-    const auto views = mesh_->device_views();
-    EXPECT_NO_THROW(static_cast<void>(views.cell_volume.extent(0)));
+    const auto topology = mesh_->vtu_topology();
+    ASSERT_TRUE(topology);
+    EXPECT_EQ(topology->cell_offsets.size(), mesh_->num_owned_cells());
+    EXPECT_EQ(mesh_->connectivity_storage_bytes(), 0U);
 }
 
 /** @brief Verifies cell-to-face and cell-to-cell distance calculations. */

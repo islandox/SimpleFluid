@@ -108,14 +108,15 @@ TEST(CellFluxBalanceCacheTest, TopologySlotsSurviveMotionAndRollback)
     check();
 }
 
-TEST(CellFluxBalanceCacheTest, PreservesLegacyOwnedFaceConvention)
+TEST(CellFluxBalanceCacheTest, DefaultFaceFieldSpellingUsesNativeOverlapConvention)
 {
-    using LegacyMesh = SimpleFluid::Mesh<Pack>;
+    using NativeMesh = SimpleFluid::MeshHandle<Pack>;
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 2, 4, 0.25));
     SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
     for (const auto face : flux.owned_face_ids())
         flux.set_value(face, 0.125 + 0.03125 * face);
-    SimpleFluid::FVM::CellFluxBalanceCache<Pack, LegacyMesh> cache(flux);
+    flux.sync_ghosts();
+    SimpleFluid::FVM::CellFluxBalanceCache<Pack, NativeMesh> cache(flux);
     const auto view = SimpleFluid::FVM::face_flux_balance_read_view(flux);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {

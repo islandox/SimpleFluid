@@ -69,8 +69,8 @@ concept GeometryEpochMesh = requires(const MeshType& mesh) {
 /**
  * @brief Return the current geometry epoch, or zero for immutable meshes.
  *
- * Legacy mesh interfaces have no motion contract and remain permanently at
- * epoch zero. Runtime MeshHandle geometry advances explicitly.
+ * Mesh interfaces without a motion contract remain at epoch zero. Runtime
+ * MeshHandle geometry advances explicitly.
  */
 template<class MeshType> constexpr std::uint64_t mesh_geometry_epoch(const MeshType& mesh)
 {

@@ -86,9 +86,9 @@ Ownership is deliberately split along existing model boundaries:
 `MultiphysicsSolverCoupler` owns the optional models, controller/motion state and
 coupled advancement and retains shared ownership of its `BoussinesqSolver`.
 The solver owns its core equations, fields, mesh and clock. The caller's native
-`MeshHandle`/`FieldStored` identity is preserved, as is legacy `Mesh` identity on
-the supported fixed-grid compatibility path; neither is silently converted into
-the other. Mutable solver-integrated ALE requires the native path.
+`MeshHandle`/`FieldStored` identity is preserved without mirrored geometry or
+fields. The former `Mesh` compatibility backend is retired. Mutable
+solver-integrated ALE retains the native geometry-motion contract.
 
 Normal typed ordering advances conservative material transport and supplied
 chemistry/population events before temperature, applies their accepted sensible

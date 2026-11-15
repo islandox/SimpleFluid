@@ -29,7 +29,7 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 
 static_assert(std::is_same_v<
               SimpleFluid::FVM::MeshBoundaryCache<
-                  Pack, SimpleFluid::Mesh<Pack>>,
+                  Pack, SimpleFluid::MeshHandle<Pack>>,
               SimpleFluid::FVM::BoundaryCache<Pack>>);
 static_assert(std::is_same_v<
               SimpleFluid::FVM::MeshBoundaryCache<Pack, Handle>,
@@ -39,7 +39,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-/** @brief Build a runtime handle without materializing a legacy Mesh. */
+/** @brief Build a runtime handle with native distributed storage. */
 SimpleFluid::SP<const Handle> make_cartesian_handle()
 {
     auto mesh = std::make_shared<Cartesian>(
@@ -92,7 +92,7 @@ TEST(BoundaryCacheTest, RejectsNullMesh)
 {
     EXPECT_THROW(
         SimpleFluid::cache_boundary_conditions<Pack>(
-            {}, SimpleFluid::BoundaryConditionMap{}),
+            SimpleFluid::SP<const Handle>{}, SimpleFluid::BoundaryConditionMap{}),
         std::invalid_argument);
 }
 
@@ -100,7 +100,6 @@ TEST(BoundaryCacheTest, RejectsNullMesh)
 TEST(BoundaryCacheTest, SupportsMeshHandleAndStoredCellCoefficients)
 {
     auto mesh = make_cartesian_handle();
-    ASSERT_FALSE(mesh->legacy_mesh());
 
     SimpleFluid::BoundaryConditionMap conditions;
     conditions["xmin"] = {

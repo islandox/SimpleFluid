@@ -81,7 +81,7 @@ function(simplefluid_configure_test_executable target_name)
     # Only legacy-reference consumers link the BUILD_TESTING-only STK fixture.
     # In particular, keep the FVM-only consumer/export guard independent of it.
     if(TARGET SimpleFluidLegacyMeshTestFixture AND target_name MATCHES
-       "^(testFields|testSTKMesh|testMeshHandle|testMeshPartitioner|testCellGradientCache|testFvmAnalyticalSolutions|testFvmOperators|testTransportTraverse|testIncompressibleMomentumEquation|testPhysicalEquations|testPressureProjectionMultiRank|testSSTSASModel|testTurbulenceModel|testTurbulenceWallTreatment|testBoussinesqSolver|testCoupledBlockOperator|testPhase13PlusModels|testSteadyDiffusionConvergence|testVerificationCases)$")
+       "^(testSTKMesh|testMeshHandle|testMeshPartitioner)$")
         target_link_libraries(${target_name} SimpleFluidLegacyMeshTestFixture)
     endif()
     simplefluid_exe_reuse_precompiled_header(${target_name})

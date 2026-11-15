@@ -68,7 +68,7 @@ public:
 
     /** Face fields supply interface temperatures; cell fields use owned owner-cell
      * values without reconstruction. Each read samples current geometry and values.
-     * Supports scalar legacy fields and FieldStored on mapped/subdomain meshes.
+     * Supports native FieldStored scalar fields on mapped/subdomain meshes.
      */
     template<class Field>
     static InnerCavityFieldBatch from_field(Field& temperature, int batch_id, InnerCavitySurface properties,
