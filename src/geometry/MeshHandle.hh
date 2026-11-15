@@ -11,6 +11,7 @@
 
 #pragma once
 
+
 #include "SimpleFluidExport.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/MeshBinding.hh"
@@ -315,6 +316,14 @@ public:
     MeshHandle(
         MutableUnstructuredPtr mesh,
         const unstructured_indexer_type& indexer);
+
+    /** @brief Build indexed rank-local geometry on its construction communicator. */
+    MeshHandle(UnstructuredPtr mesh, const unstructured_indexer_type& indexer,
+               Teuchos::RCP<const typename Pack::comm_type> comm);
+
+    /** @brief Retain mutable indexed geometry on its construction communicator. */
+    MeshHandle(MutableUnstructuredPtr mesh, const unstructured_indexer_type& indexer,
+               Teuchos::RCP<const typename Pack::comm_type> comm);
 
     /**
      * @brief Adapt an existing unstructured partition without repartitioning.
@@ -1016,6 +1025,8 @@ private:
         std::vector<size_t> owned, std::vector<size_t> overlap);
 
     SIMPLEFLUID_LOCAL void initialize_indexer(indexer_type indexer);
+    SIMPLEFLUID_LOCAL void create_unstructured_maps(
+        const Teuchos::RCP<const typename Pack::comm_type>& comm);
 
     SIMPLEFLUID_LOCAL void initialize_cell_faces();
 

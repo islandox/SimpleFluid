@@ -11,9 +11,12 @@
 
 #pragma once
 
+
 #include "MeshHandle.hh"
 #include "geometry/details/SemiStructuredPartition.hh"
 #include "geometry/MeshReorderingFactory.hh"
+#include "parallel/CollectiveConstruction.hh"
+#include <Teuchos_RCPStdSharedPtrConversions.hpp>
 
 #include <array>
 #include <cmath>
@@ -23,6 +26,26 @@
 
 namespace SimpleFluid
 {
+namespace mesh_handle_detail
+{
+/** @brief Agree local native construction work before the next collective entry. */
+template<class Operation, class Comm>
+void collective_stage(const Comm& comm, Operation&& operation)
+{
+    std::exception_ptr error;
+    try { std::forward<Operation>(operation)(); }
+    catch (...) { error = std::current_exception(); }
+    const int failed = error ? 1 : 0;
+    int any_failed = 0;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+    if (any_failed)
+    {
+        if (error) std::rethrow_exception(error);
+        throw std::runtime_error("Indexed native mesh construction failed on another rank.");
+    }
+}
+} // namespace mesh_handle_detail
+
 
 /**
  * @brief Construct and distribute a Cartesian mesh handle.
@@ -260,11 +283,19 @@ template<TpetraTypePack Pack>
 MeshHandle<Pack>::MeshHandle(
     UnstructuredPtr mesh,
     const unstructured_indexer_type& indexer)
-    : d_mesh(require_mesh(std::move(mesh)))
+    : MeshHandle(std::move(mesh), indexer, Tpetra::getDefaultComm())
 {
-    initialize_unstructured(
-        std::get<UnstructuredPtr>(d_mesh), indexer,
-        Tpetra::getDefaultComm());
+}
+
+/** @brief Bind indexed geometry to its explicit construction communicator. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    UnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
+    : d_mesh(std::move(mesh))
+{
+    initialize_unstructured(std::get<UnstructuredPtr>(d_mesh), indexer, std::move(comm));
 }
 
 /** @brief Construct a mutable handle from an indexed unstructured mesh. */
@@ -273,6 +304,17 @@ MeshHandle<Pack>::MeshHandle(
     MutableUnstructuredPtr mesh,
     const unstructured_indexer_type& indexer)
     : MeshHandle(UnstructuredPtr(mesh), indexer)
+{
+    d_mutable_mesh.emplace(std::move(mesh));
+}
+
+/** @brief Retain mutable indexed geometry with an explicit communicator. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(
+    MutableUnstructuredPtr mesh,
+    const unstructured_indexer_type& indexer,
+    Teuchos::RCP<const typename Pack::comm_type> comm)
+    : MeshHandle(UnstructuredPtr(mesh), indexer, std::move(comm))
 {
     d_mutable_mesh.emplace(std::move(mesh));
 }
@@ -889,48 +931,108 @@ void MeshHandle<Pack>::initialize_unstructured(
     const unstructured_indexer_type& indexer,
     Teuchos::RCP<const typename Pack::comm_type> comm)
 {
-    if (mesh->num_cells() != indexer.num_local_cells()
-        || mesh->num_owned_cells() != indexer.num_owned_cells()
-        || mesh->num_faces() != indexer.num_local_faces()
-        || mesh->num_owned_faces() != indexer.num_owned_faces()
-        || mesh->num_nodes() != indexer.num_local_nodes())
+    if (!comm) comm = Tpetra::getDefaultComm();
+    mesh_handle_detail::collective_stage(*comm, [&]
     {
-        throw std::invalid_argument(
-            "Partitioned UnstructuredMesh does not match its indexer.");
-    }
-
-    auto global_ids = [&](const auto& ids)
-    {
-        std::vector<size_t> flattened;
-        flattened.reserve(ids.size());
-        for (const auto id : ids)
+        if (!mesh || mesh->num_cells() != indexer.num_local_cells()
+            || mesh->num_owned_cells() != indexer.num_owned_cells()
+            || mesh->num_faces() != indexer.num_local_faces()
+            || mesh->num_owned_faces() != indexer.num_owned_faces()
+            || mesh->num_nodes() != indexer.num_local_nodes())
         {
-            using id_type = std::remove_cvref_t<decltype(id)>;
-            if constexpr (
-                std::numeric_limits<id_type>::digits
-                > std::numeric_limits<size_t>::digits)
-            {
-                if (id > static_cast<id_type>(
-                        std::numeric_limits<size_t>::max()))
-                {
-                    throw std::overflow_error(
-                        "MeshHandle unstructured global ID overflow.");
-                }
-            }
-            flattened.push_back(static_cast<size_t>(id));
+            throw std::invalid_argument(
+                "Partitioned UnstructuredMesh does not match its indexer.");
         }
-        return checked_global_ids(std::move(flattened));
-    };
 
-    initialize_indexer(indexer_type(
-        global_ids(indexer.owned_cell_global_ids()),
-        global_ids(indexer.ghost_cell_global_ids()),
-        global_ids(indexer.owned_face_global_ids()),
-        global_ids(indexer.overlap_face_global_ids()),
-        global_ids(indexer.node_global_ids())));
-    initialize_boundary_batches(*mesh);
-    create_maps(comm ? std::move(comm) : Tpetra::getDefaultComm());
-    publish_binding();
+        auto mappings = [&]<class Mapping>(size_t count, auto get_id, auto get_ordinal, auto get_local_id)
+        {
+            using LocalID = decltype(std::declval<Mapping>().local_id);
+            std::vector<Mapping> output;
+            output.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                const auto local = checked_local(i);
+                const auto id = get_id(local);
+                const auto source_local = get_local_id(id);
+                if (!std::in_range<global_ordinal_type>(id)
+                    || !std::in_range<LocalID>(source_local))
+                    throw std::overflow_error("MeshHandle unstructured entity ID overflow.");
+                output.push_back({static_cast<LocalID>(source_local),
+                                  static_cast<global_ordinal_type>(id), get_ordinal(local)});
+            }
+            return output;
+        };
+        auto cells = mappings.template operator()<typename indexer_type::CellMapping>(
+            indexer.num_local_cells(), [&](auto i) { return indexer.cell_global_id(i); },
+            [&](auto i) { return indexer.local_to_global_cell_ordinal(i); },
+            [&](auto id) { return indexer.global_to_local_cell_id(id); });
+        auto faces = mappings.template operator()<typename indexer_type::FaceMapping>(
+            indexer.num_local_faces(), [&](auto i) { return indexer.face_global_id(i); },
+            [&](auto i) { return indexer.local_to_global_face_ordinal(i); },
+            [&](auto id) { return indexer.global_to_local_face_id(id); });
+        auto nodes = mappings.template operator()<typename indexer_type::NodeMapping>(
+            indexer.num_local_nodes(), [&](auto i) { return indexer.node_global_id(i); },
+            [&](auto i) { return indexer.local_to_global_node_ordinal(i); },
+            [&](auto id) { return indexer.global_to_local_node_id(id); });
+        auto suffix = [](auto& records, size_t owned)
+        {
+            using Records = std::remove_cvref_t<decltype(records)>;
+            Records overlap(records.begin() + owned, records.end());
+            records.resize(owned);
+            return overlap;
+        };
+        auto ghost_cells = suffix(cells, indexer.num_owned_cells());
+        auto overlap_faces = suffix(faces, indexer.num_owned_faces());
+        auto overlap_nodes = suffix(nodes, indexer.num_owned_nodes());
+        initialize_indexer(indexer_type(std::move(cells), std::move(ghost_cells),
+            std::move(faces), std::move(overlap_faces), std::move(nodes), std::move(overlap_nodes)));
+        initialize_boundary_batches(*mesh);
+    });
+    create_unstructured_maps(comm);
+    mesh_handle_detail::collective_stage(*comm, [&] { publish_binding(); });
+}
+
+/** @brief Build native indexed maps after agreeing all local ordinal storage. */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::create_unstructured_maps(
+    const Teuchos::RCP<const typename Pack::comm_type>& comm)
+{
+    std::vector<global_ordinal_type> cells, faces, boundary;
+    local_ordinal_type owned_cells = 0, local_cells = 0, owned_faces = 0, local_faces = 0, boundary_faces = 0;
+    mesh_handle_detail::collective_stage(*comm, [&]
+    {
+        owned_cells = checked_local(d_indexer.num_owned_cells());
+        local_cells = checked_local(d_indexer.num_local_cells());
+        owned_faces = checked_local(d_indexer.num_owned_faces());
+        local_faces = checked_local(d_indexer.num_local_faces());
+        cells.reserve(d_indexer.num_local_cells());
+        faces.reserve(d_indexer.num_local_faces());
+        for (size_t i = 0; i < d_indexer.num_local_cells(); ++i)
+            cells.push_back(d_indexer.local_to_global_cell_ordinal(checked_local(i)));
+        for (size_t i = 0; i < d_indexer.num_local_faces(); ++i)
+            faces.push_back(d_indexer.local_to_global_face_ordinal(checked_local(i)));
+        for (const auto& [id, batch] : d_boundary_batches)
+            for (const auto face : batch.face_lids)
+                if (is_owned_face(face))
+                    boundary.push_back(d_indexer.local_to_global_face_ordinal(face));
+        boundary_faces = checked_local(boundary.size());
+        d_node_global_ids = d_indexer.node_global_ids();
+    });
+    const auto invalid_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    auto make_prepared_map = [&](const auto& gids, local_ordinal_type count, Teuchos::RCP<const map_type>& result)
+    {
+        // Shared object storage is agreed before the opaque Map constructor;
+        // RCP node allocation/publication is agreed before the next Map.
+        auto map = detail::collective_make_shared<map_type>(
+            *comm, invalid_size, gids.data(), count, global_ordinal_type{}, comm);
+        mesh_handle_detail::collective_stage(*comm, [&] { result = Teuchos::rcp(map); });
+    };
+    make_prepared_map(cells, owned_cells, d_owned_cell_map);
+    make_prepared_map(cells, local_cells, d_overlap_cell_map);
+    make_prepared_map(faces, owned_faces, d_owned_face_map);
+    make_prepared_map(faces, local_faces, d_overlap_face_map);
+    make_prepared_map(boundary, boundary_faces, d_boundary_face_map);
+    d_map_indexing = true;
 }
 
 /**
@@ -1202,10 +1304,11 @@ void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
     if constexpr (std::same_as<MeshType, MultiRegion> || std::same_as<MeshType, SemiStructured> ||
-                  std::same_as<MeshType, Cartesian> || std::same_as<MeshType, Cylindrical>)
+                  std::same_as<MeshType, Cartesian> || std::same_as<MeshType, Cylindrical> ||
+                  std::same_as<MeshType, Unstructured>)
     {
         if constexpr (std::same_as<MeshType, SemiStructured> || std::same_as<MeshType, Cartesian> ||
-                      std::same_as<MeshType, Cylindrical>)
+                      std::same_as<MeshType, Cylindrical> || std::same_as<MeshType, Unstructured>)
         {
             // Boundary configuration is global even when this rank has no
             // incident boundary faces (or owns no cells at all).
@@ -1363,7 +1466,7 @@ template<TpetraTypePack Pack>
 std::string MeshHandle<Pack>::local_output_filename(
     const std::string& filename) const
 {
-    const auto comm = Tpetra::getDefaultComm();
+    const auto comm = owned_cell_map()->getComm();
     if (comm->getSize() <= 1)
     {
         return filename;
@@ -1385,18 +1488,22 @@ template<TpetraTypePack Pack>
 void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
 {
     const auto execution = acquire_execution_view();
+    const bool unstructured = std::holds_alternative<UnstructuredPtr>(d_mesh);
     VTUWriter::Int64Data cell_ids;
+    VTUWriter::Int64Data algebraic_ids;
     VTUWriter::ScalarData cell_volumes;
     VTUWriter::VectorData cell_centroids;
     cell_ids.reserve(num_owned_cells());
+    if (unstructured) algebraic_ids.reserve(num_owned_cells());
     cell_volumes.reserve(num_owned_cells());
     cell_centroids.reserve(num_owned_cells());
     for (size_t lid = 0; lid < num_owned_cells(); ++lid)
     {
         const auto local_id = checked_local(lid);
         cell_ids.push_back(static_cast<global_index_t>(
-            (d_semi_structured_topology || d_orthogonal_decomposition) ?
+            (unstructured || d_semi_structured_topology || d_orthogonal_decomposition) ?
                 cell_geometry_global_id(local_id) : cell_global_id(local_id)));
+        if (unstructured) algebraic_ids.push_back(static_cast<global_index_t>(cell_global_id(local_id)));
         cell_volumes.push_back(cell_volume(local_id));
         cell_centroids.push_back(cell_centroid(local_id));
     }
@@ -1410,6 +1517,7 @@ void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
         writer.add_int64_cell_data("topology_region", std::move(regions));
     }
     writer.add_int64_cell_data("cell_gid", std::move(cell_ids));
+    if (unstructured) writer.add_int64_cell_data("algebraic_cell_gid", std::move(algebraic_ids));
     writer.add_scalar_cell_data("cell_volume", std::move(cell_volumes));
     writer.add_vector_cell_data("cell_centroid", std::move(cell_centroids));
 }

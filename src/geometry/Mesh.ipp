@@ -11,8 +11,8 @@
 
 #pragma once
 
+
 #include <Kokkos_Core.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
 
 #include <cstddef>
 #include <limits>

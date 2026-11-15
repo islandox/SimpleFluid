@@ -2,3 +2,8 @@ SIMPLEFLUID_TRILINOS_BACKEND_1.0 {
     global:
         simplefluid_trilinos_backend_abi_version;
 };
+
+SIMPLEFLUID_TRILINOS_BACKEND_1.1 {
+    global:
+        simplefluid_trilinos_stk_io_set_string_property;
+} SIMPLEFLUID_TRILINOS_BACKEND_1.0;

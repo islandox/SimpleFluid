@@ -10,9 +10,11 @@
  */
 #pragma once
 
+
 #include "geometry/Mesh.hh"
 #include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
+#include "geometry/mesh/UnstructuredMeshData.hh"
 #include "parallel/MPI_interface.hh"
 #include "parallel/CompositePartition.hh"
 
@@ -21,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -871,6 +874,36 @@ public:
         Meshes::UnstructuredMesh& mesh,
         const Teuchos::RCP<const comm_type>& comm);
 
+    /** @brief Compact native geometry and its source/algebraic identity maps. */
+    struct NativeUnstructuredPartition
+    {
+        std::shared_ptr<Meshes::UnstructuredMesh> geometry;
+        indexer_type indexer;
+        std::vector<int> cell_owner_ranks;
+    };
+
+    /**
+     * @brief Collectively distribute root-only or uniquely owned native records.
+     *
+     * Only the owned prefix of source.cells supplies graph rows. Duplicate
+     * source cells and inconsistent shared entities fail collectively. The
+     * default ParMETIS policy is retained; geometry travels through sparse
+     * directory/owner exchanges and is never gathered or replicated globally.
+     * Source IDs and optional algebraic ordinals remain distinct in the indexer.
+     * Faces incident on owned cells retain the existing overlapping ownership
+     * convention. All ranks retain the complete boundary catalog.
+     *
+     * @param halo_depth Number of adjacency layers, at least one.
+     * @param contiguous_algebraic_ids Explicit factory compatibility policy:
+     *        assign rank-contiguous cell ordinals after redistribution. Face
+     *        and node ordinals retain their record values.
+     */
+    static NativeUnstructuredPartition partition_native(
+        Meshes::UnstructuredMeshData source,
+        const Teuchos::RCP<const comm_type>& comm,
+        unsigned halo_depth = 1,
+        bool contiguous_algebraic_ids = false);
+
     /** @brief Collectively plan ownership without changing source geometry. */
     static CompositePartitionPlan<Pack> make_plan(
         const CompositeMeshSource& source,
@@ -962,7 +995,7 @@ private:
      * @param graph Global-cell adjacency graph distributed across the communicator.
      * @param comm Communicator containing all graph participants.
      * @param gather_root Rank that receives the complete result, or -1 to
-     *        replicate it on all ranks.
+     *        replicate it on all ranks, or -2 to retain local row assignments.
      * @return Destination rank indexed by global cell identifier on the
      *         requested recipients.
      */

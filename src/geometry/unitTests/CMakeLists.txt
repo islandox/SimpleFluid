@@ -173,3 +173,6 @@ foreach(_ortho_reorder_ranks IN ITEMS 4 8)
         ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*Orthogonal*"
         LABELS "mpi;geometry;orthogonal;mesh_reordering;empty_rank" TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(NAME NativeUnstructuredMapping_2procs
+    TARGET testUnstructuredMeshMapping PROCS 2 LABELS "mpi;geometry;unstructured;mapping" TIMEOUT 120)

@@ -421,7 +421,7 @@ void PartitionedMesh<GeometryMesh, Pack>::initialize_boundary_batches()
         {
             append_faces(source_batch.face_lids);
         }
-        if (!batch.face_lids.empty())
+        if (!batch.face_lids.empty() || std::same_as<GeometryMesh, UnstructuredMesh>)
         {
             d_boundary_batches.emplace(batch_id, std::move(batch));
         }

@@ -304,6 +304,174 @@ void validate_polygon(const Arr<UnstructuredMesh::Vec3>& x)
 
 } // namespace
 
+UnstructuredMesh UnstructuredMesh::from_data(UnstructuredMeshData data)
+{
+    using Data = UnstructuredMeshData;
+    validate_count(data.nodes.size(), "node");
+    validate_count(data.cells.size(), "cell");
+    validate_count(data.faces.size(), "face");
+    auto owned_count = [](size_t count, size_t total)
+    {
+        if (count == Data::all_owned) return total;
+        if (count > total)
+            throw std::invalid_argument("UnstructuredMesh data owned count exceeds local count.");
+        return count;
+    };
+    const auto owned_cells = owned_count(data.num_owned_cells, data.cells.size());
+    const auto owned_faces = owned_count(data.num_owned_faces, data.faces.size());
+    static_cast<void>(owned_count(data.num_owned_nodes, data.nodes.size()));
+    auto finite = [](const Vec3& value)
+    {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    auto make_lookup = [](const auto& records)
+    {
+        std::unordered_map<Data::ID, Ordinal> lookup;
+        std::unordered_set<Data::ID> algebraic_ids;
+        lookup.reserve(records.size());
+        for (size_t i = 0; i < records.size(); ++i)
+        {
+            const auto& record = records[i];
+            const auto algebraic = record.algebraic_id == Data::invalid_id ? record.id : record.algebraic_id;
+            if (record.id == Data::invalid_id || !lookup.emplace(record.id, static_cast<Ordinal>(i)).second
+                || !algebraic_ids.insert(algebraic).second)
+                throw std::invalid_argument("UnstructuredMesh data has invalid or duplicate entity IDs.");
+        }
+        return lookup;
+    };
+    const auto node_lids = make_lookup(data.nodes);
+    const auto cell_lids = make_lookup(data.cells);
+    const auto face_lids = make_lookup(data.faces);
+    auto remap = [](const auto& ids, const auto& lookup)
+    {
+        Arr<Ordinal> local;
+        std::unordered_set<Data::ID> seen;
+        local.reserve(ids.size());
+        for (const auto id : ids)
+        {
+            const auto entry = lookup.find(id);
+            if (entry == lookup.end() || !seen.insert(id).second)
+                throw std::invalid_argument("UnstructuredMesh data has invalid or repeated connectivity.");
+            local.push_back(entry->second);
+        }
+        return local;
+    };
+
+    UnstructuredMesh mesh(EmptyPartitionTag{});
+    mesh.d_boundary_names = std::move(data.boundary_names);
+    for (const auto& [id, name] : mesh.d_boundary_names)
+    {
+        if (id < 0)
+            throw std::invalid_argument("UnstructuredMesh data has an invalid boundary catalog.");
+        mesh.d_boundary_batches[id].id = id;
+    }
+    mesh.d_nodes.reserve(data.nodes.size());
+    for (const auto& node : data.nodes)
+    {
+        if (!finite(node.coordinates))
+            throw std::invalid_argument("UnstructuredMesh data contains non-finite coordinates.");
+        mesh.d_nodes.push_back(node.coordinates);
+    }
+    mesh.d_cells.reserve(data.cells.size());
+    for (const auto& cell : data.cells)
+    {
+        const bool hex = cell.type == CellType::HEXAHEDRON;
+        const bool wedge = cell.type == CellType::TRIPRISM;
+        const bool polyhedron = cell.type == CellType::POLYHEDRON;
+        if ((!hex && !wedge && !polyhedron)
+            || (hex && (cell.node_ids.size() != 8 || cell.face_ids.size() != 6))
+            || (wedge && (cell.node_ids.size() != 6 || cell.face_ids.size() != 5))
+            || (polyhedron && (cell.node_ids.size() < 4 || cell.face_ids.size() < 4)))
+            throw std::invalid_argument("UnstructuredMesh data cell type or connectivity count is unsupported.");
+        if (!finite(cell.center) || !std::isfinite(cell.volume) || cell.volume <= 0)
+            throw std::invalid_argument("UnstructuredMesh data cell metrics must be finite and positive.");
+        CellInfo output;
+        output.type = cell.type;
+        output.node_ids = remap(cell.node_ids, node_lids);
+        output.face_ids = remap(cell.face_ids, face_lids);
+        output.center = cell.center;
+        output.volume = cell.volume;
+        mesh.d_cells.push_back(std::move(output));
+    }
+    mesh.d_faces.reserve(data.faces.size());
+    std::unordered_set<FaceKey, FaceKeyHash> unique_faces;
+    for (const auto& face : data.faces)
+    {
+        const auto owner = cell_lids.find(face.owner);
+        const auto neighbor = cell_lids.find(face.neighbor);
+        if (owner == cell_lids.end() || face.owner == face.neighbor)
+            throw std::invalid_argument("UnstructuredMesh data face owner must be local and distinct from neighbor.");
+        if (face.boundary_id < invalid_boundary_id
+            || (face.neighbor != Data::invalid_id && face.boundary_id != invalid_boundary_id)
+            || (face.boundary_id != invalid_boundary_id && !mesh.d_boundary_names.contains(face.boundary_id)))
+            throw std::invalid_argument("UnstructuredMesh data face has an invalid boundary assignment.");
+        if (!finite(face.center) || !finite(face.normal_from_owner)
+            || !std::isfinite(face.area) || face.area <= 0
+            || !std::isfinite(face.normal_from_owner.norm()) || face.normal_from_owner.norm() <= 0)
+            throw std::invalid_argument("UnstructuredMesh data face metrics must be finite and positive.");
+        FaceInfo output;
+        output.type = face_type_from_node_count(face.node_ids.size());
+        output.node_ids = remap(face.node_ids, node_lids);
+        if (!unique_faces.insert(face_key(output.node_ids)).second)
+            throw std::invalid_argument("UnstructuredMesh data repeats a face node set.");
+        output.owner = owner->second;
+        output.neighbor = neighbor == cell_lids.end() ? invalid_ordinal : neighbor->second;
+        output.remote_neighbor = face.neighbor != Data::invalid_id && neighbor == cell_lids.end();
+        if (output.remote_neighbor && output.owner < owned_cells)
+            throw std::invalid_argument("UnstructuredMesh data owned cell lacks its adjacent local cell.");
+        output.boundary_id = face.boundary_id;
+        output.center = face.center;
+        output.normal = face.normal_from_owner;
+        output.area = face.area;
+        const auto local_face = static_cast<FaceID>(mesh.d_faces.size());
+        if (output.boundary_id != invalid_boundary_id)
+            mesh.d_boundary_batches.at(output.boundary_id).face_lids.push_back(local_face);
+        mesh.d_faces.push_back(std::move(output));
+    }
+    // Validate both directions without rebuilding or sorting the caller's incidence.
+    for (size_t c = 0; c < mesh.d_cells.size(); ++c)
+    {
+        const auto& cell = mesh.d_cells[c];
+        std::unordered_set<NodeID> cell_nodes(cell.node_ids.begin(), cell.node_ids.end());
+        std::unordered_set<NodeID> incident_nodes;
+        size_t triangles = 0;
+        size_t quads = 0;
+        for (const auto f : cell.face_ids)
+        {
+            const auto& face = mesh.d_faces[f];
+            triangles += face.node_ids.size() == 3;
+            quads += face.node_ids.size() == 4;
+            if (face.owner != c && face.neighbor != c)
+                throw std::invalid_argument("UnstructuredMesh data cell references a nonincident face.");
+            for (const auto node : face.node_ids)
+            {
+                if (!cell_nodes.contains(node))
+                    throw std::invalid_argument("UnstructuredMesh data face node is absent from its cell.");
+                incident_nodes.insert(node);
+            }
+        }
+        if (incident_nodes.size() != cell_nodes.size())
+            throw std::invalid_argument("UnstructuredMesh data cell has nodes absent from its faces.");
+        if ((cell.type == CellType::HEXAHEDRON && quads != 6)
+            || (cell.type == CellType::TRIPRISM && (triangles != 2 || quads != 3)))
+            throw std::invalid_argument("UnstructuredMesh data cell face counts do not match its type.");
+    }
+    for (size_t f = 0; f < mesh.d_faces.size(); ++f)
+    {
+        const auto& face = mesh.d_faces[f];
+        for (const auto c : {face.owner, face.neighbor})
+        {
+            if (c == invalid_ordinal) continue;
+            const auto& incident = mesh.d_cells[c].face_ids;
+            if (std::ranges::find(incident, f) == incident.end())
+                throw std::invalid_argument("UnstructuredMesh data face is absent from its adjacent cell.");
+        }
+    }
+    mesh.update_counts();
+    mesh.set_owned_counts(owned_cells, owned_faces);
+    return mesh;
+}
+
 /**
  * @brief Construct an unstructured mesh from nodes, cell definitions, and optional boundary faces.
  *

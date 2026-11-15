@@ -9,10 +9,13 @@
  * 
  */
 
+
 #include "MeshPartitioner.hh"
 
 #include <map>
 #include <type_traits>
+#include <exception>
+#include <optional>
 
 #include <Zoltan2_PartitioningProblem.hpp>
 #include <Zoltan2_PartitioningSolution.hpp>
@@ -797,223 +800,237 @@ auto MeshPartitioner<Pack>::build_partition_graph(
  *         recipients.
  */
 template<TpetraTypePack Pack>
-auto MeshPartitioner<Pack>::solve_partition_graph(
-    const PartitionGraph& partition_graph,
-    const Teuchos::RCP<const comm_type>& comm,
-    int gather_root)
-    -> std::unordered_map<GO, int>
+auto MeshPartitioner<Pack>::solve_partition_graph(const PartitionGraph& partition_graph,
+    const Teuchos::RCP<const comm_type>& comm, int gather_root) -> std::unordered_map<GO, int>
 {
     const auto nranks = comm->getSize();
     const auto myrank = comm->getRank();
-    if (gather_root >= nranks)
+    // The catch path must not allocate: a failed allocation is itself one of
+    // the local failures that must be agreed before the next collective.
+    const auto agreed_phase = [&](const char* name, auto&& operation)
     {
-        throw std::invalid_argument(
-            "MeshPartitioner partition-result root is invalid.");
-    }
-    const auto invalid_size =
-        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
-
-    // All ranks must enter the same map constructor: the contiguous overload
-    // performs different collectives, even when its local count is zero.
-    const auto row_map = Teuchos::rcp(new map_type(
-        invalid_size,
-        partition_graph.row_gids.data(),
-        partition_graph.row_gids.size(),
-        GO{},
-        comm));
-    const auto column_map = Teuchos::rcp(new map_type(
-        invalid_size,
-        partition_graph.column_gids.data(),
-        partition_graph.column_gids.size(),
-        GO{},
-        comm));
-
-    size_t max_adjacency = 0;
-    for (const auto& adjacency : partition_graph.row_adjacency)
-    {
-        max_adjacency = std::max(max_adjacency, adjacency.size());
-    }
-
-    auto graph = Teuchos::rcp(new graph_type(
-        row_map,
-        column_map,
-        max_adjacency));
-    for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
-    {
-        const auto& adjacency = partition_graph.row_adjacency[row];
-        if (!adjacency.empty())
+        std::exception_ptr failure;
+        try
         {
-            graph->insertGlobalIndices(
-                partition_graph.row_gids[row],
-                adjacency.size(),
-                adjacency.data());
+            operation();
         }
-    }
-    graph->fillComplete();
-
-    std::unordered_map<GO, int> local_parts;
-    {
-        using adapter_type = Zoltan2::TpetraRowGraphAdapter<graph_type>;
-        Teuchos::ParameterList parameters;
-        parameters.set("algorithm", "parmetis");
-        parameters.set("num_global_parts", nranks);
-        int weighted = partition_graph.row_weights.empty() ? 0 : 1, any_weighted = 0;
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &weighted, &any_weighted);
-        int edge_weighted = partition_graph.row_edge_weights.empty() ? 0 : 1, any_edge_weighted = 0;
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &edge_weighted, &any_edge_weighted);
-        if (any_weighted) parameters.set("imbalance_tolerance", partition_graph.imbalance_tolerance);
-        using weight_type = typename adapter_type::scalar_t;
-        std::vector<weight_type> weights(
-            partition_graph.row_weights.begin(), partition_graph.row_weights.end());
-        std::vector<weight_type> edge_weights;
-        if (any_edge_weighted)
+        catch (...)
         {
-            edge_weights.reserve(graph->getLocalNumEntries());
+            failure = std::current_exception();
+        }
+        int local_failed = failure ? 1 : 0, any_failed = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_failed, &any_failed);
+        if (any_failed)
+        {
+            if (failure)
+                std::rethrow_exception(failure);
+            throw std::runtime_error(std::string("MeshPartitioner graph phase failed: ") + name);
+        }
+    };
+    int min_root = 0, max_root = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &gather_root, &min_root);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &gather_root, &max_root);
+    size_t max_adjacency = 0;
+    agreed_phase("input validation",
+        [&]
+        {
+            if (min_root != max_root || gather_root < -2 || gather_root >= nranks)
+                throw std::invalid_argument("MeshPartitioner partition-result root is invalid or inconsistent.");
+            const auto rows = partition_graph.row_gids.size();
+            if (!std::in_range<LO>(rows) || partition_graph.row_adjacency.size() != rows ||
+                (!partition_graph.row_weights.empty() && partition_graph.row_weights.size() != rows) ||
+                (!partition_graph.row_edge_weights.empty() && partition_graph.row_edge_weights.size() != rows))
+                throw std::invalid_argument("Invalid local partition graph shape.");
+            for (size_t row = 0; row < rows; ++row)
+            {
+                const auto count = partition_graph.row_adjacency[row].size();
+                if (!partition_graph.row_edge_weights.empty() && partition_graph.row_edge_weights[row].size() != count)
+                    throw std::invalid_argument("Invalid partition edge-weight count.");
+                max_adjacency = std::max(max_adjacency, count);
+            }
+        });
+    const auto invalid_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    // Stack-backed object storage avoids a caller-side new allocation before
+    // constructors that perform their own collectives. Third-party internal
+    // collective/error handling remains the responsibility of Tpetra/Zoltan2.
+    std::optional<map_type> row_storage, column_storage;
+    Teuchos::RCP<const map_type> row_map, column_map;
+    agreed_phase("row map construction",
+        [&]
+        {
+            row_storage.emplace(
+                invalid_size, partition_graph.row_gids.data(), partition_graph.row_gids.size(), GO{}, comm);
+        });
+    agreed_phase("row map reference", [&] { row_map = Teuchos::rcpFromRef(*row_storage); });
+    agreed_phase("column map construction",
+        [&]
+        {
+            column_storage.emplace(
+                invalid_size, partition_graph.column_gids.data(), partition_graph.column_gids.size(), GO{}, comm);
+        });
+    agreed_phase("column map reference", [&] { column_map = Teuchos::rcpFromRef(*column_storage); });
+    std::optional<graph_type> graph_storage;
+    Teuchos::RCP<graph_type> graph;
+    agreed_phase("local graph insertion",
+        [&]
+        {
+            graph_storage.emplace(row_map, column_map, max_adjacency);
+            graph = Teuchos::rcpFromRef(*graph_storage);
             for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
             {
-                typename graph_type::local_inds_host_view_type columns;
-                graph->getLocalRowView(static_cast<LO>(row),columns);
-                for (size_t edge = 0; edge < columns.extent(0); ++edge)
+                const auto& adjacency = partition_graph.row_adjacency[row];
+                if (!adjacency.empty())
+                    graph->insertGlobalIndices(partition_graph.row_gids[row], adjacency.size(), adjacency.data());
+            }
+        });
+    agreed_phase("graph fillComplete", [&] { graph->fillComplete(); });
+
+    using adapter_type = Zoltan2::TpetraRowGraphAdapter<graph_type>;
+    using weight_type = typename adapter_type::scalar_t;
+    std::optional<Teuchos::ParameterList> parameters;
+    agreed_phase("partition parameters",
+        [&]
+        {
+            parameters.emplace();
+            parameters->set("algorithm", "parmetis");
+            parameters->set("num_global_parts", nranks);
+        });
+    int weighted = partition_graph.row_weights.empty() ? 0 : 1, any_weighted = 0;
+    int edge_weighted = partition_graph.row_edge_weights.empty() ? 0 : 1, any_edge_weighted = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &weighted, &any_weighted);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &edge_weighted, &any_edge_weighted);
+    std::vector<weight_type> weights, edge_weights;
+    agreed_phase("partition weights",
+        [&]
+        {
+            if ((any_weighted && partition_graph.row_weights.size() != partition_graph.row_gids.size()) ||
+                (any_edge_weighted && partition_graph.row_edge_weights.size() != partition_graph.row_gids.size()))
+                throw std::invalid_argument("Missing weights for local partition graph rows.");
+            if (any_weighted)
+                parameters->set("imbalance_tolerance", partition_graph.imbalance_tolerance);
+            weights.assign(partition_graph.row_weights.begin(), partition_graph.row_weights.end());
+            if (any_edge_weighted)
+            {
+                edge_weights.reserve(graph->getLocalNumEntries());
+                for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
                 {
-                    const auto column = columns(edge);
-                    const auto gid = graph->getColMap()->getGlobalElement(column);
-                    const auto& neighbors = partition_graph.row_adjacency[row];
-                    const auto found = std::find(neighbors.begin(),neighbors.end(),gid);
-                    if (found == neighbors.end()) throw std::logic_error("Partition graph edge weight is missing.");
-                    edge_weights.push_back(static_cast<weight_type>(
-                        partition_graph.row_edge_weights[row].at(found-neighbors.begin())));
+                    typename graph_type::local_inds_host_view_type columns;
+                    graph->getLocalRowView(static_cast<LO>(row), columns);
+                    for (size_t edge = 0; edge < columns.extent(0); ++edge)
+                    {
+                        const auto gid = graph->getColMap()->getGlobalElement(columns(edge));
+                        const auto& neighbors = partition_graph.row_adjacency[row];
+                        const auto found = std::find(neighbors.begin(), neighbors.end(), gid);
+                        if (found == neighbors.end())
+                            throw std::logic_error("Partition graph edge weight is missing.");
+                        edge_weights.push_back(static_cast<weight_type>(
+                            partition_graph.row_edge_weights.at(row).at(found - neighbors.begin())));
+                    }
                 }
             }
-        }
-        // The installed Zoltan2 pointer setters instantiate invalid code. Its
-        // ParMETIS GraphModel consumes these documented virtual host views;
-        // retain their data here without relying on those broken setters.
-        class WeightedAdapter final : public adapter_type
+        });
+    // The installed Zoltan2 pointer setters instantiate invalid code. Its
+    // ParMETIS GraphModel consumes these documented virtual host views.
+    class WeightedAdapter final : public adapter_type
+    {
+    public:
+        WeightedAdapter(const Teuchos::RCP<const graph_type>& input, int vertex_count, int edge_count,
+            std::vector<weight_type> vertices, std::vector<weight_type> edges)
+            : adapter_type(input, vertex_count, edge_count), d_vertices(std::move(vertices)), d_edges(std::move(edges))
         {
-        public:
-            WeightedAdapter(const Teuchos::RCP<const graph_type>& input, int vertex_count, int edge_count,
-                            std::vector<weight_type> vertices, std::vector<weight_type> edges)
-                : adapter_type(input,vertex_count,edge_count), d_vertices(std::move(vertices)), d_edges(std::move(edges)) {}
-            void getVertexWeightsView(const weight_type*& values,int& stride,int index) const override
+        }
+        void getVertexWeightsView(const weight_type*& values, int& stride, int index) const override
+        {
+            if (index != 0)
+                throw std::out_of_range("Invalid partition vertex-weight index.");
+            values = d_vertices.data();
+            stride = 1;
+        }
+        void getEdgeWeightsView(const weight_type*& values, int& stride, int index) const override
+        {
+            if (index != 0)
+                throw std::out_of_range("Invalid partition edge-weight index.");
+            values = d_edges.data();
+            stride = 1;
+        }
+
+    private:
+        std::vector<weight_type> d_vertices, d_edges;
+    };
+    std::optional<WeightedAdapter> adapter;
+    agreed_phase("partition adapter",
+        [&] { adapter.emplace(graph, any_weighted, any_edge_weighted, std::move(weights), std::move(edge_weights)); });
+    std::optional<Zoltan2::PartitioningProblem<adapter_type>> problem;
+    agreed_phase("partition problem construction", [&] { problem.emplace(&*adapter, &*parameters, comm); });
+    agreed_phase("partition solve", [&] { problem->solve(); });
+    std::unordered_map<GO, int> local_parts;
+    agreed_phase("partition result extraction",
+        [&]
+        {
+            const auto* parts = problem->getSolution().getPartListView();
+            if (!partition_graph.row_gids.empty() && !parts)
+                throw std::runtime_error("Missing partition result rows.");
+            local_parts.reserve(partition_graph.row_gids.size());
+            for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
             {
-                if (index != 0) throw std::out_of_range("Invalid partition vertex-weight index.");
-                values = d_vertices.data(); stride = 1;
+                if (parts[row] < 0 || parts[row] >= nranks)
+                    throw std::runtime_error("Invalid partition destination.");
+                local_parts.emplace(partition_graph.row_gids[row], parts[row]);
             }
-            void getEdgeWeightsView(const weight_type*& values,int& stride,int index) const override
+        });
+    if (gather_root == -2)
+        return local_parts;
+
+    std::vector<GO> local_pairs, gathered_pairs;
+    std::vector<int> counts, displacements;
+    int my_pair_count = 0, total_pairs = 0;
+    agreed_phase("partition result gather preparation",
+        [&]
+        {
+            if (local_parts.size() > static_cast<size_t>(std::numeric_limits<int>::max()) / 2)
+                throw std::overflow_error("Partition result count exceeds MPI int.");
+            local_pairs.reserve(local_parts.size() * 2);
+            for (const auto& [cell_gid, owner_rank] : local_parts)
             {
-                if (index != 0) throw std::out_of_range("Invalid partition edge-weight index.");
-                values = d_edges.data(); stride = 1;
+                local_pairs.push_back(cell_gid);
+                local_pairs.push_back(static_cast<GO>(owner_rank));
             }
-        private:
-            std::vector<weight_type> d_vertices, d_edges;
-        };
-        WeightedAdapter adapter(graph,any_weighted,any_edge_weighted,std::move(weights),std::move(edge_weights));
-        Zoltan2::PartitioningProblem<adapter_type> problem(
-            &adapter,
-            &parameters,
-            comm);
-        problem.solve();
-
-        const auto& solution = problem.getSolution();
-        const auto* parts = solution.getPartListView();
-        for (size_t row = 0; row < partition_graph.row_gids.size(); ++row)
-        {
-            local_parts[partition_graph.row_gids[row]] = parts[row];
-        }
-    }
-
-    std::vector<GO> local_pairs;
-    local_pairs.reserve(local_parts.size() * 2);
-    for (const auto& [cell_gid, owner_rank] : local_parts)
-    {
-        local_pairs.push_back(cell_gid);
-        local_pairs.push_back(static_cast<GO>(owner_rank));
-    }
-
-    const auto my_pair_count =
-        static_cast<int>(local_pairs.size());
-    std::vector<int> counts(static_cast<size_t>(nranks), 0);
+            my_pair_count = static_cast<int>(local_pairs.size());
+            counts.assign(nranks, 0);
+            displacements.assign(nranks, 0);
+        });
     if (gather_root >= 0)
-    {
-        MPI_Gather(
-            &my_pair_count,
-            1,
-            MPI_INT,
-            counts.data(),
-            1,
-            MPI_INT,
-            gather_root,
-            get_mpi_comm(*comm));
-    }
+        MPI_Gather(&my_pair_count, 1, MPI_INT, counts.data(), 1, MPI_INT, gather_root, get_mpi_comm(*comm));
     else
-    {
-        MPI_Allgather(
-            &my_pair_count,
-            1,
-            MPI_INT,
-            counts.data(),
-            1,
-            MPI_INT,
-            get_mpi_comm(*comm));
-    }
-
-    std::vector<int> displacements(static_cast<size_t>(nranks), 0);
-    if (gather_root < 0 || myrank == gather_root)
-    {
-        for (int r = 1; r < nranks; ++r)
+        MPI_Allgather(&my_pair_count, 1, MPI_INT, counts.data(), 1, MPI_INT, get_mpi_comm(*comm));
+    agreed_phase("partition result receive allocation",
+        [&]
         {
-            displacements[static_cast<size_t>(r)] =
-                displacements[static_cast<size_t>(r - 1)]
-              + counts[static_cast<size_t>(r - 1)];
-        }
-    }
-
-    const auto total_pairs =
-        displacements.back() + counts.back();
-    std::vector<GO> gathered_pairs(
-        static_cast<size_t>(
-            std::max(
-                gather_root < 0 || myrank == gather_root
-                    ? total_pairs
-                    : 0,
-                1)));
+            if (gather_root < 0 || myrank == gather_root)
+                for (int r = 0; r < nranks; ++r)
+                {
+                    if (counts[r] < 0 || counts[r] > std::numeric_limits<int>::max() - total_pairs)
+                        throw std::overflow_error("Partition gathered result exceeds MPI int.");
+                    displacements[r] = total_pairs;
+                    total_pairs += counts[r];
+                }
+            gathered_pairs.resize(static_cast<size_t>(std::max(total_pairs, 1)));
+        });
     if (gather_root >= 0)
-    {
-        MPI_Gatherv(
-            local_pairs.data(),
-            my_pair_count,
-            mpi_go_type(),
-            gathered_pairs.data(),
-            counts.data(),
-            displacements.data(),
-            mpi_go_type(),
-            gather_root,
-            get_mpi_comm(*comm));
-        if (myrank != gather_root)
-        {
-            return {};
-        }
-    }
+        MPI_Gatherv(local_pairs.data(), my_pair_count, mpi_go_type(), gathered_pairs.data(), counts.data(),
+            displacements.data(), mpi_go_type(), gather_root, get_mpi_comm(*comm));
     else
-    {
-        MPI_Allgatherv(
-            local_pairs.data(),
-            my_pair_count,
-            mpi_go_type(),
-            gathered_pairs.data(),
-            counts.data(),
-            displacements.data(),
-            mpi_go_type(),
-            get_mpi_comm(*comm));
-    }
-
-    local_parts.clear();
-    for (int pair = 0; pair + 1 < total_pairs; pair += 2)
-    {
-        local_parts[gathered_pairs[static_cast<size_t>(pair)]] =
-            static_cast<int>(
-                gathered_pairs[static_cast<size_t>(pair + 1)]);
-    }
+        MPI_Allgatherv(local_pairs.data(), my_pair_count, mpi_go_type(), gathered_pairs.data(), counts.data(),
+            displacements.data(), mpi_go_type(), get_mpi_comm(*comm));
+    agreed_phase("gathered partition result extraction",
+        [&]
+        {
+            local_parts.clear();
+            if (gather_root >= 0 && myrank != gather_root)
+                return;
+            for (int pair = 0; pair + 1 < total_pairs; pair += 2)
+                local_parts.emplace(gathered_pairs[pair], static_cast<int>(gathered_pairs[pair + 1]));
+        });
     return local_parts;
 }
 
@@ -2241,3 +2258,5 @@ void MeshPartitioner<Pack>::rebuild(
     decltype(mesh.d_face_key_to_face){}.swap(
         mesh.d_face_key_to_face);
 }
+
+#include "parallel/NativeMeshDistribution.tcc"

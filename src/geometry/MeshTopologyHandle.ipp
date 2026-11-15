@@ -146,6 +146,9 @@ MeshTopologyHandle<Pack>::cell_global_id(local_ordinal_type cell_lid) const
             d_owner->checked_local(static_cast<std::size_t>(d_owner->geometry_cell_lid(cell_lid)));
         return legacy->mesh_gid_to_tpetra_gid(legacy->cell_global_id(geometry_cell));
     }
+    if (!d_owner->d_serial_identity && !d_owner->d_map_indexing &&
+        std::holds_alternative<typename MeshHandle<Pack>::UnstructuredPtr>(d_owner->d_mesh))
+        return d_owner->d_indexer.local_to_global_cell_ordinal(cell_lid);
     return d_owner->d_serial_identity
                ? static_cast<global_ordinal_type>(cell_lid)
                : (d_owner->d_map_indexing ? d_owner->d_overlap_cell_map->getGlobalElement(cell_lid)
@@ -162,6 +165,8 @@ MeshTopologyHandle<Pack>::cell_geometry_global_id(local_ordinal_type cell_lid) c
         return legacy->cell_global_id(
             d_owner->checked_local(static_cast<std::size_t>(d_owner->geometry_cell_lid(cell_lid))));
     }
+    if (d_owner->d_map_indexing && std::holds_alternative<typename MeshHandle<Pack>::UnstructuredPtr>(d_owner->d_mesh))
+        return d_owner->d_indexer.cell_global_id(cell_lid);
     if (d_owner->d_semi_structured_topology || d_owner->d_orthogonal_decomposition)
         return d_owner->geometry_cell_lid(cell_lid);
     return d_owner->d_serial_identity
@@ -180,6 +185,9 @@ MeshTopologyHandle<Pack>::face_global_id(local_ordinal_type face_lid) const
         return legacy->face_global_id(
             d_owner->checked_local(static_cast<std::size_t>(d_owner->geometry_face_lid(face_lid))));
     }
+    if (!d_owner->d_serial_identity && !d_owner->d_map_indexing &&
+        std::holds_alternative<typename MeshHandle<Pack>::UnstructuredPtr>(d_owner->d_mesh))
+        return d_owner->d_indexer.local_to_global_face_ordinal(face_lid);
     return d_owner->d_serial_identity
                ? static_cast<global_ordinal_type>(face_lid)
                : (d_owner->d_map_indexing ? d_owner->d_overlap_face_map->getGlobalElement(face_lid)
@@ -194,6 +202,9 @@ MeshTopologyHandle<Pack>::face_geometry_global_id(local_ordinal_type face_lid) c
     if (const auto legacy = d_owner->legacy_mesh())
         return legacy->face_global_id(
             d_owner->checked_local(static_cast<std::size_t>(d_owner->geometry_face_lid(face_lid))));
+    if (!d_owner->d_serial_identity &&
+        std::holds_alternative<typename MeshHandle<Pack>::UnstructuredPtr>(d_owner->d_mesh))
+        return d_owner->d_indexer.face_global_id(face_lid);
     return (d_owner->d_semi_structured_topology || d_owner->d_orthogonal_decomposition)
                ? d_owner->geometry_face_lid(face_lid)
                : face_global_id(face_lid);
@@ -266,6 +277,10 @@ inline bool MeshTopologyHandle<Pack>::is_geometry_exterior_face(local_ordinal_ty
             {
                 return neighbor == invalid_id<local_ordinal_type>();
             }
+            else if constexpr (std::same_as<std::decay_t<decltype(mesh)>, typename MeshHandle<Pack>::Unstructured>)
+            {
+                return mesh.is_exterior_face(id);
+            }
             else
             {
                 return neighbor == std::decay_t<decltype(mesh)>::invalid_cell_id();
@@ -277,6 +292,9 @@ inline bool MeshTopologyHandle<Pack>::is_geometry_exterior_face(local_ordinal_ty
 template<TpetraTypePack Pack>
 inline bool MeshTopologyHandle<Pack>::is_exterior_face(local_ordinal_type face_lid) const
 {
+    if (const auto* mesh = std::get_if<typename MeshHandle<Pack>::UnstructuredPtr>(&d_owner->d_mesh))
+        return (*mesh)->is_exterior_face((*mesh)->face_id(
+            static_cast<size_t>(d_owner->geometry_face_lid(face_lid))));
     return neighbor_cell(face_lid) == invalid_local_id();
 }
 

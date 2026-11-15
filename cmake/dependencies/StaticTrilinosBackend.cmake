@@ -89,6 +89,12 @@ function(simplefluid_add_static_trilinos_backend)
            NOT EXISTS "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}")
             message(FATAL_ERROR "SIMPLEFLUID_REUSE_TRILINOS_BACKEND must name an existing absolute library path")
         endif()
+        execute_process(COMMAND "${CMAKE_NM}" -D --defined-only -j "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}"
+            RESULT_VARIABLE reused_symbols_status OUTPUT_VARIABLE reused_symbols)
+        if(NOT reused_symbols_status EQUAL 0 OR NOT reused_symbols MATCHES
+           "simplefluid_trilinos_stk_io_set_string_property")
+            message(FATAL_ERROR "Reused Trilinos backend predates the native STK input I/O bridge; rebuild it")
+        endif()
         add_library(SimpleFluidTrilinosBackend SHARED IMPORTED GLOBAL)
         add_library(SimpleFluid::TrilinosBackend ALIAS SimpleFluidTrilinosBackend)
         execute_process(COMMAND "${CMAKE_READELF}" --dynamic "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}"
@@ -107,7 +113,8 @@ function(simplefluid_add_static_trilinos_backend)
         return()
     endif()
     add_library(SimpleFluidTrilinosBackend SHARED
-        "${PROJECT_SOURCE_DIR}/src/TrilinosBackend.cc")
+        "${PROJECT_SOURCE_DIR}/src/TrilinosBackend.cc"
+        "${PROJECT_SOURCE_DIR}/src/io/details/STKBackendBridge.cc")
     add_library(SimpleFluid::TrilinosBackend ALIAS SimpleFluidTrilinosBackend)
     simplefluid_exclude_from_pgo_sources("${PROJECT_SOURCE_DIR}/src/TrilinosBackend.cc")
     set_target_properties(SimpleFluidTrilinosBackend PROPERTIES

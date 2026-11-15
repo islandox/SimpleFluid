@@ -8,3 +8,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   simplefluid_configure_test_executable(${TEST_NAME})
   simplefluid_discover_tests(${TEST_NAME})
 endforeach()
+
+foreach(_input_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME STKFaceAuthority_${_input_ranks}procs
+        TARGET testSTKFaceAuthority PROCS ${_input_ranks}
+        LABELS "mpi;io;unstructured;source_authority" TIMEOUT 120)
+endforeach()

@@ -307,9 +307,22 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
         }
     }
 
+    std::vector<typename mesh_type::indexer_type::CellMapping> owned_mappings, ghost_mappings;
+    const bool unstructured = std::holds_alternative<typename mesh_type::UnstructuredPtr>(parent->d_mesh);
+    if (unstructured)
+    {
+        for (size_t local = 0; local < reordered_to_parent.size(); ++local)
+        {
+            const auto previous = reordered_to_parent[local];
+            const auto source = parent->d_indexer.cell_global_id(previous);
+            (local < owned_count ? owned_mappings : ghost_mappings).push_back({
+                parent->d_indexer.global_to_local_cell_id(source), source,
+                parent->d_indexer.local_to_global_cell_ordinal(previous)});
+        }
+    }
     std::vector<global_ordinal_type> owned_ids;
     std::vector<global_ordinal_type> ghost_ids;
-    if (!parent->is_stk())
+    if (!parent->is_stk() && !unstructured)
     {
         owned_ids.reserve(owned_count);
         ghost_ids.reserve(selected.size() - owned_count);
@@ -335,10 +348,10 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
         }
     }
 
-    if (!reordered->is_stk())
-    {
+    if (unstructured)
+        reordered->d_indexer.set_cells(std::move(owned_mappings), std::move(ghost_mappings));
+    else if (!reordered->is_stk())
         reordered->d_indexer.set_cells(std::move(owned_ids), std::move(ghost_ids));
-    }
 
     if (!local_identity && reordered->is_stk())
     {

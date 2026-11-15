@@ -96,14 +96,26 @@ public:
     local_ordinal_type neighbor_cell(size_t face) const { return field_cell(d_geometry.neighbor_cell(face_id(face))); }
 
     /** @brief Physical exterior classification, independent of overlap depth. */
-    bool is_exterior_face(size_t face) const { return invalid_cell(d_geometry.neighbor_cell(face_id(face))); }
+    bool is_exterior_face(size_t face) const
+    {
+        if constexpr (std::same_as<GeometryMesh, Meshes::UnstructuredMesh>)
+            return d_geometry.is_exterior_face(face_id(face));
+        else
+            return invalid_cell(d_geometry.neighbor_cell(face_id(face)));
+    }
 
     /** @brief Classify through complete provider incidence, including hidden faces. */
     bool is_exterior_cell(size_t cell) const
     {
         for (const auto face : d_geometry.faces(cell_id(cell)))
-            if (invalid_cell(d_geometry.neighbor_cell(face)))
+        {
+            if constexpr (std::same_as<GeometryMesh, Meshes::UnstructuredMesh>)
+            {
+                if (d_geometry.is_exterior_face(face)) return true;
+            }
+            else if (invalid_cell(d_geometry.neighbor_cell(face)))
                 return true;
+        }
         return false;
     }
 

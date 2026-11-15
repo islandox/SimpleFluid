@@ -10,6 +10,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     explicit_instantiation/MeshReorderingFactory.cc
     explicit_instantiation/SolidSubdomain.cc
     explicit_instantiation/STKMesh.cc
+    details/NativeMeshAssembly.cc
     MeshFactory.cc
     explicit_instantiation/LocalGlobalIndexer.cc
     explicit_instantiation/OrthogonalLocalGlobalIndexer.cc

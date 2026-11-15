@@ -40,7 +40,9 @@ namespace SimpleFluid
  * Face normals point away from the owner; outward variants flip them for the
  * neighbor. Exterior faces use the derived invalid-cell sentinel as their
  * neighbor and report zero owner-neighbor distance; `cell_center_vector()`
- * throws `std::invalid_argument` for them. Outward and opposite-cell queries
+ * throws `std::invalid_argument` for them. Rank-local overlap geometry may also
+ * use that sentinel for an unavailable interior neighbor; its exterior predicate
+ * preserves the physical classification independently of local availability. Outward and opposite-cell queries
  * likewise reject cells that are not incident to the requested face.
  * A face without a physical boundary uses `invalid_boundary_id`, and asking
  * such a face for a boundary name throws `std::out_of_range`.
@@ -303,7 +305,13 @@ public:
 
     bool is_exterior_face(face_id_t face_id) const
     {
-        return neighbor_cell(face_id) == derived().invalid_cell_id();
+        if constexpr (requires { derived().is_exterior_face_impl(face_id); })
+        {
+            derived().check_face_id(face_id);
+            return derived().is_exterior_face_impl(face_id);
+        }
+        else
+            return neighbor_cell(face_id) == derived().invalid_cell_id();
     }
 
     bool is_interior_face(face_id_t face_id) const

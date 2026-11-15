@@ -12,6 +12,7 @@
 #pragma once
 
 #include "geometry/mesh/MeshBase.hh"
+#include "geometry/mesh/UnstructuredMeshData.hh"
 #include "geometry/GeometryEpoch.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 
@@ -158,6 +159,16 @@ public:
      */
     static UnstructuredMesh empty_partition() { return UnstructuredMesh(EmptyPartitionTag{}); }
 
+    /**
+     * @brief Build compact local geometry from detached source-ID records.
+     *
+     * Record and incidence order, cell types, and supplied metrics are retained.
+     * Source/algebraic identity belongs to the caller's LocalGlobalIndexer.
+     * The owner of every face must be local; an unavailable neighbor is allowed
+     * only on an outer overlap face incident solely to ghost cells.
+     */
+    static UnstructuredMesh from_data(UnstructuredMeshData data);
+
     UnstructuredMesh(
         const Arr<Vec3>& nodes,
         const Arr<CellDefinition>& cells,
@@ -230,6 +241,7 @@ private:
         CellID owner = invalid_ordinal;
         CellID neighbor = invalid_ordinal;
         int boundary_id = invalid_boundary_id;
+        bool remote_neighbor = false;
         Vec3 center;
         Vec3 normal;
         real_t area = 0.0;
@@ -254,6 +266,11 @@ private:
 
     CellID owner_cell_impl(FaceID face_id) const;
     CellID neighbor_cell_impl(FaceID face_id) const;
+    bool is_exterior_face_impl(FaceID face_id) const
+    {
+        const auto& face = d_faces[face_id];
+        return face.neighbor == invalid_ordinal && !face.remote_neighbor;
+    }
 
     real_t face_area_impl(FaceID face_id) const;
     Vec3 face_centroid_impl(FaceID face_id) const;

@@ -1,6 +1,6 @@
 
 # Multi-rank MetisPartitioner tests
-add_executable(testMeshPartitioner testMeshPartitioner.cc)
+add_executable(testMeshPartitioner testMeshPartitioner.cc PartitionedUnstructuredFieldProvider.cc)
 target_link_libraries(testMeshPartitioner SimpleFluid::Fields GTest::gtest_main)
 simplefluid_configure_test_executable(testMeshPartitioner)
 simplefluid_add_mpi_test(
@@ -47,4 +47,14 @@ foreach(_centroid_ranks IN ITEMS 1 2 3 4)
     TARGET testMeshPartitioner PROCS ${_centroid_ranks}
     ARGS "--gtest_filter=MeshPartitionerGeometryTest.GradedQuadCentroidsMatchSerialRule"
     LABELS "mpi;geometry;partition;centroid" TIMEOUT 60)
+endforeach()
+
+add_executable(testNativeMeshDistribution testNativeMeshDistribution.cc)
+target_link_libraries(testNativeMeshDistribution SimpleFluid::Fields GTest::gtest_main)
+simplefluid_configure_test_executable(testNativeMeshDistribution)
+simplefluid_discover_tests(testNativeMeshDistribution)
+foreach(_native_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME NativeMeshDistribution_${_native_ranks}procs
+        TARGET testNativeMeshDistribution PROCS ${_native_ranks}
+        LABELS "mpi;geometry;unstructured;import;empty_rank" TIMEOUT 120)
 endforeach()

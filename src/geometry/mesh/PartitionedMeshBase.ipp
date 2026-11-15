@@ -18,6 +18,8 @@
 namespace SimpleFluid::Meshes
 {
 
+class UnstructuredMesh;
+
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline const GeometryMesh&
 PartitionedMesh<GeometryMesh, Pack>::mesh() const noexcept
@@ -304,7 +306,10 @@ template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline bool PartitionedMesh<GeometryMesh, Pack>::is_exterior_face(
     local_ordinal_type face_local_id) const
 {
-    return neighbor_cell(face_local_id) == invalid_local_id();
+    if constexpr (std::same_as<GeometryMesh, UnstructuredMesh>)
+        return mesh().is_exterior_face(geometry_face_id(face_local_id));
+    else
+        return neighbor_cell(face_local_id) == invalid_local_id();
 }
 
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
