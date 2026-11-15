@@ -131,11 +131,11 @@ foreach(retired IN ITEMS transport_system non_orthogonal_transport_system
     endif()
 endforeach()
 
-# Require each exact family/backend entry point, including the two vector
-# boundary contracts and the separate temperature RHS refresh. Merely finding
-# one assemble symbol cannot establish the compiled overload inventory.
+# Require each exact native family/backend entry point, including the separate
+# temperature RHS refresh. Deprecated Mesh providers are outside this inventory.
+# Merely finding one assemble symbol cannot establish the compiled overloads.
 string(REPLACE "\n" ";" factory_signatures "${demangled_full}")
-foreach(backend IN ITEMS Mesh MeshHandle PartitionedCartesian SolidSubdomain)
+foreach(backend IN ITEMS MeshHandle PartitionedCartesian SolidSubdomain)
     if(backend STREQUAL "PartitionedCartesian")
         set(mesh_pattern "SimpleFluid::Meshes::PartitionedMesh<SimpleFluid::Meshes::OrthogonalCartesian3D,")
     else()
@@ -145,9 +145,6 @@ foreach(backend IN ITEMS Mesh MeshHandle PartitionedCartesian SolidSubdomain)
     if(NOT backend STREQUAL "SolidSubdomain")
         list(APPEND families WeightedScalar Vector Momentum)
     endif()
-    if(backend STREQUAL "Mesh")
-        list(APPEND families BasicVector)
-    endif()
     foreach(family IN LISTS families)
         set(method assemble)
         set(terms "${family}Terms")
@@ -155,9 +152,6 @@ foreach(backend IN ITEMS Mesh MeshHandle PartitionedCartesian SolidSubdomain)
         if(family STREQUAL "RefreshTemperature")
             set(method refresh_temperature_rhs)
             set(terms TemperatureTerms)
-        elseif(family STREQUAL "BasicVector")
-            set(terms VectorTerms)
-            set(boundary "BasicVectorTransportBoundary<")
         elseif(family STREQUAL "Vector")
             set(boundary "VelocityTransportBoundary<")
         endif()

@@ -1,14 +1,7 @@
-/** @brief Individual compiled transport factory overloads. */
+/** @brief Exported static-Cartesian transport factory specializations. */
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
-
-// Static mesh types are hidden; export the supported public overloads individually.
-#if defined(__GNUC__) || defined(__clang__)
-#define SIMPLEFLUID_STATIC_TRANSPORT_EXPORT __attribute__((visibility("default")))
-#else
-#define SIMPLEFLUID_STATIC_TRANSPORT_EXPORT
-#endif
 
 namespace SimpleFluid::FVM
 {
@@ -19,15 +12,34 @@ using MeshType = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
 using Factory = TransportSystemFactory<Pack, MeshType>;
 } // namespace
 
-template SIMPLEFLUID_STATIC_TRANSPORT_EXPORT TransportSystem<Pack> Factory::assemble(Factory::WeightedScalarTerms,
-    Factory::WeightedScalarBoundary, Factory::WeightedScalarOptions, Factory::WeightedScalarContext);
+template<>
+TransportSystem<Pack> Factory::assemble(WeightedScalarTerms terms,
+    WeightedScalarBoundary boundary, WeightedScalarOptions options, WeightedScalarContext context)
+{
+    if (!terms.sources.source)
+        terms.sources.source = [](typename Pack::local_ordinal_type) { return typename Pack::scalar_type{}; };
+    return detail::assemble_stored_weighted<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context));
+}
 
-template SIMPLEFLUID_STATIC_TRANSPORT_EXPORT TransportSystem<Pack> Factory::assemble(
-    Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions, Factory::TemperatureContext);
+template<>
+TransportSystem<Pack> Factory::assemble(
+    TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
+{
+    if (!terms.power_density)
+        terms.power_density = [](typename Pack::local_ordinal_type) { return typename Pack::scalar_type{}; };
+    return detail::assemble_stored_temperature<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context), false);
+}
 
-template SIMPLEFLUID_STATIC_TRANSPORT_EXPORT TransportSystem<Pack> Factory::refresh_temperature_rhs(
-    Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions, Factory::TemperatureContext);
+template<>
+TransportSystem<Pack> Factory::refresh_temperature_rhs(
+    TemperatureTerms terms, TemperatureBoundary boundary, TemperatureOptions options, TemperatureContext context)
+{
+    if (!terms.power_density)
+        terms.power_density = [](typename Pack::local_ordinal_type) { return typename Pack::scalar_type{}; };
+    return detail::assemble_stored_temperature<Pack, MeshType>(
+        std::move(terms), std::move(boundary), options, std::move(context), true);
+}
 
 } // namespace SimpleFluid::FVM
-
-#undef SIMPLEFLUID_STATIC_TRANSPORT_EXPORT

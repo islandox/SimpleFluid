@@ -64,6 +64,10 @@ represented by that backend.
 | `refresh_temperature_rhs` | Yes | Yes | Yes | Yes |
 | Momentum `assemble` | Yes | Yes | Yes | Custom provider |
 
+The declaration-only link guard and exact ELF factory inventory cover the three
+native backend columns. Deprecated `Mesh` entry points remain compatibility
+providers and are excluded from that inventory.
+
 Here Cartesian means
 `Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>`. The complete
 basic-vector condition/value overload is constrained to `Mesh<Pack>` even when

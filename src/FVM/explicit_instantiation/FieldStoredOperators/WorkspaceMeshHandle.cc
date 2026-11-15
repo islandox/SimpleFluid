@@ -7,8 +7,12 @@ template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
     MeshHandle<DefaultTpetraTypes>>::SharedGeometry::SharedGeometry(SP<const mesh_type> mesh,
     std::shared_ptr<const topology_type> topology, std::shared_ptr<const traverse_plan_type> gradient_traverse);
 
-template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
-    MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh);
+template<>
+FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
+    MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh)
+    : FieldStoredPressureWeightedFaceFluxWorkspace(mesh, std::make_shared<SharedGeometry>(mesh))
+{
+}
 
 template FieldStoredPressureWeightedFaceFluxWorkspace<DefaultTpetraTypes,
     MeshHandle<DefaultTpetraTypes>>::FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh,

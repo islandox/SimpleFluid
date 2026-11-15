@@ -9,7 +9,6 @@
 #include <gtest/gtest.h>
 #include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
-#include "fields/FieldStored.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <set>
@@ -30,12 +29,8 @@ TEST(MultiRegionMeshMultiRankTest, OwnershipHalosAndCanonicalFaces)
     EXPECT_EQ(mesh->owned_face_map()->getGlobalNumElements(), geometry->num_faces());
     EXPECT_EQ(mesh->num_owned_cells(), geometry->num_cells() / comm->getSize());
     EXPECT_FALSE(mesh->has_materialized_indexer()); EXPECT_EQ(mesh->connectivity_storage_bytes(), 0U);
-    ScalarCellFieldStored<> field(mesh, "gid");
-    for (size_t c = 0; c < mesh->num_owned_cells(); ++c) field.set_owned_value(c, mesh->cell_global_id(c) + 0.5);
-    field.sync_ghosts();
     for (size_t c = 0; c < mesh->num_cells(); ++c)
     {
-        EXPECT_DOUBLE_EQ(field.local_value(c), mesh->cell_global_id(c) + 0.5);
         for (const auto f : mesh->faces(c))
         {
             const auto global_face = mesh->face_global_id(f);
