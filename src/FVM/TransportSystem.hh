@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/ALEControlVolumeState.hh"
@@ -246,3 +249,5 @@ extern template class TransportGeometryCache<MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid::FVM
 
 #include "FVM/details/TransportGeometryCache.hh"
+
+SIMPLEFLUID_LEGACY_API_END

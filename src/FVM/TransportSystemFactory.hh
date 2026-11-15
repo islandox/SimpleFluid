@@ -2,6 +2,9 @@
  * @brief Typed transport assembly for legacy and native mesh fields.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportAssemblyPacks.hh"
@@ -56,3 +59,5 @@ public:
         MomentumTerms terms, MomentumBoundary boundary, MomentumOptions options, MomentumContext context = {});
 };
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

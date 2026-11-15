@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include <gtest/gtest.h>
 
 #include "fields/VectorFaceField.hh"
@@ -161,7 +162,7 @@ TEST(VectorFaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 TEST(VectorFaceFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =
-        std::make_shared<SimpleFluid::STKMesh<>>();
+        std::make_shared<SimpleFluid::test::LegacySTKFixture<>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }

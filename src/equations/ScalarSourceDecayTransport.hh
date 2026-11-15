@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -499,3 +502,5 @@ extern template class ScalarSourceDecayTransport<DefaultTpetraTypes, MeshHandle<
 
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

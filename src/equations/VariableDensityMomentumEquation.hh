@@ -2,6 +2,9 @@
  * @brief Conservative density-weighted momentum transport with canonical face mass flux.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
@@ -54,3 +57,5 @@ private:
 extern template class VariableDensityMomentumEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class VariableDensityMomentumEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

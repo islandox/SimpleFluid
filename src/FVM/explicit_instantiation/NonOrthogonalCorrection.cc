@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "FVM/NonOrthogonalCorrection.tcc"
 
@@ -69,3 +72,5 @@ template Teuchos::RCP<MatrixVector> full_diffusion_residual<Pack>(
     const ScalarField&, Scalar, ScalarBoundaryConditionProvider<Pack>);
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

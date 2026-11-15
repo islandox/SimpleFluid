@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/Mesh.hh"
 
@@ -509,3 +512,5 @@ bool BoundaryFaceField<Pack>::is_owned_boundary_face(
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

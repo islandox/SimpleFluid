@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -1478,3 +1481,5 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(
     ScalarFaceFieldStored<Pack, MeshType>& fluxes);
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

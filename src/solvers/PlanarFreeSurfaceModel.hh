@@ -3,6 +3,9 @@
  * @brief Fixed-grid planar liquid-level and ideal-gas headspace models.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
@@ -969,3 +972,5 @@ extern template class LiquidMassInventory<DefaultTpetraTypes, MeshHandle<Default
 
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

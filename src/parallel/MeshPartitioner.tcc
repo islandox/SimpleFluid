@@ -8,6 +8,8 @@
  * @copyright Copyright (c) 2026
  * 
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "MeshPartitioner.hh"
@@ -2260,3 +2262,5 @@ void MeshPartitioner<Pack>::rebuild(
 }
 
 #include "parallel/NativeMeshDistribution.tcc"
+
+SIMPLEFLUID_LEGACY_API_END

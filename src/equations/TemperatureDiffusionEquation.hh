@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
@@ -222,3 +225,5 @@ extern template class TemperatureDiffusionEquation<DefaultTpetraTypes, Mesh<Defa
 extern template class TemperatureDiffusionEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

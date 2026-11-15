@@ -1,4 +1,7 @@
 /** @brief Individual compiled transport factory overloads. */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/MeshHandle.hh"
 
@@ -15,3 +18,5 @@ template TransportSystem<Pack> Factory::assemble(Factory::WeightedScalarTerms, F
     Factory::WeightedScalarOptions, Factory::WeightedScalarContext);
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

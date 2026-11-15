@@ -2,6 +2,9 @@
  * @brief Allocation and error paths for basic transport RHS adapters.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "FVM/details/TransportRhs.hh"
 
@@ -34,3 +37,5 @@ template<TpetraTypePack Pack> [[noreturn]] void BasicVectorTransportRhs<Pack>::t
 }
 
 } // namespace SimpleFluid::FVM::detail
+
+SIMPLEFLUID_LEGACY_API_END

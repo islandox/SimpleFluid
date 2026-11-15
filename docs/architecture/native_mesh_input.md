@@ -3,8 +3,8 @@
 `MeshFactory` publishes native `Meshes::UnstructuredMesh` geometry through
 `MeshHandle`. STK/Ioss is a transient file-input dependency. Programmatic BOX,
 CYLINDER, ANNULUS and SPHERE construction uses STK-free node/cell/face records.
-The existing STK computational backend remains available while its callers migrate.
-Native constructors and physical fields do not own STK data.
+The runtime `STKMesh` class and its public `meta()`/`bulk()` construction API
+have been retired. Native constructors and physical fields do not own STK data.
 
 ## Factory API
 
@@ -117,12 +117,26 @@ Legacy manually paired translational periodicity is not silently translated
 into distant ordinary neighbors; native image geometry would be required.
 A closed annular seam sharing node IDs remains ordinary interior topology.
 
-`MeshFactory::build()` explicitly materializes compatibility Mesh storage from the
-common construction records. Ordinary native construction never allocates that
-snapshot or legacy solver workspaces. Existing Mesh and STKMesh APIs and template
-defaults remain available in this stage; their deprecation and runtime STK backend
-retirement are separate changes. Factory/handle consumers and providers require a
-matching rebuild for the added mapping and construction state.
+`Mesh` remains a real deprecated class with its established layout, virtual
+interface, legacy fields and compiled providers. `MeshFactory::build()` is an
+explicit deprecated compatibility operation that materializes STK-free legacy
+storage from the common construction records. Ordinary `build_handle()` and
+file input never allocate that legacy snapshot or legacy solver workspaces.
+Consumers and compiled providers must be rebuilt together for this migration:
+`MeshFactory`, native geometry and handle internals gained construction/mapping
+state. The compatibility statement about retained layout applies to `Mesh`,
+not to all surrounding C++ classes.
+Legacy template defaults remain unchanged; native low-level equation clients
+can select `MeshHandle<Pack>` explicitly.
+
+`SIMPLEFLUID_DISABLE_LEGACY_MESH_DEPRECATION` is a temporary diagnostic opt-out.
+Library-owned compatibility declarations use scoped diagnostic guards; direct
+client uses of the deprecated API still warn normally. The historical
+`STKMeshAdapter` name now describes only the generic adapter over legacy `Mesh`;
+it retains no STK dependency or source objects. Source files which constructed
+STK metadata/bulk data through the removed runtime class must migrate to native
+construction or the file reader. A frozen legacy STK geometry oracle exists
+only in the `BUILD_TESTING` fixture target.
 
 STK/Ioss property construction stays inside the single static-Trilinos archive
 owner through a narrow versioned I/O bridge. Reusing an older backend without

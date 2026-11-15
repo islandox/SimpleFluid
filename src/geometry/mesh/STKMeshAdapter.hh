@@ -10,6 +10,9 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/Mesh.hh"
 
@@ -238,3 +241,5 @@ private:
 };
 
 } // namespace SimpleFluid::Meshes
+
+SIMPLEFLUID_LEGACY_API_END

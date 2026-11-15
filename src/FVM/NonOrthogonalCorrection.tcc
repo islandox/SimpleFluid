@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "FVM/CellOperators.hh"
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
@@ -992,3 +995,5 @@ Teuchos::RCP<typename Pack::vector_type> full_diffusion_residual(const CellField
 }
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

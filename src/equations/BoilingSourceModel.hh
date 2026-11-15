@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -555,3 +558,5 @@ extern template class BoilingSourceModel<DefaultTpetraTypes, MeshHandle<DefaultT
 
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "FVM/TransportSystem.hh"
 
@@ -30,3 +33,5 @@ template class TransportGeometryCache<Mesh<Pack>>;
 template class TransportGeometryCache<MeshHandle<Pack>>;
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

@@ -1,6 +1,11 @@
 
 # Unit tests for geometry
 
+# Frozen legacy geometry oracle; never part of a production library.
+add_library(SimpleFluidLegacyMeshTestFixture STATIC fixtures/LegacySTKFixture.cc)
+simplefluid_configure_component(SimpleFluidLegacyMeshTestFixture)
+target_link_libraries(SimpleFluidLegacyMeshTestFixture PUBLIC SimpleFluid::Mesh)
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testOrthogonalDiffusionProfile\\.cc$")

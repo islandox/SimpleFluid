@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/NumericAssemblyLease.hh"
@@ -274,3 +277,5 @@ extern template class
                                    MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

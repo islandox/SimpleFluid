@@ -35,6 +35,12 @@ instead of converting a supplied native mesh into a legacy mesh.
 This avoids hidden conversions and duplicated storage while preserving compatibility
 consumers.
 
+`MeshFactory` now constructs native unstructured handles from STK/Ioss input
+and STK-free programmatic generators. `Mesh` and `MeshFactory::build()` are
+deprecated compatibility interfaces. Preserve the source-ID, metric authority,
+input layout and collective-publication contracts in
+[native mesh input](docs/architecture/native_mesh_input.md).
+
 Structural [template concepts](docs/architecture/template_concepts.md) define
 the region provider, local-ordinal mesh, field descriptor, and equation-term
 interfaces. Preserve their custom-type compatibility and the separate compiled

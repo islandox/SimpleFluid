@@ -15,7 +15,7 @@
 #include "parallel/MeshPartitioner.hh"
 
 #include "geometry/Mesh.hh"
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include <stk_mesh/base/FEMHelpers.hpp>
 #include <stk_mesh/base/FieldBase.hpp>
 #include "geometry/MeshHandle.hh"
@@ -1680,7 +1680,7 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
  */
 TEST(MeshPartitionerGeometryTest, GradedQuadCentroidsMatchSerialRule)
 {
-    auto mesh = std::make_shared<SimpleFluid::STKMesh<Pack>>();
+    auto mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
     auto meta = mesh->meta();
     auto bulk = mesh->bulk();
     auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");

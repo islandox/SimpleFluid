@@ -12,7 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshHandle.hh"
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -42,7 +42,7 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
-using ConcreteSTK = SimpleFluid::STKMesh<Pack>;
+using ConcreteSTK = SimpleFluid::test::LegacySTKFixture<Pack>;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 

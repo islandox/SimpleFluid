@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  * 
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/Mesh.hh"
 #include "geometry/Mesh.tcc"
@@ -21,3 +24,5 @@ namespace SimpleFluid
 //    template class Mesh<TpetraTypes<real_t, local_index_t, global_index_t, 
 //        Tpetra::KokkosCompat::KokkosDeviceWrapperNode<Kokkos::OpenMP> > >;
 }
+
+SIMPLEFLUID_LEGACY_API_END

@@ -227,7 +227,7 @@ TEST(BoundaryFaceFieldTest, OwnershipAndMinimalMesh)
     }
 }
 
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 
 /**
  * @brief Verifies construction errors: null mesh and unassembled mesh.
@@ -235,6 +235,6 @@ TEST(BoundaryFaceFieldTest, OwnershipAndMinimalMesh)
 TEST(BoundaryFaceFieldTest, ConstructionErrors)
 {
     EXPECT_THROW(FieldType(nullptr), std::invalid_argument);
-    EXPECT_THROW(FieldType(std::make_shared<SimpleFluid::STKMesh<>>()),
+    EXPECT_THROW(FieldType(std::make_shared<SimpleFluid::test::LegacySTKFixture<>>()),
                  std::runtime_error);
 }

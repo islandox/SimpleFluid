@@ -2,6 +2,9 @@
  * @brief Adapters from optional IF97 water to existing material fields.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoussinesqModel.hh"
@@ -75,3 +78,5 @@ auto make_if97_liquid_material_updater(double absolute_pressure) ->
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

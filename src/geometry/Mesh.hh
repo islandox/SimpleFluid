@@ -9,6 +9,9 @@
  * 
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "dataclass/TpetraTypes.hh"
 #include "dataclass/vec3.hh"
@@ -93,7 +96,7 @@ constexpr ID invalid_id() noexcept
  * @tparam Pack Tpetra type pack used for map and vector types.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
-class SIMPLEFLUID_PUBLIC_TYPE Mesh
+class SIMPLEFLUID_PUBLIC_TYPE SIMPLEFLUID_LEGACY_MESH_DEPRECATED Mesh
 {
     friend struct detail::MeshTraverseBinding;
     /** @brief Grants MeshPartitioner access to internal mesh arrays for parallel redistribution. */
@@ -545,3 +548,5 @@ struct Mesh<Pack>::DeviceViews
 
 // Include inline function definitions
 #include "geometry/Mesh.ipp"
+
+SIMPLEFLUID_LEGACY_API_END

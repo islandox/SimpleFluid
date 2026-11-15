@@ -1,5 +1,8 @@
 /** @brief Compiled mapped face operators, workspace setup and custom-provider opt-in. */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/FaceFlux.hh"
@@ -256,3 +259,5 @@ SIMPLEFLUID_FVM_EXPORT void pressure_weighted_face_fluxes(const VectorCellFieldS
 }
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

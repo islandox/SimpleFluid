@@ -3,6 +3,9 @@
  * @brief Visibility-consistent forward declarations for compiled equations.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -19,3 +22,5 @@ template<TpetraTypePack Pack = DefaultTpetraTypes, SimpleFluid::MeshType MeshTyp
 class SIMPLEFLUID_EQUATIONS_EXPORT IncompressibleMomentumEquation;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

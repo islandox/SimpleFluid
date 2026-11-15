@@ -10,7 +10,7 @@
  */
 #pragma once
 
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 
 #include <stk_mesh/base/FEMHelpers.hpp>
 #include <stk_mesh/base/FieldBase.hpp>
@@ -29,7 +29,7 @@ namespace detail
 
 template<TpetraTypePack Pack>
 stk::mesh::Field<double>& declare_skewed_prism_coordinate_field(
-    STKMesh<Pack>& mesh)
+    LegacySTKFixture<Pack>& mesh)
 {
     auto meta = mesh.meta();
     auto& coord_field =
@@ -75,7 +75,7 @@ SP<Mesh<Pack>> make_skewed_prism_mesh(size_t n_x = 3,
             "make_skewed_prism_mesh requires at least 3 cells per direction.");
     }
 
-    auto mesh = std::make_shared<STKMesh<Pack>>();
+    auto mesh = std::make_shared<LegacySTKFixture<Pack>>();
     auto& coord_field =
         detail::declare_skewed_prism_coordinate_field(*mesh);
     auto meta = mesh->meta();

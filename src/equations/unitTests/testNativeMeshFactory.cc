@@ -127,7 +127,9 @@ TEST(NativeMeshFactoryTest, NativeAndExplicitLegacyBackendsPreserveNonzeroUnifor
     db->set("domain_exterior_face_types", ArrString{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"});
     MeshFactory factory(db);
     const auto native = factory.build_handle<Pack>();
+    SIMPLEFLUID_LEGACY_API_BEGIN
     const auto legacy = factory.build<Pack>();
+    SIMPLEFLUID_LEGACY_API_END
     EXPECT_FALSE(native->legacy_mesh());
 
     TimeStepperOptions time;

@@ -1,6 +1,9 @@
 /** @file MeshTraverse.cc
  * @brief Explicit instantiations of traversal setup for supported mesh families.
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "geometry/MeshTraverse.tcc"
 #include "geometry/SolidSubdomain.hh"
 
@@ -89,3 +92,5 @@ TraverseAccess<PartitionedUnstructured, Unstructured>::layered_layout() const;
 
 } // namespace detail
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

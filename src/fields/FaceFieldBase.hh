@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/Mesh.hh"
 
@@ -369,3 +372,5 @@ auto FaceFieldBase<Pack, Derived, StorageVector>::owned_row_for_global_face(
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

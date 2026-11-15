@@ -157,12 +157,12 @@ TEST(CellFieldTest, SyncPeriodicBoundariesSynchronizesOverlapStorage)
     EXPECT_DOUBLE_EQ(temperature.local_value(1), 22.0);
 }
 
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 
 /** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(CellFieldTest, RequiresAssembledMesh)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<Pack>>();
+    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }

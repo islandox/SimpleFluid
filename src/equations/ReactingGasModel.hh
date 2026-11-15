@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -630,3 +633,5 @@ extern template class ReactingGasModel<DefaultTpetraTypes, Mesh<DefaultTpetraTyp
 extern template class ReactingGasModel<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

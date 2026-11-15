@@ -10,6 +10,9 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -1216,3 +1219,5 @@ void ReactingGasModel<Pack, MeshType>::invalidate_transport_operator()
 } // namespace SimpleFluid
 
 #include "equations/ReactingGasSpecies.ipp"
+
+SIMPLEFLUID_LEGACY_API_END

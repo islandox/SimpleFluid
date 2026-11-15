@@ -2,6 +2,8 @@
  * @brief STK-free materialization of the explicit legacy compatibility snapshot.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/details/LegacyMeshSnapshot.hh"
 #include "io/VTUWriter.hh"
@@ -431,3 +433,5 @@ template<TpetraTypePack Pack> SP<Mesh<Pack>> make_legacy_mesh_snapshot(Meshes::U
     return collective_make_shared<LegacyMeshSnapshot<Pack>>(*Tpetra::getDefaultComm(), std::move(data));
 }
 } // namespace SimpleFluid::detail
+
+SIMPLEFLUID_LEGACY_API_END

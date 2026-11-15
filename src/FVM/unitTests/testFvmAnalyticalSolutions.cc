@@ -18,7 +18,7 @@
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
 #include "FVM/Operators.hh"
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -44,7 +44,7 @@ using Pack = SimpleFluid::TpetraTypes<>;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
 using MeshType = SimpleFluid::Mesh<Pack>;
-using STKMeshType = SimpleFluid::STKMesh<Pack>;
+using STKMeshType = SimpleFluid::test::LegacySTKFixture<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 

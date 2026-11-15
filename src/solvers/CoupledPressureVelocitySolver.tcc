@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "geometry/MeshConcepts.hh"
 #include "solvers/CoupledPressureVelocitySolver.hh"
 
@@ -2587,3 +2590,5 @@ CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, 
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

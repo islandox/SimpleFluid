@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "Mesh.hh"
 
@@ -749,3 +752,5 @@ void Mesh<Pack>::check_connectivity() const
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

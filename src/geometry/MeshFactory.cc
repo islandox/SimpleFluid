@@ -1,6 +1,8 @@
 /** @file MeshFactory.cc
  * @brief Native factory publication and explicit legacy compatibility.
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/MeshFactory.hh"
 #include "geometry/details/LegacyMeshSnapshot.hh"
@@ -216,3 +218,5 @@ template SP<MeshHandle<DefaultTpetraTypes>> MeshFactory::from_stk_file<DefaultTp
     const std::string&, const STKMeshInputOptions&, Teuchos::RCP<const DefaultTpetraTypes::comm_type>);
 template SP<Mesh<DefaultTpetraTypes>> MeshFactory::build_empty_mesh<DefaultTpetraTypes>();
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

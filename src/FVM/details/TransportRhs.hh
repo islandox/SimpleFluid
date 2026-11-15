@@ -2,6 +2,9 @@
  * @brief Typed scalar/vector RHS adapters for basic transport assembly.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "FVM/AssemblyCallbacks.hh"
 #include "SimpleFluidExport.hh"
@@ -100,3 +103,5 @@ extern template struct BasicVectorTransportRhs<DefaultTpetraTypes>;
 } // namespace SimpleFluid::FVM::detail
 
 #include "FVM/details/TransportRhs.ipp"
+
+SIMPLEFLUID_LEGACY_API_END

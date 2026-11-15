@@ -3,6 +3,9 @@
  * @brief  Compiled template implementations.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -1128,3 +1131,5 @@ void LiquidMassInventory<Pack, MeshType>::update_pure_liquid_density_impl(const 
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

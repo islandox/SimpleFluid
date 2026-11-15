@@ -4,6 +4,9 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
@@ -43,3 +46,5 @@ template<TpetraTypePack Pack> struct MeshFieldTraits<Pack, Mesh<Pack>>
 };
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

@@ -13,6 +13,9 @@
  * existing callers; only the binary ownership moved.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
@@ -165,3 +168,5 @@ bool solve_non_orthogonal_diffusion(const MeshType& mesh, typename Pack::scalar_
 }
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

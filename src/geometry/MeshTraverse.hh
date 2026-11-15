@@ -2,6 +2,9 @@
  * @brief Reusable, ordered cell and face selections with typed numerical dispatch.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "SimpleFluidExport.hh"
 #include "geometry/GeometryExecutionGuard.hh"
@@ -685,3 +688,5 @@ extern template class MeshTraversePlan<Meshes::PartitionedMesh<Meshes::Unstructu
 } // namespace SimpleFluid
 
 #include "geometry/MeshTraverse.ipp"
+
+SIMPLEFLUID_LEGACY_API_END

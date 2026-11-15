@@ -10,6 +10,8 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "MeshHandle.hh"
@@ -1841,3 +1843,5 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::unstructured_vtu_topology(
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

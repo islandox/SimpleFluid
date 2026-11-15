@@ -1,4 +1,7 @@
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 /**
  * @file FVM/TransportSystem.tcc
  * @author islandox(59904740+islandox@users.noreply.github.com)
@@ -1939,3 +1942,5 @@ SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_legacy_momentum(
 
 } // namespace detail
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

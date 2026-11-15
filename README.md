@@ -20,7 +20,8 @@ Remaining acceptance and multiphysics work is tracked in `TODO.md`.
 
 The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
 run directly on `MeshHandle`/`FieldStored` data for supported mapped meshes,
-without reconstructing a legacy mesh. Existing callers that supply the legacy
+without reconstructing a legacy mesh. Factory-created handles also execute natively.
+Existing callers that supply the deprecated legacy
 `Mesh` backend retain their established object identity and behavior through a
 separate compatibility path.
 
@@ -200,8 +201,9 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     see [distribution and support](docs/semi_structured_parallel.md)
   - **Compact multi-region** — conforming/coarse-fine composition, including
     distributed extruded and swept R–Z providers with common affine Z motion
-  - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
-    other volume topologies are rejected during assembly
+  - **Unstructured input** — transient STK/Ioss ingestion of `HEX_8` and
+    `WEDGE_6` Exodus II meshes into native unstructured geometry; unsupported
+    volume topologies are rejected collectively
 - Cartesian/cylindrical [multidimensional decomposition](docs/architecture/orthogonal_decomposition.md)
   balances cell counts first, uses geometric widths for rank-grid/cut selection,
   and creates contiguous owned cell/face Tpetra maps with compact halo topology
@@ -356,7 +358,9 @@ an application chemistry or turbulent bubbly-flow model is physically validated.
 
 - Cached-topology VTU output via `VTUWriter`, with appended binary arrays and
   rank-local pieces plus a `.pvtu` index for ParaView
-- STK Exodus II `HEX_8` and `WEDGE_6` mesh input via `STKMesh`
+- STK/Ioss Exodus II `HEX_8` and `WEDGE_6` input through
+  `MeshFactory::from_stk_file()` or configured `build_handle()`, producing native
+  unstructured geometry; see [native mesh input](docs/architecture/native_mesh_input.md)
 
 ### Parallelism
 

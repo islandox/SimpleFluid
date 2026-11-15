@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/TemperatureDiffusionEquation.tcc"
@@ -16,3 +19,5 @@ namespace SimpleFluid
 {
 template class TemperatureDiffusionEquation<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

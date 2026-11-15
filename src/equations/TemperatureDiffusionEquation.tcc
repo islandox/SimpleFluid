@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -1040,3 +1043,5 @@ auto TemperatureDiffusionEquation<Pack,MeshType>::assemble_steady_physical(const
     return {scratch.d_cached_physical_transport_matrix,scratch.d_prepared_rhs};
 }
 }
+
+SIMPLEFLUID_LEGACY_API_END

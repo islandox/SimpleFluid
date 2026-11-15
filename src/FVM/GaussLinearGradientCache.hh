@@ -3,6 +3,9 @@
  * @brief  Reusable face-ordered Gauss geometry.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "SimpleFluidExport.hh"
@@ -513,3 +516,5 @@ void cached_gauss_linear_vector_gradient(const VectorField& field,
 
 } // namespace detail
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

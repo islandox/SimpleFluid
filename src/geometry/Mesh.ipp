@@ -10,6 +10,8 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include <Kokkos_Core.hpp>
@@ -795,3 +797,5 @@ inline auto Mesh<Pack>::tpetra_gid_to_mesh_gid(global_ordinal_type tpetra_gid) c
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

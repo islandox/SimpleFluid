@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/CellGradientScheme.hh"
@@ -275,3 +278,5 @@ extern template class PressureProjectionEquation<DefaultTpetraTypes, Mesh<Defaul
 extern template class PressureProjectionEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

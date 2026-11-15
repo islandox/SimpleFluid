@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoussinesqModel.hh"
@@ -144,3 +147,5 @@ extern template class BoussinesqMomentumEquation<DefaultTpetraTypes, Mesh<Defaul
 extern template class BoussinesqMomentumEquation<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

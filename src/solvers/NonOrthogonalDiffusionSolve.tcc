@@ -3,6 +3,9 @@
  * @brief Out-of-line template implementations for solver-owned steady diffusion solves.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "solvers/NonOrthogonalDiffusionSolve.hh"
 
@@ -146,3 +149,5 @@ bool solve_non_orthogonal_diffusion(const Mesh<Pack>& mesh, typename Pack::scala
 }
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

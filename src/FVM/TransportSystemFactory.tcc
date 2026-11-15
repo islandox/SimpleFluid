@@ -2,6 +2,9 @@
  * @brief Compiled factory definitions; opt in for custom mesh/type providers.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.tcc"
@@ -121,3 +124,5 @@ VectorTransportSystem<Pack> TransportSystemFactory<Pack, MeshType>::assemble(
             std::move(terms), std::move(boundary), options, std::move(context));
 }
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

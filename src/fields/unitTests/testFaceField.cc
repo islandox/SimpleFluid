@@ -187,12 +187,12 @@ TEST(FaceFieldTest, StoresOnlyFacesWhoseOwnerCellIsOwned)
 #endif
 }
 
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 
 /** @brief Ensures construction rejects a mesh without assembled maps. */
 TEST(FaceFieldTest, RequiresAssembledMesh)
 {
-    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::STKMesh<>>();
+    SimpleFluid::SP<MeshType> unassembled_mesh = std::make_shared<SimpleFluid::test::LegacySTKFixture<>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }

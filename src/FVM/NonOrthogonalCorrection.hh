@@ -10,6 +10,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
@@ -314,3 +317,5 @@ SIMPLEFLUID_FVM_EXPORT DiffusionSystem<Pack> implicit_non_orthogonal_diffusion_s
     ScalarCellValueProvider<Pack> right_hand_source, typename Pack::scalar_type implicit_weight,
     const ScalarCellFieldStored<Pack, MeshType>* partition_correction_field);
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

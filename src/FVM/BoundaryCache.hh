@@ -10,6 +10,9 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "equations/BoundaryConditions.hh"
@@ -229,3 +232,5 @@ typename Pack::scalar_type boundary_coefficient(
 } // namespace FVM
 
 }
+
+SIMPLEFLUID_LEGACY_API_END

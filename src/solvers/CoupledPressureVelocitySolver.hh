@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
@@ -728,3 +731,5 @@ extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, Mesh<Def
 extern template class CoupledPressureVelocitySolver<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

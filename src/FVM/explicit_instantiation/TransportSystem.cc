@@ -1,4 +1,7 @@
 /** @brief Individual compiled transport factory overloads. */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/MeshHandle.hh"
 
@@ -21,3 +24,5 @@ template VectorTransportSystem<Pack> Factory::assemble(
     Factory::VectorTerms, Factory::VelocityBoundary, Factory::VectorOptions, Factory::VectorContext);
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

@@ -2,6 +2,9 @@
  * @file solvers/explicit_instantiation/NonOrthogonalDiffusionSolve.cc
  * @brief Explicit instantiations for solver-owned steady non-orthogonal diffusion solves.
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "solvers/NonOrthogonalDiffusionSolve.tcc"
 
@@ -36,3 +39,5 @@ template bool solve_non_orthogonal_diffusion<Pack>(const MeshType&, Scalar, Scal
     ScalarField&, NonOrthogonalTreatment, int, const LinearSolverOptions&);
 
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

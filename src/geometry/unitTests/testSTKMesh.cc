@@ -10,7 +10,7 @@
  */
 
 #include <gtest/gtest.h>
-#include "geometry/STKMesh.hh"
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 
 #include "utils/testing_environment.hh"
 #include <stk_mesh/base/FEMHelpers.hpp>
@@ -30,7 +30,7 @@
 namespace
 {
 
-using MeshType = SimpleFluid::STKMesh<SimpleFluid::TpetraTypes<>>;
+using MeshType = SimpleFluid::test::LegacySTKFixture<SimpleFluid::TpetraTypes<>>;
 
 using utils_test::KokkosEnvironment;
 

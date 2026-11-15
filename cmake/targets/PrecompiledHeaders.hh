@@ -73,14 +73,3 @@
 #if defined(__ELF__) && defined(_LIBCPP_VERSION)
 #  pragma GCC visibility pop
 #endif
-
-#include <stk_io/IossBridge.hpp>
-#include <stk_io/StkMeshIoBroker.hpp>
-#include <stk_mesh/base/BulkData.hpp>
-#include <stk_mesh/base/Entity.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/Field.hpp>
-#include <stk_mesh/base/FieldBase.hpp>
-#include <stk_mesh/base/MetaData.hpp>
-#include <stk_mesh/base/Types.hpp>
-#include <stk_topology/topology.hpp>

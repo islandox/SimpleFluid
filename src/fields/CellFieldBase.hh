@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/Mesh.hh"
 
@@ -487,3 +490,5 @@ auto CellFieldBase<Pack, Derived, StorageVector>::local_row_for_global_cell(
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

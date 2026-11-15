@@ -2,6 +2,9 @@
  * @brief Compiled conservative variable-density momentum implementation.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
@@ -139,3 +142,5 @@ LinearSolveSummary VariableDensityMomentumEquation<Pack, MeshType>::advance(cons
     return summary;
 }
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

@@ -2,6 +2,8 @@
  * @brief Explicit compatibility materialization for deprecated legacy mesh factories.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/Mesh.hh"
 #include "geometry/mesh/UnstructuredMeshData.hh"
@@ -25,3 +27,5 @@ SIMPLEFLUID_LOCAL SP<Mesh<Pack>> make_legacy_mesh_snapshot(Meshes::UnstructuredM
 extern template SP<Mesh<DefaultTpetraTypes>> make_legacy_mesh_snapshot<DefaultTpetraTypes>(
     Meshes::UnstructuredMeshData data);
 } // namespace SimpleFluid::detail
+
+SIMPLEFLUID_LEGACY_API_END

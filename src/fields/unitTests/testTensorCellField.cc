@@ -9,6 +9,7 @@
  *
  */
 
+#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include <gtest/gtest.h>
 
 #include "fields/TensorCellField.hh"
@@ -139,7 +140,7 @@ TEST(TensorCellFieldTest, RejectsOutOfRangeComponents)
 TEST(TensorCellFieldTest, RequiresAssembledMesh)
 {
     SimpleFluid::SP<MeshType> unassembled_mesh =
-        std::make_shared<SimpleFluid::STKMesh<Pack>>();
+        std::make_shared<SimpleFluid::test::LegacySTKFixture<Pack>>();
 
     EXPECT_THROW(FieldType field(unassembled_mesh), std::runtime_error);
 }

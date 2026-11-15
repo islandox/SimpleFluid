@@ -1,15 +1,15 @@
 /**
- * @file STKMesh.ipp
+ * @file LegacySTKFixture.ipp
  * @author islandox (59904740+islandox@users.noreply.github.com)
- * @brief Inline method definitions for the STKMesh class.
+ * @brief Inline method definitions for the LegacySTKFixture class.
  * @version 0.1
  * @date 2026-05-26
- * 
+ *
  * @copyright Copyright (c) 2026
- * 
+ *
  */
 
-namespace SimpleFluid
+namespace SimpleFluid::test
 {
 
 /**
@@ -20,8 +20,7 @@ namespace SimpleFluid
  * @return 3D coordinate vector.
  * @throws std::runtime_error if coordinate data is unavailable.
  */
-template<TpetraTypePack Pack>
-inline auto STKMesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
+template<TpetraTypePack Pack> inline auto LegacySTKFixture<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
 {
     if (!node.is_local_offset_valid() || d_stk.coord_field == nullptr)
     {
@@ -31,8 +30,8 @@ inline auto STKMesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
     const double* coord = stk::mesh::field_data(*d_stk.coord_field, node);
     if (coord == nullptr)
     {
-        throw std::runtime_error("Coordinate field has no data for node "
-                               + std::to_string(d_stk.bulk->identifier(node)) + ".");
+        throw std::runtime_error(
+            "Coordinate field has no data for node " + std::to_string(d_stk.bulk->identifier(node)) + ".");
     }
 
     const auto dim = Base::spatial_dimension();
@@ -47,8 +46,7 @@ inline auto STKMesh<Pack>::node_coord(stk::mesh::Entity node) const -> Vec3
  * @return 3D coordinate vector.
  * @throws std::out_of_range if the node ID is not found.
  */
-template<TpetraTypePack Pack>
-inline auto STKMesh<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
+template<TpetraTypePack Pack> inline auto LegacySTKFixture<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
 {
     const auto node = d_stk.bulk->get_entity(stk::topology::NODE_RANK, node_id);
     if (!node.is_local_offset_valid())
@@ -68,7 +66,7 @@ inline auto STKMesh<Pack>::node_coord_by_id(EntityId node_id) const -> Vec3
  * @throws std::out_of_range if the element entity is invalid.
  */
 template<TpetraTypePack Pack>
-inline auto STKMesh<Pack>::element_node_coords(stk::mesh::Entity elem) const -> Arr<Vec3>
+inline auto LegacySTKFixture<Pack>::element_node_coords(stk::mesh::Entity elem) const -> Arr<Vec3>
 {
     if (!elem.is_local_offset_valid())
     {
@@ -89,4 +87,4 @@ inline auto STKMesh<Pack>::element_node_coords(stk::mesh::Entity elem) const -> 
     return coords;
 }
 
-}
+} // namespace SimpleFluid::test

@@ -2,6 +2,9 @@
  * @brief Borrowed, synchronous inputs to transport assembly.
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/AssemblyCallbacks.hh"
@@ -268,3 +271,5 @@ template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> struct MomentumAss
     const TransportGeometryCache<MeshType>* geometry_cache = nullptr;
 };
 } // namespace SimpleFluid::FVM
+
+SIMPLEFLUID_LEGACY_API_END

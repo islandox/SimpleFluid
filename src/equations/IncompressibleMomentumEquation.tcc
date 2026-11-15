@@ -8,6 +8,9 @@
  * @copyright Copyright (c) 2026
  *
  */
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
@@ -782,3 +785,5 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
 }
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END

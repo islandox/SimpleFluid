@@ -10,6 +10,8 @@
  */
 
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "SimpleFluidExport.hh"
@@ -1288,3 +1290,5 @@ private:
 
 //----------------------------- inline functions ---------------------------------//
 #include "geometry/MeshHandle.ipp"
+
+SIMPLEFLUID_LEGACY_API_END

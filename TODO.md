@@ -77,6 +77,19 @@ VoF, AMR and their geometry/remap qualification are maintained on the separate
 - Verify implementation, focused tests, and relevant serial/MPI runtime modes
   before changing a checkbox.
 
+## Legacy mesh retirement
+
+- Deprecation preserves `Mesh`, its explicit compatibility factory and compiled
+  providers. Removing those interfaces and changing legacy template defaults
+  requires a separately announced compatibility change.
+- Native STK/Ioss input initially supports HEX_8/WEDGE_6. Additional element
+  types, native translational-periodic import, general unstructured ALE and
+  live repartition/remap require their own implementation and qualification.
+- Existing direct `PartitionedMesh` constructor allocation/failure staging is
+  separate from the new native factory/distributor/handle publication path.
+- STK remains a required input dependency; optional-STK build packaging is
+  deferred. See [native mesh input](docs/architecture/native_mesh_input.md).
+
 ## Foundation and cross-cutting programs
 
 ### Implemented foundation — squashed Phases -1 to 8

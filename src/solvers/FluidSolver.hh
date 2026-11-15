@@ -9,6 +9,9 @@
  *
  */
 #pragma once
+#include "SimpleFluidExport.hh"
+SIMPLEFLUID_LEGACY_API_BEGIN
+
 
 #include "SimpleFluidExport.hh"
 #include "equations/BoundaryConditions.hh"
@@ -564,3 +567,5 @@ private:
 extern template class FluidSolver<DefaultTpetraTypes>;
 
 } // namespace SimpleFluid
+
+SIMPLEFLUID_LEGACY_API_END
