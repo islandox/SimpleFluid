@@ -62,7 +62,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using TestScalarField = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using global_ordinal_type = Pack::global_ordinal_type;
@@ -222,7 +222,7 @@ TEST(PressureProjectionMultiRankTest,
         mesh, linear_options);
 
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid) -> scalar_type
+        [&](Mesh::local_ordinal_type cell_lid) -> scalar_type
     {
         const auto row_gid = row_map->getGlobalElement(cell_lid);
         return row_gid == source_row_gid
@@ -245,7 +245,7 @@ TEST(PressureProjectionMultiRankTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto value = pressure.value(cell_lid);
         local_pressure_norm_squared +=
             value * value * mesh->cell_volume(cell_lid);
@@ -281,7 +281,7 @@ TEST(PressureProjectionMultiRankTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto balance = SimpleFluid::FVM::cell_flux_balance<Pack>(
             *mesh, face_fluxes, cell_lid);
         // The legacy source overload is converted to the same integrated
@@ -325,7 +325,7 @@ TEST(PressureProjectionMultiRankTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto gid = row_map->getGlobalElement(cell_lid);
         target_values[owned] = gid == first_gid
             ? scalar_type{0.125}
@@ -359,7 +359,7 @@ TEST(PressureProjectionMultiRankTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto balance = SimpleFluid::FVM::cell_flux_balance<Pack>(
             *mesh, fluxes, cell_lid);
         const auto residual = balance - target_values[owned];
@@ -440,7 +440,7 @@ TEST(PressureProjectionMultiRankTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         if (row_map->getGlobalElement(cell_lid) == last_gid)
         {
             target_values[owned] = fixed_flux;
@@ -467,7 +467,7 @@ TEST(PressureProjectionMultiRankTest,
         mesh, linear_options, boundary_conditions.pressure);
     equation.set_fixed_boundary_flux_provider(
         {"xmax"},
-        [](int, size_t, MeshType::local_ordinal_type)
+        [](int, size_t, Mesh::local_ordinal_type)
         {
             return scalar_type{0.125};
         },
@@ -657,7 +657,7 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
         VectorFieldType velocity(mesh,"skew_projection_velocity");
         for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
         {
-            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell=static_cast<Mesh::local_ordinal_type>(owned);
             const auto x=mesh->cell_centroid(cell);
             velocity.set_value(cell,{x.x*x.x+0.2*x.y,-0.3*x.y*x.y,0.1*x.z});
         }
@@ -670,7 +670,7 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
         double initial_squared=0;
         for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
         {
-            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell=static_cast<Mesh::local_ordinal_type>(owned);
             const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,initial_flux,cell);
             initial_squared+=balance*balance;
         }
@@ -696,7 +696,7 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
         double reconstructed_squared=0;
         for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
         {
-            const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell=static_cast<Mesh::local_ordinal_type>(owned);
             const auto balance=SimpleFluid::FVM::cell_flux_balance<Pack>(
                 *mesh,equation.corrected_face_fluxes(),cell);
             const auto independent=SimpleFluid::FVM::cell_flux_balance<Pack>(*mesh,reconstructed,cell);
@@ -708,7 +708,7 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
         EXPECT_NEAR(result.continuity,std::sqrt(squared),1e-13);
         for (size_t local=0; local<mesh->num_faces(); ++local)
         {
-            const auto face=static_cast<MeshType::local_ordinal_type>(local);
+            const auto face=static_cast<Mesh::local_ordinal_type>(local);
             if (mesh->is_owned_face(face))
                 EXPECT_NEAR(equation.corrected_face_fluxes().value(face),reconstructed.value(face),1e-12);
         }

@@ -66,16 +66,16 @@ struct TransportEquationTestAccess
 template<TpetraTypePack Pack>
 struct PressureProjectionEquationTestAccess
 {
-    template<SimpleFluid::MeshType MeshType>
+    template<SimpleFluid::MeshType Mesh>
     static Teuchos::RCP<const typename Pack::matrix_type> pressure_matrix(
-        const PressureProjectionEquation<Pack, MeshType>& equation)
+        const PressureProjectionEquation<Pack, Mesh>& equation)
     {
         return equation.d_cached_pressure_matrix;
     }
 
-    template<SimpleFluid::MeshType MeshType>
+    template<SimpleFluid::MeshType Mesh>
     static std::size_t preconditioner_setup_count(
-        const PressureProjectionEquation<Pack, MeshType>& equation) noexcept
+        const PressureProjectionEquation<Pack, Mesh>& equation) noexcept
     {
         return BelosLinearSolverTestAccess<Pack>::
             preconditioner_setup_count(equation.d_linear_solver);
@@ -141,7 +141,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -150,13 +150,13 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_single_hex_mesh()
+SimpleFluid::SP<Mesh> make_single_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
 }
 
-SimpleFluid::SP<MeshType> make_2x2x2_mesh()
+SimpleFluid::SP<Mesh> make_2x2x2_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
@@ -165,8 +165,8 @@ SimpleFluid::SP<MeshType> make_2x2x2_mesh()
 std::vector<Pack::scalar_type> local_values(const FieldType& field)
 {
     std::vector<Pack::scalar_type> values(field.num_local_cells());
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
         values[static_cast<size_t>(lid)] = field.local_value(lid);
@@ -190,8 +190,8 @@ int advance_explicit_diffusion_until_converged(
                                   temperature);
 
         Pack::scalar_type max_update = 0.0;
-        for (MeshType::local_ordinal_type lid = 0;
-             lid < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type lid = 0;
+             lid < static_cast<Mesh::local_ordinal_type>(
                        temperature.num_owned_cells());
              ++lid)
         {
@@ -217,8 +217,8 @@ double weighted_sum(const FieldType& field)
 {
     const auto& mesh = field.mesh();
     double sum = 0.0;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh.num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh.num_owned_cells());
          ++lid)
     {
         sum += field.value(lid) * mesh.cell_volume(lid);
@@ -227,8 +227,8 @@ double weighted_sum(const FieldType& field)
     return sum;
 }
 
-bool cell_has_exterior_face(const MeshType& mesh,
-                            MeshType::local_ordinal_type cell_lid)
+bool cell_has_exterior_face(const Mesh& mesh,
+                            Mesh::local_ordinal_type cell_lid)
 {
     for (const auto face_lid : mesh.faces(cell_lid))
     {
@@ -311,7 +311,7 @@ TEST(PhysicalEquationsTest, TemperatureExplicitStepAddsSourceTerm)
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 3.0;
     };
@@ -389,7 +389,7 @@ TEST(PhysicalEquationsTest, BoussinesqMomentumAddsCallerSourceTerm)
             mesh, bcs);
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     auto source =
-        [](MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
+        [](Mesh::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
     {
         return {1.0, 2.0, 3.0};
     };
@@ -420,8 +420,8 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
         FieldType temperature(mesh, "temperature");
         VectorFieldType velocity(mesh, "velocity");
 
-        for (MeshType::local_ordinal_type lid = 0;
-             lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+        for (Mesh::local_ordinal_type lid = 0;
+             lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
              ++lid)
         {
             const auto& center = mesh->cell_centroid(lid);
@@ -446,8 +446,8 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
                                        temperature);
 
         bool changed = false;
-        for (MeshType::local_ordinal_type lid = 0;
-             lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+        for (Mesh::local_ordinal_type lid = 0;
+             lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
              ++lid)
         {
             EXPECT_TRUE(std::isfinite(temperature.value(lid)));
@@ -472,7 +472,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitStepAddsSourceTerm)
     SimpleFluid::BoundaryConditionSet bcs;
     SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 3.0;
     };
@@ -526,7 +526,7 @@ TEST(PhysicalEquationsTest,
     SimpleFluid::MaterialPropertyFields<Pack> material(
         mesh, model_options, time_options);
     auto zero_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -567,7 +567,7 @@ TEST(PhysicalEquationsTest, ExteriorForcedConvectionUsesPhysicalTemperaturePath)
     options.specific_heat_capacity = 1.0;
     options.thermal_conductivity = 1.0;
     SimpleFluid::MaterialPropertyFields<Pack> material(mesh, options, time_options);
-    const auto zero = [](MeshType::local_ordinal_type) { return 0.0; };
+    const auto zero = [](Mesh::local_ordinal_type) { return 0.0; };
     equation.advance_physical(
         old_temperature, fluxes, 1.0, material, temperature, zero, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
     const double h = 53.32778867020997 * 0.03;
@@ -591,8 +591,8 @@ TEST(PhysicalEquationsTest,
 {
     auto mesh = make_2x2x2_mesh();
     FieldType temperature(mesh, 0.0, "temperature");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -628,8 +628,8 @@ TEST(PhysicalEquationsTest,
             std::string::npos);
     }
 
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_local_cells());
          ++cell_lid)
     {
@@ -645,8 +645,8 @@ TEST(PhysicalEquationsTest,
 {
     auto mesh = make_2x2x2_mesh();
     FieldType temperature(mesh, 0.0, "temperature");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -669,7 +669,7 @@ TEST(PhysicalEquationsTest,
     linear_options.max_iterations = 1;
     linear_options.tolerance = 1.0e-14;
     auto zero_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -695,8 +695,8 @@ TEST(PhysicalEquationsTest,
             std::string::npos);
     }
 
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_local_cells());
          ++cell_lid)
     {
@@ -730,12 +730,12 @@ TEST(PhysicalEquationsTest,
     SimpleFluid::MaterialPropertyFields<Pack> material(
         mesh, model_options, time_options);
     auto zero_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
     auto throwing_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         throw std::runtime_error("intentional assembly failure");
     };
@@ -801,7 +801,7 @@ TEST(PhysicalEquationsTest,
     SimpleFluid::MaterialPropertyFields<Pack> material(
         mesh, model_options, time_options);
     auto zero_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -861,7 +861,7 @@ TEST(PhysicalEquationsTest,
         mesh, model_options, time_options);
     FieldType effective_conductivity(mesh, 1.0, "effective_conductivity");
     auto zero_power =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -1048,7 +1048,7 @@ TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformFact
     auto database = std::make_shared<SimpleFluid::Database>(*SimpleFluid::test::make_box_database(4, 2, 1));
     database->set("X", SimpleFluid::ArrReal{0.0, 0.1, 0.3, 0.6, 1.0});
     database->set("Y", SimpleFluid::ArrReal{0.0, 0.2, 1.0});
-    expect_cg_pressure_projection_matches_gmres<MeshType>(SimpleFluid::test::build_mesh<Pack>(database));
+    expect_cg_pressure_projection_matches_gmres<Mesh>(SimpleFluid::test::build_mesh<Pack>(database));
 }
 
 TEST(PhysicalEquationsTest, PressureProjectionPcgDicMatchesGmresOnNonuniformNativeMesh)
@@ -1245,7 +1245,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         const auto pressure_value =
             2.0 * center.x - 0.5 * center.y + 0.25 * center.z;
@@ -1336,7 +1336,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_DOUBLE_EQ(
             reconstructed_pressure.value(cell_lid),
             reused_pressure.value(cell_lid));
@@ -1357,7 +1357,7 @@ TEST(PhysicalEquationsTest,
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (!reconstructed_fluxes.is_owned_face(face_lid))
         {
             continue;
@@ -1384,7 +1384,7 @@ TEST(PhysicalEquationsTest, PressureProjectionAddsSourceTermToPoissonRhs)
             mesh, bcs);
     SimpleFluid::PressureProjectionEquation<Pack> equation(mesh);
     auto source =
-        [](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type cell_lid) -> Pack::scalar_type
     {
         return cell_lid == 0 ? 0.0 : 4.0;
     };
@@ -1437,7 +1437,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto balance =
             SimpleFluid::FVM::cell_flux_balance<Pack>(
                 *mesh, fluxes, cell_lid);
@@ -1565,7 +1565,7 @@ TEST(PhysicalEquationsTest, PressureProjectionPreservesRegisteredFixedBoundaryFl
     constexpr Pack::scalar_type fixed_flux = 0.25;
     equation.set_fixed_boundary_flux_provider(
         {"zmax"},
-        [](int, size_t, MeshType::local_ordinal_type)
+        [](int, size_t, Mesh::local_ordinal_type)
         {
             return Pack::scalar_type{0.25};
         },
@@ -1620,7 +1620,7 @@ TEST(PhysicalEquationsTest,
     SimpleFluid::PressureProjectionEquation<Pack> equation(
         mesh, options, bcs.pressure);
     auto source =
-        [](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type cell_lid) -> Pack::scalar_type
     {
         return cell_lid == 0 ? 4.0 : 0.0;
     };
@@ -1637,7 +1637,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto expected =
             mesh->cell_centroid(cell_lid).x < 0.5
           ? 1.5 * reference_density
@@ -1725,7 +1725,7 @@ TEST(PhysicalEquationsTest, Steady1DDiffusionMatchesLinearProfile)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         temperature.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned), 0.0);
+            static_cast<Mesh::local_ordinal_type>(owned), 0.0);
     }
     temperature.sync_ghosts();
 
@@ -1771,7 +1771,7 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionUpdatesDirichletCell)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         temperature.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned), 0.0);
+            static_cast<Mesh::local_ordinal_type>(owned), 0.0);
     }
     temperature.sync_ghosts();
 
@@ -1796,8 +1796,8 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
     FieldType temperature(mesh, "temperature");
 
     // Set uniform value 0.5 everywhere.
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         temperature.set_value(lid, 0.5);
@@ -1818,8 +1818,8 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
     equation.advance_explicit(old_t, 0.1, 1.0, temperature);
 
     // Uniform field must remain unchanged.
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         EXPECT_NEAR(temperature.value(lid), 0.5, 1.0e-12);
@@ -1836,8 +1836,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
     bool saw_triangular_face = false;
     size_t boundary_cells = 0;
     size_t interior_cells = 0;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
@@ -1851,8 +1851,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
             ++interior_cells;
         }
     }
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         EXPECT_TRUE(std::isfinite(mesh->face_area(fid)));
@@ -1867,8 +1867,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
 
     FieldType temperature(mesh, "temperature");
     VectorFieldType velocity(mesh, "velocity");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto center = mesh->cell_centroid(lid);
@@ -1889,8 +1889,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
 
     EXPECT_NEAR(weighted_sum(temperature), old_temperature_integral, 1.0e-10);
     bool temperature_changed = false;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         EXPECT_TRUE(std::isfinite(temperature.value(lid)));
@@ -1912,8 +1912,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, bcs);
     std::vector<VectorFieldType::vec_type> old_velocity(mesh->num_owned_cells());
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_velocity[static_cast<size_t>(lid)] = velocity.value(lid);
@@ -1928,8 +1928,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
                                        velocity);
 
     bool velocity_changed = false;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto v = velocity.value(lid);
@@ -1968,8 +1968,8 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionMatchesQuadraticLaplacian)
         return pos.x * pos.x;
     };
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         temperature.set_value(lid, exact(mesh->cell_centroid(lid)));
@@ -1997,8 +1997,8 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionMatchesQuadraticLaplacian)
                               temperature);
 
     bool checked_interior = false;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto& center = mesh->cell_centroid(lid);
@@ -2036,8 +2036,8 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
     VectorFieldType velocity(mesh, "velocity");
 
     // Set temperature uniform to eliminate buoyancy effects.
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         temperature.set_value(lid, 0.5);
@@ -2074,8 +2074,8 @@ TEST(PhysicalEquationsTest, MomentumDiffusionAdvancesVelocityField)
                               velocity);
 
     // All components must be finite.
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto v = velocity.value(lid);
@@ -2115,7 +2115,7 @@ TEST(PhysicalEquationsTest,
     SimpleFluid::MaterialPropertyFields<Pack> material(
         mesh, model_options, options);
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
@@ -2139,7 +2139,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto actual = velocity.value(cell_lid);
         EXPECT_NEAR(actual.x, uniform_velocity.x, 1.0e-11);
         EXPECT_NEAR(actual.y, uniform_velocity.y, 1.0e-11);
@@ -2163,7 +2163,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto value = VectorFieldType::vec_type{
             std::sin(M_PI * mesh->cell_centroid(cell_lid).x), 0.0, 0.0};
         initial_velocity[owned] = value;
@@ -2194,7 +2194,7 @@ TEST(PhysicalEquationsTest,
         mesh, model_options, options);
     FieldType effective_viscosity(mesh, 1.0, "effective_viscosity");
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
@@ -2233,7 +2233,7 @@ TEST(PhysicalEquationsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_NEAR(
             molecular_velocity.value(cell_lid).x,
             initial_velocity[owned].x,
@@ -2272,8 +2272,8 @@ TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewe
     VectorFieldType orthogonal_velocity(mesh, "orthogonal_velocity");
     VectorFieldType implicit_velocity(mesh, "implicit_velocity");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto center = mesh->cell_centroid(lid);
@@ -2334,8 +2334,8 @@ TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewe
                               linear_options);
 
     double max_difference = 0.0;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto orthogonal_value = orthogonal_velocity.value(lid);
@@ -2369,7 +2369,7 @@ TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWi
     FieldType old_temperature(mesh, "old_temperature"), temperature(mesh, "temperature"), fresh_temperature(mesh, "fresh_temperature");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
         old_temperature.set_owned_value(cell, 275.0 + 10.0 * mesh->cell_centroid(cell).x);
     }
     old_temperature.sync_ghosts();
@@ -2383,14 +2383,14 @@ TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWi
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions model_options;
     SimpleFluid::MaterialPropertyFields<Pack> material(mesh, model_options, time_options);
-    auto zero_power = [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
+    auto zero_power = [](Mesh::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
     for (int step = 0; step < 3; ++step)
     {
         const auto dt = 0.1 + 0.03 * step;
         const auto coefficient = 0.2 + 0.4 * step;
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
             material.density.set_owned_value(cell, 1.0);
             material.specific_heat_capacity.set_owned_value(cell, 1.0);
             material.thermal_conductivity.set_owned_value(cell, coefficient);
@@ -2405,7 +2405,7 @@ TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWi
             fresh_temperature, linear_options).converged);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
             EXPECT_NEAR(temperature.value(cell), fresh_temperature.value(cell), 1.0e-8);
         }
         EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_ordinary), previous_ordinary_setups);
@@ -2416,7 +2416,7 @@ TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWi
         EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_physical), previous_physical_setups);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
             EXPECT_NEAR(temperature.value(cell), fresh_temperature.value(cell), 1.0e-8);
         }
     }

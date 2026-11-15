@@ -47,7 +47,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 namespace GeneralGas = SimpleFluid::Testing::GeneralGasModel;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
@@ -68,7 +68,7 @@ testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironme
  *
  * @return Assembled single-cell mesh.
  */
-SimpleFluid::SP<MeshType> make_single_cell_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
 }
@@ -148,7 +148,7 @@ double gas_diffusivity_with_gcl_fault(double)
  * @param mesh Mesh owning the material fields.
  * @return Initialized water-property fields.
  */
-SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<MeshType>& mesh)
+SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<Mesh>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -239,7 +239,7 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
     FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{0.1, 0.0, 0.0}, "velocity");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{0.1, 0.0, 0.0}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     for (const auto face_lid : flux.owned_face_ids())
         flux.set_value(face_lid, 0.1 * mesh->face_area_vector(face_lid).x);
@@ -293,7 +293,7 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
     FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
     auto linear = model.transport_linear_solver_options();
@@ -356,7 +356,7 @@ TEST(ReactingGasModelTest, IdealSourceRequiresAndDoesNotAdvanceAuthoritativeVoid
             {"test.explicit_resolved_gas_feed", GeneralGas::one, GeneralGas::Phase::Resolved, n, .002 * n, 0, {}, {}}};
         return input;
     };
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     FieldType external_alpha(f.grid, 0., "unowned_external_alpha");
     f.initialize();
     f.advance(.1, .1);
@@ -410,7 +410,7 @@ TEST(ReactingGasModelTest, IdealSourceHonorsAlphaAndRateLimits)
                 GeneralGas::Phase::Resolved, accepted, .002 * accepted, 0, {}, {}}};
         return result;
     };
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     f.advance(.1, .1);
     EXPECT_DOUBLE_EQ(f.model.source_alpha_reaction().value(0), .01);
@@ -443,7 +443,7 @@ TEST(ReactingGasModelTest, InitialPopulationsAreReconstructedBeforeFirstKinetics
     parameters.dissolved_one = 2.5;
     parameters.number_density[0] = 1e10;
     parameters.molar_one[0] = 1e-3;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), parameters);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), parameters);
     EXPECT_FALSE(f.model.initial_state_initialized());
     f.initialize();
     EXPECT_TRUE(f.model.initial_state_initialized());
@@ -470,7 +470,7 @@ TEST(ReactingGasModelTest, SubmergedInventoryAccessorsResolveBothBubblePopulatio
     p.dissolved_one = 2.5;
     p.number_density = {2e8, 4e6};
     p.molar_one = {3e-6, 5e-6};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     const auto dissolved = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved);
     const auto micro = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
@@ -494,7 +494,7 @@ TEST(ReactingGasModelTest, CandidateSubmergedBubbleVolumeRespondsToPressureAndTe
     {
         auto selected = p;
         selected.temperature = temperature;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), selected);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), selected);
         EXPECT_THROW(f.model.evaluate_submerged_bubble_volume(p.pressure), std::logic_error);
         f.initialize();
         const auto actual = f.model.evaluate_submerged_bubble_volume(p.pressure);
@@ -517,7 +517,7 @@ TEST(ReactingGasModelTest, DissolvedHydrogenDoesNotOccupyBubbleVolume)
     GeneralGas::Parameters p;
     p.dissolved_one = 100;
     p.dissolved_two = 50;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved), 0);
     EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::two, GeneralGas::Phase::Dissolved), 0);
@@ -535,7 +535,7 @@ TEST(ReactingGasModelTest, TwoPopulationStepConservesHydrogen)
     p.reservoir_mol_per_joule = {2e-7, 3e-7};
     p.nucleate_supplied_gas = true;
     p.independent_heat_rate = 7;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.power.put_scalar(1e5);
     f.initialize();
     EXPECT_EQ(&f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).mesh(), f.grid.get());
@@ -587,7 +587,7 @@ TEST(ReactingGasModelTest, HighScSphericalDiffusionUsesSelectedLawAndConservesHy
         p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::SphericalDiffusion;
         if (external)
             p.diffusivity_one = [](const auto&) { return 5.1886e-9; };
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         const double before = f.model.global_species_moles(GeneralGas::one);
         constexpr double dt = 1e-6;
@@ -628,7 +628,7 @@ TEST(ReactingGasModelTest, HighScFengEndpointsTransferAndConserveAtPrescribedSli
         p.controls.mass_transfer_mode = mode;
         p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
         p.controls.constant_slip_velocity = .0045;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         const auto start = f.model.snapshot();
         const double before = f.model.global_species_moles(GeneralGas::one);
@@ -677,7 +677,7 @@ TEST(ReactingGasModelTest, HighScFengLowPecletEndpointsTransferAndConserve)
         p.controls.mass_transfer_mode = mode;
         p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
         p.controls.constant_slip_velocity = 9.375e-6;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         const double before = f.model.global_species_moles(GeneralGas::one);
         const auto observed = GeneralGas::advance_film(f, 1e-6, 1e-6).front();
@@ -709,7 +709,7 @@ TEST(ReactingGasModelTest, FengFieldSelectionKeepsBothPecletRegimesCellLocal)
     p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = .0045;
-    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    GeneralGas::Fixture<Mesh> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
     f.temperature.set_owned_value(1, 300);
     f.temperature.sync_ghosts();
     f.initialize();
@@ -745,7 +745,7 @@ TEST(ReactingGasModelTest, SnapshotRestoresEveryInventoryAndCumulativeLedger)
     auto p = GeneralGas::populated();
     p.reservoir_mol_per_joule = {2e-7, 3e-7};
     p.nucleate_supplied_gas = true;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.power.put_scalar(1e5);
     f.initialize();
     const auto checkpoint = f.model.snapshot();
@@ -818,7 +818,7 @@ TEST(ReactingGasModelTest, MicrobubbleDecayIsAnalyticAndConservative)
     p.number_density[0] = 1e10;
     p.molar_one[0] = 1e-6;
     p.micro_decay_time = 1e-5;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     constexpr double dt = 5e-6;
     f.advance(dt, dt);
@@ -856,7 +856,7 @@ TEST(ReactingGasModelTest, ExactInactiveMatchesContinuousProductionAndDecay)
         p.molar_one[0] = 3e-6;
         p.reservoir_mol_per_joule[0] = 2e-7;
         p.nucleate_supplied_gas = true;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.power.put_scalar(1e5);
         f.initialize();
         const auto checkpoint = f.model.snapshot();
@@ -904,7 +904,7 @@ TEST(ReactingGasModelTest, ExactInactiveDecaysInitialPopulationWithoutPositivePo
         p.molar_one[0] = 3e-6;
         p.reservoir_mol_per_joule[0] = 2e-7;
         p.nucleate_supplied_gas = true;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.power.put_scalar(power);
         f.initialize();
         f.advance(.005, .005);
@@ -926,7 +926,7 @@ TEST(ReactingGasModelTest, ExactInactiveFallsBackAtConversionOrExistingLargePopu
         auto p = GeneralGas::populated();
         p.micro_decay_time = .01;
         p.micro_conversion_frequency = conversion ? 2 : 0;
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         const auto before_one = f.model.global_species_moles(GeneralGas::one);
         const auto before_two = f.model.global_species_moles(GeneralGas::two);
@@ -952,7 +952,7 @@ TEST(ReactingGasModelTest, MicroToLargeConversionConservesCategories)
     p.molar_one[0] = 1e-6;
     p.molar_two[0] = 2e-6;
     p.micro_conversion_frequency = 10;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     constexpr double dt = 1e-6;
     f.advance(dt, dt);
@@ -982,7 +982,7 @@ TEST(ReactingGasModelTest, LargeBubbleGrowthAndDissolutionFollowSaturation)
     p.molar_one[1] = 1e-7;
     p.diffusivity[0] = 1e-8;
     p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::Hughmark;
-    GeneralGas::Fixture<MeshType> saturated(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> saturated(make_single_cell_mesh(), p);
     saturated.initialize();
     const auto growth = GeneralGas::advance_film(saturated, 1e-6, 1e-6).front();
     EXPECT_GT(growth.transfer, 0);
@@ -990,7 +990,7 @@ TEST(ReactingGasModelTest, LargeBubbleGrowthAndDissolutionFollowSaturation)
     EXPECT_NEAR(growth.count_after, 1e6, 1e6 * 1e-12);
     p.dissolved_one = 0;
     p.controls.large_dissolution_frequency = 1e5;
-    GeneralGas::Fixture<MeshType> undersaturated(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> undersaturated(make_single_cell_mesh(), p);
     undersaturated.initialize();
     undersaturated.advance(1e-6, 1e-6);
     EXPECT_LT(
@@ -1008,7 +1008,7 @@ TEST(ReactingGasModelTest, PrescribedPressureHistoryInterpolates)
     p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
     p.controls.pressure_history_times = {0, 1};
     p.controls.pressure_history_values = {1e5, 2e5};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.pressure.put_scalar(8e4);
     f.initialize();
     f.advance(.5, .1);
@@ -1024,7 +1024,7 @@ TEST(ReactingGasModelTest, ReconstructedPressureUsesPascalGaugeVariation)
     GeneralGas::Parameters p;
     p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
     p.density = 800;
-    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    GeneralGas::Fixture<Mesh> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
     ASSERT_EQ(f.grid->num_owned_cells(), 2u);
     f.pressure.set_owned_value(0, -1000);
     f.pressure.set_owned_value(1, 1000);
@@ -1102,7 +1102,7 @@ TEST(ReactingGasModelTest, AbsolutePressureOffsetSetterShiftsPublishedPressure)
 {
     GeneralGas::Parameters p;
     p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
-    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    GeneralGas::Fixture<Mesh> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
     f.pressure.set_owned_value(0, -1000);
     f.pressure.set_owned_value(1, 1000);
     f.pressure.sync_ghosts();
@@ -1146,7 +1146,7 @@ TEST(ReactingGasModelTest, ReconstructedOffsetRefreshesTwoPopulationDiagnostics)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = .1;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    GeneralGas::Fixture<Mesh> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
     f.pressure.set_owned_value(0, -1000);
     f.pressure.set_owned_value(1, 1000);
     f.pressure.sync_ghosts();
@@ -1277,7 +1277,7 @@ TEST(ReactingGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = 10;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     const auto start = f.model.snapshot();
     constexpr double dt = .1;
@@ -1312,7 +1312,7 @@ TEST(ReactingGasModelTest, DissolvedBoundaryOutflowIsSeparateFromBubbleEscape)
     GeneralGas::Parameters p;
     p.dissolved_one = 1e-3;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     for (const auto face : f.flux.owned_face_ids())
         if (f.grid->is_boundary_face(face) && f.grid->boundary_batch_name(f.grid->boundary_id(face)) == "zmax")
@@ -1368,7 +1368,7 @@ TEST(ReactingGasModelTest, SmallPositiveEscapeIsNotDiscarded)
     // Explicit synthetic light tracer preserves the original1e9mol/m3 stress at
     // finite1000kg/m3 solution mass. A hydrogen-weight stock at that concentration was impossible.
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     for (const auto face : f.flux.owned_face_ids())
         if (f.grid->is_boundary_face(face) && f.grid->boundary_batch_name(f.grid->boundary_id(face)) == "zmax")
@@ -1391,7 +1391,7 @@ TEST(ReactingGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = 1;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(
+    GeneralGas::Fixture<Mesh> f(
         SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(1, 1, 2)), p);
     f.initialize();
     constexpr double dt = .1;
@@ -1433,7 +1433,7 @@ TEST(ReactingGasModelTest, CelataSelectorDrivesBubbleEscape)
     p.molar_mass_one = 1.2 * GeneralGas::gas_constant * 300 / (p.pressure + 2 * p.sigma / r);
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     f.advance(1e-6, 1e-6);
     EXPECT_GT(GeneralGas::step_escape(f.model), 0);
@@ -1450,9 +1450,9 @@ TEST(ReactingGasModelTest, AxialTransportDropsTransverseLiquidFlux)
     p.number_density[1] = 100;
     p.molar_one[1] = 1e-6;
     p.controls.free_surface_patches = {"xmax"};
-    GeneralGas::Fixture<MeshType> general(make_single_cell_mesh(), p), axial(make_single_cell_mesh(), p);
-    general.velocity.put_scalar(MeshType::Vec3{.1, 0, 0});
-    axial.velocity.put_scalar(MeshType::Vec3{.1, 0, 0});
+    GeneralGas::Fixture<Mesh> general(make_single_cell_mesh(), p), axial(make_single_cell_mesh(), p);
+    general.velocity.put_scalar(Mesh::Vec3{.1, 0, 0});
+    axial.velocity.put_scalar(Mesh::Vec3{.1, 0, 0});
     for (const auto face : general.flux.owned_face_ids())
         general.flux.set_value(face, .1 * general.grid->face_area_vector(face).x);
     // Axial filtering is explicit caller ownership, not an ignored specialized backend selector.
@@ -1480,7 +1480,7 @@ TEST(ReactingGasModelTest, PopulationTransportConservesInventoryWithoutEscape)
     p.molar_one[1] = 1e-7;
     const double radius = GeneralGas::radius(1e-7, 1e6, 300, p.pressure, p.sigma);
     p.dissolved_one = 1e-5 * (p.pressure + 2 * p.sigma / radius);
-    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    GeneralGas::Fixture<Mesh> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
     f.initialize();
     for (const auto face : f.flux.owned_face_ids())
         f.flux.set_value(face, f.grid->is_boundary_face(face) ? 0 : .1 * f.grid->face_area_vector(face).x);
@@ -1537,7 +1537,7 @@ TEST(ReactingGasModelTest, HigherPressureRaisesCriticalConcentrationAndDelaysCon
             }
             return result;
         };
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         f.advance(1e-6, 1e-6);
         EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-14);
@@ -1568,7 +1568,7 @@ TEST(ReactingGasModelTest, ConstantAndPrescribedPressureModesRegressTogether)
             p.controls.pressure_history_times = {0, 1};
             p.controls.pressure_history_values = {p.pressure, p.pressure};
         }
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         f.advance(.25, 1e-7);
         return std::array<double, 4>{f.model.absolute_pressure().value(0),
@@ -1589,7 +1589,7 @@ TEST(ReactingGasModelTest, ConstantAndInertialPressureModesRunFromSameCase)
     p.number_density[1] = 1e6;
     p.molar_one[1] = 1e-7;
     p.dissolved_one = 5;
-    GeneralGas::Fixture<MeshType> fixed(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> fixed(make_single_cell_mesh(), p);
     fixed.initialize();
     for (int step = 0; step < 2; ++step)
     {
@@ -1638,7 +1638,7 @@ TEST(ReactingGasModelTest, StiffLocalKineticsConvergesWithSubcycles)
             input.rates = std::move(provider);
             return input;
         };
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         f.advance(2e-6, 2e-6);
         return std::array<double, 3>{
@@ -1677,7 +1677,7 @@ TEST(ReactingGasModelTest, ClippedConcentrationAndVoidBoundsReportExcludedInvent
     p.number_density[1] = number;
     p.molar_one[1] = admitted_gas;
     p.controls.alpha_max = alpha_max;
-    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
     f.initialize();
     EXPECT_LE(f.model.alpha_g().value(0), alpha_max);
     EXPECT_GT(f.model.alpha_g().value(0), 0);
@@ -1697,7 +1697,7 @@ TEST(ReactingGasModelTest, ClippedConcentrationAndVoidBoundsReportExcludedInvent
         requested_dissolved * liquid, 1e-12);
     auto invalid = p;
     invalid.molar_one[1] = requested_gas;
-    GeneralGas::Fixture<MeshType> overcapacity(make_single_cell_mesh(), invalid);
+    GeneralGas::Fixture<Mesh> overcapacity(make_single_cell_mesh(), invalid);
     EXPECT_THROW(overcapacity.initialize(), std::exception);
     EXPECT_FALSE(overcapacity.model.initial_state_initialized());
 }
@@ -1717,7 +1717,7 @@ TEST(ReactingGasModelTest, StateFieldsRemainFiniteNonNegativeAndBoundedAcrossPre
             p.controls.pressure_history_times = {0, 1};
             p.controls.pressure_history_values = {1e5, 2e5};
         }
-        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        GeneralGas::Fixture<Mesh> f(make_single_cell_mesh(), p);
         f.initialize();
         for (int step = 0; step < 3; ++step)
         {

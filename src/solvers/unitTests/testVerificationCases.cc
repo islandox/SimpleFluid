@@ -44,7 +44,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using StoredMeshType = SimpleFluid::MeshHandle<Pack>;
@@ -122,7 +122,7 @@ int cavity_max_linear_iterations()
  * @param nz Cells along z.
  * @return Assembled mesh.
  */
-SimpleFluid::SP<MeshType> make_box_mesh(int nx, int ny, int nz)
+SimpleFluid::SP<Mesh> make_box_mesh(int nx, int ny, int nz)
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(
@@ -441,7 +441,7 @@ double solve_taylor_green_error(int n_cells)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         old_velocity.set_value(
             cell_lid,
             taylor_green_velocity(mesh->cell_centroid(cell_lid)));
@@ -450,8 +450,8 @@ double solve_taylor_green_error(int n_cells)
 
     SimpleFluid::VectorFaceField<Pack> face_velocity(
         mesh, "manufactured_face_velocity");
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -475,13 +475,13 @@ double solve_taylor_green_error(int n_cells)
         return taylor_green_velocity(mesh->face_centroid(face_lid));
     };
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid)
+        [&](Mesh::local_ordinal_type cell_lid)
     {
         return taylor_green_source(
             mesh->cell_centroid(cell_lid), viscosity);
     };
 
-    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, MeshType>;
+    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, Mesh>;
     const auto system = Factory::assemble(Factory::VectorTerms{{old_velocity, 0.1}, face_fluxes, {viscosity}, source},
         Factory::BasicVectorBoundary{[](int, size_t)
             { return SimpleFluid::VectorBoundaryCondition{SimpleFluid::BoundaryConditionType::Dirichlet}; },
@@ -527,7 +527,7 @@ double solve_skewed_diffusion_error(size_t n_cells)
             exact(mesh->face_centroid(face_lid))};
     };
     auto source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return -2.0 * diffusivity;
     };
@@ -587,7 +587,7 @@ TEST(VerificationCasesTest, WritesSimpleFluidVelocityProfileCsv)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_value(
             cell_lid, {center.x, 2.0 * center.y, 3.0 * center.z});
@@ -656,7 +656,7 @@ TEST(VerificationCasesTest, PoiseuilleFlowMatchesParabolicProfile)
             SimpleFluid::BoundaryConditionType::Neumann, {}};
     };
     auto source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return SimpleFluid::vec3<>{source_value, 0.0, 0.0};
     };
@@ -753,7 +753,7 @@ TEST(VerificationCasesTest, NaturalConvectionSquareCavityRemainsBounded)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto temperature =
             solver.temperature().value(cell_lid);
         const auto velocity = solver.velocity().value(cell_lid);

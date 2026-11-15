@@ -11,17 +11,17 @@ namespace S = SimpleFluid;
 namespace R = S::Reacting;
 namespace B = S::BubbleGasPhysics;
 using Pack = S::DefaultTpetraTypes;
-using Grid = S::MeshHandle<Pack>;
-using Model = S::ReactingGasModel<Pack, Grid>;
+using Mesh = S::MeshHandle<Pack>;
+using Model = S::ReactingGasModel<Pack, Mesh>;
 using P = R::SpeciesPhase;
 constexpr R::SpeciesId solvent = 44, gas = 101;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-std::shared_ptr<Grid> grid()
+std::shared_ptr<Mesh> grid()
 {
-    Grid::DistributionOptions distribution;
+    Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
-    return std::make_shared<Grid>(
-        std::make_shared<Grid::Cartesian>(S::Vec3D<S::ArrReal>{{{0., 1.}, {0., 1.}, {0., .5, 1.}}}), distribution);
+    return std::make_shared<Mesh>(
+        std::make_shared<Mesh::Cartesian>(S::Vec3D<S::ArrReal>{{{0., 1.}, {0., 1.}, {0., .5, 1.}}}), distribution);
 }
 S::ReactingGasOptions options(bool fail_later)
 {
@@ -69,10 +69,10 @@ S::ReactingGasOptions options(bool fail_later)
 }
 struct Fixture
 {
-    std::shared_ptr<Grid> mesh = grid();
+    std::shared_ptr<Mesh> mesh = grid();
     Model model;
     Model::field_type temperature{mesh, 300., "T"}, pressure{mesh, 0., "p"};
-    Model::velocity_field_type velocity{mesh, Grid::Vec3{}, "U"};
+    Model::velocity_field_type velocity{mesh, Mesh::Vec3{}, "U"};
     Model::face_flux_field_type flux{mesh, 0., "phi"};
     Model::material_type material;
     explicit Fixture(bool fail_later = false)

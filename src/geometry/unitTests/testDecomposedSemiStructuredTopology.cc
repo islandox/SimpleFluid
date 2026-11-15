@@ -16,8 +16,8 @@
 namespace
 {
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
-using Semi = Handle::SemiStructured;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
+using Semi = Mesh::SemiStructured;
 using Topology = SimpleFluid::Meshes::DecomposedSemiStructuredTopology;
 using LO = Pack::local_ordinal_type;
 
@@ -53,7 +53,7 @@ template<class T> T global_sum(T local)
     return global;
 }
 
-Handle::DistributionOptions hybrid_options(std::size_t depth)
+Mesh::DistributionOptions hybrid_options(std::size_t depth)
 {
     const auto ranks = static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize());
     return {.ghost_layers = depth,
@@ -62,7 +62,7 @@ Handle::DistributionOptions hybrid_options(std::size_t depth)
         .z_partitions = ranks % 2 == 0 ? ranks / 2 : ranks};
 }
 
-std::set<std::size_t> owned_cells(const Handle& handle)
+std::set<std::size_t> owned_cells(const Mesh& handle)
 {
     std::set<std::size_t> result;
     for (std::size_t row = 0; row < handle.num_owned_cells(); ++row)
@@ -209,7 +209,7 @@ void verify_virtual_partition(const SimpleFluid::Meshes::SemiStructMeshTopo& sou
 }
 
 void verify_roundtrips(
-    const std::shared_ptr<Semi>& source, const Handle& handle, const Topology& local, std::size_t depth)
+    const std::shared_ptr<Semi>& source, const Mesh& handle, const Topology& local, std::size_t depth)
 {
     EXPECT_EQ(&local.source_topology(), &source->topology());
     EXPECT_EQ(local.num_owned_cells(), handle.num_owned_cells());
@@ -264,9 +264,9 @@ void verify_roundtrips(
         const auto neighbor = source_neighbor == Semi::invalid_cell_id() ? Topology::invalid_local_id()
                                                                          : local.cell_local_id(source_neighbor);
         const auto expected_owner =
-            owner == Topology::invalid_local_id() ? Handle::invalid_local_id() : static_cast<LO>(owner);
+            owner == Topology::invalid_local_id() ? Mesh::invalid_local_id() : static_cast<LO>(owner);
         const auto expected_neighbor =
-            neighbor == Topology::invalid_local_id() ? Handle::invalid_local_id() : static_cast<LO>(neighbor);
+            neighbor == Topology::invalid_local_id() ? Mesh::invalid_local_id() : static_cast<LO>(neighbor);
         EXPECT_EQ(handle.owner_cell(static_cast<LO>(row)), expected_owner);
         EXPECT_EQ(handle.neighbor_cell(static_cast<LO>(row)), expected_neighbor);
         EXPECT_EQ(handle.boundary_id(static_cast<LO>(row)), source->boundary_id(face));
@@ -317,15 +317,15 @@ void verify_roundtrips(
 TEST(DecomposedSemiStructuredTopologyTest, ObserverIsAbsentForSerialAndOtherMeshFamilies)
 {
     const auto source = chain(8);
-    const Handle semi(source, {.allow_empty_partitions = true});
+    const Mesh semi(source, {.allow_empty_partitions = true});
     const auto local = semi.decomposed_semi_structured_topology();
     EXPECT_EQ(static_cast<bool>(local), Tpetra::getDefaultComm()->getSize() > 1);
     const auto ranks = static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize());
     SimpleFluid::ArrReal x(ranks + 1);
     std::iota(x.begin(), x.end(), 0.);
     const auto cartesian =
-        std::make_shared<Handle::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, {0., 1.}, {0., 1.}}});
-    EXPECT_FALSE(Handle(cartesian).decomposed_semi_structured_topology());
+        std::make_shared<Mesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, {0., 1.}, {0., 1.}}});
+    EXPECT_FALSE(Mesh(cartesian).decomposed_semi_structured_topology());
 }
 
 TEST(DecomposedSemiStructuredTopologyTest, CanonicalRoundtripsMatchExactBFSAndSourceIncidence)
@@ -335,7 +335,7 @@ TEST(DecomposedSemiStructuredTopologyTest, CanonicalRoundtripsMatchExactBFSAndSo
     const auto source = chain(9);
     for (const std::size_t depth : {1U, 2U})
     {
-        const Handle handle(source, hybrid_options(depth));
+        const Mesh handle(source, hybrid_options(depth));
         const auto local = handle.decomposed_semi_structured_topology();
         EXPECT_TRUE(local);
         EXPECT_FALSE(handle.has_materialized_indexer());
@@ -353,7 +353,7 @@ TEST(DecomposedSemiStructuredTopologyTest, ManhattanRadiusBandsExcludeProductCor
         GTEST_SKIP() << "Requires a distributed XY graph and Z slabs.";
     const auto source = chain(9);
     constexpr unsigned depth = 2;
-    const Handle handle(source, hybrid_options(depth));
+    const Mesh handle(source, hybrid_options(depth));
     const auto local = handle.decomposed_semi_structured_topology();
     EXPECT_TRUE(local);
     if (!local)
@@ -438,8 +438,8 @@ TEST(DecomposedSemiStructuredTopologyTest, ProductBandsStorageDoesNotScaleWithEx
         GTEST_SKIP() << "Requires the distributed compact topology observer.";
     const auto short_source = chain(8), long_source = chain(128);
     const auto ranks = static_cast<std::size_t>(comm->getSize());
-    const Handle short_mesh(short_source, {.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1});
-    const Handle long_mesh(long_source, {.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1});
+    const Mesh short_mesh(short_source, {.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1});
+    const Mesh long_mesh(long_source, {.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1});
     const auto short_local = short_mesh.decomposed_semi_structured_topology();
     const auto long_local = long_mesh.decomposed_semi_structured_topology();
     EXPECT_TRUE(short_local);
@@ -468,7 +468,7 @@ TEST(DecomposedSemiStructuredTopologyTest, EmptyOwnersRetainSourceAliasAndHaveNo
         GTEST_SKIP() << "Requires actual empty distributed owners.";
     const auto source = triangle();
     const auto ranks = static_cast<std::size_t>(comm->getSize());
-    const Handle handle(source, {.ghost_layers = 2,
+    const Mesh handle(source, {.ghost_layers = 2,
                                     .allow_empty_partitions = true,
                                     .xy_partitions = ranks % 2 == 0 ? 2U : 1U,
                                     .z_partitions = ranks % 2 == 0 ? ranks / 2 : ranks});

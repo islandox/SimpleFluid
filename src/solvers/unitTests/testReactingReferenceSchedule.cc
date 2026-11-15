@@ -19,7 +19,7 @@ using namespace SimpleFluid;
 namespace R = Reacting;
 namespace TM = Testing::ReactingMixture;
 using Pack = DefaultTpetraTypes;
-using Grid = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using Flow = BoussinesqSolver<Pack>;
 using LO = Pack::local_ordinal_type;
 constexpr R::SpeciesId a = 211, b = 907;
@@ -94,15 +94,15 @@ ReactingGasOptions options(Failure failure = Failure::None)
 }
 struct Fixture
 {
-    std::shared_ptr<Grid> grid;
+    std::shared_ptr<Mesh> grid;
     std::shared_ptr<Flow> flow;
     std::unique_ptr<MultiphysicsSolverCoupler<Pack>> coupled;
     Fixture()
     {
-        Grid::DistributionOptions partition;
+        Mesh::DistributionOptions partition;
         partition.allow_empty_partitions = true;
-        grid = std::make_shared<Grid>(
-            std::make_shared<Grid::Cartesian>(Vec3D<ArrReal>{{{0, 1}, {0, 1}, {0, .5, 1}}}), partition);
+        grid = std::make_shared<Mesh>(
+            std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{{0, 1}, {0, 1}, {0, .5, 1}}}), partition);
         TimeStepperOptions time;
         time.time_step = .1;
         time.reference_temperature = 300;
@@ -279,10 +279,10 @@ TEST(ReactingReferenceScheduleTest, PopulationEscapeUsesIndependentNumberFluxAnd
         return input;
     };
     selected.population_process = {};
-    ReactingGasModel<Pack, Grid> gas(f.grid, selected);
+    ReactingGasModel<Pack, Mesh> gas(f.grid, selected);
     gas.initialize_state(
         0, f.flow->temperature(), f.flow->pressure(), f.flow->velocity(), f.flow->material_properties());
-    ScalarFaceFieldStored<Pack, Grid> carrier(f.grid, 0.0, "zero_carrier");
+    ScalarFaceFieldStored<Pack, Mesh> carrier(f.grid, 0.0, "zero_carrier");
     const auto initial = gas.snapshot();
     const auto initial_receipt = gas.population_escape_receipt();
     EXPECT_FALSE(initial_receipt.event.accepted);

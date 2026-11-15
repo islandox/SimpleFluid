@@ -24,7 +24,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -34,14 +34,14 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the 64-cell distributed synchronization fixture. */
-SimpleFluid::SP<MeshType> make_4x4x4_mesh()
+SimpleFluid::SP<Mesh> make_4x4x4_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_4x4x4_database());
 }
 
 /** @brief Build the larger 1000-cell distributed synchronization fixture. */
-SimpleFluid::SP<MeshType> make_10x10x10_mesh()
+SimpleFluid::SP<Mesh> make_10x10x10_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_10x10x10_database());
@@ -53,7 +53,7 @@ SimpleFluid::SP<MeshType> make_10x10x10_mesh()
  * @param mesh Distributed mesh to inspect collectively.
  * @param expected_global_cells Expected sum of owned cells across ranks.
  */
-void expect_partitioned_mesh(const MeshType& mesh,
+void expect_partitioned_mesh(const Mesh& mesh,
                              size_t expected_global_cells)
 {
     const auto comm = mesh.owned_cell_map()->getComm();

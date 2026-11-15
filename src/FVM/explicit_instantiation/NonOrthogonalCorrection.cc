@@ -22,11 +22,11 @@ using MatrixVector = Pack::vector_type;
 using MatrixMultiVector = Pack::multi_vector_type;
 using ScalarField = CellField<Pack>;
 using VectorField = VectorCellField<Pack>;
-using MeshType = MeshHandle<Pack>;
-using ScalarAffineStencil = detail::AffineLeastSquaresGradientStencil<MeshType>;
-using VectorAffineStencil = detail::VectorAffineLeastSquaresGradientStencil<MeshType>;
-using InteriorStencil = detail::LeastSquaresGradientStencil<MeshType>;
-using BoundaryLocation = detail::BoundaryFaceLocation<MeshType>;
+using Mesh = MeshHandle<Pack>;
+using ScalarAffineStencil = detail::AffineLeastSquaresGradientStencil<Mesh>;
+using VectorAffineStencil = detail::VectorAffineLeastSquaresGradientStencil<Mesh>;
+using InteriorStencil = detail::LeastSquaresGradientStencil<Mesh>;
+using BoundaryLocation = detail::BoundaryFaceLocation<Mesh>;
 } // namespace
 
 template void add_explicit_non_orthogonal_correction<Pack>(
@@ -55,10 +55,10 @@ template void add_explicit_deviatoric_transpose_gradient_stress<Pack>(const Vect
     const std::vector<VectorAffineStencil>*, const std::vector<BoundaryLocation>*, FaceCoefficientInterpolation);
 
 template DiffusionSystem<Pack> explicit_non_orthogonal_diffusion_system<Pack>(
-    const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField&);
+    const Mesh&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField&);
 
 template DiffusionSystem<Pack> fully_implicit_non_orthogonal_diffusion_system<Pack>(
-    const MeshType&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField*);
+    const Mesh&, Scalar, ScalarBoundaryConditionProvider<Pack>, ScalarCellValueProvider<Pack>, const ScalarField*);
 
 template Teuchos::RCP<MatrixVector> full_diffusion_residual<Pack>(
     const ScalarField&, Scalar, ScalarBoundaryConditionProvider<Pack>);

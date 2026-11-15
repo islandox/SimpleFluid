@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -37,8 +37,8 @@ testing::Environment* const kokkos_environment =
 std::vector<Pack::scalar_type> local_values(const FieldType& field)
 {
     std::vector<Pack::scalar_type> values(field.num_local_cells());
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
         values[static_cast<size_t>(lid)] = field.local_value(lid);
@@ -62,8 +62,8 @@ int advance_explicit_diffusion_until_converged(
                                   temperature);
 
         Pack::scalar_type max_update = 0.0;
-        for (MeshType::local_ordinal_type lid = 0;
-             lid < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type lid = 0;
+             lid < static_cast<Mesh::local_ordinal_type>(
                        temperature.num_owned_cells());
              ++lid)
         {
@@ -137,7 +137,7 @@ TEST(AnalyticalConvergenceTest, DiffusionErrorDecreasesWithMeshRefinement)
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             temperature.set_owned_value(
-                static_cast<MeshType::local_ordinal_type>(owned), 0.0);
+                static_cast<Mesh::local_ordinal_type>(owned), 0.0);
         }
         temperature.sync_ghosts();
 

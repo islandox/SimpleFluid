@@ -16,7 +16,7 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 }
 TEST(MultiRegionMeshMultiRankTest, OwnershipHalosAndCanonicalFaces)
@@ -24,7 +24,7 @@ TEST(MultiRegionMeshMultiRankTest, OwnershipHalosAndCanonicalFaces)
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() == 1) GTEST_SKIP() << "Requires MPI ranks.";
     const auto geometry = test::two_regions(2);
-    SP<const Handle> mesh = std::make_shared<Handle>(geometry);
+    SP<const Mesh> mesh = std::make_shared<Mesh>(geometry);
     EXPECT_EQ(mesh->owned_cell_map()->getGlobalNumElements(), geometry->num_cells());
     EXPECT_EQ(mesh->owned_face_map()->getGlobalNumElements(), geometry->num_faces());
     EXPECT_EQ(mesh->num_owned_cells(), geometry->num_cells() / comm->getSize());
@@ -37,7 +37,7 @@ TEST(MultiRegionMeshMultiRankTest, OwnershipHalosAndCanonicalFaces)
             EXPECT_EQ(mesh->cell_global_id(c), geometry->owner_cell(global_face) == static_cast<uint64_t>(mesh->cell_global_id(c))
                 ? geometry->owner_cell(global_face) : geometry->neighbor_cell(global_face));
             if (mesh->is_owned_cell(c) && !mesh->is_geometry_exterior_face(f))
-                EXPECT_NE(mesh->opposite_cell(f, c), Handle::invalid_local_id());
+                EXPECT_NE(mesh->opposite_cell(f, c), Mesh::invalid_local_id());
         }
     }
     EXPECT_EQ(mesh->vtu_topology()->cell_offsets.size(), mesh->num_owned_cells());
@@ -54,7 +54,7 @@ TEST(MultiRegionMeshMultiRankTest, MultipleRegionsPerRank)
         if (r) interfaces.push_back(StructuredPatchInterface{{static_cast<size_t>(r-1),1},{static_cast<size_t>(r),0}});
     }
     auto geometry = std::make_shared<MultiRegionMesh>(std::move(regions),std::move(interfaces));
-    Handle mesh(geometry);
+    Mesh mesh(geometry);
     std::set<size_t> owned_regions;
     for(size_t c=0;c<mesh.num_owned_cells();++c) owned_regions.insert(geometry->native_cell(mesh.cell_global_id(c)).first);
     EXPECT_EQ(owned_regions.size(),2U);
@@ -85,15 +85,15 @@ TEST(MultiRegionMeshMultiRankTest, ExplicitGlobalRegionsAndStaleChildrenFailBefo
     auto geometry=std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("native",native)},
         std::vector<MultiRegionMesh::Interface>{});
     if(comm->getRank()==0) *native=OrthogonalCartesian3D(Vec3D<ArrReal>{{{0,1,2,3,5},{0,1},{0,1}}});
-    EXPECT_THROW((Handle(geometry)),std::logic_error);
+    EXPECT_THROW((Mesh(geometry)),std::logic_error);
 }
 
 TEST(MultiRegionMeshMultiRankTest, HaloOptionsPreserveMutableGeometryOwnership)
 {
     const auto comm=Tpetra::getDefaultComm(); if(comm->getSize()==1) GTEST_SKIP()<<"Requires MPI ranks.";
     const auto geometry=test::two_regions();
-    Handle mutable_handle(geometry,Handle::DistributionOptions{.ghost_layers=2});
-    Handle observer(std::static_pointer_cast<const MultiRegionMesh>(geometry),Handle::DistributionOptions{.ghost_layers=2});
+    Mesh mutable_handle(geometry,Mesh::DistributionOptions{.ghost_layers=2});
+    Mesh observer(std::static_pointer_cast<const MultiRegionMesh>(geometry),Mesh::DistributionOptions{.ghost_layers=2});
     EXPECT_TRUE(mutable_handle.has_mutable_geometry()); EXPECT_FALSE(observer.has_mutable_geometry());
     EXPECT_EQ(mutable_handle.geometry_identity(),observer.geometry_identity());
     EXPECT_EQ(mutable_handle.num_cells(),observer.num_cells());

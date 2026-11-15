@@ -23,7 +23,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::BoundaryFaceField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -32,7 +32,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the assembled two-cell mesh shared by field tests. */
-SimpleFluid::SP<MeshType> make_two_hex_mesh()
+SimpleFluid::SP<Mesh> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
@@ -70,8 +70,8 @@ TEST(BoundaryFaceFieldTest, BasicOperationsOnRealMesh)
 
     // Interior face is NOT owned
     bool found_interior = false;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_boundary_face(fid))
@@ -99,8 +99,8 @@ TEST(BoundaryFaceFieldTest, BasicOperationsOnRealMesh)
 
     // Non-boundary face throws in debug
 #ifndef NDEBUG
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_boundary_face(fid))
@@ -172,7 +172,7 @@ TEST(BoundaryFaceFieldTest, OwnershipAndNativeMapRows)
     EXPECT_THROW(bc_field.is_owned_boundary_face(invalid_face), std::out_of_range);
     EXPECT_THROW(bc_field.set_value(invalid_face, 0.0), std::out_of_range);
     EXPECT_THROW(bc_field.value(invalid_face), std::out_of_range);
-    if constexpr (std::is_signed_v<MeshType::local_ordinal_type>)
+    if constexpr (std::is_signed_v<Mesh::local_ordinal_type>)
     {
         EXPECT_THROW(bc_field.is_owned_boundary_face(-1), std::out_of_range);
         EXPECT_THROW(bc_field.set_value(-1, 0.0), std::out_of_range);

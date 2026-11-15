@@ -25,7 +25,7 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Spec =
     SimpleFluid::BoundaryLayerMeshFactory::BoundaryLayerSpec;
@@ -274,7 +274,7 @@ TEST(MeshQualityTest, ReportsGrowthAspectAndOrthogonality)
             {0.0, 1.0, 3.0},
             {0.0, 1.0},
             {0.0, 1.0}}});
-    const Handle mesh(geometry);
+    const Mesh mesh(geometry);
 
     const auto quality =
         SimpleFluid::evaluate_mesh_quality(mesh);
@@ -538,7 +538,7 @@ TEST(
                     {0.0, 1.0},
                     {0.0, 1.0},
                     {0.0, 1.0}}});
-            return std::make_shared<Handle>(geometry);
+            return std::make_shared<Mesh>(geometry);
         },
         [](const auto&, size_t)
         {

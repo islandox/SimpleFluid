@@ -25,17 +25,17 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Motion = SimpleFluid::PlanarALEMeshMotion<Pack>;
-using Cartesian = Handle::Cartesian;
-using Cylindrical = Handle::Cylindrical;
-using SemiStructured = Handle::SemiStructured;
+using Cartesian = Mesh::Cartesian;
+using Cylindrical = Mesh::Cylindrical;
+using SemiStructured = Mesh::SemiStructured;
 using local_ordinal_type = Pack::local_ordinal_type;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-double maximum_local_gcl_residual(const Handle& mesh, const SimpleFluid::MeshMotionModel& motion)
+double maximum_local_gcl_residual(const Mesh& mesh, const SimpleFluid::MeshMotionModel& motion)
 {
     double maximum{};
     const auto old_volumes = motion.old_cell_volumes();
@@ -56,7 +56,7 @@ double maximum_local_gcl_residual(const Handle& mesh, const SimpleFluid::MeshMot
     return maximum;
 }
 
-std::vector<Pack::global_ordinal_type> cell_geometry_ids(const Handle& mesh)
+std::vector<Pack::global_ordinal_type> cell_geometry_ids(const Mesh& mesh)
 {
     std::vector<Pack::global_ordinal_type> result;
     result.reserve(mesh.num_local_cells());
@@ -67,7 +67,7 @@ std::vector<Pack::global_ordinal_type> cell_geometry_ids(const Handle& mesh)
     return result;
 }
 
-std::vector<Pack::global_ordinal_type> face_ids(const Handle& mesh)
+std::vector<Pack::global_ordinal_type> face_ids(const Mesh& mesh)
 {
     std::vector<Pack::global_ordinal_type> result;
     result.reserve(mesh.num_faces());
@@ -78,7 +78,7 @@ std::vector<Pack::global_ordinal_type> face_ids(const Handle& mesh)
     return result;
 }
 
-std::map<std::string, std::vector<Pack::global_ordinal_type>> boundary_signature(const Handle& mesh)
+std::map<std::string, std::vector<Pack::global_ordinal_type>> boundary_signature(const Mesh& mesh)
 {
     std::map<std::string, std::vector<Pack::global_ordinal_type>> result;
     for (const auto& [batch_id, batch] : mesh.boundary_batches())
@@ -100,7 +100,7 @@ TEST(PlanarALEMeshMotionTest, CartesianTrialExposesExactVolumesSweptFluxAndRollb
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 2.0}, {0.0, 1.0, 2.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     const auto cells_before = cell_geometry_ids(*mesh);
     const auto faces_before = face_ids(*mesh);
     const auto boundaries_before = boundary_signature(*mesh);
@@ -160,7 +160,7 @@ TEST(PlanarALEMeshMotionTest, BufferedMotionAcceptsAndRepeatedCycleRecoversRefer
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.deformation_start_elevation = 1.0;
     Motion motion(mesh, options);
@@ -195,8 +195,8 @@ TEST(PlanarALEMeshMotionTest, SharedGeometryPublishesOneEpochAndAllowsOneControl
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
-    auto first_handle = std::make_shared<Handle>(geometry);
-    auto alias_handle = std::make_shared<Handle>(geometry);
+    auto first_handle = std::make_shared<Mesh>(geometry);
+    auto alias_handle = std::make_shared<Mesh>(geometry);
     EXPECT_EQ(first_handle->geometry_identity(), geometry.get());
     EXPECT_EQ(alias_handle->geometry_identity(), geometry.get());
 
@@ -204,7 +204,7 @@ TEST(PlanarALEMeshMotionTest, SharedGeometryPublishesOneEpochAndAllowsOneControl
         Motion motion(first_handle);
         EXPECT_THROW({ Motion duplicate(alias_handle); }, std::invalid_argument);
         auto independent_geometry = std::make_shared<Cartesian>(*geometry);
-        auto independent_handle = std::make_shared<Handle>(independent_geometry);
+        auto independent_handle = std::make_shared<Mesh>(independent_geometry);
         EXPECT_NE(independent_handle->geometry_identity(),
                   first_handle->geometry_identity());
         EXPECT_NO_THROW({ Motion independent(independent_handle); });
@@ -221,7 +221,7 @@ TEST(PlanarALEMeshMotionTest, ContractingMeshFluxUsesOwnerNormalSigns)
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     Motion motion(mesh);
 
     motion.begin_trial(1.0, 1.0);
@@ -241,7 +241,7 @@ TEST(PlanarALEMeshMotionTest, CartesianNonZAxisIsExactAndLevelChangeLimitIsPreMu
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.axis = SimpleFluid::Dimension::X;
     options.maximum_level_change = 0.6;
@@ -263,7 +263,7 @@ TEST(PlanarALEMeshMotionTest, CylindricalAxialMotionUpdatesSideGeometryAndSatisf
 {
     auto geometry = std::make_shared<Cylindrical>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{1.0, 2.0}, {0.0, std::numbers::pi}, {0.0, 1.0, 2.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     const Cylindrical::FaceID radial_face{1, 0, 0, Cylindrical::R_FACE};
     const auto old_radial_area = geometry->face_area(radial_face);
     Motion motion(mesh);
@@ -280,9 +280,9 @@ TEST(PlanarALEMeshMotionTest, SemiStructuredAxialMotionPreservesXYTopologyAndSat
     auto geometry = std::make_shared<SemiStructured>(
         SimpleFluid::Arr<SemiStructured::Vec3>{{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}}, SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    Handle::DistributionOptions distribution;
+    Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
-    auto mesh = std::make_shared<Handle>(geometry, distribution);
+    auto mesh = std::make_shared<Mesh>(geometry, distribution);
     const auto xy_nodes = geometry->xy_nodes();
     const auto xy_cells = geometry->xy_cell_nodes();
     Motion motion(mesh);
@@ -298,7 +298,7 @@ TEST(PlanarALEMeshMotionTest, SemiStructuredAxialMotionPreservesXYTopologyAndSat
 TEST(PlanarALEMeshMotionTest, CompositeTraversalsReleaseGeometryAcrossTrialsAndFailure)
 {
     auto geometry = SimpleFluid::test::two_regions();
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.quality_limits.maximum_aspect_ratio = 10.0;
     Motion motion(mesh, options);
@@ -341,7 +341,7 @@ TEST(PlanarALEMeshMotionTest, QualityFailureRollsBackBeforeReturningTheError)
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.quality_limits.maximum_aspect_ratio = 10.0;
     Motion motion(mesh, options);
@@ -358,7 +358,7 @@ TEST(PlanarALEMeshMotionTest, DestructorRollsBackAnUnresolvedTrial)
 {
     auto geometry =
         std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     {
         Motion motion(mesh);
         motion.begin_trial(2.0, 1.0);
@@ -372,7 +372,7 @@ TEST(PlanarALEMeshMotionTest, DestructorDoesNotOverwriteExternallyReplacedGeomet
 {
     auto geometry =
         std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     auto motion = std::make_unique<Motion>(mesh);
     motion->begin_trial(2.0, 1.0);
 
@@ -389,23 +389,23 @@ TEST(PlanarALEMeshMotionTest, RejectsConstUnsupportedAndNonAxialGeometry)
 {
     auto cartesian =
         std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    Handle::CartesianPtr read_only = cartesian;
-    auto const_backed = std::make_shared<Handle>(std::move(read_only));
+    Mesh::CartesianPtr read_only = cartesian;
+    auto const_backed = std::make_shared<Mesh>(std::move(read_only));
     EXPECT_THROW({ Motion candidate(const_backed); }, std::invalid_argument);
 
     auto unstructured = SimpleFluid::test::make_unstructured_hex_line(1);
-    auto unsupported = std::make_shared<Handle>(unstructured);
+    auto unsupported = std::make_shared<Mesh>(unstructured);
     EXPECT_THROW({ Motion candidate(unsupported); }, std::invalid_argument);
 
     auto cylindrical = std::make_shared<Cylindrical>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{1.0, 2.0}, {0.0, std::numbers::pi}, {0.0, 1.0}}});
-    auto cylindrical_handle = std::make_shared<Handle>(cylindrical);
+    auto cylindrical_handle = std::make_shared<Mesh>(cylindrical);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.axis = SimpleFluid::Dimension::X;
     EXPECT_THROW(Motion(cylindrical_handle, options), std::invalid_argument);
 
     options.axis = static_cast<SimpleFluid::Dimension>(3);
-    auto mutable_cartesian = std::make_shared<Handle>(cartesian);
+    auto mutable_cartesian = std::make_shared<Mesh>(cartesian);
     EXPECT_THROW(Motion(mutable_cartesian, options), std::invalid_argument);
 }
 
@@ -413,7 +413,7 @@ TEST(PlanarALEMeshMotionTest, DetectsRawGeometryMutationOutsideTheEpochContract)
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     Motion motion(mesh);
 
     *geometry = Cartesian(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.1, 2.0}}});
@@ -427,7 +427,7 @@ TEST(PlanarALEMeshMotionMultiRankTest, PartitionFaceFluxIsConsistentAndTargetsAr
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0, 4.0}}});
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() != 2)
     {
@@ -502,11 +502,11 @@ TEST(PlanarALEMeshMotionMultiRankTest, RejectsTransverseGeometryAndInvalidAxisMi
     auto divergent_geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, transverse_extent}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0, 4.0}}});
     // Distribution now rejects inconsistent geometry before motion is constructed.
-    EXPECT_THROW((void) std::make_shared<Handle>(divergent_geometry), std::invalid_argument);
+    EXPECT_THROW((void) std::make_shared<Mesh>(divergent_geometry), std::invalid_argument);
 
     auto common_geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0, 4.0}}});
-    auto common_mesh = std::make_shared<Handle>(common_geometry);
+    auto common_mesh = std::make_shared<Mesh>(common_geometry);
     SimpleFluid::PlanarALEMeshMotionOptions options;
     options.axis = comm->getRank() == 0 ? SimpleFluid::Dimension::Z : static_cast<SimpleFluid::Dimension>(3);
     EXPECT_THROW(Motion(common_mesh, options), std::invalid_argument);

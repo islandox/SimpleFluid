@@ -31,20 +31,20 @@ void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); 
 namespace
 {
 using namespace SimpleFluid;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 void verify_materialization(const SP<Meshes::MultiRegionMesh>& geometry,
                             bool require_expanded_face)
 {
-    Handle mesh(geometry);
+    Mesh mesh(geometry);
     const auto owned_cells = mesh.owned_cell_map();
     const auto overlap_cells = mesh.overlap_cell_map();
     const auto owned_faces = mesh.owned_face_map();
     const auto overlap_faces = mesh.overlap_face_map();
     const bool materialized_indexer = mesh.has_materialized_indexer();
-    std::vector<std::vector<Handle::local_ordinal_type>> expected;
+    std::vector<std::vector<Mesh::local_ordinal_type>> expected;
     bool expanded = false;
     for (size_t c = 0; c < mesh.num_local_cells(); ++c)
     {
@@ -88,7 +88,7 @@ TEST(RegionMaterializationTest, RetainsEveryExpandedCoarseFineLogicalFace)
 
 TEST(RegionMaterializationTest, AllocationVolumeGrowsWithFinalConnectivity)
 {
-    Handle mesh(test::two_regions(10));
+    Mesh mesh(test::two_regions(10));
     allocated_bytes = 0;
     count_allocations = true;
     try { mesh.materialize_cell_faces(); }

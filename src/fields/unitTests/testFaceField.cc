@@ -24,7 +24,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::FaceField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -33,7 +33,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the assembled two-cell mesh shared by face-field tests. */
-SimpleFluid::SP<MeshType> make_two_hex_mesh()
+SimpleFluid::SP<Mesh> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
@@ -56,8 +56,8 @@ TEST(FaceFieldTest, StoresValuesOnOwnedFaceMap)
     EXPECT_EQ(flux.map()->getLocalNumElements(), mesh->num_faces());
     EXPECT_EQ(flux.owned_face_ids().size(), mesh->num_faces());
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         EXPECT_TRUE(flux.is_owned_face(fid));
@@ -93,8 +93,8 @@ TEST(FaceFieldTest, InitialValueConstructorFillsVector)
     FieldType area_weight(mesh, 1.25, "area_weight");
 
     EXPECT_EQ(area_weight.name(), "area_weight");
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         EXPECT_DOUBLE_EQ(area_weight.value(fid), 1.25);

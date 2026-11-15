@@ -19,7 +19,7 @@ namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
-using Handle = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using Cartesian = Meshes::OrthogonalCartesian3D;
 using Composite = Meshes::MultiRegionMesh;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -28,7 +28,7 @@ struct Fixture
 {
     std::shared_ptr<Cartesian> child;
     std::shared_ptr<Composite> geometry;
-    std::shared_ptr<Handle> mesh;
+    std::shared_ptr<Mesh> mesh;
 };
 
 Fixture single_cell()
@@ -37,9 +37,9 @@ Fixture single_cell()
     result.child = std::make_shared<Cartesian>(Vec3D<ArrReal>{{{0, 1}, {0, 1}, {0, 1}}});
     result.geometry = std::make_shared<Composite>(std::vector<Composite::Region>{
         Meshes::native_region("single", result.child)}, std::vector<Composite::Interface>{});
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.allow_empty_partitions = true;
-    result.mesh = std::make_shared<Handle>(result.geometry, options);
+    result.mesh = std::make_shared<Mesh>(result.geometry, options);
     return result;
 }
 
@@ -51,9 +51,9 @@ Fixture two_cells()
     result.geometry = std::make_shared<Composite>(std::vector<Composite::Region>{
         Meshes::native_region("left", result.child), Meshes::native_region("right", right)},
         std::vector<Composite::Interface>{Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}});
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.allow_empty_partitions = true;
-    result.mesh = std::make_shared<Handle>(result.geometry, options);
+    result.mesh = std::make_shared<Mesh>(result.geometry, options);
     return result;
 }
 
@@ -99,9 +99,9 @@ TEST(QualityAccessTest, NativeAndCompositeMatchAnalyticalTwoCellMetrics)
 {
     auto fixture = two_cells();
     auto native_geometry = std::make_shared<Cartesian>(Vec3D<ArrReal>{{{0, 1, 3}, {0, 1}, {0, 1}}});
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.allow_empty_partitions = true;
-    const Handle native(native_geometry, options);
+    const Mesh native(native_geometry, options);
     MeshQualityMetrics expected;
     expected.global_cell_count = 2;
     expected.global_face_count = 11;

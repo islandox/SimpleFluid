@@ -36,7 +36,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 namespace GeneralGas = SimpleFluid::Testing::GeneralGasModel;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
@@ -61,7 +61,7 @@ testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironme
  * @param mesh Mesh owning the material fields.
  * @return Initialized water-property fields.
  */
-SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<MeshType>& mesh)
+SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<Mesh>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -80,7 +80,7 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFlui
  * @param local_value Local rank contribution.
  * @return Global sum across ranks.
  */
-double global_sum(const MeshType& mesh, double local_value)
+double global_sum(const Mesh& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_value, &global_value);
@@ -259,7 +259,7 @@ void check_repeated_kinetics_with_heterogeneous_inputs(bool continuous)
         packet.numberEvents = {{"micro", retained_source / per_bubble, c.populations.front().number * loss}};
         return packet;
     };
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const std::array<double, 3> time_steps{8e-6, 3.1e-5, 1.1e-5};
     const std::array<int, 3> subdivisions{4, 9, 6};
@@ -415,7 +415,7 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
     FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
     model.initialize_state(0.0, temperature, pressure, velocity, material);
@@ -484,7 +484,7 @@ TEST(ReactingGasModelMultiRankTest, ExternalMaterialFailureIsCollective)
                 return 6.6359547089482127e-8;
             };
         }
-        GeneralGas::Fixture<MeshType> f(mesh, p);
+        GeneralGas::Fixture<Mesh> f(mesh, p);
         f.power.put_scalar(1000);
         f.initialize();
         const auto receipt = f.model.species_event_receipt();
@@ -515,7 +515,7 @@ TEST(ReactingGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
     GeneralGas::Parameters p;
     p.reservoir_mol_per_joule = {2e-7, 1e-7};
     p.nucleate_supplied_gas = true;
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.power.put_scalar(1e5);
     f.initialize();
     f.advance(1e-6, 1e-6);
@@ -585,7 +585,7 @@ TEST(ReactingGasModelMultiRankTest, ConservesFiniteCourantFreeSurfaceEscape)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = 10;
     p.controls.free_surface_patches = {"zmax"};
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const double before = f.model.global_species_moles(GeneralGas::one);
     const double count = GeneralGas::integral(f.model.population_number_field("micro"));
@@ -634,7 +634,7 @@ TEST(ReactingGasModelMultiRankTest, ReducesClippedCellCountGlobally)
     p.number_density[1] = number;
     p.molar_one[1] = admitted;
     p.dissolved_one = 1;
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     f.advance(1e-9, 1e-9);
     int local_admissions = 0;
@@ -688,7 +688,7 @@ TEST(ReactingGasModelMultiRankTest, CollectivelyValidatesReconstructedPressureOf
         pressure.set_owned_value(static_cast<Pack::local_ordinal_type>(owned), comm->getRank() == 0 ? -1000.0 : 1000.0);
     }
     pressure.sync_ghosts();
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{}, "velocity");
     auto material = make_water_properties(mesh);
     model.initialize_state(0.0, temperature, pressure, velocity, material);
 
@@ -721,7 +721,7 @@ TEST(ReactingGasModelMultiRankTest, RankLocalBubbleSlipFailureThrowsCoherently)
     const double r = GeneralGas::radius(1e-6, 100, 300, p.pressure, p.sigma);
     p.molar_mass_one = 1.2 * GeneralGas::gas_constant * 300 / (p.pressure + 2 * p.sigma / r);
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
@@ -756,7 +756,7 @@ TEST(ReactingGasModelMultiRankTest, RankLocalLegacySchmidtLimitThrowsCoherently)
     p.diffusivity[0] = 1e-8;
     p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::Hughmark;
     p.viscosity_temperature = [](double T) { return T > 325 ? .003 : .001; };
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
@@ -797,7 +797,7 @@ TEST(ReactingGasModelMultiRankTest, RankLocalFengReynoldsLimitThrowsCoherently)
     p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     p.controls.constant_slip_velocity = .0045;
     p.viscosity_temperature = [](double T) { return T >= 300 ? .001 : .00243878721; };
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
@@ -1161,7 +1161,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesC
     p.reservoir_mol_per_joule[0] = 2e-7;
     p.nucleate_supplied_gas = true;
     p.micro_decay_time = .01;
-    GeneralGas::Fixture<MeshType> full(mesh, p), fresh(mesh, p);
+    GeneralGas::Fixture<Mesh> full(mesh, p), fresh(mesh, p);
     if (comm->getRank() == 0)
     {
         full.power.set_owned_value(0, 1000);
@@ -1202,7 +1202,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryPolicyRetainsPopulatedInventori
     p.dissolved_one = 1e-5;
     p.number_density[1] = 1e7;
     p.molar_one[1] = 1e-6;
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const double initial = f.model.global_species_moles(GeneralGas::one);
     f.advance(.001, .001);
@@ -1230,7 +1230,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroNumberStillAssemblesPopulatedMoles)
         packet.numberEvents = {{"large", 0, .25 * found->number}};
         return packet;
     };
-    GeneralGas::Fixture<MeshType> f(mesh, p);
+    GeneralGas::Fixture<Mesh> f(mesh, p);
     f.initialize();
     const double material = f.model.global_species_moles(GeneralGas::one);
     const double number = GeneralGas::integral(f.model.population_number_field("large"));
@@ -1245,7 +1245,7 @@ TEST(ReactingGasModelMultiRankTest, ZeroNumberStillAssemblesPopulatedMoles)
     }
     auto invalid = p;
     invalid.number_density[1] = 0;
-    GeneralGas::Fixture<MeshType> malformed(mesh, invalid);
+    GeneralGas::Fixture<Mesh> malformed(mesh, invalid);
     EXPECT_THROW(malformed.initialize(), std::invalid_argument);
     EXPECT_FALSE(malformed.model.initial_state_initialized());
 }

@@ -40,7 +40,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -53,13 +53,13 @@ constexpr double pi = 3.141592653589793238462643383279502884;
 constexpr double burgers_amplitude = 0.2;
 constexpr double burgers_background = 1.0;
 
-SimpleFluid::SP<MeshType> make_unit_box_mesh()
+SimpleFluid::SP<Mesh> make_unit_box_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(2, 2, 2, 0.5));
 }
 
-SimpleFluid::SP<MeshType> make_taylor_green_mesh()
+SimpleFluid::SP<Mesh> make_taylor_green_mesh()
 {
     constexpr int n_cells = 8;
     const auto mesh_size = 2.0 * pi / static_cast<double>(n_cells);
@@ -67,17 +67,17 @@ SimpleFluid::SP<MeshType> make_taylor_green_mesh()
         SimpleFluid::test::make_box_database(n_cells, n_cells, 1, mesh_size));
 }
 
-SimpleFluid::SP<MeshType> make_periodic_line_mesh(int n_cells)
+SimpleFluid::SP<Mesh> make_periodic_line_mesh(int n_cells)
 {
     const auto dx = 1.0 / static_cast<double>(n_cells);
     SimpleFluid::ArrReal x(static_cast<size_t>(n_cells) + 1);
     for (size_t i = 0; i < x.size(); ++i) x[i] = static_cast<double>(i) * dx;
-    return std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    return std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{std::move(x), {0., dx}, {0., dx}}},
         SimpleFluid::Vec3D<bool>{{true, false, false}}));
 }
 
-SimpleFluid::SP<MeshType> make_sheared_box_mesh(size_t n_cells, double shear)
+SimpleFluid::SP<Mesh> make_sheared_box_mesh(size_t n_cells, double shear)
 {
     using Native = SimpleFluid::Meshes::UnstructuredMesh;
     const auto node_id = [=](size_t i, size_t j, size_t k)
@@ -109,7 +109,7 @@ SimpleFluid::SP<MeshType> make_sheared_box_mesh(size_t n_cells, double shear)
                 if (k == 0) boundaries.push_back({{ids[0],ids[1],ids[2],ids[3]}, 5, "zmin"});
                 if (k+1 == n_cells) boundaries.push_back({{ids[4],ids[7],ids[6],ids[5]}, 6, "zmax"});
             }
-    return std::make_shared<MeshType>(std::make_shared<Native>(
+    return std::make_shared<Mesh>(std::make_shared<Native>(
         std::move(nodes), std::move(cells), std::move(boundaries)));
 }
 
@@ -187,13 +187,13 @@ double burgers_exact(double x, double time)
     return burgers_initial(foot);
 }
 
-FieldType make_viscous_burgers_solution(SimpleFluid::SP<MeshType> mesh,
+FieldType make_viscous_burgers_solution(SimpleFluid::SP<Mesh> mesh,
                                         double time,
                                         double viscosity)
 {
     FieldType solution(mesh, "viscous_burgers");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         solution.set_value(
@@ -206,11 +206,11 @@ FieldType make_viscous_burgers_solution(SimpleFluid::SP<MeshType> mesh,
     return solution;
 }
 
-FieldType make_burgers_initial_solution(SimpleFluid::SP<MeshType> mesh)
+FieldType make_burgers_initial_solution(SimpleFluid::SP<Mesh> mesh)
 {
     FieldType solution(mesh, "burgers");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         solution.set_value(lid, burgers_initial(mesh->cell_centroid(lid).x));
@@ -228,8 +228,8 @@ void overwrite_owned_values(FieldType& target, const FieldType& source)
             "Cannot overwrite Burgers solution values across different meshes.");
     }
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
              target.mesh().num_owned_cells());
          ++lid)
     {
@@ -260,8 +260,8 @@ SimpleFluid::FaceField<Pack> burgers_fluxes(const FieldType& solution)
     SimpleFluid::FaceField<Pack> fluxes(solution.mesh_ptr(), "burgers_flux");
     fluxes.put_scalar(0.0);
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh.num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh.num_faces());
          ++fid)
     {
         if (!fluxes.is_owned_face(fid))
@@ -298,8 +298,8 @@ SimpleFluid::FaceField<Pack> burgers_transport_fluxes(
                                         "burgers_transport_flux");
     fluxes.put_scalar(0.0);
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh.num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh.num_faces());
          ++fid)
     {
         if (!fluxes.is_owned_face(fid))
@@ -337,8 +337,8 @@ SimpleFluid::FaceField<Pack> viscous_burgers_transport_fluxes(
                                         "viscous_burgers_transport_flux");
     fluxes.put_scalar(0.0);
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh.num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh.num_faces());
          ++fid)
     {
         if (!fluxes.is_owned_face(fid))
@@ -386,8 +386,8 @@ FieldType advance_burgers_explicit(const FieldType& old_solution,
     const auto fluxes = burgers_fluxes(old_solution);
     FieldType new_solution(old_solution.mesh_ptr(), "burgers_next");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh.num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh.num_owned_cells());
          ++lid)
     {
         const auto balance =
@@ -480,8 +480,8 @@ FieldType solve_viscous_burgers_semi_implicit(
     return new_solution;
 }
 
-bool cell_has_exterior_face(const MeshType& mesh,
-                            MeshType::local_ordinal_type cell_lid)
+bool cell_has_exterior_face(const Mesh& mesh,
+                            Mesh::local_ordinal_type cell_lid)
 {
     for (const auto face_lid : mesh.faces(cell_lid))
     {
@@ -502,8 +502,8 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
     auto mesh = make_unit_box_mesh();
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_owned_face(fid))
@@ -538,8 +538,8 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     bool saw_triangular_face = false;
     size_t boundary_cells = 0;
     size_t interior_cells = 0;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
@@ -555,8 +555,8 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     }
 
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "skewed_face_velocity");
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         saw_triangular_face =
@@ -593,8 +593,8 @@ TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
     auto mesh = make_taylor_green_mesh();
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "taylor_green");
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_owned_face(fid))
@@ -627,8 +627,8 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
     auto mesh = make_unit_box_mesh();
     FieldType old_values(mesh, "old_values");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(lid, affine_scalar(mesh->cell_centroid(lid)));
@@ -664,8 +664,8 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
         options));
 
     const auto data = solution.getData();
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         EXPECT_NEAR(data[static_cast<size_t>(lid)],
@@ -682,8 +682,8 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
     auto mesh = make_unit_box_mesh();
     FieldType old_values(mesh, "old_values");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(lid, affine_scalar(mesh->cell_centroid(lid)));
@@ -702,7 +702,7 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
         return affine_scalar(point) + time_step * scalar_source(point);
     };
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+        [&](Mesh::local_ordinal_type cell_lid) -> Pack::scalar_type
     {
         return scalar_source(mesh->cell_centroid(cell_lid));
     };
@@ -758,8 +758,8 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
                                                source_value, diffusivity);
     };
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(lid, exact(mesh->cell_centroid(lid)));
@@ -780,7 +780,7 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
         return exact(mesh->face_centroid(face_lid));
     };
     auto source =
-        [=](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [=](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return source_value;
     };
@@ -834,7 +834,7 @@ TEST(FvmAnalyticalSolutionsTest, OrthogonalPoissonMatchesManufacturedQuadratic)
         return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
     };
     auto source =
-        [=](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [=](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return source_value;
     };
@@ -886,7 +886,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorOrthogonalPoissonMatchesManufacturedQuadr
         return {SimpleFluid::BoundaryConditionType::Neumann, {}};
     };
     auto source =
-        [&](MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
+        [&](Mesh::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
     {
         return source_value;
     };
@@ -928,7 +928,7 @@ TEST(FvmAnalyticalSolutionsTest, ExplicitNonOrthogonalCorrectorsConvergeOnSheare
     constexpr double diffusivity = 1.0;
     constexpr double source_value = -2.0 * diffusivity;
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return source_value;
     };
@@ -985,7 +985,7 @@ TEST(FvmAnalyticalSolutionsTest, NonOrthogonalTreatmentsConvergeOnShearedQuadrat
     constexpr double diffusivity = 1.0;
     constexpr double source_value = -2.0 * diffusivity;
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return source_value;
     };
@@ -1065,8 +1065,8 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
     auto mesh = make_unit_box_mesh();
     VectorFieldType old_values(mesh, "old_values");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(lid, affine_vector(mesh->cell_centroid(lid)));
@@ -1086,7 +1086,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
         return affine_vector(point) + vector_source(point) * time_step;
     };
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid)
+        [&](Mesh::local_ordinal_type cell_lid)
             -> SimpleFluid::vec3<Pack::scalar_type>
     {
         return vector_source(mesh->cell_centroid(cell_lid));

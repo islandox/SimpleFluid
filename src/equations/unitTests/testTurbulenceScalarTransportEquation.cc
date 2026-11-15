@@ -48,7 +48,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using Equation = SimpleFluid::TurbulenceScalarTransportEquation<Pack>;
 
@@ -57,24 +57,24 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_single_cell_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
 }
 
-SimpleFluid::SP<MeshType> make_two_cell_mesh()
+SimpleFluid::SP<Mesh> make_two_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
 }
 
-SimpleFluid::SP<MeshType> make_2x2x2_mesh()
+SimpleFluid::SP<Mesh> make_2x2x2_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_2x2x2_database());
 }
 
 Equation::scalar_provider_type zero_provider()
 {
-    return [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
+    return [](Mesh::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
 }
 
 /** @brief Verifies accepted-state advance with an explicit source and implicit sink. */
@@ -86,8 +86,8 @@ TEST(TurbulenceScalarTransportEquationTest, AdvancesAcceptedStateWithExplicitSou
     SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
     Equation equation(mesh);
 
-    const Equation::scalar_provider_type source = [](MeshType::local_ordinal_type) { return 3.0; };
-    const Equation::scalar_provider_type sink = [](MeshType::local_ordinal_type) { return 4.0; };
+    const Equation::scalar_provider_type source = [](Mesh::local_ordinal_type) { return 3.0; };
+    const Equation::scalar_provider_type sink = [](Mesh::local_ordinal_type) { return 4.0; };
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
 
@@ -164,7 +164,7 @@ TEST(TurbulenceScalarTransportEquationTest, AppliesPositiveFloorAfterStrongImpli
     FieldType diffusivity(mesh, 0.0, "diffusivity");
     SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
     Equation equation(mesh);
-    const Equation::scalar_provider_type sink = [](MeshType::local_ordinal_type) { return 1.0e9; };
+    const Equation::scalar_provider_type sink = [](Mesh::local_ordinal_type) { return 1.0e9; };
 
     const auto statistics =
         equation.advance(state, zero_flux, 1.0, diffusivity, state, zero_provider(), sink, 1.0e-6);
@@ -182,11 +182,11 @@ TEST(TurbulenceScalarTransportEquationTest, RejectsInvalidInputsWithoutPublishin
     FieldType diffusivity(mesh, 0.1, "diffusivity");
     SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
     Equation equation(mesh);
-    const Equation::scalar_provider_type negative_source = [](MeshType::local_ordinal_type)
+    const Equation::scalar_provider_type negative_source = [](Mesh::local_ordinal_type)
     { return -1.0; };
-    const Equation::scalar_provider_type negative_sink = [](MeshType::local_ordinal_type)
+    const Equation::scalar_provider_type negative_sink = [](Mesh::local_ordinal_type)
     { return -1.0; };
-    const Equation::scalar_provider_type infinite_source = [](MeshType::local_ordinal_type)
+    const Equation::scalar_provider_type infinite_source = [](Mesh::local_ordinal_type)
     { return std::numeric_limits<double>::infinity(); };
 
     EXPECT_THROW(equation.advance(old_state, zero_flux, 0.1, diffusivity, accepted_state,
@@ -225,14 +225,14 @@ TEST(TurbulenceScalarTransportEquationTest, LinearSolveRejectionPreservesAliased
     std::vector<Pack::scalar_type> accepted(mesh->num_local_cells());
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto value = 1.0 + static_cast<double>(owned * owned);
         state.set_owned_value(cell_lid, value);
     }
     state.sync_ghosts();
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
-        accepted[local] = state.local_value(static_cast<MeshType::local_ordinal_type>(local));
+        accepted[local] = state.local_value(static_cast<Mesh::local_ordinal_type>(local));
     }
 
     FieldType diffusivity(mesh, 1.0, "diffusivity");
@@ -256,7 +256,7 @@ TEST(TurbulenceScalarTransportEquationTest, LinearSolveRejectionPreservesAliased
 
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
-        EXPECT_DOUBLE_EQ(state.local_value(static_cast<MeshType::local_ordinal_type>(local)),
+        EXPECT_DOUBLE_EQ(state.local_value(static_cast<Mesh::local_ordinal_type>(local)),
                          accepted[local]);
     }
 }
@@ -268,7 +268,7 @@ TEST(TurbulenceScalarTransportEquationTest, RebuildsCachedGraphWhenNonOrthogonal
     FieldType state(mesh, "state");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        state.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned),
+        state.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned),
                               1.0 + static_cast<double>(owned));
     }
     state.sync_ghosts();
@@ -313,8 +313,8 @@ TEST(TurbulenceScalarTransportEquationTest, ExtrapolatesNeumannDataForAdvectiveB
     FieldType state(mesh, 1.0, "state");
     FieldType diffusivity(mesh, 0.0, "diffusivity");
     SimpleFluid::FaceField<Pack> face_flux(mesh, 0.0, "face_flux");
-    MeshType::local_ordinal_type xmin_face = -1;
-    MeshType::local_ordinal_type xmax_face = -1;
+    Mesh::local_ordinal_type xmin_face = -1;
+    Mesh::local_ordinal_type xmax_face = -1;
     for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
         const auto& name = mesh->boundary_batch_name(batch_id);
@@ -377,7 +377,7 @@ TEST(TurbulenceScalarTransportEquationTest,
         std::invalid_argument);
 
     wall.allow_zero_dirichlet = true;
-    wall.fixed_cell_value = [](MeshType::local_ordinal_type)
+    wall.fixed_cell_value = [](Mesh::local_ordinal_type)
         -> std::optional<Pack::scalar_type>
     {
         return 2.5;
@@ -452,7 +452,7 @@ TEST(TurbulenceScalarTransportEquationTest, MixedRankDiffusivityAndChangedCoeffi
         SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
     FieldType old_state(mesh, "old_state");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-        old_state.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned),
+        old_state.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned),
             1.0 + 0.01 * static_cast<double>(mesh->owned_cell_map()->getGlobalElement(owned)));
     old_state.sync_ghosts();
     FieldType diffusivity(mesh, 0.2, "diffusivity");
@@ -470,7 +470,7 @@ TEST(TurbulenceScalarTransportEquationTest, MixedRankDiffusivityAndChangedCoeffi
         if (step == 2)
         {
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-                diffusivity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.7);
+                diffusivity.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 0.7);
             diffusivity.sync_ghosts();
         }
         const auto previous_setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused);
@@ -484,8 +484,8 @@ TEST(TurbulenceScalarTransportEquationTest, MixedRankDiffusivityAndChangedCoeffi
             SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, linear_options).converged);
         EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused), previous_setups);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-            EXPECT_NEAR(state.value(static_cast<MeshType::local_ordinal_type>(owned)),
-                fresh_state.value(static_cast<MeshType::local_ordinal_type>(owned)), 1.0e-9);
+            EXPECT_NEAR(state.value(static_cast<Mesh::local_ordinal_type>(owned)),
+                fresh_state.value(static_cast<Mesh::local_ordinal_type>(owned)), 1.0e-9);
     }
 }
 
@@ -502,14 +502,14 @@ TEST(TurbulenceScalarTransportEquationTest, EmptyOwnedRanksParticipateInImplicit
         if (step == 2)
         {
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-                diffusivity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.2);
+                diffusivity.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 0.2);
             diffusivity.sync_ghosts();
         }
         EXPECT_TRUE(equation.advance(old_state, flux, 0.1, diffusivity, state,
             zero_provider(), zero_provider(), 1.0e-12,
             SimpleFluid::FVM::NonOrthogonalTreatment::Implicit).converged);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-            EXPECT_NEAR(state.value(static_cast<MeshType::local_ordinal_type>(owned)), 1.0, 1.0e-12);
+            EXPECT_NEAR(state.value(static_cast<Mesh::local_ordinal_type>(owned)), 1.0, 1.0e-12);
     }
 }
 

@@ -31,14 +31,14 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Factory = SimpleFluid::MeshReorderingFactory<Pack>;
 using Subdomain = SimpleFluid::SolidSubdomain<Pack>;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using LocalOrdinal = Pack::local_ordinal_type;
 using GlobalOrdinal = Pack::global_ordinal_type;
-using Vec3 = Handle::Vec3;
+using Vec3 = Mesh::Vec3;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
@@ -67,33 +67,33 @@ bool in_tube(const Vec3& center)
     return radius >= 2.0 && radius < 4.0;
 }
 
-SimpleFluid::SP<Handle> make_box_parent()
+SimpleFluid::SP<Mesh> make_box_parent()
 {
     auto mesh = std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{
         {{-2.0, -1.0, 0.0, 1.0, 2.0}, {-2.0, -1.0, 0.0, 1.0, 2.0}, {0.0, 1.0, 2.0}}});
-    return std::make_shared<Handle>(std::move(mesh));
+    return std::make_shared<Mesh>(std::move(mesh));
 }
 
-SimpleFluid::SP<Handle> make_cylinder_parent()
+SimpleFluid::SP<Mesh> make_cylinder_parent()
 {
     auto mesh = std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{
         {{-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0}, {-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0}, {0.0, 1.0, 2.0}}});
-    return std::make_shared<Handle>(std::move(mesh));
+    return std::make_shared<Mesh>(std::move(mesh));
 }
 
-SimpleFluid::SP<Handle> make_tube_parent()
+SimpleFluid::SP<Mesh> make_tube_parent()
 {
     constexpr auto pi = std::numbers::pi_v<double>;
     auto mesh = std::make_shared<Cylindrical>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{
         {{1.0, 2.0, 3.0, 4.0, 5.0}, {0.0, 0.5 * pi, pi, 1.5 * pi, 2.0 * pi}, {0.0, 1.0, 2.0}}});
-    return std::make_shared<Handle>(std::move(mesh));
+    return std::make_shared<Mesh>(std::move(mesh));
 }
 
-SimpleFluid::SP<Handle> make_partitioned_line_parent()
+SimpleFluid::SP<Mesh> make_partitioned_line_parent()
 {
     auto mesh = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0, 4.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    return std::make_shared<Handle>(std::move(mesh));
+    return std::make_shared<Mesh>(std::move(mesh));
 }
 
 struct CellIdentity
@@ -105,7 +105,7 @@ struct CellIdentity
     std::vector<GlobalOrdinal> face_gids;
 };
 
-std::map<GlobalOrdinal, CellIdentity> capture_cells(const Handle& mesh)
+std::map<GlobalOrdinal, CellIdentity> capture_cells(const Mesh& mesh)
 {
     std::map<GlobalOrdinal, CellIdentity> cells;
     for (size_t index = 0; index < mesh.num_local_cells(); ++index)
@@ -125,7 +125,7 @@ std::map<GlobalOrdinal, CellIdentity> capture_cells(const Handle& mesh)
     return cells;
 }
 
-void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before, const Handle& reordered)
+void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before, const Mesh& reordered)
 {
     ASSERT_EQ(reordered.num_local_cells(), before.size());
     for (size_t index = 0; index < reordered.num_local_cells(); ++index)
@@ -168,7 +168,7 @@ void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before,
     }
 }
 
-std::optional<LocalOrdinal> find_x_face(const Handle& mesh, double x)
+std::optional<LocalOrdinal> find_x_face(const Mesh& mesh, double x)
 {
     for (size_t index = 0; index < mesh.num_faces(); ++index)
     {
@@ -249,8 +249,8 @@ TEST(MeshReorderingFactoryTest, RejectsOverlapWithoutCommunicatorOwner)
 {
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0, 4.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    auto parent = std::make_shared<Handle>(
-        std::move(geometry), Handle::DistributionOptions{.ghost_layers = 1, .partition = 0, .partitions = 2});
+    auto parent = std::make_shared<Mesh>(
+        std::move(geometry), Mesh::DistributionOptions{.ghost_layers = 1, .partition = 0, .partitions = 2});
 
     EXPECT_THROW(static_cast<void>(
                      Factory::selected_cells_first(std::move(parent), [](GlobalOrdinal, const Vec3&) { return true; })),
@@ -293,7 +293,7 @@ TEST(MeshReorderingFactoryTest, BoxSelectionIsStableAndPreservesMeshIdentity)
 TEST(MeshReorderingFactoryTest, ReordersFactoryStorageWithoutChangingGeometryIdentity)
 {
     const auto factory_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto parent = std::make_shared<Handle>(*factory_mesh);
+    auto parent = std::make_shared<Mesh>(*factory_mesh);
     const auto* parent_address = parent.get();
     const auto before = capture_cells(*parent);
 
@@ -303,7 +303,7 @@ TEST(MeshReorderingFactoryTest, ReordersFactoryStorageWithoutChangingGeometryIde
     ASSERT_TRUE(layout.mesh);
     EXPECT_FALSE(parent);
     EXPECT_EQ(layout.mesh.get(), parent_address);
-    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(layout.mesh->variant()));
+    EXPECT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(layout.mesh->variant()));
     EXPECT_EQ(layout.selected_owned_cells, 1U);
     EXPECT_EQ(layout.selected_ghost_cells, 0U);
     EXPECT_GT(layout.mesh->cell_centroid(0).x, 1.0);
@@ -320,7 +320,7 @@ TEST(MeshReorderingFactoryTest, ReordersFactoryStorageWithoutChangingGeometryIde
 TEST(MeshReorderingFactoryTest, ReordersUnstructuredStorageAndIndexerTogether)
 {
     const auto geometry = SimpleFluid::test::make_unstructured_hex_line(2);
-    auto parent = std::make_shared<Handle>(geometry);
+    auto parent = std::make_shared<Mesh>(geometry);
     const auto* parent_address = parent.get();
     const auto before = capture_cells(*parent);
     const auto expected_first_gid = parent->indexer().cell_global_id(1);
@@ -331,7 +331,7 @@ TEST(MeshReorderingFactoryTest, ReordersUnstructuredStorageAndIndexerTogether)
     ASSERT_TRUE(layout.mesh);
     EXPECT_FALSE(parent);
     EXPECT_EQ(layout.mesh.get(), parent_address);
-    EXPECT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(layout.mesh->variant()));
+    EXPECT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(layout.mesh->variant()));
     EXPECT_EQ(layout.selected_owned_cells, 1U);
     EXPECT_GT(layout.mesh->cell_centroid(0).x, 1.0);
     expect_cells_preserved(before, *layout.mesh);
@@ -352,7 +352,7 @@ TEST(MeshReorderingFactoryTest, SparseSelectionMapsOnlyRetainedFaces)
     }
     auto geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{std::move(x_edges), {0.0, 1.0}, {0.0, 1.0}}});
-    auto parent = std::make_shared<Handle>(std::move(geometry));
+    auto parent = std::make_shared<Mesh>(std::move(geometry));
     const auto layout = Factory::selected_cells_first(
         std::move(parent), [](GlobalOrdinal, const Vec3& center) { return center.x >= 510.0 && center.x < 513.0; });
     const Subdomain solid(layout);
@@ -638,13 +638,13 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
             }
         const SimpleFluid::ArrReal z = sparse_slab ? SimpleFluid::ArrReal{0, .8} : SimpleFluid::ArrReal{0, .2, .9, 1.7};
         const auto geometry = std::make_shared<Native>(points, polygons, z);
-        Handle::DistributionOptions options;
+        Mesh::DistributionOptions options;
         options.allow_empty_partitions = true;
         options.ghost_layers = 1;
         const auto ranks = std::size_t(comm->getSize());
         options.xy_partitions = sparse_slab ? 1 : (ranks >= 2 && ranks % 2 == 0 ? 2 : ranks);
         options.z_partitions = ranks / *options.xy_partitions;
-        auto parent = std::make_shared<Handle>(geometry, options);
+        auto parent = std::make_shared<Mesh>(geometry, options);
         EXPECT_TRUE(parent->owned_cell_map()->isContiguous());
         EXPECT_TRUE(parent->owned_face_map()->isContiguous());
         int local_empty = parent->num_owned_cells() == 0 ? 1 : 0, empty = 0;
@@ -652,7 +652,7 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
         if (sparse_slab)
             EXPECT_EQ(empty, comm->getSize() - 1);
 
-        const auto reorder = [&](SimpleFluid::SP<Handle> input)
+        const auto reorder = [&](SimpleFluid::SP<Mesh> input)
         {
             const auto before = capture_cells(*input);
             std::vector<GlobalOrdinal> previous_owned_gids;
@@ -714,7 +714,7 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
         const auto first = reorder(std::move(parent));
         // A fresh mutable handle copy owns the already selected overlay. The
         // second selection must compose it, while the first handle stays valid.
-        auto repeated = std::make_shared<Handle>(*first.mesh);
+        auto repeated = std::make_shared<Mesh>(*first.mesh);
         const auto second = reorder(std::move(repeated));
         expect_cells_preserved(original, *second.mesh);
         expect_cells_preserved(original, *first.mesh);
@@ -733,13 +733,13 @@ TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometr
             SCOPED_TRACE(::testing::Message() << "cylindrical=" << cylindrical << " sparse_slab=" << sparse_slab);
             const SimpleFluid::Vec3D<SimpleFluid::ArrReal> edges{{{1., 1.2, 1.7, 2.1, 3.}, {0., .2, .6, 1.1, 1.5},
                 sparse_slab ? SimpleFluid::ArrReal{0., 1.7} : SimpleFluid::ArrReal{0., .2, .7, 1.1, 1.7}}};
-            Handle::DistributionOptions options;
+            Mesh::DistributionOptions options;
             options.allow_empty_partitions = true;
             options.orthogonal_partitions =
                 sparse_slab ? std::array<std::size_t, 3>{1, 1, ranks}
                             : std::array<std::size_t, 3>{2, ranks >= 4 ? 2U : 1U, ranks == 8 ? 2U : 1U};
-            auto parent = cylindrical ? std::make_shared<Handle>(std::make_shared<Cylindrical>(edges), options)
-                                      : std::make_shared<Handle>(std::make_shared<Cartesian>(edges), options);
+            auto parent = cylindrical ? std::make_shared<Mesh>(std::make_shared<Cylindrical>(edges), options)
+                                      : std::make_shared<Mesh>(std::make_shared<Cartesian>(edges), options);
             EXPECT_TRUE(parent->owned_cell_map()->isContiguous());
             EXPECT_TRUE(parent->owned_face_map()->isContiguous());
             EXPECT_TRUE(parent->owned_cell_map()->isOneToOne());
@@ -842,7 +842,7 @@ TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometr
                 verify_import(false);
             };
             verify_layout(first);
-            auto copy = std::make_shared<Handle>(*first.mesh);
+            auto copy = std::make_shared<Mesh>(*first.mesh);
             const auto second = Factory::selected_cells_first(std::move(copy), selected);
             verify_layout(second);
             verify_layout(first);

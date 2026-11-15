@@ -45,7 +45,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -55,7 +55,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the shared single-cell fixture mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_single_cell_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
@@ -95,7 +95,7 @@ make_native_distributed_line_mesh()
  * @return Initialized water-property fields.
  */
 SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
-    const SimpleFluid::SP<MeshType>& mesh)
+    const SimpleFluid::SP<Mesh>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -664,7 +664,7 @@ TEST(BoilingSourceModelTest, GloballyReducesAcceptedEvaporationMass)
     double local_volume = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        local_volume += mesh->cell_volume(static_cast<MeshType::local_ordinal_type>(owned));
+        local_volume += mesh->cell_volume(static_cast<Mesh::local_ordinal_type>(owned));
     }
     double global_volume = 0.0;
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_volume, &global_volume);
@@ -741,7 +741,7 @@ TEST(ScalarVoidFractionModelTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         initial_alpha.set_owned_value(
             cell_lid,
             mesh->cell_centroid(cell_lid).x < 1.0 ? 0.12 : 0.34);
@@ -754,7 +754,7 @@ TEST(ScalarVoidFractionModelTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto expected =
             mesh->cell_centroid(cell_lid).x < 1.0 ? 0.12 : 0.34;
         EXPECT_DOUBLE_EQ(model.alpha_g().value(cell_lid), expected);
@@ -779,7 +779,7 @@ TEST(ScalarVoidFractionModelTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         initial_alpha.set_owned_value(
             cell_lid,
             mesh->cell_centroid(cell_lid).x < 0.5 ? 0.8 : 0.1);
@@ -793,7 +793,7 @@ TEST(ScalarVoidFractionModelTest,
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Mesh::local_ordinal_type>(owned);
             local_integral +=
                 field.value(cell_lid) * mesh->cell_volume(cell_lid);
         }
@@ -817,7 +817,7 @@ TEST(ScalarVoidFractionModelTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto alpha = model.alpha_g().value(cell_lid);
         local_minimum = std::min(local_minimum, alpha);
         local_maximum = std::max(local_maximum, alpha);
@@ -1338,7 +1338,7 @@ TEST(MaterialFeedbackModelTest, BoussinesqVoidDensityAndFloors)
     auto material = make_water_properties(mesh);
     FieldType temperature(mesh, 310.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
+    VelocityFieldType velocity(mesh, Mesh::Vec3{}, "velocity");
     FieldType alpha(mesh, 0.25, "alpha_g");
 
     SimpleFluid::BoussinesqUpdateContext<Pack> context{
@@ -1559,11 +1559,11 @@ TEST(ScalarSourceDecayTransportTest,
     constexpr double time_step = 0.2;
     model.advance(time_step, alpha_l, nullptr);
 
-    MeshType::local_ordinal_type interior_face = -1;
+    Mesh::local_ordinal_type interior_face = -1;
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (mesh->is_interior_face(face_lid))
         {
             interior_face = face_lid;
@@ -1611,7 +1611,7 @@ TEST(ScalarSourceDecayTransportTest,
         model.liquid_inventory(0).value(0) * mesh->cell_volume(0)
       + model.liquid_inventory(0).value(1) * mesh->cell_volume(1);
     EXPECT_NEAR(inventory_after, inventory_before, 1.0e-11);
-    for (MeshType::local_ordinal_type cell_lid = 0; cell_lid < 2; ++cell_lid)
+    for (Mesh::local_ordinal_type cell_lid = 0; cell_lid < 2; ++cell_lid)
     {
         EXPECT_NEAR(
             model.liquid_inventory(0).value(cell_lid),
@@ -1874,7 +1874,7 @@ TEST(ScalarSourceDecayTransportTest, BoundaryOutflowClosesInventoryBalance)
     SimpleFluid::FaceField<Pack> liquid_flux(
         mesh, 0.0, "liquid_face_flux");
 
-    MeshType::local_ordinal_type outlet = -1;
+    Mesh::local_ordinal_type outlet = -1;
     for (const auto& [batch_id, batch] : mesh->boundary_batches())
     {
         static_cast<void>(batch_id);
@@ -1914,8 +1914,8 @@ TEST(ScalarSourceDecayTransportTest,
     SimpleFluid::ScalarSourceDecayTransport<Pack> model(mesh, options);
     FieldType alpha_l(mesh, 0.6, "alpha_l");
     FieldType additional_source(mesh, "scalar_inventory_source");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -1929,8 +1929,8 @@ TEST(ScalarSourceDecayTransportTest,
     model.advance(0.05, alpha_l, &additional_source);
 
     FieldType old_concentration(mesh, "scalar_group_old_concentration");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -1947,7 +1947,7 @@ TEST(ScalarSourceDecayTransportTest,
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Mesh::local_ordinal_type>(owned);
             for (const auto face_lid : mesh->faces(cell_lid))
             {
                 if (!mesh->is_interior_face(face_lid))
@@ -1995,7 +1995,7 @@ TEST(ScalarSourceDecayTransportTest,
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Mesh::local_ordinal_type>(owned);
             local_inventory +=
                 model.liquid_inventory(0).value(cell_lid)
               * mesh->cell_volume(cell_lid);
@@ -2028,12 +2028,12 @@ TEST(ScalarSourceDecayTransportTest,
         return 0.0;
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
     constexpr double time_step = 0.05;
-    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, MeshType>;
+    using Factory = SimpleFluid::FVM::TransportSystemFactory<Pack, Mesh>;
     const Factory::WeightedScalarTerms terms{
         {old_concentration, time_step}, zero_flux, {alpha_l, alpha_l, diffusion_weight}, {zero_source}};
     const Factory::WeightedScalarBoundary boundary{boundary_condition, boundary_value};
@@ -2063,8 +2063,8 @@ TEST(ScalarSourceDecayTransportTest,
 
     double max_non_orthogonal_effect = 0.0;
     double max_corrected_error = 0.0;
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {

@@ -44,7 +44,7 @@ namespace
 using Pack = SimpleFluid::TpetraTypes<>;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
@@ -115,7 +115,7 @@ TEST(FvmOperatorDetailsTest,
         SimpleFluid::FVM::detail::packed_face_local_id(mesh, 5), 5U);
 }
 
-SimpleFluid::SP<MeshType> make_mesh()
+SimpleFluid::SP<Mesh> make_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
@@ -138,8 +138,8 @@ make_native_distributed_line_mesh()
 std::vector<Pack::scalar_type> local_values(const FieldType& field)
 {
     std::vector<Pack::scalar_type> values(field.num_local_cells());
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(field.num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(field.num_local_cells());
          ++lid)
     {
         values[static_cast<size_t>(lid)] = field.local_value(lid);
@@ -147,7 +147,7 @@ std::vector<Pack::scalar_type> local_values(const FieldType& field)
     return values;
 }
 
-MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
+Mesh::local_ordinal_type boundary_face_lid(const Mesh& mesh,
                                                const char* boundary_name)
 {
     for (const auto& [batch_id, batch] : mesh.boundary_batches())
@@ -162,7 +162,7 @@ MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
     if (std::string_view(boundary_name) == "xmin" || std::string_view(boundary_name) == "xmax")
         for (size_t local = 0; local < mesh.num_faces(); ++local)
         {
-            const auto face = static_cast<MeshType::local_ordinal_type>(local);
+            const auto face = static_cast<Mesh::local_ordinal_type>(local);
             if (mesh.is_periodic_face(face)) return face;
         }
     throw std::runtime_error("Requested boundary face was not found.");
@@ -170,8 +170,8 @@ MeshType::local_ordinal_type boundary_face_lid(const MeshType& mesh,
 
 Pack::scalar_type local_matrix_entry(
     const Pack::matrix_type& matrix,
-    MeshType::local_ordinal_type row,
-    MeshType::local_ordinal_type column)
+    Mesh::local_ordinal_type row,
+    Mesh::local_ordinal_type column)
 {
     const auto row_entries = matrix.getNumEntriesInLocalRow(row);
     typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
@@ -198,8 +198,8 @@ std::vector<Pack::scalar_type> local_matrix_action(
     const FieldType& field)
 {
     std::vector<Pack::scalar_type> result(field.num_owned_cells(), 0.0);
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(field.num_owned_cells());
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(field.num_owned_cells());
          ++row)
     {
         const auto row_entries = matrix.getNumEntriesInLocalRow(row);
@@ -236,8 +236,8 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     auto mesh = make_mesh();
     FieldType phi(mesh, "phi");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto& c = mesh->cell_centroid(lid);
@@ -250,7 +250,7 @@ TEST(FvmOperatorsTest, RecoversLinearCellGradientOnStructuredBox)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto gradient = gradients.value(
-            static_cast<MeshType::local_ordinal_type>(owned));
+            static_cast<Mesh::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient.x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient.y, 3.0, 1.0e-12);
         EXPECT_NEAR(gradient.z, 4.0, 1.0e-12);
@@ -264,8 +264,8 @@ TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
         SimpleFluid::test::make_box_database(3, 3, 1, 0.25));
     FieldType phi(mesh, "planar_phi");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
                    mesh->num_owned_cells());
          ++lid)
     {
@@ -280,7 +280,7 @@ TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto gradient = gradients.value(
-            static_cast<MeshType::local_ordinal_type>(owned));
+            static_cast<Mesh::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient.x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient.y, -3.0, 1.0e-12);
         EXPECT_NEAR(gradient.z, 0.0, 1.0e-12);
@@ -290,15 +290,15 @@ TEST(FvmOperatorsTest, RecoversInPlaneGradientOnOneCellThickBox)
 /** @brief Verifies the normal-system solver handles a rank-deficient oblique plane. */
 TEST(FvmOperatorsTest, SolvesRankDeficientNormalSystemInObliquePlane)
 {
-    const MeshType::Vec3 first_direction{1.0, 0.0, 1.0};
-    const MeshType::Vec3 second_direction{0.0, 1.0, 1.0};
-    const MeshType::Vec3 expected =
+    const Mesh::Vec3 first_direction{1.0, 0.0, 1.0};
+    const Mesh::Vec3 second_direction{0.0, 1.0, 1.0};
+    const Mesh::Vec3 expected =
         first_direction * 2.0 - second_direction * 3.0;
 
     std::array<std::array<SimpleFluid::real_t, 3>, 3> normal{};
-    MeshType::Vec3 rhs{};
+    Mesh::Vec3 rhs{};
     for (const auto& direction :
-         std::array<MeshType::Vec3, 2>{
+         std::array<Mesh::Vec3, 2>{
              first_direction, second_direction})
     {
         for (size_t row = 0; row < 3; ++row)
@@ -329,8 +329,8 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, "velocity");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto& c = mesh->cell_centroid(lid);
@@ -346,7 +346,7 @@ TEST(FvmOperatorsTest, RecoversLinearVectorCellGradientOnStructuredBox)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto gradient = gradients.value(
-            static_cast<MeshType::local_ordinal_type>(owned));
+            static_cast<Mesh::local_ordinal_type>(owned));
         EXPECT_NEAR(gradient[0].x, 2.0, 1.0e-12);
         EXPECT_NEAR(gradient[0].y, -3.0, 1.0e-12);
         EXPECT_NEAR(gradient[0].z, 4.0, 1.0e-12);
@@ -367,9 +367,9 @@ TEST(FvmOperatorsTest,
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
-    auto affine_value = [](const MeshType::Vec3& point)
+    auto affine_value = [](const Mesh::Vec3& point)
     {
-        return MeshType::Vec3{
+        return Mesh::Vec3{
             1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z,
             -2.0 + point.x + 0.5 * point.y - 1.5 * point.z,
             3.0 - 4.0 * point.x + 2.0 * point.y + point.z};
@@ -382,7 +382,7 @@ TEST(FvmOperatorsTest,
     SimpleFluid::FVM::cell_gradient(velocity, cell_only_gradients);
     for (const auto& component : cell_only_gradients.value(0))
     {
-        EXPECT_EQ(component, MeshType::Vec3{});
+        EXPECT_EQ(component, Mesh::Vec3{});
     }
 
     auto boundary_value = [&](int batch_id, size_t in_batch_id)
@@ -412,14 +412,14 @@ TEST(FvmOperatorsTest, GaussLinearRecoversAffineBoundaryGradients)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
-    auto scalar_value = [](const MeshType::Vec3& point)
+    auto scalar_value = [](const Mesh::Vec3& point)
     {
         return 0.25 + 2.0 * point.x
              - 3.0 * point.y + 4.0 * point.z;
     };
-    auto vector_value = [](const MeshType::Vec3& point)
+    auto vector_value = [](const Mesh::Vec3& point)
     {
-        return MeshType::Vec3{
+        return Mesh::Vec3{
             1.0 + 2.0 * point.x - 3.0 * point.y + 4.0 * point.z,
             -2.0 + point.x + 0.5 * point.y - 1.5 * point.z,
             3.0 - 4.0 * point.x + 2.0 * point.y + point.z};
@@ -521,8 +521,8 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     FieldType phi(mesh, "phi");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         phi.set_value(lid, nonlinear_scalar(mesh->cell_centroid(lid)));
@@ -537,7 +537,7 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
     ASSERT_EQ(stencils.size(), gradients.num_owned_cells());
     for (size_t row = 0; row < stencils.size(); ++row)
     {
-        MeshType::Vec3 reconstructed{};
+        Mesh::Vec3 reconstructed{};
         for (const auto& entry : stencils[row])
         {
             const auto value = phi.local_value(entry.cell_lid);
@@ -545,7 +545,7 @@ TEST(FvmOperatorsTest, LeastSquaresGradientStencilMatchesCellGradient)
         }
 
         const auto gradient = gradients.value(
-            static_cast<MeshType::local_ordinal_type>(row));
+            static_cast<Mesh::local_ordinal_type>(row));
         EXPECT_NEAR(reconstructed.x, gradient.x, 1.0e-12);
         EXPECT_NEAR(reconstructed.y, gradient.y, 1.0e-12);
         EXPECT_NEAR(reconstructed.z, gradient.z, 1.0e-12);
@@ -576,7 +576,7 @@ TEST(FvmOperatorsTest,
     auto reconstruct = [&](bool use_normal_distance)
     {
         std::array<std::array<SimpleFluid::real_t, 3>, 3> normal{};
-        MeshType::Vec3 rhs{};
+        Mesh::Vec3 rhs{};
         for (const auto face_lid : mesh->faces(target_cell))
         {
             const auto direction =
@@ -634,8 +634,8 @@ TEST(FvmOperatorsTest,
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     FieldType pressure(mesh, "pressure");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
                    mesh->num_owned_cells());
          ++lid)
     {
@@ -663,7 +663,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         maximum_map_difference = std::max(
             maximum_map_difference,
             (empty_gradient.value(cell_lid)
@@ -690,7 +690,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
         return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
     };
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -702,8 +702,8 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixExpandsGradientGraph)
             *mesh, 0.5, boundary_condition, source, &correction);
 
     bool saw_expanded_row = false;
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++row)
     {
         if (implicit.matrix->getNumEntriesInLocalRow(row)
@@ -743,7 +743,7 @@ TEST(FvmOperatorsTest,
         return {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
     };
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -820,17 +820,17 @@ TEST(FvmOperatorsTest,
         return 0.0;
     };
     auto scalar_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
     auto vector_boundary_value =
-        [](int, size_t) -> MeshType::Vec3
+        [](int, size_t) -> Mesh::Vec3
     {
         return {};
     };
     auto vector_source =
-        [](MeshType::local_ordinal_type) -> MeshType::Vec3
+        [](Mesh::local_ordinal_type) -> Mesh::Vec3
     {
         return {};
     };
@@ -911,12 +911,12 @@ TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradi
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [](int, MeshType::local_ordinal_type)
+        [](int, Mesh::local_ordinal_type)
     {
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };
     auto source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return SimpleFluid::vec3<Pack::scalar_type>{};
     };
@@ -942,8 +942,8 @@ TEST(FvmOperatorsTest, VectorTransportImplicitNonOrthogonalDiffusionExpandsGradi
         {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit}}, {});
 
     bool saw_expanded_row = false;
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++row)
     {
         if (implicit.matrix->getNumEntriesInLocalRow(row)
@@ -963,7 +963,7 @@ TEST(FvmOperatorsTest,
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     using GeometryCache =
-        SimpleFluid::FVM::TransportGeometryCache<MeshType>;
+        SimpleFluid::FVM::TransportGeometryCache<Mesh>;
     GeometryCache geometry_cache(*mesh);
 
     ASSERT_FALSE(geometry_cache.interior_stencils().empty());
@@ -1096,8 +1096,8 @@ TEST(FvmOperatorsTest,
     FieldType storage(mesh, 1.0, "cached_transport_storage");
     FieldType advection(mesh, 0.0, "cached_transport_advection");
     FieldType diffusivity(mesh, 0.7, "cached_transport_diffusivity");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -1110,14 +1110,14 @@ TEST(FvmOperatorsTest,
     SimpleFluid::FaceField<Pack> zero_fluxes(
         mesh, 0.0, "cached_transport_fluxes");
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
     using SinkProvider = std::function<Pack::scalar_type(
-        MeshType::local_ordinal_type)>;
+        Mesh::local_ordinal_type)>;
     using FixedValueProvider = std::function<std::optional<Pack::scalar_type>(
-        MeshType::local_ordinal_type)>;
+        Mesh::local_ordinal_type)>;
     auto assemble = [&](const GeometryCache* cache)
     {
         return TransportFactory<decltype(scalar)>::assemble(
@@ -1133,8 +1133,8 @@ TEST(FvmOperatorsTest,
     };
     auto expect_systems_equal = [&](const auto& expected, const auto& actual)
     {
-        for (MeshType::local_ordinal_type row = 0;
-             row < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type row = 0;
+             row < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_owned_cells());
              ++row)
         {
@@ -1142,8 +1142,8 @@ TEST(FvmOperatorsTest,
                 actual.rhs->getData()[row],
                 expected.rhs->getData()[row],
                 1.0e-12);
-            for (MeshType::local_ordinal_type column = 0;
-                 column < static_cast<MeshType::local_ordinal_type>(
+            for (Mesh::local_ordinal_type column = 0;
+                 column < static_cast<Mesh::local_ordinal_type>(
                      mesh->num_local_cells());
                  ++column)
             {
@@ -1192,8 +1192,8 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
     constexpr double diffusivity = 0.7;
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     FieldType phi(mesh, "phi");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         phi.set_value(lid, nonlinear_scalar(mesh->cell_centroid(lid)));
@@ -1210,7 +1210,7 @@ TEST(FvmOperatorsTest, ImplicitNonOrthogonalMatrixMatchesFullResidual)
                 nonlinear_scalar(mesh->face_centroid(face_lid))};
     };
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -1248,7 +1248,7 @@ TEST(FvmOperatorsTest, HybridNonOrthogonalSolveSupportsPartitionFaces)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         for (const auto face_lid : mesh->faces(cell_lid))
         {
             if (!mesh->is_interior_face(face_lid))
@@ -1274,7 +1274,7 @@ TEST(FvmOperatorsTest, HybridNonOrthogonalSolveSupportsPartitionFaces)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         solution.set_owned_value(
             cell_lid,
             nonlinear_scalar(mesh->cell_centroid(cell_lid)));
@@ -1292,7 +1292,7 @@ TEST(FvmOperatorsTest, HybridNonOrthogonalSolveSupportsPartitionFaces)
             nonlinear_scalar(mesh->face_centroid(face_lid))};
     };
     auto source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -1308,7 +1308,7 @@ TEST(FvmOperatorsTest, HybridNonOrthogonalSolveSupportsPartitionFaces)
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
         EXPECT_TRUE(std::isfinite(solution.local_value(
-            static_cast<MeshType::local_ordinal_type>(local))));
+            static_cast<Mesh::local_ordinal_type>(local))));
     }
 }
 
@@ -1341,8 +1341,8 @@ TEST(FvmOperatorsTest, FaceFluxesUseAllThreeVelocityComponents)
     bool saw_x_face = false;
     bool saw_y_face = false;
     bool saw_z_face = false;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_interior_face(fid))
@@ -1380,8 +1380,8 @@ TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, "velocity");
     FieldType pressure(mesh, "pressure");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
                    mesh->num_owned_cells());
          ++lid)
     {
@@ -1400,8 +1400,8 @@ TEST(FvmOperatorsTest, PressureWeightedFluxPreservesLinearPressure)
     SimpleFluid::FVM::pressure_weighted_face_fluxes(
         velocity, pressure, 0.1, cache, fluxes);
 
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -1432,7 +1432,7 @@ TEST(FvmOperatorsTest, PressureWeightedFluxAcceptsPrecomputedGradient)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(
             cell_lid,
@@ -1473,8 +1473,8 @@ TEST(FvmOperatorsTest, PressureWeightedFluxAcceptsPrecomputedGradient)
         reused_gradient_workspace,
         reused_gradient_fluxes);
 
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -1494,8 +1494,8 @@ TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
         SimpleFluid::test::make_4x4x4_database());
     VectorFieldType velocity(mesh, "velocity");
     FieldType pressure(mesh, "pressure");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
                    mesh->num_owned_cells());
          ++lid)
     {
@@ -1522,7 +1522,7 @@ TEST(FvmOperatorsTest, PressureWeightedFluxSuppressesCheckerboardMode)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto balance =
             SimpleFluid::FVM::cell_flux_balance<Pack>(
                 *mesh, fluxes, cell_lid);
@@ -1576,7 +1576,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(
             cell_lid,
@@ -1603,8 +1603,8 @@ TEST(FvmOperatorsTest,
         initial_boundary_locations);
 
     std::vector<Pack::scalar_type> first_fluxes(mesh->num_faces());
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -1616,8 +1616,8 @@ TEST(FvmOperatorsTest,
     }
     std::vector<SimpleFluid::vec3<Pack::scalar_type>> first_gradient(
         mesh->num_local_cells());
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_local_cells());
          ++cell_lid)
     {
@@ -1628,7 +1628,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(
             cell_lid,
@@ -1671,8 +1671,8 @@ TEST(FvmOperatorsTest,
         fresh_fluxes);
 
     bool face_flux_changed = false;
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -1689,8 +1689,8 @@ TEST(FvmOperatorsTest,
     EXPECT_TRUE(face_flux_changed);
 
     bool pressure_gradient_changed = false;
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_local_cells());
          ++cell_lid)
     {
@@ -1758,7 +1758,7 @@ TEST(FvmOperatorsTest,
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Mesh::local_ordinal_type>(owned);
             const auto center = mesh->cell_centroid(cell_lid);
             velocity.set_owned_value(
                 cell_lid,
@@ -1830,8 +1830,8 @@ TEST(FvmOperatorsTest,
 
             bool saw_interior_face = false;
             bool saw_boundary_face = false;
-            for (MeshType::local_ordinal_type face_lid = 0;
-                 face_lid < static_cast<MeshType::local_ordinal_type>(
+            for (Mesh::local_ordinal_type face_lid = 0;
+                 face_lid < static_cast<Mesh::local_ordinal_type>(
                                 mesh->num_faces());
                  ++face_lid)
             {
@@ -1897,8 +1897,8 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, "velocity");
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto& center = mesh->cell_centroid(lid);
@@ -1913,8 +1913,8 @@ TEST(FvmOperatorsTest, FaceVelocitiesInterpolateInteriorFaces)
     SimpleFluid::FVM::face_velocities(velocity, face_velocity);
 
     bool saw_interior_face = false;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_interior_face(fid))
@@ -1951,7 +1951,7 @@ TEST(FvmOperatorsTest, FaceVelocitiesWeightNonuniformCellDistances)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(
             cell_lid, {center.x, 2.0 * center.x, -center.x});
@@ -1964,8 +1964,8 @@ TEST(FvmOperatorsTest, FaceVelocitiesWeightNonuniformCellDistances)
         velocity, face_velocity);
 
     bool checked = false;
-    for (MeshType::local_ordinal_type face_lid = 0;
-         face_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type face_lid = 0;
+         face_lid < static_cast<Mesh::local_ordinal_type>(
                         mesh->num_faces());
          ++face_lid)
     {
@@ -2001,8 +2001,8 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroFaceVelocity)
     SimpleFluid::VectorFaceField<Pack> face_velocity(mesh, "face_velocity");
     SimpleFluid::FVM::face_velocities(velocity, cache, face_velocity);
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -2030,8 +2030,8 @@ TEST(FvmOperatorsTest, NoSlipBoundaryProducesZeroExteriorFlux)
     SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
     SimpleFluid::FVM::face_fluxes(velocity, cache, fluxes);
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -2048,8 +2048,8 @@ TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
 {
     auto mesh = make_mesh();
     VectorFieldType velocity(mesh, "velocity");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto& center = mesh->cell_centroid(lid);
@@ -2075,8 +2075,8 @@ TEST(FvmOperatorsTest, SlipBoundaryRemovesNormalVelocityAndFlux)
     SimpleFluid::FVM::normal_face_fluxes(face_velocity, fluxes);
 
     bool saw_boundary_face = false;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (!mesh->is_boundary_face(fid))
@@ -2203,8 +2203,8 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
 {
     auto mesh = make_mesh();
     FieldType old_values(mesh, "old_values");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(lid, 3.0 + static_cast<double>(lid));
@@ -2213,12 +2213,12 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [](int, MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](int, Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid) -> Pack::scalar_type
+        [&](Mesh::local_ordinal_type cell_lid) -> Pack::scalar_type
     {
         return 2.0 + mesh->cell_centroid(cell_lid).x;
     };
@@ -2236,8 +2236,8 @@ TEST(FvmOperatorsTest, ScalarTransportRhsIncludesCellSourceTerm)
         {}, {});
 
     const auto rhs_data = system.rhs->getData();
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         const auto volume = mesh->cell_volume(lid);
@@ -2256,7 +2256,7 @@ TEST(FvmOperatorsTest, ScalarNonOrthogonalTransportValidatesConstantCoefficients
     auto boundary_condition = [](int, size_t) -> SimpleFluid::BoundaryCondition
     { return {SimpleFluid::BoundaryConditionType::Neumann, 0.0}; };
     auto boundary_value = [](int, size_t) -> Pack::scalar_type { return 1.0; };
-    auto zero_source = [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
+    auto zero_source = [](Mesh::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
     auto assemble = [&](Pack::scalar_type time_step, Pack::scalar_type diffusivity)
     {
         return TransportFactory<decltype(old_values)>::assemble(
@@ -2285,8 +2285,8 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
 {
     auto mesh = make_mesh();
     VectorFieldType old_values(mesh, "old_values");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
         old_values.set_value(
@@ -2299,12 +2299,12 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [](int, MeshType::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
+        [](int, Mesh::local_ordinal_type) -> SimpleFluid::vec3<Pack::scalar_type>
     {
         return {};
     };
     auto source =
-        [&](MeshType::local_ordinal_type cell_lid)
+        [&](Mesh::local_ordinal_type cell_lid)
             -> SimpleFluid::vec3<Pack::scalar_type>
     {
         const auto& center = mesh->cell_centroid(cell_lid);
@@ -2329,8 +2329,8 @@ TEST(FvmOperatorsTest, VectorTransportRhsIncludesCellSourceTerm)
          ++component)
     {
         const auto rhs_data = system.rhs->getData(component);
-        for (MeshType::local_ordinal_type lid = 0;
-             lid < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type lid = 0;
+             lid < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_owned_cells());
              ++lid)
         {
@@ -2370,7 +2370,7 @@ TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
         return 0.0;
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -2385,8 +2385,8 @@ TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
 
     std::vector<double> expected_diagonal(mesh->num_owned_cells(), 0.0);
     std::vector<double> expected_rhs(mesh->num_owned_cells(), 0.0);
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -2431,8 +2431,8 @@ TEST(FvmOperatorsTest, ScalarTransportTreatsNeumannBoundaryAsFlux)
     }
 
     const auto rhs_data = system.rhs->getData();
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -2452,8 +2452,8 @@ TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
 {
     auto mesh = make_mesh();
     VectorFieldType old_values(mesh, "old_values");
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++lid)
     {
@@ -2482,7 +2482,7 @@ TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
         return {};
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
             -> SimpleFluid::vec3<Pack::scalar_type>
     {
         return {};
@@ -2523,8 +2523,8 @@ TEST(FvmOperatorsTest, VectorTransportTreatsNeumannBoundaryAsFlux)
     {
         const auto rhs_data = system.rhs->getData(component);
         double actual = 0.0;
-        for (MeshType::local_ordinal_type cell_lid = 0;
-             cell_lid < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type cell_lid = 0;
+             cell_lid < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_owned_cells());
              ++cell_lid)
         {
@@ -2592,8 +2592,8 @@ TEST(FvmOperatorsTest, ReusesScalarAndVectorTransportMatrices)
         vector_second.matrix.getRawPtr(),
         vector_first.matrix.getRawPtr());
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++lid)
     {
@@ -2719,16 +2719,16 @@ TEST(FvmOperatorsTest,
 {
     auto mesh = make_mesh();
     VectorFieldType old_values(
-        mesh, MeshType::Vec3{1.0, -2.0, 3.0}, "old_values");
+        mesh, Mesh::Vec3{1.0, -2.0, 3.0}, "old_values");
     old_values.sync_ghosts();
     SimpleFluid::FaceField<Pack> face_fluxes(
         mesh, 0.0, "face_fluxes");
 
-    MeshType::local_ordinal_type interior_face = -1;
+    Mesh::local_ordinal_type interior_face = -1;
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (mesh->is_owned_face(face_lid)
             && mesh->is_interior_face(face_lid))
         {
@@ -2738,11 +2738,11 @@ TEST(FvmOperatorsTest,
     }
     ASSERT_GE(interior_face, 0);
 
-    auto boundary_value = [](int, size_t) -> MeshType::Vec3
+    auto boundary_value = [](int, size_t) -> Mesh::Vec3
     {
         return {};
     };
-    auto source = [](MeshType::local_ordinal_type) -> MeshType::Vec3
+    auto source = [](Mesh::local_ordinal_type) -> Mesh::Vec3
     {
         return {};
     };
@@ -2768,13 +2768,13 @@ TEST(FvmOperatorsTest,
     const auto fresh = assemble(Teuchos::null);
     EXPECT_EQ(reused.matrix.getRawPtr(), cached_storage);
 
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++row)
     {
-        for (MeshType::local_ordinal_type column = 0;
-             column < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type column = 0;
+             column < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_local_cells());
              ++column)
         {
@@ -2823,28 +2823,28 @@ TEST(FvmOperatorsTest, ReusesWeightedAndPhysicalTransportMatrices)
     };
     auto vector_boundary = [](int, size_t)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
-    auto scalar_source = [](MeshType::local_ordinal_type)
+    auto scalar_source = [](Mesh::local_ordinal_type)
     {
         return Pack::scalar_type{};
     };
-    auto vector_source = [](MeshType::local_ordinal_type)
+    auto vector_source = [](Mesh::local_ordinal_type)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
 
     auto expect_matrix_equal =
         [&](const Pack::matrix_type& expected,
             const Pack::matrix_type& actual)
     {
-        for (MeshType::local_ordinal_type row = 0;
-             row < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type row = 0;
+             row < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_owned_cells());
              ++row)
         {
-            for (MeshType::local_ordinal_type column = 0;
-                 column < static_cast<MeshType::local_ordinal_type>(
+            for (Mesh::local_ordinal_type column = 0;
+                 column < static_cast<Mesh::local_ordinal_type>(
                      mesh->num_local_cells());
                  ++column)
             {
@@ -2968,9 +2968,9 @@ TEST(FvmOperatorsTest, ReusesWeightedAndPhysicalTransportMatrices)
  *
  * @return Shared pointer to the configured mesh with periodic pairs set.
  */
-SimpleFluid::SP<MeshType> make_periodic_box_mesh()
+SimpleFluid::SP<Mesh> make_periodic_box_mesh()
 {
-    return std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    return std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., .5, 1.}, {0., .5}, {0., .5}}},
         SimpleFluid::Vec3D<bool>{{true, false, false}}));
 }
@@ -2982,7 +2982,7 @@ TEST(FvmOperatorsTest, PeriodicTopologyUsesCanonicalNativeNeighbors)
     size_t periodic_faces = 0;
     for (size_t local = 0; local < mesh->num_faces(); ++local)
     {
-        const auto face = static_cast<MeshType::local_ordinal_type>(local);
+        const auto face = static_cast<Mesh::local_ordinal_type>(local);
         if (!mesh->is_periodic_face(face)) continue;
         ++periodic_faces;
         EXPECT_TRUE(mesh->is_interior_face(face));
@@ -3044,8 +3044,8 @@ TEST(FvmOperatorsTest,
             workspace,
             pressure_weighted_fluxes);
 
-        for (MeshType::local_ordinal_type face_lid = 0;
-             face_lid < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type face_lid = 0;
+             face_lid < static_cast<Mesh::local_ordinal_type>(
                             mesh->num_faces());
              ++face_lid)
         {
@@ -3248,7 +3248,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryScalarTransportMatrixUsesPairedCell)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [&](int batch_id, MeshType::local_ordinal_type in_batch_id)
+        [&](int batch_id, Mesh::local_ordinal_type in_batch_id)
     {
         const auto face_lid =
             mesh->boundary_face_batch(batch_id).face_lids[
@@ -3307,7 +3307,7 @@ TEST(FvmOperatorsTest, PeriodicBoundaryVectorTransportMatrixUsesPairedCell)
 
     SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "face_flux");
     auto boundary_value =
-        [&](int batch_id, MeshType::local_ordinal_type in_batch_id)
+        [&](int batch_id, Mesh::local_ordinal_type in_batch_id)
     {
         const auto face_lid =
             mesh->boundary_face_batch(batch_id).face_lids[
@@ -3343,12 +3343,12 @@ TEST(FvmOperatorsTest, HarmonicFaceValueUsesCellToFaceDistances)
     coefficient.set_value(1, 4.0);
     coefficient.sync_ghosts();
 
-    MeshType::local_ordinal_type interior_face =
-        static_cast<MeshType::local_ordinal_type>(-1);
+    Mesh::local_ordinal_type interior_face =
+        static_cast<Mesh::local_ordinal_type>(-1);
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (mesh->is_interior_face(face_lid))
         {
             interior_face = face_lid;
@@ -3374,12 +3374,12 @@ TEST(FvmOperatorsTest, HarmonicFaceValueRejectsNegativeCellValues)
     coefficient.set_value(1, -1.0);
     coefficient.sync_ghosts();
 
-    MeshType::local_ordinal_type interior_face =
-        static_cast<MeshType::local_ordinal_type>(-1);
+    Mesh::local_ordinal_type interior_face =
+        static_cast<Mesh::local_ordinal_type>(-1);
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (mesh->is_interior_face(face_lid))
         {
             interior_face = face_lid;
@@ -3423,7 +3423,7 @@ TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
         return 0.0;
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -3453,8 +3453,8 @@ TEST(FvmOperatorsTest, WeightedScalarTransportTreatsNeumannBoundaryAsFlux)
     }
 
     const auto rhs_data = system.rhs->getData();
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -3486,12 +3486,12 @@ TEST(FvmOperatorsTest,
     {
         return 0.0;
     };
-    auto source = [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    auto source = [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 1.0;
     };
     using SinkProvider = std::function<Pack::scalar_type(
-        MeshType::local_ordinal_type)>;
+        Mesh::local_ordinal_type)>;
     auto assemble = [&](Pack::scalar_type sink)
     {
         return TransportFactory<decltype(scalar)>::assemble(
@@ -3500,7 +3500,7 @@ TEST(FvmOperatorsTest,
                 .face_fluxes = zero_fluxes,
                 .coefficients = {.storage_weight = storage, .advection_weight = advection, .diffusivity = diffusivity},
                 .sources = {.source = source,
-                    .implicit_sink = SinkProvider{[sink](MeshType::local_ordinal_type) { return sink; }}},
+                    .implicit_sink = SinkProvider{[sink](Mesh::local_ordinal_type) { return sink; }}},
                 .constraints = {}},
             {.condition = boundary_condition, .value = boundary_value},
             {.correction = {.treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, .lagged_field = nullptr}},
@@ -3543,7 +3543,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         scalar.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned),
+            static_cast<Mesh::local_ordinal_type>(owned),
             1.0 + static_cast<double>(owned));
     }
     scalar.sync_ghosts();
@@ -3558,14 +3558,14 @@ TEST(FvmOperatorsTest,
     {
         return 0.0;
     };
-    auto source = [](MeshType::local_ordinal_type) -> Pack::scalar_type
+    auto source = [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 3.0;
     };
     using FixedProvider = std::function<std::optional<Pack::scalar_type>(
-        MeshType::local_ordinal_type)>;
+        Mesh::local_ordinal_type)>;
     constexpr Pack::scalar_type fixed_value = 7.25;
-    FixedProvider fixed = [fixed_value](MeshType::local_ordinal_type cell_lid)
+    FixedProvider fixed = [fixed_value](Mesh::local_ordinal_type cell_lid)
         -> std::optional<Pack::scalar_type>
     {
         return cell_lid == 0
@@ -3601,7 +3601,7 @@ TEST(FvmOperatorsTest,
             1.0e-14);
     }
 
-    FixedProvider non_finite = [](MeshType::local_ordinal_type)
+    FixedProvider non_finite = [](Mesh::local_ordinal_type)
         -> std::optional<Pack::scalar_type>
     {
         return std::numeric_limits<Pack::scalar_type>::infinity();
@@ -3633,7 +3633,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto centroid = mesh->cell_centroid(cell_lid);
         scalar.set_owned_value(
             cell_lid,
@@ -3670,7 +3670,7 @@ TEST(FvmOperatorsTest,
         const auto centroid = mesh->face_centroid(face_lid);
         return 1.0 + centroid.x + 2.0 * centroid.y - centroid.z;
     };
-    auto zero_source = [](MeshType::local_ordinal_type)
+    auto zero_source = [](Mesh::local_ordinal_type)
     {
         return Pack::scalar_type{};
     };
@@ -3736,12 +3736,12 @@ TEST(FvmOperatorsTest,
         const auto face_lid =
             mesh->boundary_batches().at(batch_id).face_lids.at(in_batch_id);
         const auto centroid = mesh->face_centroid(face_lid);
-        return MeshType::Vec3{
+        return Mesh::Vec3{
             1.0 + centroid.x, 2.0 * centroid.y, 0.5 - centroid.z};
     };
-    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    auto zero_acceleration = [](Mesh::local_ordinal_type)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
     constexpr Pack::scalar_type reference_density = 2.0;
     auto assemble_vector =
@@ -3793,7 +3793,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto row =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         for (size_t component = 0; component < 3; ++component)
         {
             auto matrix_action =
@@ -3860,7 +3860,7 @@ TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
         return 0.0;
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> Pack::scalar_type
+        [](Mesh::local_ordinal_type) -> Pack::scalar_type
     {
         return 0.0;
     };
@@ -3891,8 +3891,8 @@ TEST(FvmOperatorsTest, PhysicalTemperatureTransportTreatsNeumannBoundaryAsFlux)
     }
 
     const auto rhs_data = system.rhs->getData();
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -3917,7 +3917,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         temperature.set_owned_value(
             cell_lid,
             nonlinear_scalar(mesh->cell_centroid(cell_lid)));
@@ -3941,7 +3941,7 @@ TEST(FvmOperatorsTest,
         return nonlinear_scalar(mesh->face_centroid(face_lid));
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return Pack::scalar_type{};
     };
@@ -3995,16 +3995,16 @@ TEST(FvmOperatorsTest,
 TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
 {
     auto native = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
-    const auto check = []<class MeshType>(SimpleFluid::SP<const MeshType> mesh)
+    const auto check = []<class Mesh>(SimpleFluid::SP<const Mesh> mesh)
     {
-        using Traits = SimpleFluid::MeshFieldTraits<Pack, MeshType>;
+        using Traits = SimpleFluid::MeshFieldTraits<Pack, Mesh>;
         using Field = typename Traits::scalar_cell_type;
         using Flux = typename Traits::scalar_face_type;
         Field temperature(mesh, "temperature");
         Field density(mesh, 1.0, "density");
         Field capacity(mesh, 1.0, "capacity");
         Field conductivity(mesh, 2.0, "conductivity");
-        const typename MeshType::Vec3 gradient{2.0, 3.0, 4.0};
+        const typename Mesh::Vec3 gradient{2.0, 3.0, 4.0};
         const auto exact = [&](const auto& position) { return 300.0 + gradient.dot(position); };
         for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
             temperature.set_owned_value(static_cast<Pack::local_ordinal_type>(i),
@@ -4020,7 +4020,7 @@ TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
         };
         const auto value = [&](int batch_id, size_t index) { return condition(batch_id, index).value; };
         const auto zero = [](Pack::local_ordinal_type) { return 0.0; };
-        SimpleFluid::FVM::TransportGeometryCache<MeshType> cache(*mesh);
+        SimpleFluid::FVM::TransportGeometryCache<Mesh> cache(*mesh);
         for (const auto treatment : {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
                  SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
         {
@@ -4046,7 +4046,7 @@ TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
             }
         }
     };
-    check(SimpleFluid::SP<const MeshType>(native));
+    check(SimpleFluid::SP<const Mesh>(native));
 
 }
 
@@ -4058,7 +4058,7 @@ TEST(FvmOperatorsTest, PhysicalTemperatureCacheSkipsPeriodicBoundaryData)
     FieldType capacity(mesh, 1.0, "capacity");
     FieldType conductivity(mesh, 1.0, "conductivity");
     SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "zero_flux");
-    SimpleFluid::FVM::TransportGeometryCache<MeshType> cache(*mesh);
+    SimpleFluid::FVM::TransportGeometryCache<Mesh> cache(*mesh);
     const auto condition = [&](int batch_id, size_t)
     {
         const auto name = mesh->boundary_batch_name(batch_id);
@@ -4108,7 +4108,7 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
         return 0.0;
     };
     auto zero_source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return 0.0;
     };
@@ -4147,12 +4147,12 @@ TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
     dynamic_viscosity.set_value(1, 8.0);
     dynamic_viscosity.sync_ghosts();
     auto velocity_boundary =
-        [](int, MeshType::local_ordinal_type)
+        [](int, Mesh::local_ordinal_type)
     {
         return SimpleFluid::vec3<>{};
     };
     auto zero_acceleration =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
     {
         return SimpleFluid::vec3<>{};
     };
@@ -4202,7 +4202,7 @@ TEST(FvmOperatorsTest, PhysicalTransportSupportsLinearMaterialCoefficients)
     {
         return Pack::scalar_type{};
     };
-    auto zero_source = [](MeshType::local_ordinal_type)
+    auto zero_source = [](Mesh::local_ordinal_type)
     {
         return Pack::scalar_type{};
     };
@@ -4260,7 +4260,7 @@ TEST(FvmOperatorsTest,
     {
         return Pack::scalar_type{};
     };
-    auto zero_source = [](MeshType::local_ordinal_type)
+    auto zero_source = [](Mesh::local_ordinal_type)
     {
         return Pack::scalar_type{};
     };
@@ -4305,11 +4305,11 @@ TEST(FvmOperatorsTest,
 
     auto vector_boundary_value = [](int, size_t)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
-    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    auto zero_acceleration = [](Mesh::local_ordinal_type)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
     auto assemble_momentum = [&](const SimpleFluid::FVM::BoundaryCache<Pack>* boundary_cache)
     {
@@ -4356,7 +4356,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         // Divergence-free simple shear: grad(u_y) = e_x.  A viscosity
         // gradient in y therefore drives the x component only through
@@ -4373,11 +4373,11 @@ TEST(FvmOperatorsTest,
     {
         const auto face_lid =
             mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
-        return MeshType::Vec3{0.0, mesh->face_centroid(face_lid).x, 0.0};
+        return Mesh::Vec3{0.0, mesh->face_centroid(face_lid).x, 0.0};
     };
-    auto zero_acceleration = [](MeshType::local_ordinal_type)
+    auto zero_acceleration = [](Mesh::local_ordinal_type)
     {
-        return MeshType::Vec3{};
+        return Mesh::Vec3{};
     };
     SimpleFluid::FaceField<Pack> zero_fluxes(
         mesh, 0.0, "zero_fluxes");
@@ -4403,7 +4403,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         Pack::scalar_type expected_integrated_stress = 0.0;
         for (const auto face_lid : mesh->faces(cell_lid))
         {
@@ -4449,7 +4449,7 @@ TEST(FvmOperatorsTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         velocity.set_owned_value(
             cell_lid,
             {mesh->cell_centroid(cell_lid).x, 0.0, 0.0});
@@ -4461,7 +4461,7 @@ TEST(FvmOperatorsTest,
     {
         const auto face_lid =
             mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
-        return MeshType::Vec3{
+        return Mesh::Vec3{
             mesh->face_centroid(face_lid).x, 0.0, 0.0};
     };
     Pack::multi_vector_type rhs(mesh->owned_cell_map(), 3, true);
@@ -4490,7 +4490,7 @@ TEST(FvmOperatorsTest, SkewAffinePressureWithExactGradientHasZeroStabilization)
     const SimpleFluid::vec3<double> exact{0.7,-1.1,0.3};
     for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
     {
-        const auto cell=static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell=static_cast<Mesh::local_ordinal_type>(owned);
         velocity.set_value(cell,{});
         pressure.set_value(cell,2.3+exact.dot(mesh->cell_centroid(cell)));
         gradient.set_value(cell,exact);
@@ -4506,7 +4506,7 @@ TEST(FvmOperatorsTest, SkewAffinePressureWithExactGradientHasZeroStabilization)
     size_t skew_faces=0;
     for (size_t local=0; local<mesh->num_faces(); ++local)
     {
-        const auto face=static_cast<MeshType::local_ordinal_type>(local);
+        const auto face=static_cast<Mesh::local_ordinal_type>(local);
         if (!flux.is_owned_face(face) || mesh->is_boundary_face(face)) continue;
         const auto owner=mesh->owner_cell(face);
         const auto neighbor=mesh->opposite_or_periodic_neighbor_cell(face,owner);

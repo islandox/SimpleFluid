@@ -30,7 +30,7 @@
 namespace
 {
 
-using MeshType = SimpleFluid::test::LegacySTKFixture<SimpleFluid::TpetraTypes<>>;
+using Mesh = SimpleFluid::test::LegacySTKFixture<SimpleFluid::TpetraTypes<>>;
 
 using utils_test::KokkosEnvironment;
 
@@ -43,7 +43,7 @@ testing::Environment* const kokkos_environment =
  * @param mesh STK mesh instance that will own the coordinate field.
  * @return Reference to the declared coordinate field.
  */
-stk::mesh::Field<double>& declare_coordinate_field(MeshType& mesh)
+stk::mesh::Field<double>& declare_coordinate_field(Mesh& mesh)
 {
     auto meta = mesh.meta();
     auto& coord_field = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
@@ -73,7 +73,7 @@ void set_node_coord(stk::mesh::Field<double>& coord_field,
  * @param mesh STK mesh to populate.
  * @param elem_id Global ID for the new element.
  */
-void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
+void populate_single_hex(Mesh& mesh, stk::mesh::EntityId elem_id)
 {
     auto& coord_field = declare_coordinate_field(mesh);
     auto meta = mesh.meta();
@@ -110,7 +110,7 @@ void populate_single_hex(MeshType& mesh, stk::mesh::EntityId elem_id)
  *
  * @param mesh STK mesh to populate.
  */
-void populate_single_tet(MeshType& mesh)
+void populate_single_tet(Mesh& mesh)
 {
     auto& coord_field = declare_coordinate_field(mesh);
     auto meta = mesh.meta();
@@ -145,7 +145,7 @@ void populate_single_tet(MeshType& mesh)
  *
  * @param mesh STK mesh to populate.
  */
-void populate_two_adjacent_hexes(MeshType& mesh)
+void populate_two_adjacent_hexes(Mesh& mesh)
 {
     auto& coord_field = declare_coordinate_field(mesh);
     auto meta = mesh.meta();
@@ -188,7 +188,7 @@ void populate_two_adjacent_hexes(MeshType& mesh)
  */
 TEST(LegacySTKGeometryOracleTest, AssembleMeshWithoutThrowing)
 {
-    MeshType mesh;
+    Mesh mesh;
     populate_two_adjacent_hexes(mesh);
 
     mesh.assemble();
@@ -210,7 +210,7 @@ TEST(LegacySTKGeometryOracleTest, AssembleMeshWithoutThrowing)
  */
 TEST(LegacySTKGeometryOracleTest, AssembleRejectsUnsupportedVolumeTopology)
 {
-    MeshType mesh;
+    Mesh mesh;
     populate_single_tet(mesh);
 
     try
@@ -230,7 +230,7 @@ TEST(LegacySTKGeometryOracleTest, AssembleRejectsUnsupportedVolumeTopology)
  */
 TEST(LegacySTKGeometryOracleTest, ExportVtuWritesUnstructuredGrid)
 {
-    MeshType mesh;
+    Mesh mesh;
     populate_single_hex(mesh, 42);
     mesh.assemble();
 

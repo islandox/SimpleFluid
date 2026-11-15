@@ -40,7 +40,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -138,7 +138,7 @@ void initialize_shear(
     const auto& mesh = solver.velocity().mesh();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto x = mesh.cell_centroid(cell_lid).x;
         const auto y = mesh.cell_centroid(cell_lid).y;
         solver.velocity().set_owned_value(
@@ -158,7 +158,7 @@ void initialize_transporting_shear(
     const auto& mesh = solver.velocity().mesh();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto centroid = mesh.cell_centroid(cell_lid);
         const auto velocity_x =
             velocity_scale * std::sin(wave_number * centroid.x) * std::cos(wave_number * centroid.y);
@@ -185,7 +185,7 @@ void expect_positive_turbulence_fields(const SimpleFluid::BoussinesqSolver<Pack>
     const auto& lambda_eff = model.effective_thermal_conductivity();
     for (size_t owned = 0; owned < k.num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_TRUE(std::isfinite(k.value(cell_lid)));
         EXPECT_TRUE(std::isfinite(epsilon.value(cell_lid)));
         EXPECT_TRUE(std::isfinite(nu_t.value(cell_lid)));
@@ -200,7 +200,7 @@ void expect_positive_turbulence_fields(const SimpleFluid::BoussinesqSolver<Pack>
 }
 
 /** @brief Sum one rank-local scalar over the field communicator. */
-template<class MeshType> double global_sum(const MeshType& mesh, double local_value)
+template<class Mesh> double global_sum(const Mesh& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_value, &global_value);
@@ -315,7 +315,7 @@ void expect_global_species_balance(const ReactingGas& gas,
 
 
 /** @brief Exercise the combined turbulent-reacting_gas acceptance path. */
-void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
+void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<Mesh>& mesh,
     SimpleFluid::PressureVelocityCoupling coupling = SimpleFluid::PressureVelocityCoupling::PISO,
     SimpleFluid::test::CoupledBackendSelection selection = {})
 {
@@ -350,7 +350,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     ASSERT_NE(turbulence.dissipation_rate(), nullptr);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         initial_k[owned] =
             turbulence.turbulent_kinetic_energy().value(cell_lid);
         initial_epsilon[owned] =
@@ -498,7 +498,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
         ASSERT_NE(solver_coupling.find_scalar_void_fraction_model(), nullptr);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             const auto alpha = reacting_gas.alpha_g().value(cell_lid);
             EXPECT_TRUE(std::isfinite(alpha));
             EXPECT_GE(alpha, reacting_gas_options.alpha_min);
@@ -570,7 +570,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     double local_epsilon_delta = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto volume = mesh->cell_volume(cell_lid);
         local_k_delta +=
             std::abs(
@@ -591,7 +591,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     double local_maximum_velocity_y = -std::numeric_limits<double>::infinity();
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         local_minimum_velocity_y = std::min(local_minimum_velocity_y, solver.velocity().value(cell_lid).y);
         local_maximum_velocity_y = std::max(local_maximum_velocity_y, solver.velocity().value(cell_lid).y);
     }
@@ -612,7 +612,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
         mesh->num_owned_cells());
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         micro_one_before_transport[owned] = micro_one.value(cell_lid);
         dissolved_one_before_transport[owned] =
             dissolved_one.value(cell_lid);
@@ -642,7 +642,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     double local_feedback_velocity_delta = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         local_transport_delta +=
             std::abs(micro_one.value(cell_lid) - micro_one_before_transport[owned]) *
             mesh->cell_volume(cell_lid);
@@ -692,7 +692,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     double local_dissolved_advection_effect = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         local_dissolved_advection_effect +=
             std::abs(
                 dissolved_one.value(cell_lid)
@@ -760,7 +760,7 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesTurbulenceThroughSegregatedAndCouple
             expect_positive_turbulence_fields(model);
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+                const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
                 EXPECT_NEAR(model.effective_dynamic_viscosity().value(cell_lid),
                     molecular_viscosity + model.turbulent_kinematic_viscosity().value(cell_lid), 1.0e-12);
             }
@@ -807,7 +807,7 @@ TEST(TurbulentBoussinesqSolverTest, PassesDirectBuoyancyContextThroughSegregated
             double minimum_production = 0.0;
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
             {
-                const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+                const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
                 const auto value = production->value(cell_lid);
                 EXPECT_TRUE(std::isfinite(value));
                 EXPECT_LE(value, 0.0);
@@ -937,7 +937,7 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesWallTreatmentClosurePairingsThroughS
                 EXPECT_GT(wall_statistics.front().maximum, 0.0);
                 for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
                 {
-                    const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
+                    const auto lid = static_cast<Mesh::local_ordinal_type>(owned);
                     EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(lid)));
                     EXPECT_GT(model.turbulent_kinetic_energy().value(lid), 0.0);
                     const auto* secondary = wall_case.model == SimpleFluid::TurbulenceModelType::SSTKOmega

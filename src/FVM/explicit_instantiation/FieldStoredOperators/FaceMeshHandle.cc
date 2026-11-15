@@ -7,30 +7,30 @@ namespace SimpleFluid::FVM
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 } // namespace
 
-template FieldStoredVelocityBoundaryCache<Pack, MeshType> cache_velocity_boundary_conditions<Pack, MeshType>(
-    SP<const MeshType> mesh, const BoundaryConditionSet& boundary_conditions);
+template FieldStoredVelocityBoundaryCache<Pack, Mesh> cache_velocity_boundary_conditions<Pack, Mesh>(
+    SP<const Mesh> mesh, const BoundaryConditionSet& boundary_conditions);
 
-template void face_velocities<Pack, MeshType>(
-    const VectorCellFieldStored<Pack, MeshType>& velocity, VectorFaceFieldStored<Pack, MeshType>& face_velocity);
+template void face_velocities<Pack, Mesh>(
+    const VectorCellFieldStored<Pack, Mesh>& velocity, VectorFaceFieldStored<Pack, Mesh>& face_velocity);
 
-template void face_velocities<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
-    VectorFaceFieldStored<Pack, MeshType>& face_velocity);
+template void face_velocities<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
+    VectorFaceFieldStored<Pack, Mesh>& face_velocity);
 
-template void normal_face_fluxes<Pack, MeshType>(
-    const VectorFaceFieldStored<Pack, MeshType>& face_velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+template void normal_face_fluxes<Pack, Mesh>(
+    const VectorFaceFieldStored<Pack, Mesh>& face_velocity, ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
-template void face_fluxes<Pack, MeshType>(
-    const VectorCellFieldStored<Pack, MeshType>& velocity, ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+template void face_fluxes<Pack, Mesh>(
+    const VectorCellFieldStored<Pack, Mesh>& velocity, ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
-template void face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
-    ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+template void face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
+    ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
-template void mesh_relative_face_fluxes<Pack, MeshType>(const ScalarFaceFieldStored<Pack, MeshType>& absolute_fluxes,
-    const ALEControlVolumeState& ale, ScalarFaceFieldStored<Pack, MeshType>& relative_fluxes);
+template void mesh_relative_face_fluxes<Pack, Mesh>(const ScalarFaceFieldStored<Pack, Mesh>& absolute_fluxes,
+    const ALEControlVolumeState& ale, ScalarFaceFieldStored<Pack, Mesh>& relative_fluxes);
 
 } // namespace SimpleFluid::FVM

@@ -16,7 +16,7 @@ namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
-using Handle = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using LO = Pack::local_ordinal_type;
 using GO = Pack::global_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -54,13 +54,13 @@ template<class Native> auto halo(const Native& native, std::set<std::size_t> res
 }
 template<class Native> void verify(const std::shared_ptr<Native>& native, std::size_t depth, bool explicit_grid = false)
 {
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.ghost_layers = depth;
     options.allow_empty_partitions = true;
     const auto processes = std::size_t(Tpetra::getDefaultComm()->getSize());
     if (explicit_grid && (processes == 4 || processes == 8))
         options.orthogonal_partitions = std::array<std::size_t, 3>{2, 2, processes / 4};
-    const Handle mesh(native, options);
+    const Mesh mesh(native, options);
     if (options.orthogonal_partitions)
         EXPECT_EQ(mesh.orthogonal_decomposition()->factors(), *options.orthogonal_partitions);
     EXPECT_FALSE(mesh.has_materialized_indexer());
@@ -96,7 +96,7 @@ template<class Native> void verify(const std::shared_ptr<Native>& native, std::s
             EXPECT_EQ(native->indexer().face_ordinal(source), std::size_t(mesh.face_geometry_global_id(LO(f))));
             const auto translate = [](std::size_t value)
             {
-                return value == Meshes::DecomposedOrthogonalTopology::invalid_local_id() ? Handle::invalid_local_id()
+                return value == Meshes::DecomposedOrthogonalTopology::invalid_local_id() ? Mesh::invalid_local_id()
                                                                                          : LO(value);
             };
             EXPECT_EQ(translate(compact->owner_cell(f)), mesh.owner_cell(LO(f)));
@@ -237,7 +237,7 @@ TEST(OrthogonalDistributedTest, NonuniformCartesianExactGeometryAndPeriodicHalos
     const Vec3D<ArrReal> edges{{{0., .1, .8, 1.4, 2.}, {0., .3, .9, 1.6, 2.}, {0., .2, .7, 1.5, 2.}}};
     for (const bool periodic : {false, true})
         for (const std::size_t depth : {1U, 2U})
-            verify(std::make_shared<Handle::Cartesian>(edges, Vec3D<bool>{periodic, periodic, periodic}), depth, true);
+            verify(std::make_shared<Mesh::Cartesian>(edges, Vec3D<bool>{periodic, periodic, periodic}), depth, true);
 }
 TEST(OrthogonalDistributedTest, NonuniformCylindricalExactGeometryAndThetaPeriodicHalos)
 {
@@ -246,14 +246,14 @@ TEST(OrthogonalDistributedTest, NonuniformCylindricalExactGeometryAndThetaPeriod
         {
             const Vec3D<ArrReal> edges{
                 {{1., 1.1, 1.6, 2.1, 3.}, {0., .1 * angle, .4 * angle, .7 * angle, angle}, {0., .2, .7, 1.5, 2.}}};
-            verify(std::make_shared<Handle::Cylindrical>(edges), depth, true);
+            verify(std::make_shared<Mesh::Cylindrical>(edges), depth, true);
         }
 }
 TEST(OrthogonalDistributedTest, EmptyOwnersRetainCollectiveMaps)
 {
     const Vec3D<ArrReal> edges{{{1., 2.}, {0., .5}, {0., 1.}}};
-    verify(std::make_shared<Handle::Cartesian>(edges), 1);
-    verify(std::make_shared<Handle::Cylindrical>(edges), 1);
+    verify(std::make_shared<Mesh::Cartesian>(edges), 1);
+    verify(std::make_shared<Mesh::Cylindrical>(edges), 1);
 }
 TEST(OrthogonalDistributedTest, AutomaticGridBalancesCountsBeforePhysicalAspect)
 {
@@ -261,18 +261,18 @@ TEST(OrthogonalDistributedTest, AutomaticGridBalancesCountsBeforePhysicalAspect)
     if (ranks != 4 && ranks != 8)
         GTEST_SKIP() << "Requires four or eight MPI ranks.";
     const ArrReal regular{0., .25, .5, .75, 1.};
-    auto native = std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{regular, regular, regular}});
-    const Handle cube(native);
+    auto native = std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{regular, regular, regular}});
+    const Mesh cube(native);
     auto factors = cube.orthogonal_decomposition()->factors();
     std::ranges::sort(factors);
     EXPECT_EQ(factors, (ranks == 4 ? std::array<std::size_t, 3>{1, 2, 2} : std::array<std::size_t, 3>{2, 2, 2}));
     if (ranks == 4)
     {
-        const Handle long_box(
-            std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0., 4., 8., 12., 16.}, regular, regular}}));
+        const Mesh long_box(
+            std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{{0., 4., 8., 12., 16.}, regular, regular}}));
         EXPECT_EQ(long_box.orthogonal_decomposition()->factors(), (std::array<std::size_t, 3>{4, 1, 1}));
-        const Handle count_first(
-            std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0., 20., 40., 60., 80., 100.}, regular, regular}}));
+        const Mesh count_first(
+            std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{{0., 20., 40., 60., 80., 100.}, regular, regular}}));
         EXPECT_EQ(count_first.orthogonal_decomposition()->factors(), (std::array<std::size_t, 3>{1, 2, 2}));
     }
 }
@@ -281,36 +281,36 @@ TEST(OrthogonalDistributedTest, InvalidAndRankDivergentMetadataFailCollectively)
 {
     const auto comm = Tpetra::getDefaultComm();
     const Vec3D<ArrReal> edges{{{0., .2, .7, 1., 2.}, {0., .3, .8, 1.2, 2.}, {0., .1, .4, .9, 2.}}};
-    auto native = std::make_shared<Handle::Cartesian>(edges);
-    Handle::DistributionOptions options;
+    auto native = std::make_shared<Mesh::Cartesian>(edges);
+    Mesh::DistributionOptions options;
     options.orthogonal_partitions = std::array<std::size_t, 3>{0, 1, std::size_t(comm->getSize())};
-    EXPECT_THROW((Handle(native, options)), std::invalid_argument);
+    EXPECT_THROW((Mesh(native, options)), std::invalid_argument);
     options.orthogonal_partitions = std::array<std::size_t, 3>{1, 1, std::size_t(comm->getSize()) + 1};
-    EXPECT_THROW((Handle(native, options)), std::invalid_argument);
+    EXPECT_THROW((Mesh(native, options)), std::invalid_argument);
     if (comm->getSize() == 1)
         return;
     auto changed = edges;
     if (comm->getRank() == 0)
         changed[0][1] += .01;
-    EXPECT_THROW((Handle(std::make_shared<Handle::Cartesian>(changed))), std::invalid_argument);
-    EXPECT_THROW((Handle(std::make_shared<Handle::Cartesian>(edges, Vec3D<bool>{comm->getRank() == 0, false, false}))),
+    EXPECT_THROW((Mesh(std::make_shared<Mesh::Cartesian>(changed))), std::invalid_argument);
+    EXPECT_THROW((Mesh(std::make_shared<Mesh::Cartesian>(edges, Vec3D<bool>{comm->getRank() == 0, false, false}))),
         std::invalid_argument);
     options = {};
     options.allow_empty_partitions = true;
     if (comm->getRank() == 0)
         options.ghost_layers = 2;
-    EXPECT_THROW((Handle(native, options)), std::invalid_argument);
+    EXPECT_THROW((Mesh(native, options)), std::invalid_argument);
 }
 TEST(OrthogonalDistributedTest, PhysicalWidthsBreakBalancedCutLocationTies)
 {
     if (Tpetra::getDefaultComm()->getSize() != 2)
         GTEST_SKIP() << "Requires two MPI ranks.";
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.orthogonal_partitions = std::array<std::size_t, 3>{2, 1, 1};
-    const Handle right_heavy(
-        std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0., .1, .2, .3, .4, 10.}, {0., 1.}, {0., 1.}}}), options);
-    const Handle left_heavy(
-        std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0., 9.6, 9.7, 9.8, 9.9, 10.}, {0., 1.}, {0., 1.}}}),
+    const Mesh right_heavy(
+        std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{{0., .1, .2, .3, .4, 10.}, {0., 1.}, {0., 1.}}}), options);
+    const Mesh left_heavy(
+        std::make_shared<Mesh::Cartesian>(Vec3D<ArrReal>{{{0., 9.6, 9.7, 9.8, 9.9, 10.}, {0., 1.}, {0., 1.}}}),
         options);
     EXPECT_EQ(right_heavy.orthogonal_decomposition()->axis_cuts(0), (std::vector<std::size_t>{0, 3, 5}));
     EXPECT_EQ(left_heavy.orthogonal_decomposition()->axis_cuts(0), (std::vector<std::size_t>{0, 2, 5}));
@@ -320,25 +320,25 @@ TEST(OrthogonalDistributedTest, RankLocalNullGeometryFailsCollectively)
 {
     const auto comm = Tpetra::getDefaultComm();
     const Vec3D<ArrReal> edges{{{1., 1.2, 1.7, 2.1, 3.}, {0., .3, .8, 1.2, 2.}, {0., .1, .4, .9, 2.}}};
-    Handle::CartesianPtr cartesian;
-    Handle::CylindricalPtr cylindrical;
+    Mesh::CartesianPtr cartesian;
+    Mesh::CylindricalPtr cylindrical;
     if (comm->getRank() != 0)
     {
-        cartesian = std::make_shared<Handle::Cartesian>(edges);
-        cylindrical = std::make_shared<Handle::Cylindrical>(edges);
+        cartesian = std::make_shared<Mesh::Cartesian>(edges);
+        cylindrical = std::make_shared<Mesh::Cylindrical>(edges);
     }
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.allow_empty_partitions = true;
     // Every rank must observe the failure before any rank enters map construction.
     // In serial these calls exercise the ordinary null-pointer rejection too.
-    EXPECT_THROW((Handle(cartesian, options)), std::invalid_argument);
-    EXPECT_THROW((Handle(cylindrical, options)), std::invalid_argument);
+    EXPECT_THROW((Mesh(cartesian, options)), std::invalid_argument);
+    EXPECT_THROW((Mesh(cylindrical, options)), std::invalid_argument);
 }
 
 TEST(OrthogonalDistributedTest, CompactTopologyStorageDoesNotScaleWithOwnedVolume)
 {
     const auto ranks = std::size_t(Tpetra::getDefaultComm()->getSize());
-    Handle::DistributionOptions options;
+    Mesh::DistributionOptions options;
     options.allow_empty_partitions = true;
     const auto partitions = std::max<std::size_t>(ranks, 2);
     options.orthogonal_partitions = std::array<std::size_t, 3>{partitions, 1, 1};
@@ -356,7 +356,7 @@ TEST(OrthogonalDistributedTest, CompactTopologyStorageDoesNotScaleWithOwnedVolum
             for (std::size_t edge = 0; edge <= cells; ++edge)
                 edges[axis].push_back(double(edge) / double(cells));
         }
-        return std::make_shared<Handle>(std::make_shared<Handle::Cartesian>(edges), options);
+        return std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(edges), options);
     };
     const auto small = make(4), large = make(16);
     const auto small_topology = small->decomposed_orthogonal_topology();
@@ -381,15 +381,15 @@ TEST(OrthogonalDistributedTest, CompactViewRetainsNativeGeometryAcrossAxialTrial
 {
     const auto check = []<class Native>(const std::shared_ptr<Native>& native)
     {
-        Handle::DistributionOptions options;
+        Mesh::DistributionOptions options;
         options.allow_empty_partitions = true;
-        auto mesh = std::make_shared<Handle>(native, options);
+        auto mesh = std::make_shared<Mesh>(native, options);
         const auto compact = mesh->decomposed_orthogonal_topology();
         if (compact)
             EXPECT_EQ(&compact->source_topology(), &native->topology());
         const auto owned_cells = mesh->owned_cell_map(), owned_faces = mesh->owned_face_map();
         std::vector<double> volumes;
-        std::vector<Handle::Vec3> centers;
+        std::vector<Mesh::Vec3> centers;
         std::vector<GO> cell_source, cell_algebraic, face_source, face_algebraic;
         for (std::size_t c = 0; c < mesh->num_local_cells(); ++c)
         {
@@ -441,6 +441,6 @@ TEST(OrthogonalDistributedTest, CompactViewRetainsNativeGeometryAcrossAxialTrial
         EXPECT_FALSE(mesh->has_materialized_connectivity());
     };
     const Vec3D<ArrReal> edges{{{1., 1.2, 1.7, 2.1, 3.}, {0., .3, .8, 1.2, 2.}, {0., .1, .4, .9, 2.}}};
-    check(std::make_shared<Handle::Cartesian>(edges));
-    check(std::make_shared<Handle::Cylindrical>(edges));
+    check(std::make_shared<Mesh::Cartesian>(edges));
+    check(std::make_shared<Mesh::Cylindrical>(edges));
 }

@@ -43,7 +43,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 using OracleMesh = SimpleFluid::test::LegacyMesh<Pack>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using UnstructuredMesh = SimpleFluid::Meshes::UnstructuredMesh;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<UnstructuredMesh, Pack>;
@@ -71,13 +71,13 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_4x4x4_box_mesh()
+SimpleFluid::SP<Mesh> make_4x4x4_box_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_4x4x4_database());
 }
 
-SimpleFluid::SP<MeshType> make_2x2x2_box_mesh()
+SimpleFluid::SP<Mesh> make_2x2x2_box_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
@@ -369,7 +369,7 @@ gather_all_owned_gids(const OracleMesh& mesh)
 }
 
 std::set<SimpleFluid::global_index_t>
-gather_all_owned_gids(const MeshType& mesh)
+gather_all_owned_gids(const Mesh& mesh)
 {
     using GO = SimpleFluid::global_index_t;
     const auto comm = mesh.owned_cell_map()->getComm();
@@ -602,7 +602,7 @@ TEST(MeshPartitionerTest, FactoryBuildsDistributedNativeGeometry)
     SimpleFluid::MeshFactory factory(SimpleFluid::test::make_4x4x4_database());
     const auto mesh = factory.build_handle<Pack>();
     ASSERT_NE(mesh, nullptr);
-    EXPECT_TRUE(std::holds_alternative<MeshType::UnstructuredPtr>(mesh->variant()));
+    EXPECT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(mesh->variant()));
     EXPECT_TRUE(mesh->visit([](const auto& geometry)
         { return std::is_same_v<std::remove_cvref_t<decltype(geometry)>, UnstructuredMesh>; }));
     EXPECT_EQ(mesh->owned_cell_map()->getGlobalNumElements(), 64U);
@@ -1417,7 +1417,7 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
             local_id);
     }
 
-    EXPECT_THROW(MeshType{mesh}, std::invalid_argument);
+    EXPECT_THROW(Mesh{mesh}, std::invalid_argument);
     const auto partitioned = std::make_shared<PartitionedUnstructured>(
         mesh, partition.indexer, comm);
     EXPECT_EQ(partitioned->num_global_cells(),
@@ -1439,9 +1439,9 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
     EXPECT_TRUE(partitioned->is_owned_node(0));
     EXPECT_DOUBLE_EQ(partitioned->cell_volume(0), mesh->cell_volume(0));
 
-    const MeshType handle(partitioned);
+    const Mesh handle(partitioned);
     const auto& handle_mesh =
-        std::get<MeshType::UnstructuredPtr>(handle.variant());
+        std::get<Mesh::UnstructuredPtr>(handle.variant());
     ASSERT_TRUE(handle_mesh);
     EXPECT_EQ(handle_mesh.get(), mesh.get());
     EXPECT_EQ(handle_mesh->num_cells(), handle.num_local_cells());
@@ -1495,7 +1495,7 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
             {
                 EXPECT_NE(
                     handle.opposite_cell(face_lid, local_cell),
-                    MeshType::invalid_local_id());
+                    Mesh::invalid_local_id());
             }
         }
     }
@@ -1550,7 +1550,7 @@ TEST(MeshPartitionerGeometryTest, GradedQuadCentroidsMatchSerialRule)
     if (any_failed)
         throw std::runtime_error("Graded native source construction failed on another rank.");
     auto partition = SimpleFluid::MeshPartitioner<Pack>::partition_native(std::move(data), comm, 1, true);
-    auto mesh = SimpleFluid::detail::collective_make_shared<MeshType>(
+    auto mesh = SimpleFluid::detail::collective_make_shared<Mesh>(
         *comm, std::move(partition.geometry), partition.indexer, comm);
     std::size_t trapezoids = 0;
     for (std::size_t face = 0; face < mesh->num_faces(); ++face)

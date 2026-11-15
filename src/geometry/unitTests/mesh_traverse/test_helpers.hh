@@ -36,15 +36,15 @@ namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
-using Handle = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using Cartesian = Meshes::OrthogonalCartesian3D;
 using Cylindrical = Meshes::OrthogonalCylindrical3D;
 using Local = Pack::local_ordinal_type;
 
-static_assert(!std::is_constructible_v<MeshTraversePlan<Handle>, Handle&&>);
-static_assert(!std::is_constructible_v<MeshTraverseExecution<Handle>, MeshTraversePlan<Handle>&&>);
-static_assert(!std::is_constructible_v<FaceBatchProxy<Handle>, MeshTraverseExecution<Handle>&&>);
-static_assert(!std::is_constructible_v<CellFaceBatchProxy<Handle>, const MeshTraverseExecution<Handle>&, Local>);
+static_assert(!std::is_constructible_v<MeshTraversePlan<Mesh>, Mesh&&>);
+static_assert(!std::is_constructible_v<MeshTraverseExecution<Mesh>, MeshTraversePlan<Mesh>&&>);
+static_assert(!std::is_constructible_v<FaceBatchProxy<Mesh>, MeshTraverseExecution<Mesh>&&>);
+static_assert(!std::is_constructible_v<CellFaceBatchProxy<Mesh>, const MeshTraverseExecution<Mesh>&, Local>);
 
 template<class Proxy, class Access>
 concept AcceptsBoundTraverseAccess = requires(const Proxy& proxy, const Access& access)
@@ -52,11 +52,11 @@ concept AcceptsBoundTraverseAccess = requires(const Proxy& proxy, const Access& 
     proxy.apply(access, [](const auto&) {});
     proxy.visit_batches(access, [](const auto&) {});
 };
-static_assert(AcceptsBoundTraverseAccess<CellFaceBatchProxy<Handle>,
-    detail::TraverseAccess<Handle, Cartesian>>);
-static_assert(!AcceptsBoundTraverseAccess<CellFaceBatchProxy<Handle>,
+static_assert(AcceptsBoundTraverseAccess<CellFaceBatchProxy<Mesh>,
+    detail::TraverseAccess<Mesh, Cartesian>>);
+static_assert(!AcceptsBoundTraverseAccess<CellFaceBatchProxy<Mesh>,
     detail::TraverseAccess<Cartesian, Cartesian>>);
-static_assert(!AcceptsBoundTraverseAccess<CellFaceBatchProxy<Handle>, int>);
+static_assert(!AcceptsBoundTraverseAccess<CellFaceBatchProxy<Mesh>, int>);
 
 template<class Access> struct FaceRefStorageMirror
 {
@@ -86,9 +86,9 @@ template<class Access> constexpr bool face_storage_unchanged()
     static_assert(sizeof(MeshTraverseBatch<Access,Entity,false,true>) == sizeof(FaceBatchStorageMirror<Access>));
     return true;
 }
-static_assert(face_storage_unchanged<detail::TraverseAccess<Handle,Cartesian>>());
+static_assert(face_storage_unchanged<detail::TraverseAccess<Mesh,Cartesian>>());
 static_assert(face_storage_unchanged<detail::TraverseAccess<Cartesian,Cartesian>>());
-static_assert(face_storage_unchanged<detail::LayeredTraverseAccess<detail::TraverseAccess<Handle,Meshes::SemiStructuredXY_Z>>>());
+static_assert(face_storage_unchanged<detail::LayeredTraverseAccess<detail::TraverseAccess<Mesh,Meshes::SemiStructuredXY_Z>>>());
 static_assert(face_storage_unchanged<detail::LayeredTraverseAccess<detail::TraverseAccess<Meshes::SemiStructuredXY_Z,Meshes::SemiStructuredXY_Z>>>());
 
 
@@ -131,7 +131,7 @@ void expect_vector_equal(const auto& actual, const auto& expected)
 }
 
 /** Compare against canonical topology while keeping field ordinals explicit. */
-void expect_handle_selections(const Handle& mesh)
+void expect_handle_selections(const Mesh& mesh)
 {
     const auto plan = make_mesh_traverse_plan(mesh);
     const auto traverse = plan.acquire();
@@ -219,7 +219,7 @@ void expect_handle_selections(const Handle& mesh)
 
 /** The public point queries are independent of the structured range generator. */
 template<class NativeMesh>
-void expect_structured_plan(const NativeMesh& mesh, const Handle& reference)
+void expect_structured_plan(const NativeMesh& mesh, const Mesh& reference)
 {
     const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
     ASSERT_TRUE(plan.uses_structured_ranges());

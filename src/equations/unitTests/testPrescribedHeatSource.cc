@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using SourceType = SimpleFluid::PrescribedHeatSource<Pack>;
 
@@ -35,7 +35,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_unit_box(size_t cells = 3)
+SimpleFluid::SP<Mesh> make_unit_box(size_t cells = 3)
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(
@@ -43,7 +43,7 @@ SimpleFluid::SP<MeshType> make_unit_box(size_t cells = 3)
             1.0 / static_cast<double>(cells)));
 }
 
-SimpleFluid::SP<MeshType> make_cylinder()
+SimpleFluid::SP<Mesh> make_cylinder()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);

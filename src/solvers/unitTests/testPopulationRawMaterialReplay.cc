@@ -13,8 +13,8 @@ namespace S = SimpleFluid;
 namespace R = S::Reacting;
 namespace B = S::BubbleGasPhysics;
 using Pack = S::DefaultTpetraTypes;
-using Grid = S::MeshHandle<Pack>;
-using Model = S::ReactingGasModel<Pack, Grid>;
+using Mesh = S::MeshHandle<Pack>;
+using Model = S::ReactingGasModel<Pack, Mesh>;
 using P = R::SpeciesPhase;
 constexpr R::SpeciesId solvent = 44, one = 101, two = 709;
 constexpr double gas_constant = 8.31446261815324;
@@ -27,14 +27,14 @@ enum class Case
     Film
 };
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-std::shared_ptr<Grid> grid()
+std::shared_ptr<Mesh> grid()
 {
-    Grid::DistributionOptions d;
+    Mesh::DistributionOptions d;
     d.allow_empty_partitions = true;
     // Each control volume is2m3: a positive minimum-subnormal mol amount cannot
     // be stored as its mol/m3 density, which must reject rather than disappear.
-    return std::make_shared<Grid>(
-        std::make_shared<Grid::Cartesian>(S::Vec3D<S::ArrReal>{{{0., 2.}, {0., 1.}, {0., 1., 2.}}}), d);
+    return std::make_shared<Mesh>(
+        std::make_shared<Mesh::Cartesian>(S::Vec3D<S::ArrReal>{{{0., 2.}, {0., 1.}, {0., 1., 2.}}}), d);
 }
 S::ReactingGasOptions options(Case selected)
 {
@@ -119,10 +119,10 @@ S::ReactingGasOptions options(Case selected)
 }
 struct Fixture
 {
-    std::shared_ptr<Grid> mesh = grid();
+    std::shared_ptr<Mesh> mesh = grid();
     Model model;
     Model::field_type temperature{mesh, 300., "T"}, pressure{mesh, 0., "p"};
-    Model::velocity_field_type velocity{mesh, Grid::Vec3{}, "U"};
+    Model::velocity_field_type velocity{mesh, Mesh::Vec3{}, "U"};
     Model::face_flux_field_type flux{mesh, 0., "phi"};
     Model::material_type material;
     explicit Fixture(Case selected = Case::Replacement)

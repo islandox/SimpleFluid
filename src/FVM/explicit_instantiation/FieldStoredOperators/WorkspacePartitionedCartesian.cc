@@ -6,11 +6,11 @@ namespace SimpleFluid::FVM
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
+using Mesh = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
 } // namespace
 
 template<>
-FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::SharedGeometry::SharedGeometry(SP<const mesh_type> mesh,
+FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::SharedGeometry::SharedGeometry(SP<const mesh_type> mesh,
     std::shared_ptr<const topology_type> topology, std::shared_ptr<const traverse_plan_type> gradient_traverse)
     : d_mesh(require_mesh(std::move(mesh))), d_topology(std::move(topology)),
       d_geometry_identity(detail::ale_geometry_identity(*d_mesh))
@@ -39,14 +39,14 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::SharedGeometry::Sh
 }
 
 template<>
-FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressureWeightedFaceFluxWorkspace(
+FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::FieldStoredPressureWeightedFaceFluxWorkspace(
     SP<const mesh_type> mesh)
     : FieldStoredPressureWeightedFaceFluxWorkspace(mesh, std::make_shared<SharedGeometry>(mesh))
 {
 }
 
 template<>
-FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressureWeightedFaceFluxWorkspace(
+FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::FieldStoredPressureWeightedFaceFluxWorkspace(
     SP<const mesh_type> mesh, shared_geometry_type geometry)
     : d_mesh(require_mesh(std::move(mesh))), d_geometry(require_geometry(d_mesh, std::move(geometry))),
       d_pressure_gradient(VectorCellFieldDescriptor<Pack>("rhie_chow_pressure_gradient_workspace"), d_mesh, false)
@@ -54,8 +54,8 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FieldStoredPressur
 }
 
 template<>
-const std::vector<typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry_type>&
-FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry() const
+const std::vector<typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::face_geometry_type>&
+FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::face_geometry() const
 {
     const auto execution = acquire_execution();
     std::call_once(d_geometry->d_legacy_geometry_once,
@@ -68,8 +68,8 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_geometry() co
 }
 
 template<>
-const typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::FaceBatches&
-FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_batches() const
+const typename FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::FaceBatches&
+FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::face_batches() const
 {
     const auto& geometry = face_geometry();
     std::call_once(d_geometry->d_legacy_batches_once,
@@ -102,7 +102,7 @@ FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::face_batches() con
     return d_geometry->d_legacy_batches;
 }
 
-template<> void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geometry()
+template<> void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::refresh_geometry()
 {
     require_ready_geometry(*d_geometry);
     d_geometry->d_topology->require_valid(*d_mesh);
@@ -116,7 +116,7 @@ template<> void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::re
 }
 
 template<>
-void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>::refresh_geometry(shared_geometry_type geometry)
+void FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>::refresh_geometry(shared_geometry_type geometry)
 {
     auto next = require_geometry(d_mesh, std::move(geometry));
     require_ready_geometry(*next);

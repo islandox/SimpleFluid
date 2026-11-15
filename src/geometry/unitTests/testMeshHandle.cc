@@ -38,7 +38,7 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
@@ -157,10 +157,10 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
         SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition>{
             {{3, 7, 4, 0}, 6, "xmin"}});
 
-    const Handle cartesian_handle(cartesian);
-    const Handle cylindrical_handle(cylindrical);
-    const Handle semi_structured_handle(semi_structured);
-    const Handle unstructured_handle(unstructured);
+    const Mesh cartesian_handle(cartesian);
+    const Mesh cylindrical_handle(cylindrical);
+    const Mesh semi_structured_handle(semi_structured);
+    const Mesh unstructured_handle(unstructured);
 
     EXPECT_EQ(
         cartesian_handle.visit(
@@ -219,60 +219,60 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
 TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
 {
     static_assert(std::is_same_v<
-                  Handle::MutableCartesianPtr,
+                  Mesh::MutableCartesianPtr,
                   SimpleFluid::SP<Cartesian>>);
     static_assert(std::is_same_v<
-                  Handle::MutableCylindricalPtr,
+                  Mesh::MutableCylindricalPtr,
                   SimpleFluid::SP<Cylindrical>>);
     static_assert(std::is_same_v<
-                  Handle::MutableSemiStructuredPtr,
+                  Mesh::MutableSemiStructuredPtr,
                   SimpleFluid::SP<SemiStructured>>);
     static_assert(std::is_same_v<
-                  Handle::MutableUnstructuredPtr,
+                  Mesh::MutableUnstructuredPtr,
                   SimpleFluid::SP<Unstructured>>);
-    static_assert(!std::is_constructible_v<Handle, SimpleFluid::SP<ConcreteSTK>>);
-    static_assert(!std::is_constructible_v<Handle, SimpleFluid::SP<const ConcreteSTK>>);
+    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<ConcreteSTK>>);
+    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<const ConcreteSTK>>);
     static_assert(std::is_constructible_v<
                   PartitionedUnstructured,
                   std::nullptr_t,
-                  Handle::unstructured_indexer_type>);
+                  Mesh::unstructured_indexer_type>);
 
     auto cartesian = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
             {0.0, 1.0},
             {0.0, 1.0},
             {0.0, 1.0}}});
-    Handle handle(cartesian);
+    Mesh handle(cartesian);
 
     ASSERT_TRUE(handle.has_mutable_geometry());
     auto* mutable_address = handle.visit_mutable(
-        []<class Handle>(Handle& mesh) -> void*
+        []<class Mesh>(Mesh& mesh) -> void*
         {
-            static_assert(!std::is_const_v<Handle>);
+            static_assert(!std::is_const_v<Mesh>);
             return std::addressof(mesh);
         });
     EXPECT_EQ(mutable_address, cartesian.get());
 
     const auto* const_address = std::as_const(handle).visit(
-        []<class Handle>(Handle& mesh) -> const void*
+        []<class Mesh>(Mesh& mesh) -> const void*
         {
-            static_assert(std::is_const_v<Handle>);
+            static_assert(std::is_const_v<Mesh>);
             return std::addressof(mesh);
         });
     EXPECT_EQ(const_address, cartesian.get());
 
-    Handle::CartesianPtr read_only_geometry = cartesian;
-    Handle read_only_handle(std::move(read_only_geometry));
+    Mesh::CartesianPtr read_only_geometry = cartesian;
+    Mesh read_only_handle(std::move(read_only_geometry));
     EXPECT_FALSE(read_only_handle.has_mutable_geometry());
     EXPECT_THROW(
         read_only_handle.visit_mutable([](auto&) {}),
         std::logic_error);
     EXPECT_THROW(
-        static_cast<void>(Handle(Handle::UnstructuredPtr{}, Handle::unstructured_indexer_type{})),
+        static_cast<void>(Mesh(Mesh::UnstructuredPtr{}, Mesh::unstructured_indexer_type{})),
         std::invalid_argument);
     EXPECT_THROW(
         static_cast<void>(PartitionedUnstructured(
-            nullptr, Handle::unstructured_indexer_type{})),
+            nullptr, Mesh::unstructured_indexer_type{})),
         std::invalid_argument);
 }
 
@@ -280,7 +280,7 @@ TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
 TEST(MeshHandleTest, RetainsMutablePartitionGeometry)
 {
     const auto mesh = SimpleFluid::test::make_unstructured_hex_line(1);
-    using Indexer = Handle::unstructured_indexer_type;
+    using Indexer = Mesh::unstructured_indexer_type;
     std::vector<Indexer::cell_id_t> owned_cells;
     std::vector<Indexer::face_id_t> owned_faces;
     std::vector<Indexer::node_id_t> nodes;
@@ -301,7 +301,7 @@ TEST(MeshHandleTest, RetainsMutablePartitionGeometry)
         mesh,
         Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
             std::move(nodes)));
-    Handle mutable_handle(partitioned);
+    Mesh mutable_handle(partitioned);
     EXPECT_TRUE(mutable_handle.has_mutable_geometry());
     EXPECT_EQ(
         mutable_handle.visit_mutable(
@@ -313,7 +313,7 @@ TEST(MeshHandleTest, RetainsMutablePartitionGeometry)
 
     SimpleFluid::SP<const PartitionedUnstructured> read_only_partition =
         partitioned;
-    EXPECT_FALSE(Handle(read_only_partition).has_mutable_geometry());
+    EXPECT_FALSE(Mesh(read_only_partition).has_mutable_geometry());
 }
 
 /** @brief The preserved one-argument constructor builds default native MPI ownership. */
@@ -330,7 +330,7 @@ TEST(MeshHandleTest, SemiStructuredConstructionPreservesDefaultDistributedOwners
             {0.0, 1.0, 0.0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
         z_edges);
-    const Handle handle(mesh);
+    const Mesh handle(mesh);
     EXPECT_EQ(handle.num_owned_cells(), 1U);
     EXPECT_EQ(handle.cell_global_id(0), communicator->getRank());
     EXPECT_EQ(handle.cell_geometry_global_id(0), communicator->getRank());
@@ -354,7 +354,7 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
     const auto self = Teuchos::rcp(
         new Teuchos::MpiComm<int>(MPI_COMM_SELF));
     const auto mesh = SimpleFluid::test::make_unstructured_hex_line(1);
-    using Indexer = Handle::unstructured_indexer_type;
+    using Indexer = Mesh::unstructured_indexer_type;
     std::vector<Indexer::cell_id_t> owned_cells;
     std::vector<Indexer::face_id_t> owned_faces;
     std::vector<Indexer::node_id_t> nodes;
@@ -379,13 +379,13 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
         Indexer(std::move(owned_cells), {}, std::move(owned_faces), {},
             std::move(nodes)),
         self);
-    Handle handle(partitioned);
+    Mesh handle(partitioned);
 
     EXPECT_EQ(partitioned->mutable_mesh_ptr().get(), mesh.get());
     EXPECT_TRUE(handle.has_mutable_geometry());
     SimpleFluid::SP<const PartitionedUnstructured> read_only_partition =
         partitioned;
-    EXPECT_FALSE(Handle(read_only_partition).has_mutable_geometry());
+    EXPECT_FALSE(Mesh(read_only_partition).has_mutable_geometry());
     EXPECT_EQ(handle.owned_cell_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.overlap_cell_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.owned_face_map()->getComm()->getSize(), 1);
@@ -420,8 +420,8 @@ TEST(MeshHandleTest, NativeFactoryMatchesIndependentSTKGeometryOracle)
     const auto handle = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
     ASSERT_TRUE(oracle);
     ASSERT_TRUE(handle);
-    ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(handle->variant()));
-    const auto geometry = std::get<Handle::UnstructuredPtr>(handle->variant());
+    ASSERT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(handle->variant()));
+    const auto geometry = std::get<Mesh::UnstructuredPtr>(handle->variant());
     EXPECT_TRUE(handle->has_mutable_geometry());
     EXPECT_EQ(handle->visit_mutable([](auto& mesh) -> const void* { return &mesh; }), geometry.get());
     EXPECT_EQ(handle->num_owned_cells(), oracle->num_owned_cells());
@@ -474,7 +474,7 @@ TEST(MeshHandleTest, ComputesCellFaceRangesWithoutMaterialization)
             {0.0, 1.0, 2.0},
             {0.0, 1.0},
             {0.0, 1.0}}});
-    const Handle handle(mesh);
+    const Mesh handle(mesh);
 
     static_assert(std::ranges::random_access_range<decltype(handle.faces(0))>);
 
@@ -500,9 +500,9 @@ TEST(MeshHandleTest, BuildsOrthogonalSlabOwnershipAndGhostMaps)
             {0.0, 1.0, 2.0, 3.0, 4.0},
             {0.0, 1.0},
             {0.0, 1.0}}});
-    const Handle handle(
+    const Mesh handle(
         mesh,
-        Handle::DistributionOptions{
+        Mesh::DistributionOptions{
             .ghost_layers = 1,
             .partition = 0,
             .partitions = 2});
@@ -571,10 +571,10 @@ TEST(MeshHandleTest, ExportsEveryCRTPMeshAlternative)
             {Unstructured::CellType::HEXAHEDRON,
              {0, 1, 2, 3, 4, 5, 6, 7}}});
 
-    Handle(cartesian).export_vtu(cartesian_file);
-    Handle(cylindrical).export_vtu(cylindrical_file);
-    Handle(semi_structured).export_vtu(semi_structured_file);
-    Handle(unstructured).export_vtu(unstructured_file);
+    Mesh(cartesian).export_vtu(cartesian_file);
+    Mesh(cylindrical).export_vtu(cylindrical_file);
+    Mesh(semi_structured).export_vtu(semi_structured_file);
+    Mesh(unstructured).export_vtu(unstructured_file);
 
     EXPECT_TRUE(std::filesystem::exists(cartesian_file));
     EXPECT_TRUE(std::filesystem::exists(cylindrical_file));
@@ -593,7 +593,7 @@ TEST(MeshHandleTest, PolygonalXY_ZExportUsesOrientedPolyhedra)
     const auto mesh = std::make_shared<SemiStructured>(
         SimpleFluid::Arr<SemiStructured::Vec3>{{0,0,0},{2,0,0},{3,1,0},{1.5,2,0},{0,1,0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0,1,2,3,4}}, SimpleFluid::ArrReal{0,1,3});
-    const Handle handle(mesh);
+    const Mesh handle(mesh);
     const auto output = handle.vtu_topology();
     EXPECT_EQ(output->cell_types, (SimpleFluid::VTUWriter::UInt8Data{42,42}));
     EXPECT_EQ(output->face_offsets, (SimpleFluid::VTUWriter::Int64Data{38,76}));
@@ -624,19 +624,19 @@ TEST(MeshHandleTest, PolygonalXY_ZExportUsesOrientedPolyhedra)
 
 TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
 {
-    const auto visible_native_faces = [](const Handle& mesh, const auto& native_mesh, size_t cell)
+    const auto visible_native_faces = [](const Mesh& mesh, const auto& native_mesh, size_t cell)
     {
         std::vector<Pack::global_ordinal_type> faces;
         const auto native_cell = native_mesh.cell_id(mesh.cell_geometry_global_id(cell));
         for (const auto face : native_mesh.cell_faces(native_cell))
         {
             const auto global = static_cast<Pack::global_ordinal_type>(native_mesh.face_local_id(face));
-            if (mesh.overlap_face_map()->getLocalElement(global) != Handle::invalid_local_id())
+            if (mesh.overlap_face_map()->getLocalElement(global) != Mesh::invalid_local_id())
                 faces.push_back(global);
         }
         return faces;
     };
-    const auto check_visitation = [](const Handle& mesh)
+    const auto check_visitation = [](const Mesh& mesh)
     {
         for (size_t index = 0; index < mesh.num_local_cells(); ++index)
         {
@@ -676,7 +676,7 @@ TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
     };
     auto cylinder=std::make_shared<Cylindrical>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
         {1,2,3},{0,std::numbers::pi,2*std::numbers::pi},{0,1,2}}});
-    Handle periodic(cylinder);
+    Mesh periodic(cylinder);
     check_visitation(periodic);
     for(size_t c=0;c<periodic.num_cells();++c)
     {
@@ -690,7 +690,7 @@ TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
         if(periodic.overlap_face_map()->getComm()->getSize()==1) EXPECT_EQ(other.size(),6U);
     }
     auto cart=std::make_shared<Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0,1,2,3,4,5,6},{0,1,2},{0,1,2}}});
-    Handle partition(cart,{.ghost_layers=1,.partition=0,.partitions=2});
+    Mesh partition(cart,{.ghost_layers=1,.partition=0,.partitions=2});
     check_visitation(partition);
     bool absent_remote_neighbor=false;
     for(size_t c=0;c<partition.num_cells();++c)
@@ -701,7 +701,7 @@ TEST(MeshHandleTest, ImplicitRangesPreservePeriodicAndGhostTraversal)
         for(size_t i=0;i<range.size();++i)
         {
             EXPECT_EQ(partition.face_global_id(range[i]),native[i]);
-            if(partition.neighbor_cell(range[i])==Handle::invalid_local_id() && !partition.is_geometry_exterior_face(range[i]))
+            if(partition.neighbor_cell(range[i])==Mesh::invalid_local_id() && !partition.is_geometry_exterior_face(range[i]))
             { absent_remote_neighbor=true; EXPECT_FALSE(partition.is_boundary_face(range[i])); }
         }
     }

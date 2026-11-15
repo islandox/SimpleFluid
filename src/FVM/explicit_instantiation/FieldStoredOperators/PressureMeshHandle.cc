@@ -7,47 +7,47 @@ namespace SimpleFluid::FVM
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 } // namespace
 
-template void pressure_weighted_face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
-    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
-    ScalarFaceFieldStored<Pack, MeshType>& fluxes, CellGradientScheme gradient_scheme);
+template void pressure_weighted_face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const ScalarCellFieldStored<Pack, Mesh>& pressure, typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>& workspace,
+    ScalarFaceFieldStored<Pack, Mesh>& fluxes, CellGradientScheme gradient_scheme);
 
-template void pressure_weighted_face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
-    ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+template void pressure_weighted_face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const ScalarCellFieldStored<Pack, Mesh>& pressure, typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
+    ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
-template void pressure_weighted_face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+template void pressure_weighted_face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const ScalarCellFieldStored<Pack, Mesh>& pressure, typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
     const BoundaryConditionMap& pressure_boundary_conditions,
-    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
-    ScalarFaceFieldStored<Pack, MeshType>& fluxes, CellGradientScheme gradient_scheme);
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>& workspace,
+    ScalarFaceFieldStored<Pack, Mesh>& fluxes, CellGradientScheme gradient_scheme);
 
-template void pressure_weighted_face_flux_components<Pack, MeshType>(
-    const VectorCellFieldStored<Pack, MeshType>& velocity, const ScalarCellFieldStored<Pack, MeshType>& pressure,
+template void pressure_weighted_face_flux_components<Pack, Mesh>(
+    const VectorCellFieldStored<Pack, Mesh>& velocity, const ScalarCellFieldStored<Pack, Mesh>& pressure,
     typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
     const BoundaryConditionMap& pressure_boundary_conditions,
-    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
-    ScalarFaceFieldStored<Pack, MeshType>& total, ScalarFaceFieldStored<Pack, MeshType>& velocity_component,
-    ScalarFaceFieldStored<Pack, MeshType>& pressure_component, CellGradientScheme gradient_scheme);
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>& workspace,
+    ScalarFaceFieldStored<Pack, Mesh>& total, ScalarFaceFieldStored<Pack, Mesh>& velocity_component,
+    ScalarFaceFieldStored<Pack, Mesh>& pressure_component, CellGradientScheme gradient_scheme);
 
-template void pressure_weighted_face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const ScalarCellFieldStored<Pack, MeshType>& pressure, VectorCellFieldStored<Pack, MeshType>& pressure_gradient,
+template void pressure_weighted_face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const ScalarCellFieldStored<Pack, Mesh>& pressure, VectorCellFieldStored<Pack, Mesh>& pressure_gradient,
     typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
     const BoundaryConditionMap& pressure_boundary_conditions,
-    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, MeshType>& workspace,
-    ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+    FieldStoredPressureWeightedFaceFluxWorkspace<Pack, Mesh>& workspace,
+    ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
-template void pressure_weighted_face_fluxes<Pack, MeshType>(const VectorCellFieldStored<Pack, MeshType>& velocity,
-    const ScalarCellFieldStored<Pack, MeshType>& pressure, typename Pack::scalar_type pressure_coefficient,
-    const FieldStoredVelocityBoundaryCache<Pack, MeshType>& boundary_cache,
-    const BoundaryConditionMap& pressure_boundary_conditions, ScalarFaceFieldStored<Pack, MeshType>& fluxes);
+template void pressure_weighted_face_fluxes<Pack, Mesh>(const VectorCellFieldStored<Pack, Mesh>& velocity,
+    const ScalarCellFieldStored<Pack, Mesh>& pressure, typename Pack::scalar_type pressure_coefficient,
+    const FieldStoredVelocityBoundaryCache<Pack, Mesh>& boundary_cache,
+    const BoundaryConditionMap& pressure_boundary_conditions, ScalarFaceFieldStored<Pack, Mesh>& fluxes);
 
 } // namespace SimpleFluid::FVM

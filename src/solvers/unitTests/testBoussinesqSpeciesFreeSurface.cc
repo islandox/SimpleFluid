@@ -20,14 +20,14 @@ using namespace SimpleFluid;
 namespace M = Testing::ReactingMixture;
 namespace R = Reacting;
 using Pack = DefaultTpetraTypes;
-using Grid = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using Solver = BoussinesqSolver<Pack>;
 using Coupler = MultiphysicsSolverCoupler<Pack>;
 using Model = Coupler::reacting_gas_model_type;
 using LO = Pack::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-BoundaryConditionSet closed(const Grid& grid)
+BoundaryConditionSet closed(const Mesh& grid)
 {
     BoundaryConditionSet result;
     for (const auto& [id, batch] : grid.boundary_batches())
@@ -50,7 +50,7 @@ double integral(const Model::field_type& field)
 struct Fixture
 {
     M::Mixture chemistry{false, true, R::EnergyConvention::SensibleEnergy, 0};
-    SP<Grid> grid;
+    SP<Mesh> grid;
     std::shared_ptr<Solver> solver;
     std::unique_ptr<Coupler> coupling;
     Model* gas = nullptr;
@@ -58,9 +58,9 @@ struct Fixture
     explicit Fixture(bool bubbles = true, double reference_pressure = 100000, double resolved_fraction = 0)
         : pressure(reference_pressure)
     {
-        Grid::DistributionOptions distribution;
+        Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
-        grid = std::make_shared<Grid>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        grid = std::make_shared<Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
                                           Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
             distribution);
         TimeStepperOptions time;

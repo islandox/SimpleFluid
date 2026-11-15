@@ -20,9 +20,9 @@ namespace
 namespace S = SimpleFluid;
 namespace R = S::Reacting;
 using Pack = S::DefaultTpetraTypes;
-using Grid = S::MeshHandle<Pack>;
+using Mesh = S::MeshHandle<Pack>;
 using LO = Pack::local_ordinal_type;
-using Model = S::ReactingGasModel<Pack, Grid>;
+using Model = S::ReactingGasModel<Pack, Mesh>;
 using Flow = R::LowMachMixtureSolver;
 constexpr R::SpeciesId left = 37, right = 903;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -32,14 +32,14 @@ void require(bool valid, const char* message)
     if (!valid)
         throw std::invalid_argument(message);
 }
-S::SP<Grid> two_cells()
+S::SP<Mesh> two_cells()
 {
-    Grid::DistributionOptions distribution;
+    Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
-    return std::make_shared<Grid>(std::make_shared<Grid::Cartesian>(
+    return std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         S::Vec3D<S::ArrReal>{{{0., 1.}, {0., 1.}, {0., .5, 1.}}}), distribution);
 }
-S::SP<Grid> hybrid_cells()
+S::SP<Mesh> hybrid_cells()
 {
     using Semi = S::Meshes::SemiStructuredXY_Z;
     S::Arr<Semi::Vec3> vertices;
@@ -51,7 +51,7 @@ S::SP<Grid> hybrid_cells()
     S::Arr<S::Arr<unsigned>> cells;
     for (const unsigned x : {3U, 0U, 2U, 1U})
         cells.push_back({2 * x, 2 * x + 2, 2 * x + 3, 2 * x + 1});
-    Grid::DistributionOptions distribution;
+    Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
     const auto ranks = Tpetra::getDefaultComm()->getSize();
     if (ranks == 2 || ranks == 4)
@@ -59,14 +59,14 @@ S::SP<Grid> hybrid_cells()
         distribution.xy_partitions = 2;
         distribution.z_partitions = ranks / 2;
     }
-    return std::make_shared<Grid>(
+    return std::make_shared<Mesh>(
         std::make_shared<Semi>(std::move(vertices), std::move(cells), S::ArrReal{0., .4, 1.}), distribution);
 }
 double source_shape(const R::ReactionLocation& location)
 {
     return 1. + location.centroid[0] + 2. * location.centroid[2];
 }
-void validate_location(const R::ReactionEnvironment& environment, const Grid& grid)
+void validate_location(const R::ReactionEnvironment& environment, const Mesh& grid)
 {
     require(environment.location && environment.location->ownedCell, "A mesh source requires its owned location.");
     const auto& location = *environment.location;
@@ -95,7 +95,7 @@ struct Chemistry
         catalog, {{20., 300., 0.}, {20., 300., 0.}}, {250., 500., 10000., 2000000.},
         R::EnergyConvention::SensibleEnergy);
 };
-R::ReactionSourceInput spatial_source(const R::ReactionContext& context, double dt, const Grid& grid)
+R::ReactionSourceInput spatial_source(const R::ReactionContext& context, double dt, const Mesh& grid)
 {
     validate_location(context.environment, grid);
     const double shape = source_shape(*context.environment.location);
@@ -104,7 +104,7 @@ R::ReactionSourceInput spatial_source(const R::ReactionContext& context, double 
     input.heat.rate = R::VolumetricHeatRate{4. * shape, R::SourceVolumeBasis::BulkVolume};
     return input;
 }
-S::ReactingGasOptions field_options(const Chemistry& chemistry, const S::SP<Grid>& grid)
+S::ReactingGasOptions field_options(const Chemistry& chemistry, const S::SP<Mesh>& grid)
 {
     S::ReactingGasOptions options;
     options.mode = S::ReactingGasMode::Species;
@@ -145,14 +145,14 @@ S::BoussinesqModelOptions material_options()
 }
 struct FieldFixture
 {
-    S::SP<Grid> grid;
+    S::SP<Mesh> grid;
     Chemistry chemistry;
     Model model;
     Model::field_type temperature, pressure;
     Model::velocity_field_type velocity;
     Model::face_flux_field_type relative_flux;
-    S::MaterialPropertyFields<Pack, Grid> material;
-    explicit FieldFixture(S::SP<Grid> selected)
+    S::MaterialPropertyFields<Pack, Mesh> material;
+    explicit FieldFixture(S::SP<Mesh> selected)
         : grid(std::move(selected)), model(grid, field_options(chemistry, grid)),
           temperature(grid, 300., "T"), pressure(grid, 0., "p"), velocity(grid, S::vec3<double>{}, "U"),
           relative_flux(grid, 0., "relative_phi"), material(grid, material_options(), S::TimeStepperOptions{})

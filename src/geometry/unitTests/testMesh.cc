@@ -30,7 +30,7 @@
 namespace
 {
 
-using MeshType = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
+using Mesh = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
 using Pack = SimpleFluid::TpetraTypes<>;
 
 using utils_test::KokkosEnvironment;
@@ -41,7 +41,7 @@ testing::Environment* const kokkos_environment =
 // ---------------------------------------------------------------------------
 // Helper: build a small 2x2x2 hex mesh (8 cells)
 // ---------------------------------------------------------------------------
-SimpleFluid::SP<MeshType> make_2x2x2_mesh()
+SimpleFluid::SP<Mesh> make_2x2x2_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
@@ -59,7 +59,7 @@ TEST(MeshTest, InvalidIdAndVtuCellType)
               std::numeric_limits<unsigned>::max());
     EXPECT_EQ(SimpleFluid::invalid_id<size_t>(),
               std::numeric_limits<size_t>::max());
-    EXPECT_EQ(MeshType::invalid_boundary_id, SimpleFluid::invalid_id<int>());
+    EXPECT_EQ(Mesh::invalid_boundary_id, SimpleFluid::invalid_id<int>());
 
     // vtu_cell_type_code
     EXPECT_EQ(SimpleFluid::MeshUtils::vtu_cell_type_code(
@@ -85,7 +85,7 @@ protected:
         ASSERT_NE(mesh_, nullptr);
     }
 
-    SimpleFluid::SP<MeshType> mesh_;
+    SimpleFluid::SP<Mesh> mesh_;
 };
 
 /** @brief Verifies the fixture mesh exposes its expected entity counts and maps. */
@@ -219,7 +219,7 @@ TEST_F(MeshMethodTest, FaceTopology)
         if (mesh_->is_boundary_face(fid))
         {
             ++boundary_count;
-            EXPECT_NE(mesh_->boundary_id(fid), MeshType::invalid_boundary_id);
+            EXPECT_NE(mesh_->boundary_id(fid), Mesh::invalid_boundary_id);
             EXPECT_NO_THROW(mesh_->boundary_batch_name(mesh_->boundary_id(fid)));
             EXPECT_TRUE(mesh_->is_exterior_face(fid));
         }

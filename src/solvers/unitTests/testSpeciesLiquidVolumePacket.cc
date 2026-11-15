@@ -14,8 +14,8 @@ namespace
 using namespace SimpleFluid;
 namespace R = Reacting;
 using Pack = DefaultTpetraTypes;
-using Grid = MeshHandle<Pack>;
-using Model = ReactingGasModel<Pack, Grid>;
+using Mesh = MeshHandle<Pack>;
+using Model = ReactingGasModel<Pack, Mesh>;
 using LO = Pack::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 constexpr R::SpeciesId a = 19, b = 811;
@@ -26,19 +26,19 @@ double rho(double x)
 }
 struct Fixture
 {
-    SP<Grid> grid;
+    SP<Mesh> grid;
     std::shared_ptr<const R::SpeciesCatalog> catalog;
     ReactingGasOptions options;
     std::unique_ptr<Model> model;
     std::unique_ptr<Model::field_type> temperature, pressure;
     std::unique_ptr<Model::velocity_field_type> velocity;
     std::unique_ptr<Model::face_flux_field_type> flux;
-    std::unique_ptr<MaterialPropertyFields<Pack, Grid>> material;
+    std::unique_ptr<MaterialPropertyFields<Pack, Mesh>> material;
     Fixture()
     {
-        Grid::DistributionOptions distribution;
+        Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
-        grid = std::make_shared<Grid>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        grid = std::make_shared<Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
                                           Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
             distribution);
         catalog = std::make_shared<const R::SpeciesCatalog>(
@@ -77,7 +77,7 @@ struct Fixture
         physics.specific_heat_capacity = 4000;
         physics.dynamic_viscosity = .001;
         physics.thermal_conductivity = 0;
-        material = std::make_unique<MaterialPropertyFields<Pack, Grid>>(grid, physics, TimeStepperOptions{});
+        material = std::make_unique<MaterialPropertyFields<Pack, Mesh>>(grid, physics, TimeStepperOptions{});
         std::vector<R::CellSpeciesState> initial;
         std::vector<std::vector<double>> numbers;
         for (std::size_t c = 0; c < grid->num_owned_cells(); ++c)

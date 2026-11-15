@@ -32,7 +32,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
 using StoredFaceFieldType = SimpleFluid::ScalarFaceFieldStored<Pack>;
@@ -146,8 +146,8 @@ private:
  * @param local_value Local contribution.
  * @return Global sum across ranks.
  */
-template<class MeshType>
-double global_sum(const MeshType& mesh, double local_value)
+template<class Mesh>
+double global_sum(const Mesh& mesh, double local_value)
 {
     double global_value = 0.0;
     Teuchos::reduceAll(
@@ -160,14 +160,14 @@ double global_sum(const MeshType& mesh, double local_value)
 }
 
 /** @brief Build the distributed cavity mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> distributed_mesh()
+SimpleFluid::SP<Mesh> distributed_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 8, 1, 0.125));
 }
 
 /** @brief Build the distributed line mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> distributed_line_mesh()
+SimpleFluid::SP<Mesh> distributed_line_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(8, 1, 1, 0.125));
@@ -202,7 +202,7 @@ native_graded_distributed_line_mesh()
 }
 
 /** @brief Build a line mesh with smaller cells after the rank interface. */
-SimpleFluid::SP<MeshType> graded_distributed_line_mesh()
+SimpleFluid::SP<Mesh> graded_distributed_line_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);
@@ -278,9 +278,9 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
 
     ExposedFluidSolver solver(mesh, {});
     VelocityFieldType before(
-        mesh, MeshType::Vec3{}, "velocity_before");
+        mesh, Mesh::Vec3{}, "velocity_before");
     VelocityFieldType after(
-        mesh, MeshType::Vec3{}, "velocity_after");
+        mesh, Mesh::Vec3{}, "velocity_after");
 
     double local_squared_norm = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -290,7 +290,7 @@ TEST(FluidSolverMultiRankTest, VelocityUpdateNormIsGlobal)
         const auto cell_gid =
             mesh->owned_cell_map()->getGlobalElement(cell_lid);
         const auto scale = static_cast<double>(cell_gid + 1);
-        const MeshType::Vec3 value{
+        const Mesh::Vec3 value{
             scale, -0.5 * scale, 2.0 * scale};
         after.set_value(cell_lid, value);
         local_squared_norm +=

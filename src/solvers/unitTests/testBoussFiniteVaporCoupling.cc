@@ -18,7 +18,7 @@ namespace R = Reacting;
 namespace B = BubbleGasPhysics;
 using P = R::SpeciesPhase;
 using Pack = DefaultTpetraTypes;
-using Grid = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 using LO = Pack::local_ordinal_type;
 class Solver : public BoussinesqSolver<Pack>
 {
@@ -26,7 +26,7 @@ public:
     using BoussinesqSolver<Pack>::BoussinesqSolver;
     auto& temperature_owner()
     {
-        return this->FluidSolver<Pack>::d_problem.template object<TemperatureDiffusionEquation<Pack, Grid>>(
+        return this->FluidSolver<Pack>::d_problem.template object<TemperatureDiffusionEquation<Pack, Mesh>>(
             "temperature_equation");
     }
 };
@@ -36,7 +36,7 @@ constexpr R::SpeciesId solvent = 29, donor = 73, gasOne = 5, gasTwo = 101;
 constexpr R::ReactionId gasReaction = 47;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-BoundaryConditionSet closed(const Grid& mesh)
+BoundaryConditionSet closed(const Mesh& mesh)
 {
     BoundaryConditionSet result;
     for (const auto& [id, batch] : mesh.boundary_batches())
@@ -67,20 +67,20 @@ struct Fixture
     std::shared_ptr<const R::ReactionMechanism> mechanism = std::make_shared<const R::ReactionMechanism>(
         catalog, std::vector<R::ReactionDefinition>{{gasReaction, "two_gases",
                      {{donor, P::Liquid, -1}, {gasOne, P::Resolved, 1}, {gasTwo, P::Resolved, 1}}, 0}});
-    SP<Grid> grid;
+    SP<Mesh> grid;
     std::shared_ptr<Solver> solver;
     std::unique_ptr<Coupler> coupling;
     Model* model = nullptr;
-    ScalarVoidFractionModel<Pack, Grid>* scalar = nullptr;
+    ScalarVoidFractionModel<Pack, Mesh>* scalar = nullptr;
     std::shared_ptr<const R::BoussReferenceVolume> reference = std::make_shared<const R::BoussReferenceVolume>(
         R::BoussReferenceVolume{"manufactured.fixed_rho_cp", 1, catalog->fingerprint(), 2, 2, 5, {.2, 1, 0, .1}});
     Fixture(double temperature = 383, double alpha = .19, double maximum = .2, double dt = 1, double solventDensity = 2,
         double initialVapor = 0, bool mixedMicro = false, double wallFlux = 0, double conductivity = 0,
         BoundaryConditionType wallType = BoundaryConditionType::Neumann, double sourceHeating = 0)
     {
-        Grid::DistributionOptions distribution;
+        Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
-        grid = std::make_shared<Grid>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        grid = std::make_shared<Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
                                           Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
             distribution);
         TimeStepperOptions time;
@@ -639,7 +639,7 @@ TEST(BoussFiniteVaporCouplingTest, BoundaryConductivityCacheCannotMaskChangedOwn
 TEST(BoussFiniteVaporCouplingTest, ExplicitHeatFluxSnapshotOwnsWallHeatAndIsRestoredByIdentity)
 {
     Fixture f(373, 0, .9, .1, 2, 0, false, 0, 1);
-    using Cache = TemperatureDiffusionEquation<Pack, Grid>::boundary_cache_type;
+    using Cache = TemperatureDiffusionEquation<Pack, Mesh>::boundary_cache_type;
     auto supplied = std::make_shared<Cache>();
     supplied->mesh = f.grid;
     for (const auto& [id, batch] : f.grid->boundary_batches())
@@ -778,9 +778,9 @@ TEST(BoussFiniteVaporCouplingTest, RankAsymmetricValidSurfacePressureRejectsBefo
 {
     namespace M = Testing::ReactingMixture;
     const M::Mixture mixture;
-    Grid::DistributionOptions distribution;
+    Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
-    auto grid = std::make_shared<Grid>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+    auto grid = std::make_shared<Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
                                            Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
         distribution);
     TimeStepperOptions time;

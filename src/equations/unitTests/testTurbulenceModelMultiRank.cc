@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using Model = SimpleFluid::TurbulenceModel<Pack>;
 
@@ -35,12 +35,12 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_distributed_mesh()
+SimpleFluid::SP<Mesh> make_distributed_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
 }
 
-SimpleFluid::MaterialPropertyFields<Pack> make_material(SimpleFluid::SP<const MeshType> mesh)
+SimpleFluid::MaterialPropertyFields<Pack> make_material(SimpleFluid::SP<const Mesh> mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;

@@ -19,7 +19,7 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 static_assert(!GeometryProvider<RectilinearTopology>);
 static_assert(!TopologyProvider<RectilinearGeometry>);
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -75,7 +75,7 @@ TEST(MultiRegionMeshTest, CanonicalIncidenceMatchesSingleBlock)
         }
     }
     EXPECT_EQ(seam, 4U);
-    Handle handle(std::static_pointer_cast<const MultiRegionMesh>(mesh));
+    Mesh handle(std::static_pointer_cast<const MultiRegionMesh>(mesh));
     EXPECT_EQ(handle.connectivity_storage_bytes(), 0U); EXPECT_FALSE(handle.has_materialized_indexer());
     EXPECT_FALSE(handle.has_mutable_geometry());
     EXPECT_THROW(handle.visit_mutable([](auto&){}), std::logic_error);
@@ -145,14 +145,14 @@ TEST(MultiRegionMeshTest, NativeAliasReplacementInvalidatesStaticObservation)
 {
     auto native = std::make_shared<OrthogonalCartesian3D>(Vec3D<ArrReal>{{{0,1},{0,1},{0,1}}});
     auto mesh = std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("one",native)}, std::vector<MultiRegionMesh::Interface>{});
-    Handle handle(mesh);
+    Mesh handle(mesh);
     *native = OrthogonalCartesian3D(Vec3D<ArrReal>{{{0,2},{0,1},{0,1}}});
     EXPECT_THROW(handle.geometry_epoch(), std::logic_error);
     EXPECT_THROW(handle.cell_volume(0), std::logic_error);
 }
 TEST(MultiRegionMeshTest, OutputIsTemporaryAndLabelsRegionCells)
 {
-    auto mesh = test::mixed_regions(); Handle handle(mesh);
+    auto mesh = test::mixed_regions(); Mesh handle(mesh);
     const auto file = std::filesystem::temp_directory_path() / "simplefluid_regions_test.vtu";
     handle.export_vtu(file.string());
     std::ifstream stream(file); const std::string text((std::istreambuf_iterator<char>(stream)), {});
@@ -428,7 +428,7 @@ TEST(RegionProvidersTest, IndependentExtrusionsShareTopologyAndMatchAnalyticMetr
 TEST(MultiRegionMeshTest, TranslatedPeriodicFacesUseAdjacentImages)
 {
     const auto mesh=test::periodic_regions();
-    auto handle=std::make_shared<Handle>(mesh);
+    auto handle=std::make_shared<Mesh>(mesh);
     size_t periodic=0;
     for(size_t f=0;f<mesh->num_faces();++f)
         if(std::abs(mesh->face_centroid(f).x)<1e-12 && std::abs(mesh->face_normal(f).x)>0.5)
@@ -522,7 +522,7 @@ TEST(MultiRegionMeshTest, ExplicitConstituentsKeepStaticMotionContract)
     auto native=test::explicit_reference(source);
     auto geometry=std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("explicit",native)},
         std::vector<MultiRegionMesh::Interface>{});
-    auto mesh=std::make_shared<Handle>(geometry);
+    auto mesh=std::make_shared<Mesh>(geometry);
     EXPECT_FALSE(geometry->supports_axial_motion());
     EXPECT_THROW((PlanarALEMeshMotion<>(mesh)),std::invalid_argument);
 }

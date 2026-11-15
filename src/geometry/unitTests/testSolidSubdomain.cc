@@ -22,17 +22,17 @@ namespace
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Subdomain = SimpleFluid::SolidSubdomain<Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<Handle> make_three_cell_handle()
+SimpleFluid::SP<Mesh> make_three_cell_handle()
 {
     auto mesh = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0, 2.0, 3.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    return std::make_shared<Handle>(std::move(mesh));
+    return std::make_shared<Mesh>(std::move(mesh));
 }
 
 const Subdomain::InterfaceFace& only_interface(const Subdomain& subdomain)
@@ -142,8 +142,8 @@ TEST(SolidSubdomainTest, ReorientsCutFaceFromSelectedParentNeighbor)
 TEST(SolidSubdomainTest, SelectsCellsOnFactoryMeshHandle)
 {
     const auto factory_mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto parent = std::make_shared<Handle>(*factory_mesh);
-    ASSERT_TRUE(std::holds_alternative<Handle::UnstructuredPtr>(parent->variant()));
+    auto parent = std::make_shared<Mesh>(*factory_mesh);
+    ASSERT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(parent->variant()));
     const auto selected_field_gid = parent->cell_global_id(1);
 
     const Subdomain solid(
@@ -169,7 +169,7 @@ TEST(SolidSubdomainTest, AcceptsUntaggedUnstructuredExteriorFaces)
             {0.0, 0.0, 1.0}, {1.0, 0.0, 1.0}, {1.0, 1.0, 1.0}, {0.0, 1.0, 1.0}},
         SimpleFluid::Arr<Unstructured::CellDefinition>{{Unstructured::CellType::HEXAHEDRON, {0, 1, 2, 3, 4, 5, 6, 7}}},
         SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition>{});
-    const auto parent = std::make_shared<Handle>(geometry);
+    const auto parent = std::make_shared<Mesh>(geometry);
     const Subdomain solid(parent);
 
     ASSERT_EQ(solid.num_owned_cells(), 1U);
@@ -220,10 +220,10 @@ TEST(SolidSubdomainTest, PreservesPeriodicImageVectorsInBothOrientations)
         auto geometry = std::make_shared<Cartesian>(
             SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, 1, 2, 3}, {0, 1}, {0, 1}}},
             SimpleFluid::Vec3D<bool>{{true, false, false}});
-        auto parent = std::make_shared<Handle>(geometry);
+        auto parent = std::make_shared<Mesh>(geometry);
         std::unique_ptr<Subdomain> solid;
         if (select_all)
-            solid = std::make_unique<Subdomain>(SimpleFluid::SP<const Handle>(parent));
+            solid = std::make_unique<Subdomain>(SimpleFluid::SP<const Mesh>(parent));
         else
             solid = std::make_unique<Subdomain>(std::move(parent),
                 [](Pack::global_ordinal_type gid, const Subdomain::Vec3&) { return gid != 1; });
@@ -257,8 +257,8 @@ TEST(SolidSubdomainTest, ForwardsParentMotionEpochAndExecutionProtection)
         std::vector<SimpleFluid::Meshes::MultiRegionMesh::Region>{
             SimpleFluid::Meshes::native_region("solid", native)},
         std::vector<SimpleFluid::Meshes::MultiRegionMesh::Interface>{});
-    auto parent = std::make_shared<Handle>(composite);
-    const Subdomain solid{SimpleFluid::SP<const Handle>(parent)};
+    auto parent = std::make_shared<Mesh>(composite);
+    const Subdomain solid{SimpleFluid::SP<const Mesh>(parent)};
     SimpleFluid::PlanarALEMeshMotion<Pack> motion(parent);
     const auto epoch = solid.geometry_epoch();
     {

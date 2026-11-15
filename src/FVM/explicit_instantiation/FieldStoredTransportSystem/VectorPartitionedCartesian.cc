@@ -9,21 +9,21 @@ namespace SimpleFluid::FVM
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
-using Factory = TransportSystemFactory<Pack, MeshType>;
+using Mesh = Meshes::PartitionedMesh<Meshes::OrthogonalCartesian3D, Pack>;
+using Factory = TransportSystemFactory<Pack, Mesh>;
 } // namespace
 
 template<>
 VectorTransportSystem<Pack> Factory::assemble(
     VectorTerms terms, VelocityBoundary boundary, VectorOptions options, VectorContext context)
 {
-    return detail::assemble_factory_vector<Pack, MeshType>(
+    return detail::assemble_factory_vector<Pack, Mesh>(
         std::move(terms), std::move(boundary), options, std::move(context));
 }
 
 namespace detail
 {
-template VectorTransportSystem<Pack> assemble_stored_vector<Pack, MeshType>(
+template VectorTransportSystem<Pack> assemble_stored_vector<Pack, Mesh>(
     Factory::VectorTerms, Factory::VelocityBoundary, Factory::VectorOptions, Factory::VectorContext);
 } // namespace detail
 } // namespace SimpleFluid::FVM

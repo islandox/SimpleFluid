@@ -8,8 +8,8 @@ namespace SimpleFluid::FVM
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = MeshHandle<Pack>;
-using Factory = TransportSystemFactory<Pack, MeshType>;
+using Mesh = MeshHandle<Pack>;
+using Factory = TransportSystemFactory<Pack, Mesh>;
 } // namespace
 
 template TransportSystem<Pack> Factory::assemble(Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary,
@@ -23,11 +23,11 @@ template TransportSystem<Pack> Factory::refresh_temperature_rhs(
 
 namespace detail
 {
-template TransportSystem<Pack> assemble_stored_weighted<Pack, MeshType>(
+template TransportSystem<Pack> assemble_stored_weighted<Pack, Mesh>(
     Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary, Factory::WeightedScalarOptions,
     Factory::WeightedScalarContext);
 
-template TransportSystem<Pack> assemble_stored_temperature<Pack, MeshType>(
+template TransportSystem<Pack> assemble_stored_temperature<Pack, Mesh>(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions,
     Factory::TemperatureContext, bool);
 } // namespace detail

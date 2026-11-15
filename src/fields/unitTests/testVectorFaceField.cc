@@ -24,9 +24,9 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::VectorFaceField<Pack>;
-using Vec3 = MeshType::Vec3;
+using Vec3 = Mesh::Vec3;
 
 using utils_test::KokkosEnvironment;
 
@@ -34,7 +34,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the assembled two-cell mesh shared by vector-face tests. */
-SimpleFluid::SP<MeshType> make_two_hex_mesh()
+SimpleFluid::SP<Mesh> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());
@@ -75,8 +75,8 @@ TEST(VectorFaceFieldTest, InitialValueConstructorFillsAllComponents)
 
     FieldType velocity(mesh, Vec3{1.0, -2.0, 3.5}, "initial_velocity");
 
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         EXPECT_EQ(velocity.value(fid), (Vec3{1.0, -2.0, 3.5}));

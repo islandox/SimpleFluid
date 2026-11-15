@@ -18,7 +18,7 @@
 namespace
 {
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using Handle = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Semi = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using LO = Pack::local_ordinal_type;
 using GO = Pack::global_ordinal_type;
@@ -85,7 +85,7 @@ std::set<std::size_t> expected_overlap(const Semi& native, std::set<std::size_t>
 }
 
 /** Actual owned maps identify labels; native graph/column invariants independently validate them. */
-std::vector<int> global_cell_owners(const Handle& handle, const Semi& native)
+std::vector<int> global_cell_owners(const Mesh& handle, const Semi& native)
 {
     const auto comm = Tpetra::getDefaultComm();
     std::vector<int> local(native.num_cells()), owners(native.num_cells());
@@ -106,7 +106,7 @@ std::vector<int> global_cell_owners(const Handle& handle, const Semi& native)
 }
 
 /** Verify contiguous owned algebraic maps and exact owner-to-ghost allocation by canonical geometry identity. */
-void verify_algebraic_maps(const Handle& handle, const Semi& native)
+void verify_algebraic_maps(const Mesh& handle, const Semi& native)
 {
     const auto comm = Tpetra::getDefaultComm();
     const auto ranks = static_cast<std::size_t>(comm->getSize());
@@ -185,7 +185,7 @@ void verify_algebraic_maps(const Handle& handle, const Semi& native)
 }
 
 std::vector<std::size_t> verify_hybrid_ownership(
-    const Handle& handle, const Semi& native, const std::vector<int>& owners)
+    const Mesh& handle, const Semi& native, const std::vector<int>& owners)
 {
     const auto factors = handle.semi_structured_decomposition();
     const std::size_t px = factors.xy_partitions, pz = factors.z_partitions;
@@ -231,14 +231,14 @@ std::shared_ptr<Semi> shuffled_chain()
 
 /** Native compact geometry is the serial oracle; no serial MeshHandle is constructed on MPI. */
 void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_depth,
-    Handle::DistributionOptions options = {}, double expected_volume = 5.)
+    Mesh::DistributionOptions options = {}, double expected_volume = 5.)
 {
     const auto comm = Tpetra::getDefaultComm();
     const std::size_t ranks = comm->getSize();
     const std::size_t count = native->num_cells();
     options.ghost_layers = ghost_depth;
     options.allow_empty_partitions = true;
-    const Handle handle(native, options);
+    const Mesh handle(native, options);
     verify_algebraic_maps(handle, *native);
     const auto owners = global_cell_owners(handle, *native);
     const auto xy_owners = verify_hybrid_ownership(handle, *native, owners);
@@ -347,7 +347,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         const auto owner = handle.owner_cell(lid);
         const auto neighbor = handle.neighbor_cell(lid);
         const auto native_owner = native->indexer().cell_ordinal(native->owner_cell(face));
-        if (owner != Handle::invalid_local_id())
+        if (owner != Mesh::invalid_local_id())
             EXPECT_EQ(static_cast<std::size_t>(handle.cell_geometry_global_id(owner)), native_owner);
         const bool physically_exterior = native->neighbor_cell(face) == Semi::invalid_cell_id();
         EXPECT_EQ(handle.is_geometry_exterior_face(lid), physically_exterior);
@@ -355,11 +355,11 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         EXPECT_EQ(handle.boundary_id(lid), native->boundary_id(face));
         if (!physically_exterior)
         {
-            if (neighbor != Handle::invalid_local_id())
+            if (neighbor != Mesh::invalid_local_id())
                 EXPECT_EQ(static_cast<std::size_t>(handle.cell_geometry_global_id(neighbor)),
                     native->indexer().cell_ordinal(native->neighbor_cell(face)));
-            if ((owner != Handle::invalid_local_id() && handle.is_owned_cell(owner)) !=
-                (neighbor != Handle::invalid_local_id() && handle.is_owned_cell(neighbor)))
+            if ((owner != Mesh::invalid_local_id() && handle.is_owned_cell(owner)) !=
+                (neighbor != Mesh::invalid_local_id() && handle.is_owned_cell(neighbor)))
                 ++partition_faces;
         }
         EXPECT_EQ(handle.is_owned_face(lid), owned.contains(native_owner));
@@ -459,7 +459,7 @@ TEST(SemiStructuredDistributedTest, TwoGhostLayersFollowTopologyBreadthFirst)
 TEST(SemiStructuredDistributedTest, SingleLayerPartitionsAcrossXYAndHasActualEmptyOwners)
 {
     verify_partition(mixed_mesh(true), 1);
-    const Handle handle(mixed_mesh(true), {.allow_empty_partitions = true});
+    const Mesh handle(mixed_mesh(true), {.allow_empty_partitions = true});
     const auto owners = global_cell_owners(handle, *mixed_mesh(true));
     (void) verify_hybrid_ownership(handle, *mixed_mesh(true), owners);
 }
@@ -467,7 +467,7 @@ TEST(SemiStructuredDistributedTest, SingleLayerPartitionsAcrossXYAndHasActualEmp
 TEST(SemiStructuredDistributedTest, MoreRanksThanOneCellRetainsEmptyMapsAndOwnedOnlyOutput)
 {
     const auto native = one_triangle();
-    const Handle handle(native, {.ghost_layers = 2, .allow_empty_partitions = true});
+    const Mesh handle(native, {.ghost_layers = 2, .allow_empty_partitions = true});
     const auto ranks = Tpetra::getDefaultComm()->getSize();
     EXPECT_EQ(global_sum(handle.num_owned_cells() == 0 ? 1 : 0), ranks - 1);
     EXPECT_EQ(global_sum(static_cast<int>(handle.num_owned_cells())), 1);
@@ -503,15 +503,15 @@ TEST(SemiStructuredDistributedTest, MoreRanksThanOneCellRetainsEmptyMapsAndOwned
 TEST(SemiStructuredDistributedTest, MutableCopiesPreserveConcreteIdentityAndConstObserverPolicy)
 {
     const auto native = mixed_mesh();
-    Handle handle(native, {.ghost_layers = 2});
-    Handle copy = handle;
+    Mesh handle(native, {.ghost_layers = 2});
+    Mesh copy = handle;
     EXPECT_TRUE(handle.has_mutable_geometry());
     EXPECT_TRUE(copy.has_mutable_geometry());
     EXPECT_EQ(handle.owned_cell_map().get(), copy.owned_cell_map().get());
     EXPECT_EQ(handle.visit([](const auto& mesh) -> const void* { return &mesh; }), native.get());
     EXPECT_EQ(copy.visit_mutable([](auto& mesh) -> const void* { return &mesh; }), native.get());
     EXPECT_EQ(handle.geometry_epoch(), copy.geometry_epoch());
-    Handle observer(Handle::SemiStructuredPtr(native), {.ghost_layers = 2});
+    Mesh observer(Mesh::SemiStructuredPtr(native), {.ghost_layers = 2});
     EXPECT_FALSE(observer.has_mutable_geometry());
     EXPECT_THROW(observer.visit_mutable([](auto&) {}), std::logic_error);
 }
@@ -520,25 +520,25 @@ TEST(SemiStructuredDistributedTest, InvalidAndRankAsymmetricOptionsRejectCollect
 {
     const auto comm = Tpetra::getDefaultComm();
     const auto native = mixed_mesh();
-    EXPECT_THROW((void) Handle(native, {.ghost_layers = 0}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.ghost_layers = 0}), std::invalid_argument);
     EXPECT_THROW(
-        (void) Handle(native, {.partition = static_cast<std::size_t>(comm->getRank())}), std::invalid_argument);
-    EXPECT_THROW((void) Handle(native, {.partition = static_cast<std::size_t>(comm->getRank()),
+        (void) Mesh(native, {.partition = static_cast<std::size_t>(comm->getRank())}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.partition = static_cast<std::size_t>(comm->getRank()),
                                            .partitions = static_cast<std::size_t>(comm->getSize() + 1)}),
         std::invalid_argument);
-    EXPECT_NO_THROW((void) Handle(native, {.partition = static_cast<std::size_t>(comm->getRank()),
+    EXPECT_NO_THROW((void) Mesh(native, {.partition = static_cast<std::size_t>(comm->getRank()),
                                               .partitions = static_cast<std::size_t>(comm->getSize()),
                                               .allow_empty_partitions = true}));
     if (comm->getSize() > 1)
     {
-        EXPECT_THROW((void) Handle(native, {.ghost_layers = comm->getRank() == 0 ? 1U : 2U}), std::invalid_argument);
-        EXPECT_THROW((void) Handle(native, {.allow_empty_partitions = comm->getRank() == 0}), std::invalid_argument);
-        EXPECT_THROW((void) Handle(one_triangle()), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(native, {.ghost_layers = comm->getRank() == 0 ? 1U : 2U}), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(native, {.allow_empty_partitions = comm->getRank() == 0}), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(one_triangle()), std::invalid_argument);
         EXPECT_THROW(
-            (void) Handle(comm->getRank() == 0 ? mixed_mesh() : mixed_mesh(false, .125)), std::invalid_argument);
-        EXPECT_THROW((void) Handle(comm->getRank() == 0 ? mixed_mesh() : mixed_mesh(true)), std::invalid_argument);
+            (void) Mesh(comm->getRank() == 0 ? mixed_mesh() : mixed_mesh(false, .125)), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(comm->getRank() == 0 ? mixed_mesh() : mixed_mesh(true)), std::invalid_argument);
         const std::shared_ptr<Semi> maybe_null = comm->getRank() == 0 ? nullptr : native;
-        EXPECT_THROW((void) Handle(maybe_null), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(maybe_null), std::invalid_argument);
     }
 }
 
@@ -548,9 +548,9 @@ TEST(SemiStructuredDistributedTest, ShuffledXYGraphCutsAndFactoryReorderingPrese
     const auto native = shuffled_chain();
     const auto comm = Tpetra::getDefaultComm();
     const auto ranks = static_cast<std::size_t>(comm->getSize());
-    Handle::DistributionOptions options{.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1};
+    Mesh::DistributionOptions options{.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1};
     verify_partition(native, 2, options, 60.);
-    const Handle handle(native, options);
+    const Mesh handle(native, options);
     verify_algebraic_maps(handle, *native);
     const auto owners = global_cell_owners(handle, *native);
     const auto xy_owners = verify_hybrid_ownership(handle, *native, owners);
@@ -602,10 +602,10 @@ TEST(SemiStructuredDistributedTest, HybridFactorOverridesInferBothWaysAndRetainC
     {
         SCOPED_TRACE(px);
         const auto pz = ranks / px;
-        const Handle explicit_factors(
+        const Mesh explicit_factors(
             native, {.allow_empty_partitions = true, .xy_partitions = px, .z_partitions = pz});
-        const Handle infer_z(native, {.allow_empty_partitions = true, .xy_partitions = px});
-        const Handle infer_xy(native, {.allow_empty_partitions = true, .z_partitions = pz});
+        const Mesh infer_z(native, {.allow_empty_partitions = true, .xy_partitions = px});
+        const Mesh infer_xy(native, {.allow_empty_partitions = true, .z_partitions = pz});
         EXPECT_EQ(explicit_factors.semi_structured_decomposition().xy_partitions, px);
         EXPECT_EQ(explicit_factors.semi_structured_decomposition().z_partitions, pz);
         EXPECT_EQ(infer_z.semi_structured_decomposition().z_partitions, pz);
@@ -616,7 +616,7 @@ TEST(SemiStructuredDistributedTest, HybridFactorOverridesInferBothWaysAndRetainC
         (void) verify_hybrid_ownership(explicit_factors, *native, owners);
         verify_partition(native, 2, {.xy_partitions = px, .z_partitions = pz}, 60.);
     }
-    const Handle automatic(native);
+    const Mesh automatic(native);
     const auto selected = automatic.semi_structured_decomposition();
     EXPECT_EQ(selected.xy_partitions * selected.z_partitions, ranks);
     if (ranks == 4)
@@ -631,21 +631,21 @@ TEST(SemiStructuredDistributedTest, ProductFactorEmptyOwnersRequireExplicitPolic
 {
     const auto native = mixed_mesh(true);
     const auto ranks = static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize());
-    const Handle handle(native, {.allow_empty_partitions = true, .xy_partitions = 1, .z_partitions = ranks});
+    const Mesh handle(native, {.allow_empty_partitions = true, .xy_partitions = 1, .z_partitions = ranks});
     const auto owners = global_cell_owners(handle, *native);
     (void) verify_hybrid_ownership(handle, *native, owners);
     EXPECT_EQ(global_sum(handle.num_owned_cells() == 0 ? 1 : 0), static_cast<int>(ranks - 1));
     verify_partition(native, 1, {.xy_partitions = 1, .z_partitions = ranks});
     if (ranks > 1)
-        EXPECT_THROW((void) Handle(native, {.xy_partitions = 1, .z_partitions = ranks}), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(native, {.xy_partitions = 1, .z_partitions = ranks}), std::invalid_argument);
 }
 
 /** Repeated construction must preserve label canonicalization and XY-order/map identity by value. */
 TEST(SemiStructuredDistributedTest, RepeatedHybridConstructionHasDeterministicMapsAndCanonicalFaces)
 {
     const auto native = shuffled_chain();
-    const Handle first(native, {.ghost_layers = 2});
-    const Handle second(native, {.ghost_layers = 2});
+    const Mesh first(native, {.ghost_layers = 2});
+    const Mesh second(native, {.ghost_layers = 2});
     EXPECT_EQ(
         first.semi_structured_decomposition().xy_partitions, second.semi_structured_decomposition().xy_partitions);
     EXPECT_EQ(first.semi_structured_decomposition().z_partitions, second.semi_structured_decomposition().z_partitions);
@@ -674,21 +674,21 @@ TEST(SemiStructuredDistributedTest, InvalidOrRankDivergentHybridFactorsRejectBef
     const auto native = shuffled_chain();
     const auto comm = Tpetra::getDefaultComm();
     const auto ranks = static_cast<std::size_t>(comm->getSize());
-    EXPECT_THROW((void) Handle(native, {.xy_partitions = 0}), std::invalid_argument);
-    EXPECT_THROW((void) Handle(native, {.z_partitions = 0}), std::invalid_argument);
-    EXPECT_THROW((void) Handle(native, {.xy_partitions = ranks + 1}), std::invalid_argument);
-    EXPECT_THROW((void) Handle(native, {.z_partitions = ranks + 1}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.xy_partitions = 0}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.z_partitions = 0}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.xy_partitions = ranks + 1}), std::invalid_argument);
+    EXPECT_THROW((void) Mesh(native, {.z_partitions = ranks + 1}), std::invalid_argument);
     if (ranks > 1)
     {
-        EXPECT_THROW((void) Handle(native, {.xy_partitions = ranks, .z_partitions = ranks}), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(native, {.xy_partitions = ranks, .z_partitions = ranks}), std::invalid_argument);
         EXPECT_THROW(
-            (void) Handle(native, {.allow_empty_partitions = true, .xy_partitions = comm->getRank() == 0 ? 1U : ranks}),
+            (void) Mesh(native, {.allow_empty_partitions = true, .xy_partitions = comm->getRank() == 0 ? 1U : ranks}),
             std::invalid_argument);
-        Handle::DistributionOptions options;
+        Mesh::DistributionOptions options;
         options.allow_empty_partitions = true;
         options.xy_partitions = 1;
         if (comm->getRank() != 0)
             options.z_partitions = ranks;
-        EXPECT_THROW((void) Handle(native, options), std::invalid_argument);
+        EXPECT_THROW((void) Mesh(native, options), std::invalid_argument);
     }
 }

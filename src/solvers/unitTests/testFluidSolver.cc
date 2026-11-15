@@ -36,7 +36,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 
 using utils_test::KokkosEnvironment;
 
@@ -44,7 +44,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build a single-cell box mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_single_cell_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);
@@ -63,7 +63,7 @@ SimpleFluid::SP<MeshType> make_single_cell_mesh()
 }
 
 /** @brief Build a two-cell line mesh along x. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_two_cell_line_mesh()
+SimpleFluid::SP<Mesh> make_two_cell_line_mesh()
 {
     auto database = std::make_shared<SimpleFluid::Database>();
     database->set("dimension", 3);
@@ -274,7 +274,7 @@ TEST(FluidSolverTest, CentralGeometryRefreshRestoresCoreCachesAndVtuPoints)
 /** @brief Const construction shares one exact handle across equations and fields. */
 TEST(FluidSolverTest, ConstNativeConstructionPreservesFieldAndWorkspaceIdentity)
 {
-    SimpleFluid::SP<const MeshType> mesh = make_single_cell_mesh();
+    SimpleFluid::SP<const Mesh> mesh = make_single_cell_mesh();
     TestFluidSolver solver(mesh, {});
 
     ASSERT_TRUE(solver.runtime_mesh_handle());
@@ -603,7 +603,7 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         solver.pressure().set_value(
             cell_lid, mesh->cell_centroid(cell_lid).x);
     }
@@ -615,7 +615,7 @@ TEST(FluidSolverTest, MomentumPredictorIncludesOldPressureGradient)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto velocity = solver.velocity().value(cell_lid);
         EXPECT_NEAR(velocity.x, -time_options.time_step, 1.0e-12);
         EXPECT_NEAR(velocity.y, 0.0, 1.0e-12);

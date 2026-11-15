@@ -57,7 +57,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::ScalarCellFieldStored<Pack>;
 using Comm = Teuchos::Comm<int>;
 
@@ -494,7 +494,7 @@ make_box_database(const Dimensions& dimensions)
  * @param shear Shear factor applied to node x-coordinates.
  * @return Shared pointer to the assembled sheared mesh.
  */
-std::shared_ptr<MeshType> make_sheared_box_mesh(const Dimensions& dimensions, double shear)
+std::shared_ptr<Mesh> make_sheared_box_mesh(const Dimensions& dimensions, double shear)
 {
     using Data = SimpleFluid::Meshes::UnstructuredMeshData;
     const auto comm = Tpetra::getDefaultComm();
@@ -521,7 +521,7 @@ std::shared_ptr<MeshType> make_sheared_box_mesh(const Dimensions& dimensions, do
         throw std::runtime_error("Benchmark mesh generation failed on rank zero.");
     }
     auto partition = SimpleFluid::MeshPartitioner<Pack>::partition_native(std::move(data), comm, 1, true);
-    return SimpleFluid::detail::collective_make_shared<MeshType>(*comm, partition.geometry, partition.indexer, comm);
+    return SimpleFluid::detail::collective_make_shared<Mesh>(*comm, partition.geometry, partition.indexer, comm);
 }
 
 /**
@@ -542,7 +542,7 @@ double manufactured_solution(const SimpleFluid::vec3<>& point)
  * @param mesh Assembled finite-volume mesh.
  * @return AngleMetrics with mean and max angles in degrees.
  */
-AngleMetrics nonorthogonality_metrics(const MeshType& mesh)
+AngleMetrics nonorthogonality_metrics(const Mesh& mesh)
 {
     double local_sum = 0.0;
     double local_maximum = 0.0;
@@ -550,7 +550,7 @@ AngleMetrics nonorthogonality_metrics(const MeshType& mesh)
     for (size_t face = 0; face < mesh.num_faces(); ++face)
     {
         const auto face_lid =
-            static_cast<MeshType::local_ordinal_type>(face);
+            static_cast<Mesh::local_ordinal_type>(face);
         if (!mesh.is_owned_face(face_lid)
             || !mesh.is_interior_face(face_lid))
         {
@@ -601,7 +601,7 @@ ErrorMetrics error_metrics(const FieldType& field)
          ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto error =
             field.value(cell_lid)
           - manufactured_solution(field.mesh().cell_centroid(cell_lid));
@@ -716,7 +716,7 @@ SimpleFluid::Benchmark::Record run_diffusion(
             manufactured_solution(mesh->face_centroid(face_lid))};
     };
     auto source =
-        [](MeshType::local_ordinal_type)
+        [](Mesh::local_ordinal_type)
         {
             return -2.0;
         };
@@ -947,7 +947,7 @@ SimpleFluid::Benchmark::Record run_lid_driven_cavity(
     const auto boundary_conditions =
         lid_driven_cavity_boundary_conditions();
     const auto boundary_cache =
-        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack, MeshType>(
+        SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack, Mesh>(
             mesh, boundary_conditions);
     double local_lid_velocity = 0.0;
     for (const auto& [batch_id, values] : boundary_cache.value)

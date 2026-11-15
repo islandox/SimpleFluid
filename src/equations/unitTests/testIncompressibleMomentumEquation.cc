@@ -48,7 +48,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -57,13 +57,13 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_single_hex_mesh()
+SimpleFluid::SP<Mesh> make_single_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_single_hex_database());
 }
 
-SimpleFluid::SP<MeshType> make_2x2x2_mesh()
+SimpleFluid::SP<Mesh> make_2x2x2_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_2x2x2_database());
@@ -71,8 +71,8 @@ SimpleFluid::SP<MeshType> make_2x2x2_mesh()
 
 Pack::scalar_type local_matrix_entry(
     const Pack::matrix_type& matrix,
-    MeshType::local_ordinal_type row,
-    MeshType::local_ordinal_type column)
+    Mesh::local_ordinal_type row,
+    Mesh::local_ordinal_type column)
 {
     const auto row_entries = matrix.getNumEntriesInLocalRow(row);
     typename Pack::matrix_type::nonconst_local_inds_host_view_type columns(
@@ -114,7 +114,7 @@ TEST(IncompressibleMomentumEquationTest, AdvancesVelocityFromSource)
     options.kinematic_viscosity = 0.0;
 
     auto source =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {1.0, 2.0, 3.0};
     };
@@ -147,7 +147,7 @@ TEST(IncompressibleMomentumEquationTest, AdvancesPhysicalMomentum)
     options.time_step = 0.2;
 
     auto acceleration =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {-2.0, 1.0, 0.5};
     };
@@ -184,7 +184,7 @@ TEST(IncompressibleMomentumEquationTest,
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 0.2;
     auto zero_acceleration =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
@@ -225,7 +225,7 @@ TEST(IncompressibleMomentumEquationTest,
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 0.2;
     auto acceleration =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         // Cancels the transient RHS in X, advances Y, and leaves Z at its
         // exact warm start.
@@ -261,7 +261,7 @@ TEST(IncompressibleMomentumEquationTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto index = static_cast<double>(owned + 1);
         velocity.set_owned_value(
             cell_lid, {1.0 + index * index,
@@ -272,7 +272,7 @@ TEST(IncompressibleMomentumEquationTest,
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
         accepted[local] = velocity.local_value(
-            static_cast<MeshType::local_ordinal_type>(local));
+            static_cast<Mesh::local_ordinal_type>(local));
     }
 
     FieldType dynamic_viscosity(mesh, 1.0, "dynamic_viscosity");
@@ -284,7 +284,7 @@ TEST(IncompressibleMomentumEquationTest,
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 1.0;
     auto zero_acceleration =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
@@ -303,7 +303,7 @@ TEST(IncompressibleMomentumEquationTest,
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
         const auto actual = velocity.local_value(
-            static_cast<MeshType::local_ordinal_type>(local));
+            static_cast<Mesh::local_ordinal_type>(local));
         EXPECT_DOUBLE_EQ(actual.x, accepted[local].x);
         EXPECT_DOUBLE_EQ(actual.y, accepted[local].y);
         EXPECT_DOUBLE_EQ(actual.z, accepted[local].z);
@@ -348,7 +348,7 @@ TEST(IncompressibleMomentumEquationTest,
 
     FieldType dynamic_viscosity(mesh, 10.0, "dynamic_viscosity");
     auto zero_acceleration =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
@@ -371,8 +371,8 @@ TEST(IncompressibleMomentumEquationTest,
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
     VectorFieldType velocity(mesh, "cached_momentum_velocity");
-    for (MeshType::local_ordinal_type cell_lid = 0;
-         cell_lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type cell_lid = 0;
+         cell_lid < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++cell_lid)
     {
@@ -424,13 +424,13 @@ TEST(IncompressibleMomentumEquationTest,
     }
     std::vector<Pack::scalar_type> first_matrix(
         mesh->num_owned_cells() * mesh->num_local_cells());
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++row)
     {
-        for (MeshType::local_ordinal_type column = 0;
-             column < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type column = 0;
+             column < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_local_cells());
              ++column)
         {
@@ -445,8 +445,8 @@ TEST(IncompressibleMomentumEquationTest,
     const auto second = equation.assemble_system(
         velocity, zero_fluxes, boundary_cache, options, &velocity);
     EXPECT_EQ(second.matrix.get(), matrix_storage);
-    for (MeshType::local_ordinal_type row = 0;
-         row < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type row = 0;
+         row < static_cast<Mesh::local_ordinal_type>(
              mesh->num_owned_cells());
          ++row)
     {
@@ -457,8 +457,8 @@ TEST(IncompressibleMomentumEquationTest,
                 first_rhs[static_cast<size_t>(row)][component],
                 1.0e-12);
         }
-        for (MeshType::local_ordinal_type column = 0;
-             column < static_cast<MeshType::local_ordinal_type>(
+        for (Mesh::local_ordinal_type column = 0;
+             column < static_cast<Mesh::local_ordinal_type>(
                  mesh->num_local_cells());
              ++column)
         {
@@ -510,12 +510,12 @@ TEST(IncompressibleMomentumEquationTest,
         SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
 
     auto zero_source =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         return {};
     };
     auto throwing_source =
-        [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type
+        [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type
     {
         throw std::runtime_error("intentional assembly failure");
     };
@@ -546,7 +546,7 @@ TEST(IncompressibleMomentumEquationTest, MixedRankViscosityAndChangedTimeStepMat
     VectorFieldType old_velocity(mesh, "old_velocity"), velocity(mesh, "velocity"), fresh_velocity(mesh, "fresh_velocity");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
         const auto x = mesh->cell_centroid(cell).x;
         old_velocity.set_value(cell, {1.0 + x, 0.5 * x, -0.2 * x});
     }
@@ -563,14 +563,14 @@ TEST(IncompressibleMomentumEquationTest, MixedRankViscosityAndChangedTimeStepMat
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
     linear_options.reuse_preconditioner = true;
-    auto acceleration = [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type { return {0.1, 0.2, 0.3}; };
+    auto acceleration = [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type { return {0.1, 0.2, 0.3}; };
     SimpleFluid::IncompressibleMomentumEquation<Pack> reused(mesh);
     for (int step = 0; step < 3; ++step)
     {
         if (step == 2)
         {
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-                viscosity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.7);
+                viscosity.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 0.7);
             viscosity.sync_ghosts();
         }
         options.time_step = 0.1 + 0.03 * step;
@@ -583,7 +583,7 @@ TEST(IncompressibleMomentumEquationTest, MixedRankViscosityAndChangedTimeStepMat
         EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused), previous_setups);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell = static_cast<Mesh::local_ordinal_type>(owned);
             EXPECT_NEAR(velocity.value(cell).x, fresh_velocity.value(cell).x, 1.0e-9);
             EXPECT_NEAR(velocity.value(cell).y, fresh_velocity.value(cell).y, 1.0e-9);
             EXPECT_NEAR(velocity.value(cell).z, fresh_velocity.value(cell).z, 1.0e-9);
@@ -604,21 +604,21 @@ TEST(IncompressibleMomentumEquationTest, EmptyOwnedRanksParticipateInImplicitCoe
     SimpleFluid::TimeStepperOptions options;
     options.time_step = 0.1;
     options.non_orthogonal_treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
-    auto acceleration = [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type { return {1.0, 2.0, 3.0}; };
+    auto acceleration = [](Mesh::local_ordinal_type) -> VectorFieldType::vec_type { return {1.0, 2.0, 3.0}; };
     SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
     for (int step = 0; step < 3; ++step)
     {
         if (step == 2)
         {
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-                viscosity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.2);
+                viscosity.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 0.2);
             viscosity.sync_ghosts();
         }
         equation.advance_velocity_physical(old_velocity, flux, boundary_cache, options, viscosity,
             1.0, velocity, acceleration);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto value = velocity.value(static_cast<MeshType::local_ordinal_type>(owned));
+            const auto value = velocity.value(static_cast<Mesh::local_ordinal_type>(owned));
             EXPECT_NEAR(value.x, 0.1, 1.0e-12);
             EXPECT_NEAR(value.y, 0.2, 1.0e-12);
             EXPECT_NEAR(value.z, 0.3, 1.0e-12);

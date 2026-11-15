@@ -22,7 +22,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 
 using utils_test::KokkosEnvironment;
@@ -31,7 +31,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the assembled two-cell mesh shared by cell-field tests. */
-SimpleFluid::SP<MeshType> make_two_hex_mesh()
+SimpleFluid::SP<Mesh> make_two_hex_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_two_hex_database());

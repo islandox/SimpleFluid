@@ -24,11 +24,11 @@
 namespace
 {
 
-using MeshType = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
+using Mesh = SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<>>;
 
-SimpleFluid::MeshUtils::CellType factory_cell_type(const MeshType& mesh, MeshType::local_ordinal_type cell)
+SimpleFluid::MeshUtils::CellType factory_cell_type(const Mesh& mesh, Mesh::local_ordinal_type cell)
 {
-    const auto& geometry = *std::get<MeshType::UnstructuredPtr>(mesh.variant());
+    const auto& geometry = *std::get<Mesh::UnstructuredPtr>(mesh.variant());
     const auto native = mesh.indexer().global_to_local_cell_id(mesh.cell_geometry_global_id(cell));
     return geometry.cell_type(geometry.cell_id(static_cast<size_t>(native)));
 }
@@ -238,8 +238,8 @@ TEST(MeshFactoryTest, BoxBuildsStructuredNativeHexMesh)
     EXPECT_DOUBLE_EQ(mesh->cell_volume(0), 1.0);
     EXPECT_DOUBLE_EQ(mesh->cell_volume(1), 1.0);
     const auto expect_centroid_near =
-        [&](MeshType::local_ordinal_type cell_lid,
-            const MeshType::Vec3& expected)
+        [&](Mesh::local_ordinal_type cell_lid,
+            const Mesh::Vec3& expected)
     {
         const auto& actual = mesh->cell_centroid(cell_lid);
         EXPECT_NEAR(actual.x, expected.x, 1.0e-12);
@@ -250,10 +250,10 @@ TEST(MeshFactoryTest, BoxBuildsStructuredNativeHexMesh)
     expect_centroid_near(1, {1.5, 0.5, 0.5});
     expect_centroid_near(26, {2.5, 2.5, 2.5});
 
-    auto has_face_centroid = [&](const MeshType::Vec3& expected)
+    auto has_face_centroid = [&](const Mesh::Vec3& expected)
     {
-        for (MeshType::local_ordinal_type fid = 0;
-             fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+        for (Mesh::local_ordinal_type fid = 0;
+             fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
              ++fid)
         {
             if (mesh->face_centroid(fid) == expected)
@@ -269,8 +269,8 @@ TEST(MeshFactoryTest, BoxBuildsStructuredNativeHexMesh)
     EXPECT_TRUE(has_face_centroid(SimpleFluid::vec3{2.0, 0.5, 0.5}));
 
     std::unordered_map<std::string, size_t> boundary_counts;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -399,8 +399,8 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     EXPECT_EQ(mesh->num_local_cells(), 14u);
     EXPECT_EQ(mesh->num_owned_cells(), 14u);
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
         EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::TRIPRISM);
@@ -408,8 +408,8 @@ TEST(MeshFactoryTest, CylinderBuildsVariableRingWedgeMeshWithBoundaryParts)
     }
 
     std::unordered_map<std::string, size_t> boundary_counts;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -441,8 +441,8 @@ TEST(MeshFactoryTest, CylinderAcceptsIndependentCircumferentialSpacing)
     // One radial ring has ceil(2 pi / 0.5) = 13 triangles and the height has
     // two layers.
     EXPECT_EQ(mesh->num_owned_cells(), 26u);
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(
                    mesh->num_local_cells());
          ++lid)
     {
@@ -463,15 +463,15 @@ TEST(MeshFactoryTest, AnnulusBuildsPeriodicHexMeshWithPhysicalBoundaries)
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_owned_cells(), 16u);
     std::unordered_map<std::string, size_t> boundary_counts;
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
         EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
     }
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -496,8 +496,8 @@ TEST(MeshFactoryTest, AnnulusSectorBuildsThetaBoundaryPlanes)
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_owned_cells(), 12u);
     std::unordered_map<std::string, size_t> boundary_counts;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -526,8 +526,8 @@ TEST(MeshFactoryTest, CylinderBoundaryLayersBuildPositiveWedgeMesh)
     // Circular point fronts follow physical arc length, giving 37 Delaunay
     // triangles per XY plane across four axial layers.
     EXPECT_EQ(mesh->num_local_cells(), 148u);
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
         EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::TRIPRISM);
@@ -550,8 +550,8 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
     EXPECT_EQ(mesh->num_local_cells(), 8u);
     EXPECT_EQ(mesh->num_owned_cells(), 8u);
 
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
         EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);
@@ -559,8 +559,8 @@ TEST(MeshFactoryTest, SphereBuildsSpherifiedHexMeshWithSurfaceBatch)
     }
 
     size_t surface_faces = 0;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -587,8 +587,8 @@ TEST(MeshFactoryTest, SphereBuildsSplitSurfaceBatches)
 
     std::unordered_map<std::string, size_t> boundary_counts;
     size_t boundary_faces = 0;
-    for (MeshType::local_ordinal_type fid = 0;
-         fid < static_cast<MeshType::local_ordinal_type>(mesh->num_faces());
+    for (Mesh::local_ordinal_type fid = 0;
+         fid < static_cast<Mesh::local_ordinal_type>(mesh->num_faces());
          ++fid)
     {
         if (mesh->is_boundary_face(fid))
@@ -617,8 +617,8 @@ TEST(MeshFactoryTest, SphereBoundaryLayersBuildPositiveSplitSurfaceMesh)
 
     ASSERT_TRUE(mesh != nullptr);
     EXPECT_EQ(mesh->num_local_cells(), 64u);
-    for (MeshType::local_ordinal_type lid = 0;
-         lid < static_cast<MeshType::local_ordinal_type>(mesh->num_local_cells());
+    for (Mesh::local_ordinal_type lid = 0;
+         lid < static_cast<Mesh::local_ordinal_type>(mesh->num_local_cells());
          ++lid)
     {
         EXPECT_EQ(factory_cell_type(*mesh, lid), SimpleFluid::MeshUtils::CellType::HEXAHEDRON);

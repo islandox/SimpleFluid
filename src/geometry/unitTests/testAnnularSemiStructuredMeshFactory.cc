@@ -29,7 +29,7 @@ namespace
 using Factory = SimpleFluid::AnnularSemiStructuredMeshFactory;
 using Native = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Composite = SimpleFluid::Meshes::MultiRegionMesh;
-using Handle = SimpleFluid::MeshHandle<>;
+using Mesh = SimpleFluid::MeshHandle<>;
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
@@ -537,7 +537,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CentimetreR100DefaultsMeetUnchangedAL
     for (size_t cell = 0; cell < result.mesh->num_cells(); ++cell)
         volume += result.mesh->cell_volume(cell);
     EXPECT_NEAR(static_cast<double>(volume), result.cross_section_area * (options.top - options.bottom), 2e-13);
-    const Handle handle(result.mesh);
+    const Mesh handle(result.mesh);
     const auto metrics = SimpleFluid::evaluate_mesh_quality(handle);
     const SimpleFluid::MeshQualityGate gate;
     const auto assessment = gate.assess(metrics);
@@ -592,7 +592,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CompositeWrapperPartitionsAndMovesWit
         SCOPED_TRACE(refine_top);
         const auto result = Factory(options).build();
         const auto original_z = axial_edges(*result.mesh);
-        auto handle = std::make_shared<Handle>(result.mesh);
+        auto handle = std::make_shared<Mesh>(result.mesh);
         const auto comm = Tpetra::getDefaultComm();
         EXPECT_EQ(handle->owned_cell_map()->getGlobalNumElements(), result.counts.cells);
         const auto vtu = handle->vtu_topology();
@@ -718,7 +718,7 @@ TEST(AnnularSemiStructuredMeshFactoryTest, CornerTransitionsPreserveConformingFa
     for (const auto id : result.mesh->boundary_batch_ids()) boundaries.insert(result.mesh->boundary_batch_name(id));
     EXPECT_EQ(boundaries, (std::set<std::string>{"rmin", "rmax", "zmin", "zmax"}));
 
-    auto handle = std::make_shared<Handle>(result.mesh);
+    auto handle = std::make_shared<Mesh>(result.mesh);
     const auto comm = Tpetra::getDefaultComm();
     const auto global_volume = [&]()
     {

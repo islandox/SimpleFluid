@@ -26,7 +26,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using TensorFieldType = SimpleFluid::TensorCellField<Pack>;
@@ -43,7 +43,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 SimpleFluid::real_t scalar_value(
-    const MeshType::Vec3& point,
+    const Mesh::Vec3& point,
     SimpleFluid::real_t scale)
 {
     return 0.25 + scale * (0.5 * point.x - 0.2 * point.y)
@@ -51,8 +51,8 @@ SimpleFluid::real_t scalar_value(
          - 0.15 * point.z * point.z;
 }
 
-MeshType::Vec3 vector_value(
-    const MeshType::Vec3& point,
+Mesh::Vec3 vector_value(
+    const Mesh::Vec3& point,
     SimpleFluid::real_t scale)
 {
     return {
@@ -72,7 +72,7 @@ void expect_scalar_gradients_near(
     for (size_t owned = 0; owned < actual.num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto difference =
             actual.value(cell_lid) - expected.value(cell_lid);
         EXPECT_NEAR(difference.x, 0.0, tolerance);
@@ -90,7 +90,7 @@ void expect_vector_gradients_near(
     for (size_t owned = 0; owned < actual.num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto actual_value = actual.value(cell_lid);
         const auto expected_value = expected.value(cell_lid);
         for (size_t component = 0; component < 3; ++component)
@@ -127,7 +127,7 @@ TEST(CellGradientCacheTest,
              owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid =
-                static_cast<MeshType::local_ordinal_type>(owned);
+                static_cast<Mesh::local_ordinal_type>(owned);
             const auto& center = mesh->cell_centroid(cell_lid);
             scalar.set_owned_value(
                 cell_lid, scalar_value(center, scale));
@@ -163,7 +163,7 @@ TEST(CellGradientCacheTest,
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto& center = mesh->cell_centroid(cell_lid);
         scalar.set_owned_value(
             cell_lid, scalar_value(center, 1.1));
@@ -282,7 +282,7 @@ TEST(CellGradientCacheTest, GaussGeometryRetainsLiveNativeBoundariesAndPublished
 TEST(CellGradientCacheTest,
      MatchesRankDeficientPeriodicReconstruction)
 {
-    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    auto mesh = std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1. / 3., 2. / 3., 1.},
             {0., 1. / 3.}, {0., 1. / 3.}}}, SimpleFluid::Vec3D<bool>{{true, false, false}}));
 
@@ -294,7 +294,7 @@ TEST(CellGradientCacheTest,
          ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto& center = mesh->cell_centroid(cell_lid);
         scalar.set_owned_value(
             cell_lid, scalar_value(center, 0.8));
@@ -331,11 +331,11 @@ TEST(CellGradientCacheTest,
      RetainsItsMeshAndRejectsFieldsOnAnotherMesh)
 {
     EXPECT_THROW(
-        GradientCache(SimpleFluid::SP<const MeshType>{}),
+        GradientCache(SimpleFluid::SP<const Mesh>{}),
         std::invalid_argument);
 
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
-    std::weak_ptr<const MeshType> retained_mesh = mesh;
+    std::weak_ptr<const Mesh> retained_mesh = mesh;
     auto cache = std::make_unique<GradientCache>(mesh);
     mesh.reset();
     ASSERT_FALSE(retained_mesh.expired());

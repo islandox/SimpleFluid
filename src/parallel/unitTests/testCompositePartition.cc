@@ -16,7 +16,7 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using Partitioner = MeshPartitioner<DefaultTpetraTypes>;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 using ID = MultiRegionMesh::ID;
 using Policy = CompositePartitionOptions::Policy;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -36,7 +36,7 @@ void check_partition(const CompositePartition<>& partition, unsigned layers)
 {
     const auto& plan = partition.plan();
     const auto& geometry = *partition.geometry();
-    auto handle = std::make_shared<Handle>(partition);
+    auto handle = std::make_shared<Mesh>(partition);
     EXPECT_EQ(handle->num_owned_cells(),plan.owned_cells().size());
     EXPECT_EQ(handle->num_cells(),plan.cell_ids().size());
     EXPECT_EQ(handle->owned_cell_map()->getGlobalNumElements(),3*layers);
@@ -74,7 +74,7 @@ void check_partition(const CompositePartition<>& partition, unsigned layers)
         for (const auto face : handle->faces(local))
         {
             if (handle->is_owned_cell(local) && !handle->is_geometry_exterior_face(face))
-                EXPECT_NE(handle->opposite_cell(face,local),Handle::invalid_local_id());
+                EXPECT_NE(handle->opposite_cell(face,local),Mesh::invalid_local_id());
             const auto global_face = handle->face_global_id(face);
             EXPECT_TRUE(geometry.owner_cell(global_face) == static_cast<ID>(global)
                 || geometry.neighbor_cell(global_face) == static_cast<ID>(global));
@@ -113,7 +113,7 @@ TEST(CompositePartitionTest, EmptyRanksKeepGlobalCatalogAndEmptyFields)
     const auto comm = Tpetra::getDefaultComm();
     CompositeMeshSource source(comm->getRank() == 0 ? one_box(1) : nullptr);
     const auto partition = Partitioner::partition(source,{},comm);
-    auto handle = std::make_shared<Handle>(partition);
+    auto handle = std::make_shared<Mesh>(partition);
     EXPECT_EQ(handle->num_owned_cells(),comm->getRank() == 0 ? 1U : 0U);
     EXPECT_EQ(handle->owned_cell_map()->getGlobalNumElements(),1U);
     ScalarCellFieldStored<> values(handle,"empty_rank"); values.sync_ghosts();
@@ -159,7 +159,7 @@ TEST(CompositePartitionTest, IndependentCommunicatorControlsOwnership)
     const auto comm = world->split(world->getRank()%2,world->getRank());
     CompositeMeshSource source(comm->getRank() == 0 ? one_box(8) : nullptr);
     const auto partition = Partitioner::partition(source,{},comm);
-    Handle handle(partition);
+    Mesh handle(partition);
     EXPECT_EQ(handle.owned_cell_map()->getComm()->getSize(),comm->getSize());
     EXPECT_EQ(handle.owned_cell_map()->getComm()->getRank(),comm->getRank());
     EXPECT_EQ(handle.owned_cell_map()->getGlobalNumElements(),8U);
@@ -172,7 +172,7 @@ TEST(CompositePartitionTest, CanonicalCoarseFineAndPeriodicIncidenceSurvivesGrap
     {
         CompositeMeshSource source(comm->getRank() == 0 ? reference : nullptr);
         const auto partition = Partitioner::partition(source,{},comm);
-        auto handle = std::make_shared<Handle>(partition);
+        auto handle = std::make_shared<Mesh>(partition);
         EXPECT_EQ(handle->owned_cell_map()->getGlobalNumElements(),reference->num_cells());
         EXPECT_EQ(handle->owned_face_map()->getGlobalNumElements(),reference->num_faces());
         for (size_t local = 0; local < handle->num_owned_cells(); ++local)
@@ -188,7 +188,7 @@ TEST(CompositePartitionTest, CanonicalCoarseFineAndPeriodicIncidenceSurvivesGrap
                 EXPECT_NEAR((handle->face_center_vector(face,local)-reference->face_center_vector(canonical,global)).norm(),0,1e-13);
                 if (!reference->is_exterior_face(canonical))
                 {
-                    EXPECT_NE(handle->opposite_cell(face,local),Handle::invalid_local_id());
+                    EXPECT_NE(handle->opposite_cell(face,local),Mesh::invalid_local_id());
                     EXPECT_NEAR((handle->cell_center_vector(face,local)-reference->cell_center_vector(canonical,global)).norm(),0,1e-13);
                 }
             }

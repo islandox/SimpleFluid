@@ -21,7 +21,7 @@ namespace
 using Pack = SimpleFluid::DefaultTpetraTypes;
 template<class Field>
 using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename std::remove_cvref_t<Field>::mesh_type>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -189,12 +189,12 @@ TEST(BasicTransportAssemblyTest, BasicTransportSharesMatrixAndPreservesComponent
 TEST(BasicTransportAssemblyTest, NativeBoundaryOutflowContributesOnceAndRetainsCallbacks)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
+    using Factory = FVM::TransportSystemFactory<Pack, Mesh>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    auto mesh = std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         Vec3D<ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
-        MeshType::DistributionOptions{.allow_empty_partitions = true});
+        Mesh::DistributionOptions{.allow_empty_partitions = true});
     VectorFieldType old(mesh, Vec{1., -2., 3.}, "old");
     FaceField<Pack> flux(mesh, 0., "flux");
     for (const auto face : flux.owned_face_ids())
@@ -270,10 +270,10 @@ TEST(BasicTransportAssemblyTest, NativeBoundaryOutflowContributesOnceAndRetainsC
 TEST(BasicTransportAssemblyTest, NativePartitionFluxMatchesIndependentTwoCellBalance)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
+    using Factory = FVM::TransportSystemFactory<Pack, Mesh>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    auto mesh = std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         Vec3D<ArrReal>{{{0., 1., 2.}, {0., 1.}, {0., 1.}}}));
     VectorFieldType old(mesh, "old");
     for (size_t local = 0; local < mesh->num_owned_cells(); ++local)
@@ -325,12 +325,12 @@ TEST(BasicTransportAssemblyTest, NativePartitionFluxMatchesIndependentTwoCellBal
 TEST(BasicTransportAssemblyTest, NativeFailuresAreCollectiveAndPreserveCachedOperator)
 {
     using namespace SimpleFluid;
-    using Factory = FVM::TransportSystemFactory<Pack, MeshType>;
+    using Factory = FVM::TransportSystemFactory<Pack, Mesh>;
     using LO = Pack::local_ordinal_type;
     using Vec = vec3<Pack::scalar_type>;
-    auto mesh = std::make_shared<MeshType>(std::make_shared<MeshType::Cartesian>(
+    auto mesh = std::make_shared<Mesh>(std::make_shared<Mesh::Cartesian>(
         Vec3D<ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
-        MeshType::DistributionOptions{.allow_empty_partitions = true});
+        Mesh::DistributionOptions{.allow_empty_partitions = true});
     const auto comm = mesh->owned_cell_map()->getComm();
     const int local_owner = mesh->num_owned_cells() ? comm->getRank() : -1;
     int owner_rank = -1;

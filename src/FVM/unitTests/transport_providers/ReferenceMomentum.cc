@@ -9,14 +9,14 @@
 namespace SimpleFluid::FVM
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = test::transport_providers::ReferenceHandle;
-using Factory = TransportSystemFactory<Pack, MeshType>;
+using Mesh = test::transport_providers::ReferenceHandle;
+using Factory = TransportSystemFactory<Pack, Mesh>;
 template VectorTransportSystem<Pack> Factory::assemble(
     Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
 
 namespace detail
 {
-template VectorTransportSystem<Pack> assemble_stored_momentum<Pack, MeshType>(
+template VectorTransportSystem<Pack> assemble_stored_momentum<Pack, Mesh>(
     Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
 } // namespace detail
 } // namespace SimpleFluid::FVM

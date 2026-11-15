@@ -43,7 +43,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Handle = SimpleFluid::MeshHandle<Pack>;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
 using PartitionedUnstructured =
@@ -54,7 +54,7 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /** @brief Build the standard 2-by-2-by-2 box test mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_box_mesh()
+SimpleFluid::SP<Mesh> make_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -70,7 +70,7 @@ SimpleFluid::SP<MeshType> make_box_mesh()
 }
 
 /** @brief Build the 4-by-4-by-4 checkerboard test mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
+SimpleFluid::SP<Mesh> make_checkerboard_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -86,7 +86,7 @@ SimpleFluid::SP<MeshType> make_checkerboard_box_mesh()
 }
 
 /** @brief Build a single-cell box test mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_single_cell_box_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -162,7 +162,7 @@ SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>> make_native_distributed_car
 }
 
 /** @brief Build a box refined toward all six boundaries. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
+SimpleFluid::SP<Mesh> make_boundary_layer_box_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -182,7 +182,7 @@ SimpleFluid::SP<MeshType> make_boundary_layer_box_mesh()
 }
 
 /** @brief Build the baseline cylindrical test mesh. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_cylinder_mesh()
+SimpleFluid::SP<Mesh> make_cylinder_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -197,7 +197,7 @@ SimpleFluid::SP<MeshType> make_cylinder_mesh()
 }
 
 /** @brief Build a cylinder with boundary-layer refinement. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
+SimpleFluid::SP<Mesh> make_boundaried_cylinder_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -216,7 +216,7 @@ SimpleFluid::SP<MeshType> make_boundaried_cylinder_mesh()
 }
 
 /** @brief Build a sphere split into upper and lower boundary patches. @return Assembled mesh. */
-SimpleFluid::SP<MeshType> make_split_sphere_mesh()
+SimpleFluid::SP<Mesh> make_split_sphere_mesh()
 {
     auto db = std::make_shared<SimpleFluid::Database>();
     db->set("dimension", 3);
@@ -257,9 +257,9 @@ public:
  * @param mesh Mesh defining owned cells.
  * @param solver Solver containing fields to inspect.
  */
-void expect_finite_solution(const MeshType& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver)
+void expect_finite_solution(const Mesh& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver)
 {
-    for (MeshType::local_ordinal_type lid = 0; lid < static_cast<MeshType::local_ordinal_type>(mesh.num_owned_cells());
+    for (Mesh::local_ordinal_type lid = 0; lid < static_cast<Mesh::local_ordinal_type>(mesh.num_owned_cells());
         ++lid)
     {
         EXPECT_TRUE(std::isfinite(solver.temperature().value(lid)));
@@ -280,7 +280,7 @@ void expect_finite_solution(const MeshType& mesh, const SimpleFluid::BoussinesqS
  * @param boundary_name Patch to inspect.
  */
 template<class FaceVelocityField, class FaceFluxField>
-void expect_zero_boundary_velocity(const MeshType& mesh, const FaceVelocityField& face_velocity,
+void expect_zero_boundary_velocity(const Mesh& mesh, const FaceVelocityField& face_velocity,
     const FaceFluxField& face_fluxes, const char* boundary_name)
 {
     bool saw_boundary = false;
@@ -332,7 +332,7 @@ Pack::scalar_type continuity_imbalance_norm(const SimpleFluid::VectorCellFieldSt
     Pack::scalar_type norm_squared = 0.0;
     for (size_t owned = 0; owned < velocity.mesh().num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto value = SimpleFluid::FVM::cell_flux_balance<Pack>(velocity.mesh(), face_fluxes, cell_lid);
         norm_squared += value * value;
     }
@@ -1376,7 +1376,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         const auto& transport_fluxes = solver.transport_face_fluxes();
         for (size_t face = 0; face < mesh->num_faces(); ++face)
         {
-            const auto face_lid = static_cast<MeshType::local_ordinal_type>(face);
+            const auto face_lid = static_cast<Mesh::local_ordinal_type>(face);
             if (!transport_fluxes.is_owned_face(face_lid))
             {
                 continue;
@@ -1390,7 +1390,7 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         expect_finite_solution(*mesh, solver);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             EXPECT_GE(solver.temperature().value(cell_lid), -1.0e-9);
             EXPECT_LE(solver.temperature().value(cell_lid), 1.0 + 1.0e-9);
         }
@@ -1444,7 +1444,7 @@ TEST(BoussinesqSolverTest, StoresPressureInPascalsAcrossSegregatedAndCoupledSolv
     struct CaseState
     {
         std::vector<double> pressure;
-        std::vector<MeshType::Vec3> velocity;
+        std::vector<Mesh::Vec3> velocity;
     };
 
     auto run_case = [](SimpleFluid::PressureVelocityCoupling coupling, double reference_density)
@@ -1490,7 +1490,7 @@ TEST(BoussinesqSolverTest, StoresPressureInPascalsAcrossSegregatedAndCoupledSolv
         state.velocity.reserve(mesh->num_owned_cells());
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             state.pressure.push_back(solver.pressure().value(cell_lid));
             state.velocity.push_back(solver.velocity().value(cell_lid));
         }
@@ -1581,7 +1581,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovAssemblesVelocityPressureBlocks)
     typename Pack::vector_type checkerboard(mesh->owned_cell_map(), true);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         const auto parity =
             static_cast<int>(center.x * 4.0) + static_cast<int>(center.y * 4.0) + static_cast<int>(center.z * 4.0);
@@ -1598,7 +1598,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
 {
     struct RunResult
     {
-        std::vector<MeshType::Vec3> velocity;
+        std::vector<Mesh::Vec3> velocity;
         std::vector<double> pressure;
         SimpleFluid::CoupledPressureVelocityCacheStatistics statistics;
     };
@@ -1620,7 +1620,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         SimpleFluid::CellField<Pack> temperature(mesh, "temperature");
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             temperature.set_owned_value(cell_lid, mesh->cell_centroid(cell_lid).x);
         }
         temperature.sync_ghosts();
@@ -1654,7 +1654,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         result.statistics = solver.cache_statistics();
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             result.velocity.push_back(velocity.value(cell_lid));
             result.pressure.push_back(pressure.value(cell_lid));
         }
@@ -1852,7 +1852,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovIncludesIsotropicTurbulentKineticEnergyS
     const auto turbulent_rhs = turbulent.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto cell_gid = mesh->owned_cell_map()->getGlobalElement(cell_lid);
         for (size_t component = 0; component < 3; ++component)
         {
@@ -1879,7 +1879,7 @@ TEST(BoussinesqSolverTest, SegregatedAndCoupledMomentumCarryEffectiveTransposeSt
     SimpleFluid::CellField<Pack> effective_viscosity(mesh, "effective_viscosity");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(cell_lid, {0.0, center.x, 0.0});
         effective_viscosity.set_owned_value(cell_lid, center.y < 0.5 ? 1.0 : 3.0);
@@ -1911,7 +1911,7 @@ TEST(BoussinesqSolverTest, SegregatedAndCoupledMomentumCarryEffectiveTransposeSt
     model_options.dynamic_viscosity = 2.0;
     SimpleFluid::MaterialPropertyFields<Pack> material(mesh, model_options, time_options);
 
-    auto zero_source = [](MeshType::local_ordinal_type) { return SimpleFluid::VectorCellField<Pack>::vec_type{}; };
+    auto zero_source = [](Mesh::local_ordinal_type) { return SimpleFluid::VectorCellField<Pack>::vec_type{}; };
     SimpleFluid::BoussinesqMomentumEquation<Pack> momentum_equation(mesh);
     const auto segregated = momentum_equation.assemble_physical_system(velocity, zero_fluxes, temperature,
         boundary_cache, time_options, material, 1.0, false, zero_source, &velocity, &effective_viscosity);
@@ -2025,7 +2025,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovUsesNormalDistanceForSkewBoundaryNeumann
     double maximum_euclidean_error = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto expected_stencil_constant = reconstructed_gradient.value(cell_lid) / reference_density;
         const auto actual_stencil_constant = coupled_stencils[owned].constant;
         EXPECT_NEAR(actual_stencil_constant.x, expected_stencil_constant.x, 1.0e-12);
@@ -2145,7 +2145,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovDirichletPressurePreservesContinuityAndG
     typename Pack::vector_type normalized_pressure_shift(base.map, true);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto cell_gid = mesh->owned_cell_map()->getGlobalElement(cell_lid);
         normalized_pressure_shift.replaceGlobalValue(4 * cell_gid + 3, pressure_shift / reference_density);
     }
@@ -2183,7 +2183,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovDirichletContinuityMatchesBoundaryFaceFl
     SimpleFluid::CellField<Pack> pressure(mesh, "pressure");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto center = mesh->cell_centroid(cell_lid);
         velocity.set_owned_value(cell_lid, {0.2 + 0.1 * center.x, -0.05 * center.y, 0.03 * center.z});
         pressure.set_owned_value(cell_lid, 500.0 + 300.0 * center.x - 100.0 * center.y + 50.0 * center.z);
@@ -2207,7 +2207,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovDirichletContinuityMatchesBoundaryFaceFl
     typename Pack::vector_type state(system.map, true);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto cell_gid = mesh->owned_cell_map()->getGlobalElement(cell_lid);
         const auto cell_velocity = velocity.value(cell_lid);
         state.replaceGlobalValue(4 * cell_gid, cell_velocity.x);
@@ -2223,7 +2223,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovDirichletContinuityMatchesBoundaryFaceFl
     double maximum_face_flux_balance = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto cell_gid = mesh->owned_cell_map()->getGlobalElement(cell_lid);
         const auto pressure_row_lid = system.map->getLocalElement(4 * cell_gid + 3);
         const auto coupled_residual = applied_view(pressure_row_lid, 0) - rhs_view(pressure_row_lid, 0);
@@ -2499,7 +2499,7 @@ TEST(BoussinesqSolverTest, PhysicalDefaultsMatchLegacySolver)
 
     for (size_t owned = 0; owned < legacy_mesh->num_owned_cells(); ++owned)
     {
-        const auto lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto lid = static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_NEAR(legacy.temperature().value(lid), physical.temperature().value(lid), 1.0e-11);
         const auto legacy_velocity = legacy.velocity().value(lid);
         const auto physical_velocity = physical.velocity().value(lid);

@@ -22,7 +22,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 
@@ -31,14 +31,14 @@ using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_distributed_mesh()
+SimpleFluid::SP<Mesh> make_distributed_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(
         SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
 }
 
 SimpleFluid::MaterialPropertyFields<Pack> make_material(
-    SimpleFluid::SP<const MeshType> mesh)
+    SimpleFluid::SP<const Mesh> mesh)
 {
     const SimpleFluid::TimeStepperOptions time_options;
     const auto options =
@@ -320,18 +320,18 @@ TEST(BoussinesqModelMultiRankTest, AsymmetricMaterialUpdaterSynchronizesAndRejec
     FieldType expected(mesh, material.density.value(0), "expected_density");
     if (rank == 0)
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-            expected.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 2.0);
+            expected.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 2.0);
     expected.sync_ghosts();
     if (rank == 0)
         material.set_updater([](const auto&, auto& fields)
         {
             for (size_t owned = 0; owned < fields.density.mesh().num_owned_cells(); ++owned)
-                fields.density.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 2.0);
+                fields.density.set_owned_value(static_cast<Mesh::local_ordinal_type>(owned), 2.0);
         });
     EXPECT_NO_THROW(material.update(context));
     for (size_t local = 0; local < mesh->num_local_cells(); ++local)
     {
-        const auto cell = static_cast<MeshType::local_ordinal_type>(local);
+        const auto cell = static_cast<Mesh::local_ordinal_type>(local);
         EXPECT_DOUBLE_EQ(material.density.local_value(cell), expected.local_value(cell));
     }
     if (rank == 0)

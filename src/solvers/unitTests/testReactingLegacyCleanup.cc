@@ -15,19 +15,19 @@ namespace
 {
 using namespace SimpleFluid;
 using Pack = DefaultTpetraTypes;
-using Grid = MeshHandle<Pack>;
+using Mesh = MeshHandle<Pack>;
 namespace M = Testing::ReactingMixture;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 struct Fixture
 {
-    SP<Grid> grid;
+    SP<Mesh> grid;
     std::shared_ptr<BoussinesqSolver<Pack>> solver;
     std::unique_ptr<MultiphysicsSolverCoupler<Pack>> coupling;
     Fixture()
     {
-        Grid::DistributionOptions distribution;
+        Mesh::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
-        grid = std::make_shared<Grid>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        grid = std::make_shared<Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
                                           Vec3D<ArrReal>{ArrReal{0, 1}, ArrReal{0, 1}, ArrReal{0, .5, 1}}),
             distribution);
         TimeStepperOptions time;

@@ -11,7 +11,7 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 auto one_native(const std::shared_ptr<OrthogonalCartesian3D>& native)
@@ -101,7 +101,7 @@ TEST(RegionExecutionTest, CanonicalAndRegionNativeTraversalAgreeWithoutMateriali
     for (const auto& geometry : {test::two_regions(), test::coarse_fine_regions(),
              test::periodic_regions(), test::cylindrical_regions(), test::independent_extruded_regions()})
     {
-        Handle mesh(geometry);
+        Mesh mesh(geometry);
         real_t canonical = 0, regional = 0;
         const auto execution = mesh.acquire_execution_view();
         for (size_t c = 0; c < geometry->num_cells(); ++c) canonical += geometry->cell_volume(c);
@@ -119,8 +119,8 @@ TEST(RegionExecutionTest, CompositeAndChildMotionAreRejectedUntilViewEnds)
 {
     auto native = std::make_shared<OrthogonalCartesian3D>(Vec3D<ArrReal>{{{0,1},{0,1},{0,1}}});
     auto composite = one_native(native);
-    auto child_handle = std::make_shared<Handle>(native);
-    auto handle = std::make_shared<Handle>(composite);
+    auto child_handle = std::make_shared<Mesh>(native);
+    auto handle = std::make_shared<Mesh>(composite);
     PlanarALEMeshMotion<> motion(handle), child_motion(child_handle);
     {
         const auto execution = handle->acquire_execution_view();
@@ -140,7 +140,7 @@ TEST(RegionExecutionMultiRankTest, OneRankExecutionLeaseRejectsMotionCollectivel
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() == 1) GTEST_SKIP() << "Requires an MPI decomposition.";
     auto geometry = test::two_regions();
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     PlanarALEMeshMotion<> motion(mesh);
     std::unique_ptr<MultiRegionMesh::ExecutionView> execution;
     if (comm->getRank() == 0) execution = std::make_unique<MultiRegionMesh::ExecutionView>(geometry.get());

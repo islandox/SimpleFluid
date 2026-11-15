@@ -26,13 +26,13 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Solver = SimpleFluid::BoussinesqSolver<Pack>;
 namespace SurfaceGas = SimpleFluid::Testing::SurfaceGas;
 
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-SimpleFluid::SP<MeshType> make_mesh()
+SimpleFluid::SP<Mesh> make_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
 }

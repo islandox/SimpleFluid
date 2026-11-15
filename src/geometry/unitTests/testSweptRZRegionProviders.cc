@@ -16,7 +16,7 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
-using Handle = MeshHandle<>;
+using Mesh = MeshHandle<>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 Arr<MeshUtils::Vec3> base_nodes()
@@ -194,7 +194,7 @@ TEST(SweptRZRegionProvidersTest, CoincidentSelfSeamRetainsChecksAndCanonicalInci
 TEST(SweptRZRegionProvidersTest, CompactOwnershipAndAffineMotionPreserveGCLAndRollback)
 {
     const auto geometry = full_sweep();
-    auto mesh = std::make_shared<Handle>(geometry);
+    auto mesh = std::make_shared<Mesh>(geometry);
     EXPECT_EQ(mesh->owned_cell_map()->getGlobalNumElements(), geometry->num_cells());
     EXPECT_EQ(mesh->owned_face_map()->getGlobalNumElements(), geometry->num_faces());
     EXPECT_FALSE(mesh->has_materialized_indexer());

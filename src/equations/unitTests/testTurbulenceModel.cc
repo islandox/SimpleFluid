@@ -28,7 +28,7 @@ namespace
 {
 
 using Pack = SimpleFluid::DefaultTpetraTypes;
-using MeshType = SimpleFluid::MeshHandle<Pack>;
+using Mesh = SimpleFluid::MeshHandle<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using MaterialType = SimpleFluid::MaterialPropertyFields<Pack>;
@@ -65,17 +65,17 @@ constexpr double molecular_viscosity = 1.5e-3;
 constexpr double molecular_conductivity = 0.61;
 constexpr double turbulent_prandtl_number = 0.85;
 
-SimpleFluid::SP<MeshType> make_single_cell_mesh()
+SimpleFluid::SP<Mesh> make_single_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
 }
 
-SimpleFluid::SP<MeshType> make_two_cell_mesh()
+SimpleFluid::SP<Mesh> make_two_cell_mesh()
 {
     return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
 }
 
-MaterialType make_material(SimpleFluid::SP<const MeshType> mesh)
+MaterialType make_material(SimpleFluid::SP<const Mesh> mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -172,7 +172,7 @@ TEST(TurbulenceModelTest, AdvancesStandardKEpsilonOnNativeMeshHandle)
 TEST(TurbulenceModelTest, RejectsNullMeshBeforeBuildingBoundaryCaches)
 {
     SimpleFluid::BoundaryConditionSet boundary_conditions;
-    EXPECT_THROW((Model(SimpleFluid::SP<const MeshType>{}, boundary_conditions)),
+    EXPECT_THROW((Model(SimpleFluid::SP<const Mesh>{}, boundary_conditions)),
                  std::invalid_argument);
 }
 
@@ -474,7 +474,7 @@ TEST(TurbulenceModelTest, RefreshRejectsEffectivePropertyOverflowWithoutPartialP
     std::array<double, 2> initial_lambda_eff{};
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         initial_mu_eff[owned] = model.effective_dynamic_viscosity().value(cell_lid);
         initial_lambda_eff[owned] = model.effective_thermal_conductivity().value(cell_lid);
     }
@@ -490,7 +490,7 @@ TEST(TurbulenceModelTest, RefreshRejectsEffectivePropertyOverflowWithoutPartialP
 
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_DOUBLE_EQ(model.effective_dynamic_viscosity().value(cell_lid),
                          initial_mu_eff[owned]);
         EXPECT_DOUBLE_EQ(model.effective_thermal_conductivity().value(cell_lid),
@@ -576,7 +576,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto x = mesh->cell_centroid(cell_lid).x;
         velocity.set_owned_value(
             cell_lid, {0.0, 100.0 * x, 0.0});
@@ -603,7 +603,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         accepted_k[owned] =
             model.turbulent_kinetic_energy().value(cell_lid);
         accepted_omega[owned] =
@@ -626,7 +626,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         const auto nu_t =
             model.turbulent_kinematic_viscosity().value(cell_lid);
         limiter_changed =
@@ -670,7 +670,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         committed_distance[owned] =
             model.wall_distance()->value(cell_lid);
         committed_nu_t[owned] =
@@ -685,7 +685,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         overflow_material.specific_heat_capacity.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned),
+            static_cast<Mesh::local_ordinal_type>(owned),
             std::numeric_limits<double>::max());
     }
     overflow_material.specific_heat_capacity.sync_ghosts();
@@ -721,7 +721,7 @@ TEST(TurbulenceModelTest, SetWallDistanceTransactionallyRefreshesSSTDerivedPrope
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_DOUBLE_EQ(
             model.wall_distance()->value(cell_lid),
             committed_distance[owned]);
@@ -1001,7 +1001,7 @@ TEST(TurbulenceModelTest, AutomaticWallDistanceUsesUnionOfAllNoSlipWalls)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_NEAR(
             model.wall_distance()->value(cell_lid),
             union_distance.value(cell_lid), 1.0e-12);
@@ -1061,7 +1061,7 @@ TEST(TurbulenceModelTest, AutomaticWallDistanceConfiguresOnSkewedMesh)
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_TRUE(std::isfinite(model.wall_distance()->value(cell_lid)));
         EXPECT_GT(model.wall_distance()->value(cell_lid), 0.0);
     }
@@ -1099,7 +1099,7 @@ TEST(TurbulenceModelTest, EveryClosureAdvancesBothTransportEquations)
         double maximum_initial_k_gradient = 0.0;
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             const auto gradient =
                 model.turbulent_kinetic_energy_gradient().value(cell_lid);
             maximum_initial_k_gradient = std::max(
@@ -1111,7 +1111,7 @@ TEST(TurbulenceModelTest, EveryClosureAdvancesBothTransportEquations)
         VectorFieldType velocity(mesh, "velocity");
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             const auto x = mesh->cell_centroid(cell_lid).x;
             velocity.set_owned_value(cell_lid, {x, 0.25 * x, 0.0});
         }
@@ -1131,7 +1131,7 @@ TEST(TurbulenceModelTest, EveryClosureAdvancesBothTransportEquations)
         ASSERT_NE(secondary, nullptr);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
-            const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+            const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
             EXPECT_TRUE(std::isfinite(model.turbulent_kinetic_energy().value(cell_lid)));
             EXPECT_TRUE(std::isfinite(secondary->value(cell_lid)));
             EXPECT_TRUE(std::isfinite(model.turbulent_kinematic_viscosity().value(cell_lid)));
@@ -1167,7 +1167,7 @@ TEST(TurbulenceModelTest, StandardKEpsilonAdvanceUsesBoundaryAwareShearAndReport
     VectorFieldType velocity(mesh, "velocity");
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const auto x = mesh->cell_centroid(cell_lid).x;
         velocity.set_owned_value(cell_lid, {x, 0.25 * x, -0.1 * x});
     }
@@ -1193,7 +1193,7 @@ TEST(TurbulenceModelTest, StandardKEpsilonAdvanceUsesBoundaryAwareShearAndReport
     ASSERT_NE(epsilon, nullptr);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Mesh::local_ordinal_type>(owned);
         const std::array values{model.turbulent_kinetic_energy().value(cell_lid),
                                 epsilon->value(cell_lid),
                                 model.turbulent_kinematic_viscosity().value(cell_lid),
@@ -1400,7 +1400,7 @@ TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailu
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         velocity.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned),
+            static_cast<Mesh::local_ordinal_type>(owned),
             {0.0, 1.0, 0.0});
     }
     velocity.sync_ghosts();
@@ -1428,7 +1428,7 @@ TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailu
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         accepted_k[owned] =
             model.turbulent_kinetic_energy().value(cell_lid);
         accepted_epsilon[owned] =
@@ -1460,7 +1460,7 @@ TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailu
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         velocity.set_owned_value(
-            static_cast<MeshType::local_ordinal_type>(owned),
+            static_cast<Mesh::local_ordinal_type>(owned),
             {0.0, 4.0, 0.0});
     }
     velocity.sync_ghosts();
@@ -1504,7 +1504,7 @@ TEST(TurbulenceModelTest, AdvanceRollsBackFieldsAndWallPublicationAfterLateFailu
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
-            static_cast<MeshType::local_ordinal_type>(owned);
+            static_cast<Mesh::local_ordinal_type>(owned);
         EXPECT_DOUBLE_EQ(
             model.turbulent_kinetic_energy().value(cell_lid),
             accepted_k[owned]);
