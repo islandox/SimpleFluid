@@ -42,7 +42,7 @@ namespace SimpleFluid
 
 namespace FVM::detail
 {
-template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class PrescribedFluxResponsePlan;
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class SIMPLEFLUID_LOCAL PrescribedFluxResponsePlan;
 }
 
 namespace detail

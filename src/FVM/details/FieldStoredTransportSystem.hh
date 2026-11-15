@@ -42,6 +42,37 @@ namespace detail
 
 template<SimpleFluid::MeshType MeshType> struct TransportAssemblyGeometry;
 
+/** Typed entry points supplied by stored-field implementation providers. */
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_scalar(ScalarTerms<Pack, MeshType> terms,
+    ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType> options,
+    ScalarAssemblyContext<Pack, MeshType> resources);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_corrected_scalar(ScalarTerms<Pack, MeshType> terms,
+    ScalarTransportBoundary<Pack> boundary, ScalarAssemblyOptions<Pack, MeshType> options,
+    ScalarAssemblyContext<Pack, MeshType> resources);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_weighted(WeightedScalarTerms<Pack, MeshType> terms,
+    CoefficientTransportBoundary<Pack, MeshType> boundary, WeightedScalarAssemblyOptions<Pack, MeshType> options,
+    WeightedScalarAssemblyContext<Pack, MeshType> resources);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL TransportSystem<Pack> assemble_stored_temperature(TemperatureTerms<Pack, MeshType> terms,
+    CoefficientTransportBoundary<Pack, MeshType> boundary, TemperatureAssemblyOptions<Pack, MeshType> options,
+    TemperatureAssemblyContext<Pack, MeshType> resources, bool rhs_only);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_vector(VectorTerms<Pack, MeshType> terms,
+    VelocityTransportBoundary<Pack> boundary, VectorAssemblyOptions<Pack, MeshType> options,
+    VectorAssemblyContext<Pack, MeshType> resources);
+
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType>
+SIMPLEFLUID_LOCAL VectorTransportSystem<Pack> assemble_stored_momentum(MomentumTerms<Pack, MeshType> terms,
+    MomentumTransportBoundary<Pack, MeshType> boundary, MomentumAssemblyOptions<Pack, MeshType> options,
+    MomentumAssemblyContext<Pack, MeshType> resources);
+
 template<TpetraTypePack Pack> struct StoredPreparedTransportMatrix
 {
     Teuchos::RCP<typename Pack::matrix_type> matrix;

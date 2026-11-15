@@ -168,6 +168,14 @@ simplefluid_add_mpi_test(
     LABELS "mpi;solid_conduction;cache"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME SolidHeatConduction_PreparedBoundaryResponse_2procs
+    TARGET testSolidHeatConductionEquation
+    PROCS 2
+    ARGS "--gtest_filter=SolidHeatConductionEquationTest.PreparedBoundaryResponseMatchesHomogeneousFullAssembly:SolidHeatConductionEquationTest.PreparedBoundaryResponseRejectsNonzeroFluxAtZeroConductivity:SolidHeatConductionEquationTest.PreparedBoundaryResponseSupportsEmptySolidRanks"
+    LABELS "mpi;solid_conduction;cache;empty_rank"
+    TIMEOUT 120)
+
 foreach(_momentum_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME VariableDensityMomentum_${_momentum_ranks}procs
         TARGET testVariableDensityMomentumEquation PROCS ${_momentum_ranks}

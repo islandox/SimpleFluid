@@ -3,8 +3,7 @@
  * @brief Analytic pressure-flux checks across workspace reuse and ALE epochs.
  */
 
-// This implementation owns direct diagnostic/custom-cache pressure-kernel instantiations.
-#include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
+#include "transport_providers/PressureFluxFixtures.hh"
 #include <gtest/gtest.h>
 
 #include "FVM/FaceFlux.hh"
@@ -37,34 +36,8 @@ using Workspace = SimpleFluid::FVM::FieldStoredPressureWeightedFaceFluxWorkspace
 using Vec = SimpleFluid::vec3<double>;
 using BoundaryType = SimpleFluid::BoundaryConditionType;
 
-template<class Map>
-struct CountingBoundaryMap : Map
-{
-    explicit CountingBoundaryMap(const Map& entries) : Map(entries) {}
-
-    auto find(const typename Map::key_type& key) const
-    {
-        ++lookups;
-        return Map::find(key);
-    }
-
-    mutable size_t lookups = 0;
-};
-
-struct CountingVelocityBoundaryCache
-{
-    using Cache = SimpleFluid::FVM::FieldStoredVelocityBoundaryCache<Pack, Mesh>;
-
-    explicit CountingVelocityBoundaryCache(const Cache& cache)
-        : value(cache.value), type(cache.type), type_by_name(cache.type_by_name), mesh(cache.mesh)
-    {
-    }
-
-    CountingBoundaryMap<decltype(Cache::value)> value;
-    CountingBoundaryMap<decltype(Cache::type)> type;
-    decltype(Cache::type_by_name) type_by_name;
-    SimpleFluid::SP<const Mesh> mesh;
-};
+using SimpleFluid::test::pressure_flux::CountingVelocityBoundaryCache;
+using SimpleFluid::test::pressure_flux::FailingWorkspace;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
@@ -607,19 +580,6 @@ TEST(StoredPressureFaceFluxCacheTest, UntaggedExteriorOverwritesOutputWithoutBou
 
 TEST(StoredPressureFaceFluxCacheTest, ExecutionPreflightFailureIsCollectiveAndPreservesOutput)
 {
-    struct FailingWorkspace : Workspace
-    {
-        using Workspace::Workspace;
-        bool reject_acquisition = false;
-
-        auto acquire_execution() const
-        {
-            if (reject_acquisition)
-                throw std::logic_error("Injected pressure execution acquisition failure.");
-            return Workspace::acquire_execution();
-        }
-    };
-
     auto mesh = make_mesh();
     const auto comm = mesh->owned_cell_map()->getComm();
     FailingWorkspace workspace(mesh);

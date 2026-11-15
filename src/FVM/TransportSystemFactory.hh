@@ -13,7 +13,8 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 namespace SimpleFluid::FVM
 {
 /** Stateless assembly. Packs are consumed synchronously and never retained.
- * Include TransportSystemFactory.tcc to provide custom mesh/type instantiations.
+ * Custom providers need factory and matching builder definitions; the stored
+ * route is aggregated by FieldStoredTransportSystem.tcc.
  */
 template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType = Mesh<Pack>> class TransportSystemFactory
 {

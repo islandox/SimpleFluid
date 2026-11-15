@@ -1,7 +1,11 @@
 # Unit tests for FVM
 
-# This consumer must compile against declarations without the shared PCH.
-set_source_files_properties(testFvmLibrary.cc PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+# These consumers must compile against declarations without the shared PCH.
+set_source_files_properties(
+    testFvmLibrary.cc
+    testStoredPressureFaceFluxCache.cc
+    testMultiRegionALE.cc
+    PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
@@ -208,6 +212,8 @@ simplefluid_add_mpi_test(
 
 # Custom meshes own their implementation providers outside public headers.
 target_sources(testStoredTransportReuse PRIVATE transport_providers/EpochMatrix.cc)
+target_sources(testStoredPressureFaceFluxCache PRIVATE transport_providers/PressureFlux.cc)
+target_sources(testMultiRegionALE PRIVATE transport_providers/ALEValidation.cc)
 target_sources(testRegionTransportAssembly PRIVATE
     transport_providers/ReferenceGeometry.cc
     transport_providers/ReferenceWeightedScalar.cc
@@ -219,6 +225,8 @@ target_sources(testRegionTransportAssembly PRIVATE
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set(_stored_transport_test_providers
         transport_providers/EpochMatrix.cc
+        transport_providers/PressureFlux.cc
+        transport_providers/ALEValidation.cc
         transport_providers/ReferenceGeometry.cc
         transport_providers/ReferenceWeightedScalar.cc
         transport_providers/ReferenceMomentum.cc

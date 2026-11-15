@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
@@ -35,7 +36,7 @@ namespace SimpleFluid::FVM::detail
  * Geometry and coefficients are captured after the native operator is assembled.
  * Mutable gradient scratch belongs to one equation owner; returned vectors are independent.
  */
-template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class PrescribedFluxResponsePlan
+template<TpetraTypePack Pack, SimpleFluid::MeshType MeshType> class SIMPLEFLUID_LOCAL PrescribedFluxResponsePlan
 {
     using Scalar = typename Pack::scalar_type;
     using Local = typename Pack::local_ordinal_type;

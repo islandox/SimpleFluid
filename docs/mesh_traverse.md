@@ -696,12 +696,14 @@ solve orchestration while using the compiled FVM assembly providers.
 `FVM/details/PrescribedFluxResponse.hh` declares the response-plan layout;
 its `.tcc` holds construction, increment validation and response application.
 `equations/explicit_instantiation/TemperatureFluxResponse.cc` compiles the
-default mapped specialization once inside the solver DSO. The detail class
-remains internal; it introduces no cross-DSO helper API. Temperature equation
-providers reference these compiled methods instead of instantiating them.
-The temperature `.tcc` includes the response `.tcc` for generic mesh/type-pack
-providers, including the existing solid-subdomain path. This retains generic
-support and repeated parsing while isolating default instantiation work.
+default `MeshHandle` and `SolidSubdomain` specializations inside the solver
+DSO. The detail class remains hidden; it introduces no cross-DSO helper API.
+Temperature equation definitions include only the declaration header and
+reference these compiled methods. Deprecated `Mesh` retains its existing
+compile-time fallback without constructing a response plan. A custom
+mesh/type-pack provider that uses the response plan must also instantiate its
+required response methods in its own library or executable by including
+`FVM/details/PrescribedFluxResponse.tcc` in a dedicated provider unit.
 
 `fields/FieldStored.hh` retains descriptor traits, class layout, aliases and
 short storage queries. Generic location-layout acquisition and longer hot
@@ -720,10 +722,14 @@ Mapped internal assembly declarations and symbolic-plan layout live in
 read-only nonorthogonality query and its `.tcc` contains heavy builders.
 The public factory definitions live in `FVM/TransportSystemFactory.tcc`, outside
 the declaration include graph, and carry grouped inputs into those builders.
+The helper layer includes only builder declarations. Existing factory provider
+units include the heavy stored definitions and explicitly instantiate the
+private entries corresponding to their public overloads.
 Default providers cover runtime handles, the supported static Cartesian
 partition wrapper, and solid scalar/temperature paths. Custom meshes own a
-provider including the factory `.tcc`, plus `fields/FieldStored.tcc` when custom
-storage has no compiled provider. Detail builders remain local to the owning
+provider including `FVM/FieldStoredTransportSystem.tcc`, plus
+`fields/FieldStored.tcc` when custom storage has no compiled provider. Detail
+builders remain local to the owning
 image; public APIs retain targeted export visibility.
 
 The remaining stored-field FVM declarations use matching implementation groups.
@@ -734,8 +740,34 @@ fluxes/workspace setup and nonorthogonal diffusion keep their heavy kernels in
 `.tcc`. The mapped fractional-implicit diffusion entry preserves the solver's
 first half-implicit Hybrid sweep through the public FVM boundary.
 `FVM/FieldStoredOperators.tcc` is the aggregate opt-in implementation for custom
-mesh/type-pack providers. Implementation-owned diagnostics may include their
-private `.tcc`; declaration headers and `.ipp` files never include it.
+mesh/type-pack providers. Ordinary library, application and test consumers use
+declaration headers, including existing `FVM/details` declarations when needed;
+declaration headers and `.ipp` files never include FVM `.tcc` implementations.
+Heavy definitions belong to dedicated implementation-provider translation
+units, not to equation/solver definitions or test bodies.
+
+`FVM/details/TransportSystemFactory.hh` declares the shared scalar, vector,
+weighted-scalar, temperature and momentum helpers and legacy builder entries.
+Its matching `.tcc` retains only dispatch/default-source definitions and uses
+declarations from the existing stored-builder header. The owning provider units
+supply the heavy native or legacy builders explicitly. These helpers remain
+private; the supported public factory overload matrix is unchanged.
+
+Pressure diagnostics use the exported public precomputed-gradient overload
+where its contract suffices. The diagnostic path that also captures velocity
+and pressure components has an executable-independent private provider in
+`solvers/explicit_instantiation/DiagnosticPressureFaceFlux.cc`, covering
+`DefaultTpetraTypes`, `MeshHandle`, the standard stored velocity boundary cache
+and the standard pressure workspace inside the solver DSO. A hidden detail
+symbol cannot be imported from the FVM DSO: a custom mesh/cache/workspace needs
+its own provider in the consuming library or executable, or must use a public
+exported entry point.
+
+Custom pressure-cache, ALE-validation and continuity tests share named internal
+fixture headers with their dedicated providers. Those providers instantiate
+the required kernel or cold members; ordinary test bodies retain declaration
+includes. This keeps the tests' custom execution and observation types intact
+without treating a test translation unit as an implicit implementation owner.
 
 Pressure-workspace providers own cold construction, refresh and legacy
 materialization only. Runtime-handle cold members use explicit instantiations;

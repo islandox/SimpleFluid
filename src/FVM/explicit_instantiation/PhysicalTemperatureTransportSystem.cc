@@ -3,6 +3,7 @@
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "FVM/TransportSystemFactory.tcc"
+#include "FVM/TransportSystem.tcc"
 #include "geometry/MeshHandle.hh"
 
 namespace SimpleFluid::FVM
@@ -19,6 +20,13 @@ template TransportSystem<Pack> Factory::assemble(
 
 template TransportSystem<Pack> Factory::refresh_temperature_rhs(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions, Factory::TemperatureContext);
+
+namespace detail
+{
+template TransportSystem<Pack> assemble_legacy_temperature<Pack>(
+    Factory::TemperatureTerms, Factory::TemperatureBoundary,
+    Factory::TemperatureOptions, Factory::TemperatureContext, bool);
+} // namespace detail
 
 } // namespace SimpleFluid::FVM
 

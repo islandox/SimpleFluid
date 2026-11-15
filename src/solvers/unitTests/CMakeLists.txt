@@ -19,6 +19,16 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     # Exercise the private adapter directly without exporting it from the DSO.
     target_sources(${TEST_NAME} PRIVATE ../details/LowMachFaceTransportAdapter.cc)
   endif()
+  if(TEST_NAME STREQUAL "testVolumeContinuityGeometryAccess")
+    target_sources(${TEST_NAME} PRIVATE
+      VolumeContinuityALETestProvider.cc
+      VolumeContinuityModelTestProvider.cc)
+    set_source_files_properties(
+      testVolumeContinuityGeometryAccess.cc
+      VolumeContinuityALETestProvider.cc
+      VolumeContinuityModelTestProvider.cc
+      PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(

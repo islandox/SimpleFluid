@@ -1,6 +1,7 @@
 /** @file ReferenceMomentum.cc
  * @brief Momentum factory provider for the generic reference mesh.
  */
+#include "FVM/details/FieldStoredTransportSystem.tcc"
 #include "FVM/TransportSystemFactory.tcc"
 #include "TestMeshes.hh"
 #include "fields/FieldStored.tcc"
@@ -12,4 +13,10 @@ using MeshType = test::transport_providers::ReferenceHandle;
 using Factory = TransportSystemFactory<Pack, MeshType>;
 template VectorTransportSystem<Pack> Factory::assemble(
     Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
+
+namespace detail
+{
+template VectorTransportSystem<Pack> assemble_stored_momentum<Pack, MeshType>(
+    Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
+} // namespace detail
 } // namespace SimpleFluid::FVM

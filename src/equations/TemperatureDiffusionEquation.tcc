@@ -14,7 +14,7 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystemFactory.hh"
-#include "FVM/details/PrescribedFluxResponse.tcc"
+#include "FVM/details/PrescribedFluxResponse.hh"
 #include "TemperatureDiffusionEquation.hh"
 #include "equations/CollectiveValidation.hh"
 

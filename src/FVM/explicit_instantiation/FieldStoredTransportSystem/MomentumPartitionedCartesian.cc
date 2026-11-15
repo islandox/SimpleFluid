@@ -1,4 +1,5 @@
 /** @brief Exported static-Cartesian transport factory specializations. */
+#include "FVM/details/FieldStoredTransportSystem.tcc"
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
@@ -16,11 +17,13 @@ template<>
 VectorTransportSystem<Pack> Factory::assemble(
     MomentumTerms terms, MomentumBoundary boundary, MomentumOptions options, MomentumContext context)
 {
-    if (!terms.acceleration_source)
-        terms.acceleration_source = [](typename Pack::local_ordinal_type)
-        { return typename VectorCellField<Pack>::vec_type{}; };
-    return detail::assemble_stored_momentum<Pack, MeshType>(
+    return detail::assemble_factory_momentum<Pack, MeshType>(
         std::move(terms), std::move(boundary), options, std::move(context));
 }
 
+namespace detail
+{
+template VectorTransportSystem<Pack> assemble_stored_momentum<Pack, MeshType>(
+    Factory::MomentumTerms, Factory::MomentumBoundary, Factory::MomentumOptions, Factory::MomentumContext);
+} // namespace detail
 } // namespace SimpleFluid::FVM
