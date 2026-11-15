@@ -62,7 +62,7 @@ namespace
 
 using Pack = SimpleFluid::TpetraTypes<>;
 using MeshType = SimpleFluid::Mesh<Pack>;
-using FieldType = SimpleFluid::CellField<Pack>;
+using TestScalarField = SimpleFluid::CellField<Pack>;
 using VectorFieldType = SimpleFluid::VectorCellField<Pack>;
 using global_ordinal_type = Pack::global_ordinal_type;
 using scalar_type = Pack::scalar_type;
@@ -127,14 +127,14 @@ TEST(PressureProjectionMultiRankTest, CgEliminatesRemoteGaugeColumnAndMatchesGmr
     SimpleFluid::LinearSolverOptions options;
     options.tolerance = 1.0e-12;
     SimpleFluid::PressureProjectionEquation<Pack> equation(mesh, options);
-    FieldType gmres_pressure(mesh, "gmres_pressure");
+    TestScalarField gmres_pressure(mesh, "gmres_pressure");
     VectorFieldType gmres_velocity(mesh, SimpleFluid::vec3{}, "gmres_velocity");
     const auto gmres = equation.project(gmres_pressure, 0.1, 1.0, cache, gmres_velocity, target);
     ASSERT_TRUE(gmres.linear_solve.converged);
 
     options.backend = SimpleFluid::LinearSolverBackend::Cg;
     equation.set_linear_solver_options(options);
-    FieldType cg_pressure(mesh, "cg_pressure");
+    TestScalarField cg_pressure(mesh, "cg_pressure");
     VectorFieldType cg_velocity(mesh, SimpleFluid::vec3{}, "cg_velocity");
     const auto cg = equation.project(cg_pressure, 0.1, 1.0, cache, cg_velocity, target);
     ASSERT_TRUE(cg.linear_solve.converged);
@@ -188,7 +188,7 @@ TEST(PressureProjectionMultiRankTest,
     ASSERT_NE(source_row_gid, no_source_candidate);
     ASSERT_NE(source_row_gid, gauge_row_gid);
 
-    FieldType pressure(mesh, "pressure");
+    TestScalarField pressure(mesh, "pressure");
     VectorFieldType velocity(
         mesh, SimpleFluid::vec3{}, "velocity");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
@@ -315,7 +315,7 @@ TEST(PressureProjectionMultiRankTest,
             : gid == last_gid ? scalar_type{-0.125} : scalar_type{};
     }
 
-    FieldType pressure(mesh, "pressure");
+    TestScalarField pressure(mesh, "pressure");
     VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
     const SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
@@ -386,7 +386,7 @@ TEST(PressureProjectionMultiRankTest,
         GTEST_SKIP() << "This test requires exactly two MPI ranks.";
     }
 
-    FieldType pressure(mesh, "pressure");
+    TestScalarField pressure(mesh, "pressure");
     VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
     const SimpleFluid::BoundaryConditionSet boundary_conditions;
     const auto boundary_cache =
@@ -430,7 +430,7 @@ TEST(PressureProjectionMultiRankTest,
         }
     }
 
-    FieldType pressure(mesh, "pressure");
+    TestScalarField pressure(mesh, "pressure");
     VectorFieldType velocity(mesh, SimpleFluid::vec3{}, "velocity");
     SimpleFluid::BoundaryConditionSet boundary_conditions;
     boundary_conditions.pressure["xmax"] = {
@@ -509,7 +509,7 @@ TEST(PressureProjectionMultiRankTest,
         SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(
             mesh, boundary_conditions);
     VectorFieldType velocity(mesh, "velocity");
-    FieldType pressure(mesh, "pressure");
+    TestScalarField pressure(mesh, "pressure");
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_fluxes");
 
     int local_rejected = 0;
@@ -565,7 +565,7 @@ TEST(PressureProjectionMultiRankTest,
     options.max_iterations = 100;
     options.preconditioner = SimpleFluid::LinearPreconditioner::None;
     SimpleFluid::PressureProjectionEquation<Pack> gmres_equation(mesh, options);
-    FieldType gmres_pressure(mesh, "distributed_gmres_pressure");
+    TestScalarField gmres_pressure(mesh, "distributed_gmres_pressure");
     VectorFieldType gmres_velocity(mesh, SimpleFluid::vec3{}, "distributed_gmres_velocity");
     const auto gmres = gmres_equation.project(
         gmres_pressure, 0.1, 1.0, boundary_cache, gmres_velocity, target);
@@ -574,7 +574,7 @@ TEST(PressureProjectionMultiRankTest,
     options.backend = SimpleFluid::LinearSolverBackend::Cg;
     options.preconditioner = SimpleFluid::LinearPreconditioner::DIC;
     SimpleFluid::PressureProjectionEquation<Pack> dic_equation(mesh, options);
-    FieldType dic_pressure(mesh, "distributed_dic_pressure");
+    TestScalarField dic_pressure(mesh, "distributed_dic_pressure");
     VectorFieldType dic_velocity(mesh, SimpleFluid::vec3{}, "distributed_dic_velocity");
     const auto dic = dic_equation.project(
         dic_pressure, 0.1, 1.0, boundary_cache, dic_velocity, target);
@@ -636,7 +636,7 @@ TEST(PressureProjectionMultiRankTest, SkewProjectionMatchesReconstructedFluxAndC
              SimpleFluid::PressureProjectionMethod::FullOperator})
     {
         SCOPED_TRACE(static_cast<int>(method));
-        FieldType pressure(mesh,"skew_projection_pressure");
+        TestScalarField pressure(mesh,"skew_projection_pressure");
         VectorFieldType velocity(mesh,"skew_projection_velocity");
         for (size_t owned=0; owned<mesh->num_owned_cells(); ++owned)
         {
@@ -821,7 +821,8 @@ TEST(PressureProjectionMultiRankTest, NonAffineCorrectionMatchesFluxAndFullPress
     constexpr double dt = 0.13, rho = 13.0;
     for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
     {
-        FieldType pressure(mesh, "identity_p"), correction(mesh, "identity_q"), updated_pressure(mesh, "identity_p1");
+        TestScalarField pressure(mesh, "identity_p"), correction(mesh, "identity_q"),
+            updated_pressure(mesh, "identity_p1");
         VectorFieldType velocity(mesh, "identity_u"), updated_velocity(mesh, "identity_u1"), gradient(mesh, "identity_gq");
         FaceField<Pack> initial_flux(mesh, "identity_phi0"), final_flux(mesh, "identity_phi1"), explicit_flux(mesh, "identity_C");
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -934,7 +935,7 @@ TEST(PressureProjectionMultiRankTest, AccumulatedPressureFixedFluxMatchesPhysica
         SCOPED_TRACE(static_cast<int>(method));
         for (const auto scheme : {FVM::CellGradientScheme::LeastSquares, FVM::CellGradientScheme::GaussLinear})
         {
-            FieldType pressure(mesh, "fixed_physical_p"), correction(mesh, "fixed_q");
+            TestScalarField pressure(mesh, "fixed_physical_p"), correction(mesh, "fixed_q");
             VectorFieldType velocity(mesh, "fixed_u");
             for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
             {
@@ -1169,7 +1170,7 @@ TEST(PressureProjectionMultiRankTest, FullOperatorAcceptsZeroCorrectionAndDefers
     options.preconditioner = LinearPreconditioner::ILUT;
     PressureProjectionEquation<Pack> equation(mesh, options);
     equation.set_projection_method(PressureProjectionMethod::FullOperator);
-    FieldType pressure(mesh, "zero_full_pressure");
+    TestScalarField pressure(mesh, "zero_full_pressure");
     VectorFieldType velocity(mesh, vec3{}, "zero_full_velocity");
     const BoundaryConditionSet conditions;
     const auto boundaries = FVM::cache_velocity_boundary_conditions<Pack>(mesh, conditions);

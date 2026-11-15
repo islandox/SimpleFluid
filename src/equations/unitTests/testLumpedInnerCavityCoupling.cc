@@ -13,18 +13,18 @@ using namespace SimpleFluid;
 namespace
 {
 using Pack = DefaultTpetraTypes;
-using MeshType = MeshHandle<Pack>;
+using Grid = MeshHandle<Pack>;
 using Solid = SolidSubdomain<Pack>;
-using Cells = ScalarCellFieldStored<Pack, MeshType>;
-using Faces = ScalarFaceFieldStored<Pack, MeshType>;
+using Cells = ScalarCellFieldStored<Pack, Grid>;
+using Faces = ScalarFaceFieldStored<Pack, Grid>;
 using Batch = InnerCavityFieldBatch;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-SP<const MeshType> mesh()
+SP<const Grid> mesh()
 {
     auto geometry = std::make_shared<Meshes::OrthogonalCartesian3D>(
         Vec3D<ArrReal>{{{0.0, 1.0, 3.0, 6.0, 10.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    return std::make_shared<MeshType>(std::move(geometry));
+    return std::make_shared<Grid>(std::move(geometry));
 }
 
 LumpedInnerCavityOptions options()
@@ -47,7 +47,7 @@ InnerCavitySurface properties(std::string name, bool wet = false)
     return p;
 }
 
-real_t sum(const MeshType& mesh, real_t local)
+real_t sum(const Grid& mesh, real_t local)
 {
     real_t global = 0.0;
     Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &global);
@@ -238,7 +238,7 @@ TEST(LumpedInnerCavityCouplingTest, RefreshSelectsHeatOrTotalEnergyAndRollsBackO
         m->owned_cell_map()->getComm(), {Batch::from_field(pool, "ymax", properties("pool", true))});
     LumpedInnerCavityModel cavity(options(), {300.0, 0.005});
     const auto result = cavity.evaluate(batch);
-    FVM::MeshBoundaryCache<Pack, MeshType> heat{{}, m}, total{{}, m};
+    FVM::MeshBoundaryCache<Pack, Grid> heat{{}, m}, total{{}, m};
     refresh_inner_cavity_boundary_conditions(heat, result);
     refresh_inner_cavity_boundary_conditions(total, result, InnerCavityEnergyTransfer::TotalEnergy);
     real_t local_difference = 0.0;
@@ -254,7 +254,7 @@ TEST(LumpedInnerCavityCouplingTest, RefreshSelectsHeatOrTotalEnergyAndRollsBackO
         bad.boundaries[0].faces[0].area *= 2.0;
     EXPECT_ANY_THROW(refresh_inner_cavity_boundary_conditions(heat, bad));
     EXPECT_EQ(heat.value, saved);
-    FVM::MeshBoundaryCache<Pack, MeshType> wrong{{}, mesh()};
+    FVM::MeshBoundaryCache<Pack, Grid> wrong{{}, mesh()};
     EXPECT_ANY_THROW(refresh_inner_cavity_boundary_conditions(wrong, result));
 }
 
@@ -378,8 +378,8 @@ TEST(LumpedInnerCavityCouplingTest, SharedFluxSnapshotsSupportRollbackAndRejectS
 {
     const auto m = mesh();
     Cells cells(m, 310.0, "temperature");
-    TemperatureDiffusionEquation<Pack, MeshType> equation(m, {});
-    using Cache = FVM::MeshBoundaryCache<Pack, MeshType>;
+    TemperatureDiffusionEquation<Pack, Grid> equation(m, {});
+    using Cache = FVM::MeshBoundaryCache<Pack, Grid>;
     SP<const Cache> flux = std::make_shared<const Cache>(Cache{{}, m});
     InnerCavityFieldInput input(m->owned_cell_map()->getComm(), {Batch::from_field(cells, "ymax", properties("wall"))});
     LumpedInnerCavityModel cavity(options(), {300.0, 0.0});
@@ -410,8 +410,8 @@ TEST(LumpedInnerCavityCouplingTest, PhysicalTemperatureFluxUpdatesAreTransaction
     Cells temperature(m, 320.0, "temperature"), conductivity(m, 4.0, "conductivity");
     Faces carrier(m, 0.0, "carrier_flux");
     auto mat = material(m);
-    TemperatureDiffusionEquation<Pack, MeshType> equation(m, {});
-    FVM::MeshBoundaryCache<Pack, MeshType> flux{{}, m};
+    TemperatureDiffusionEquation<Pack, Grid> equation(m, {});
+    FVM::MeshBoundaryCache<Pack, Grid> flux{{}, m};
     for (const auto& [id, batch] : m->boundary_batches())
         if (m->boundary_batch_name(id) == "ymax")
             flux.value[id] = ArrReal(batch.face_lids.size(), 10.0);
