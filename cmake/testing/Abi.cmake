@@ -44,6 +44,13 @@ function(simplefluid_add_abi_tests)
         find_program(SIMPLEFLUID_FVM_CXXFILT
             NAMES llvm-cxxfilt c++filt
             REQUIRED)
+        set(fvm_rtti_backend_options)
+        if(TARGET SimpleFluidTrilinosBackend)
+            list(APPEND fvm_rtti_backend_options
+                "-DSIMPLEFLUID_RTTI_BACKEND_LIBRARY=$<TARGET_FILE:SimpleFluidTrilinosBackend>"
+                "-DSIMPLEFLUID_RTTI_BACKEND_SONAME=$<TARGET_SONAME_FILE_NAME:SimpleFluidTrilinosBackend>"
+                "-DSIMPLEFLUID_READELF=${CMAKE_READELF}")
+        endif()
         add_test(NAME simplefluid_fvm_elf_export_boundary
             COMMAND "${CMAKE_COMMAND}"
                 "-DSIMPLEFLUID_LIBRARY=$<TARGET_FILE:SimpleFluidFVM>"
@@ -52,6 +59,7 @@ function(simplefluid_add_abi_tests)
                 "-DSIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES=$<AND:$<BOOL:${SIMPLEFLUID_CXX_USES_LIBCXX}>,$<BOOL:${SIMPLEFLUID_EXTERNAL_TRILINOS_RUNTIME}>>"
                 "-DSIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING=${SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING}"
                 "-DSIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING=${SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING}"
+                ${fvm_rtti_backend_options}
                 -P "${PROJECT_SOURCE_DIR}/cmake/testing/abi/CheckFvmExports.cmake")
         set_tests_properties(simplefluid_fvm_elf_export_boundary PROPERTIES
             LABELS abi)

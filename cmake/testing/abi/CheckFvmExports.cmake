@@ -47,8 +47,16 @@ foreach(symbol IN LISTS symbol_lines)
     endif()
 endforeach()
 include("${CMAKE_CURRENT_LIST_DIR}/CheckSharedTrilinosRtti.cmake")
-simplefluid_check_shared_trilinos_rtti("${shared_trilinos_rtti_symbols}"
-    "${SIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES}")
+if(SIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES AND DEFINED SIMPLEFLUID_RTTI_BACKEND_LIBRARY)
+    # The static backend owns dependency RTTI that this consumer does not emit.
+    # Keep the per-image export checks, then verify the actual runtime provider.
+    simplefluid_check_shared_trilinos_rtti("${shared_trilinos_rtti_symbols}" FALSE)
+    include("${CMAKE_CURRENT_LIST_DIR}/CheckBackendTrilinosRtti.cmake")
+    simplefluid_check_backend_trilinos_rtti("${shared_trilinos_rtti_symbols}")
+else()
+    simplefluid_check_shared_trilinos_rtti("${shared_trilinos_rtti_symbols}"
+        "${SIMPLEFLUID_REQUIRE_SHARED_LIBCXX_RTTI_BRIDGES}")
+endif()
 if(kokkos_count GREATER SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING
    OR tpetra_count GREATER SIMPLEFLUID_TPETRA_RTTI_SYMBOL_CEILING)
     message(FATAL_ERROR

@@ -24,6 +24,12 @@ libraries keep their SimpleFluid export boundary and the required dependency
 RTTI visibility. The backend boundary test checks the ownership marker and,
 with Ninja, verifies that only one link rule receives Trilinos archives.
 
+For libc++ builds using this backend, the FVM export audit checks the core
+Teuchos/Tpetra/string RTTI in the backend and requires FVM's direct dependency
+on that provider. FVM may omit unused RTTI, while any core RTTI it defines must
+remain visible through its versioned bridge. The per-consumer RTTI export
+allowlist and limit still apply; the backend's vendor ABI is checked separately.
+
 Set `SIMPLEFLUID_WRAP_STATIC_TRILINOS=OFF` to use direct static linking. Shared
 Trilinos installations continue to use their imported shared libraries. The
 wrapper defaults off on platforms other than Linux.
