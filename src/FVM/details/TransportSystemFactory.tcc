@@ -7,9 +7,8 @@
 #include "SimpleFluidExport.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
-#include "FVM/TransportSystem.tcc"
-#include "FVM/TransportSystemFactory.hh"
-#include "FVM/details/FieldStoredTransportSystem.tcc"
+#include "FVM/details/TransportSystemFactory.hh"
+#include "FVM/details/FieldStoredTransportSystem.hh"
 
 namespace SimpleFluid::FVM::detail
 {

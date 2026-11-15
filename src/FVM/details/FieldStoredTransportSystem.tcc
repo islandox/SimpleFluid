@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include "geometry/MeshConcepts.hh"
+#include "FVM/details/FieldStoredTransportSystem.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"
 #include "FVM/BoundaryCache.hh"

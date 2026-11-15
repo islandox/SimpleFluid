@@ -6,7 +6,8 @@
  * @date 2026-09-10
  * @copyright Copyright (c) 2026
  */
-#include "FVM/ALEControlVolumeState.tcc"
+#include "FVM/ALEControlVolumeState.hh"
+#include "transport_providers/ALEFixtures.hh"
 #include "FVM/Operators.hh"
 #include "FVM/TransportSystemFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -28,31 +29,7 @@ using TransportFactory = SimpleFluid::FVM::TransportSystemFactory<Pack, typename
 using Handle=MeshHandle<>;
 testing::Environment* const environment=testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-class ThrowingHandle : public Handle
-{
-public:
-    using Handle::Handle;
-    bool fail_epoch = false, fail_faces = false, fail_owner = false;
-    mutable size_t face_traversals = 0;
-
-    std::uint64_t geometry_epoch() const
-    {
-        if (fail_epoch) throw std::runtime_error("Injected rank-local static geometry failure.");
-        return Handle::geometry_epoch();
-    }
-
-    CellFaceRange faces(local_ordinal_type cell) const
-    {
-        ++face_traversals;
-        if (fail_faces) throw std::runtime_error("Injected rank-local face traversal failure.");
-        return Handle::faces(cell);
-    }
-    local_ordinal_type owner_cell(local_ordinal_type face) const
-    {
-        if (fail_owner) throw std::runtime_error("Injected rank-local owner lookup failure.");
-        return Handle::owner_cell(face);
-    }
-};
+using SimpleFluid::test::ale::ThrowingHandle;
 
 class MutableTestMotion final : public MeshMotionModel
 {

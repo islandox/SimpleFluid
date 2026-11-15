@@ -264,19 +264,38 @@ providers reach that overload, including under ThinLTO. Private assembly helpers
 remain local to their owning image; finding a single `assemble` export does not
 establish all families.
 
-A custom mesh or type pack supplies the required overload definitions by
-including `FVM/TransportSystemFactory.tcc` in a provider translation unit and
-explicitly instantiating the overloads it needs. Do not instantiate the whole
-factory class to claim unsupported families. For example, with a named
-`CustomMesh` and matching fields:
+`FVM/details/TransportSystemFactory.hh` declares the shared private factory
+helpers and the legacy builder entry points. Their matching `.tcc` includes
+builder declarations, not the heavy legacy or stored assembly definitions.
+Stored builder declarations reuse `FVM/details/FieldStoredTransportSystem.hh`.
+The owning factory provider units include the appropriate builder implementation
+and explicitly instantiate the private entries they require. Including a detail
+declaration header does not provide generic definitions or make a hidden helper
+callable across shared-library boundaries.
+
+A custom stored mesh or type pack supplies the required overload definitions
+through `FVM/FieldStoredTransportSystem.tcc` in a provider translation unit.
+This aggregate includes factory definitions and stored builder definitions;
+`FVM/TransportSystemFactory.tcc` alone supplies only the factory layer. Explicitly
+instantiate the private builder entries and public overloads needed by that
+provider. Do not instantiate the whole factory class to claim unsupported
+families. For example, with a named `CustomMesh` and matching fields:
 
 ```cpp
 #include "CustomMesh.hh"
-#include "FVM/TransportSystemFactory.tcc"
+#include "FVM/FieldStoredTransportSystem.tcc"
 #include "fields/FieldStored.tcc" // If custom storage lacks compiled providers.
 
 namespace SimpleFluid::FVM {
 using CustomFactory = TransportSystemFactory<DefaultTpetraTypes, CustomMesh>;
+namespace detail {
+template TransportSystem<DefaultTpetraTypes>
+assemble_stored_weighted<DefaultTpetraTypes, CustomMesh>(
+    CustomFactory::WeightedScalarTerms,
+    CustomFactory::WeightedScalarBoundary,
+    CustomFactory::WeightedScalarOptions,
+    CustomFactory::WeightedScalarContext);
+}
 template TransportSystem<DefaultTpetraTypes> CustomFactory::assemble(
     CustomFactory::WeightedScalarTerms,
     CustomFactory::WeightedScalarBoundary,
@@ -285,12 +304,22 @@ template TransportSystem<DefaultTpetraTypes> CustomFactory::assemble(
 }
 ```
 
+Legacy custom type-pack providers include `FVM/TransportSystem.tcc` for their
+private builder definitions and `FVM/details/TransportRhs.tcc` when supplying
+their own scalar/vector RHS adapters. The default-pack RHS adapters remain in
+their existing dedicated provider.
+
 Custom assembly/cache paths that construct traversal plans also need their
 mesh's provider through `geometry/MeshTraverse.tcc`; custom ALE validation uses
-`FVM/ALEControlVolumeState.tcc`. Keep providers for translation-unit-local mesh
-types in the translation unit that defines the type. Named reusable custom
-types can place these definitions in separate provider units. Public headers
-and `.ipp` files must not pull heavy factory implementations into consumers.
+`FVM/ALEControlVolumeState.tcc`. Put shared custom mesh/cache layouts in a named
+internal header and instantiate their required operations in dedicated provider
+units registered with the owning library or executable. Ordinary test and
+application sources include declarations. A translation-unit-local type is
+appropriate only when its operations are wholly owned by that provider unit.
+Public headers and `.ipp` files must not pull heavy factory implementations
+into consumers. Caller-dependent execution-lease construction, destruction and
+bookkeeping remain inline in the consuming image rather than being suppressed
+through whole-class instantiation.
 
 This migration intentionally breaks source and ABI compatibility. The old
 transport free functions and flat weighted request aliases are removed.

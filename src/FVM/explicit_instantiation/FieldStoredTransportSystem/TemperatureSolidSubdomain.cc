@@ -1,4 +1,5 @@
 /** @brief Individual compiled transport factory overloads. */
+#include "FVM/details/FieldStoredTransportSystem.tcc"
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/SolidSubdomain.hh"
 
@@ -17,4 +18,10 @@ template TransportSystem<Pack> Factory::assemble(
 template TransportSystem<Pack> Factory::refresh_temperature_rhs(
     Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions, Factory::TemperatureContext);
 
+namespace detail
+{
+template TransportSystem<Pack> assemble_stored_temperature<Pack, MeshType>(
+    Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions,
+    Factory::TemperatureContext, bool);
+} // namespace detail
 } // namespace SimpleFluid::FVM

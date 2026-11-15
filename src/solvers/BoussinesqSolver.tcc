@@ -9,8 +9,6 @@
  *
  */
 
-// This implementation owns direct diagnostic/custom-cache pressure-kernel instantiations.
-#include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
 #include "BoussinesqSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 #include "solvers/FieldStateTransaction.hh"
@@ -1353,8 +1351,8 @@ auto BoussinesqSolver<Pack>::evaluate_diagnostics(const SolverDiagnosticsOptions
         velocity_field_type gradient(d_mesh,"diagnostic_ALE_flux_gradient");
         FVM::cell_gradient(diagnostic_p,physical_bc,gradient,workspace.gradient_cache(),d_problem.time_options().pressure_gradient_scheme);
         const auto coefficient=static_cast<scalar_type>(options.pressure_coefficient_time_step.value_or(d_problem.time_options().time_step))/d_model_options.reference_density;
-        FVM::detail::pressure_weighted_stored_face_fluxes_impl(diagnostic_u,diagnostic_p,coefficient,cache,
-            &flux_bc,workspace,&gradient,output,d_problem.time_options().pressure_gradient_scheme);
+        FVM::pressure_weighted_face_fluxes(diagnostic_u,diagnostic_p,gradient,coefficient,cache,
+            flux_bc,workspace,output);
         if(ale) {
             for(const auto& [id,batch]:d_mesh->boundary_batches())
                 if(std::find(kinematic.begin(),kinematic.end(),d_mesh->boundary_batch_name(id))!=kinematic.end())

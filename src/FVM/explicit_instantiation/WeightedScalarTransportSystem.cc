@@ -3,6 +3,7 @@
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "FVM/TransportSystemFactory.tcc"
+#include "FVM/TransportSystem.tcc"
 #include "geometry/MeshHandle.hh"
 
 namespace SimpleFluid::FVM
@@ -16,6 +17,13 @@ using Factory = TransportSystemFactory<Pack, MeshType>;
 
 template TransportSystem<Pack> Factory::assemble(Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary,
     Factory::WeightedScalarOptions, Factory::WeightedScalarContext);
+
+namespace detail
+{
+template TransportSystem<Pack> assemble_legacy_weighted<Pack>(
+    Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary,
+    Factory::WeightedScalarOptions, Factory::WeightedScalarContext);
+} // namespace detail
 
 } // namespace SimpleFluid::FVM
 

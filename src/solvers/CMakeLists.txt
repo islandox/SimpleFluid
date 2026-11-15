@@ -15,6 +15,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     CoupledNonlinearProblem.cc
     NoxNonlinearSolver.cc
     explicit_instantiation/FluidSolver.cc
+    explicit_instantiation/DiagnosticPressureFaceFlux.cc
     explicit_instantiation/IncompressibleIsothermalSolver.cc
     PlanarFreeSurfaceModel.cc
     ClosedMixtureHeadspaceModel.cc

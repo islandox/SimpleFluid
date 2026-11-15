@@ -2,10 +2,7 @@
  * @brief Preview traversal parity, scoped geometry access and collective failure.
  */
 #include "solvers/VolumeContinuityModel.hh"
-#include "solvers/VolumeContinuityModel.tcc"
-#include "FVM/ALEControlVolumeState.tcc"
-// ObservedMesh is test-local: its field constructors cannot come from a DSO.
-#include "fields/FieldStored.tcc"
+#include "VolumeContinuityObservedMesh.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "utils/testing_environment.hh"
@@ -23,44 +20,7 @@ using Composite = Meshes::MultiRegionMesh;
 using Cartesian = Meshes::OrthogonalCartesian3D;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-class ObservedMesh : public Handle
-{
-public:
-    using Handle::Handle;
-    using NativeExecution = decltype(std::declval<const Handle&>().acquire_execution_view());
-    mutable int acquisitions = 0, active = 0, visits = 0;
-    bool observe = false, use_lease = true, fail_acquisition = false, fail_traversal = false;
-    struct Execution
-    {
-        const ObservedMesh& mesh;
-        std::unique_ptr<NativeExecution> native;
-        explicit Execution(const ObservedMesh& source) : mesh(source)
-        {
-            if (mesh.use_lease)
-                native.reset(new NativeExecution(mesh.Handle::acquire_execution_view()));
-            if (mesh.observe)
-            {
-                ++mesh.acquisitions;
-                if (mesh.fail_acquisition) throw std::logic_error("Injected continuity acquisition failure.");
-                ++mesh.active;
-            }
-        }
-        ~Execution() { if (mesh.observe) --mesh.active; }
-        Execution(const Execution&) = delete;
-        Execution& operator=(const Execution&) = delete;
-    };
-    Execution acquire_execution_view() const { return Execution(*this); }
-    auto faces(local_ordinal_type cell) const
-    {
-        if (observe)
-        {
-            ++visits;
-            if (active != 1) throw std::logic_error("Continuity traversal escaped its execution scope.");
-            if (fail_traversal) throw std::out_of_range("Injected continuity traversal failure.");
-        }
-        return Handle::faces(cell);
-    }
-};
+using ObservedMesh = test::VolumeContinuityObservedMesh;
 using Model = VolumeContinuityModel<Pack, ObservedMesh>;
 using Flux = ScalarFaceFieldStored<Pack, ObservedMesh>;
 

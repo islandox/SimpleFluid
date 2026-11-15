@@ -1,4 +1,5 @@
 /** @brief Exported static-Cartesian transport factory specializations. */
+#include "FVM/details/FieldStoredTransportSystem.tcc"
 #include "FVM/TransportSystemFactory.tcc"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
@@ -36,4 +37,14 @@ TransportSystem<Pack> Factory::refresh_temperature_rhs(
         std::move(terms), std::move(boundary), options, std::move(context), true);
 }
 
+namespace detail
+{
+template TransportSystem<Pack> assemble_stored_weighted<Pack, MeshType>(
+    Factory::WeightedScalarTerms, Factory::WeightedScalarBoundary, Factory::WeightedScalarOptions,
+    Factory::WeightedScalarContext);
+
+template TransportSystem<Pack> assemble_stored_temperature<Pack, MeshType>(
+    Factory::TemperatureTerms, Factory::TemperatureBoundary, Factory::TemperatureOptions,
+    Factory::TemperatureContext, bool);
+} // namespace detail
 } // namespace SimpleFluid::FVM

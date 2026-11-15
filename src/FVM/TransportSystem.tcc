@@ -15,8 +15,8 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "geometry/MeshConcepts.hh"
 #include "FVM/FieldViewAccess.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
-#include "FVM/TransportSystemFactory.hh"
-#include "FVM/details/TransportRhs.tcc"
+#include "FVM/details/TransportSystemFactory.hh"
+#include "FVM/details/TransportRhs.hh"
 #include "FVM/details/TransportValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>

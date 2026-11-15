@@ -1,6 +1,5 @@
 #pragma once
-// This implementation owns direct diagnostic/custom-cache pressure-kernel instantiations.
-#include "FVM/details/FieldStoredPressureWeightedFaceFlux.tcc"
+#include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
 #include "FVM/details/DiagnosticCapture.hh"
 #include <cstdint>
 #include <cstdlib>
