@@ -2,7 +2,10 @@
 # Unit tests for geometry
 
 # Frozen legacy geometry oracle; never part of a production library.
-add_library(SimpleFluidLegacyMeshTestFixture STATIC fixtures/LegacySTKFixture.cc)
+add_library(SimpleFluidLegacyMeshTestFixture STATIC
+    fixtures/LegacySTKFixture.cc
+    fixtures/LegacyMesh.cc
+    fixtures/LegacyMeshPartitioner.cc)
 simplefluid_configure_component(SimpleFluidLegacyMeshTestFixture)
 target_link_libraries(SimpleFluidLegacyMeshTestFixture PUBLIC SimpleFluid::Mesh)
 
