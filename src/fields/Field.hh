@@ -60,6 +60,16 @@ public:
     size_t id() const noexcept { return d_id; }
     const std::string& name() const noexcept { return d_name; }
 
+    /** @brief Rename the descriptor without changing its identity. */
+    void set_name(std::string name)
+    {
+        if (name.empty())
+        {
+            throw std::invalid_argument("Field requires a non-empty name.");
+        }
+        d_name = std::move(name);
+    }
+
     friend bool operator==(const Field&, const Field&) = default;
 
 private:

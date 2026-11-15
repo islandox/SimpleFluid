@@ -150,6 +150,87 @@ inline void FieldStored<Descriptor, Pack, MeshT>::set_owned_component_value(
 }
 
 template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::row_for_global(
+    const storage_type& storage, global_ordinal_type global_id) -> local_ordinal_type
+{
+    const auto row = storage.getMap()->getLocalElement(global_id);
+    if (row == invalid_local_ordinal())
+    {
+        throw std::out_of_range("Field global ID is not available in the selected map.");
+    }
+    return row;
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::global_component_value(
+    global_ordinal_type global_id, size_t component) const -> scalar_type
+{
+    check_component(component);
+    const auto row = row_for_global(d_owned, global_id);
+    if constexpr (value_traits::is_vector)
+        return d_owned.getData(component)[row];
+    else
+        return d_owned.getData()[row];
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::set_global_value(global_ordinal_type global_id, const value_type& value)
+{
+    set_at(d_owned, row_for_global(d_owned, global_id), value);
+    set_at(d_overlap, row_for_global(d_overlap, global_id), value);
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::set_global_component_value(
+    global_ordinal_type global_id, size_t component, scalar_type value)
+{
+    check_component(component);
+    const auto owned = row_for_global(d_owned, global_id);
+    const auto overlap = row_for_global(d_overlap, global_id);
+    if constexpr (value_traits::is_vector)
+    {
+        d_owned.replaceLocalValue(owned, component, value);
+        d_overlap.replaceLocalValue(overlap, component, value);
+    }
+    else
+    {
+        d_owned.replaceLocalValue(owned, value);
+        d_overlap.replaceLocalValue(overlap, value);
+    }
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline void FieldStored<Descriptor, Pack, MeshT>::sum_into_global_value(global_ordinal_type global_id, scalar_type value)
+    requires (!value_traits::is_vector)
+{
+    d_owned.sumIntoLocalValue(row_for_global(d_owned, global_id), value);
+    d_overlap.sumIntoLocalValue(row_for_global(d_overlap, global_id), value);
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline auto FieldStored<Descriptor, Pack, MeshT>::boundary_face_local_id(
+    int boundary_id, local_ordinal_type in_batch_id) const -> local_ordinal_type
+    requires std::same_as<location_type, BoundaryFaceLocation>
+{
+    const auto& batch = d_mesh->boundary_face_batch(boundary_id);
+    if (!valid_local_id(in_batch_id, batch.face_lids.size()))
+    {
+        throw std::out_of_range("In-batch ID is out of bounds for the specified boundary batch.");
+    }
+    return batch.face_lids[static_cast<size_t>(in_batch_id)];
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
+inline size_t FieldStored<Descriptor, Pack, MeshT>::tensor_component_index(size_t row, size_t column)
+{
+    if (row >= 3 || column >= 3)
+    {
+        throw std::out_of_range("Tensor field row or column is out of range.");
+    }
+    return row * 3 + column;
+}
+
+template<FieldType Descriptor, TpetraTypePack Pack, MeshType MeshT>
 inline auto FieldStored<Descriptor, Pack, MeshT>::value_at(const storage_type& storage, local_ordinal_type row)
     -> value_type
 {

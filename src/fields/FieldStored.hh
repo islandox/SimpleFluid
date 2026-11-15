@@ -191,6 +191,13 @@ public:
         return d_descriptor.name();
     }
 
+    /** @brief Rename a mutable descriptor without changing its identity. */
+    void set_name(std::string name)
+        requires requires(descriptor_type& descriptor) { descriptor.set_name(std::move(name)); }
+    {
+        d_descriptor.set_name(std::move(name));
+    }
+
     const mesh_type& mesh() const noexcept { return *d_mesh; }
     SP<const mesh_type> mesh_ptr() const noexcept { return d_mesh; }
 
@@ -200,6 +207,10 @@ public:
     const storage_type& owned_data() const noexcept { return d_owned; }
     storage_type& overlap_data() noexcept { return d_overlap; }
     const storage_type& overlap_data() const noexcept { return d_overlap; }
+
+    /** @brief Scalar-field compatibility access to authoritative storage. */
+    storage_type& vector() noexcept requires (!value_traits::is_vector) { return d_owned; }
+    const storage_type& vector() const noexcept requires (!value_traits::is_vector) { return d_owned; }
 
     Teuchos::RCP<const map_type> map() const
     {
@@ -299,6 +310,20 @@ public:
         return d_layout->owned_face_ids;
     }
 
+    /** @brief Mesh-local boundary face IDs in authoritative map-row order. */
+    const std::vector<local_ordinal_type>& owned_boundary_face_ids() const noexcept
+        requires std::same_as<location_type, BoundaryFaceLocation>
+    {
+        return d_layout->owned_face_ids;
+    }
+
+    /** @brief Native algebraic global ID of an owned face. */
+    global_ordinal_type face_global_id(local_ordinal_type face_lid) const
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return d_owned.getMap()->getGlobalElement(owned_row(face_lid));
+    }
+
     /** @brief Return the owned storage row for an owned mesh-local face ID. */
     local_ordinal_type owned_row(local_ordinal_type face_lid) const
         requires std::same_as<location_type, FaceLocation>
@@ -342,11 +367,40 @@ public:
         return value_at(d_overlap, overlap_row(local_id));
     }
 
+    /** @brief Read an owned value by its native algebraic global ID. */
+    value_type global_value(global_ordinal_type global_id) const
+    {
+        return value_at(d_owned, row_for_global(d_owned, global_id));
+    }
+
+    /** @brief Read one owned component by its native algebraic global ID. */
+    scalar_type global_component_value(global_ordinal_type global_id, size_t component) const;
+
+    /** @brief Read a boundary value by batch and in-batch face index. */
+    value_type value(int boundary_id, local_ordinal_type in_batch_id) const
+        requires std::same_as<location_type, BoundaryFaceLocation>
+    {
+        return value(boundary_face_local_id(boundary_id, in_batch_id));
+    }
+
     scalar_type component_value(local_ordinal_type local_id,
                                 size_t component) const;
 
     scalar_type local_component_value(local_ordinal_type local_id,
                                       size_t component) const;
+
+    /** @brief Read a row-major tensor component by row and column. */
+    scalar_type component_value(local_ordinal_type local_id, size_t row, size_t column) const
+        requires std::same_as<value_type, tensor_type>
+    {
+        return component_value(local_id, tensor_component_index(row, column));
+    }
+
+    scalar_type local_component_value(local_ordinal_type local_id, size_t row, size_t column) const
+        requires std::same_as<value_type, tensor_type>
+    {
+        return local_component_value(local_id, tensor_component_index(row, column));
+    }
 
     /**
      * @brief Update an owned entry and its local overlap copy.
@@ -370,6 +424,16 @@ public:
         set_at(d_owned, owned_row(local_id), value);
     }
 
+    /** @brief Update owned and overlap entries by native algebraic global ID. */
+    void set_global_value(global_ordinal_type global_id, const value_type& value);
+
+    /** @brief Update a boundary value by batch and in-batch face index. */
+    void set_value(int boundary_id, local_ordinal_type in_batch_id, const value_type& value)
+        requires std::same_as<location_type, BoundaryFaceLocation>
+    {
+        set_value(boundary_face_local_id(boundary_id, in_batch_id), value);
+    }
+
     void set_component_value(local_ordinal_type local_id,
                              size_t component,
                              scalar_type value);
@@ -379,6 +443,20 @@ public:
                                    size_t component,
                                    scalar_type value);
 
+    void set_global_component_value(global_ordinal_type global_id, size_t component, scalar_type value);
+
+    void set_component_value(local_ordinal_type local_id, size_t row, size_t column, scalar_type value)
+        requires std::same_as<value_type, tensor_type>
+    {
+        set_component_value(local_id, tensor_component_index(row, column), value);
+    }
+
+    void set_owned_component_value(local_ordinal_type local_id, size_t row, size_t column, scalar_type value)
+        requires std::same_as<value_type, tensor_type>
+    {
+        set_owned_component_value(local_id, tensor_component_index(row, column), value);
+    }
+
     /** @brief Accumulate a scalar value into owned and local copies. */
     void sum_into_value(local_ordinal_type local_id, scalar_type value)
         requires (!value_traits::is_vector)
@@ -386,6 +464,10 @@ public:
         d_owned.sumIntoLocalValue(owned_row(local_id), value);
         d_overlap.sumIntoLocalValue(overlap_row(local_id), value);
     }
+
+    /** @brief Accumulate into owned and overlap scalar entries by native GID. */
+    void sum_into_global_value(global_ordinal_type global_id, scalar_type value)
+        requires (!value_traits::is_vector);
 
     bool is_owned(local_ordinal_type local_id) const
     {
@@ -411,6 +493,18 @@ public:
         return is_local(local_id);
     }
 
+    bool is_owned_global_cell(global_ordinal_type global_id) const
+        requires std::same_as<location_type, CellLocation>
+    {
+        return d_owned.getMap()->getLocalElement(global_id) != invalid_local_ordinal();
+    }
+
+    bool is_local_global_cell(global_ordinal_type global_id) const
+        requires std::same_as<location_type, CellLocation>
+    {
+        return d_overlap.getMap()->getLocalElement(global_id) != invalid_local_ordinal();
+    }
+
     bool is_owned_face(local_ordinal_type local_id) const
         requires std::same_as<location_type, FaceLocation>
     {
@@ -421,6 +515,12 @@ public:
         requires std::same_as<location_type, FaceLocation>
     {
         return is_local(local_id);
+    }
+
+    bool is_owned_global_face(global_ordinal_type global_id) const
+        requires std::same_as<location_type, FaceLocation>
+    {
+        return d_owned.getMap()->getLocalElement(global_id) != invalid_local_ordinal();
     }
 
     bool is_owned_boundary_face(local_ordinal_type local_id) const
@@ -640,6 +740,13 @@ public:
     }
 
 private:
+    static local_ordinal_type row_for_global(const storage_type& storage, global_ordinal_type global_id);
+
+    local_ordinal_type boundary_face_local_id(int boundary_id, local_ordinal_type in_batch_id) const
+        requires std::same_as<location_type, BoundaryFaceLocation>;
+
+    static size_t tensor_component_index(size_t row, size_t column);
+
     static SP<const mesh_type> require_mesh(
         SP<const mesh_type> mesh)
     {

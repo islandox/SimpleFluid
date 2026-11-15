@@ -5,6 +5,8 @@
 
 #include "fields/FieldStored.hh"
 
+#include <algorithm>
+
 namespace SimpleFluid
 {
 
@@ -89,6 +91,24 @@ auto FieldStored<Descriptor, Pack, MeshT>::make_owned_face_ids(const mesh_type& 
                 throw std::runtime_error("FieldStored requires owned faces to form a "
                                          "local-ID prefix.");
             }
+        }
+    }
+    else if constexpr (std::is_same_v<location_type, BoundaryFaceLocation>)
+    {
+        const auto map = mesh.boundary_face_map();
+        result.assign(map->getLocalNumElements(), invalid_local_ordinal());
+        for (size_t face = 0; face < mesh.num_faces(); ++face)
+        {
+            const auto face_lid = static_cast<local_ordinal_type>(face);
+            const auto row = map->getLocalElement(mesh.face_global_id(face_lid));
+            if (row != invalid_local_ordinal())
+            {
+                result[static_cast<size_t>(row)] = face_lid;
+            }
+        }
+        if (std::find(result.begin(), result.end(), invalid_local_ordinal()) != result.end())
+        {
+            throw std::runtime_error("FieldStored boundary-face IDs do not match the boundary map.");
         }
     }
     return result;
