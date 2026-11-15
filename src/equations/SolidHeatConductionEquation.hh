@@ -7,7 +7,7 @@
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/Operators.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "fields/MeshFieldTraits.hh"

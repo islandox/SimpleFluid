@@ -5,7 +5,7 @@
 #pragma once
 
 #include "geometry/MeshConcepts.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 
 #include "FVM/CellGradientScheme.hh"
 #include "equations/BoundaryConditions.hh"

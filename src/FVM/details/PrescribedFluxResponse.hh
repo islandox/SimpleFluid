@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshConcepts.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"

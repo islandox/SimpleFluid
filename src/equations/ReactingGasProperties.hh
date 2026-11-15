@@ -10,7 +10,7 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/typedefs.hh"
 #include "equations/ReactingThermodynamics.hh"

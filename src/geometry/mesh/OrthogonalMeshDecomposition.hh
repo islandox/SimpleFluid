@@ -2,7 +2,7 @@
  * @brief Count-balanced tensor partitioning of shared orthogonal geometry.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include <array>
 #include <optional>

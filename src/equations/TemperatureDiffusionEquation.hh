@@ -9,7 +9,7 @@
  *
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
@@ -17,7 +17,7 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "FVM/BoundaryCache.hh"
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/Operators.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/EquationValidation.hh"

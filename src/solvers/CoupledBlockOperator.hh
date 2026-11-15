@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 
 #include "FVM/NumericAssemblyLease.hh"
 #include "dataclass/TpetraTypes.hh"

@@ -3,7 +3,7 @@
  * @brief Out-of-line template implementations for solver-owned steady diffusion solves.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 

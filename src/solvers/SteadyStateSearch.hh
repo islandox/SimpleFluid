@@ -10,12 +10,12 @@
  */
 
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "geometry/MeshConcepts.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "dataclass/typedefs.hh"
 #include "equations/PressureVelocityCoupling.hh"
 #include "fields/CellField.hh"

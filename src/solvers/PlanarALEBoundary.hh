@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/FaceFlux.hh"

@@ -1,7 +1,7 @@
 /** @file ReactingGasModel.cc
  * @brief Instantiates reacting gas models for supported mesh types.
  */
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "equations/ReactingGasModel.tcc"

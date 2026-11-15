@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "FVM/BoundaryCache.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "equations/BoundaryConditions.hh"

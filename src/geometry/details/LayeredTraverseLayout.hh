@@ -2,7 +2,7 @@
  * @brief Immutable XY metadata with arithmetic Z repetitions.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/details/StructuredTraverseLayout.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
 #include <cstddef>

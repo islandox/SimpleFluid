@@ -1,5 +1,5 @@
 /**
- * @file SimpleFluidExport.hh
+ * @file utils/export_helper.hh
  * @brief Shared-library visibility annotations for the public binary API.
  */
 #pragma once

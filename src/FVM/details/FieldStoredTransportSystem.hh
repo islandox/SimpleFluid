@@ -6,7 +6,7 @@
 #pragma once
 
 #include "geometry/MeshConcepts.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "FVM/AssemblyCallbacks.hh"

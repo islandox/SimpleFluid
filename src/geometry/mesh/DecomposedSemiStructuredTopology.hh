@@ -2,7 +2,7 @@
  * @brief Compact local XY/Z products and exact adjacency halos for a decomposed extrusion.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
 #include <array>
 #include <limits>

@@ -2,7 +2,7 @@
  * @brief External transactional reaction controller for conservative low-Mach mixture flow.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactionMechanism.hh"
 #include "solvers/LowMachMixtureSolver.hh"

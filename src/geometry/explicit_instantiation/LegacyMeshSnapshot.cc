@@ -1,7 +1,7 @@
 /** @file LegacyMeshSnapshot.cc
  * @brief Default compiled provider for deprecated legacy factory snapshots.
  */
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/details/LegacyMeshSnapshot.hh"

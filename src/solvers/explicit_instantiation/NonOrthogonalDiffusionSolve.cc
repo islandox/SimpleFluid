@@ -2,7 +2,7 @@
  * @file solvers/explicit_instantiation/NonOrthogonalDiffusionSolve.cc
  * @brief Explicit instantiations for solver-owned steady non-orthogonal diffusion solves.
  */
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 

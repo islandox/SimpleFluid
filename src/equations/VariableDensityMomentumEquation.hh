@@ -2,13 +2,13 @@
  * @brief Conservative density-weighted momentum transport with canonical face mass flux.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/TransportSystem.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "fields/MeshFieldTraits.hh"

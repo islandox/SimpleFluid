@@ -2,7 +2,7 @@
  * @brief Native mesh construction and STK/Ioss file input.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "dataclass/Database.hh"

@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/OrthogonalIndexer.hh"
 
 #include <array>

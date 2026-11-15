@@ -2,7 +2,7 @@
  * @brief Explicit compatibility materialization for deprecated legacy mesh factories.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/Mesh.hh"

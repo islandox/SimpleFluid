@@ -10,12 +10,12 @@
  */
 
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "geometry/MeshConcepts.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "FVM/BoundaryCache.hh"
 #include "FVM/FaceFlux.hh"
 #include "dataclass/typedefs.hh"

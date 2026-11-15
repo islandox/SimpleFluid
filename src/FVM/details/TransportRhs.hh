@@ -2,12 +2,12 @@
  * @brief Typed scalar/vector RHS adapters for basic transport assembly.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "FVM/AssemblyCallbacks.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "fields/CellField.hh"
 #include "fields/VectorCellField.hh"
 

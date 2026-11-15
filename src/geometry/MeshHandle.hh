@@ -10,11 +10,11 @@
  */
 
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/MeshBinding.hh"
 #include "geometry/MeshGeometryHandle.hh"

@@ -2,7 +2,7 @@
  * @brief Allocation and error paths for basic transport RHS adapters.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 

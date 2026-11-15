@@ -2,7 +2,7 @@
  * @brief Native conservative multicomponent low-Mach flow with supplied caloric mixture EOS.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/LowMachPressureEquation.hh"
 #include "equations/PressureConditionedThermal.hh"
 #include "equations/ReactingThermodynamics.hh"

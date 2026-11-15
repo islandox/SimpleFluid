@@ -2,7 +2,7 @@
  * @brief Finite material admission for an explicitly prescribed rho_ref*cp*T thermal owner.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/BubblePopulationKinetics.hh"
 
 #include <functional>

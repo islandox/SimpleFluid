@@ -2,7 +2,7 @@
  * @brief Adapters from optional IF97 water to existing material fields.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 

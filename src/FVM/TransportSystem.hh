@@ -9,7 +9,7 @@
  *
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
@@ -23,7 +23,7 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "FVM/details/TransportAssemblyGeometry.hh"
 #include "FVM/details/TransportValidation.hh"
 #include "FVM/details/OperatorDetails.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"

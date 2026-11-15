@@ -2,11 +2,11 @@
  * @brief Reusable, ordered cell and face selections with typed numerical dispatch.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/details/MeshTraverseAccess.hh"
 

@@ -9,14 +9,14 @@
  *
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "geometry/MeshConcepts.hh"
 #include "FVM/NumericAssemblyLease.hh"
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/EquationForward.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/MomentumSolveException.hh"

@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/ALEControlVolumeState.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"

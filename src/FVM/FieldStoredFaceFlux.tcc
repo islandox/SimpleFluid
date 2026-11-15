@@ -1,6 +1,6 @@
 /** @brief Compiled mapped face operators, workspace setup and custom-provider opt-in. */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 

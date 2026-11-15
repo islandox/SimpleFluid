@@ -10,7 +10,7 @@
  *
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
@@ -20,7 +20,7 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "FVM/NonOrthogonalTreatment.hh"
 #include "FVM/details/FieldStoredNonOrthogonalDiffusion.hh"
 #include "FVM/details/OperatorDetails.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "equations/BoundaryConditions.hh"
 
 #include <vector>

@@ -1,7 +1,7 @@
 /** @file MeshTraverse.cc
  * @brief Explicit instantiations of traversal setup for supported mesh families.
  */
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 #include "geometry/MeshTraverse.tcc"

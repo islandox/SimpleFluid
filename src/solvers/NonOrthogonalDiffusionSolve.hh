@@ -13,7 +13,7 @@
  * existing callers; only the binary ownership moved.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
@@ -23,7 +23,7 @@ SIMPLEFLUID_LEGACY_API_BEGIN
 #include "FVM/NonOrthogonalConvergenceOptions.hh"
 #include "FVM/NonOrthogonalCorrection.hh"
 #include "FVM/NonOrthogonalTreatment.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "fields/CellField.hh"
 #include "fields/FieldStored.hh"
 #include "geometry/Mesh.hh"

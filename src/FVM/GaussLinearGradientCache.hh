@@ -3,12 +3,12 @@
  * @brief  Reusable face-ordered Gauss geometry.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 SIMPLEFLUID_LEGACY_API_BEGIN
 
 
 #include "geometry/MeshConcepts.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 
 #include "FVM/details/OperatorDetails.hh"
 #include "geometry/GeometryEpoch.hh"
