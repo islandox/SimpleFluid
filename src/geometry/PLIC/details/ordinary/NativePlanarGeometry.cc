@@ -1057,7 +1057,29 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
             auto support = planar_support<ArithmeticMode::Ordinary>(*face);
             charge(1, sizeof(std::pair<FacePtr, int>) + 4 * sizeof(void*));
             allocations.retain(support, bytes, byte_cap);
-            groups[std::move(support)].emplace_back(std::move(face), sign);
+            auto group = groups.find(support);
+            if (group == groups.end())
+            {
+                // Support identity records construction provenance. Independently
+                // built parent/child faces can prove the same represented plane
+                // with different source recipes. Reuse the exact predicate used
+                // by planar partition/subtraction; no metric tolerance merges
+                // planes, and every represented vertex test consumes the cap.
+                for (auto candidate = groups.begin(); candidate != groups.end(); ++candidate)
+                {
+                    if (face->points().size() > pair_cap - pairs)
+                        reject("native cell partition pair-test cap exhausted.");
+                    pairs += face->points().size();
+                    if (coplanar(candidate->second.front().first->points(), face->points()))
+                    {
+                        group = candidate;
+                        break;
+                    }
+                }
+                if (group == groups.end())
+                    group = groups.try_emplace(std::move(support)).first;
+            }
+            group->second.emplace_back(std::move(face), sign);
         }
     };
     add_cell(parent, -1);

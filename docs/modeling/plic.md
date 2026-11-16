@@ -693,3 +693,12 @@ separate qualification tasks.
 - [VoF verification contracts](../verification/vof_solver_contracts.md) describe
   broader numerical acceptance requirements. Source coverage and successful
   local fits do not substitute for those gates.
+
+
+Cell-partition certification distinguishes source-support identity from physical
+coplanarity. Independently constructed faces can carry different source recipes
+on the same represented plane. Those faces share a proof group only after the
+existing exact coplanarity predicate succeeds; every tested vertex consumes the
+pair-work cap. Exact oriented boundary cancellation and the independent volume
+and local first-moment gates still apply. A gap or overlap below the metric
+allowance remains a rejection.

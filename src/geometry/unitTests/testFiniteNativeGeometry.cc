@@ -739,3 +739,26 @@ TEST(FiniteNativeGeometryTest, PlaneMeasureScratchReusesCapacityAcrossDegreesAnd
 }
 
 } // namespace
+
+
+TEST(FiniteNativeGeometryTest, IndependentPrismSupportsProveOnePhysicalPartitionWithoutMetricMerging)
+{
+    const auto prism = [](double low, double high)
+    {
+        const std::vector<PLIC::GeometryPoint> points{
+            {0, 0, low}, {1, 0, low}, {0, 1, low}, {0, 0, high}, {1, 0, high}, {0, 1, high}};
+        return Cell::make(points, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
+    };
+    const auto parent = prism(0, 1);
+    const std::array valid{prism(0, .5), prism(.5, 1)};
+    EXPECT_DOUBLE_EQ(parent->volume().as_double(), .5);
+    EXPECT_DOUBLE_EQ(valid[0]->volume().as_double(), .25);
+    EXPECT_NO_THROW(parent->certify_partition(valid));
+    const double delta = std::ldexp(1., -48);
+    // Both impostors preserve total volume. The gap/overlap is smaller than the
+    // metric allowance, but the exact oriented boundary proof must reject it.
+    const std::array gap{prism(0, .5 - delta), prism(.5, 1 + delta)};
+    const std::array overlap{prism(0, .5 + delta), prism(.5, 1 - delta)};
+    EXPECT_THROW(parent->certify_partition(gap), std::invalid_argument);
+    EXPECT_THROW(parent->certify_partition(overlap), std::invalid_argument);
+}
