@@ -89,6 +89,11 @@ The default Cartesian hierarchy retains its 64 MiB budget. [Cubic halo measureme
     - `PolyhedralAMR`: Manages planar-faced convex polyhedra via oriented halfspace clipping and canonical subdivision.
     - `MixedAMRGrid`: Facilitates mixed-region assemblies through conservative interfaces and nonconforming join operators.
 
+The opt-in [procedural Cartesian contact path](spatial_adaptive_closure.md#opt-in-procedural-cartesian-contact)
+also pins this exact layout. Its detached contact and subface queries derive
+uniform nonperiodic incidence without a second authoritative geometry catalog.
+Operation-local overlay borrows must be rebound before a reader escapes.
+
 For implementation details on specific algorithms, refer to:
 - **Heap attribution:** [AMR requested-heap attribution](amr_heap_attribution.md) distinguishes allocation domains, admission budgets, and retained generations.
 - **PLIC/Clipping:** [plic.md](../modeling/plic.md)

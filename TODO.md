@@ -44,4 +44,9 @@ Detailed workstream status is tracked in [docs/verification/](docs/verification/
 
 ## Active roadmap
 
+- [ ] Qualify the opt-in uniform, nonperiodic Cartesian contact integration.
+      Detached contact/subface queries and native publication are implemented;
+      full owned scans remain, G1 is open, and focused migration checks do not
+      replace the historical full Debug/CTest or physical/scaling gates.
+
 See the specific project documentation for detailed implementation contracts and validation gates for active workstreams.

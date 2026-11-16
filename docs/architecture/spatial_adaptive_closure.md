@@ -571,3 +571,34 @@ on each inner rank. The two N32 construction paths use the same pair oracle.
 Each unique pair incurs one span comparison and one trace comparison. A repeat
 query on the same halo adds zero pair work, record fetches, decoded replies,
 query bytes, record bytes and pages. Ranks still participate in collective checks.
+
+## Opt-in procedural Cartesian contact
+
+Presence of `SIMPLEFLUID_CARTESIAN_CONTACT` on every rank enables eligibility
+checking; empty and `0` values also count as present. The certified support class
+is a complete, uniformly refined, nonperiodic native Cartesian frame with
+compatible evaluated coordinates and arithmetic controls. Unsupported bootstrap
+uses explicit incidence. An active Cartesian session rejects unsupported
+mixed-level updates transactionally; it does not convert backends mid-trial.
+
+Hierarchy-backed Cartesian state pins the exact `AdaptiveLeafLayout` instead of
+retaining another local key/index/revision catalog. Preparation reads the accepted
+layout and operation-local candidate leaves; those overlay borrows cannot escape
+through readers. Only a hierarchy-issued transition permits sealing another
+selection. Owner replies authenticate remote revisions in the current transaction
+context. Standalone halo callers retain their owning compatibility metadata.
+
+Detached contact snapshots enumerate every shared canonical point, including
+four face, two edge and one corner occurrence. Detached subface snapshots generate
+canonical support, source-surface and native-face provenance, orientation and
+physical loops from the certified frame. Requested views pin their source;
+explicit geometry materialization admits native construction and identity buffers
+before allocation. The procedural snapshot retains no regular incidence rows,
+fans or tile bodies. Existing persistent directories, Product elections and
+geometry-demand ownership retain their authorities.
+
+This integration does not establish bounded incremental work. Capability proof,
+owner resolution and successful updates still perform full owned scans, and an
+ordered complete-piece visit uses admitted operation-local sorting scratch. Keep
+G1 and the full historical Cartesian qualification gates open until their own
+required campaigns pass; focused migration checks do not close those gates.
