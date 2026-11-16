@@ -2,7 +2,7 @@
  * @brief Shared scalar, interface-plane and phase record codec declarations.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/ScalarPacket.hh"

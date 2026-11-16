@@ -2,7 +2,7 @@
  * @brief Private mode-independent projection reductions and occupancy stages.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshHandle.hh"
 #include <Teuchos_Comm.hpp>
 #include <array>

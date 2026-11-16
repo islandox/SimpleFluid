@@ -2,7 +2,7 @@
  * @brief Canonical versioned identity wire import and explicit promotion.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryIdentity.hh"
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include <span>

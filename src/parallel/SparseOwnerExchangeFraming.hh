@@ -2,7 +2,7 @@
  * @brief Private allocation-free owner-stream framing audit and traversal.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include <cstddef>
 #include <cstdint>

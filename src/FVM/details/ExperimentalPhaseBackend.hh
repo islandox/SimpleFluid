@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/ExperimentalPhaseInventory.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <memory>
 #include <span>
 #include <vector>

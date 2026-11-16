@@ -2,7 +2,7 @@
  * @brief Private sink-based emission of finite canonical scalar words.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <cstdint>
 
 namespace SimpleFluid::PLIC::details

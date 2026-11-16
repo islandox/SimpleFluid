@@ -2,7 +2,7 @@
  * @brief Exact, budgeted contact deduplication with ascending pair traversal.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <cstddef>
 #include <cstdint>
 #include <iterator>

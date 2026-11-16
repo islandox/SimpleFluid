@@ -2,7 +2,7 @@
  * @brief Physical-cell volume-fit PLIC reconstruction on certified convex cells.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/CellGeometryView.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryError.hh"

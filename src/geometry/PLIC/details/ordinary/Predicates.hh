@@ -2,7 +2,7 @@
  * @brief Fixed-work compensated predicates on represented Ordinary coordinates.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <array>
 #include <span>
 

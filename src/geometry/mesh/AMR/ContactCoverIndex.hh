@@ -4,7 +4,7 @@
 #pragma once
 #include "ClosedContactIndex.hh"
 #include "ContactPointRef.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <array>
 #include <cstddef>
 #include <memory>

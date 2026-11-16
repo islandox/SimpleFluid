@@ -2,7 +2,7 @@
  * @brief Cumulative exact payload and explicit container capacity accounting.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include <array>
 #include <map>

@@ -2,7 +2,7 @@
  * @brief Mode- and kind-specific opaque geometry identities.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryCodecTags.hh"
 #include "utils/ArithmeticMode.hh"
 #include <algorithm>

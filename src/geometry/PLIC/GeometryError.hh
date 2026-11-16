@@ -2,7 +2,7 @@
  * @brief Typed finite geometry failures; only unresolved arithmetic is a recoverable trial.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <stdexcept>
 #include <string>
 

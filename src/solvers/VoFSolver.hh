@@ -5,7 +5,7 @@
 #pragma once
 
 #include "FVM/GeometricVoF.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "fields/FieldStored.hh"
 
 #include <memory>

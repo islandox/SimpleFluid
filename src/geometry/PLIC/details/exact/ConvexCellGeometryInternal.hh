@@ -7,7 +7,7 @@
 #include "geometry/PLIC/GeometryCodecTags.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "utils/ExactRational.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"

@@ -2,7 +2,7 @@
  * @brief Bounded canonical arithmetic closure of source-free integrated volume.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"

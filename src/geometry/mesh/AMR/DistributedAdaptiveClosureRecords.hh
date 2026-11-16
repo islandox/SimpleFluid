@@ -2,7 +2,7 @@
  * @brief Private immutable closure records and shared grading predicates.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include <array>

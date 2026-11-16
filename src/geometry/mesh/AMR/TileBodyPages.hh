@@ -1,7 +1,7 @@
 #pragma once
 #include "ContactSourcePoints.hh"
 #include "PooledTile.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <cstddef>
 #include <cstdint>
 #include <functional>

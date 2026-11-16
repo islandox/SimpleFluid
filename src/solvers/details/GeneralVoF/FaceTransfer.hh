@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include <span>
 namespace SimpleFluid::detail::general_vof

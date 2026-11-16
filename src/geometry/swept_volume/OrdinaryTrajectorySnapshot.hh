@@ -2,7 +2,7 @@
  * @brief Immutable canonical-node Ordinary trajectories shared by finite recipes.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <map>
 #include <span>

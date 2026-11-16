@@ -2,7 +2,7 @@
  * @brief Private exact-incidence spatial closure session.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/mesh/AMR/ContactHaloContext.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"

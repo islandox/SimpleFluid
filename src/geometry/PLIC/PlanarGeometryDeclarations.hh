@@ -2,7 +2,7 @@
  * @brief Mode-selected planar geometry and opaque topology identities.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshUtils.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/GeometryBackendTypes.hh"

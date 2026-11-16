@@ -2,7 +2,7 @@
  * @brief Collective rational inventory reduction within an explicit packet budget.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include <span>

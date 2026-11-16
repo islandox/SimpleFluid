@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoFSurface.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "utils/ArithmeticMode.hh"

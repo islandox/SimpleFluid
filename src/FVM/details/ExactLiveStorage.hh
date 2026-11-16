@@ -2,7 +2,7 @@
  * @brief Phase-local bounded immutable exact payload leases for geometry work.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>

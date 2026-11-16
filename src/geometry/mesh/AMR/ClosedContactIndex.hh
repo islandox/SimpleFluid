@@ -2,7 +2,7 @@
  * @brief Private owner-local dynamic closed-range broad phase; no MPI state.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include <limits>
 #include <memory>

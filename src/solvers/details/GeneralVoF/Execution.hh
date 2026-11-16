@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/details/VoFFailure.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshHandle.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <exception>

@@ -2,7 +2,7 @@
  * @brief Source-pinned geometry-only capillary patches and filter diagnostics.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/CertifiedGeometryProperties.hh"
 #include <compare>
 #include <cstdint>

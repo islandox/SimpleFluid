@@ -2,7 +2,7 @@
  * @brief Shared complete-support validation and overlay kernel.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include <cstddef>
 #include <cstdint>

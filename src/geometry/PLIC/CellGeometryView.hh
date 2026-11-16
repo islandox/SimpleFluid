@@ -2,7 +2,7 @@
  * @brief Owning immutable indexed geometry views and explicit shell materialization.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"

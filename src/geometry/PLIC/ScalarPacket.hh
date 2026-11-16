@@ -2,7 +2,7 @@
  * @brief Lossless native scalar words shared by geometry and bounded transports.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <array>
 #include <cstdint>
 #include <limits>

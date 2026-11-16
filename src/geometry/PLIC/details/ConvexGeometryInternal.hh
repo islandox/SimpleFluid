@@ -1,5 +1,5 @@
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "utils/BoundedInterval.hh"

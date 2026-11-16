@@ -2,7 +2,7 @@
  * @brief Finite phase publication and outward conversion-bound declarations.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::VoF::detail
 {

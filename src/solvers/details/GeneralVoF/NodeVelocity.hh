@@ -4,7 +4,7 @@
 #pragma once
 #include "FVM/GeneralVoF.hh"
 #include "FVM/GeometricVoF.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <span>
 #include <vector>
 

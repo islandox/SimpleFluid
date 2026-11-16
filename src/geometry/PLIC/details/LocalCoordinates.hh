@@ -2,7 +2,7 @@
  * @brief Backend-neutral synchronous numerical coordinates relative to origin().
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include <memory>
 #include <type_traits>

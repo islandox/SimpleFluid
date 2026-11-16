@@ -2,7 +2,7 @@
  * @brief Bounded exact normalization and original physical residual reductions.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::detail::vof_exact

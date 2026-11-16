@@ -5,7 +5,7 @@
 #if defined(__FAST_MATH__) || (defined(__FINITE_MATH_ONLY__) && __FINITE_MATH_ONLY__ > 0)
 #error "Finite arithmetic requires strict caller floating-point compilation."
 #endif
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "utils/BoundedFloatingPoint.hh"
 #include "utils/CompensatedSum.hh"

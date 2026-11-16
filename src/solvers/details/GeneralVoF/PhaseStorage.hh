@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "solvers/VoFSolver.hh"
 #include <vector>
 

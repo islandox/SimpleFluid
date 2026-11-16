@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoFSurface.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/PLIC/PolyhedralInterface.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <optional>

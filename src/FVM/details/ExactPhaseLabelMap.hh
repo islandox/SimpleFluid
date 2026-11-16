@@ -2,7 +2,7 @@
  * @brief Bounded donor-wide complementary geometric phase label correction.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::VoF::detail
 {

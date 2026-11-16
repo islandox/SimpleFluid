@@ -2,7 +2,7 @@
  * @brief Operation-derived arithmetic intervals for represented projection fluxes.
  */
 #pragma once
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::detail
 {
