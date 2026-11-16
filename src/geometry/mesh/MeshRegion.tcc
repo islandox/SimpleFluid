@@ -55,7 +55,7 @@ EntityRange<uint64_t> NativeRegionProvider<Native>::cell_nodes(size_t c) const
     CHECK_BOUNDS(c, 0, layout().cells);
     size_t count = 8;
     if constexpr (std::same_as<Native, SemiStructuredXY_Z>)
-        count = 2 * d_mesh->xy_cell_nodes().at(d_mesh->cell_id(c).ij).size();
+        count = 2 * d_mesh->xy_cell_nodes()[d_mesh->cell_id(c).ij].size();
     else if constexpr (std::same_as<Native, UnstructuredMesh>) count = d_mesh->cell_nodes(c).size();
     return {this, c, count, [](const void* source, size_t c, size_t i) -> ID
     {
@@ -80,7 +80,7 @@ EntityRange<uint64_t> NativeRegionProvider<Native>::face_nodes(size_t f) const
     if constexpr (std::same_as<Native, SemiStructuredXY_Z>)
     {
         const auto id = d_mesh->face_id(f);
-        if (id.orientation == Native::Z_FACE) count = d_mesh->xy_cell_nodes().at(id.ij).size();
+        if (id.orientation == Native::Z_FACE) count = d_mesh->xy_cell_nodes()[id.ij].size();
     }
     else if constexpr (std::same_as<Native, UnstructuredMesh>) count = d_mesh->face_nodes(f).size();
     return {this, f, count, [](const void* source, size_t f, size_t i) -> ID
@@ -107,7 +107,7 @@ MeshUtils::CellType NativeRegionProvider<Native>::cell_type(size_t c) const
     else if constexpr (std::same_as<Native, UnstructuredMesh>) return d_mesh->cell_type(c);
     else
     {
-        const auto count = d_mesh->xy_cell_nodes().at(d_mesh->cell_id(c).ij).size();
+        const auto count = d_mesh->xy_cell_nodes()[d_mesh->cell_id(c).ij].size();
         if (count == 3) return MeshUtils::CellType::TRIPRISM;
         if (count == 4) return MeshUtils::CellType::HEXAHEDRON;
         return MeshUtils::CellType::POLYHEDRON;
