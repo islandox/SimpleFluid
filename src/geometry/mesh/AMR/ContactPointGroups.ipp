@@ -464,12 +464,12 @@ template<class Visitor>
 void ContactPointGroups<H>::visit_borrowed_payload(Visitor&& visitor, bool include_object) const
 {
     if (include_object)
-        contact_payload_object(visitor, this, ContactPayloadRole::GroupObject, sizeof(*this));
-    contact_payload_buffer(visitor, this, ContactPayloadRole::GroupSlots, groups_);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::GroupFreeSlots, free_);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::GroupBuckets, buckets_);
-    contact_payload_object(visitor, readers_.get(), ContactPayloadRole::ReaderObject, sizeof(Readers), true);
-    fan_owners_.visit_borrowed_payload(visitor, ContactPayloadRole::FanOwnerIndexBuckets);
+        contact_payload_object(visitor, this, ParallelSupportPayloadRole::GroupObject, sizeof(*this));
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::GroupSlots, groups_);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::GroupFreeSlots, free_);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::GroupBuckets, buckets_);
+    contact_payload_object(visitor, readers_.get(), ParallelSupportPayloadRole::ReaderObject, sizeof(Readers), true);
+    fan_owners_.visit_borrowed_payload(visitor, ParallelSupportPayloadRole::FanOwnerIndexBuckets);
     domains_.visit_borrowed_payload(visitor);
     catalog_->visit_borrowed_payload(visitor);
     fan_owners_.visit([&](const void*, const auto& owner) { owner->visit_borrowed_payload(visitor); });

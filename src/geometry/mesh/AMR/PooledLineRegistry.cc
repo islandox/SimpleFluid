@@ -1146,9 +1146,11 @@ void PooledLineRegistry::visit_borrowed_payload(
     Index::visit_pages(lines_,
         [&](const auto& page)
         {
-            contact_payload_object(visitor, page.get(), ContactPayloadRole::LineRegistryNodes, sizeof(*page), true);
-            contact_payload_buffer(visitor, page.get(), ContactPayloadRole::LineHistoryRows, page->rows);
-            contact_payload_buffer(visitor, page.get(), ContactPayloadRole::LineHistoryChildren, page->children);
+            contact_payload_object(
+                visitor, page.get(), GeometryContactPayloadRole::LineRegistryNodes, sizeof(*page), true);
+            contact_payload_buffer(visitor, page.get(), GeometryContactPayloadRole::LineHistoryRows, page->rows);
+            contact_payload_buffer(
+                visitor, page.get(), GeometryContactPayloadRole::LineHistoryChildren, page->children);
         });
     Index::visit_from(
         lines_, [](const auto&) { return false; },
@@ -1157,26 +1159,28 @@ void PooledLineRegistry::visit_borrowed_payload(
             if (!row.bucket)
                 return true;
             const auto& bucket = *row.bucket;
-            contact_payload_object(visitor, &bucket, ContactPayloadRole::LineBucketObject, sizeof(bucket), true);
-            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineSubscriberValues, bucket.subscribers);
-            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LineRunValues, bucket.runs);
-            contact_payload_buffer(visitor, &bucket, ContactPayloadRole::LinePatternValues, bucket.patterns);
+            contact_payload_object(
+                visitor, &bucket, GeometryContactPayloadRole::LineBucketObject, sizeof(bucket), true);
+            contact_payload_buffer(
+                visitor, &bucket, GeometryContactPayloadRole::LineSubscriberValues, bucket.subscribers);
+            contact_payload_buffer(visitor, &bucket, GeometryContactPayloadRole::LineRunValues, bucket.runs);
+            contact_payload_buffer(visitor, &bucket, GeometryContactPayloadRole::LinePatternValues, bucket.patterns);
             for (const auto& subscriber : bucket.subscribers)
                 if (subscriber.spill)
                 {
-                    contact_payload_object(
-                        visitor, subscriber.spill.get(), ContactPayloadRole::LineSpillObject, sizeof(SubscriberSpill));
-                    contact_payload_buffer(visitor, subscriber.spill.get(), ContactPayloadRole::LineResultValues,
-                        subscriber.spill->result);
+                    contact_payload_object(visitor, subscriber.spill.get(), GeometryContactPayloadRole::LineSpillObject,
+                        sizeof(SubscriberSpill));
+                    contact_payload_buffer(visitor, subscriber.spill.get(),
+                        GeometryContactPayloadRole::LineResultValues, subscriber.spill->result);
                 }
             if (bucket.source_ranges)
                 bucket.source_ranges->visit_borrowed_payload(visitor);
             return true;
         });
     for (const auto& entry : dirty_)
-        contact_payload_node_value(visitor, this, ContactPayloadRole::LineRegistryDirtyNodes, entry);
+        contact_payload_node_value(visitor, this, GeometryContactPayloadRole::LineRegistryDirtyNodes, entry);
     for (const auto& entry : touched_)
-        contact_payload_node_value(visitor, this, ContactPayloadRole::LineRegistryTouchedNodes, entry);
+        contact_payload_node_value(visitor, this, GeometryContactPayloadRole::LineRegistryTouchedNodes, entry);
 }
 bool PooledLineRegistry::imports_source_owner(const void* identity) const noexcept
 {

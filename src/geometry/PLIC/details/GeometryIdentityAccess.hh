@@ -42,6 +42,8 @@ public:
     {
         return identity.storage_;
     }
+    /** Finite/canonical-zero admission into an inline ordinary identity. This
+     * boundary allocates no storage and supplies no native-source certificate. */
     [[nodiscard]] static PointIdentity<ArithmeticMode::Ordinary> point(OrdinaryIdentityPoint coordinates)
     {
         return PointIdentity<ArithmeticMode::Ordinary>(normalize_identity_point(std::move(coordinates)));

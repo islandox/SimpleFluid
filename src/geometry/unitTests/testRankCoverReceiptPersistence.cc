@@ -102,7 +102,7 @@ std::map<const void*, std::size_t> page_edges(const Snapshot& snapshot)
     snapshot->visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& row)
         {
-            if (row.identity.role == D::ContactPayloadRole::RankCoverPage)
+            if (row.identity.role == D::GeometryContactPayloadRole::RankCoverPage)
             {
                 auto& edges = result[row.owner];
                 if (row.kind == D::ContactPayloadKind::Buffer)

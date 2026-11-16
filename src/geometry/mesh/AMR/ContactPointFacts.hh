@@ -135,14 +135,14 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::FactDirectoryObject, sizeof(*this));
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FactPages, pages_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FactEntries, entries_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FactFreeEntries, free_entries_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FactFreePages, free_pages_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FactBuckets, buckets_);
+            contact_payload_object(visitor, this, BasicContactPayloadRole::FactDirectoryObject, sizeof(*this));
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::FactPages, pages_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::FactEntries, entries_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::FactFreeEntries, free_entries_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::FactFreePages, free_pages_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::FactBuckets, buckets_);
         for (const auto& value : page_index_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::FactPageIndexValues, value);
+            contact_payload_node_value(visitor, this, BasicContactPayloadRole::FactPageIndexValues, value);
         for (const auto& page : pages_)
             if (page.view)
                 page.view->visit_borrowed_payload(visitor);
@@ -150,11 +150,11 @@ public:
                 page.source_view->visit_borrowed_payload(visitor);
             else if (page.fallback)
             {
-                contact_payload_object(visitor, page.fallback.get(), ContactPayloadRole::FallbackCreditObject,
+                contact_payload_object(visitor, page.fallback.get(), BasicContactPayloadRole::FallbackCreditObject,
                     sizeof(FallbackCredit), true);
-                contact_payload_object(visitor, page.fallback->body.get(), ContactPayloadRole::FallbackBodyObject,
+                contact_payload_object(visitor, page.fallback->body.get(), BasicContactPayloadRole::FallbackBodyObject,
                     sizeof(FallbackBody), true);
-                contact_payload_buffer(visitor, page.fallback->body.get(), ContactPayloadRole::FallbackValues,
+                contact_payload_buffer(visitor, page.fallback->body.get(), BasicContactPayloadRole::FallbackValues,
                     page.fallback->body->values);
             }
     }

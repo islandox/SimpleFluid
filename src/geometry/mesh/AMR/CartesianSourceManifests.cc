@@ -1,5 +1,6 @@
 #include "CartesianSourceManifests.hh"
 #include "BudgetedOwnerExchange.hh"
+#include "CartesianSupportKey.hh"
 #include "OwnedSupportMembership.hh"
 #include "SupportRegistry.hh"
 #include <algorithm>
@@ -628,16 +629,14 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                 {
                     const auto support = reader.bytes_view();
                     const auto encoded_size = host_size(reader.word());
-                    Reader key{support};
-                    if (!encoded_size || key.word() != 0x5346434152543631ULL)
+                    const auto typed = decode_cartesian_support_key(support);
+                    if (!encoded_size || !typed || typed->domain.empty() ||
+                        (ordinal && !std::ranges::equal(domain, typed->domain)) || typed->region != grid.region_id)
                         throw std::invalid_argument("Invalid explicit Cartesian support header.");
-                    const auto member_domain = key.bytes_view();
-                    if (member_domain.empty() || (ordinal && !std::ranges::equal(domain, member_domain)) ||
-                        key.word() != grid.region_id)
-                        throw std::invalid_argument("Foreign explicit support domain or region.");
+                    const auto member_domain = typed->domain;
                     domain = member_domain;
-                    const auto axis = key.word(), level = key.word(), plane = key.word();
-                    if (axis >= 3 || level > ancestry->level)
+                    const auto axis = typed->axis, level = typed->level, plane = typed->plane;
+                    if (level > ancestry->level)
                         throw std::invalid_argument("Invalid explicit support axis/level.");
                     bool valid_plane = false;
                     for (unsigned side = 0; side != 2; ++side)
@@ -656,9 +655,9 @@ void CartesianSourceManifestSet::decode_wire(const AMRGrid& grid, ContactHaloCon
                     if (!valid_plane)
                         throw std::invalid_argument("Explicit support plane differs from its full cell key.");
                     for (unsigned a = 0; a != 3; ++a)
-                        if (a != axis && key.word() != (ancestry->index[a] >> (ancestry->level - unsigned(level))))
+                        if (a != axis &&
+                            typed->transverse[a] != (ancestry->index[a] >> (ancestry->level - unsigned(level))))
                             throw std::invalid_argument("Explicit support transverse identity differs.");
-                    key.done();
                     for (const auto& previous : std::span(previous_keys).first(ordinal))
                         if (std::ranges::equal(previous, support))
                             throw std::invalid_argument("Duplicate explicit face ordinal/key.");

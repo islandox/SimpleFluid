@@ -156,19 +156,20 @@ public:
     }
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::RankCoverSnapshot, sizeof(*this), true);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::RankCoverSnapshot, sizeof(*this), true);
         Tree::visit_pages(root_,
             [&](const auto& node)
             {
-                contact_payload_object(visitor, node.get(), ContactPayloadRole::RankCoverPage, sizeof(*node), true);
-                contact_payload_buffer(visitor, node.get(), ContactPayloadRole::RankCoverPage, node->rows);
-                contact_payload_buffer(visitor, node.get(), ContactPayloadRole::RankCoverPage, node->children);
+                contact_payload_object(
+                    visitor, node.get(), GeometryContactPayloadRole::RankCoverPage, sizeof(*node), true);
+                contact_payload_buffer(visitor, node.get(), GeometryContactPayloadRole::RankCoverPage, node->rows);
+                contact_payload_buffer(visitor, node.get(), GeometryContactPayloadRole::RankCoverPage, node->children);
                 for (const auto& row : node->rows)
                 {
                     contact_payload_object(
-                        visitor, row.domain.get(), ContactPayloadRole::RankCoverDomain, sizeof(Domain), true);
+                        visitor, row.domain.get(), GeometryContactPayloadRole::RankCoverDomain, sizeof(Domain), true);
                     contact_payload_buffer(
-                        visitor, row.domain.get(), ContactPayloadRole::RankCoverDomain, row.domain->bytes);
+                        visitor, row.domain.get(), GeometryContactPayloadRole::RankCoverDomain, row.domain->bytes);
                 }
             });
     }

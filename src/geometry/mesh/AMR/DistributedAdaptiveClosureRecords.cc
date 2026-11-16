@@ -437,16 +437,51 @@ bool span_exceeds_ratio(long double first, long double second, double ratio)
 {
     return first > ratio * second;
 }
-void join_closure_requirement(const ContactBody& contact, std::optional<AdaptiveSplit>& required, std::uint64_t split)
+ContactClosureView closure_view(const ContactBody& contact, int owner)
 {
-    if (split > 2 ||
-        std::all_of(contact.factors.begin(), contact.factors.end(), [](auto factor) { return factor == 3; }))
+    return {owner, std::span<const long double>(contact.spans), std::span<const std::uint64_t>(contact.factors),
+        contact.trace_faces(), contact.traces_point_independent};
+}
+void join_closure_requirement(
+    std::span<const std::uint64_t> factors, std::optional<AdaptiveSplit>& required, std::uint64_t split)
+{
+    if (split > 2 || std::all_of(factors.begin(), factors.end(), [](auto factor) { return factor == 3; }))
         throw std::invalid_argument("Closed-contact closure needs an unsupported static refinement.");
     auto kind = AdaptiveSplit(split);
     if (!required)
         required = kind;
     else if (*required != kind)
         required = AdaptiveSplit::Isotropic;
+}
+void join_closure_requirement(const ContactBody& contact, std::optional<AdaptiveSplit>& required, std::uint64_t split)
+{
+    join_closure_requirement(std::span<const std::uint64_t>(contact.factors), required, split);
+}
+void grade_contact_spans(const ContactClosureView& first, const ContactClosureView& second, double maximum_span_ratio,
+    int local_rank, ClosureRequirements& required)
+{
+    for (std::size_t axis = 0; axis != 3; ++axis)
+    {
+        if (first.owner == local_rank && span_exceeds_ratio(first.spans[axis], second.spans[axis], maximum_span_ratio))
+            join_closure_requirement(first.factors, required.first, first.factors[axis]);
+        if (second.owner == local_rank && span_exceeds_ratio(second.spans[axis], first.spans[axis], maximum_span_ratio))
+            join_closure_requirement(second.factors, required.second, second.factors[axis]);
+    }
+}
+void grade_contact_trace_point(const ContactClosureView& first, const ContactClosureView& second,
+    unsigned maximum_trace_jump, int local_rank, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& first_physical,
+    const PLIC::PointIdentity<ArithmeticMode::Ordinary>& second_physical, ClosureRequirements& required)
+{
+    for (const auto& first_face : first.trace_faces)
+        for (const auto& second_face : second.trace_faces)
+        {
+            const auto request =
+                trace_pair_requirements(first_face, second_face, first_physical, second_physical, maximum_trace_jump);
+            if (first.owner == local_rank && request.first)
+                join_closure_requirement(first.factors, required.first, std::uint64_t(*request.first));
+            if (second.owner == local_rank && request.second)
+                join_closure_requirement(second.factors, required.second, std::uint64_t(*request.second));
+        }
 }
 ClosureRequirements trace_pair_requirements(const AdaptiveTraceFace& first, const AdaptiveTraceFace& second,
     const PLIC::PointIdentity<ArithmeticMode::Ordinary>& first_point,

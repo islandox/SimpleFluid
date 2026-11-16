@@ -78,10 +78,11 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = true) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::BindingCatalogObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::BindingEntries, bindings_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::BindingFreeSlots, free_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::BindingBuckets, buckets_);
+            contact_payload_object(
+                visitor, this, ParallelSupportPayloadRole::BindingCatalogObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::BindingEntries, bindings_);
+        contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::BindingFreeSlots, free_);
+        contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::BindingBuckets, buckets_);
         points.visit_borrowed_payload(visitor);
     }
 
@@ -140,13 +141,13 @@ public:
     [[nodiscard]] static bool needs_wide(std::uint64_t value) noexcept;
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::FanBlockObject, sizeof(*this), true);
+        contact_payload_object(visitor, this, ParallelSupportPayloadRole::FanBlockObject, sizeof(*this), true);
         std::visit(
             [&](const auto& arrays)
             {
-                contact_payload_buffer(visitor, this, ContactPayloadRole::FanLocal, arrays.local);
-                contact_payload_buffer(visitor, this, ContactPayloadRole::FanRemote, arrays.remote);
-                contact_payload_buffer(visitor, this, ContactPayloadRole::FanSlices, arrays.slices);
+                contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::FanLocal, arrays.local);
+                contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::FanRemote, arrays.remote);
+                contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::FanSlices, arrays.slices);
             },
             data_);
     }
@@ -194,8 +195,8 @@ public:
     [[nodiscard]] std::size_t shared_body_bytes() const noexcept { return block_ ? block_->storage_bytes() : 0; }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::FanOwnerObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::FanViews, views_);
+        contact_payload_object(visitor, this, ParallelSupportPayloadRole::FanOwnerObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::FanViews, views_);
         if (block_)
             block_->visit_borrowed_payload(visitor);
     }

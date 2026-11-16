@@ -59,6 +59,8 @@ struct Budget
     std::size_t limit, used = 0, peak = 0, cumulative = 0;
     geometry_detail::NativeCounterAllocationEnvelope native_allocation;
     std::size_t publication_mirror_live = 0;
+    /** Exact shared arena object/control allocation; zero for stack budgets. */
+    std::size_t owner_bytes = 0;
     void add(std::size_t bytes)
     {
         if (bytes > limit - used)
@@ -86,7 +88,17 @@ struct Budget
             throw std::invalid_argument("Distributed adaptive vector capacity budget exhausted.");
         const auto next = previous ? 2 * previous : 1;
         add(next * sizeof(T));
-        values.reserve(next);
+        try
+        {
+            values.reserve(next);
+        }
+        catch (...)
+        {
+            // reserve preserves the old allocation on failure. Its original
+            // credit remains live; only the failed replacement is refunded.
+            used -= next * sizeof(T);
+            throw;
+        }
         if (values.capacity() != next)
             throw std::invalid_argument("Distributed adaptive vector capacity differs from admission.");
         used -= previous * sizeof(T);
@@ -190,8 +202,7 @@ struct BatchHeader
     uint8_t version;
     std::uint64_t dictionary_count;
 };
-static_assert(std::is_standard_layout_v<GeometryRecordHeader> &&
-              std::is_trivially_copyable_v<GeometryRecordHeader>);
+static_assert(std::is_standard_layout_v<GeometryRecordHeader> && std::is_trivially_copyable_v<GeometryRecordHeader>);
 static_assert(std::is_standard_layout_v<BatchHeader> && std::is_trivially_copyable_v<BatchHeader>);
 inline constexpr uint8_t geometry_record_version = 4;
 inline constexpr uint8_t batch_version = 8;

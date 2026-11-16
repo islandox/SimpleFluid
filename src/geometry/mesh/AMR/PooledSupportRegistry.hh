@@ -70,7 +70,7 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::SupportRegistryObject, sizeof(*this));
+            contact_payload_object(visitor, this, ParallelSupportPayloadRole::SupportRegistryObject, sizeof(*this));
         const auto visit_group = [&](const Group& group)
         {
             const auto& spill = group.members.spill();
@@ -78,23 +78,24 @@ public:
             {
                 const void* owner = group.spill_owner ? static_cast<const void*>(group.spill_owner) : spill.get();
                 const auto object_bytes = group.spill_owner ? sizeof(OwnedSpill) : sizeof(Members::Spill);
-                contact_payload_object(visitor, owner, ContactPayloadRole::SupportMembershipSpill, object_bytes, true);
-                contact_payload_buffer(visitor, owner, ContactPayloadRole::SupportMembershipValues, *spill);
+                contact_payload_object(
+                    visitor, owner, ParallelSupportPayloadRole::SupportMembershipSpill, object_bytes, true);
+                contact_payload_buffer(visitor, owner, ParallelSupportPayloadRole::SupportMembershipValues, *spill);
             }
         };
         if (persistent_)
         {
             contact_payload_object(
-                visitor, persistent_.get(), ContactPayloadRole::SupportRegistryObject, sizeof(Persistent));
+                visitor, persistent_.get(), ParallelSupportPayloadRole::SupportRegistryObject, sizeof(Persistent));
             Index::visit_pages(persistent_->root,
                 [&](const Root& node)
                 {
-                    contact_payload_object(visitor, node.get(), ContactPayloadRole::SupportRegistryGroupNodes,
+                    contact_payload_object(visitor, node.get(), ParallelSupportPayloadRole::SupportRegistryGroupNodes,
                         sizeof(typename Index::Node), true);
                     contact_payload_buffer(
-                        visitor, node.get(), ContactPayloadRole::SupportRegistryGroupNodes, node->rows);
+                        visitor, node.get(), ParallelSupportPayloadRole::SupportRegistryGroupNodes, node->rows);
                     contact_payload_buffer(
-                        visitor, node.get(), ContactPayloadRole::SupportRegistryGroupNodes, node->children);
+                        visitor, node.get(), ParallelSupportPayloadRole::SupportRegistryGroupNodes, node->children);
                     for (const auto& row : node->rows)
                         visit_group(row.group);
                 });
@@ -102,11 +103,11 @@ public:
         else
             for (const auto& value : groups_)
             {
-                contact_payload_node_value(visitor, this, ContactPayloadRole::SupportRegistryGroupNodes, value);
+                contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::SupportRegistryGroupNodes, value);
                 visit_group(value.second);
             }
         for (const auto& value : dirty_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::SupportRegistryDirtyNodes, value);
+            contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::SupportRegistryDirtyNodes, value);
         deferred_.visit_borrowed_payload(visitor);
     }
 

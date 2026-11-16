@@ -1,239 +1,48 @@
 #pragma once
+#include "BasicContactPayloadRole.hh"
+#include "GeometryContactPayloadRole.hh"
+#include "ParallelSupportPayloadRole.hh"
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
-enum class ContactPayloadRole : std::uint8_t
+/** Census categories have independent ordinals. ContactPayloadRole retains
+ * the category alongside that ordinal, so heterogeneous visitor identities and
+ * ordered containers cannot alias two roles whose underlying value is zero.
+ * This local diagnostic tag is not a wire identifier or a geometry identity. */
+enum class ContactPayloadCategory : std::uint8_t
 {
-    GroupObject,
-    GroupSlots,
-    GroupFreeSlots,
-    GroupBuckets,
-    ReaderObject,
-    HaloGroupEditPositions,
-    HaloFanEdits,
-    HaloRemovedBindings,
-    HaloAppendedLocal,
-    HaloAppendedRemote,
-    PointArrayObject,
-    PointArrayPhysical,
-    PointArrayNormalized,
-    PointArrayPhysicalRefs,
-    PointArrayNormalizedRefs,
-    IdentityPoolObject,
-    IdentityBySlot,
-    IdentityPageEntries,
-    IdentityHashBuckets,
-    IdentityOrderedValues,
-    IdentityPageOwnerBuckets,
-    IdentityPageCreditObject,
-    IdentityPageObject,
-    IdentityPageValues,
-    IdentityDynamicBytes,
-    IdentityCellPath,
-    PageViewObject,
-    PageViewDirectory,
-    PageViewCaptureValues,
-    FactDirectoryObject,
-    FactPages,
-    FactEntries,
-    FactFreeEntries,
-    FactFreePages,
-    FactBuckets,
-    FactPageIndexValues,
-    FallbackCreditObject,
-    FallbackBodyObject,
-    FallbackValues,
-    BindingCatalogObject,
-    BindingEntries,
-    BindingFreeSlots,
-    BindingBuckets,
-    FanOwnerObject,
-    FanViews,
-    FanBlockObject,
-    FanLocal,
-    FanRemote,
-    FanSlices,
-    FanOwnerIndexBuckets,
-    PhysicalOwnerIndexObject,
-    PhysicalOwnerBuckets,
-    SourcePointSnapshotObject,
-    SourcePointComponents,
-    SourcePointSelectors,
-    SourcePointLookup,
-    SourcePointExceptions,
-    SourcePointLeases,
-    SourcePointViewObject,
-    SourcePointDirectoryObject,
-    SourcePointScalarIndex,
-    SourcePointIdentityIndex,
-    CartesianSourceObject,
-    CartesianSourceDomain,
-    CartesianSourceIdentity,
-    CartesianSourceRanges,
-    CartesianSourceAxes,
-    CartesianSourceAxisValues,
-    CartesianSourceRevisions,
-    CartesianSourceKernel,
-    CartesianInventoryObject,
-    CartesianInventoryBatches,
-    CartesianInventoryRanges,
-    CartesianInventoryIdentity,
-    CartesianInventoryLeases,
-    CartesianInventoryDependencyNode,
-    CartesianInventoryDependencyRows,
-    CartesianInventoryDependencyChildren,
-    CartesianManifestObject,
-    CartesianManifestSources,
-    CartesianManifestIdentity,
-    CartesianManifestRanges,
-    CartesianManifestLeases,
-    CartesianArenaObject,
-    CartesianArenaEntries,
-    CartesianArenaRetirementHints,
-    CartesianOwnerCreditObject,
-    CartesianLineCatalogObject,
-    CartesianLineCatalogImpl,
-    CartesianLineCatalogMaps,
-    CartesianLineAxisEntries,
-    CartesianLineCatalogLeases,
-    CartesianLineRecipeObject,
-    CartesianLineRecipeImpl,
-    CartesianLineBytes,
-    CartesianLineFamilies,
-    CartesianLinePrototype,
-    CartesianLineMask,
-    CartesianLineRanges,
-    CartesianLineResultObject,
-    CartesianLineResultPoints,
-    CartesianControlCreditObject,
-    SourcePointValueBlockObject,
-    IncidenceSessionObject,
-    IncidenceSessionImpl,
-    OwnedMembershipController,
-    OwnedMembershipNodes,
-    OwnedMembershipCell,
-    OwnedMembershipMembers,
-    OwnedMembershipReverseNodes,
-    OwnedMembershipSpill,
-    OwnedMembershipValues,
-    OwnedMembershipRetiredNodes,
-    OwnedMembershipLeases,
-    LineRegistryObject,
-    LineRegistryNodes,
-    LineHistoryRows,
-    LineHistoryChildren,
-    LineRegistryDirtyNodes,
-    LineRegistryTouchedNodes,
-    LineBucketObject,
-    LineSubscriberValues,
-    LineRunValues,
-    LinePatternValues,
-    LineSpillObject,
-    LineResultValues,
-    LineSourceOwners,
-    LineSourceLeases,
-    TilePageDirectory,
-    TilePageCreditObject,
-    TilePageObject,
-    TilePageRecords,
-    TilePageRings,
-    TileSourceCreditObject,
-    TileSourceContextIndexNodes,
-    TileSourceLeaseValues,
-    SupportRegistryObject,
-    SupportRegistryGroupNodes,
-    SupportRegistryDirtyNodes,
-    SupportMembershipSpill,
-    SupportMembershipValues,
-    CellPointsObject,
-    CellPointCounts,
-    CellPointsBefore,
-    OwnerRowsObject,
-    OwnerRowsCellNodes,
-    OwnerRowsDirtyNodes,
-    TileIndexObject,
-    TileIndexPageDirectory,
-    TileIndexCompactDescriptors,
-    TileIndexWideDescriptors,
-    TileIndexPageObject,
-    DeferredOwnerChargesObject,
-    DeferredOwnerChargeNodes,
-    CertifiedIncidenceLoopObject,
-    CertifiedIncidenceLoopParts,
-    CertifiedIncidenceLoopLeases,
-    IncidenceAuthorityCountNodes,
-    IncidenceResidentGenerationNodes,
-    IncidenceLayerHistoryObject,
-    IncidenceLayerHistoryEntries,
-    IncidenceLayerObject,
-    IncidenceLayerInput,
-    IncidenceLayerOutput,
-    IncidenceLayerEdges,
-    IncidenceLayerEdgeResults,
-    ContactIncidenceRowObject,
-    ContactIncidenceRowDomain,
-    ContactSnapshotObject,
-    ContactSnapshotStorage,
-    ContactSlotBranch,
-    ContactSlotLeaf,
-    ContactRowGroupObject,
-    ContactRowGroupSlots,
-    ContactOwnedIdentityObject,
-    ContactOwnedIdentityDomain,
-    ContactOwnerUsageNode,
-    ContactBodyObject,
-    ContactTraceFaceSlots,
-    ContactTraceStem,
-    ContactTraceInventoryObject,
-    CartesianExplicitCellHeaders,
-    CartesianExplicitMemberHeaders,
-    CartesianExplicitSupportKeys,
-    IncidenceLayerEndpointFacts,
-    IncidenceLayerLeases,
-    IncidenceSessionLayerSourceLeases,
-    CertifiedIncidenceResultPartsObject,
-    PooledLineCompletionProofObject,
-    PooledLineCompletionKeys,
-    PooledLineCompletionResults,
-    CertifiedIncidenceResultValueObject,
-    CertifiedIncidenceResultValueMask,
-    PooledLineCompletionObject,
-    IncidenceLayerCompletions,
-    CartesianLinePrototypeEntries,
-    SubfaceSnapshotObject,
-    SubfaceIndexRootObject,
-    SubfaceIndexPageObject,
-    SubfaceIndexChildren,
-    SubfacePieceOwnerIndexRows,
-    SubfaceProvenanceOwnerIndexRows,
-    SubfacePieces,
-    SubfaceSelectors,
-    SubfacePiecePageObject,
-    SubfacePieceRecords,
-    SubfacePointRanges,
-    SubfaceProvenancePageObject,
-    SubfaceProvenanceRecords,
-    SubfaceMembers,
-    SubfaceGroups,
-    SubfaceForeignKeys,
-    SubfaceBoundaryNames,
-    SubfaceBoundaryBytes,
-    SubfaceAuthorityKeyBytes,
-    SubfaceShifts,
-    SubfaceRingObject,
-    SubfaceRingSlots,
-    IdentityPersistentRoot,
-    IdentityPersistentIndex,
-    RankCoverSnapshot,
-    RankCoverPage,
-    RankCoverDomain,
-    HaloControllerObject,
-    HaloBudgetObject,
-    HaloExternalLeaseCounter,
-    Count
+    Basic,
+    ParallelSupport,
+    Geometry
+};
+class ContactPayloadRole
+{
+public:
+    constexpr ContactPayloadRole() noexcept = default;
+    constexpr ContactPayloadRole(BasicContactPayloadRole role) noexcept
+        : category_(ContactPayloadCategory::Basic), ordinal_(static_cast<std::uint8_t>(role))
+    {
+    }
+    constexpr ContactPayloadRole(ParallelSupportPayloadRole role) noexcept
+        : category_(ContactPayloadCategory::ParallelSupport), ordinal_(static_cast<std::uint8_t>(role))
+    {
+    }
+    constexpr ContactPayloadRole(GeometryContactPayloadRole role) noexcept
+        : category_(ContactPayloadCategory::Geometry), ordinal_(static_cast<std::uint8_t>(role))
+    {
+    }
+    [[nodiscard]] constexpr ContactPayloadCategory category() const noexcept { return category_; }
+    [[nodiscard]] constexpr std::uint8_t ordinal() const noexcept { return ordinal_; }
+    auto operator<=>(const ContactPayloadRole&) const = default;
+    bool operator==(const ContactPayloadRole&) const = default;
+
+private:
+    ContactPayloadCategory category_ = ContactPayloadCategory::Basic;
+    std::uint8_t ordinal_ = 0;
 };
 enum class ContactPayloadKind : std::uint8_t
 {
@@ -269,18 +78,16 @@ void contact_payload_object(
     visitor(ContactPayloadAllocation{
         {object, role}, object, ContactPayloadKind::Object, bytes, bytes, 1, 1, bytes, true, shared_control, false});
 }
-template<class Visitor, class T, class Allocator>
-void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role,
-    const std::vector<T, Allocator>& values,
+template<class Visitor, class T>
+void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role, const std::vector<T>& values,
     std::size_t live, bool opaque_element_payload = false)
 {
     if (values.capacity())
         visitor(ContactPayloadAllocation{{values.data(), role}, owner, ContactPayloadKind::Buffer, 0, sizeof(T), live,
             values.capacity(), sizeof(T) * values.capacity(), true, false, false, opaque_element_payload});
 }
-template<class Visitor, class T, class Allocator>
-void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role,
-    const std::vector<T, Allocator>& values)
+template<class Visitor, class T>
+void contact_payload_buffer(Visitor& visitor, const void* owner, ContactPayloadRole role, const std::vector<T>& values)
 {
     contact_payload_buffer(visitor, owner, role, values, values.size());
 }

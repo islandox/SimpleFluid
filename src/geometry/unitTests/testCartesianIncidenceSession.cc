@@ -350,10 +350,10 @@ void expect_source_path(const D::DistributedAdaptiveContactHalo& halo, std::size
     halo.for_each_borrowed_contact_payload(
         [&](const D::ContactPayloadAllocation& allocation)
         {
-            if (allocation.identity.role == D::ContactPayloadRole::IncidenceLayerInput ||
-                allocation.identity.role == D::ContactPayloadRole::IncidenceLayerOutput ||
-                allocation.identity.role == D::ContactPayloadRole::IncidenceLayerEdgeResults ||
-                allocation.identity.role == D::ContactPayloadRole::PooledLineCompletionResults)
+            if (allocation.identity.role == D::GeometryContactPayloadRole::IncidenceLayerInput ||
+                allocation.identity.role == D::GeometryContactPayloadRole::IncidenceLayerOutput ||
+                allocation.identity.role == D::GeometryContactPayloadRole::IncidenceLayerEdgeResults ||
+                allocation.identity.role == D::ParallelSupportPayloadRole::PooledLineCompletionResults)
             {
                 EXPECT_EQ(allocation.payload_bytes, allocation.element_size * allocation.capacity);
                 explicit_layer_payload += allocation.payload_bytes;
@@ -653,7 +653,7 @@ TEST(CartesianIncidenceSession, EditingParentAfterForkKeepsChildLayerOwnersAndCa
     const auto second_payload = payload_inventory(*second);
     std::uint64_t new_layers = 0;
     for (const auto& [key, value] : second_payload)
-        if (key.second == D::ContactPayloadRole::IncidenceLayerObject && !first_payload.contains(key))
+        if (key.second == D::GeometryContactPayloadRole::IncidenceLayerObject && !first_payload.contains(key))
             ++new_layers;
     std::uint64_t global_new_layers = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &new_layers, &global_new_layers);
@@ -667,7 +667,7 @@ TEST(CartesianIncidenceSession, EditingParentAfterForkKeepsChildLayerOwnersAndCa
     const auto child_cumulative = third->allocation().cumulative;
     std::uint64_t shared_new_layers = 0;
     for (const auto& [key, value] : second_payload)
-        if (key.second == D::ContactPayloadRole::IncidenceLayerObject && !first_payload.contains(key))
+        if (key.second == D::GeometryContactPayloadRole::IncidenceLayerObject && !first_payload.contains(key))
             if (const auto found = child_payload.find(key); found != child_payload.end())
             {
                 EXPECT_EQ(found->second, value);

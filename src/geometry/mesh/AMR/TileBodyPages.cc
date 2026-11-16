@@ -1037,8 +1037,8 @@ void visit_tile_source(const std::shared_ptr<TileSourceCredit>& source,
     if (!source)
         return;
     contact_payload_object(
-        visitor, source.get(), ContactPayloadRole::TileSourceCreditObject, sizeof(TileSourceCredit), true);
-    contact_payload_buffer(visitor, source.get(), ContactPayloadRole::TileSourceLeaseValues, source->leases);
+        visitor, source.get(), GeometryContactPayloadRole::TileSourceCreditObject, sizeof(TileSourceCredit), true);
+    contact_payload_buffer(visitor, source.get(), GeometryContactPayloadRole::TileSourceLeaseValues, source->leases);
     for (const auto& lease : source->leases)
         lease->visit_borrowed_payload(visitor);
     if (source->source)
@@ -1050,14 +1050,14 @@ void visit_tile_credit(const std::shared_ptr<TileBodyPageCredit>& credit,
     if (!credit)
         return;
     contact_payload_object(
-        visitor, credit.get(), ContactPayloadRole::TilePageCreditObject, sizeof(TileBodyPageCredit), true);
+        visitor, credit.get(), GeometryContactPayloadRole::TilePageCreditObject, sizeof(TileBodyPageCredit), true);
     const auto& page = *credit->page;
-    contact_payload_object(visitor, &page, ContactPayloadRole::TilePageObject, sizeof(BodyPage), true);
+    contact_payload_object(visitor, &page, GeometryContactPayloadRole::TilePageObject, sizeof(BodyPage), true);
     std::visit(
         [&](const auto& data)
         {
-            contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRecords, data.records);
-            contact_payload_buffer(visitor, &page, ContactPayloadRole::TilePageRings, data.rings);
+            contact_payload_buffer(visitor, &page, GeometryContactPayloadRole::TilePageRecords, data.records);
+            contact_payload_buffer(visitor, &page, GeometryContactPayloadRole::TilePageRings, data.rings);
         },
         page.data);
     if (page.source)
@@ -1107,11 +1107,11 @@ void TileBodyHandle::visit_borrowed_payload(const std::function<void(const Conta
 }
 void TileBodyPages::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_buffer(visitor, this, ContactPayloadRole::TilePageDirectory, pages_);
+    contact_payload_buffer(visitor, this, GeometryContactPayloadRole::TilePageDirectory, pages_);
     for (const auto& entry : deferred_)
-        contact_payload_node_value(visitor, this, ContactPayloadRole::DeferredOwnerChargeNodes, entry);
+        contact_payload_node_value(visitor, this, BasicContactPayloadRole::DeferredOwnerChargeNodes, entry);
     for (const auto& context : source_contexts_)
-        contact_payload_node_value(visitor, this, ContactPayloadRole::TileSourceContextIndexNodes, context);
+        contact_payload_node_value(visitor, this, GeometryContactPayloadRole::TileSourceContextIndexNodes, context);
     visit_tile_source(source_credit_, visitor);
     for (const auto& credit : pages_)
         visit_tile_credit(credit, visitor);

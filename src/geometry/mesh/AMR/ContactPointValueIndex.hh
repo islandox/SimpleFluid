@@ -241,12 +241,12 @@ public:
             descend(descend, root);
         };
         for (const auto& root : scalars32_)
-            visit(root, ContactPayloadRole::SourcePointScalarIndex);
+            visit(root, GeometryContactPayloadRole::SourcePointScalarIndex);
         for (const auto& root : scalars64_)
-            visit(root, ContactPayloadRole::SourcePointScalarIndex);
-        visit(points32_, ContactPayloadRole::SourcePointIdentityIndex);
-        visit(points64_, ContactPayloadRole::SourcePointIdentityIndex);
-        visit(custom_, ContactPayloadRole::SourcePointIdentityIndex);
+            visit(root, GeometryContactPayloadRole::SourcePointScalarIndex);
+        visit(points32_, GeometryContactPayloadRole::SourcePointIdentityIndex);
+        visit(points64_, GeometryContactPayloadRole::SourcePointIdentityIndex);
+        visit(custom_, GeometryContactPayloadRole::SourcePointIdentityIndex);
     }
 
 private:

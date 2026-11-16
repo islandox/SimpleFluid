@@ -56,7 +56,7 @@ TEST(PersistentSlotValues, TwoSizesShareUnchangedPagesAndKeepRetiredOverlapUntil
                 if (allocation.kind == D::ContactPayloadKind::Object)
                     old_pages.insert(allocation.identity.address);
             },
-            D::ContactPayloadRole::IncidenceAuthorityCountNodes);
+            D::ParallelSupportPayloadRole::IncidenceAuthorityCountNodes);
         Values candidate(source, candidate_memory);
         EXPECT_EQ(candidate_memory->used, source.metadata_bytes());
         EXPECT_EQ(candidate.last_edit_work().copied_pages, 0u);
@@ -72,7 +72,7 @@ TEST(PersistentSlotValues, TwoSizesShareUnchangedPagesAndKeepRetiredOverlapUntil
                 if (allocation.kind == D::ContactPayloadKind::Object)
                     shared += old_pages.contains(allocation.identity.address);
             },
-            D::ContactPayloadRole::IncidenceAuthorityCountNodes);
+            D::ParallelSupportPayloadRole::IncidenceAuthorityCountNodes);
         EXPECT_GE(shared, old_pages.size() - candidate.last_edit_work().copied_pages);
         const auto overlap = candidate.overlap_bytes(), before = candidate_memory->used;
         candidate.finish_overlap();

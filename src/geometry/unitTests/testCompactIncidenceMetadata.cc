@@ -685,7 +685,7 @@ TEST(CompactIncidenceMetadata, PersistentSupportGroupsShareCleanSpillsAcrossSpar
             registry.visit_borrowed_payload(
                 [&](const D::ContactPayloadAllocation& item)
                 {
-                    if (item.identity.role == D::ContactPayloadRole::SupportRegistryGroupNodes &&
+                    if (item.identity.role == D::ParallelSupportPayloadRole::SupportRegistryGroupNodes &&
                         item.kind == D::ContactPayloadKind::Object)
                         result.push_back(item.identity.address);
                 });
@@ -802,9 +802,9 @@ TEST(CompactIncidenceMetadata, SupportSpillCensusReportsTheOwningObjectAndItsBuf
         registry.visit_borrowed_payload(
             [&](const D::ContactPayloadAllocation& item)
             {
-                if (item.identity.role == D::ContactPayloadRole::SupportMembershipSpill)
+                if (item.identity.role == D::ParallelSupportPayloadRole::SupportMembershipSpill)
                     object = item;
-                if (item.identity.role == D::ContactPayloadRole::SupportMembershipValues)
+                if (item.identity.role == D::ParallelSupportPayloadRole::SupportMembershipValues)
                     buffer = item;
             });
         ASSERT_TRUE(object);

@@ -216,7 +216,7 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
             latest->visit_borrowed_payload(
                 [&](const ContactPayloadAllocation& item)
                 {
-                    if (item.identity.role == ContactPayloadRole::SourcePointSelectors &&
+                    if (item.identity.role == GeometryContactPayloadRole::SourcePointSelectors &&
                         seen.insert(item.identity.address).second)
                         actual_selector_records += item.live_count;
                 });
@@ -225,9 +225,9 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
             latest->visit_borrowed_payload(
                 [&](const ContactPayloadAllocation& item)
                 {
-                    old_lookup_buffers += item.identity.role == ContactPayloadRole::SourcePointLookup;
-                    scalar_indexes += item.identity.role == ContactPayloadRole::SourcePointScalarIndex;
-                    point_indexes += item.identity.role == ContactPayloadRole::SourcePointIdentityIndex;
+                    old_lookup_buffers += item.identity.role == GeometryContactPayloadRole::SourcePointLookup;
+                    scalar_indexes += item.identity.role == GeometryContactPayloadRole::SourcePointScalarIndex;
+                    point_indexes += item.identity.role == GeometryContactPayloadRole::SourcePointIdentityIndex;
                 });
             EXPECT_EQ(old_lookup_buffers, 0u);
             EXPECT_GT(scalar_indexes, 0u);
@@ -260,7 +260,7 @@ TEST(CartesianPointSourceUpdates, SparseRefinementsShareFlatValueBlocksWithoutHi
     const auto collect = [&](const ContactPayloadAllocation& item)
     {
         if (seen_payload.emplace(item.identity.address, item.identity.role).second &&
-            item.identity.role == ContactPayloadRole::SourcePointSelectors)
+            item.identity.role == GeometryContactPayloadRole::SourcePointSelectors)
             selector_records += item.live_count;
     };
     latest->visit_borrowed_payload(collect);
@@ -333,10 +333,10 @@ TEST(CartesianPointSourceUpdates, LargerAcceptedPrefixDoesNotCopyOrReindexPointV
                 [&](const ContactPayloadAllocation& item)
                 {
                     const auto role = item.identity.role;
-                    if (role == ContactPayloadRole::SourcePointComponents ||
-                        role == ContactPayloadRole::SourcePointSelectors ||
-                        role == ContactPayloadRole::SourcePointLookup ||
-                        role == ContactPayloadRole::SourcePointExceptions)
+                    if (role == GeometryContactPayloadRole::SourcePointComponents ||
+                        role == GeometryContactPayloadRole::SourcePointSelectors ||
+                        role == GeometryContactPayloadRole::SourcePointLookup ||
+                        role == GeometryContactPayloadRole::SourcePointExceptions)
                         result.emplace(BufferKey{role, item.identity.address}, item.payload_bytes);
                 });
             return result;

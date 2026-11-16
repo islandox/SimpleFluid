@@ -695,7 +695,7 @@ TEST(AdaptiveSubfaceSnapshot, SmallEditsCopyOnlyAffectedPagesForEveryProvider)
             for (const auto& [key, bytes] : next_index)
                 if (!old_index.contains(key))
                 {
-                    work[scale].retained_pages += key.second == ContactPayloadRole::SubfaceIndexPageObject;
+                    work[scale].retained_pages += key.second == GeometryContactPayloadRole::SubfaceIndexPageObject;
                     work[scale].retained_bytes += bytes;
                 }
             const auto changes = current->index_work();
@@ -705,7 +705,7 @@ TEST(AdaptiveSubfaceSnapshot, SmallEditsCopyOnlyAffectedPagesForEveryProvider)
             EXPECT_GT(changes.copied_pages, 0u);
             EXPECT_LT(work[scale].retained_pages,
                 std::count_if(next_index.begin(), next_index.end(), [](const auto& value)
-                    { return value.first.second == ContactPayloadRole::SubfaceIndexPageObject; }));
+                    { return value.first.second == GeometryContactPayloadRole::SubfaceIndexPageObject; }));
 
             auto third_arena = std::make_shared<Budget>(Budget{ample});
             IdentityBudget third_ids;

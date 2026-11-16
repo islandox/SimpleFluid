@@ -61,6 +61,16 @@ struct CartesianEvaluationEnvironment
     auto operator<=>(const CartesianEvaluationEnvironment&) const = default;
 };
 [[nodiscard]] CartesianEvaluationEnvironment cartesian_evaluation_environment();
+/** Replay the same native coordinate under the captured source controls and
+ * restore the caller controls. No allocation; needed by immutable pinned rows
+ * that may be consumed after the caller changes its floating environment. */
+[[nodiscard]] double cartesian_frozen_coordinate(
+    const AMRGrid&, std::size_t axis, std::uint64_t index, unsigned level, const std::fenv_t&);
+/** Strict arithmetic subset for the logical-contact proof. This does not by
+ * itself authenticate native recipes or establish complete membership. */
+[[nodiscard]] bool cartesian_contact_arithmetic_environment_supported() noexcept;
+[[nodiscard]] bool cartesian_contact_arithmetic_eligible(const AMRGrid&, unsigned level);
+[[nodiscard]] bool cartesian_grid_identity_equal(const AMRGrid&, const AMRGrid&) noexcept;
 /** Half-open active Cartesian ancestry box. Ranges never imply physical incidence. */
 struct CartesianIncidenceRange
 {
@@ -130,6 +140,9 @@ class CartesianIncidenceSource
 {
 public:
     [[nodiscard]] static bool eligible(const AdaptiveLeaf&) noexcept;
+    /** The same native ordinal, topology and evaluated-axis authentication used
+     * by make(), without retaining a source or materializing geometry. */
+    [[nodiscard]] static bool authenticates_native_leaf(const AMRGrid&, const AdaptiveLeaf&);
     /** Every supplied leaf must belong to this owner/domain and pass the existing
      * Cartesian kernel authentication. Unsupported supplied geometry stays explicit. */
     [[nodiscard]] static std::shared_ptr<const CartesianIncidenceSource> make(const AMRGrid&,
@@ -151,6 +164,7 @@ public:
     [[nodiscard]] const ContactHaloContext& context() const noexcept { return context_; }
     [[nodiscard]] int owner() const noexcept { return owner_; }
     [[nodiscard]] std::uint64_t region() const noexcept { return grid_.region_id; }
+    [[nodiscard]] const AMRGrid& grid() const noexcept { return grid_; }
     [[nodiscard]] CartesianEvaluationEnvironment evaluation_environment() const noexcept { return evaluation_; }
     [[nodiscard]] std::uint64_t version() const noexcept { return version_; }
     [[nodiscard]] std::size_t metadata_bytes() const noexcept { return charge_; }
@@ -161,19 +175,19 @@ public:
     /** Pure borrowed storage walk: never evaluate or synthesize incidence. */
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::CartesianSourceObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceDomain, domain_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceIdentity, identity_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceRanges, ranges_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceAxes, axes_);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::CartesianSourceObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceDomain, domain_);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceIdentity, identity_);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceRanges, ranges_);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceAxes, axes_);
         for (const auto& axis : axes_)
-            contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceAxisValues, axis.values);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianSourceRevisions, revisions_);
+            contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceAxisValues, axis.values);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianSourceRevisions, revisions_);
         // This private owner is always issued by the exact Cartesian factory.
         // Its owning translation unit supplies the concrete sizeof, without
         // RTTI, geometry evaluation or guessing from the public AMRGrid layout.
         if (kernel_)
-            contact_payload_object(visitor, kernel_.get(), ContactPayloadRole::CartesianSourceKernel,
+            contact_payload_object(visitor, kernel_.get(), GeometryContactPayloadRole::CartesianSourceKernel,
                 native_cartesian_kernel_payload_bytes(), true);
     }
     [[nodiscard]] bool contains(const CartesianCellAncestry&) const noexcept;
@@ -186,6 +200,17 @@ public:
      * This makes no inverse-normalization or physical-neighbor claim. */
     void visit_surfaces(Budget&, const CartesianSurfaceEmit&, std::span<const char> support = {},
         std::optional<std::size_t> range = {}, CartesianSourceVisitStatistics* = nullptr) const;
+    /** Derive exactly the members of one certified support key from the lattice.
+     *
+     * This is the complete association recipe: a uniform support plane may
+     * contain many tangential cells. Enumerate every candidate in its source
+     * ranges and compare the entire key against the actual generated faces.
+     * Returns false for an unrecognized or foreign key, or when no generated
+     * face matches it. Matching faces across the source's levels and periodic
+     * images are included by the same complete traversal and exact key filter.
+     * Callers must keep the explicit record when this returns false. */
+    [[nodiscard]] bool visit_support_members(std::span<const char> support_key, Budget&, const CartesianSurfaceEmit&,
+        CartesianSourceVisitStatistics* = nullptr) const;
     /** Generate one cell's actual faces, preserving constructors and native face ordinals. */
     void visit_cell(const CartesianCellAncestry&, Budget&, const CartesianSurfaceEmit&) const;
 

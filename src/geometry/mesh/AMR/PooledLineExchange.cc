@@ -444,8 +444,7 @@ void write_cached_point(Writer& writer, const IncidencePools::Point& point)
 {
     append_framed_contact_point_identity(writer, point);
 }
-void write_cached_request(
-    Writer& writer, const PooledLineCompletionRequest& request, const IncidencePools& pools)
+void write_cached_request(Writer& writer, const PooledLineCompletionRequest& request, const IncidencePools& pools)
 {
     writer.bytes(pools.lines.get(request.line));
     subscriber(writer, request.original, pools, false);
@@ -695,11 +694,12 @@ std::pair<const void*, std::size_t> PooledLineCompletion::Proof::borrowed_contro
 void PooledLineCompletion::Proof::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::PooledLineCompletionProofObject, sizeof(*this), true);
     contact_payload_object(
-        visitor, control_, ContactPayloadRole::CartesianControlCreditObject, sizeof(ReceiptControl), true);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::PooledLineCompletionKeys, line_);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::PooledLineCompletionKeys, support_);
+        visitor, this, ParallelSupportPayloadRole::PooledLineCompletionProofObject, sizeof(*this), true);
+    contact_payload_object(
+        visitor, control_, GeometryContactPayloadRole::CartesianControlCreditObject, sizeof(ReceiptControl), true);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::PooledLineCompletionKeys, line_);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::PooledLineCompletionKeys, support_);
 }
 PooledLineCompletion::PooledLineCompletion(std::shared_ptr<const Proof> proof, std::vector<std::size_t>&& result,
     Budget& budget, std::shared_ptr<Budget> keeper)
@@ -814,13 +814,14 @@ void PooledLineCompletion::visit_borrowed_payload(
 {
     if (wrapper_control_)
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::PooledLineCompletionObject, sizeof(*this), true);
         contact_payload_object(
-            visitor, wrapper_control_, ContactPayloadRole::CartesianControlCreditObject, sizeof(ReceiptControl), true);
+            visitor, this, ParallelSupportPayloadRole::PooledLineCompletionObject, sizeof(*this), true);
+        contact_payload_object(visitor, wrapper_control_, GeometryContactPayloadRole::CartesianControlCreditObject,
+            sizeof(ReceiptControl), true);
     }
     if (proof_)
         proof_->visit_borrowed_payload(visitor);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::PooledLineCompletionResults, result_);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::PooledLineCompletionResults, result_);
 }
 PooledLineBorrowedCompletion::PooledLineBorrowedCompletion(std::size_t line, const PooledLineSubscriber& original,
     std::span<const std::size_t> result, ContactHaloContext context, unsigned layer, const IncidencePools& pools)
@@ -836,7 +837,10 @@ ContactSourcePoint PooledLineBorrowedCompletion::endpoint(unsigned i) const
         throw std::out_of_range("Invalid borrowed line endpoint ordinal.");
     return pools_.points.get(i ? original_.last : original_.first);
 }
-const void* PooledLineBorrowedCompletion::point_pool_identity() const noexcept { return &pools_.points; }
+const void* PooledLineBorrowedCompletion::point_pool_identity() const noexcept
+{
+    return &pools_.points;
+}
 void exchange_pooled_line_edits(PooledLineRegistry& registry, IncidencePools& pools, const NextPooledLineEdit& next,
     unsigned layer, ContactHaloContext context, Teuchos::RCP<const Teuchos::Comm<int>> comm, Budget& budget,
     std::size_t page_bytes, const PooledLineReply& publish, const PooledLineBeforeSend& before_send,
@@ -1575,8 +1579,8 @@ void fetch_pooled_line_completions(PooledLineRegistry& registry, IncidencePools&
                                 writer.word(found->offset);
                                 writer.word(count);
                                 for (std::size_t p = 0; p < count; ++p)
-                                    write_cached_point(writer,
-                                        pools.points.get(found->cached.result.result_at(found->offset + p)));
+                                    write_cached_point(
+                                        writer, pools.points.get(found->cached.result.result_at(found->offset + p)));
                             });
                         if (count)
                         {

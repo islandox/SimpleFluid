@@ -4,11 +4,13 @@
 #include "geometry/mesh/AMR/CartesianIncidenceSource.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
 #include "geometry/mesh/AMR/CartesianIncidenceBudget.hh"
+#include "geometry/mesh/AMR/CartesianSupportKey.hh"
 #include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
 #include "geometry/mesh/AMR/SupportSurfaceCodec.hh"
 #include "geometry/mesh/OrthogonalIndexer.hh"
 #include <algorithm>
 #include <bit>
+#include <cfloat>
 #include <charconv>
 #include <cmath>
 #include <cstring>
@@ -72,29 +74,18 @@ struct SupportLocator
 };
 std::optional<SupportLocator> support_locator(std::span<const char> key)
 {
-    // Reader is bounded and borrows the framed domain. Invalid or future key
-    // grammars deliberately retain the complete range scan.
-    if (key.size() < 64)
-        return {};
-    Reader reader{key};
-    if (reader.word() != 0x5346434152543631ULL)
-        return {};
-    const auto domain_size = reader.word();
-    if (domain_size != key.size() - 64)
+    // The typed decoder is the single grammar owner; it rejects truncated,
+    // inconsistent, out-of-range and future frames before any field is used.
+    const auto typed = decode_cartesian_support_key(key);
+    if (!typed)
         return {};
     SupportLocator result;
-    result.domain = key.subspan(reader.offset, domain_size);
-    reader.offset += domain_size;
-    result.region = reader.word();
-    result.axis = reader.word();
-    result.level = reader.word();
-    result.plane = reader.word();
-    if (result.axis >= 3 || result.level >= 63)
-        return {};
-    for (unsigned a = 0; a < 3; ++a)
-        if (a != result.axis)
-            result.transverse[a] = reader.word();
-    reader.done();
+    result.domain = typed->domain;
+    result.region = typed->region;
+    result.axis = typed->axis;
+    result.level = typed->level;
+    result.plane = typed->plane;
+    result.transverse = typed->transverse;
     return result;
 }
 void write_context(Writer& w, const ContactHaloContext& c)
@@ -166,9 +157,7 @@ struct NativeCompare
 };
 double source_coordinate(const AMRGrid& grid, std::size_t axis, ID index, unsigned level)
 {
-    const auto finest = product(index, scale(grid.max_level - level));
-    const auto total = product(product(grid.root_blocks[axis], grid.block_cells[axis]), scale(grid.max_level));
-    return grid.origin[axis] + grid.extent[axis] * (double(finest) / double(total));
+    return native_cartesian_coordinate(grid, axis, index, level);
 }
 void validate_native_source(const AMRGrid& grid, const AdaptiveLeaf& leaf)
 {
@@ -349,11 +338,130 @@ CartesianEvaluationEnvironment cartesian_evaluation_environment()
 #endif
     return result;
 }
+double cartesian_frozen_coordinate(
+    const AMRGrid& grid, std::size_t axis, std::uint64_t index, unsigned level, const std::fenv_t& environment)
+{
+    // Preserve exception flags as well as controls, including when controls
+    // already match: an inexact native division must not dirty its caller.
+    FrozenEnvironment frozen(environment);
+    return native_cartesian_coordinate(grid, axis, index, level);
+}
+bool cartesian_contact_arithmetic_environment_supported() noexcept
+{
+    // Fast/reassociated arithmetic and excess binary64 evaluation are outside
+    // this certificate. Coordinate contraction need not be assumed absent:
+    // source, kernel and contact use one out-of-line native evaluation boundary.
+#if defined(__FAST_MATH__) || FLT_EVAL_METHOD != 0
+    return false;
+#else
+    if (!std::numeric_limits<double>::is_iec559 || std::numeric_limits<double>::radix != 2 ||
+        std::numeric_limits<double>::digits != 53 || std::numeric_limits<long double>::radix != 2 ||
+        std::numeric_limits<long double>::digits < 64 || std::numeric_limits<long double>::max_exponent < 1024 ||
+        std::numeric_limits<long double>::min_exponent > -1021)
+        return false;
+    try
+    {
+        const auto environment = cartesian_evaluation_environment();
+        // The current proof recognizes x86 extended arithmetic only. Require
+        // nearest rounding, masked exceptions, 64-bit x87 precision, and no
+        // SSE flush-to-zero/denormals-are-zero controls.
+        return environment.platform == 1 && environment.rounding == FE_TONEAREST &&
+               (environment.primary & 0x0f3fU) == 0x033fU && environment.secondary == 0x1f80U;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+#endif
+}
+bool cartesian_grid_identity_equal(const AMRGrid& a, const AMRGrid& b) noexcept
+{
+    if (a.root_blocks != b.root_blocks || a.block_cells != b.block_cells || a.periodic != b.periodic ||
+        a.max_level != b.max_level || a.region_id != b.region_id || a.material_id != b.material_id)
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (std::bit_cast<ID>(a.origin[axis]) != std::bit_cast<ID>(b.origin[axis]) ||
+            std::bit_cast<ID>(a.extent[axis]) != std::bit_cast<ID>(b.extent[axis]))
+            return false;
+    return true;
+}
+bool cartesian_contact_arithmetic_eligible(const AMRGrid& grid, unsigned level)
+{
+    if (!cartesian_contact_arithmetic_environment_supported() || level > grid.max_level || grid.max_level >= 63)
+        return false;
+    constexpr ID exact_integer_limit = ID(1) << 52;
+    const auto finest_scale = ID(1) << grid.max_level;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        if (grid.periodic[axis] || !grid.root_blocks[axis] || grid.block_cells[axis] < 2 ||
+            grid.block_cells[axis] % 2 || grid.block_cells[axis] >= std::numeric_limits<unsigned>::max() ||
+            !std::isfinite(grid.origin[axis]) || !std::isfinite(grid.extent[axis]) || !(grid.extent[axis] > 0) ||
+            grid.root_blocks[axis] > exact_integer_limit / grid.block_cells[axis])
+            return false;
+        const auto base = ID(grid.root_blocks[axis]) * ID(grid.block_cells[axis]);
+        if (base > exact_integer_limit / finest_scale)
+            return false;
+        const auto count = base << level;
+        // Certification is an evaluated-axis proof, not an unbounded scan of
+        // a compact logical description. Bound its work before entering it;
+        // larger grids retain the explicit path without attempting the proof.
+        if (count > (ID(1) << 20))
+            return false;
+        auto previous = native_cartesian_coordinate(grid, axis, 0, level);
+        if (!std::isfinite(previous) || std::abs(previous) > 0x1p100)
+            return false;
+        for (ID index = 1; index <= count; ++index)
+        {
+            const auto current = native_cartesian_coordinate(grid, axis, index, level);
+            if (!std::isfinite(current) || std::abs(current) > 0x1p100 || !(current > previous))
+                return false;
+            if (previous != 0 && current != 0)
+            {
+                int before = 0, after = 0;
+                (void) std::frexp(previous, &before);
+                (void) std::frexp(current, &after);
+                // Two 53-bit binary64 operands spanning at most ten binary
+                // exponents have a difference representable in 64 bits,
+                // including a possible carry when the signs differ.
+                if (std::abs(before - after) > 10)
+                    return false;
+            }
+            const auto width = static_cast<long double>(current) - static_cast<long double>(previous);
+            // These deliberately conservative bounds keep all origin/frame
+            // translations, binary scalings, face and volume products normal.
+            if (!std::isfinite(width) || width < 0x1p-100L || width > 0x1p100L)
+                return false;
+            previous = current;
+        }
+    }
+    return true;
+}
 bool CartesianIncidenceSource::eligible(const AdaptiveLeaf& leaf) noexcept
 {
     return leaf.provider == AdaptiveProviderKind::Cartesian && !leaf.geometry && leaf.surfaces.empty() &&
            leaf.native_recipe && !leaf.factor_recipe && !leaf.join_recipe &&
            std::holds_alternative<CartesianCellAncestry>(leaf.key.ancestry);
+}
+bool CartesianIncidenceSource::authenticates_native_leaf(const AMRGrid& grid, const AdaptiveLeaf& leaf)
+{
+    if (!eligible(leaf) || grid.max_level >= 63)
+        return false;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (!grid.root_blocks[axis] || !grid.block_cells[axis])
+            return false;
+    try
+    {
+        validate_native_source(grid, leaf);
+        return true;
+    }
+    catch (const std::invalid_argument&)
+    {
+        return false;
+    }
+    catch (const std::overflow_error&)
+    {
+        return false;
+    }
 }
 std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::make(const AMRGrid& grid,
     std::span<const AdaptiveLeaf> leaves, const AdaptiveBytes& domain, int owner, std::uint64_t version,
@@ -484,14 +592,9 @@ std::shared_ptr<const CartesianIncidenceSource> CartesianIncidenceSource::make(c
         auto& axis = result->axes_.back();
         const auto count = add(std::size_t(interval.last - interval.first), 1);
         retained.reserve(axis.values, count);
-        const auto finest_scale = scale(grid.max_level - interval.level);
-        const auto total =
-            product(product(grid.root_blocks[interval.axis], grid.block_cells[interval.axis]), scale(grid.max_level));
         for (ID index = interval.first;; ++index)
         {
-            const auto finest = product(index, finest_scale);
-            axis.values.push_back(
-                grid.origin[interval.axis] + grid.extent[interval.axis] * (double(finest) / double(total)));
+            axis.values.push_back(source_coordinate(grid, interval.axis, index, interval.level));
             if (index == interval.last)
                 break;
         }
@@ -812,6 +915,25 @@ void CartesianIncidenceSource::visit_surfaces(Budget& budget, const CartesianSur
                         });
                 }
     }
+}
+bool CartesianIncidenceSource::visit_support_members(std::span<const char> support_key, Budget& budget,
+    const CartesianSurfaceEmit& emit, CartesianSourceVisitStatistics* statistics) const
+{
+    if (support_key.empty())
+        throw std::invalid_argument("Empty Cartesian support membership query.");
+    const auto locator = support_locator(support_key);
+    if (!locator || locator->region != grid_.region_id || !std::ranges::equal(locator->domain, domain_))
+        return false;
+    std::size_t emitted = 0;
+    visit_surfaces(
+        budget,
+        [&](const CartesianIncidenceSurface& surface)
+        {
+            ++emitted;
+            emit(surface);
+        },
+        support_key, {}, statistics);
+    return emitted != 0;
 }
 void visit_cartesian_source_edges(
     const CartesianIncidenceSource& source, Budget& budget, const CartesianEdgeEmit& emit, std::span<const char> line)

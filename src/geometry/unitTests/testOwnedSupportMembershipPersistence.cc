@@ -69,7 +69,7 @@ std::map<Identity, std::size_t> payload(const D::OwnedSupportMembership& members
     membership.visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& allocation)
         {
-            if (allocation.identity.role == D::ContactPayloadRole::OwnedMembershipController)
+            if (allocation.identity.role == D::GeometryContactPayloadRole::OwnedMembershipController)
                 return;
             result.emplace(
                 Identity{reinterpret_cast<std::uintptr_t>(allocation.identity.address), allocation.identity.role},

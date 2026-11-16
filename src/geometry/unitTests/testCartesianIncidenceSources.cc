@@ -6,6 +6,7 @@
 #include <array>
 #include <gtest/gtest.h>
 #include <map>
+#include <set>
 #include <stdexcept>
 namespace
 {
@@ -162,5 +163,36 @@ TEST(CartesianIncidenceSources, ThrowingCallbacksAndFailedReevaluationLeaveImmut
         EXPECT_NE(other->identity(), identity);
     }
     EXPECT_EQ(budget.used, 0);
+}
+TEST(CartesianIncidenceSources, DerivedSupportMembershipMatchesCompleteEnumeration)
+{
+    auto value = grid();
+    auto native = leaves(value);
+    const auto kernel = cartesian_adaptive_kernel(value);
+    std::map<AdaptiveBytes, std::set<Member>> expected;
+    for (auto leaf : native)
+    {
+        leaf.surfaces = kernel->surfaces(leaf);
+        for (std::size_t face = 0; face != leaf.surfaces.size(); ++face)
+            expected[leaf.surfaces[face].key].insert(Member{leaf.key, face});
+    }
+    ASSERT_EQ(expected.size(), 36);
+    auto budget = std::make_shared<Budget>(Budget{ample});
+    {
+        const auto source = CartesianIncidenceSource::make(value, native, {'d'}, 0, 1, {}, *budget, budget);
+        for (const auto& [key, members] : expected)
+        {
+            std::set<Member> derived;
+            const bool complete =
+                source->visit_support_members(key, *budget, [&](const CartesianIncidenceSurface& surface)
+                    { derived.insert(Member{surface.cell, surface.ordinal}); });
+            ASSERT_TRUE(complete) << "each uniform nonperiodic support must derive";
+            EXPECT_EQ(derived, members);
+        }
+        auto foreign = AdaptiveBytes{'x'};
+        EXPECT_FALSE(source->visit_support_members(
+            foreign, *budget, [&](const CartesianIncidenceSurface&) { FAIL() << "foreign key must emit nothing"; }));
+    }
+    EXPECT_EQ(budget->used, 0);
 }
 } // namespace

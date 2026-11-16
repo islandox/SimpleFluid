@@ -1004,34 +1004,34 @@ void OwnedSupportMembership::visit_payload(
 {
     const auto visit_cell = [&](const Cell& cell)
     {
-        contact_payload_object(visitor, &cell, ContactPayloadRole::OwnedMembershipCell, sizeof(Cell), true);
-        contact_payload_buffer(visitor, &cell, ContactPayloadRole::OwnedMembershipMembers, cell.members);
+        contact_payload_object(visitor, &cell, ParallelSupportPayloadRole::OwnedMembershipCell, sizeof(Cell), true);
+        contact_payload_buffer(visitor, &cell, ParallelSupportPayloadRole::OwnedMembershipMembers, cell.members);
     };
     const auto visit_reverse = [&](const SupportCells& cells)
     {
         if (const auto& spill = cells.spill())
         {
-            contact_payload_object(
-                visitor, spill.get(), ContactPayloadRole::OwnedMembershipSpill, sizeof(SupportCells::Spill), true);
-            contact_payload_buffer(visitor, spill.get(), ContactPayloadRole::OwnedMembershipValues, *spill);
+            contact_payload_object(visitor, spill.get(), ParallelSupportPayloadRole::OwnedMembershipSpill,
+                sizeof(SupportCells::Spill), true);
+            contact_payload_buffer(visitor, spill.get(), ParallelSupportPayloadRole::OwnedMembershipValues, *spill);
         }
     };
     if (persistent_)
     {
         contact_payload_object(
-            visitor, persistent_.get(), ContactPayloadRole::OwnedMembershipController, sizeof(Persistent));
+            visitor, persistent_.get(), GeometryContactPayloadRole::OwnedMembershipController, sizeof(Persistent));
         const auto page = [&](const auto& node, ContactPayloadRole role)
         {
             contact_payload_object(visitor, node.get(), role, sizeof(*node), true);
             contact_payload_buffer(visitor, node.get(), role, node->rows);
             contact_payload_buffer(visitor, node.get(), role, node->children);
         };
-        Persistent::Tree<Persistent::CellRow>::visit_pages(
-            persistent_->cells, [&](const auto& node) { page(node, ContactPayloadRole::OwnedMembershipNodes); });
+        Persistent::Tree<Persistent::CellRow>::visit_pages(persistent_->cells,
+            [&](const auto& node) { page(node, ParallelSupportPayloadRole::OwnedMembershipNodes); });
         Persistent::Tree<Persistent::ReverseRow>::visit_pages(persistent_->reverse,
-            [&](const auto& node) { page(node, ContactPayloadRole::OwnedMembershipReverseNodes); });
+            [&](const auto& node) { page(node, ParallelSupportPayloadRole::OwnedMembershipReverseNodes); });
         Persistent::Tree<Persistent::RetiredRow>::visit_pages(persistent_->retired,
-            [&](const auto& node) { page(node, ContactPayloadRole::OwnedMembershipRetiredNodes); });
+            [&](const auto& node) { page(node, ParallelSupportPayloadRole::OwnedMembershipRetiredNodes); });
         visit_explicit_cells([&](Slot, const Cell& cell) { visit_cell(cell); });
         Persistent::visit<Persistent::ReverseRow>(
             persistent_->reverse, [&](const auto& row) { visit_reverse(row.cells); });
@@ -1040,20 +1040,20 @@ void OwnedSupportMembership::visit_payload(
     {
         for (const auto& entry : cells_)
         {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipNodes, entry);
+            contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::OwnedMembershipNodes, entry);
             visit_cell(*entry.second);
         }
         for (const auto& entry : reverse_)
         {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipReverseNodes, entry);
+            contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::OwnedMembershipReverseNodes, entry);
             visit_reverse(entry.second);
         }
         for (const auto& entry : retired_source_cells_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipRetiredNodes, entry);
+            contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::OwnedMembershipRetiredNodes, entry);
     }
     for (const auto& entry : changed_explicit_cells_)
-        contact_payload_node_value(visitor, this, ContactPayloadRole::OwnedMembershipRetiredNodes, entry);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::OwnedMembershipLeases, source_leases_);
+        contact_payload_node_value(visitor, this, ParallelSupportPayloadRole::OwnedMembershipRetiredNodes, entry);
+    contact_payload_buffer(visitor, this, ParallelSupportPayloadRole::OwnedMembershipLeases, source_leases_);
     for (const auto& lease : source_leases_)
         lease->visit_borrowed_payload(visitor);
     if (inventory_)

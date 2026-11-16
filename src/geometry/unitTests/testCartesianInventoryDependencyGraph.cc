@@ -129,7 +129,7 @@ std::map<const void*, std::size_t> pages(const Inventory& inventory)
     inventory.visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& allocation)
         {
-            if (allocation.identity.role == D::ContactPayloadRole::CartesianInventoryDependencyNode)
+            if (allocation.identity.role == D::GeometryContactPayloadRole::CartesianInventoryDependencyNode)
                 result.emplace(allocation.identity.address, allocation.payload_bytes);
         });
     return result;

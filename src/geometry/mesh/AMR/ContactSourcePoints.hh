@@ -147,11 +147,12 @@ public:
     [[nodiscard]] const void* admission_identity() const noexcept { return &charge_; }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::SourcePointSnapshotObject, sizeof(*this), true);
+        contact_payload_object(
+            visitor, this, GeometryContactPayloadRole::SourcePointSnapshotObject, sizeof(*this), true);
         BlockDirectory::visit_pages(blocks_,
             [&](const auto& page)
             {
-                constexpr auto role = ContactPayloadRole::SourcePointDirectoryObject;
+                constexpr auto role = GeometryContactPayloadRole::SourcePointDirectoryObject;
                 contact_payload_object(visitor, page.get(), role, sizeof(*page), true);
                 contact_payload_buffer(visitor, page.get(), role, page->children);
                 contact_payload_buffer(visitor, page.get(), role, page->rows);
@@ -159,9 +160,9 @@ public:
                     block->visit_borrowed_payload(visitor);
             });
         indexes_.visit_borrowed_payload(visitor);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointLeases, leases_);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::SourcePointLeases, leases_);
         if (control_identity_)
-            contact_payload_object(visitor, control_identity_, ContactPayloadRole::CartesianControlCreditObject,
+            contact_payload_object(visitor, control_identity_, GeometryContactPayloadRole::CartesianControlCreditObject,
                 control_payload_bytes_, true);
         if (source_)
             source_->visit_borrowed_payload(visitor);
@@ -253,16 +254,17 @@ private:
         }
         template<class Visitor> void visit_borrowed_payload(Visitor& visitor) const
         {
-            contact_payload_object(visitor, this, ContactPayloadRole::SourcePointValueBlockObject, sizeof(*this), true);
+            contact_payload_object(
+                visitor, this, GeometryContactPayloadRole::SourcePointValueBlockObject, sizeof(*this), true);
             if (control_identity)
-                contact_payload_object(visitor, control_identity, ContactPayloadRole::CartesianControlCreditObject,
-                    control_payload_bytes, true);
+                contact_payload_object(visitor, control_identity,
+                    GeometryContactPayloadRole::CartesianControlCreditObject, control_payload_bytes, true);
             for (const auto& values : components)
-                contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointComponents, values);
+                contact_payload_buffer(visitor, this, GeometryContactPayloadRole::SourcePointComponents, values);
             std::visit([&](const auto& values)
-                { contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointSelectors, values); },
+                { contact_payload_buffer(visitor, this, GeometryContactPayloadRole::SourcePointSelectors, values); },
                 selectors);
-            contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointExceptions, exceptions);
+            contact_payload_buffer(visitor, this, GeometryContactPayloadRole::SourcePointExceptions, exceptions);
         }
     };
     using Block = std::shared_ptr<const ValueBlock>;

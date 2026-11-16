@@ -114,11 +114,12 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visit, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visit, this, ContactPayloadRole::TileIndexObject, sizeof(*this));
+            contact_payload_object(visit, this, GeometryContactPayloadRole::TileIndexObject, sizeof(*this));
         Tree::visit_pages(root_,
             [&](const Root& page)
             {
-                contact_payload_object(visit, page.get(), ContactPayloadRole::TileIndexPageObject, page->charge.bytes);
+                contact_payload_object(
+                    visit, page.get(), GeometryContactPayloadRole::TileIndexPageObject, page->charge.bytes);
             });
     }
 

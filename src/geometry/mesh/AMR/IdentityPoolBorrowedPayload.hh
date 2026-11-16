@@ -25,7 +25,7 @@ template<> struct IdentityPoolBorrowedPayload<AdaptiveBytes>
     static constexpr bool complete = true;
     template<class Visitor> static void visit(const AdaptiveBytes& value, Visitor& visitor)
     {
-        contact_payload_buffer(visitor, &value, ContactPayloadRole::IdentityDynamicBytes, value);
+        contact_payload_buffer(visitor, &value, BasicContactPayloadRole::IdentityDynamicBytes, value);
     }
 };
 template<> struct IdentityPoolBorrowedPayload<AdaptiveCellKey>
@@ -33,17 +33,21 @@ template<> struct IdentityPoolBorrowedPayload<AdaptiveCellKey>
     static constexpr bool complete = true;
     template<class Visitor> static void visit(const AdaptiveCellKey& value, Visitor& visitor)
     {
-        std::visit([&](const auto& ancestry)
+        std::visit(
+            [&](const auto& ancestry)
             {
                 using A = std::decay_t<decltype(ancestry)>;
                 if constexpr (std::is_same_v<A, ConvexCellAncestry>)
-                    contact_payload_buffer(visitor, &value, ContactPayloadRole::IdentityCellPath, ancestry.path);
+                    contact_payload_buffer(visitor, &value, BasicContactPayloadRole::IdentityCellPath, ancestry.path);
                 else if constexpr (std::is_same_v<A, ProductCellAncestry>)
                 {
-                    contact_payload_buffer(visitor, &value, ContactPayloadRole::IdentityCellPath, ancestry.base.path);
-                    contact_payload_buffer(visitor, &value, ContactPayloadRole::IdentityCellPath, ancestry.axial.path);
+                    contact_payload_buffer(
+                        visitor, &value, BasicContactPayloadRole::IdentityCellPath, ancestry.base.path);
+                    contact_payload_buffer(
+                        visitor, &value, BasicContactPayloadRole::IdentityCellPath, ancestry.axial.path);
                 }
-            }, value.ancestry);
+            },
+            value.ancestry);
     }
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

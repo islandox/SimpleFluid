@@ -188,8 +188,8 @@ public:
     [[nodiscard]] bool has_arena_keeper() const noexcept { return bool(keeper_); }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::CartesianManifestObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianManifestLeases, leases_);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::CartesianManifestObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianManifestLeases, leases_);
         const auto page = [&](const auto& node, ContactPayloadRole role)
         {
             contact_payload_object(visitor, node.get(), role, sizeof(*node), true);
@@ -205,22 +205,22 @@ public:
             }
         };
         PeerTree::visit_pages(
-            peers_, [&](const auto& node) { page(node, ContactPayloadRole::CartesianManifestSources); });
+            peers_, [&](const auto& node) { page(node, GeometryContactPayloadRole::CartesianManifestSources); });
         for (const auto& peer : peers())
         {
-            SourceTree::visit_pages(
-                peer.sources, [&](const auto& node) { page(node, ContactPayloadRole::CartesianManifestSources); });
+            SourceTree::visit_pages(peer.sources,
+                [&](const auto& node) { page(node, GeometryContactPayloadRole::CartesianManifestSources); });
             for (const auto& source : SourceRows(peer.sources.get()))
             {
-                body(source.identity_, ContactPayloadRole::CartesianManifestIdentity);
-                body(source.irregular_ranges_, ContactPayloadRole::CartesianManifestRanges);
+                body(source.identity_, GeometryContactPayloadRole::CartesianManifestIdentity);
+                body(source.irregular_ranges_, GeometryContactPayloadRole::CartesianManifestRanges);
                 RangeTree::visit_pages(source.active_ranges_,
-                    [&](const auto& node) { page(node, ContactPayloadRole::CartesianManifestRanges); });
+                    [&](const auto& node) { page(node, GeometryContactPayloadRole::CartesianManifestRanges); });
             }
             ExplicitTree::visit_pages(peer.explicit_cells,
-                [&](const auto& node) { page(node, ContactPayloadRole::CartesianExplicitCellHeaders); });
+                [&](const auto& node) { page(node, GeometryContactPayloadRole::CartesianExplicitCellHeaders); });
             for (const auto& cell : ExplicitRows(peer.explicit_cells.get()))
-                body(cell.owner, ContactPayloadRole::CartesianExplicitSupportKeys);
+                body(cell.owner, GeometryContactPayloadRole::CartesianExplicitSupportKeys);
         }
 
         if (local_)

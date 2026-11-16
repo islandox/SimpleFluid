@@ -271,13 +271,13 @@ private:
     template<class Visitor> static void visit_credit_payload(const PageCredit& credit, Visitor& visitor)
     {
         contact_payload_object(
-            visitor, &credit, ContactPayloadRole::IdentityPageCreditObject, sizeof(PageCredit), true);
+            visitor, &credit, BasicContactPayloadRole::IdentityPageCreditObject, sizeof(PageCredit), true);
         const auto& page = *credit.page;
-        contact_payload_object(visitor, &page, ContactPayloadRole::IdentityPageObject, sizeof(Page), true);
-        contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPageValues, page.values, page.values.size(),
-            !IdentityPoolBorrowedPayload<T>::complete);
+        contact_payload_object(visitor, &page, BasicContactPayloadRole::IdentityPageObject, sizeof(Page), true);
+        contact_payload_buffer(visitor, &page, BasicContactPayloadRole::IdentityPageValues, page.values,
+            page.values.size(), !IdentityPoolBorrowedPayload<T>::complete);
         if constexpr (owns_plane_backing)
-            contact_payload_buffer(visitor, &page, ContactPayloadRole::IdentityPersistentIndex, page.plane_owners);
+            contact_payload_buffer(visitor, &page, BasicContactPayloadRole::IdentityPersistentIndex, page.plane_owners);
         for (const auto& value : page.values)
             IdentityPoolBorrowedPayload<T>::visit(value, visitor);
     }
@@ -532,26 +532,26 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::IdentityPoolObject, sizeof(*this));
-        contact_payload_buffer(visitor, this, ContactPayloadRole::IdentityBySlot, by_slot_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::IdentityPageEntries, pages_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::IdentityHashBuckets, buckets_);
+            contact_payload_object(visitor, this, BasicContactPayloadRole::IdentityPoolObject, sizeof(*this));
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::IdentityBySlot, by_slot_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::IdentityPageEntries, pages_);
+        contact_payload_buffer(visitor, this, BasicContactPayloadRole::IdentityHashBuckets, buckets_);
         for (const auto& value : by_value_)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::IdentityOrderedValues, value);
-        page_index_.visit_borrowed_payload(visitor, ContactPayloadRole::IdentityPageOwnerBuckets);
+            contact_payload_node_value(visitor, this, BasicContactPayloadRole::IdentityOrderedValues, value);
+        page_index_.visit_borrowed_payload(visitor, BasicContactPayloadRole::IdentityPageOwnerBuckets);
         if (persistent_)
         {
             contact_payload_object(
-                visitor, persistent_.get(), ContactPayloadRole::IdentityPersistentRoot, sizeof(PersistentStorage));
+                visitor, persistent_.get(), BasicContactPayloadRole::IdentityPersistentRoot, sizeof(PersistentStorage));
             const auto visit_index = [&](const auto& node)
             {
-                contact_payload_object(visitor, node.get(), ContactPayloadRole::IdentityPersistentIndex,
+                contact_payload_object(visitor, node.get(), BasicContactPayloadRole::IdentityPersistentIndex,
                     node->charge.bytes - persistent_ordered_detail::control_bytes, true);
             };
             PageDirectory::visit_pages(persistent_->pages,
                 [&](const auto* address, std::size_t bytes)
                 {
-                    contact_payload_object(visitor, address, ContactPayloadRole::IdentityPersistentIndex,
+                    contact_payload_object(visitor, address, BasicContactPayloadRole::IdentityPersistentIndex,
                         bytes - persistent_ordered_detail::control_bytes, true);
                 });
             ValueIndex::visit_pages(persistent_->values, visit_index);
@@ -563,7 +563,8 @@ public:
                     [&](const auto& node)
                     {
                         for (const auto& row : node->rows)
-                            contact_payload_object(visitor, row.owner.get(), ContactPayloadRole::IdentityPersistentRoot,
+                            contact_payload_object(visitor, row.owner.get(),
+                                BasicContactPayloadRole::IdentityPersistentRoot,
                                 sizeof(PersistentPlaneOwnerIndex::Owner), true);
                     });
             }
@@ -788,10 +789,10 @@ public:
         [[nodiscard]] const void* metadata_identity() const noexcept { return &charged_; }
         template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
         {
-            contact_payload_object(visitor, this, ContactPayloadRole::PageViewObject, sizeof(*this), true);
-            contact_payload_buffer(visitor, this, ContactPayloadRole::PageViewDirectory, directory_);
+            contact_payload_object(visitor, this, BasicContactPayloadRole::PageViewObject, sizeof(*this), true);
+            contact_payload_buffer(visitor, this, BasicContactPayloadRole::PageViewDirectory, directory_);
             for (const auto& value : index_)
-                contact_payload_node_value(visitor, this, ContactPayloadRole::PageViewCaptureValues, value);
+                contact_payload_node_value(visitor, this, BasicContactPayloadRole::PageViewCaptureValues, value);
             for (const auto& credit : directory_)
                 visit_credit_payload(*credit, visitor);
         }

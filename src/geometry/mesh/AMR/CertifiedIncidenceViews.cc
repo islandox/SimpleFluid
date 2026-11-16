@@ -426,13 +426,14 @@ void CertifiedIncidenceResultView::visit_borrowed_payload(
         recipe_->visit_borrowed_payload(visitor);
         return;
     }
-    contact_payload_object(
-        visitor, remote_.get(), ContactPayloadRole::CertifiedIncidenceResultValueObject, sizeof(RemoteValue), true);
-    contact_payload_object(
-        visitor, remote_->control, ContactPayloadRole::CartesianControlCreditObject, sizeof(ControlCredit), true);
+    contact_payload_object(visitor, remote_.get(), GeometryContactPayloadRole::CertifiedIncidenceResultValueObject,
+        sizeof(RemoteValue), true);
+    contact_payload_object(visitor, remote_->control, GeometryContactPayloadRole::CartesianControlCreditObject,
+        sizeof(ControlCredit), true);
     contact_payload_buffer(
-        visitor, remote_.get(), ContactPayloadRole::CertifiedIncidenceResultValueMask, remote_->mask);
-    contact_payload_buffer(visitor, remote_.get(), ContactPayloadRole::CertifiedIncidenceLoopLeases, remote_->leases);
+        visitor, remote_.get(), GeometryContactPayloadRole::CertifiedIncidenceResultValueMask, remote_->mask);
+    contact_payload_buffer(
+        visitor, remote_.get(), GeometryContactPayloadRole::CertifiedIncidenceLoopLeases, remote_->leases);
     remote_->proof->visit_borrowed_payload(visitor);
     remote_->snapshot->visit_borrowed_payload(visitor);
     for (const auto& lease : remote_->leases)
@@ -547,12 +548,14 @@ void CertifiedIncidenceResultParts::retain_dependencies(
 void CertifiedIncidenceResultParts::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(
-        visitor, storage_.get(), ContactPayloadRole::CertifiedIncidenceResultPartsObject, sizeof(Storage), true);
-    contact_payload_object(
-        visitor, storage_->control, ContactPayloadRole::CartesianControlCreditObject, sizeof(ControlCredit), true);
-    contact_payload_buffer(visitor, storage_.get(), ContactPayloadRole::CertifiedIncidenceLoopParts, storage_->parts);
-    contact_payload_buffer(visitor, storage_.get(), ContactPayloadRole::CertifiedIncidenceLoopLeases, storage_->leases);
+    contact_payload_object(visitor, storage_.get(), GeometryContactPayloadRole::CertifiedIncidenceResultPartsObject,
+        sizeof(Storage), true);
+    contact_payload_object(visitor, storage_->control, GeometryContactPayloadRole::CartesianControlCreditObject,
+        sizeof(ControlCredit), true);
+    contact_payload_buffer(
+        visitor, storage_.get(), GeometryContactPayloadRole::CertifiedIncidenceLoopParts, storage_->parts);
+    contact_payload_buffer(
+        visitor, storage_.get(), GeometryContactPayloadRole::CertifiedIncidenceLoopLeases, storage_->leases);
     for (const auto& part : storage_->parts)
         part.visit_borrowed_payload(visitor);
     for (const auto& lease : storage_->leases)
@@ -893,12 +896,13 @@ void CertifiedIncidenceLoopView::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
     contact_payload_object(
-        visitor, storage_.get(), ContactPayloadRole::CertifiedIncidenceLoopObject, sizeof(Storage), true);
-    contact_payload_object(
-        visitor, storage_->control, ContactPayloadRole::CartesianControlCreditObject, sizeof(ControlCredit), true);
+        visitor, storage_.get(), GeometryContactPayloadRole::CertifiedIncidenceLoopObject, sizeof(Storage), true);
+    contact_payload_object(visitor, storage_->control, GeometryContactPayloadRole::CartesianControlCreditObject,
+        sizeof(ControlCredit), true);
     if (storage_->parts)
         storage_->parts->visit_borrowed_payload(visitor);
-    contact_payload_buffer(visitor, storage_.get(), ContactPayloadRole::CertifiedIncidenceLoopLeases, storage_->leases);
+    contact_payload_buffer(
+        visitor, storage_.get(), GeometryContactPayloadRole::CertifiedIncidenceLoopLeases, storage_->leases);
     if (storage_->snapshot)
         storage_->snapshot->visit_borrowed_payload(visitor);
     for (const auto& part : parts())

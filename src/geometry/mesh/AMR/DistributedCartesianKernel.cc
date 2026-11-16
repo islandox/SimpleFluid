@@ -70,9 +70,7 @@ const CartesianCellAncestry& ancestry(const AMRGrid& grid, const AdaptiveCellKey
 }
 double coordinate(const AMRGrid& grid, std::size_t axis, ID index, unsigned level)
 {
-    auto finest = mul(index, scale(grid.max_level - level));
-    auto total = mul(mul(grid.root_blocks[axis], grid.block_cells[axis]), scale(grid.max_level));
-    return grid.origin[axis] + grid.extent[axis] * (double(finest) / double(total));
+    return adaptive_detail::native_cartesian_coordinate(grid, axis, index, level);
 }
 AMRBlock block(const AMRGrid& grid, const CartesianCellAncestry& cell)
 {
@@ -723,6 +721,20 @@ geometry_detail::NativeTrackedOwner<const AdaptiveProviderKernel> adaptive_detai
 std::size_t adaptive_detail::native_cartesian_kernel_payload_bytes() noexcept
 {
     return sizeof(CartesianKernel);
+}
+// Keep the arithmetic boundary shared even in optimized builds. In particular,
+// caller-specific inlining/cloning must not choose different contraction paths.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noipa))
+#elif defined(__clang__)
+__attribute__((noinline))
+#endif
+double adaptive_detail::native_cartesian_coordinate(
+    const AMRGrid& grid, std::size_t axis, std::uint64_t index, unsigned level)
+{
+    const auto finest = mul(index, scale(grid.max_level - level));
+    const auto total = mul(mul(grid.root_blocks[axis], grid.block_cells[axis]), scale(grid.max_level));
+    return grid.origin[axis] + grid.extent[axis] * (double(finest) / double(total));
 }
 std::optional<AMRGrid> trusted_cartesian_incidence_grid(const AdaptiveProviderKernel& kernel) noexcept
 {

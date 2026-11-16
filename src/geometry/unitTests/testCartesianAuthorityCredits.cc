@@ -196,7 +196,7 @@ TEST(CartesianAuthorityCredits, ExpiredPolicyReapsPreviouslyActiveOwnerWithoutAH
         arena->visit_borrowed_payload(
             [&](const ContactPayloadAllocation& allocation)
             {
-                if (allocation.identity.role != ContactPayloadRole::CartesianArenaRetirementHints)
+                if (allocation.identity.role != GeometryContactPayloadRole::CartesianArenaRetirementHints)
                     return;
                 ++count;
                 ASSERT_FALSE(arena->retired_hints.empty());

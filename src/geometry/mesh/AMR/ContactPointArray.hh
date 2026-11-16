@@ -60,6 +60,16 @@ public:
         ContactPointIdentity physical;
         operator ContactPointIncidence() const { return {normalized, physical}; }
     };
+
+private:
+    struct Generated
+    {
+        std::shared_ptr<const void> snapshot;
+        std::size_t row = 0, count = 0;
+        Reference (*read)(const void*, std::size_t, std::size_t) = nullptr;
+    };
+
+public:
     class const_iterator
     {
     public:
@@ -96,6 +106,19 @@ public:
         for (const auto& point : points)
             push_back(point);
     }
+    /** Allocation-free immutable reader. The pin must retain every object read
+     * by the callback, and those objects must remain immutable for its lifetime.
+     * The callback supplies normalized and physical identities independently in
+     * their existing row order; this adapter does not normalize or reorder. */
+    [[nodiscard]] static ContactPointArray generated(std::shared_ptr<const void> snapshot, std::size_t row,
+        std::size_t count, Reference (*read)(const void*, std::size_t, std::size_t))
+    {
+        if (!snapshot || !read)
+            throw std::invalid_argument("Generated contact points require an immutable snapshot and reader.");
+        ContactPointArray result;
+        result.storage_.emplace<Generated>(std::move(snapshot), row, count, read);
+        return result;
+    }
     /** Canonical rows retain references into their batch directory. Buffer
      * admissions transfer to the row owner; directory/page credits own theirs. */
     static ContactPointArray pooled(ContactPointBatch& batch, std::size_t capacity, Budget& budget)
@@ -129,7 +152,8 @@ public:
             [&](auto& values)
             {
                 using Values = std::decay_t<decltype(values)>;
-                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Generated> ||
+                              std::is_same_v<Values, Sourced<std::uint32_t>> ||
                               std::is_same_v<Values, Sourced<std::uint64_t>>)
                     throw std::invalid_argument("Contact point array does not use pooled references.");
                 else
@@ -215,26 +239,55 @@ public:
     }
     [[nodiscard]] std::size_t size() const noexcept
     {
-        return std::visit([](const auto& values) { return values.physical.size(); }, storage_);
+        return std::visit(
+            [](const auto& values) -> std::size_t
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Generated>)
+                    return values.count;
+                else
+                    return values.physical.size();
+            },
+            storage_);
     }
     [[nodiscard]] std::size_t capacity() const noexcept
     {
-        return std::visit([](const auto& values) { return values.physical.capacity(); }, storage_);
+        return std::visit(
+            [](const auto& values) -> std::size_t
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Generated>)
+                    return 0;
+                else
+                    return values.physical.capacity();
+            },
+            storage_);
     }
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }
     [[nodiscard]] bool shares_normalized_storage() const noexcept
     {
-        return std::visit([](const auto& values) { return values.normalized.empty(); }, storage_);
+        return std::visit(
+            [](const auto& values)
+            {
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Generated>)
+                    return false;
+                else
+                    return values.normalized.empty();
+            },
+            storage_);
     }
     [[nodiscard]] std::size_t storage_bytes() const
     {
         return std::visit(
             [](const auto& values)
             {
-                const auto physical = buffer_bytes(values.physical), normalized = buffer_bytes(values.normalized);
-                if (normalized > std::numeric_limits<std::size_t>::max() - physical)
-                    throw std::length_error("Contact point storage size overflows.");
-                return physical + normalized;
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Generated>)
+                    return std::size_t{0};
+                else
+                {
+                    const auto physical = buffer_bytes(values.physical), normalized = buffer_bytes(values.normalized);
+                    if (normalized > std::numeric_limits<std::size_t>::max() - physical)
+                        throw std::length_error("Contact point storage size overflows.");
+                    return physical + normalized;
+                }
             },
             storage_);
     }
@@ -246,6 +299,8 @@ public:
                 using Values = std::decay_t<decltype(values)>;
                 if constexpr (std::is_same_v<Values, Owning>)
                     return {values.normalized.empty() ? values.physical[i] : values.normalized[i], values.physical[i]};
+                else if constexpr (std::is_same_v<Values, Generated>)
+                    return values.read(values.snapshot.get(), values.row, i);
                 else
                 {
                     const auto physical = typename Values::Reference{values.physical[i]};
@@ -264,7 +319,11 @@ public:
     }
     [[nodiscard]] const_iterator begin() const noexcept { return {this, 0}; }
     [[nodiscard]] const_iterator end() const noexcept { return {this, size()}; }
-    [[nodiscard]] bool pooled() const noexcept { return !std::holds_alternative<Owning>(storage_); }
+    [[nodiscard]] bool pooled() const noexcept
+    {
+        return !std::holds_alternative<Owning>(storage_) && !std::holds_alternative<Generated>(storage_);
+    }
+    [[nodiscard]] bool generated() const noexcept { return std::holds_alternative<Generated>(storage_); }
     /** Construction directories are borrowed only during this call. A consumer
      * that escapes must selectively import the returned physical page. */
     [[nodiscard]] std::optional<Locator> normalized_locator(std::size_t i) const { return locator(i, true); }
@@ -275,7 +334,8 @@ public:
             [](const auto& values) -> const ContactPointPageView*
             {
                 using Values = std::decay_t<decltype(values)>;
-                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Generated> ||
+                              std::is_same_v<Values, Sourced<std::uint32_t>> ||
                               std::is_same_v<Values, Sourced<std::uint64_t>>)
                     return nullptr;
                 else
@@ -286,21 +346,23 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::PointArrayObject, sizeof(*this));
+            contact_payload_object(visitor, this, BasicContactPayloadRole::PointArrayObject, sizeof(*this));
         std::visit(
             [&](const auto& values)
             {
                 using Values = std::decay_t<decltype(values)>;
                 if constexpr (std::is_same_v<Values, Owning>)
                 {
-                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysical, values.physical);
-                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayNormalized, values.normalized);
-                }
-                else
-                {
-                    contact_payload_buffer(visitor, this, ContactPayloadRole::PointArrayPhysicalRefs, values.physical);
+                    contact_payload_buffer(visitor, this, BasicContactPayloadRole::PointArrayPhysical, values.physical);
                     contact_payload_buffer(
-                        visitor, this, ContactPayloadRole::PointArrayNormalizedRefs, values.normalized);
+                        visitor, this, BasicContactPayloadRole::PointArrayNormalized, values.normalized);
+                }
+                else if constexpr (!std::is_same_v<Values, Generated>)
+                {
+                    contact_payload_buffer(
+                        visitor, this, BasicContactPayloadRole::PointArrayPhysicalRefs, values.physical);
+                    contact_payload_buffer(
+                        visitor, this, BasicContactPayloadRole::PointArrayNormalizedRefs, values.normalized);
                     if (values.view)
                         values.view->visit_borrowed_payload(visitor);
                 }
@@ -313,7 +375,8 @@ public:
             [](const auto& values) -> std::shared_ptr<const ContactPointPageView>
             {
                 using Values = std::decay_t<decltype(values)>;
-                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Sourced<std::uint32_t>> ||
+                if constexpr (std::is_same_v<Values, Owning> || std::is_same_v<Values, Generated> ||
+                              std::is_same_v<Values, Sourced<std::uint32_t>> ||
                               std::is_same_v<Values, Sourced<std::uint64_t>>)
                     return {};
                 else
@@ -342,6 +405,8 @@ public:
     bool bind_private_initial_source(
         IncidencePointDirectory<>& pool, const std::shared_ptr<ContactSourcePointView>& target)
     {
+        if (generated())
+            throw std::invalid_argument("Cannot rebind generated contact points.");
         if (!target || target->frozen() || target->source() != pool.source())
             throw std::invalid_argument("Invalid private source-row construction binding.");
         return std::visit(
@@ -396,7 +461,8 @@ private:
         return std::visit(
             [&](const auto& values) -> std::optional<Locator>
             {
-                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning>)
+                if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Owning> ||
+                              std::is_same_v<std::decay_t<decltype(values)>, Generated>)
                     return {};
                 else if constexpr (std::is_same_v<std::decay_t<decltype(values)>, Sourced<std::uint32_t>> ||
                                    std::is_same_v<std::decay_t<decltype(values)>, Sourced<std::uint64_t>>)
@@ -516,7 +582,8 @@ private:
         storage_.emplace<Sourced<std::uint64_t>>(std::move(wide));
         budget.used -= previous;
     }
-    std::variant<Owning, Pooled<std::uint32_t>, Pooled<std::uint64_t>, Sourced<std::uint32_t>, Sourced<std::uint64_t>>
+    std::variant<Owning, Pooled<std::uint32_t>, Pooled<std::uint64_t>, Sourced<std::uint32_t>, Sourced<std::uint64_t>,
+        Generated>
         storage_;
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

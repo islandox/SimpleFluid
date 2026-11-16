@@ -155,8 +155,8 @@ public:
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::SourcePointViewObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::SourcePointLeases, leases_);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::SourcePointViewObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::SourcePointLeases, leases_);
         source_->visit_borrowed_payload(visitor);
         for (const auto& lease : leases_)
             lease->visit_borrowed_payload(visitor);

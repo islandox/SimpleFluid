@@ -226,21 +226,22 @@ struct IncidenceOwnerRows::Storage
     }
     void visit_payload(const PayloadVisit& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::OwnerRowsObject, sizeof(*this));
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::OwnerRowsObject, sizeof(*this));
         Tree::visit_pages(root,
             [&](const Root& page)
             {
                 contact_payload_object(
-                    visitor, page.get(), ContactPayloadRole::OwnerRowsCellNodes, sizeof(Tree::Node), true);
-                contact_payload_buffer(visitor, page.get(), ContactPayloadRole::OwnerRowsCellNodes, page->rows);
-                contact_payload_buffer(visitor, page.get(), ContactPayloadRole::OwnerRowsCellNodes, page->children);
+                    visitor, page.get(), GeometryContactPayloadRole::OwnerRowsCellNodes, sizeof(Tree::Node), true);
+                contact_payload_buffer(visitor, page.get(), GeometryContactPayloadRole::OwnerRowsCellNodes, page->rows);
+                contact_payload_buffer(
+                    visitor, page.get(), GeometryContactPayloadRole::OwnerRowsCellNodes, page->children);
                 for (const auto& row : page->rows)
                     if (row.points)
                         row.points->visit_borrowed_payload(visitor);
             });
         for (const auto& value : dirty)
         {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::OwnerRowsDirtyNodes, value);
+            contact_payload_node_value(visitor, this, GeometryContactPayloadRole::OwnerRowsDirtyNodes, value);
             value.second.points->visit_borrowed_payload(visitor, true);
         }
     }
@@ -437,7 +438,7 @@ IncidenceOwnerRows::PersistenceWork IncidenceOwnerRows::persistence_work() const
 void IncidenceOwnerRows::visit_payload(const PayloadVisit& visitor, bool include_object) const
 {
     if (include_object)
-        contact_payload_object(visitor, this, ContactPayloadRole::OwnerRowsObject, sizeof(*this));
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::OwnerRowsObject, sizeof(*this));
     storage_->visit_payload(visitor);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

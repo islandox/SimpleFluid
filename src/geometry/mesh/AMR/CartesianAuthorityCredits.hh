@@ -60,9 +60,10 @@ struct AuthorityOwnerCredit
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
         // owner stays weak: this census never promotes or visits its target.
-        contact_payload_object(visitor, this, ContactPayloadRole::CartesianOwnerCreditObject, sizeof(*this), true);
+        contact_payload_object(
+            visitor, this, GeometryContactPayloadRole::CartesianOwnerCreditObject, sizeof(*this), true);
         if (observed_control)
-            contact_payload_object(visitor, observed_control, ContactPayloadRole::CartesianControlCreditObject,
+            contact_payload_object(visitor, observed_control, GeometryContactPayloadRole::CartesianControlCreditObject,
                 observed_control_bytes, true);
     }
 };
@@ -101,15 +102,15 @@ struct ArenaCredits
     }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::CartesianArenaObject, sizeof(*this), true);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::CartesianArenaObject, sizeof(*this), true);
         for (const auto& entry : entries)
         {
-            contact_payload_node_value(visitor, this, ContactPayloadRole::CartesianArenaEntries, entry);
+            contact_payload_node_value(visitor, this, GeometryContactPayloadRole::CartesianArenaEntries, entry);
             if (entry.second)
                 entry.second->visit_borrowed_payload(visitor);
         }
         for (const auto& hint : retired_hints)
-            contact_payload_node_value(visitor, this, ContactPayloadRole::CartesianArenaRetirementHints, hint);
+            contact_payload_node_value(visitor, this, GeometryContactPayloadRole::CartesianArenaRetirementHints, hint);
     }
     void cancel_retirement(Entries::iterator at) noexcept
     {

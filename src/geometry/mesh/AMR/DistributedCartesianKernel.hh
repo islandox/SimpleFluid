@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 namespace SimpleFluid::geometry_detail
 {
@@ -26,6 +27,11 @@ namespace adaptive_detail
 [[nodiscard]] SIMPLEFLUID_LOCAL std::shared_ptr<const AdaptiveProviderKernel> cartesian_incidence_replay_kernel(AMRGrid);
 [[nodiscard]] SIMPLEFLUID_LOCAL geometry_detail::NativeTrackedOwner<const AdaptiveProviderKernel>
 cartesian_incidence_replay_kernel(AMRGrid, const geometry_detail::NativeConstructionAdmission&);
+/** The native constructor's actual binary64 coordinate evaluation. All trusted
+ * Cartesian source and contact replay uses this same evaluation boundary;
+ * callers must validate the grid, axis, level and index before calling. */
+[[nodiscard]] SIMPLEFLUID_LOCAL double native_cartesian_coordinate(
+    const AMRGrid&, std::size_t axis, std::uint64_t index, unsigned level);
 /** Actual object payload of the private concrete type issued by this factory;
  * diagnostic only, with implementation-defined shared control overhead excluded. */
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t native_cartesian_kernel_payload_bytes() noexcept;

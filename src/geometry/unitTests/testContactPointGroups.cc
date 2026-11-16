@@ -12,6 +12,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -744,8 +745,9 @@ TEST(ContactPointGroups, IdentityPacketAppendMatchesLegacyBytesAndFloatingEnviro
                 expected[8 + offsetof(Header, kind)] = static_cast<char>(P::GeometryPacketKind::PointIdentity);
                 expected[8 + offsetof(Header, mode)] = static_cast<char>(SimpleFluid::ArithmeticMode::Ordinary);
                 using Profile = P::GeometryNumericProfile;
-                constexpr auto profile = std::numeric_limits<long double>::digits == 53 ? Profile::Binary64 :
-                    std::numeric_limits<long double>::digits == 64 ? Profile::X87Binary80 : Profile::Binary128;
+                constexpr auto profile = std::numeric_limits<long double>::digits == 53   ? Profile::Binary64
+                                         : std::numeric_limits<long double>::digits == 64 ? Profile::X87Binary80
+                                                                                          : Profile::Binary128;
                 expected[8 + offsetof(Header, profile)] = static_cast<char>(profile);
                 word(8 + offsetof(Header, body_length), body.size());
                 std::copy(body.begin(), body.end(), expected.begin() + 8 + sizeof(Header));
@@ -1034,14 +1036,14 @@ TEST(ContactPointGroups, ActualPayloadCensusMatchesIndependentHeapRequestsAndPre
     EXPECT_FALSE(audit.overflow);
     EXPECT_EQ(allocations, 0u);
     std::size_t payload_bytes = 0, live_requested = 0, controls_excluded = 0, nodes_excluded = 0;
-    std::array<bool, 64> roles{};
+    std::set<D::ContactPayloadRole> roles;
     for (std::size_t i = 0; i < audit.count; ++i)
         if (audit.allocations[i].live)
             live_requested += audit.allocations[i].bytes;
     for (std::size_t i = 0; i < count; ++i)
     {
         const auto& value = payload[i];
-        roles[static_cast<std::size_t>(value.identity.role)] = true;
+        roles.insert(value.identity.role);
         payload_bytes += value.payload_bytes;
         controls_excluded += value.control_overhead_excluded;
         nodes_excluded += value.node_overhead_excluded;
@@ -1066,17 +1068,25 @@ TEST(ContactPointGroups, ActualPayloadCensusMatchesIndependentHeapRequestsAndPre
         for (std::size_t j = 0; j < i; ++j)
             EXPECT_FALSE(value.identity == payload[j].identity);
     }
-    using R = D::ContactPayloadRole;
-    for (const auto role : {R::GroupSlots, R::GroupFreeSlots, R::GroupBuckets, R::FanOwnerIndexBuckets,
-             R::IdentityBySlot, R::IdentityPageEntries, R::IdentityHashBuckets, R::IdentityPageOwnerBuckets,
-             R::IdentityPageValues, R::IdentityDynamicBytes, R::FactPages, R::FactEntries, R::FactFreeEntries,
-             R::FactFreePages, R::FactBuckets, R::FactPageIndexValues, R::FallbackValues, R::BindingEntries,
-             R::BindingFreeSlots, R::BindingBuckets, R::FanViews, R::FanLocal, R::FanRemote, R::FanSlices})
-        EXPECT_TRUE(roles[static_cast<std::size_t>(role)]);
-    EXPECT_FALSE(roles[static_cast<std::size_t>(R::GroupObject)]);
-    EXPECT_FALSE(roles[static_cast<std::size_t>(R::FactDirectoryObject)]);
-    EXPECT_FALSE(roles[static_cast<std::size_t>(R::IdentityPoolObject)]);
-    EXPECT_FALSE(roles[static_cast<std::size_t>(R::PhysicalOwnerIndexObject)]);
+    const std::array<D::ContactPayloadRole, 24> expected_roles{D::ParallelSupportPayloadRole::GroupSlots,
+        D::ParallelSupportPayloadRole::GroupFreeSlots, D::ParallelSupportPayloadRole::GroupBuckets,
+        D::ParallelSupportPayloadRole::FanOwnerIndexBuckets, D::BasicContactPayloadRole::IdentityBySlot,
+        D::BasicContactPayloadRole::IdentityPageEntries, D::BasicContactPayloadRole::IdentityHashBuckets,
+        D::BasicContactPayloadRole::IdentityPageOwnerBuckets, D::BasicContactPayloadRole::IdentityPageValues,
+        D::BasicContactPayloadRole::IdentityDynamicBytes, D::BasicContactPayloadRole::FactPages,
+        D::BasicContactPayloadRole::FactEntries, D::BasicContactPayloadRole::FactFreeEntries,
+        D::BasicContactPayloadRole::FactFreePages, D::BasicContactPayloadRole::FactBuckets,
+        D::BasicContactPayloadRole::FactPageIndexValues, D::BasicContactPayloadRole::FallbackValues,
+        D::ParallelSupportPayloadRole::BindingEntries, D::ParallelSupportPayloadRole::BindingFreeSlots,
+        D::ParallelSupportPayloadRole::BindingBuckets, D::ParallelSupportPayloadRole::FanViews,
+        D::ParallelSupportPayloadRole::FanLocal, D::ParallelSupportPayloadRole::FanRemote,
+        D::ParallelSupportPayloadRole::FanSlices};
+    for (const auto role : expected_roles)
+        EXPECT_TRUE(roles.contains(role));
+    EXPECT_FALSE(roles.contains(D::ParallelSupportPayloadRole::GroupObject));
+    EXPECT_FALSE(roles.contains(D::BasicContactPayloadRole::FactDirectoryObject));
+    EXPECT_FALSE(roles.contains(D::BasicContactPayloadRole::IdentityPoolObject));
+    EXPECT_FALSE(roles.contains(D::ParallelSupportPayloadRole::PhysicalOwnerIndexObject));
     EXPECT_GT(controls_excluded, 0u);
     EXPECT_GT(nodes_excluded, 0u);
     EXPECT_LT(payload_bytes, live_requested);
@@ -1211,8 +1221,8 @@ TEST(ContactPointGroups, PointArrayPayloadReportsBothOwningAndReferenceBuffersWi
         [&](const D::ContactPayloadAllocation& value)
         {
             EXPECT_EQ(value.kind, D::ContactPayloadKind::Buffer);
-            EXPECT_TRUE(value.identity.role == D::ContactPayloadRole::PointArrayPhysical ||
-                        value.identity.role == D::ContactPayloadRole::PointArrayNormalized);
+            EXPECT_TRUE(value.identity.role == D::BasicContactPayloadRole::PointArrayPhysical ||
+                        value.identity.role == D::BasicContactPayloadRole::PointArrayNormalized);
             EXPECT_EQ(value.element_size, sizeof(D::ContactPointIdentity));
             EXPECT_EQ(value.live_count, 2u);
             EXPECT_EQ(value.capacity, 4u);
@@ -1239,8 +1249,8 @@ TEST(ContactPointGroups, PointArrayPayloadReportsBothOwningAndReferenceBuffersWi
             for (std::size_t i = 0; i < count; ++i)
             {
                 const auto& value = payload[i];
-                if (value.identity.role == D::ContactPayloadRole::PointArrayPhysicalRefs ||
-                    value.identity.role == D::ContactPayloadRole::PointArrayNormalizedRefs)
+                if (value.identity.role == D::BasicContactPayloadRole::PointArrayPhysicalRefs ||
+                    value.identity.role == D::BasicContactPayloadRole::PointArrayNormalizedRefs)
                 {
                     ++references;
                     EXPECT_EQ(value.element_size, sizeof(std::uint32_t));
@@ -1248,13 +1258,13 @@ TEST(ContactPointGroups, PointArrayPayloadReportsBothOwningAndReferenceBuffersWi
                     EXPECT_EQ(value.capacity, 4u);
                     EXPECT_EQ(value.payload_bytes, 4 * sizeof(std::uint32_t));
                 }
-                if (value.identity.role == D::ContactPayloadRole::PageViewCaptureValues)
+                if (value.identity.role == D::BasicContactPayloadRole::PageViewCaptureValues)
                 {
                     ++capture_values;
                     EXPECT_TRUE(value.node_overhead_excluded);
                     EXPECT_EQ(value.payload_bytes, sizeof(std::pair<const void* const, std::size_t>));
                 }
-                EXPECT_NE(value.identity.role, D::ContactPayloadRole::PointArrayObject);
+                EXPECT_NE(value.identity.role, D::BasicContactPayloadRole::PointArrayObject);
             }
             EXPECT_EQ(references, 2u);
             EXPECT_EQ(capture_values, 1u);
@@ -1283,13 +1293,13 @@ TEST(ContactPointGroups, GenericPoolPayloadExposesOrderedNodeValuesAndOwnedAnces
     pool.visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& value)
         {
-            if (value.identity.role == D::ContactPayloadRole::IdentityOrderedValues)
+            if (value.identity.role == D::BasicContactPayloadRole::IdentityOrderedValues)
             {
                 ++ordered_values;
                 EXPECT_TRUE(value.node_overhead_excluded);
                 EXPECT_EQ(value.payload_bytes, sizeof(std::pair<const Key* const, std::size_t>));
             }
-            if (value.identity.role == D::ContactPayloadRole::IdentityCellPath)
+            if (value.identity.role == D::BasicContactPayloadRole::IdentityCellPath)
             {
                 ++paths;
                 EXPECT_EQ(value.identity.address, path.data());
@@ -1297,7 +1307,7 @@ TEST(ContactPointGroups, GenericPoolPayloadExposesOrderedNodeValuesAndOwnedAnces
                 EXPECT_EQ(value.element_size, sizeof(std::uint64_t));
                 EXPECT_EQ(value.payload_bytes, path.capacity() * sizeof(std::uint64_t));
             }
-            if (value.identity.role == D::ContactPayloadRole::IdentityPageValues)
+            if (value.identity.role == D::BasicContactPayloadRole::IdentityPageValues)
             {
                 ++page_buffers;
                 EXPECT_EQ(value.element_size, sizeof(Key));
@@ -1305,8 +1315,8 @@ TEST(ContactPointGroups, GenericPoolPayloadExposesOrderedNodeValuesAndOwnedAnces
                 EXPECT_EQ(value.payload_bytes, 16 * sizeof(Key));
                 EXPECT_FALSE(value.opaque_element_payload_excluded);
             }
-            hashes += value.identity.role == D::ContactPayloadRole::IdentityHashBuckets;
-            EXPECT_NE(value.identity.role, D::ContactPayloadRole::IdentityPoolObject);
+            hashes += value.identity.role == D::BasicContactPayloadRole::IdentityHashBuckets;
+            EXPECT_NE(value.identity.role, D::BasicContactPayloadRole::IdentityPoolObject);
         });
     EXPECT_EQ(ordered_values, 1u);
     EXPECT_EQ(paths, 1u);

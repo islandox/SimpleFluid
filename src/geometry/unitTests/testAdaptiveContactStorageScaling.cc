@@ -22,8 +22,9 @@ Census metadata(const D::DistributedAdaptiveContactHalo& halo)
     halo.for_each_borrowed_contact_payload([&](const D::ContactPayloadAllocation& allocation)
         {
             const auto role = allocation.identity.role;
-            if (role == D::ContactPayloadRole::ContactSlotBranch || role == D::ContactPayloadRole::ContactSlotLeaf ||
-                role == D::ContactPayloadRole::ContactOwnerUsageNode)
+            if (role == D::GeometryContactPayloadRole::ContactSlotBranch ||
+                role == D::GeometryContactPayloadRole::ContactSlotLeaf ||
+                role == D::GeometryContactPayloadRole::ContactOwnerUsageNode)
                 result.emplace(Key{reinterpret_cast<std::uintptr_t>(allocation.identity.address), role},
                     allocation.payload_bytes);
         });

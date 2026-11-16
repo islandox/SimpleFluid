@@ -3368,9 +3368,9 @@ void DistributedAdaptiveIncidenceSession::for_each_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor, bool include_object) const
 {
     if (include_object)
-        contact_payload_object(visitor, this, ContactPayloadRole::IncidenceSessionObject, sizeof(*this));
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::IncidenceSessionObject, sizeof(*this));
     const auto& state = *impl_;
-    contact_payload_object(visitor, impl_.get(), ContactPayloadRole::IncidenceSessionImpl, sizeof(Impl));
+    contact_payload_object(visitor, impl_.get(), GeometryContactPayloadRole::IncidenceSessionImpl, sizeof(Impl));
     state.pools.cells.visit_borrowed_payload(visitor);
     state.pools.domains.visit_borrowed_payload(visitor);
     state.pools.supports.visit_borrowed_payload(visitor);
@@ -3387,41 +3387,45 @@ void DistributedAdaptiveIncidenceSession::for_each_borrowed_payload(
         state.subfaces->visit_borrowed_payload(visitor);
     state.borrowed.visit_borrowed_payload(visitor);
     contact_payload_buffer(
-        visitor, impl_.get(), ContactPayloadRole::IncidenceSessionLayerSourceLeases, state.layer_source_leases);
+        visitor, impl_.get(), GeometryContactPayloadRole::IncidenceSessionLayerSourceLeases, state.layer_source_leases);
     for (const auto& lease : state.layer_source_leases)
         lease->visit_borrowed_payload(visitor);
-    state.authority_tile_counts.visit_borrowed_payload(visitor, ContactPayloadRole::IncidenceAuthorityCountNodes);
-    state.resident_generations.visit_borrowed_payload(visitor, ContactPayloadRole::IncidenceResidentGenerationNodes);
+    state.authority_tile_counts.visit_borrowed_payload(
+        visitor, ParallelSupportPayloadRole::IncidenceAuthorityCountNodes);
+    state.resident_generations.visit_borrowed_payload(
+        visitor, ParallelSupportPayloadRole::IncidenceResidentGenerationNodes);
     for (std::size_t i = 0; i != state.tiles.size(); ++i)
     {
         const auto& tile = state.tiles.value_at(i);
         if (!tile.history)
             continue;
-        contact_payload_object(
-            visitor, tile.history.get(), ContactPayloadRole::IncidenceLayerHistoryObject, sizeof(LayerHistory), true);
-        contact_payload_buffer(
-            visitor, tile.history.get(), ContactPayloadRole::IncidenceLayerHistoryEntries, tile.history->layers);
+        contact_payload_object(visitor, tile.history.get(), GeometryContactPayloadRole::IncidenceLayerHistoryObject,
+            sizeof(LayerHistory), true);
+        contact_payload_buffer(visitor, tile.history.get(), GeometryContactPayloadRole::IncidenceLayerHistoryEntries,
+            tile.history->layers);
         for (const auto& entry : tile.history->layers)
             if (entry.second)
             {
                 const auto& layer = *entry.second;
-                contact_payload_object(visitor, &layer, ContactPayloadRole::IncidenceLayerObject,
+                contact_payload_object(visitor, &layer, GeometryContactPayloadRole::IncidenceLayerObject,
                     state.native_source_protocol ? sizeof(SavedLayer) : sizeof(Layer), true);
-                contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerInput, layer.input);
-                contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerOutput, layer.output);
+                contact_payload_buffer(visitor, &layer, GeometryContactPayloadRole::IncidenceLayerInput, layer.input);
+                contact_payload_buffer(visitor, &layer, GeometryContactPayloadRole::IncidenceLayerOutput, layer.output);
                 if (layer.final_output)
                     layer.final_output->visit_borrowed_payload(visitor);
-                contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerEdges, layer.edges);
+                contact_payload_buffer(visitor, &layer, GeometryContactPayloadRole::IncidenceLayerEdges, layer.edges);
                 for (const auto& edge : layer.edges)
-                    contact_payload_buffer(visitor, &layer, ContactPayloadRole::IncidenceLayerEdgeResults, edge.result);
+                    contact_payload_buffer(
+                        visitor, &layer, GeometryContactPayloadRole::IncidenceLayerEdgeResults, edge.result);
                 if (state.native_source_protocol)
                 {
                     const auto& saved = static_cast<const SavedLayer&>(layer);
                     contact_payload_buffer(
-                        visitor, &saved, ContactPayloadRole::IncidenceLayerEndpointFacts, saved.endpoint_facts);
-                    contact_payload_buffer(visitor, &saved, ContactPayloadRole::IncidenceLayerLeases, saved.leases);
+                        visitor, &saved, GeometryContactPayloadRole::IncidenceLayerEndpointFacts, saved.endpoint_facts);
                     contact_payload_buffer(
-                        visitor, &saved, ContactPayloadRole::IncidenceLayerCompletions, saved.completions);
+                        visitor, &saved, GeometryContactPayloadRole::IncidenceLayerLeases, saved.leases);
+                    contact_payload_buffer(
+                        visitor, &saved, GeometryContactPayloadRole::IncidenceLayerCompletions, saved.completions);
                     for (const auto& completion : saved.completions)
                         if (completion)
                             completion->visit_borrowed_payload(visitor);

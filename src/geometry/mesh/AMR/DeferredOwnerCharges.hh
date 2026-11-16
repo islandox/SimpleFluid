@@ -112,9 +112,9 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::DeferredOwnerChargesObject, sizeof(*this));
+            contact_payload_object(visitor, this, BasicContactPayloadRole::DeferredOwnerChargesObject, sizeof(*this));
         for (const auto& value : entries_)
-            visitor(ContactPayloadAllocation{{&value, ContactPayloadRole::DeferredOwnerChargeNodes}, this,
+            visitor(ContactPayloadAllocation{{&value, BasicContactPayloadRole::DeferredOwnerChargeNodes}, this,
                 ContactPayloadKind::NodeValue, sizeof(value), sizeof(value), 1, 1, sizeof(value), true, true, true});
     }
 

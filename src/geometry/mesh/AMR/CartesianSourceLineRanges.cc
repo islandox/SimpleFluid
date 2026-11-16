@@ -1,5 +1,6 @@
 #include "CartesianSourceLineRanges.hh"
 #include "CartesianSourceManifests.hh"
+#include "CartesianSupportKey.hh"
 #include "NativeContactFunding.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include <algorithm>
@@ -67,27 +68,24 @@ template<class Index> struct ComponentSelector
 };
 std::optional<ParsedSupport> parse_support(std::span<const char> key, const CartesianSourceManifestSet& manifests)
 {
-    if (key.size() < 64)
-        return {};
-    Reader reader{key};
-    if (reader.word() != 0x5346434152543631ULL)
-        return {};
-    const auto domain = reader.bytes_view();
-    if (key.size() != add(64, domain.size()) || reader.word() != manifests.grid().region_id)
+    // One typed grammar owner: the Cartesian support-key decoder. It already
+    // rejects truncated, inconsistent and future frames, so this routine only
+    // applies the manifest's region and source-domain filters.
+    const auto typed = decode_cartesian_support_key(key);
+    if (!typed || typed->region != manifests.grid().region_id)
         return {};
     bool source_domain = false;
     for (std::size_t owner = 0; owner < manifests.source_count(); ++owner)
-        if (manifests.source(owner).cell_count() && std::ranges::equal(domain, manifests.source(owner).domain()))
+        if (manifests.source(owner).cell_count() && std::ranges::equal(typed->domain, manifests.source(owner).domain()))
         {
             source_domain = true;
             break;
         }
     if (!source_domain)
         return {};
-    const auto normal = reader.word(), level = reader.word();
-    if (normal >= 3 || level >= 63)
-        return {};
-    return ParsedSupport{reader.offset, normal, level};
+    // Plane and transverse words follow the level word, which is the last field
+    // the typed identity consumes before the coordinate block.
+    return ParsedSupport{cartesian_support_key_size(typed->domain) - 24, typed->axis, typed->level};
 }
 std::uint64_t word(const IncidenceSupportKey& key, std::size_t offset)
 {
@@ -464,20 +462,20 @@ std::pair<const void*, std::size_t> CartesianSourceLineRangeRecipe::borrowed_con
 void CartesianSourceLineRangeCatalog::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::CartesianLineCatalogObject, sizeof(*this), true);
+    contact_payload_object(visitor, this, GeometryContactPayloadRole::CartesianLineCatalogObject, sizeof(*this), true);
     if (!impl_)
         return;
     const auto& c = *impl_;
-    contact_payload_object(visitor, &c, ContactPayloadRole::CartesianLineCatalogImpl, sizeof(c));
+    contact_payload_object(visitor, &c, GeometryContactPayloadRole::CartesianLineCatalogImpl, sizeof(c));
     if (c.control_credit)
-        contact_payload_object(
-            visitor, c.control_credit, ContactPayloadRole::CartesianControlCreditObject, sizeof(ControlCredit), true);
-    contact_payload_buffer(visitor, &c, ContactPayloadRole::CartesianLineCatalogMaps, c.maps);
-    contact_payload_buffer(visitor, &c, ContactPayloadRole::CartesianLinePrototypeEntries, c.prototypes);
-    contact_payload_buffer(visitor, &c, ContactPayloadRole::CartesianLinePrototype, c.prototype_bytes);
+        contact_payload_object(visitor, c.control_credit, GeometryContactPayloadRole::CartesianControlCreditObject,
+            sizeof(ControlCredit), true);
+    contact_payload_buffer(visitor, &c, GeometryContactPayloadRole::CartesianLineCatalogMaps, c.maps);
+    contact_payload_buffer(visitor, &c, GeometryContactPayloadRole::CartesianLinePrototypeEntries, c.prototypes);
+    contact_payload_buffer(visitor, &c, GeometryContactPayloadRole::CartesianLinePrototype, c.prototype_bytes);
     for (const auto& map : c.maps)
-        contact_payload_buffer(visitor, &c, ContactPayloadRole::CartesianLineAxisEntries, map.entries);
-    contact_payload_buffer(visitor, &c, ContactPayloadRole::CartesianLineCatalogLeases, c.leases);
+        contact_payload_buffer(visitor, &c, GeometryContactPayloadRole::CartesianLineAxisEntries, map.entries);
+    contact_payload_buffer(visitor, &c, GeometryContactPayloadRole::CartesianLineCatalogLeases, c.leases);
     for (const auto& lease : c.leases)
         if (lease)
             lease->visit_borrowed_payload(visitor);
@@ -489,21 +487,21 @@ void CartesianSourceLineRangeCatalog::visit_borrowed_payload(
 void CartesianSourceLineRangeRecipe::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::CartesianLineRecipeObject, sizeof(*this), true);
+    contact_payload_object(visitor, this, GeometryContactPayloadRole::CartesianLineRecipeObject, sizeof(*this), true);
     if (!impl_)
         return;
     const auto& r = *impl_;
-    contact_payload_object(visitor, &r, ContactPayloadRole::CartesianLineRecipeImpl, sizeof(r));
+    contact_payload_object(visitor, &r, GeometryContactPayloadRole::CartesianLineRecipeImpl, sizeof(r));
     if (r.control_credit)
-        contact_payload_object(
-            visitor, r.control_credit, ContactPayloadRole::CartesianControlCreditObject, sizeof(ControlCredit), true);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineBytes, r.line);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineFamilies, r.compact);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineFamilies, r.wide);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineMask, r.masks);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineRanges, r.ranges);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineResultPoints, r.compact_results);
-    contact_payload_buffer(visitor, &r, ContactPayloadRole::CartesianLineResultPoints, r.wide_results);
+        contact_payload_object(visitor, r.control_credit, GeometryContactPayloadRole::CartesianControlCreditObject,
+            sizeof(ControlCredit), true);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineBytes, r.line);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineFamilies, r.compact);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineFamilies, r.wide);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineMask, r.masks);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineRanges, r.ranges);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineResultPoints, r.compact_results);
+    contact_payload_buffer(visitor, &r, GeometryContactPayloadRole::CartesianLineResultPoints, r.wide_results);
     if (r.catalog)
         r.catalog->visit_borrowed_payload(visitor);
 }

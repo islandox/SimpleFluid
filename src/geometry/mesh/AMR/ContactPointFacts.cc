@@ -364,11 +364,12 @@ void PointFactDirectory::FrozenPoint::visit_borrowed_payload(
     else if (const auto* fallback = std::get_if<Fallback>(&storage_))
     {
         const auto& credit = fallback->credit;
-        contact_payload_object(visitor, credit.get(), ContactPayloadRole::FallbackCreditObject,
-            sizeof(FallbackCredit), true);
-        contact_payload_object(visitor, credit->body.get(), ContactPayloadRole::FallbackBodyObject,
-            sizeof(FallbackBody), true);
-        contact_payload_buffer(visitor, credit->body.get(), ContactPayloadRole::FallbackValues, credit->body->values);
+        contact_payload_object(
+            visitor, credit.get(), BasicContactPayloadRole::FallbackCreditObject, sizeof(FallbackCredit), true);
+        contact_payload_object(
+            visitor, credit->body.get(), BasicContactPayloadRole::FallbackBodyObject, sizeof(FallbackBody), true);
+        contact_payload_buffer(
+            visitor, credit->body.get(), BasicContactPayloadRole::FallbackValues, credit->body->values);
     }
 }
 PointFactDirectory::FrozenPoint PointFactDirectory::frozen(ContactPointRef reference) const

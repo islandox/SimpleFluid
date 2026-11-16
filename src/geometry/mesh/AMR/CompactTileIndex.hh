@@ -59,7 +59,7 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::TileIndexObject, sizeof(*this));
+            contact_payload_object(visitor, this, GeometryContactPayloadRole::TileIndexObject, sizeof(*this));
         const auto array = [&](const auto& values, ContactPayloadRole role)
         {
             if (!values.capacity)
@@ -68,14 +68,15 @@ public:
             visitor(ContactPayloadAllocation{{values.data.get(), role}, this, ContactPayloadKind::Buffer, 0,
                 sizeof(Value), values.count, values.capacity, values.capacity * sizeof(Value)});
         };
-        array(pages_, ContactPayloadRole::TileIndexPageDirectory);
-        array(compact_, ContactPayloadRole::TileIndexCompactDescriptors);
-        array(wide_, ContactPayloadRole::TileIndexWideDescriptors);
+        array(pages_, GeometryContactPayloadRole::TileIndexPageDirectory);
+        array(compact_, GeometryContactPayloadRole::TileIndexCompactDescriptors);
+        array(wide_, GeometryContactPayloadRole::TileIndexWideDescriptors);
         for (std::size_t i = 0; i < pages_.count; ++i)
         {
             const auto& page = pages_[i];
             if (page)
-                contact_payload_object(visitor, page.get(), ContactPayloadRole::TileIndexPageObject, sizeof(Page));
+                contact_payload_object(
+                    visitor, page.get(), GeometryContactPayloadRole::TileIndexPageObject, sizeof(Page));
         }
     }
 

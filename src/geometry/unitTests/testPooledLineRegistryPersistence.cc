@@ -80,8 +80,9 @@ std::map<AllocationKey, std::size_t> index_pages(const PooledLineRegistry& regis
         [&](const ContactPayloadAllocation& allocation)
         {
             const auto role = allocation.identity.role;
-            if (role == ContactPayloadRole::LineRegistryNodes || role == ContactPayloadRole::LineHistoryRows ||
-                role == ContactPayloadRole::LineHistoryChildren)
+            if (role == GeometryContactPayloadRole::LineRegistryNodes ||
+                role == GeometryContactPayloadRole::LineHistoryRows ||
+                role == GeometryContactPayloadRole::LineHistoryChildren)
                 result.emplace(AllocationKey{allocation.identity.address, role}, allocation.payload_bytes);
         });
     return result;
@@ -175,7 +176,7 @@ TEST(PooledLineRegistryPersistence, NullWitnessAndFutureAliasAreExactWithBounded
             if (!old.contains(key))
             {
                 new_bytes[scale] += bytes;
-                new_nodes += key.second == ContactPayloadRole::LineRegistryNodes;
+                new_nodes += key.second == GeometryContactPayloadRole::LineRegistryNodes;
             }
         EXPECT_LE(new_nodes, 3u);
 

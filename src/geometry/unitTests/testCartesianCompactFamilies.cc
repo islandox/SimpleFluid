@@ -86,24 +86,24 @@ TEST(CartesianCompactFamilies, UniformActualPassRetainsExactFamilyCapacityAndLit
     session.for_each_borrowed_payload(
         [&](const ContactPayloadAllocation& allocation)
         {
-            if (allocation.identity.role == ContactPayloadRole::CartesianLineRecipeObject)
+            if (allocation.identity.role == GeometryContactPayloadRole::CartesianLineRecipeObject)
             {
                 ++observed_recipes;
                 const auto* recipe = static_cast<const CartesianSourceLineRangeRecipe*>(allocation.identity.address);
                 EXPECT_EQ(recipe->index_width_bytes(), std::size_t(SIMPLEFLUID_TEST_EXPECT_LINE_INDEX_WIDTH));
                 RecordProperty("actual_retained_index_width_bytes", recipe->index_width_bytes());
             }
-            if (allocation.identity.role == ContactPayloadRole::CartesianLineFamilies)
+            if (allocation.identity.role == GeometryContactPayloadRole::CartesianLineFamilies)
             {
                 ++families;
                 observed_descriptor_bytes.insert(allocation.element_size);
                 EXPECT_GT(allocation.live_count, 0);
                 EXPECT_EQ(allocation.live_count, allocation.capacity);
             }
-            if (allocation.identity.role == ContactPayloadRole::CartesianLineMask ||
-                allocation.identity.role == ContactPayloadRole::CartesianLineRanges)
+            if (allocation.identity.role == GeometryContactPayloadRole::CartesianLineMask ||
+                allocation.identity.role == GeometryContactPayloadRole::CartesianLineRanges)
                 ++general_membership_buffers;
-            if (allocation.identity.role == ContactPayloadRole::CartesianLinePrototypeEntries)
+            if (allocation.identity.role == GeometryContactPayloadRole::CartesianLinePrototypeEntries)
             {
                 ++prototype_tables;
                 EXPECT_EQ(allocation.live_count, allocation.capacity);

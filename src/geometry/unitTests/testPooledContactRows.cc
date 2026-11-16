@@ -729,7 +729,7 @@ TEST(PooledContactRows, OwnerRowsForkSharesActualPagesAndCountsAndCopiesOneBound
             [&](const D::ContactPayloadAllocation& allocation)
             {
                 accepted.insert(identity(allocation));
-                if (allocation.identity.role == D::ContactPayloadRole::CellPointCounts)
+                if (allocation.identity.role == D::GeometryContactPayloadRole::CellPointCounts)
                     ++counts;
             });
         ASSERT_EQ(counts, count);
@@ -772,7 +772,7 @@ TEST(PooledContactRows, OwnerRowsForkSharesActualPagesAndCountsAndCopiesOneBound
                 if (accepted.contains(identity(allocation)))
                     return;
                 new_payload += allocation.payload_bytes;
-                if (allocation.identity.role == D::ContactPayloadRole::CellPointCounts)
+                if (allocation.identity.role == D::GeometryContactPayloadRole::CellPointCounts)
                     ++new_counts;
             });
         EXPECT_EQ(new_counts, 1u);

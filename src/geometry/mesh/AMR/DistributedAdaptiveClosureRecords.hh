@@ -39,6 +39,21 @@ struct SIMPLEFLUID_LOCAL ClosureRequirements
 {
     std::optional<AdaptiveSplit> first, second;
 };
+/** Non-owning grading view over one side of a contact pair.
+ *
+ * The explicit backend borrows the retained ContactRecord fields; a Cartesian
+ * backend will supply the same facts from its retained source and topology.
+ * No pointer or span may outlive the pair evaluation. `spans` and `factors`
+ * always carry exactly three elements. */
+struct SIMPLEFLUID_LOCAL ContactClosureView
+{
+    int owner = -1;
+    std::span<const long double> spans;
+    std::span<const std::uint64_t> factors;
+    std::span<const AdaptiveTraceFace> trace_faces;
+    bool traces_point_independent = true;
+};
+[[nodiscard]] SIMPLEFLUID_LOCAL ContactClosureView closure_view(const ContactBody&, int owner);
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t key_capacity(const AdaptiveCellKey&);
 [[nodiscard]] SIMPLEFLUID_LOCAL std::size_t key_wire_size(const AdaptiveCellKey&);
 [[nodiscard]] SIMPLEFLUID_LOCAL AdaptiveCellKey decode_bounded_key(std::span<const char>, Budget&);
@@ -63,6 +78,18 @@ struct SIMPLEFLUID_LOCAL ClosureRequirements
 [[nodiscard]] SIMPLEFLUID_LOCAL bool span_exceeds_ratio(long double first, long double second, double ratio);
 SIMPLEFLUID_LOCAL void join_closure_requirement(
     const ContactBody&, std::optional<AdaptiveSplit>& required, std::uint64_t split);
+/** Factor-only join for grading views; same policy as the record overload. */
+SIMPLEFLUID_LOCAL void join_closure_requirement(
+    std::span<const std::uint64_t> factors, std::optional<AdaptiveSplit>& required, std::uint64_t split);
+/** Shared span grading over two closure views. Each owner's requirement is
+ * joined only for the local rank, preserving the existing pair policy. */
+SIMPLEFLUID_LOCAL void grade_contact_spans(const ContactClosureView& first, const ContactClosureView& second,
+    double maximum_span_ratio, int local_rank, ClosureRequirements& required);
+/** Shared trace grading for one common contact point. The caller owns work
+ * charging and statistics; this applies the span-ratio/trace-jump policy only. */
+SIMPLEFLUID_LOCAL void grade_contact_trace_point(const ContactClosureView& first, const ContactClosureView& second,
+    unsigned maximum_trace_jump, int local_rank, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& first_physical,
+    const PLIC::PointIdentity<ArithmeticMode::Ordinary>& second_physical, ClosureRequirements& required);
 [[nodiscard]] SIMPLEFLUID_LOCAL ClosureRequirements trace_pair_requirements(const AdaptiveTraceFace& first,
     const AdaptiveTraceFace& second, const PLIC::PointIdentity<ArithmeticMode::Ordinary>& first_point,
     const PLIC::PointIdentity<ArithmeticMode::Ordinary>& second_point, unsigned maximum_trace_jump);

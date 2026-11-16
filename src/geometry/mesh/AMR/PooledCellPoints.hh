@@ -40,9 +40,9 @@ public:
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor, bool include_object = false) const
     {
         if (include_object)
-            contact_payload_object(visitor, this, ContactPayloadRole::CellPointsObject, sizeof(*this));
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CellPointCounts, counts_);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CellPointsBefore, before_);
+            contact_payload_object(visitor, this, GeometryContactPayloadRole::CellPointsObject, sizeof(*this));
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CellPointCounts, counts_);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CellPointsBefore, before_);
     }
 
 private:
@@ -64,8 +64,8 @@ public:
     [[nodiscard]] const Budget* origin() const noexcept { return &admission_.arena(); }
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::CellPointsObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CellPointCounts, counts_);
+        contact_payload_object(visitor, this, GeometryContactPayloadRole::CellPointsObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CellPointCounts, counts_);
     }
 
 private:

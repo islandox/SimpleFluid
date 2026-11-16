@@ -248,20 +248,21 @@ public:
 
     template<class Visitor> void visit_borrowed_payload(Visitor&& visitor) const
     {
-        contact_payload_object(visitor, this, ContactPayloadRole::CartesianInventoryObject, sizeof(*this), true);
-        contact_payload_buffer(visitor, this, ContactPayloadRole::CartesianInventoryLeases, leases_);
+        contact_payload_object(
+            visitor, this, GeometryContactPayloadRole::CartesianInventoryObject, sizeof(*this), true);
+        contact_payload_buffer(visitor, this, GeometryContactPayloadRole::CartesianInventoryLeases, leases_);
         const auto visit_page = [&](const auto& node, ContactPayloadRole object, ContactPayloadRole rows)
         {
             contact_payload_object(visitor, node.get(), object, sizeof(*node), true);
             contact_payload_buffer(visitor, node.get(), rows, node->rows);
             contact_payload_buffer(
-                visitor, node.get(), ContactPayloadRole::CartesianInventoryDependencyChildren, node->children);
+                visitor, node.get(), GeometryContactPayloadRole::CartesianInventoryDependencyChildren, node->children);
         };
         BatchTree::visit_pages(batches_,
             [&](const auto& node)
             {
-                visit_page(node, ContactPayloadRole::CartesianInventoryDependencyNode,
-                    ContactPayloadRole::CartesianInventoryBatches);
+                visit_page(node, GeometryContactPayloadRole::CartesianInventoryDependencyNode,
+                    GeometryContactPayloadRole::CartesianInventoryBatches);
             });
         for (const auto& batch : batches())
         {
@@ -269,15 +270,15 @@ public:
             RangeTree::visit_pages(batch.ranges_,
                 [&](const auto& node)
                 {
-                    visit_page(node, ContactPayloadRole::CartesianInventoryDependencyNode,
-                        ContactPayloadRole::CartesianInventoryRanges);
+                    visit_page(node, GeometryContactPayloadRole::CartesianInventoryDependencyNode,
+                        GeometryContactPayloadRole::CartesianInventoryRanges);
                 });
         }
         SelectorTree::visit_pages(selectors_,
             [&](const auto& node)
             {
-                visit_page(node, ContactPayloadRole::CartesianInventoryDependencyNode,
-                    ContactPayloadRole::CartesianInventoryDependencyRows);
+                visit_page(node, GeometryContactPayloadRole::CartesianInventoryDependencyNode,
+                    GeometryContactPayloadRole::CartesianInventoryDependencyRows);
             });
         for (const auto& lease : leases_)
             lease->visit_borrowed_payload(visitor);
