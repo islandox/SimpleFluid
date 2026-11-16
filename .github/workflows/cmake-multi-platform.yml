@@ -145,6 +145,8 @@ jobs:
       CCACHE_COMPILERCHECK: content
       # Required to cache compilations that use the shared precompiled headers.
       CCACHE_SLOPPINESS: pch_defines,time_macros
+      SIMPLEFLUID_DWO_CACHE_DIR: ${{ github.workspace }}/.dwo-cache
+      SIMPLEFLUID_DWO_BUNDLE: ${{ github.workspace }}/.dwo-cache.tar.zst
 
     strategy:
       # Set fail-fast to false to ensure that feedback is delivered for all matrix combinations. Consider changing this to true when your workflow is stable.
@@ -254,6 +256,10 @@ jobs:
         compiler_hash="$(shasum -a 256 "$RUNNER_TEMP/simplefluid-compiler-identity.txt" | cut -d ' ' -f1)"
         echo "compiler-hash=$compiler_hash" >> "$GITHUB_OUTPUT"
 
+    - name: Check split DWARF cache launcher
+      if: runner.os == 'Linux' && matrix.build_type == 'Debug'
+      run: python3 -m unittest discover -s .github/scripts/tests -v
+
     - name: Download Trilinos and its dependencies
       uses: actions/download-artifact@v8
       with:
@@ -287,10 +293,17 @@ jobs:
       uses: actions/cache/restore@v6
       continue-on-error: true
       with:
-        path: ${{ env.CCACHE_DIR }}
-        key: simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
+        # Objects and their companion symbols are restored as one generation.
+        path: |
+          ${{ env.CCACHE_DIR }}
+          ${{ env.SIMPLEFLUID_DWO_BUNDLE }}
+        key: simplefluid-ccache-v2-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
         restore-keys: |
-          simplefluid-ccache-v1-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
+          simplefluid-ccache-v2-${{ matrix.os }}-${{ runner.arch }}-${{ matrix.compiler_id }}-${{ matrix.build_type }}-${{ steps.ccache_setup.outputs.compiler-hash }}-${{ matrix.ccache_suffix }}
+
+    - name: Restore split DWARF bundle
+      continue-on-error: true
+      run: python3 .github/scripts/ccache-split-dwarf.py unpack "$SIMPLEFLUID_DWO_BUNDLE"
 
     - name: Reset compiler cache statistics
       run: ccache --zero-stats
@@ -302,8 +315,8 @@ jobs:
         cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
-        -DCMAKE_C_COMPILER_LAUNCHER=ccache
-        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        -DCMAKE_C_COMPILER_LAUNCHER="python3;${{ github.workspace }}/.github/scripts/ccache-split-dwarf.py;ccache"
+        -DCMAKE_CXX_COMPILER_LAUNCHER="python3;${{ github.workspace }}/.github/scripts/ccache-split-dwarf.py;ccache"
         -DSIMPLEFLUID_SPLIT_DEBUG_INFO=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
         ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
@@ -325,7 +338,7 @@ jobs:
     - name: Build
       id: build
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
-      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 1
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2
 
     - name: Capture macOS FVM link symbols
       if: failure() && runner.os == 'macOS'
@@ -346,12 +359,27 @@ jobs:
           fi
         done
 
+    - name: Pack split DWARF bundle
+      id: dwo_pack
+      if: steps.build.outcome == 'success'
+      continue-on-error: true
+      run: python3 .github/scripts/ccache-split-dwarf.py pack "$SIMPLEFLUID_DWO_BUNDLE"
+
+    - name: Clean up SimpleFluid compiler cache
+      if: steps.build.outcome == 'success'
+      shell: bash
+      run: |
+        # Drop entries unused for seven days and enforce CCACHE_MAXSIZE before saving.
+        ccache --evict-older-than 7d
+        ccache --cleanup
+
     # Replace only this ref's exact key, including after an exact restore hit.
     # Fork PR tokens cannot delete caches; those runs still save on a miss.
     - name: Delete previous SimpleFluid compiler cache
       id: ccache_delete
       if: >-
-        steps.build.outcome == 'success' && steps.ccache.outputs.cache-primary-key != '' &&
+        steps.build.outcome == 'success' && steps.dwo_pack.outcome == 'success' &&
+        steps.ccache.outputs.cache-primary-key != '' &&
         (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
       continue-on-error: true
       shell: bash
@@ -370,13 +398,16 @@ jobs:
     # Skip replacement if listing or deleting previous caches fails.
     - name: Save SimpleFluid compiler cache
       if: >-
-        steps.build.outcome == 'success' && steps.ccache.outputs.cache-primary-key != '' &&
+        steps.build.outcome == 'success' && steps.dwo_pack.outcome == 'success' &&
+        steps.ccache.outputs.cache-primary-key != '' &&
         (steps.ccache_delete.outcome == 'success' ||
          (steps.ccache_delete.outcome == 'skipped' && steps.ccache.outputs.cache-hit != 'true'))
       uses: actions/cache/save@v6
       continue-on-error: true
       with:
-        path: ${{ env.CCACHE_DIR }}
+        path: |
+          ${{ env.CCACHE_DIR }}
+          ${{ env.SIMPLEFLUID_DWO_BUNDLE }}
         key: ${{ steps.ccache.outputs.cache-primary-key }}
 
     - name: Test

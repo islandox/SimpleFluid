@@ -59,6 +59,33 @@ may emit an empty `.dwo`). Keep the `.dwo` files and their build-tree paths
 available to the debugger; copying a binary alone is insufficient. Set
 `SIMPLEFLUID_SPLIT_DEBUG_INFO=OFF` for conventional embedded debug information.
 
+The GitHub Actions build uses `.github/scripts/ccache-split-dwarf.py` as the
+C/C++ compiler launcher around ccache. For split compilations it passes
+`-gsplit-dwarf` through `--ccache-skip`, so ccache caches the object and dependency
+outputs without embedding the `.dwo`. A separate symbol store keys each record
+by the object's SHA256 and checksums the raw DWARF payload. The launcher restores
+symbols beside each object on cache hits and recompiles when a matching symbol
+record is missing or corrupt. Its ccache namespace includes the object output
+path, preserving the skeleton DWARF filename identity otherwise handled by
+ccache's split-DWARF support. Non-split/IPO compilations use ordinary ccache.
+This launcher supports the workflow's expanded GCC/Clang CMake compile commands
+with plain `-gsplit-dwarf` and explicit `-o`; response files and custom DWARF
+output destinations are outside its supported scope.
+
+After a successful build, CI packs that symbol store as one tar/zstd stream
+(`.dwo-cache.tar.zst`, level 9, 128 MiB window, two compression workers). The
+bundle and object cache share one GitHub Actions cache generation; packing must
+succeed before replacing the previous generation. Records unused for seven
+days are pruned. `CCACHE_MAXSIZE` limits the object cache only; the symbol bundle
+is stored separately and does not count against that limit. This layout enables
+compression across translation units; it does not establish a compression-ratio
+or build-time improvement without matched measurements. The bundle contains
+internal checksummed records; the launcher restores ordinary `.dwo` files at
+their original build paths for debuggers. Local builds retain their existing
+launcher behavior unless this CI launcher is explicitly configured.
+Focused real-compiler/PCH and bundle-recovery checks run in Linux Debug CI;
+run them locally with `python3 -m unittest discover -s .github/scripts/tests -v`.
+
 Split mode preserves optimization and IPO/LTO policy. A target is eligible only
 when IPO is disabled for the active configuration: its
 `INTERPROCEDURAL_OPTIMIZATION_<CONFIG>` property takes precedence over the

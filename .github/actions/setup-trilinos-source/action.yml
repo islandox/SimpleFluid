@@ -425,6 +425,16 @@ runs:
         cmake --build ${{ github.workspace }}/_deps/trilinos_build --parallel 2
         cmake --install ${{ github.workspace }}/_deps/trilinos_build
 
+    - name: Clean up Trilinos compiler cache
+      if: steps.cache-trilinos.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        CCACHE_DIR: ${{ inputs.ccache-dir }}
+      run: |
+        # Drop entries unused for seven days and enforce CCACHE_MAXSIZE before saving.
+        ccache --evict-older-than 7d
+        ccache --cleanup
+
     - name: Export dependency prefixes
       shell: bash
       run: bash "${{ github.workspace }}/.github/scripts/export-dependency-prefixes.sh"

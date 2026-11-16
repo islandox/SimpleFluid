@@ -12,6 +12,8 @@ runs:
         sudo apt-get install -y --no-install-recommends \
           build-essential \
           ccache \
+          python3 \
+          zstd \
           git \
           cmake \
           ninja-build \
@@ -38,6 +40,8 @@ runs:
         brew install \
           boost \
           ccache \
+          python \
+          zstd \
           googletest \
           hdf5-mpi \
           open-mpi
