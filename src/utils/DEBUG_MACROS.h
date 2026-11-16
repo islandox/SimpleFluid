@@ -72,8 +72,10 @@
 #endif
 
 #ifdef CHECK_BOUNDS_ENABLED
+    // Construct the diagnostic string only when the bounds check fails.
     #define CHECK_BOUNDS(value, lower, upper) \
-        utils::check<std::out_of_range>(((value) >= (lower)) && ((value) < (upper)))
+        ((((value) >= (lower)) && ((value) < (upper))) \
+            ? static_cast<void>(0) : utils::check<std::out_of_range>(false))
 #else
     #define CHECK_BOUNDS(value, lower, upper) // do nothing
 #endif
