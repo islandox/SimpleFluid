@@ -6,7 +6,7 @@
 #include "ContactGroupAllocation.hh"
 #include "ContactHaloContext.hh"
 #include "ContactPayloadCensus.hh"
-#include "SimpleFluidExport.hh"
+#include "utils/export_helper.hh"
 #include <memory>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
