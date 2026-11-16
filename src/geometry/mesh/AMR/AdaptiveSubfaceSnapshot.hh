@@ -148,7 +148,7 @@ public:
 };
 
 /** Canonical first-cell physical loop, outward from first. The view pins
- * immutable point/provenance pages and is independent of the session. */
+ * immutable pages or a certified procedural source, independently of the session. */
 class SIMPLEFLUID_LOCAL CanonicalSubfaceView
 {
 public:
@@ -225,8 +225,8 @@ struct SubfaceIndexWork
     std::size_t copied_pages = 0, copied_bytes = 0, owner_probes = 0;
     std::size_t retired_foreign_index_bytes = 0;
 };
-/** The sealed completed piece set. Query selectors borrow keys from actual
- * piece pages. A face visit preserves canonical piece ordering. */
+/** The sealed completed piece set, backed by immutable pages or a certified
+ * procedural source. A face visit preserves canonical piece ordering. */
 class SIMPLEFLUID_LOCAL AdaptiveSubfaceSnapshot
 {
 public:

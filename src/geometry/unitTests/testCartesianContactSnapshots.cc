@@ -41,23 +41,27 @@ struct Gate
 };
 AMRGrid config()
 {
-    auto value = grid();
-    value.root_blocks = {2, 2, 2};
-    value.block_cells = {1, 1, 1};
-    return value;
+    return grid();
 }
 int owner_of(const AdaptiveCellKey& key, int ranks)
 {
-    return ranks == 1 ? 0 : int(std::get<CartesianCellAncestry>(key.ancestry).index[0]);
+    return ranks == 1 ? 0 : int(std::get<CartesianCellAncestry>(key.ancestry).index[0] % 2);
 }
 std::vector<AdaptiveLeaf> all_leaves(const AMRGrid& value)
 {
-    auto all = leaves(value);
-    for (auto& leaf : all)
-    {
-        const auto& index = std::get<CartesianCellAncestry>(leaf.key.ancestry).index;
-        leaf.revision = 101 + index[0] + 2 * index[1] + 4 * index[2];
-    }
+    std::vector<AdaptiveLeaf> all;
+    const auto nx = value.root_blocks[0] * value.block_cells[0];
+    const auto ny = value.root_blocks[1] * value.block_cells[1];
+    const auto nz = value.root_blocks[2] * value.block_cells[2];
+    for (std::uint64_t z = 0; z < nz; ++z)
+        for (std::uint64_t y = 0; y < ny; ++y)
+            for (std::uint64_t x = 0; x < nx; ++x)
+            {
+                auto leaf =
+                    cartesian_adaptive_leaf(value, {value.region_id, CartesianCellAncestry{0, {x, y, z}}}, {'d'});
+                leaf.revision = 101 + x + nx * (y + ny * z);
+                all.push_back(std::move(leaf));
+            }
     return all;
 }
 Owner source(const AMRGrid& value)
@@ -229,7 +233,9 @@ TEST(CartesianContactSnapshots, DetachedReadersSurviveRefinementMigrationAndCont
 TEST(CartesianContactSnapshots, UnsupportedMixedLevelEditPreservesAcceptedRootsAndNativePublication)
 {
     const Gate gate("1");
-    const auto state = source(config());
+    auto value = config();
+    value.root_blocks[0] = 2;
+    const auto state = source(value);
     const auto contacts = contact_snapshot(*state);
     const auto layout = state->leaf_layout();
     const auto before = identities(state->native_draft());

@@ -369,7 +369,7 @@ public:
     [[nodiscard]] static std::shared_ptr<CartesianContactState> build(const AdaptiveProviderKernel& kernel,
         CartesianLeafSelection owned, int owner, Budget& budget, std::shared_ptr<Budget> keeper,
         std::uint64_t generation, const CartesianContactCapability* elected = nullptr,
-        std::shared_ptr<const AdaptiveLeafLayout> layout = {})
+        std::shared_ptr<const AdaptiveLeafLayout> layout = {}, bool accepted_selection = false)
     {
         cartesian_detail::check_keeper(budget, keeper);
         const auto grid = SimpleFluid::Meshes::AMR::trusted_cartesian_incidence_grid(kernel);
@@ -400,7 +400,28 @@ public:
             keeper, generation);
         state->shared_allocation_bytes_ = shared_bytes;
         state->layout_ = std::move(layout);
-        if (state->layout_)
+        if (state->layout_ && accepted_selection)
+        {
+            if (state->layout_->size() != owned.size())
+                return {};
+            cartesian_detail::Allocation validation(budget);
+            std::vector<unsigned char> seen;
+            validation.reserve(seen, owned.size());
+            seen.resize(owned.size());
+            for (const auto& leaf : owned)
+            {
+                const auto ordinal = state->layout_->ordinal_of(leaf.key);
+                if (!ordinal || seen[*ordinal])
+                    return {};
+                seen[*ordinal] = 1;
+                const auto& accepted = state->layout_->at_ordinal(*ordinal);
+                if (accepted.revision != leaf.revision || accepted.domain != leaf.domain ||
+                    accepted.provider != leaf.provider || accepted.material != leaf.material ||
+                    accepted.native_cell != leaf.native_cell || accepted.native_recipe != leaf.native_recipe)
+                    return {};
+            }
+        }
+        else if (state->layout_)
         {
             bool exact = state->layout_->size() == owned.size();
             for (const auto& leaf : owned)
@@ -413,11 +434,11 @@ public:
                 state->pending_selection_ = true;
                 state->allocation_.reserve(state->pending_leaves_, owned.size());
                 for (const auto& leaf : owned)
-                    state->pending_leaves_.push_back(&leaf);
+                    state->pending_leaves_.push_back({leaf.key, leaf.revision});
                 std::ranges::sort(
-                    state->pending_leaves_, {}, [](const auto* leaf) -> const AdaptiveCellKey& { return leaf->key; });
+                    state->pending_leaves_, {}, [](const auto& leaf) -> const AdaptiveCellKey& { return leaf.key; });
                 for (std::size_t i = 1; i < state->pending_leaves_.size(); ++i)
-                    if (state->pending_leaves_[i - 1]->key == state->pending_leaves_[i]->key)
+                    if (state->pending_leaves_[i - 1].key == state->pending_leaves_[i].key)
                         return {};
             }
         }
@@ -520,8 +541,9 @@ public:
     [[nodiscard]] bool requirements_empty() const noexcept { return marks_.empty(); }
     [[nodiscard]] bool pending_selection() const noexcept { return pending_selection_; }
     [[nodiscard]] const std::shared_ptr<const AdaptiveLeafLayout>& layout() const noexcept { return layout_; }
-    /** Validate before any publication, then release operation-local overlay
-     * borrows. This private draft has never escaped through a reader. */
+    /** Validate before any publication, then release admitted operation-local
+     * key/revision witnesses. Mutable overlay nodes can disappear before seal;
+     * no published reader retains this temporary selection. */
     void validate_layout(const std::shared_ptr<const AdaptiveLeafLayout>& next) const
     {
         if (!layout_ || !next || next->size() != key_count())
@@ -530,14 +552,15 @@ public:
         {
             const auto& key = key_at(i);
             const auto* leaf = next->find(key);
-            if (!leaf || leaf->revision != revision(key) || leaf->domain != domain())
+            if (!leaf || leaf->revision != revision(key) || leaf->domain != domain() ||
+                !CartesianIncidenceSource::authenticates_native_leaf(capability().grid, *leaf))
                 throw std::invalid_argument("Cartesian seal disagrees with the authenticated leaf selection.");
         }
     }
     void bind_validated_layout(std::shared_ptr<const AdaptiveLeafLayout> next) noexcept
     {
-        const auto bytes = pending_leaves_.capacity() * sizeof(const AdaptiveLeaf*);
-        std::vector<const AdaptiveLeaf*>().swap(pending_leaves_);
+        const auto bytes = pending_leaves_.capacity() * sizeof(PendingLeaf);
+        std::vector<PendingLeaf>().swap(pending_leaves_);
         allocation_.bytes -= bytes;
         allocation_.budget.used -= bytes;
         layout_ = std::move(next);
@@ -555,8 +578,8 @@ public:
         if (pending_selection_)
         {
             const auto found = std::lower_bound(pending_leaves_.begin(), pending_leaves_.end(), key,
-                [](const AdaptiveLeaf* leaf, const AdaptiveCellKey& value) { return leaf->key < value; });
-            if (found != pending_leaves_.end() && (*found)->key == key)
+                [](const PendingLeaf& leaf, const AdaptiveCellKey& value) { return leaf.key < value; });
+            if (found != pending_leaves_.end() && found->key == key)
                 return std::size_t(found - pending_leaves_.begin());
         }
         else if (layout_)
@@ -573,8 +596,8 @@ public:
         if (pending_selection_)
         {
             const auto found = std::lower_bound(pending_leaves_.begin(), pending_leaves_.end(), key,
-                [](const AdaptiveLeaf* leaf, const AdaptiveCellKey& value) { return leaf->key < value; });
-            return found != pending_leaves_.end() && (*found)->key == key;
+                [](const PendingLeaf& leaf, const AdaptiveCellKey& value) { return leaf.key < value; });
+            return found != pending_leaves_.end() && found->key == key;
         }
         return layout_ ? layout_->contains(key) : index_.contains(key);
     }
@@ -582,7 +605,7 @@ public:
     {
         const auto ordinal = record_id(key);
         if (pending_selection_)
-            return pending_leaves_[ordinal]->revision;
+            return pending_leaves_[ordinal].revision;
         return layout_ ? layout_->at_ordinal(ordinal).revision : revisions_.at(ordinal);
     }
     [[nodiscard]] std::pair<int, std::uint64_t> owner_revision(const AdaptiveCellKey& key) const
@@ -921,11 +944,16 @@ private:
     [[nodiscard]] const AdaptiveCellKey& key_at(std::size_t i) const
     {
         if (pending_selection_)
-            return pending_leaves_.at(i)->key;
+            return pending_leaves_.at(i).key;
         return layout_ ? layout_->at_ordinal(i).key : keys_.at(i);
     }
     std::shared_ptr<const AdaptiveLeafLayout> layout_;
-    std::vector<const AdaptiveLeaf*> pending_leaves_;
+    struct PendingLeaf
+    {
+        AdaptiveCellKey key;
+        std::uint64_t revision;
+    };
+    std::vector<PendingLeaf> pending_leaves_;
     bool pending_selection_ = false;
     std::vector<AdaptiveCellKey> keys_;
     std::map<AdaptiveCellKey, std::size_t> index_;

@@ -2444,7 +2444,7 @@ std::shared_ptr<CartesianContactState> DistributedAdaptiveContactHalo::Impl::pre
             {
                 capability->frame = kernel.descriptor();
                 result = CartesianContactState::build(
-                    kernel, owned, rank, budget, arena, generation, &*capability, query->layout);
+                    kernel, owned, rank, budget, arena, generation, &*capability, query->layout, generation == 1);
             }
         });
     local_eligible = bool(result);
@@ -3181,7 +3181,7 @@ std::shared_ptr<const AdaptiveContactSnapshot> DistributedAdaptiveContactHalo::s
         auto subfaces = AdaptiveSubfaceSnapshot::cartesian(state.cartesian, next, state.context,
             geometry_construction_controls(), state.rank, state.budget, state.arena);
         // Every throwing allocation and validation above precedes publication.
-        // Pending overlay borrows are private and all readers reject them.
+        // Pending selection witnesses are private and all readers reject them.
         if (state.cartesian->pending_selection())
             const_cast<CartesianContactState&>(*state.cartesian).bind_validated_layout(next);
         state.query = std::move(storage);

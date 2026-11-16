@@ -583,8 +583,9 @@ mixed-level updates transactionally; it does not convert backends mid-trial.
 
 Hierarchy-backed Cartesian state pins the exact `AdaptiveLeafLayout` instead of
 retaining another local key/index/revision catalog. Preparation reads the accepted
-layout and operation-local candidate leaves; those overlay borrows cannot escape
-through readers. Only a hierarchy-issued transition permits sealing another
+layout and operation-local candidate leaves. Admitted temporary key/revision
+witnesses survive release of the mutable overlay and disappear at layout seal;
+published readers cannot retain them. Only a hierarchy-issued transition permits sealing another
 selection. Owner replies authenticate remote revisions in the current transaction
 context. Standalone halo callers retain their owning compatibility metadata.
 

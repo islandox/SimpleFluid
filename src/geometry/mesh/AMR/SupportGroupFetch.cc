@@ -132,9 +132,6 @@ struct Expected
 {
     PooledSupportRegistry::Slot group;
     std::size_t member;
-    /** Exact member snapshot at request time. A compacted (derived) group has no
-     * stored address to re-read, so the reply is validated against this copy. */
-    PooledSupportMember snapshot;
     std::span<const char> payload;
     bool seen = false;
 };
@@ -219,7 +216,7 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                     {
                         const auto& member = (*members)[i];
                         page_memory.append(expected);
-                        expected.push_back({slot, i, member, {}, false});
+                        expected.push_back({slot, i, {}, false});
                         auto key = encoded_key(registry.member_cell(member), page_memory);
                         std::size_t packet_size = words + 8 * 6;
                         add_size(packet_size, support.size());
@@ -311,7 +308,10 @@ void fetch_dirty_support_groups(const PooledSupportRegistry& registry, const Own
                     if (index >= expected.size())
                         throw std::invalid_argument("Foreign support fetch reply slot.");
                     auto& e = expected[index];
-                    const auto& member = e.snapshot;
+                    const auto* group = registry.find(e.group);
+                    if (!group || e.member >= group->size())
+                        throw std::invalid_argument("Stale support fetch group.");
+                    const auto& member = (*group)[e.member];
                     if (e.seen || packet.peer != member.owner || revision != member.revision ||
                         ordinal != member.surface || size != member.encoded_size || payload.size() != size ||
                         !std::ranges::equal(support, registry.support_key(e.group)) ||
