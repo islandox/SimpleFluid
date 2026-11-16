@@ -33,7 +33,7 @@ inline void OrthogonalCylindrial3D::check_cell_id(cell_id_t id) const
  */
 inline void OrthogonalCylindrial3D::check_face_id(face_id_t id) const
 {
-    CHECK(id.orientation == R_FACE || id.orientation == THETA_FACE || id.orientation == Z_FACE);
+    CHECK_BOUNDS(id.orientation, R_FACE, Z_FACE + 1);
     CHECK_BOUNDS(
         id.i,
         0,

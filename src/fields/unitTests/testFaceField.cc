@@ -78,9 +78,7 @@ TEST(FaceFieldTest, StoresValuesOnOwnedFaceMap)
     EXPECT_DOUBLE_EQ(flux.global_value(face10_gid), 5.0);
     EXPECT_TRUE(flux.is_owned_global_face(face10_gid));
     EXPECT_FALSE(flux.is_owned_global_face(77));
-#ifndef NDEBUG
-    EXPECT_THROW(flux.value(11), std::out_of_range);
-#endif
+    EXPECT_THROW_WHEN_DEBUG(flux.value(11), std::out_of_range);
 }
 
 /**

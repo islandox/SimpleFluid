@@ -70,7 +70,7 @@ EntityRange<uint64_t> ExtrudedTopology::base_cell_nodes(size_t c) const
 }
 EntityRange<uint64_t> ExtrudedTopology::cell_faces(size_t c) const
 {
-    if(c>=layout().cells) throw std::out_of_range("Extruded cell ordinal out of bounds.");
+    CHECK_BOUNDS(c, 0, layout().cells);
     const auto id=indexer().cell_id(c);
     return {this,c,d_topology.cell_side_faces(id.ij).size()+2,[](const void* source,size_t c,size_t i)->ID
     {
@@ -80,7 +80,7 @@ EntityRange<uint64_t> ExtrudedTopology::cell_faces(size_t c) const
 }
 EntityRange<uint64_t> ExtrudedTopology::cell_nodes(size_t c) const
 {
-    if(c>=layout().cells) throw std::out_of_range("Extruded cell ordinal out of bounds.");
+    CHECK_BOUNDS(c, 0, layout().cells);
     const auto id=indexer().cell_id(c);
     return {this,c,2*base_cell_nodes(id.ij).size(),[](const void* source,size_t c,size_t i)->ID
     {
@@ -91,7 +91,7 @@ EntityRange<uint64_t> ExtrudedTopology::cell_nodes(size_t c) const
 }
 EntityRange<uint64_t> ExtrudedTopology::face_nodes(size_t f) const
 {
-    if(f>=layout().faces) throw std::out_of_range("Extruded face ordinal out of bounds.");
+    CHECK_BOUNDS(f, 0, layout().faces);
     const auto id=indexer().face_id(f);
     const auto count=id.orientation==SemiStructuredIndexer::AXIAL?base_cell_nodes(id.ij).size():4;
     return {this,f,count,[](const void* source,size_t f,size_t i)->ID
@@ -153,34 +153,40 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
 }
 real_t ExtrudedGeometry::cell_volume(size_t c) const
 {
-    const auto id=d_topology->indexer().cell_id(c); return d_areas.at(id.ij)*(d_z.at(id.k+1)-d_z.at(id.k));
+    CHECK_BOUNDS(c, 0, layout().cells);
+    const auto id=d_topology->indexer().cell_id(c); return d_areas[id.ij]*(d_z[id.k+1]-d_z[id.k]);
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::cell_centroid(size_t c) const
 {
-    const auto id=d_topology->indexer().cell_id(c); auto center=d_cell_centers.at(id.ij);
-    center.z=std::midpoint(d_z.at(id.k),d_z.at(id.k+1)); return center;
+    CHECK_BOUNDS(c, 0, layout().cells);
+    const auto id=d_topology->indexer().cell_id(c); auto center=d_cell_centers[id.ij];
+    center.z=std::midpoint(d_z[id.k],d_z[id.k+1]); return center;
 }
 real_t ExtrudedGeometry::face_area(size_t f) const
 {
+    CHECK_BOUNDS(f, 0, layout().faces);
     const auto id=d_topology->indexer().face_id(f);
-    return id.orientation==SemiStructuredIndexer::AXIAL?d_areas.at(id.ij):d_lengths.at(id.ij)*(d_z.at(id.k+1)-d_z.at(id.k));
+    return id.orientation==SemiStructuredIndexer::AXIAL?d_areas[id.ij]:d_lengths[id.ij]*(d_z[id.k+1]-d_z[id.k]);
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::face_centroid(size_t f) const
 {
+    CHECK_BOUNDS(f, 0, layout().faces);
     const auto id=d_topology->indexer().face_id(f);
-    auto center=id.orientation==SemiStructuredIndexer::AXIAL?d_cell_centers.at(id.ij):d_edge_centers.at(id.ij);
-    center.z=id.orientation==SemiStructuredIndexer::AXIAL?d_z.at(id.k):std::midpoint(d_z.at(id.k),d_z.at(id.k+1));
+    auto center=id.orientation==SemiStructuredIndexer::AXIAL?d_cell_centers[id.ij]:d_edge_centers[id.ij];
+    center.z=id.orientation==SemiStructuredIndexer::AXIAL?d_z[id.k]:std::midpoint(d_z[id.k],d_z[id.k+1]);
     return center;
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::face_area_vector(size_t f) const
 {
+    CHECK_BOUNDS(f, 0, layout().faces);
     const auto id=d_topology->indexer().face_id(f);
     if(id.orientation==SemiStructuredIndexer::AXIAL) return {0,0,(id.k==0?-1.0:1.0)*face_area(f)};
-    return d_edge_normals.at(id.ij)*face_area(f);
+    return d_edge_normals[id.ij]*face_area(f);
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::node_coordinates(size_t n) const
 {
-    const auto id=d_topology->indexer().node_id(n); auto p=d_nodes.at(id.ij); p.z=d_z.at(id.k); return p;
+    CHECK_BOUNDS(n, 0, layout().nodes);
+    const auto id=d_topology->indexer().node_id(n); auto p=d_nodes[id.ij]; p.z=d_z[id.k]; return p;
 }
 MeshStorageReport ExtrudedGeometry::storage_report() const
 {

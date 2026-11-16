@@ -26,50 +26,56 @@ inline int UnstructuredMesh::cell_face_orientation(CellID cell, FaceID face) con
 /**
  * @brief Validate a compact cell ID.
  * @param id Cell ID to validate.
- * @throws std::out_of_range If @p id is outside local cells.
+ * @throws std::out_of_range If @p id is outside local cells and bounds checks are enabled.
  */
 inline void UnstructuredMesh::check_cell_id(CellID id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (id >= d_cells.size())
     {
         throw std::out_of_range(
             "UnstructuredMesh cell ID is out of range.");
     }
+#endif
 }
 
 /**
  * @brief Validate a compact face ID.
  * @param id Face ID to validate.
- * @throws std::out_of_range If @p id is outside local faces.
+ * @throws std::out_of_range If @p id is outside local faces and bounds checks are enabled.
  */
 inline void UnstructuredMesh::check_face_id(FaceID id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (id >= d_faces.size())
     {
         throw std::out_of_range(
             "UnstructuredMesh face ID is out of range.");
     }
+#endif
 }
 
 /**
  * @brief Validate a compact node ID.
  * @param id Node ID to validate.
- * @throws std::out_of_range If @p id is outside local nodes.
+ * @throws std::out_of_range If @p id is outside local nodes and bounds checks are enabled.
  */
 inline void UnstructuredMesh::check_node_id(NodeID id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (id >= d_nodes.size())
     {
         throw std::out_of_range(
             "UnstructuredMesh node ID is out of range.");
     }
+#endif
 }
 
 /**
  * @brief Return ordered node connectivity for a cell.
  * @param id Cell ID.
  * @return Cell node IDs.
- * @throws std::out_of_range If @p id is invalid.
+ * @throws std::out_of_range If @p id is invalid and bounds checks are enabled.
  */
 inline const Arr<UnstructuredMesh::NodeID>&
 UnstructuredMesh::cell_nodes(CellID id) const
@@ -82,7 +88,7 @@ UnstructuredMesh::cell_nodes(CellID id) const
  * @brief Return ordered node connectivity for a face.
  * @param id Face ID.
  * @return Face node IDs.
- * @throws std::out_of_range If @p id is invalid.
+ * @throws std::out_of_range If @p id is invalid and bounds checks are enabled.
  */
 inline const Arr<UnstructuredMesh::NodeID>&
 UnstructuredMesh::face_nodes(FaceID id) const
@@ -95,7 +101,7 @@ UnstructuredMesh::face_nodes(FaceID id) const
  * @brief Return the topology type of a cell.
  * @param id Cell ID.
  * @return Cell topology type.
- * @throws std::out_of_range If @p id is invalid.
+ * @throws std::out_of_range If @p id is invalid and bounds checks are enabled.
  */
 inline auto UnstructuredMesh::cell_type(CellID id) const -> CellType
 {

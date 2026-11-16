@@ -206,7 +206,7 @@ public:
             : d_mesh(mesh), d_index(index), d_region(region) {}
         void check_cell(ID cell) const
         {
-            if (cell >= layout().cells) throw std::out_of_range("Native cell out of bounds.");
+            CHECK_BOUNDS(cell, 0, layout().cells);
         }
         const MultiRegionMesh& d_mesh;
         size_t d_index;
@@ -216,9 +216,10 @@ public:
     /**
      * @brief Validate once and pin constituent geometry for an existing kernel.
      *
-     * Queries through this mesh (including MeshHandle aliases) keep bounds
-     * checks but avoid whole-composite validation on this thread while the
-     * view lives. Public queries outside a view remain fully checked. Views
+     * Queries through this mesh (including MeshHandle aliases) check bounds
+     * in Debug or when runtime bounds checks are explicitly enabled, and avoid
+     * whole-composite validation on this thread while the view lives. Public
+     * queries outside a view always validate constituent geometry. Views
      * borrow the mesh, are thread-affine, and must be destroyed in scope order.
      * Nested operations reuse an enclosing view of the same mesh. Geometry
      * motion and constituent/provider replacement are rejected before mutation.

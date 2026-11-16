@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "utils/testing_environment.hh"
 
 #include "geometry/mesh/LocalGlobalIndexer.hh"
 #include "geometry/mesh/LocalGlobalIndexer.tcc"
@@ -179,9 +180,9 @@ TEST(LocalGlobalIndexerTest, ReportsMissingAndInvalidIdentifiers)
         Indexer::invalid_local_id());
     EXPECT_THROW(indexer.local_to_global_cell_id(9), std::out_of_range);
     EXPECT_THROW(indexer.global_to_local_face_id(99), std::out_of_range);
-    EXPECT_THROW(indexer.cell_global_id(-1), std::out_of_range);
-    EXPECT_THROW(indexer.face_global_id(1), std::out_of_range);
-    EXPECT_THROW(indexer.local_to_global_node(1), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(indexer.cell_global_id(-1), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(indexer.face_global_id(1), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(indexer.local_to_global_node(1), std::out_of_range);
 }
 
 /** @brief Verifies duplicate global identifiers are rejected for every entity map. */

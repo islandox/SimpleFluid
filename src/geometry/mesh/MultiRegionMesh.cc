@@ -352,7 +352,7 @@ std::optional<MultiRegionMesh::RefinedFaceView> MultiRegionMesh::refinement(Regi
 }
 MultiRegionMesh::ID MultiRegionMesh::encode_native_face(RegionFace f) const
 {
-    if(f.face>=region_layout(f.region).faces) throw std::out_of_range("Native face out of bounds.");
+    CHECK_BOUNDS(f.face, 0, region_layout(f.region).faces);
     return d_native_faces[f.region]+f.face;
 }
 RegionFace MultiRegionMesh::decode_native_face(ID key) const
@@ -397,7 +397,7 @@ InterfaceFacePolygon MultiRegionMesh::interface_polygon(RegionFace f) const
 }
 ID MultiRegionMesh::canonical_face(RegionFace f) const
 {
-    if (f.face >= region_layout(f.region).faces) throw std::out_of_range("Native face out of bounds.");
+    CHECK_BOUNDS(f.face, 0, region_layout(f.region).faces);
     if (refinement(f)) throw std::invalid_argument("A subdivided native face has multiple logical faces; use logical_faces().");
     if (topology(f.region, [&](const auto& t) { return t.neighbor_cell(f.face); }) == invalid_cell_id())
         if (const auto owner = partner(f, false)) f = *owner;
@@ -405,7 +405,7 @@ ID MultiRegionMesh::canonical_face(RegionFace f) const
 }
 RegionFace MultiRegionMesh::native_face(ID f) const
 {
-    if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds.");
+    CHECK_BOUNDS(f, 0, num_faces());
     const size_t r = std::upper_bound(d_faces.begin(), d_faces.end(), f) - d_faces.begin() - 1;
     const ID ordinal = f - d_faces[r];
     const auto& directory = d_region_interfaces[r];
@@ -436,13 +436,13 @@ RegionFace MultiRegionMesh::native_face(ID f) const
 }
 std::pair<size_t, ID> MultiRegionMesh::native_cell(ID c) const
 {
-    if (c >= num_cells()) throw std::out_of_range("Composite cell out of bounds.");
+    CHECK_BOUNDS(c, 0, num_cells());
     const size_t r = std::upper_bound(d_cells.begin(), d_cells.end(), c) - d_cells.begin() - 1;
     return {r, c - d_cells[r]};
 }
 ID MultiRegionMesh::composite_cell(size_t r, ID c) const
 {
-    if (c >= region_layout(r).cells) throw std::out_of_range("Native cell out of bounds.");
+    CHECK_BOUNDS(c, 0, region_layout(r).cells);
     return d_cells[r] + c;
 }
 void MultiRegionMesh::validate_static() const
@@ -495,9 +495,21 @@ void MultiRegionMesh::validate_query() const
 {
     if (!executing_on_this_thread()) validate_static();
 }
-void MultiRegionMesh::check_cell_id(ID c) const { validate_query(); if (c >= num_cells()) throw std::out_of_range("Composite cell out of bounds."); }
-void MultiRegionMesh::check_face_id(ID f) const { validate_query(); if (f >= num_faces()) throw std::out_of_range("Composite face out of bounds."); }
-void MultiRegionMesh::check_node_id(ID n) const { validate_query(); if (n >= num_nodes()) throw std::out_of_range("Composite node out of bounds."); }
+void MultiRegionMesh::check_cell_id(ID c) const
+{
+    validate_query();
+    CHECK_BOUNDS(c, 0, num_cells());
+}
+void MultiRegionMesh::check_face_id(ID f) const
+{
+    validate_query();
+    CHECK_BOUNDS(f, 0, num_faces());
+}
+void MultiRegionMesh::check_node_id(ID n) const
+{
+    validate_query();
+    CHECK_BOUNDS(n, 0, num_nodes());
+}
 real_t MultiRegionMesh::cell_volume_impl(ID c) const
 {
     const auto [r, id] = native_cell(c); return axial_scale() * geometry(r, [&](const auto& g) { return g.cell_volume(id); });

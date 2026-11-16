@@ -33,8 +33,9 @@ namespace SimpleFluid
  * Derived meshes provide the primitive geometry and connectivity operations
  * through private `*_impl` methods. MeshBase supplies the topology predicates,
  * outward geometry, and distance queries shared by finite-volume operators.
- * Local-ordinal conversions reject out-of-range values; ID-based queries
- * delegate validation to the derived mesh. The invalid cell sentinel maps to
+ * Local-ordinal conversions check bounds in Debug or when runtime bounds
+ * checks are explicitly enabled; ID-based queries delegate validation to the
+ * derived mesh. The invalid cell sentinel maps to
  * `invalid_local_id` in `cell_local_id()`.
  *
  * Face normals point away from the owner; outward variants flip them for the
@@ -84,28 +85,19 @@ public:
 
     cell_id_t cell_id(local_ordinal_type local_id) const
     {
-        if (local_id >= num_cells())
-        {
-            throw std::out_of_range("Cell local ID is out of range.");
-        }
+        CHECK_BOUNDS(local_id, 0, num_cells());
         return derived().indexer().cell_id(local_id);
     }
 
     face_id_t face_id(local_ordinal_type local_id) const
     {
-        if (local_id >= num_faces())
-        {
-            throw std::out_of_range("Face local ID is out of range.");
-        }
+        CHECK_BOUNDS(local_id, 0, num_faces());
         return derived().indexer().face_id(local_id);
     }
 
     node_id_t node_id(local_ordinal_type local_id) const
     {
-        if (local_id >= num_nodes())
-        {
-            throw std::out_of_range("Node local ID is out of range.");
-        }
+        CHECK_BOUNDS(local_id, 0, num_nodes());
         return derived().indexer().node_id(local_id);
     }
 

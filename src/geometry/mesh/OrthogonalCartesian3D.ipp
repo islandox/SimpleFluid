@@ -33,7 +33,7 @@ inline void OrthogonalCartesian3D::check_cell_id(cell_id_t id) const
  */
 inline void OrthogonalCartesian3D::check_face_id(face_id_t id) const
 {
-    CHECK(id.orientation == X_FACE || id.orientation == Y_FACE || id.orientation == Z_FACE);
+    CHECK_BOUNDS(id.orientation, X_FACE, Z_FACE + 1);
     CHECK_BOUNDS(id.i, 0, id.orientation == X_FACE ?
                             d_indexer.num_cells_per_dim[X] + 1 : d_indexer.num_cells_per_dim[X]);
     CHECK_BOUNDS(id.j, 0, id.orientation == Y_FACE ? 

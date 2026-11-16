@@ -48,7 +48,8 @@ private:
  *
  * XY nodes use z=0 and the supplied template's exact numbering and CCW loops.
  * Z coordinates are finite and strictly increasing. Base metrics are cached
- * once; no cell or face metrics are expanded through layers.
+ * once; no cell or face metrics are expanded through layers. Entity query
+ * bounds are checked in Debug or with explicit runtime bounds checks.
  */
 class ExtrudedGeometry
 {

@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "utils/testing_environment.hh"
 
 #include "geometry/mesh/OrthoMeshPartitioner.hh"
 
@@ -224,10 +225,10 @@ TEST(OrthoMeshPartitionerTest, RejectsInvalidRequests)
     EXPECT_THROW(
         partitioner.owned_coordinate_range(2),
         std::out_of_range);
-    EXPECT_THROW(
+    EXPECT_THROW_WHEN_DEBUG(
         partitioner.owner_partition(CellID{3, 0, 0}),
         std::out_of_range);
-    EXPECT_THROW(
+    EXPECT_THROW_WHEN_DEBUG(
         partitioner.owner_partition(
             FaceID{0, 0, 0, static_cast<uint8_t>(3)}),
         std::out_of_range);

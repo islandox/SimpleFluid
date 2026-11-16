@@ -244,11 +244,12 @@ const DecomposedSemiStructuredTopology::Band& DecomposedSemiStructuredTopology::
 {
     const auto entry = std::upper_bound(
         bands.begin(), bands.end(), local, [](size_t id, const Band& band) { return id < band.offset; });
+#ifdef CHECK_BOUNDS_ENABLED
     if (entry == bands.begin())
         throw std::out_of_range("Decomposed topology local ID is absent.");
+#endif
     const auto& band = *(entry - 1);
-    if (local - band.offset >= band.count())
-        throw std::out_of_range("Decomposed topology local ID is out of range.");
+    CHECK_BOUNDS(local - band.offset, 0, band.count());
     return band;
 }
 size_t DecomposedSemiStructuredTopology::lookup(const std::vector<Band>& bands, std::span<const Group> groups,

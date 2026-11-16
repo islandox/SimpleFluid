@@ -105,7 +105,7 @@ void check_reference_face_order(const MultiRegionMesh& mesh)
                 ++canonical;
             }
     EXPECT_EQ(canonical, mesh.num_faces());
-    EXPECT_THROW(mesh.native_face(canonical), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(mesh.native_face(canonical), std::out_of_range);
 }
 
 Vec3D<ArrReal> unit_edges(const std::array<size_t, 3>& dimensions)

@@ -40,9 +40,9 @@ TEST(RegionExecutionTest, PinsNativeReplacementAndMoveBeforeAnyStorageChanges)
         EXPECT_EQ(native->geometry_epoch(), 0U);
         auto independent_copy = *native;
         EXPECT_DOUBLE_EQ(independent_copy.cell_volume(independent_copy.cell_id(0)), 0.5);
-        EXPECT_THROW(mesh->cell_volume(mesh->num_cells()), std::out_of_range);
-        EXPECT_THROW(mesh->face_area(mesh->num_faces()), std::out_of_range);
-        EXPECT_THROW(mesh->node_coordinates(mesh->num_nodes()), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(mesh->cell_volume(mesh->num_cells()), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(mesh->face_area(mesh->num_faces()), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(mesh->node_coordinates(mesh->num_nodes()), std::out_of_range);
     }
     *native = OrthogonalCartesian3D(edges);
     EXPECT_THROW(static_cast<void>(mesh->acquire_execution_view()), std::logic_error);

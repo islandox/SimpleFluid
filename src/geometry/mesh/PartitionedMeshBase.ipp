@@ -471,17 +471,19 @@ PartitionedMesh<GeometryMesh, Pack>::checked_local(size_t local_id)
  * @tparam Pack Tpetra type pack.
  * @param local_id Local cell ordinal.
  * @return Geometry cell ID.
- * @throws std::out_of_range If @p local_id is invalid.
+ * @throws std::out_of_range If @p local_id is invalid and bounds checks are enabled.
  */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::cell_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_cell_id(
     local_ordinal_type local_id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (!is_local_cell(local_id))
     {
         throw std::out_of_range("Cell local ID is out of range.");
     }
+#endif
     return mesh().cell_id(static_cast<size_t>(local_id));
 }
 
@@ -491,17 +493,19 @@ PartitionedMesh<GeometryMesh, Pack>::geometry_cell_id(
  * @tparam Pack Tpetra type pack.
  * @param local_id Local face ordinal.
  * @return Geometry face ID.
- * @throws std::out_of_range If @p local_id is invalid.
+ * @throws std::out_of_range If @p local_id is invalid and bounds checks are enabled.
  */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::face_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_face_id(
     local_ordinal_type local_id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (!is_local_face(local_id))
     {
         throw std::out_of_range("Face local ID is out of range.");
     }
+#endif
     return mesh().face_id(static_cast<size_t>(local_id));
 }
 
@@ -511,17 +515,19 @@ PartitionedMesh<GeometryMesh, Pack>::geometry_face_id(
  * @tparam Pack Tpetra type pack.
  * @param local_id Local node ordinal.
  * @return Geometry node ID.
- * @throws std::out_of_range If @p local_id is invalid.
+ * @throws std::out_of_range If @p local_id is invalid and bounds checks are enabled.
  */
 template<MeshClass GeometryMesh, TpetraTypePack Pack>
 inline typename PartitionedMesh<GeometryMesh, Pack>::node_id_t
 PartitionedMesh<GeometryMesh, Pack>::geometry_node_id(
     local_ordinal_type local_id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (!is_local_node(local_id))
     {
         throw std::out_of_range("Node local ID is out of range.");
     }
+#endif
     return mesh().node_id(static_cast<size_t>(local_id));
 }
 

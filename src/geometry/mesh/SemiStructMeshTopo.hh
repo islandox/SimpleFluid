@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "utils/debug_check.hh"
+
 #include "dataclass/typedefs.hh"
 #include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/BoundaryFaceBatch.hh"
@@ -30,7 +32,7 @@ namespace SimpleFluid::Meshes
  * Base cells are supplied as consistently oriented node loops. Their edges
  * are deduplicated into side faces, then repeated through every axial layer.
  * `cell_side_faces()` follows each base cell's node-loop order, and both
- * ordinal accessors are bounds checked. `interior_cell_batch()` contains only
+ * ordinal accessors check bounds in Debug or with explicit runtime bounds checks. `interior_cell_batch()` contains only
  * cells with a neighbor across every face. `neighbor_cells()` returns axial
  * neighbors before base-topology neighbors.
  */
@@ -96,11 +98,13 @@ public:
     }
     const SideFace& side_face(Ordinal side_face_id) const
     {
-        return d_side_faces.at(side_face_id);
+        CHECK_BOUNDS(side_face_id, 0, d_side_faces.size());
+        return d_side_faces[side_face_id];
     }
     const Arr<Ordinal>& cell_side_faces(Ordinal base_cell_id) const
     {
-        return d_cell_side_faces.at(base_cell_id);
+        CHECK_BOUNDS(base_cell_id, 0, d_cell_side_faces.size());
+        return d_cell_side_faces[base_cell_id];
     }
 
     EntityRange<FaceID> cell_faces(CellID cell_id) const;

@@ -4,6 +4,7 @@
 #include "geometry/mesh/DecomposedOrthogonalTopology.hh"
 #include <algorithm>
 #include <gtest/gtest.h>
+#include "utils/testing_environment.hh"
 #include <set>
 
 namespace
@@ -157,7 +158,7 @@ void verify(Point n, Point periodic, Point begin, Point end, size_t depth)
     EXPECT_EQ(local.lookup_storage_estimate(), 0);
     EXPECT_EQ(local.cell_local_id({}), Topology::invalid_local_id());
     EXPECT_EQ(local.face_local_id({}), Topology::invalid_local_id());
-    EXPECT_THROW(local.source_cell(local.num_local_cells()), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(local.source_cell(local.num_local_cells()), std::out_of_range);
 }
 
 TEST(DecomposedOrthogonalTopologyTest, ExactAdjacencyHalosAcrossVirtualBlocks)

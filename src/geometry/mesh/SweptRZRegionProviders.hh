@@ -19,7 +19,8 @@ namespace SimpleFluid::Meshes
  * The topology uses its usual base-cell/axial-layer ordinals, with angular
  * layers replacing axial layers. Its nonperiodic caps may be joined by a
  * coincident explicit self-interface in MultiRegionMesh. Physical Z motion
- * belongs to the enclosing composite's common affine map.
+ * belongs to the enclosing composite's common affine map. Entity query bounds
+ * are checked in Debug or with explicit runtime bounds checks.
  */
 class SweptRZGeometry
 {

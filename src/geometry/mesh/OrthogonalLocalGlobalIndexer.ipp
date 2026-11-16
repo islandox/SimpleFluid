@@ -437,7 +437,7 @@ inline bool LocalGlobalIndexer<Pack>::valid_coordinates(
  * @param indexer Indexer supplying the valid dimensions.
  * @param id Cell ID to validate.
  * @param scope Label distinguishing local and global diagnostics.
- * @throws std::out_of_range If @p id is outside the indexer.
+ * @throws std::out_of_range If @p id is outside the indexer and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -448,6 +448,7 @@ inline void LocalGlobalIndexer<Pack>::check_cell_id(
     const cell_id_t& id,
     std::string_view scope)
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (!valid_coordinates(
             coordinates(id), indexer.num_cells_per_dim))
     {
@@ -455,6 +456,7 @@ inline void LocalGlobalIndexer<Pack>::check_cell_id(
             "Orthogonal " + std::string(scope)
             + " cell ID is out of range.");
     }
+#endif
 }
 
 /**
@@ -463,7 +465,7 @@ inline void LocalGlobalIndexer<Pack>::check_cell_id(
  * @param indexer Indexer supplying orientation-specific dimensions.
  * @param id Face ID to validate.
  * @param scope Label distinguishing local and global diagnostics.
- * @throws std::out_of_range If @p id is outside the indexer.
+ * @throws std::out_of_range If @p id is outside the indexer and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -474,6 +476,7 @@ inline void LocalGlobalIndexer<Pack>::check_face_id(
     const face_id_t& id,
     std::string_view scope)
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (id.orientation >= 3
         || !valid_coordinates(
             coordinates(id),
@@ -484,6 +487,7 @@ inline void LocalGlobalIndexer<Pack>::check_face_id(
             "Orthogonal " + std::string(scope)
             + " face ID is out of range.");
     }
+#endif
 }
 
 /**
@@ -492,7 +496,7 @@ inline void LocalGlobalIndexer<Pack>::check_face_id(
  * @param indexer Indexer supplying the valid dimensions.
  * @param id Node ID to validate.
  * @param scope Label distinguishing local and global diagnostics.
- * @throws std::out_of_range If @p id is outside the indexer.
+ * @throws std::out_of_range If @p id is outside the indexer and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -503,6 +507,7 @@ inline void LocalGlobalIndexer<Pack>::check_node_id(
     const node_id_t& id,
     std::string_view scope)
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if (!valid_coordinates(
             coordinates(id), indexer.num_nodes_per_dim))
     {
@@ -510,6 +515,7 @@ inline void LocalGlobalIndexer<Pack>::check_node_id(
             "Orthogonal " + std::string(scope)
             + " node ID is out of range.");
     }
+#endif
 }
 
 /**
@@ -518,7 +524,7 @@ inline void LocalGlobalIndexer<Pack>::check_node_id(
  * @param local_ordinal Ordinal to validate.
  * @param count Exclusive upper bound.
  * @param entity Entity label used in diagnostics.
- * @throws std::out_of_range If @p local_ordinal is invalid.
+ * @throws std::out_of_range If @p local_ordinal is invalid and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -529,6 +535,7 @@ inline void LocalGlobalIndexer<Pack>::check_local_ordinal(
     size_t count,
     std::string_view entity)
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
         if (local_ordinal < 0)
@@ -544,6 +551,7 @@ inline void LocalGlobalIndexer<Pack>::check_local_ordinal(
             "Orthogonal " + std::string(entity)
             + " local ordinal is out of range.");
     }
+#endif
 }
 
 /**
@@ -553,7 +561,7 @@ inline void LocalGlobalIndexer<Pack>::check_local_ordinal(
  * @param count Exclusive upper bound.
  * @param entity Entity label used in diagnostics.
  * @return Size-based geometry ordinal.
- * @throws std::out_of_range If @p local_ordinal is invalid.
+ * @throws std::out_of_range If @p local_ordinal is invalid and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {

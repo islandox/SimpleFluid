@@ -43,7 +43,7 @@ LocalGlobalIndexer<Pack>::invalid_local_id() noexcept
  * @param index Entity index supplying the local count.
  * @param local_id Local ordinal to validate.
  * @param entity Entity label used in diagnostics.
- * @throws std::out_of_range If @p local_id is invalid.
+ * @throws std::out_of_range If @p local_id is invalid and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
@@ -52,6 +52,7 @@ inline void LocalGlobalIndexer<Pack>::check_local(
     local_ordinal_type local_id,
     std::string_view entity)
 {
+#ifdef CHECK_BOUNDS_ENABLED
     if constexpr (std::is_signed_v<local_ordinal_type>)
     {
         if (local_id < 0)
@@ -67,6 +68,7 @@ inline void LocalGlobalIndexer<Pack>::check_local(
             "Local/global indexer " + std::string(entity)
             + " local ID is out of range.");
     }
+#endif
 }
 
 /**
@@ -78,7 +80,7 @@ inline void LocalGlobalIndexer<Pack>::check_local(
  * @param local_id Local ordinal.
  * @param entity Entity label used in diagnostics.
  * @return Global entity ID.
- * @throws std::out_of_range If @p local_id is invalid.
+ * @throws std::out_of_range If @p local_id is invalid and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>
@@ -181,7 +183,7 @@ LocalGlobalIndexer<Pack>::mapped_local_id(
  * @param local_ordinal Local ordinal.
  * @param entity Entity label used in diagnostics.
  * @return Global ordinal.
- * @throws std::out_of_range If @p local_ordinal is invalid.
+ * @throws std::out_of_range If @p local_ordinal is invalid and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
 template<class LocalID, class GlobalID>

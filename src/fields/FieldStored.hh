@@ -14,6 +14,7 @@
 #include "fields/Field.hh"
 #include "geometry/MeshConcepts.hh"
 #include "geometry/MeshHandle.hh"
+#include "utils/debug_check.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
 #include <Tpetra_Access.hpp>
@@ -524,7 +525,7 @@ public:
     }
 
     /** @brief Test ownership of a mesh-local boundary face.
-     * @throws std::out_of_range If the ID is outside the local mesh-face range.
+     * @throws std::out_of_range If bounds checks are enabled and the ID is outside the local mesh-face range.
      */
     bool is_owned_boundary_face(local_ordinal_type local_id) const
         requires std::same_as<location_type, BoundaryFaceLocation>
@@ -807,8 +808,7 @@ private:
         {
             if constexpr (std::is_same_v<location_type, BoundaryFaceLocation>)
             {
-                if (!valid_local_id(local_id, d_mesh->num_faces()))
-                    throw std::out_of_range("Boundary face local ID is out of bounds.");
+                CHECK_BOUNDS(local_id, 0, d_mesh->num_faces());
             }
             return d_mesh->face_global_id(local_id);
         }
@@ -875,13 +875,26 @@ private:
 
     local_ordinal_type overlap_row(local_ordinal_type local_id) const
     {
-        const auto row = overlap_row_or_invalid(local_id);
-        if (row == invalid_local_ordinal())
+        if constexpr (std::is_same_v<location_type, CellLocation>)
         {
-            throw std::out_of_range(
-                "Field entry is not locally available.");
+            CHECK_BOUNDS(local_id, 0, d_mesh->num_local_cells());
+            return local_id;
         }
-        return row;
+        else if constexpr (std::is_same_v<location_type, FaceLocation>)
+        {
+            CHECK_BOUNDS(local_id, 0, d_mesh->num_faces());
+            return local_id;
+        }
+        else
+        {
+            const auto row = overlap_row_or_invalid(local_id);
+            if (row == invalid_local_ordinal())
+            {
+                throw std::out_of_range(
+                    "Field entry is not locally available.");
+            }
+            return row;
+        }
     }
 
     static void check_component(size_t component)

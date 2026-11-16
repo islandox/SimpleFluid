@@ -123,7 +123,8 @@ SemiStructMeshTopo::SemiStructMeshTopo(
 EntityRange<SemiStructMeshTopo::FaceID>
 SemiStructMeshTopo::cell_faces(CellID id) const
 {
-    return {this, d_indexer.cell_ordinal(id), d_cell_side_faces.at(id.ij).size() + 2,
+    CHECK_BOUNDS(id.ij, 0, d_cell_side_faces.size());
+    return {this, d_indexer.cell_ordinal(id), d_cell_side_faces[id.ij].size() + 2,
         [](const void* source, size_t cell, size_t face) -> FaceID
         {
             const auto& topo = *static_cast<const SemiStructMeshTopo*>(source);

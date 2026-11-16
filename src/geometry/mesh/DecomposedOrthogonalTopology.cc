@@ -2,6 +2,7 @@
  * @brief Arithmetic local topology over disjoint boxes and exact L1 halos.
  */
 #include "geometry/mesh/DecomposedOrthogonalTopology.hh"
+#include "utils/debug_check.hh"
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
@@ -118,11 +119,12 @@ auto Topology::select(const Boxes& boxes, size_t local) -> Coordinates
 {
     const auto next =
         std::upper_bound(boxes.begin(), boxes.end(), local, [](size_t id, const Box& box) { return id < box.offset; });
+#ifdef CHECK_BOUNDS_ENABLED
     if (next == boxes.begin())
         throw std::out_of_range("Decomposed orthogonal local ID is absent.");
+#endif
     const auto& b = *(next - 1);
-    if (local - b.offset >= b.count())
-        throw std::out_of_range("Decomposed orthogonal local ID is absent.");
+    CHECK_BOUNDS(local - b.offset, 0, b.count());
     auto p = expand(local - b.offset, {b.end[0] - b.begin[0], b.end[1] - b.begin[1], b.end[2] - b.begin[2]});
     for (unsigned a = 0; a < 3; ++a)
         p[a] += b.begin[a];
@@ -354,6 +356,7 @@ auto Topology::owned_source_face(size_t local) const -> FaceID
 }
 auto Topology::source_face(size_t local) const -> FaceID
 {
+    CHECK_BOUNDS(local, 0, num_local_faces());
     if (local < d_owned_faces)
         return owned_source_face(local);
     local -= d_owned_faces;
@@ -364,7 +367,7 @@ auto Topology::source_face(size_t local) const -> FaceID
             return {static_cast<Ordinal>(p[0]), static_cast<Ordinal>(p[1]), static_cast<Ordinal>(p[2]),
                 static_cast<uint8_t>(o)};
         }
-    throw std::out_of_range("Decomposed orthogonal face ID is absent.");
+    std::unreachable();
 }
 auto Topology::source_node(size_t local) const -> NodeID
 {

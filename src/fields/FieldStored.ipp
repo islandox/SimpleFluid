@@ -213,10 +213,7 @@ inline auto FieldStored<Descriptor, Pack, MeshT>::boundary_face_local_id(
     requires std::same_as<location_type, BoundaryFaceLocation>
 {
     const auto& batch = d_mesh->boundary_face_batch(boundary_id);
-    if (!valid_local_id(in_batch_id, batch.face_lids.size()))
-    {
-        throw std::out_of_range("In-batch ID is out of bounds for the specified boundary batch.");
-    }
+    CHECK_BOUNDS(in_batch_id, 0, batch.face_lids.size());
     return batch.face_lids[static_cast<size_t>(in_batch_id)];
 }
 

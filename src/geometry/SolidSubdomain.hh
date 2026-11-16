@@ -41,7 +41,8 @@ namespace SimpleFluid
  * owned cells and selected ghost cells at the fronts of their respective parent
  * ranges.  The subdomain then translates those two compact ranges
  * arithmetically. Ghost membership therefore remains authoritative without a
- * persistent parent-sized mask.
+ * persistent parent-sized mask. Subdomain and parent query bounds are checked
+ * in Debug or with explicit runtime bounds checks.
  *
  * @tparam Pack Tpetra scalar, ordinal, communicator, and map types.
  */
@@ -475,34 +476,22 @@ private:
 
     void check_cell(local_ordinal_type cell_lid) const
     {
-        if (!valid_local(cell_lid, num_local_cells()))
-        {
-            throw std::out_of_range("SolidSubdomain cell local ID is out of range.");
-        }
+        CHECK_BOUNDS(cell_lid, 0, num_local_cells());
     }
 
     void check_face(local_ordinal_type face_lid) const
     {
-        if (!valid_local(face_lid, num_faces()))
-        {
-            throw std::out_of_range("SolidSubdomain face local ID is out of range.");
-        }
+        CHECK_BOUNDS(face_lid, 0, num_faces());
     }
 
     void check_parent_cell(local_ordinal_type cell_lid) const
     {
-        if (!valid_local(cell_lid, d_parent->num_local_cells()))
-        {
-            throw std::out_of_range("Parent cell local ID is out of range.");
-        }
+        CHECK_BOUNDS(cell_lid, 0, d_parent->num_local_cells());
     }
 
     void check_parent_face(local_ordinal_type face_lid) const
     {
-        if (!valid_local(face_lid, d_parent->num_faces()))
-        {
-            throw std::out_of_range("Parent face local ID is out of range.");
-        }
+        CHECK_BOUNDS(face_lid, 0, d_parent->num_faces());
     }
 
     Teuchos::RCP<const map_type> make_map(std::span<const global_ordinal_type> gids) const

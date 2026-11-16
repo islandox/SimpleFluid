@@ -103,23 +103,25 @@ SweptRZGeometry::SweptRZGeometry(std::shared_ptr<const ExtrudedTopology> topolog
 
 SweptRZGeometry::Vec3 SweptRZGeometry::physical_node(unsigned base, unsigned angle) const
 {
-    const auto& p = d_nodes.at(base);
-    const auto theta = d_theta.at(angle);
+    CHECK_BOUNDS(base, 0, d_nodes.size());
+    CHECK_BOUNDS(angle, 0, d_theta.size());
+    const auto& p = d_nodes[base];
+    const auto theta = d_theta[angle];
     return {p.x * std::cos(theta), p.x * std::sin(theta), p.y};
 }
 
 real_t SweptRZGeometry::cell_volume(size_t cell) const
 {
-    if (cell >= layout().cells) throw std::out_of_range("Swept cell ordinal out of bounds.");
+    CHECK_BOUNDS(cell, 0, layout().cells);
     const auto id = d_topology->indexer().cell_id(cell);
-    return d_metrics.at(id.ij).radial_moment * std::sin(d_theta[id.k + 1] - d_theta[id.k]);
+    return d_metrics[id.ij].radial_moment * std::sin(d_theta[id.k + 1] - d_theta[id.k]);
 }
 
 SweptRZGeometry::Vec3 SweptRZGeometry::cell_centroid(size_t cell) const
 {
-    if (cell >= layout().cells) throw std::out_of_range("Swept cell ordinal out of bounds.");
+    CHECK_BOUNDS(cell, 0, layout().cells);
     const auto id = d_topology->indexer().cell_id(cell);
-    const auto& m = d_metrics.at(id.ij);
+    const auto& m = d_metrics[id.ij];
     const auto a = d_theta[id.k], b = d_theta[id.k + 1];
     return {0.5 * (std::cos(a) + std::cos(b)) * m.radial_second_over_first,
             0.5 * (std::sin(a) + std::sin(b)) * m.radial_second_over_first,
@@ -128,15 +130,15 @@ SweptRZGeometry::Vec3 SweptRZGeometry::cell_centroid(size_t cell) const
 
 SweptRZGeometry::Vec3 SweptRZGeometry::face_area_vector(size_t face) const
 {
-    if (face >= layout().faces) throw std::out_of_range("Swept face ordinal out of bounds.");
+    CHECK_BOUNDS(face, 0, layout().faces);
     const auto id = d_topology->indexer().face_id(face);
     if (id.orientation == SemiStructuredIndexer::AXIAL)
     {
-        const auto area = d_metrics.at(id.ij).area * (id.k == 0 ? -1.0 : 1.0);
+        const auto area = d_metrics[id.ij].area * (id.k == 0 ? -1.0 : 1.0);
         return {-area * std::sin(d_theta[id.k]), area * std::cos(d_theta[id.k]), 0};
     }
     const auto& edge = d_topology->native_topology().side_face(id.ij);
-    const auto a = d_nodes.at(edge.nodes[0]), b = d_nodes.at(edge.nodes[1]);
+    const auto a = d_nodes[edge.nodes[0]], b = d_nodes[edge.nodes[1]];
     const auto t0 = d_theta[id.k], t1 = d_theta[id.k + 1];
     const auto radial_factor = -0.5 * (b.y - a.y) * (a.x + b.x);
     return {radial_factor * (std::sin(t1) - std::sin(t0)),
@@ -151,11 +153,11 @@ real_t SweptRZGeometry::face_area(size_t face) const
 
 SweptRZGeometry::Vec3 SweptRZGeometry::face_centroid(size_t face) const
 {
-    if (face >= layout().faces) throw std::out_of_range("Swept face ordinal out of bounds.");
+    CHECK_BOUNDS(face, 0, layout().faces);
     const auto id = d_topology->indexer().face_id(face);
     if (id.orientation == SemiStructuredIndexer::AXIAL)
     {
-        const auto& m = d_metrics.at(id.ij);
+        const auto& m = d_metrics[id.ij];
         return {m.centroid_radius * std::cos(d_theta[id.k]),
                 m.centroid_radius * std::sin(d_theta[id.k]), m.centroid_height};
     }
@@ -168,7 +170,7 @@ SweptRZGeometry::Vec3 SweptRZGeometry::face_centroid(size_t face) const
 
 SweptRZGeometry::Vec3 SweptRZGeometry::node_coordinates(size_t node) const
 {
-    if (node >= layout().nodes) throw std::out_of_range("Swept node ordinal out of bounds.");
+    CHECK_BOUNDS(node, 0, layout().nodes);
     const auto id = d_topology->indexer().node_id(node);
     return physical_node(id.ij, id.k);
 }

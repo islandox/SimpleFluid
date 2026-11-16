@@ -12,6 +12,7 @@
 #pragma once
 
 #include "geometry/mesh/MeshIndexTypes.hh"
+#include "utils/debug_check.hh"
 
 #include <concepts>
 #include <cstddef>
@@ -37,8 +38,9 @@ namespace SimpleFluid::Meshes
  * local IDs and integral global ordinals from their input order and IDs.
  * Construction and replacement reject duplicate IDs or ordinals and values
  * that overflow the configured ordinal types. A single node-list overload
- * treats every supplied node as owned. Checked forward lookups throw when an
- * entity is unavailable; `noexcept` reverse lookups return
+ * treats every supplied node as owned. Local-ordinal query bounds are checked
+ * in Debug or when runtime bounds checks are explicitly enabled. Explicit-ID
+ * lookups throw when an entity is unavailable; `noexcept` reverse lookups return
  * `invalid_local_id()` instead.
  *
  * @par Template instantiation

@@ -96,7 +96,7 @@ LocalGlobalIndexer<Pack>::LocalGlobalIndexer(
  * @tparam Pack Orthogonal entity-ID and ordinal types.
  * @param local_id Block-local cell ID.
  * @return Global cell ID.
- * @throws std::out_of_range If @p local_id is outside the block.
+ * @throws std::out_of_range If @p local_id is outside the block and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -118,7 +118,7 @@ LocalGlobalIndexer<Pack>::local_to_global_cell_id(
  * @tparam Pack Orthogonal entity-ID and ordinal types.
  * @param local_id Block-local face ID.
  * @return Global face ID.
- * @throws std::out_of_range If @p local_id is outside the block.
+ * @throws std::out_of_range If @p local_id is outside the block and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {
@@ -143,7 +143,7 @@ LocalGlobalIndexer<Pack>::local_to_global_face_id(
  * @tparam Pack Orthogonal entity-ID and ordinal types.
  * @param local_id Block-local node ID.
  * @return Global node ID.
- * @throws std::out_of_range If @p local_id is outside the block.
+ * @throws std::out_of_range If @p local_id is outside the block and bounds checks are enabled.
  */
 template<MeshIndexTypePack Pack>
     requires requires {

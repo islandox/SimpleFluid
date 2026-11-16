@@ -73,13 +73,13 @@ void same_geometry(const std::shared_ptr<MultiRegionMesh>& mesh)
             });
             EXPECT_EQ(index, checked.size());
         }
-        EXPECT_THROW(geometry.cell_volume(geometry.layout().cells), std::out_of_range);
-        EXPECT_THROW(geometry.cell_centroid(geometry.layout().cells), std::out_of_range);
-        EXPECT_THROW(geometry.visit_cell_faces(geometry.layout().cells, [](const auto&) {}), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(geometry.cell_volume(geometry.layout().cells), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(geometry.cell_centroid(geometry.layout().cells), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(geometry.visit_cell_faces(geometry.layout().cells, [](const auto&) {}), std::out_of_range);
     });
     EXPECT_EQ(visited_cells, mesh->num_cells());
     for (ID face = 0; face < mesh->num_faces(); ++face) same_face(*mesh, execution.resolve_face(face));
-    EXPECT_THROW(execution.resolve_face(mesh->num_faces()), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(execution.resolve_face(mesh->num_faces()), std::out_of_range);
 }
 
 std::shared_ptr<MultiRegionMesh> native_periodic_cylinder()

@@ -10,6 +10,7 @@
  */
 
 #include "geometry/mesh/OrthoMeshPartitioner.hh"
+#include "utils/debug_check.hh"
 
 #include <algorithm>
 #include <stdexcept>
@@ -387,10 +388,11 @@ void OrthoMeshPartitioner::check_partition(size_t partition) const
 /**
  * @brief Validate a structured cell identifier.
  * @param cell_id Cell identifier to check.
- * @throws std::out_of_range If any coordinate is outside the topology.
+ * @throws std::out_of_range If any coordinate is outside the topology and bounds checks are enabled.
  */
 void OrthoMeshPartitioner::check_cell_id(CellID cell_id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     const auto& dimensions = indexer().num_cells_per_dim;
     if (cell_id.i >= dimensions[Indexer::I]
         || cell_id.j >= dimensions[Indexer::J]
@@ -399,15 +401,17 @@ void OrthoMeshPartitioner::check_cell_id(CellID cell_id) const
         throw std::out_of_range(
             "Orthogonal mesh cell ID is out of range.");
     }
+#endif
 }
 
 /**
  * @brief Validate a structured face identifier.
  * @param face_id Face identifier to check.
- * @throws std::out_of_range If its orientation or coordinates are invalid.
+ * @throws std::out_of_range If its orientation or coordinates are invalid and bounds checks are enabled.
  */
 void OrthoMeshPartitioner::check_face_id(FaceID face_id) const
 {
+#ifdef CHECK_BOUNDS_ENABLED
     const auto orientation = static_cast<size_t>(face_id.orientation);
     if (orientation >= 3)
     {
@@ -425,6 +429,7 @@ void OrthoMeshPartitioner::check_face_id(FaceID face_id) const
         throw std::out_of_range(
             "Orthogonal mesh face ID is out of range.");
     }
+#endif
 }
 
 } // namespace SimpleFluid::Meshes

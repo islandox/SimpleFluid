@@ -35,6 +35,17 @@ Two independent validity tokens are preserved and must not be merged:
   traversal plans stay valid; metric caches refresh through their existing
   `refresh()` entry point.
 
+Cell, face, boundary-face and node (vertex) query IDs must be within the relevant
+mesh-local or provider range. Bounds diagnostics use `CHECK_BOUNDS`: they run in
+Debug and compile out with `NDEBUG`, unless
+`SIMPLEFLUID_ENABLE_RUNTIME_BOUNDS_CHECKS` is explicitly enabled. This includes
+typed-ID/ordinal conversions, geometry queries, field overlap access and
+boundary in-batch indices. Release callers must supply valid indices.
+`EXPECT_THROW_WHEN_DEBUG` keeps invalid-index test expressions out of Release
+execution. Ownership and availability predicates retain their sentinel results;
+owned-field access, missing map entries, boundary-batch membership, construction
+validation and geometry lifetime/epoch errors retain their runtime contracts.
+
 ## Compatibility
 
 The native `variant()`, `visit()`, `visit_mutable()`, maps, boundary queries,

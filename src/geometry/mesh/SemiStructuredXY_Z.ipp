@@ -45,7 +45,7 @@ inline void SemiStructuredXY_Z::check_cell_id(cell_id_t id) const
  */
 inline void SemiStructuredXY_Z::check_face_id(face_id_t id) const
 {
-    CHECK(id.orientation == Z_FACE || id.orientation == SIDE_FACE);
+    CHECK_BOUNDS(id.orientation, Z_FACE, SIDE_FACE + 1);
     if (id.orientation == Z_FACE)
     {
         CHECK_BOUNDS(id.ij, 0, indexer().num_cells_per_layer);

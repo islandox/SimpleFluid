@@ -571,9 +571,9 @@ TEST(DecomposedSemiStructuredTopologyTest, PureConstructorRejectsInvalidLabelsPe
     bad_order[0] = bad_order[1];
     EXPECT_THROW((Topology(source, labels, bad_order, 0, 2, 2, 1)), std::invalid_argument);
     const Topology valid(source, labels, order, 0, 2, 2, 1);
-    EXPECT_THROW(valid.source_cell(valid.num_local_cells()), std::out_of_range);
-    EXPECT_THROW(valid.source_face(valid.num_local_faces()), std::out_of_range);
-    EXPECT_THROW(valid.source_node(valid.num_local_nodes()), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(valid.source_cell(valid.num_local_cells()), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(valid.source_face(valid.num_local_faces()), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(valid.source_node(valid.num_local_nodes()), std::out_of_range);
     EXPECT_EQ(valid.cell_local_id(Semi::invalid_cell_id()), Topology::invalid_local_id());
     EXPECT_EQ(valid.face_local_id({0, 0, 99}), Topology::invalid_local_id());
     EXPECT_EQ(valid.node_local_id({static_cast<unsigned>(-1), 0}), Topology::invalid_local_id());

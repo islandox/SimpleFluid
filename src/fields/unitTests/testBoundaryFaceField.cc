@@ -169,18 +169,18 @@ TEST(BoundaryFaceFieldTest, OwnershipAndNativeMapRows)
         EXPECT_DOUBLE_EQ(bc_field.value(fid), 77.0);
     }
     const auto invalid_face = static_cast<Pack::local_ordinal_type>(mesh->num_faces());
-    EXPECT_THROW(bc_field.is_owned_boundary_face(invalid_face), std::out_of_range);
-    EXPECT_THROW(bc_field.is_local(invalid_face), std::out_of_range);
-    EXPECT_THROW(bc_field.local_value(invalid_face), std::out_of_range);
-    EXPECT_THROW(bc_field.set_value(invalid_face, 0.0), std::out_of_range);
-    EXPECT_THROW(bc_field.value(invalid_face), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(bc_field.is_owned_boundary_face(invalid_face), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(bc_field.is_local(invalid_face), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(bc_field.local_value(invalid_face), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(bc_field.set_value(invalid_face, 0.0), std::out_of_range);
+    EXPECT_THROW_WHEN_DEBUG(bc_field.value(invalid_face), std::out_of_range);
     if constexpr (std::is_signed_v<Mesh::local_ordinal_type>)
     {
-        EXPECT_THROW(bc_field.is_owned_boundary_face(-1), std::out_of_range);
-        EXPECT_THROW(bc_field.is_local(-1), std::out_of_range);
-        EXPECT_THROW(bc_field.local_value(-1), std::out_of_range);
-        EXPECT_THROW(bc_field.set_value(-1, 0.0), std::out_of_range);
-        EXPECT_THROW(bc_field.value(-1), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(bc_field.is_owned_boundary_face(-1), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(bc_field.is_local(-1), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(bc_field.local_value(-1), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(bc_field.set_value(-1, 0.0), std::out_of_range);
+        EXPECT_THROW_WHEN_DEBUG(bc_field.value(-1), std::out_of_range);
     }
     int local_owned = static_cast<int>(expected_owned), global_owned = 0;
     Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 1, &local_owned, &global_owned);
