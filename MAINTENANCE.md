@@ -452,6 +452,7 @@ Useful configuration switches are:
 | `SIMPLEFLUID_BUILD_BENCHMARKS` | `ON` | Build benchmark and performance-regression targets |
 | `SIMPLEFLUID_ENABLE_COVERAGE` | `OFF` | Add GCC/Clang coverage instrumentation |
 | `SIMPLEFLUID_ENABLE_LTO` | `ON` | Enable IPO in Release and RelWithDebInfo |
+| `SIMPLEFLUID_DISABLE_TEST_LTO` | `OFF` | Disable CMake IPO for unit-test executables and their dedicated PCH; CI enables this in Release |
 | `SIMPLEFLUID_SPLIT_DEBUG_INFO` | `ON` on Linux GCC/Clang; `OFF` otherwise | Store Debug/RelWithDebInfo symbols in reusable `.dwo` files for non-IPO targets; IPO targets retain embedded symbols |
 | `SIMPLEFLUID_DEBUG_SYMBOLS`, `SIMPLEFLUID_DEBUG_SYMBOLS_<MODULE>` | `INHERIT` | Select Debug/RelWithDebInfo symbols globally or per module with `INHERIT`, `ON`, or `OFF` |
 | `SIMPLEFLUID_MAX_TEST_PROCS` | `0` | Limit generated MPI tests; CI commonly uses `2` |

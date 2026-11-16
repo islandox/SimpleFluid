@@ -33,6 +33,20 @@ function(simplefluid_exe_reuse_precompiled_header target_name)
         ${target_name} REUSE_FROM SimpleFluidExecutablePch)
 endfunction()
 
+# Override both the generic property and configuration-specific defaults copied
+# when the target was created, including caller-defined configurations.
+function(simplefluid_disable_ipo target_name)
+    set_property(TARGET ${target_name} PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set(configurations Debug Release RelWithDebInfo MinSizeRel
+        ${CMAKE_CONFIGURATION_TYPES} ${CMAKE_BUILD_TYPE})
+    list(REMOVE_DUPLICATES configurations)
+    foreach(configuration IN LISTS configurations)
+        string(TOUPPER "${configuration}" configuration_upper)
+        set_property(TARGET ${target_name} PROPERTY
+            INTERPROCEDURAL_OPTIMIZATION_${configuration_upper} FALSE)
+    endforeach()
+endfunction()
+
 # Apply the common binary-library policy without changing target ownership.
 function(simplefluid_configure_component target_name)
     simplefluid_configure_library(${target_name})

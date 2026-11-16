@@ -84,7 +84,12 @@ function(simplefluid_configure_test_executable target_name)
        "^(testSTKMesh|testMeshHandle|testMeshPartitioner)$")
         target_link_libraries(${target_name} SimpleFluidLegacyMeshTestFixture)
     endif()
-    simplefluid_exe_reuse_precompiled_header(${target_name})
+    if(SIMPLEFLUID_DISABLE_TEST_LTO)
+        simplefluid_disable_ipo(${target_name})
+        target_precompile_headers(${target_name} REUSE_FROM SimpleFluidTestPch)
+    else()
+        simplefluid_exe_reuse_precompiled_header(${target_name})
+    endif()
 
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
        AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU"

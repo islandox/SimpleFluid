@@ -32,6 +32,8 @@ set(SIMPLEFLUID_REUSE_TRILINOS_BACKEND "" CACHE FILEPATH
 
 # Testing. CTest consumes BUILD_TESTING after these defaults are established.
 option(BUILD_TESTING "Build the testing tree." ON)
+option(SIMPLEFLUID_DISABLE_TEST_LTO
+       "Disable CMake IPO for unit-test executables and their dedicated PCH" OFF)
 set(SIMPLEFLUID_MAX_TEST_PROCS "0" CACHE STRING
     "Maximum MPI processes for tests (0 = unlimited). Set to 2 for free-tier runners.")
 if(BUILD_TESTING)

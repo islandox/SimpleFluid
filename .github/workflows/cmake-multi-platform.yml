@@ -260,6 +260,10 @@ jobs:
       if: runner.os == 'Linux' && matrix.build_type == 'Debug'
       run: python3 -m unittest discover -s .github/scripts/tests -v
 
+    - name: Check unit-test IPO policy
+      if: matrix.build_type == 'Release'
+      run: python3 cmake/testing/ipo/run.py --compiler "${{ matrix.cpp_compiler }}"
+
     - name: Download Trilinos and its dependencies
       uses: actions/download-artifact@v8
       with:
@@ -318,6 +322,7 @@ jobs:
         -DCMAKE_C_COMPILER_LAUNCHER="python3;${{ github.workspace }}/.github/scripts/ccache-split-dwarf.py;ccache"
         -DCMAKE_CXX_COMPILER_LAUNCHER="python3;${{ github.workspace }}/.github/scripts/ccache-split-dwarf.py;ccache"
         -DSIMPLEFLUID_SPLIT_DEBUG_INFO=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+        -DSIMPLEFLUID_DISABLE_TEST_LTO=${{ matrix.build_type == 'Release' && 'ON' || 'OFF' }}
         ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
         -DSIMPLEFLUID_MAX_TEST_PROCS=2

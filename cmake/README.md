@@ -25,6 +25,28 @@ rebuild SimpleFluid components while retaining the same runtime used by another
 solver. The backend ownership/export tests still run; no consumer may acquire
 static Trilinos archives. Leaving the option empty builds the backend normally.
 
+## Unit-test IPO
+
+`SIMPLEFLUID_DISABLE_TEST_LTO=ON` disables CMake IPO for executables configured
+by `simplefluid_configure_test_executable` and gives them a dedicated matching
+`SimpleFluidTestPch`. It overrides generic and configuration-specific IPO
+properties, including custom configurations. The default is `OFF`, preserving
+the existing target policies and GCC/static-Trilinos compatibility exception.
+GitHub Actions enables the option in its Release jobs and leaves it off in Debug.
+
+Production libraries, examples, benchmarks, and their PCH providers retain
+their existing IPO policy. Linked static archives may still contain LTO input
+and require linker processing; this option removes IPO from the unit tests'
+own compilation and linking rather than creating native copies of libraries.
+Non-IPO RelWithDebInfo test targets and their PCH follow the existing split-DWARF
+policy. Integration tests that run production applications keep those
+applications' optimization settings.
+
+Focused configure, generated-command, and PCH build checks run in CI Release.
+Run them locally with `python3 cmake/testing/ipo/run.py --compiler g++` (or
+`--compiler clang++`). They cover the default/off and opt-out policies, custom
+configurations, global LTO off, testing off, and the GNU compatibility exception.
+
 ## Focused debug symbols
 
 `SIMPLEFLUID_DEBUG_SYMBOLS` and `SIMPLEFLUID_DEBUG_SYMBOLS_<MODULE>` accept
