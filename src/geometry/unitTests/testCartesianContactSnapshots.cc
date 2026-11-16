@@ -214,6 +214,15 @@ TEST(CartesianContactSnapshots, DetachedReadersSurviveRefinementMigrationAndCont
         Budget budget{ample};
         IdentityBudget identities;
         EXPECT_NO_THROW((void) escaped.materialize(budget, identities));
+        const auto exact_peak = budget.peak;
+        Budget exact{exact_peak};
+        IdentityBudget exact_identities;
+        EXPECT_NO_THROW((void) escaped.materialize(exact, exact_identities));
+        ASSERT_GT(exact_peak, 0u);
+        Budget short_budget{exact_peak - 1};
+        IdentityBudget short_identities;
+        EXPECT_THROW((void) escaped.materialize(short_budget, short_identities), std::invalid_argument);
+        EXPECT_EQ(escaped.point(0), *point);
     }
 }
 
