@@ -17,6 +17,7 @@
 #include "fields/TensorCellField.hh"
 #include "fields/VectorCellField.hh"
 #include "FVM/Operators.hh"
+#include "FVM/unitTests/test_periodic_mesh_helpers.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -163,7 +164,7 @@ Mesh::local_ordinal_type boundary_face_lid(const Mesh& mesh,
         for (size_t local = 0; local < mesh.num_faces(); ++local)
         {
             const auto face = static_cast<Mesh::local_ordinal_type>(local);
-            if (mesh.is_periodic_face(face)) return face;
+            if (SimpleFluid::test::is_cartesian_periodic_face(mesh, face)) return face;
         }
     throw std::runtime_error("Requested boundary face was not found.");
 }
@@ -775,6 +776,41 @@ TEST(FvmOperatorsTest,
             *mesh, 0.5, boundary_condition, source,
             inconsistent_weight, &correction),
         std::invalid_argument);
+
+    const auto invalid_diffusivity = communicator->getRank() == 0
+        ? std::numeric_limits<Pack::scalar_type>::quiet_NaN() : 0.5;
+    EXPECT_THROW(SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                     *mesh, invalid_diffusivity, boundary_condition, source, &correction),
+                 std::invalid_argument);
+    const auto invalid_weight = communicator->getRank() == 0
+        ? std::numeric_limits<Pack::scalar_type>::quiet_NaN() : 0.5;
+    EXPECT_THROW(SimpleFluid::FVM::implicit_non_orthogonal_diffusion_system<Pack>(
+                     *mesh, 0.5, boundary_condition, source, invalid_weight, &correction),
+                 std::invalid_argument);
+    EXPECT_THROW(SimpleFluid::FVM::fully_implicit_non_orthogonal_diffusion_system<Pack>(
+                     *mesh, 0.5, boundary_condition, source),
+                 std::invalid_argument);
+
+    // Rejections must leave collective order usable. Zero implicit weight
+    // needs no partition-gradient field and retains the orthogonal operator.
+    const auto zero_weight = SimpleFluid::FVM::implicit_non_orthogonal_diffusion_system<Pack>(
+        *mesh, 0.5, boundary_condition, source, 0.0);
+    const auto orthogonal = SimpleFluid::FVM::diffusion_system<Pack>(
+        *mesh, 0.5, boundary_condition, source);
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        const auto local_row = static_cast<Pack::local_ordinal_type>(row);
+        EXPECT_DOUBLE_EQ(zero_weight.rhs->getData()[row], orthogonal.rhs->getData()[row]);
+        for (size_t column = 0; column < mesh->num_local_cells(); ++column)
+        {
+            const auto global_column = mesh->overlap_cell_map()->getGlobalElement(
+                static_cast<Pack::local_ordinal_type>(column));
+            const auto zero_column = zero_weight.matrix->getColMap()->getLocalElement(global_column);
+            const auto orthogonal_column = orthogonal.matrix->getColMap()->getLocalElement(global_column);
+            EXPECT_NEAR(local_matrix_entry(*zero_weight.matrix, local_row, zero_column),
+                        local_matrix_entry(*orthogonal.matrix, local_row, orthogonal_column), 1.0e-12);
+        }
+    }
 }
 
 /**
@@ -2983,7 +3019,7 @@ TEST(FvmOperatorsTest, PeriodicTopologyUsesCanonicalNativeNeighbors)
     for (size_t local = 0; local < mesh->num_faces(); ++local)
     {
         const auto face = static_cast<Mesh::local_ordinal_type>(local);
-        if (!mesh->is_periodic_face(face)) continue;
+        if (!SimpleFluid::test::is_cartesian_periodic_face(*mesh, face)) continue;
         ++periodic_faces;
         EXPECT_TRUE(mesh->is_interior_face(face));
         EXPECT_FALSE(mesh->is_boundary_face(face));
@@ -2992,7 +3028,7 @@ TEST(FvmOperatorsTest, PeriodicTopologyUsesCanonicalNativeNeighbors)
         EXPECT_NE(owner, neighbor);
         EXPECT_NEAR(mesh->cell_center_vector(face, owner).norm(), .5, 1e-14);
     }
-    EXPECT_GT(periodic_faces, 0U);
+    EXPECT_EQ(periodic_faces, 1U);
 }
 
 /** @brief Verifies fused periodic face fluxes match the face-velocity composition. */
@@ -3284,7 +3320,7 @@ TEST(FvmOperatorsTest, NativePeriodicUpwindMatrixHasConservativeCanonicalFlux)
         const auto owner_gid = mesh->overlap_cell_map()->getGlobalElement(mesh->owner_cell(face));
         // A circulation sends .5 from cell 0 to 1 through the central face,
         // and returns .25 from cell 1 to 0 through the one canonical periodic seam.
-        const auto value = mesh->is_periodic_face(face)
+        const auto value = SimpleFluid::test::is_cartesian_periodic_face(*mesh, face)
             ? (owner_gid == 1 ? .25 : -.25) : (owner_gid == 0 ? .5 : -.5);
         fluxes.set_value(face, value);
     }

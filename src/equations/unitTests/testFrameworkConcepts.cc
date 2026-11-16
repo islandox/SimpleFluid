@@ -111,10 +111,12 @@ struct WrongTopologyPack : RegionTopology
 };
 struct MismatchedOrdinalRange
 {
-    std::vector<std::string>::const_iterator begin() const;
-    std::vector<std::string>::const_iterator end() const;
-    size_t size() const;
-    size_t operator[](size_t) const;
+    std::vector<std::string>::const_iterator begin() const { return values.begin(); }
+    std::vector<std::string>::const_iterator end() const { return values.end(); }
+    size_t size() const { return values.size(); }
+    // Indexing deliberately disagrees with the iterator's string value type.
+    size_t operator[](size_t index) const { return index; }
+    std::vector<std::string> values;
 };
 struct MismatchedTopologyRange : RegionTopology
 {

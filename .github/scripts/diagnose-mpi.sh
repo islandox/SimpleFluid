@@ -20,7 +20,7 @@ fi
     ompi_info --parsable --param btl sm --level 9
 } >"$diagnostics/environment.log" 2>&1
 
-filter=MeshPartitionerTest.PartitionsRootOnlySourceGeometry
+filter=MeshPartitionerTest.FactoryBuildsDistributedNativeGeometry
 timeout 30s mpiexec -n 2 "$probe" --gtest_filter="$filter" --gtest_color=no \
     2>&1 | tee "$diagnostics/default-transport.log"
 printf 'Default transport exit status: %s\n' "$?"

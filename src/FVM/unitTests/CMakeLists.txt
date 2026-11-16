@@ -57,6 +57,14 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME NativePeriodicTopology_2procs
+    TARGET testFvmOperators
+    PROCS 2
+    ARGS "--gtest_filter=FvmOperatorsTest.PeriodicTopologyUsesCanonicalNativeNeighbors"
+    LABELS "mpi;periodic;topology"
+    TIMEOUT 60)
+
+simplefluid_add_mpi_test(
     NAME FieldStoredTransportValidation_2procs
     TARGET testFieldStoredOperators
     PROCS 2

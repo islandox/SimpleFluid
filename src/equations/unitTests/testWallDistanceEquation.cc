@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "equations/turbulence/WallDistanceEquation.hh"
+#include "fields/CellField.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"

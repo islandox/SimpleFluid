@@ -318,7 +318,7 @@ jobs:
       run: |
         cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2 --target testMeshPartitioner testGhostSyncMultiRank
         for attempt in 1 2 3; do
-          timeout 30s mpiexec -n 2 ${{ steps.strings.outputs.build-output-dir }}/bin/${{ matrix.build_type }}/testMeshPartitioner --gtest_filter=MeshPartitionerTest.PartitionsRootOnlySourceGeometry --gtest_color=no
+          timeout 30s mpiexec -n 2 ${{ steps.strings.outputs.build-output-dir }}/bin/${{ matrix.build_type }}/testMeshPartitioner --gtest_filter=MeshPartitionerTest.FactoryBuildsDistributedNativeGeometry --gtest_color=no
           timeout 30s mpiexec -n 2 ${{ steps.strings.outputs.build-output-dir }}/bin/${{ matrix.build_type }}/testGhostSyncMultiRank --gtest_filter=GhostSyncMultiRankTest.SyncsOwnedGlobalIdValuesToAllLocalCells --gtest_color=no
         done
 

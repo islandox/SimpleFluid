@@ -523,6 +523,9 @@ public:
         return d_owned.getMap()->getLocalElement(global_id) != invalid_local_ordinal();
     }
 
+    /** @brief Test ownership of a mesh-local boundary face.
+     * @throws std::out_of_range If the ID is outside the local mesh-face range.
+     */
     bool is_owned_boundary_face(local_ordinal_type local_id) const
         requires std::same_as<location_type, BoundaryFaceLocation>
     {
@@ -802,6 +805,11 @@ private:
         }
         else
         {
+            if constexpr (std::is_same_v<location_type, BoundaryFaceLocation>)
+            {
+                if (!valid_local_id(local_id, d_mesh->num_faces()))
+                    throw std::out_of_range("Boundary face local ID is out of bounds.");
+            }
             return d_mesh->face_global_id(local_id);
         }
     }

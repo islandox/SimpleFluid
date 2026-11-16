@@ -147,9 +147,64 @@ DiffusionSystem<Pack> stored_implicit_diffusion_system(const MeshType& mesh, typ
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
-    if (!std::isfinite(implicit_weight) || implicit_weight < scalar_type{} || implicit_weight > scalar_type{1})
+    const int correction_active = implicit_weight > scalar_type{} ? 1 : 0;
+    const int field_state =
+        partition_correction_field == nullptr ? 0 : (partition_correction_field->mesh_ptr().get() == &mesh ? 1 : 2);
+    const int invalid_weight =
+        !std::isfinite(implicit_weight) || implicit_weight < scalar_type{} || implicit_weight > scalar_type{1};
+    const auto state = reduce_transport_validation_state(mesh,
+        std::array<int, 6>{!std::isfinite(diffusivity) || diffusivity < scalar_type{} ? 1 : 0,
+            invalid_weight, correction_active, -correction_active, field_state, -field_state});
+    if (state[0] != 0)
     {
-        throw std::invalid_argument("Mapped non-orthogonal implicit weight must be finite and in [0, 1].");
+        throw std::invalid_argument("implicit_non_orthogonal_diffusion_system requires finite "
+                                    "non-negative diffusivity.");
+    }
+    if (state[1] != 0)
+    {
+        throw std::invalid_argument("non-orthogonal implicit weight must be finite and in [0, 1].");
+    }
+    if (state[2] != -state[3])
+    {
+        throw std::invalid_argument("Ranks must agree whether implicit non-orthogonal correction "
+                                    "is active.");
+    }
+    if (state[4] != -state[5])
+    {
+        throw std::invalid_argument("Ranks must supply a consistent partition correction field.");
+    }
+    if (state[4] == 2)
+    {
+        throw std::invalid_argument("implicit_non_orthogonal_diffusion_system requires its "
+                                    "partition correction field on the target mesh.");
+    }
+    if (state[2] != 0 && state[4] == 0)
+    {
+        int local_partition_face = 0;
+        for (size_t owned = 0; owned < mesh.num_owned_cells() && local_partition_face == 0; ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            for (const auto face_lid : mesh.faces(cell_lid))
+            {
+                if (!mesh.is_interior_face(face_lid))
+                {
+                    continue;
+                }
+                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                if (!mesh.is_owned_cell(other))
+                {
+                    local_partition_face = 1;
+                    break;
+                }
+            }
+        }
+        const auto partition_state =
+            reduce_transport_validation_state(mesh, std::array<int, 1>{local_partition_face});
+        if (partition_state[0] != 0)
+        {
+            throw std::invalid_argument("Distributed implicit non-orthogonal diffusion requires "
+                                        "a synchronized partition correction field.");
+        }
     }
 
     const auto gradient_stencils = least_squares_gradient_stencils(mesh);
@@ -196,6 +251,11 @@ DiffusionSystem<Pack> stored_implicit_diffusion_system(const MeshType& mesh, typ
                 const auto coefficient = interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
                 add_matrix_entry(row_values, cell_lid, coefficient);
                 add_matrix_entry(row_values, other, -coefficient);
+
+                if (implicit_weight == scalar_type{})
+                {
+                    continue;
+                }
 
                 const auto tangential_area = non_orthogonal_area_vector(
                     mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));

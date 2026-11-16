@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include "FVM/TransportSystemFactory.hh"
+#include "FVM/unitTests/test_periodic_mesh_helpers.hh"
 #include "fields/CellField.hh"
 #include "fields/FaceField.hh"
 #include "fields/FieldStored.hh"
@@ -520,7 +521,7 @@ TEST(ScalarTransportDiscretizationTest, PeriodicBoundedLinearUpwindUsesWrappedCo
     CartesianFlux flux(cartesian_mesh, 0.0, "flux");
     set_cell_values(old, {0.0, 0.0, 1.0});
     for (const auto face : flux.owned_face_ids())
-        if (cartesian_mesh->is_periodic_face(face))
+        if (SimpleFluid::test::is_cartesian_periodic_face(*cartesian_mesh, face))
             flux.set_value(face, 0.2 * cartesian_mesh->face_normal(face).x);
     flux.sync_ghosts();
     const auto cartesian_condition = periodic_scalar_condition(cartesian_mesh);
@@ -549,7 +550,7 @@ TEST(ScalarTransportDiscretizationTest, PeriodicBoundedLinearUpwindUsesWrappedCo
     MappedFlux mapped_flux(mapped_mesh, 0.0, "flux");
     set_cell_values(mapped_old, {0.0, 0.0, 1.0});
     for (const auto face : mapped_flux.owned_face_ids())
-        if (cartesian_mesh->is_periodic_face(face))
+        if (SimpleFluid::test::is_cartesian_periodic_face(*cartesian_mesh, face))
             mapped_flux.set_value(face, 0.2 * cartesian_mesh->face_normal(face).x);
     mapped_flux.sync_ghosts();
     const auto mapped_condition = periodic_scalar_condition(mapped_mesh);

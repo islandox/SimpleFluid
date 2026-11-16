@@ -1644,6 +1644,7 @@ TEST(BoussinesqSolverTest, CoupledKrylovReusesCompatibleSetupAndMatchesForcedReb
         for (size_t step = 0; step < 2; ++step)
         {
             SimpleFluid::FVM::face_fluxes(velocity, boundary_cache, face_fluxes);
+            face_fluxes.sync_ghosts();
             const auto system = solver.assemble(
                 momentum, velocity, pressure, temperature, face_fluxes, boundary_cache, boundaries, time_options);
             const auto result = solver.solve(system, velocity, pressure, linear_options);

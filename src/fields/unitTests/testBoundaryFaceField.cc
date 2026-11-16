@@ -170,11 +170,15 @@ TEST(BoundaryFaceFieldTest, OwnershipAndNativeMapRows)
     }
     const auto invalid_face = static_cast<Pack::local_ordinal_type>(mesh->num_faces());
     EXPECT_THROW(bc_field.is_owned_boundary_face(invalid_face), std::out_of_range);
+    EXPECT_THROW(bc_field.is_local(invalid_face), std::out_of_range);
+    EXPECT_THROW(bc_field.local_value(invalid_face), std::out_of_range);
     EXPECT_THROW(bc_field.set_value(invalid_face, 0.0), std::out_of_range);
     EXPECT_THROW(bc_field.value(invalid_face), std::out_of_range);
     if constexpr (std::is_signed_v<Mesh::local_ordinal_type>)
     {
         EXPECT_THROW(bc_field.is_owned_boundary_face(-1), std::out_of_range);
+        EXPECT_THROW(bc_field.is_local(-1), std::out_of_range);
+        EXPECT_THROW(bc_field.local_value(-1), std::out_of_range);
         EXPECT_THROW(bc_field.set_value(-1, 0.0), std::out_of_range);
         EXPECT_THROW(bc_field.value(-1), std::out_of_range);
     }

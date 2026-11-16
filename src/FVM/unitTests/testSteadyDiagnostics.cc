@@ -64,7 +64,8 @@ TEST(SteadyDiagnostics, NativeBalancePerturbationAndTimeStepIndependence)
 TEST(SteadyDiagnostics, FactoryScalarBalanceAndTimeStepIndependence)
 {
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
- SimpleFluid::CellField<Pack> q(m,2.),storage(m,3.),adv(m,1.),diffusion(m,0.);SimpleFluid::FaceField<Pack> flux(m,0.);
+ SimpleFluid::CellField<Pack> q(m,2.,"q"),storage(m,3.,"storage"),adv(m,1.,"adv"),diffusion(m,0.,"diffusion");
+ SimpleFluid::FaceField<Pack> flux(m,0.,"flux");
  auto assemble = [&](double dt)
  {
      return TransportFactory<decltype(q)>::assemble(
@@ -89,8 +90,9 @@ TEST(SteadyDiagnostics, FactoryScalarBalanceAndTimeStepIndependence)
 TEST(SteadyDiagnostics, FactoryPhysicalMomentumAndThermalOmitStorage)
 {
  auto m=SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4,1,1));
- SimpleFluid::VectorCellField<Pack> u(m,SimpleFluid::vec3<double>{2.,3.,4.});
- SimpleFluid::CellField<Pack> temperature(m,2.),rho(m,3.),cp(m,4.),zero(m,0.);SimpleFluid::FaceField<Pack> flux(m,0.);
+ SimpleFluid::VectorCellField<Pack> u(m,SimpleFluid::vec3<double>{2.,3.,4.},"velocity");
+ SimpleFluid::CellField<Pack> temperature(m,2.,"temperature"),rho(m,3.,"rho"),cp(m,4.,"cp"),zero(m,0.,"zero");
+ SimpleFluid::FaceField<Pack> flux(m,0.,"flux");
  auto momentum = [&](double dt)
  {
      return TransportFactory<decltype(u)>::assemble(

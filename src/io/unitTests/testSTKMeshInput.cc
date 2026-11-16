@@ -143,6 +143,8 @@ void write_exodus(const std::string& filename, Shape shape, MPI_Comm raw_comm = 
     writer.set_bulk_data(*bulk);
     if (decomposed_output)
         simplefluid_trilinos_stk_io_set_string_property(&writer, "COMPOSE_RESULTS", "NO");
+    else
+        simplefluid_trilinos_stk_io_set_string_property(&writer, "FILE_TYPE", "netcdf4");
     const auto output = writer.create_output_mesh(filename, stk::io::WRITE_RESULTS);
     writer.write_output_mesh(output);
 }

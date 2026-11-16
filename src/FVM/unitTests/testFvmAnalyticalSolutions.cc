@@ -32,6 +32,7 @@
 #include <limits>
 #include <stdexcept>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace
@@ -517,6 +518,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "face_flux");
     SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
+    face_fluxes.sync_ghosts();
     const auto divergence =
         SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
@@ -532,6 +534,11 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergence)
 TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSkewedPrisms)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    ASSERT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(mesh->variant()));
+    const auto& geometry = *std::get<Mesh::UnstructuredPtr>(mesh->variant());
+    // This fixture retains native input order for the handle's local ordinals.
+    ASSERT_EQ(geometry.num_cells(), mesh->num_local_cells());
+    ASSERT_EQ(geometry.num_faces(), mesh->num_faces());
     ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
     EXPECT_EQ(mesh->boundary_batches().size(), 6u);
 
@@ -542,7 +549,8 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
          lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
+        EXPECT_EQ(geometry.cell_type(geometry.cell_id(static_cast<size_t>(lid))),
+                  SimpleFluid::MeshUtils::CellType::TRIPRISM);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
         if (cell_has_exterior_face(*mesh, lid))
         {
@@ -561,7 +569,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
     {
         saw_triangular_face =
             saw_triangular_face
-         || mesh->face(fid).type == SimpleFluid::MeshUtils::FaceType::TRIANGLE;
+         || geometry.face_nodes(geometry.face_id(static_cast<size_t>(fid))).size() == 3;
         if (!mesh->is_owned_face(fid))
         {
             continue;
@@ -576,6 +584,7 @@ TEST(FvmAnalyticalSolutionsTest, FaceSampledAffineVelocityHasExactDivergenceOnSk
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "skewed_face_flux");
     SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
+    face_fluxes.sync_ghosts();
     const auto divergence =
         SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
@@ -608,6 +617,7 @@ TEST(FvmAnalyticalSolutionsTest, TaylorGreenVortexIsDiscreteDivergenceFree)
 
     SimpleFluid::FaceField<Pack> face_fluxes(mesh, "taylor_green_flux");
     SimpleFluid::FVM::normal_face_fluxes(face_velocity, face_fluxes);
+    face_fluxes.sync_ghosts();
     const auto divergence =
         SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
             *mesh, face_fluxes);
@@ -635,7 +645,7 @@ TEST(FvmAnalyticalSolutionsTest, SemiImplicitDiffusionPreservesAffineScalar)
     }
     old_values.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     auto boundary_value =
         [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
@@ -690,7 +700,7 @@ TEST(FvmAnalyticalSolutionsTest, ScalarTransportSourceMatchesExactTransient)
     }
     old_values.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =
@@ -766,7 +776,7 @@ TEST(FvmAnalyticalSolutionsTest, OneDimensionalDiffusionWithConstantSourceMatche
     }
     old_values.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     auto boundary_value =
         [&](int batch_id, size_t in_batch_id) -> Pack::scalar_type
     {
@@ -1073,7 +1083,7 @@ TEST(FvmAnalyticalSolutionsTest, VectorTransportSourceMatchesExactTransient)
     }
     old_values.sync_ghosts();
 
-    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0);
+    SimpleFluid::FaceField<Pack> zero_fluxes(mesh, 0.0, "zero_fluxes");
     constexpr double time_step = 0.125;
     constexpr double diffusivity = 0.7;
     auto boundary_value =

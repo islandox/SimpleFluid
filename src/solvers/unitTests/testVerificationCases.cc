@@ -466,6 +466,7 @@ double solve_taylor_green_error(int n_cells)
         mesh, "manufactured_face_fluxes");
     SimpleFluid::FVM::normal_face_fluxes(
         face_velocity, face_fluxes);
+    face_fluxes.sync_ghosts();
 
     auto boundary_value =
         [&](int batch_id, size_t in_batch_id)

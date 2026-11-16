@@ -68,10 +68,13 @@ public:
         int interface_faces = 0;
         for (const auto face_lid : flux.owned_face_ids())
         {
+            const auto owner = d_mesh->owner_cell(face_lid);
             const auto neighbor = d_mesh->neighbor_cell(face_lid);
             if (neighbor >= 0
-                && !d_mesh->is_owned_cell(neighbor))
+                && d_mesh->is_owned_cell(owner) != d_mesh->is_owned_cell(neighbor))
             {
+                EXPECT_NEAR(std::min(d_mesh->cell_volume(owner), d_mesh->cell_volume(neighbor)), 0.1, 1.0e-12);
+                EXPECT_NEAR(std::max(d_mesh->cell_volume(owner), d_mesh->cell_volume(neighbor)), 1.0, 1.0e-12);
                 flux.set_value(face_lid, value);
                 ++interface_faces;
             }
@@ -430,8 +433,8 @@ TEST(FluidSolverMultiRankTest,
         1,
         &local_interface_faces,
         &global_interface_faces);
-    // Partition interfaces are represented once on each adjacent rank, with
-    // the local owned cell preferred as face owner.
+    // The unstructured face map owns a copy on each incident rank. Both copies
+    // must carry the same canonical flux, including the one with a ghost owner.
     ASSERT_EQ(global_interface_faces, 2);
 
     // The face owner has unit volume. The neighboring cell on the other rank

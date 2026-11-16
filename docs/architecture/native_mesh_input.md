@@ -37,6 +37,11 @@ The generated rank suffix uses Ioss's processor-width convention. Input mode
 is selected collectively. All Ioss/STK operations use the supplied communicator,
 including split communicators, rather than an implicit world communicator.
 
+Single-file parallel input requires a NetCDF backend compatible with the file
+format: parallel HDF5 support for netCDF-4/HDF5 files, or PNetCDF support for
+classic NetCDF files. Format availability depends on the linked Exodus/NetCDF
+build.
+
 The input support matrix remains `HEX_8`, `WEDGE_6`, and mixtures of those
 volume types. Unsupported populated volume topologies fail collectively.
 General native polyhedron support does not imply arbitrary Exodus polyhedron,

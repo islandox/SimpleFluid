@@ -6,6 +6,14 @@ The existing matrix/RHS split is retained: owned-cell gradient stencils enter
 the matrix, while the remote half of a partition-face gradient is reconstructed
 from the current synchronized solution and placed on the RHS.
 
+Native implicit assembly validates diffusivity, the implicit fraction, and the
+correction-field category collectively before constructing or importing gradients.
+Ranks must agree whether implicit correction is active and whether its field is
+present on the target mesh. Active correction across partition faces requires
+that lagged field; invalid, foreign, missing, or rank-inconsistent inputs reject
+collectively before assembly. A zero implicit fraction retains the orthogonal
+operator without requiring partition gradients.
+
 The optional final `NonOrthogonalConvergenceOptions` argument controls this
 iteration. Existing call sites continue to compile with the defaults:
 

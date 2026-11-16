@@ -29,6 +29,7 @@
 #include <cmath>
 #include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace SimpleFluid::detail
@@ -439,6 +440,7 @@ TEST(PhysicalEquationsTest, TemperatureSemiImplicitAdvectionRunsInEachDirection)
         const auto old_temperature = local_values(temperature);
         SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
         SimpleFluid::FVM::face_fluxes(velocity, fluxes);
+        fluxes.sync_ghosts();
 
         SimpleFluid::BoundaryConditionSet bcs;
         SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
@@ -1663,6 +1665,7 @@ TEST(PhysicalEquationsTest, PressureProjectionReducesFluxDivergence)
                 mesh, bcs);
         SimpleFluid::FaceField<Pack> fluxes(mesh, "face_flux");
         SimpleFluid::FVM::face_fluxes(velocity, cache, fluxes);
+        fluxes.sync_ghosts();
         const auto divergence =
             SimpleFluid::FVM::cell_divergence_from_fluxes<Pack>(
                 *mesh, fluxes);
@@ -1830,6 +1833,11 @@ TEST(PhysicalEquationsTest, ExplicitDiffusionPreservesUniformField)
 TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
 {
     auto mesh = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    ASSERT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(mesh->variant()));
+    const auto& geometry = *std::get<Mesh::UnstructuredPtr>(mesh->variant());
+    // This fixture retains native input order for the handle's local ordinals.
+    ASSERT_EQ(geometry.num_cells(), mesh->num_local_cells());
+    ASSERT_EQ(geometry.num_faces(), mesh->num_faces());
     ASSERT_GE(mesh->num_owned_cells(), 3u * 3u * 3u);
     EXPECT_EQ(mesh->boundary_batches().size(), 6u);
 
@@ -1840,7 +1848,8 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
          lid < static_cast<Mesh::local_ordinal_type>(mesh->num_owned_cells());
          ++lid)
     {
-        EXPECT_EQ(mesh->cell(lid).type, SimpleFluid::MeshUtils::CellType::TRIPRISM);
+        EXPECT_EQ(geometry.cell_type(geometry.cell_id(static_cast<size_t>(lid))),
+                  SimpleFluid::MeshUtils::CellType::TRIPRISM);
         EXPECT_GT(mesh->cell_volume(lid), 0.0);
         if (cell_has_exterior_face(*mesh, lid))
         {
@@ -1859,7 +1868,7 @@ TEST(PhysicalEquationsTest, SkewedTriangularPrismCellsAdvancePhysicalEquations)
         EXPECT_GT(mesh->face_area(fid), 0.0);
         saw_triangular_face =
             saw_triangular_face
-         || mesh->face(fid).type == SimpleFluid::MeshUtils::FaceType::TRIANGLE;
+         || geometry.face_nodes(geometry.face_id(static_cast<size_t>(fid))).size() == 3;
     }
     EXPECT_TRUE(saw_triangular_face);
     EXPECT_GT(boundary_cells, 0u);
