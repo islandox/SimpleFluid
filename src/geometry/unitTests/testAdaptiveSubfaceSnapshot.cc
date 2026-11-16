@@ -606,7 +606,7 @@ TEST(AdaptiveSubfaceSnapshot, SmallEditsCopyOnlyAffectedPagesForEveryProvider)
         snapshot.visit_borrowed_payload(
             [&](const ContactPayloadAllocation& value)
             {
-                using Role = ContactPayloadRole;
+                using Role = GeometryContactPayloadRole;
                 const auto role = value.identity.role;
                 if (role == Role::SubfaceIndexPageObject || role == Role::SubfaceIndexChildren ||
                     role == Role::SubfacePieces || role == Role::SubfaceSelectors ||

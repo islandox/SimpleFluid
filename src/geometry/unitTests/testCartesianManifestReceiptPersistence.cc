@@ -29,7 +29,7 @@ Metadata payload(const Manifest& manifests)
     manifests.visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& allocation)
         {
-            using Role = D::ContactPayloadRole;
+            using Role = D::GeometryContactPayloadRole;
             const auto role = allocation.identity.role;
             if (role == Role::CartesianManifestObject || role == Role::CartesianManifestSources ||
                 role == Role::CartesianManifestIdentity || role == Role::CartesianManifestRanges ||

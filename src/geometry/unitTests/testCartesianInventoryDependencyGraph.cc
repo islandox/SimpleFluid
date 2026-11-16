@@ -186,8 +186,10 @@ std::map<AllocationKey, std::size_t> inventory_metadata(const Inventory& invento
     inventory.visit_borrowed_payload(
         [&](const D::ContactPayloadAllocation& allocation)
         {
-            using Role = D::ContactPayloadRole;
-            switch (allocation.identity.role)
+            using Role = D::GeometryContactPayloadRole;
+            if (allocation.identity.role.category() != D::ContactPayloadCategory::Geometry)
+                return;
+            switch (static_cast<Role>(allocation.identity.role.ordinal()))
             {
                 case Role::CartesianInventoryObject:
                 case Role::CartesianInventoryBatches:
