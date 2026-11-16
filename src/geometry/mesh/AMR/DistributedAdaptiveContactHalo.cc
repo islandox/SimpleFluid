@@ -4,8 +4,12 @@
 #include "DistributedAdaptiveContactHalo.hh"
 #include "AdaptiveContactSnapshot.hh"
 #include "AdaptiveLeafLayout.hh"
+#include "AdaptiveSubfaceSnapshot.hh"
 #include "BudgetedOwnerExchange.hh"
+#include "CartesianContactBackend.hh"
+#include "CartesianIncidenceBudget.hh"
 #include "ClosedContactIndex.hh"
+#include "ContactBackend.hh"
 #include "ContactCoverIndex.hh"
 #include "ContactPairSet.hh"
 #include "ContactPointGroups.hh"
@@ -45,6 +49,50 @@ constexpr std::uint64_t halo_magic = 0x53464348414c4f31ULL;
 using Kind = ContactHaloMessageKind;
 constexpr std::size_t header_bytes = 13 * 8;
 constexpr std::size_t map_links = 4 * sizeof(void*);
+constexpr std::size_t controller_allowance_bytes = 128;
+/** Rebound only during allocate_shared's one arena allocation. The seed is
+ * copied into Budget after allocate() admits the exact object/control block.
+ * The stored seed pointer is never dereferenced during shared-owner teardown. */
+template<class T> struct HaloArenaAllocator
+{
+    using value_type = T;
+    Budget* seed;
+    explicit HaloArenaAllocator(Budget& initial) noexcept : seed(&initial) {}
+    template<class U> HaloArenaAllocator(const HaloArenaAllocator<U>& other) noexcept : seed(other.seed) {}
+    [[nodiscard]] T* allocate(std::size_t count)
+    {
+        const auto bytes = cartesian_detail::product(count, sizeof(T));
+        seed->add(bytes);
+        seed->owner_bytes = cartesian_detail::add(seed->owner_bytes, bytes);
+        try
+        {
+            return std::allocator<T>{}.allocate(count);
+        }
+        catch (...)
+        {
+            seed->used -= bytes;
+            seed->owner_bytes -= bytes;
+            throw;
+        }
+    }
+    void deallocate(T* allocation, std::size_t count) noexcept
+    {
+        // Budget has already died here: neither seed nor its counters may be read.
+        std::allocator<T>{}.deallocate(allocation, count);
+    }
+    template<class U> bool operator==(const HaloArenaAllocator<U>& other) const noexcept { return seed == other.seed; }
+};
+std::shared_ptr<Budget> make_halo_arena(std::size_t limit)
+{
+    Budget seed{limit};
+    return std::allocate_shared<Budget>(HaloArenaAllocator<Budget>(seed), seed);
+}
+std::shared_ptr<std::size_t> make_external_lease_counter(const std::shared_ptr<Budget>& arena, std::size_t& owner_bytes)
+{
+    // The rebound allocator pins the arena until this counter's last shared or
+    // weak owner dies; its exact allocation refunds itself independently of Impl.
+    return std::allocate_shared<std::size_t>(CartesianContactAllocator<std::size_t>(*arena, arena, owner_bytes), 0);
+}
 struct Bounds
 {
     AdaptiveContactBounds box;
@@ -229,6 +277,7 @@ struct AdaptiveContactSnapshot::Storage
 {
     ContactGroupAllocation admission;
     std::shared_ptr<const AdaptiveLeafLayout> layout;
+    std::shared_ptr<const CartesianContactState> cartesian;
     ContactSlotPages<ContactRecordSlot> records;
     ContactSlotPages<ContactRowSlot> rows;
     ContactRecordIndex index;
@@ -338,11 +387,33 @@ struct DistributedAdaptiveContactHalo::Impl
     AdaptiveClosureOptions options;
     ContactHaloContext context;
     ContactHaloBeforeSend before_send;
+    struct HeaderAdmission
+    {
+        Budget& budget;
+        std::size_t bytes;
+        HeaderAdmission(Budget& arena, std::size_t size, bool precharged) : budget(arena), bytes(size)
+        {
+            if (!precharged)
+                budget.add(size);
+        }
+        ~HeaderAdmission() { budget.used -= bytes; }
+    };
     std::shared_ptr<Budget> arena;
-    std::shared_ptr<std::size_t> external_lease_bytes = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, std::size_t>(
-        0);
     bool native_source_floors_sealed = false;
     Budget& budget;
+    HeaderAdmission header_admission;
+    std::size_t external_counter_owner_bytes = 0;
+    std::shared_ptr<std::size_t> external_lease_bytes =
+        make_external_lease_counter(arena, external_counter_owner_bytes);
+    // The 128-byte fixed controller allowance below covers this empty dispatch
+    // object and other controller bookkeeping. Arena and external counter
+    // object/control blocks are separately admitted; so is the substantive
+    // Cartesian backend payload owned by the snapshot.
+    std::unique_ptr<ContactBackend> backend = std::make_unique<ExplicitContactBackend>();
+    std::shared_ptr<const CartesianContactState> cartesian;
+    std::shared_ptr<const AdaptiveSubfaceSnapshot> cartesian_subfaces;
+    CartesianContactFaultHook cartesian_fault_hook;
+    std::uint64_t cartesian_generation = 0;
     DeferredOwnerCharges deferred_owners;
     IdentityBudget identities;
     std::optional<ContactTracePool> trace_pool;
@@ -396,25 +467,64 @@ struct DistributedAdaptiveContactHalo::Impl
     bool ready = false, evaluated = false;
     const char* diagnostic_phase = "construct";
 
+    // A failed draft restores accounting only after its scoped owners unwind.
+    struct CartesianTransaction
+    {
+        Impl& owner;
+        Budget saved_budget;
+        ContactHaloStatistics saved_statistics;
+        AdaptiveClosureStats saved_diagnostics;
+        ContactHaloContext saved_context;
+        const char* saved_phase;
+        std::size_t saved_reservation;
+        bool committed = false;
+        explicit CartesianTransaction(Impl& state) noexcept
+            : owner(state), saved_budget(state.budget), saved_statistics(state.statistics),
+              saved_diagnostics(state.diagnostics), saved_context(state.context), saved_phase(state.diagnostic_phase),
+              saved_reservation(state.page_reservation)
+        {
+        }
+        ~CartesianTransaction()
+        {
+            if (!committed)
+            {
+                owner.budget.used = saved_budget.used;
+                owner.budget.peak = std::max(owner.budget.peak, saved_budget.peak);
+                owner.statistics = saved_statistics;
+                owner.diagnostics = saved_diagnostics;
+                owner.context = saved_context;
+                owner.diagnostic_phase = saved_phase;
+                owner.page_reservation = saved_reservation;
+            }
+        }
+    };
     Impl(const AdaptiveProviderKernel& kernel_, Teuchos::RCP<const Teuchos::Comm<int>> comm_,
         AdaptiveClosureOptions options_, ContactHaloContext context_, ContactHaloBeforeSend before_send_,
-        std::size_t caller_live_bytes)
+        std::size_t caller_live_bytes, std::shared_ptr<Budget> shared_arena = {}, bool header_precharged = false)
         : kernel(kernel_), comm(std::move(comm_)), options(options_), context(context_),
           before_send(std::move(before_send_)),
-          arena(geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Budget>(
-              Budget{options.byte_budget, caller_live_bytes,
-              caller_live_bytes, caller_live_bytes})),
-          budget(*arena), deferred_owners(budget), trace_pool(std::in_place, budget), affected_pairs(budget),
+          arena(shared_arena ? std::move(shared_arena)
+                             : geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, Budget>(
+                                   Budget{options.byte_budget, caller_live_bytes, caller_live_bytes,
+                                          caller_live_bytes})),
+          budget(*arena),
+          header_admission(budget, fixed_admission_bytes(bool(shared_arena)), header_precharged),
+          deferred_owners(budget), trace_pool(std::in_place, budget), affected_pairs(budget),
           work(std::in_place, arena), ranks(comm.is_null() ? 0 : comm->getSize()),
           rank(comm.is_null() ? -1 : comm->getRank()), external_retained_bytes(caller_live_bytes)
     {
-        budget.add(sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
-                   sizeof(Groups));
         groups = std::make_unique<Groups>(arena);
         ContactGroupAllocation charge(arena);
         charge.add(sizeof(AdaptiveContactSnapshot::Storage) + 128);
         query = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, AdaptiveContactSnapshot::Storage>(
             std::move(charge), rank);
+    }
+    [[nodiscard]] static constexpr std::size_t fixed_admission_bytes(bool) noexcept
+    {
+        // Arena and external counter object/control allocations own their
+        // exact lifetime credits and are excluded from refundable headers.
+        static_assert(sizeof(ExplicitContactBackend) <= controller_allowance_bytes);
+        return sizeof(Impl) + controller_allowance_bytes + sizeof(DistributedAdaptiveContactHalo) + sizeof(Groups);
     }
     void initialize_collective()
     {
@@ -1094,6 +1204,11 @@ struct DistributedAdaptiveContactHalo::Impl
     void remove_remote_points(GroupId);
     void discover_points();
     void fetch_records();
+    [[nodiscard]] std::shared_ptr<CartesianContactState> prepare_cartesian_state(
+        CartesianLeafSelection, std::uint64_t generation);
+    void resolve_cartesian_owners(CartesianContactState&);
+    void apply_cartesian_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>,
+        ContactHaloContext, const ContactOwnedLeafLookup&);
     std::vector<AdaptiveMark> evaluate(bool retain_charge = false);
 };
 
@@ -1108,11 +1223,11 @@ std::size_t row_storage(const ContactIncidenceRow& row)
 
 std::size_t DistributedAdaptiveContactHalo::Impl::metadata_bytes() const
 {
-    std::size_t bytes =
-        sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 + sizeof(DistributedAdaptiveContactHalo) +
-        query->admission.bytes() + (sealed_contacts ? sizeof(AdaptiveContactSnapshot) + 128 : 0) +
-        retired_records.capacity() * sizeof(std::size_t) +
-        identities.metadata_bytes() + deferred_owners.metadata_bytes();
+    std::size_t bytes = sizeof(Impl) + budget.owner_bytes + external_counter_owner_bytes + controller_allowance_bytes +
+                        sizeof(DistributedAdaptiveContactHalo) + query->admission.bytes() +
+                        (sealed_contacts ? sizeof(AdaptiveContactSnapshot) + 128 : 0) +
+                        retired_records.capacity() * sizeof(std::size_t) + identities.metadata_bytes() +
+                        deferred_owners.metadata_bytes();
     if (persistent_groups)
         bytes += sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128;
     else
@@ -1152,6 +1267,10 @@ std::size_t DistributedAdaptiveContactHalo::Impl::metadata_bytes() const
         bytes += incidence->metadata_bytes();
     if (trace_pool)
         bytes += trace_pool->metadata_bytes();
+    if (cartesian)
+        bytes += cartesian->metadata_bytes();
+    if (cartesian_subfaces)
+        bytes += cartesian_subfaces->index_bytes();
     return bytes;
 }
 
@@ -2243,8 +2362,465 @@ void DistributedAdaptiveContactHalo::Impl::fetch_records()
     }
 }
 
+std::shared_ptr<CartesianContactState> DistributedAdaptiveContactHalo::Impl::prepare_cartesian_state(
+    CartesianLeafSelection owned, std::uint64_t generation)
+{
+    // Elect a nonempty owner, then authenticate its complete grid recipe on
+    // every rank. Empty owners never fabricate native leaves or infer a level.
+    int candidate = owned.empty() ? ranks : rank, elected = ranks;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &candidate, &elected);
+    if (elected == ranks)
+        return {};
+    constexpr std::size_t grid_words = 18;
+    std::array<std::uint64_t, grid_words + 2> elected_words{};
+    auto pack = [](const AMRGrid& grid)
+    {
+        std::array<std::uint64_t, grid_words> words{};
+        for (std::size_t a = 0; a != 3; ++a)
+        {
+            words[5 * a] = grid.root_blocks[a];
+            words[5 * a + 1] = grid.block_cells[a];
+            words[5 * a + 2] = std::bit_cast<std::uint64_t>(grid.origin[a]);
+            words[5 * a + 3] = std::bit_cast<std::uint64_t>(grid.extent[a]);
+            words[5 * a + 4] = grid.periodic[a];
+        }
+        words[15] = grid.max_level;
+        words[16] = grid.region_id;
+        words[17] = grid.material_id;
+        return words;
+    };
+    auto grid = SimpleFluid::Meshes::AMR::trusted_cartesian_incidence_grid(kernel);
+    collective(*comm,
+        [&]
+        {
+            if (rank != elected)
+                return;
+            if (!grid)
+                return;
+            const auto* ancestry = std::get_if<CartesianCellAncestry>(&owned.front().key.ancestry);
+            if (!ancestry)
+                return;
+            const auto words = pack(*grid);
+            std::copy(words.begin(), words.end(), elected_words.begin());
+            elected_words[grid_words] = ancestry->level;
+            elected_words[grid_words + 1] = owned.front().domain.size();
+        });
+    Teuchos::broadcast(*comm, elected, int(elected_words.size()), elected_words.data());
+    int local_eligible = bool(grid);
+    if (grid)
+    {
+        const auto words = pack(*grid);
+        local_eligible =
+            std::equal(words.begin(), words.end(), elected_words.begin()) && elected_words[grid_words + 1] != 0;
+    }
+    int all_eligible = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_eligible, &all_eligible);
+    if (!all_eligible)
+        return {};
+    cartesian_detail::Allocation scratch(budget);
+    AdaptiveBytes domain;
+    collective(*comm,
+        [&]
+        {
+            const auto size = elected_words[grid_words + 1];
+            if (size > std::uint64_t(std::numeric_limits<int>::max()))
+                throw std::invalid_argument("Cartesian connected domain exceeds broadcast capacity.");
+            scratch.reserve(domain, std::size_t(size));
+            domain.resize(std::size_t(size));
+            if (rank == elected)
+                std::copy(owned.front().domain.begin(), owned.front().domain.end(), domain.begin());
+        });
+    Teuchos::broadcast(*comm, elected, int(domain.size()), domain.data());
+    std::shared_ptr<CartesianContactState> result;
+    collective(*comm,
+        [&]
+        {
+            // Prepay the temporary seed domain and native descriptor writer
+            // growth. build authenticates and admits its independent frame.
+            scratch.retain(domain.size());
+            scratch.retain(cartesian_detail::growth(152, 1));
+            auto capability = capability_from_grid(*grid, domain, unsigned(elected_words[grid_words]));
+            if (capability)
+            {
+                capability->frame = kernel.descriptor();
+                result = CartesianContactState::build(
+                    kernel, owned, rank, budget, arena, generation, &*capability, query->layout);
+            }
+        });
+    local_eligible = bool(result);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_eligible, &all_eligible);
+    if (!all_eligible)
+        result.reset();
+    return result;
+}
+
+void DistributedAdaptiveContactHalo::Impl::resolve_cartesian_owners(CartesianContactState& state)
+{
+    cartesian_detail::Allocation scratch(budget);
+    const auto& capability = state.capability();
+    constexpr std::size_t cover_words = 9;
+    std::array<std::uint64_t, cover_words> cover{};
+    std::vector<std::uint64_t> covers;
+    std::vector<AdaptiveCellKey> boundary;
+    collective(*comm,
+        [&]
+        {
+            cover[0] = !state.keys().empty();
+            cover[1] = state.keys().size();
+            std::array<std::uint64_t, 3> low{}, high{};
+            low.fill(std::numeric_limits<std::uint64_t>::max());
+            for (const auto& key : state.keys())
+            {
+                const auto& index = std::get<CartesianCellAncestry>(key.ancestry).index;
+                for (std::size_t axis = 0; axis != 3; ++axis)
+                {
+                    low[axis] = std::min(low[axis], index[axis]);
+                    high[axis] = std::max(high[axis], index[axis]);
+                }
+            }
+            for (std::size_t axis = 0; axis != 3; ++axis)
+            {
+                cover[2 + axis] = cover[0] ? low[axis] : 0;
+                cover[5 + axis] = high[axis];
+            }
+            cover[8] = capability.level;
+            const auto count = cartesian_detail::product(cover_words, std::size_t(ranks));
+            if (count > std::size_t(std::numeric_limits<int>::max()))
+                throw std::invalid_argument("Cartesian cover collective exceeds count capacity.");
+            scratch.reserve(covers, count);
+            covers.resize(count);
+        });
+    Teuchos::gatherAll(*comm, int(cover_words), cover.data(), int(covers.size()), covers.data());
+    collective(*comm,
+        [&]
+        {
+            std::uint64_t global_cells = 0;
+            for (int peer = 0; peer != ranks; ++peer)
+            {
+                const auto* record = &covers[cover_words * std::size_t(peer)];
+                if (record[0] > 1 || record[8] != capability.level || bool(record[0]) != bool(record[1]) ||
+                    record[1] > state.total_cells() || record[1] > state.total_cells() - global_cells)
+                    throw std::invalid_argument("Invalid Cartesian logical cover.");
+                for (std::size_t axis = 0; axis != 3; ++axis)
+                    if (record[0] &&
+                        (record[2 + axis] > record[5 + axis] || record[5 + axis] >= capability.counts[axis]))
+                        throw std::invalid_argument("Invalid Cartesian logical cover bounds.");
+                global_cells += record[1];
+            }
+            if (global_cells != state.total_cells())
+                throw std::invalid_argument("Cartesian canonical bootstrap needs complete global coverage.");
+            state.boundary_keys(boundary, scratch);
+        });
+    auto in_cover = [&](int peer, const std::array<std::uint64_t, 3>& index)
+    {
+        const auto* record = &covers[cover_words * std::size_t(peer)];
+        if (!record[0])
+            return false;
+        for (std::size_t axis = 0; axis != 3; ++axis)
+            if (index[axis] < record[2 + axis] || record[5 + axis] < index[axis])
+                return false;
+        return true;
+    };
+    auto key_of = [&](const std::array<std::uint64_t, 3>& index)
+    { return AdaptiveCellKey{capability.region, CartesianCellAncestry{capability.level, index}}; };
+    for (int offset = 1; offset < ranks; ++offset)
+    {
+        const int destination = (rank + offset) % ranks;
+        const int source = (rank + ranks - offset) % ranks;
+        cartesian_detail::Allocation probe_scratch(budget);
+        std::vector<std::array<std::uint64_t, 3>> probing;
+        std::size_t cursor = 0;
+        bool sent_final = false, received_final = false;
+        std::uint64_t page = 0, expected_page = 0;
+        // Every sender emits an explicit terminal page. Synchronous exchange
+        // drains each page before the next sent_done reduction, so missing
+        // completion is a bounded collective failure once all senders finish.
+        while (any(!sent_final))
+        {
+            const auto cap = credit();
+            Writer outgoing;
+            int peer = -1;
+            collective(*comm,
+                [&]
+                {
+                    if (sent_final)
+                        return;
+                    if (cap <= header_bytes + 8)
+                        throw std::invalid_argument("Insufficient Cartesian owner probe page credit.");
+                    peer = destination;
+                    outgoing = writer(Kind::CellOwners, 0, page++);
+                    ++statistics.owner_query_pages;
+                    admit_writer(outgoing, cap);
+                    outgoing.word(0);
+                    std::size_t count = 0;
+                    while (cursor < boundary.size())
+                    {
+                        const auto& index = std::get<CartesianCellAncestry>(boundary[cursor].ancestry).index;
+                        if (!in_cover(destination, index))
+                        {
+                            ++cursor;
+                            continue;
+                        }
+                        if (cap - outgoing.data.size() < 24)
+                        {
+                            if (!count)
+                                throw std::invalid_argument("A Cartesian owner probe key exceeds page credit.");
+                            break;
+                        }
+                        for (const auto value : index)
+                            outgoing.word(value);
+                        ++count;
+                        ++cursor;
+                    }
+                    sent_final = cursor == boundary.size();
+                    replace_word(outgoing.data, header_bytes, count);
+                    replace_word(outgoing.data, header_bytes - 8, sent_final);
+                });
+            auto incoming = exchange(peer, std::move(outgoing));
+            collective(*comm,
+                [&]
+                {
+                    if (incoming.packets.empty())
+                        return;
+                    if (received_final || incoming.packets.size() != 1 || incoming.packets.front().peer != source)
+                        throw std::invalid_argument("Foreign or duplicate Cartesian owner probe page.");
+                    Reader r{incoming.packets.front().bytes};
+                    const auto frame = read(r, Kind::CellOwners, source);
+                    if (frame.query || frame.page != expected_page++)
+                        throw std::invalid_argument("Missing or duplicate Cartesian owner probe page.");
+                    const auto count = r.word();
+                    if (count > r.data.size() / 24)
+                        throw std::invalid_argument("Invalid Cartesian owner probe count.");
+                    for (std::uint64_t i = 0; i != count; ++i)
+                    {
+                        std::array<std::uint64_t, 3> index{};
+                        for (auto& axis : index)
+                            axis = r.word();
+                        for (std::size_t axis = 0; axis != 3; ++axis)
+                            if (index[axis] >= capability.counts[axis])
+                                throw std::invalid_argument("Cartesian owner probe lies outside the frame.");
+                        probe_scratch.append(probing);
+                        probing.push_back(index);
+                    }
+                    r.done();
+                    received_final = frame.final;
+                });
+            retire(incoming);
+        }
+        collective(*comm,
+            [&]
+            {
+                if (!received_final)
+                    throw std::invalid_argument("Missing terminal Cartesian owner probe page.");
+            });
+        std::size_t reply_cursor = 0;
+        bool reply_final = false, reply_received = false;
+        std::uint64_t reply_page = 0, expected_reply_page = 0;
+        while (any(!reply_final))
+        {
+            const auto cap = credit();
+            Writer outgoing;
+            int peer = -1;
+            collective(*comm,
+                [&]
+                {
+                    if (reply_final)
+                        return;
+                    if (cap <= header_bytes + 8)
+                        throw std::invalid_argument("Insufficient Cartesian owner reply page credit.");
+                    peer = source;
+                    outgoing = writer(Kind::CellOwnerReply, 0, reply_page++);
+                    ++statistics.owner_reply_pages;
+                    admit_writer(outgoing, cap);
+                    outgoing.word(0);
+                    std::size_t count = 0;
+                    while (reply_cursor < probing.size())
+                    {
+                        if (!state.owns(key_of(probing[reply_cursor])))
+                        {
+                            ++reply_cursor;
+                            continue;
+                        }
+                        if (cap - outgoing.data.size() < 32)
+                        {
+                            if (!count)
+                                throw std::invalid_argument("A Cartesian owner reply key exceeds page credit.");
+                            break;
+                        }
+                        for (const auto value : probing[reply_cursor])
+                            outgoing.word(value);
+                        outgoing.word(state.revision(key_of(probing[reply_cursor])));
+                        ++count;
+                        ++reply_cursor;
+                    }
+                    reply_final = reply_cursor == probing.size();
+                    replace_word(outgoing.data, header_bytes, count);
+                    replace_word(outgoing.data, header_bytes - 8, reply_final);
+                });
+            auto incoming = exchange(peer, std::move(outgoing));
+            collective(*comm,
+                [&]
+                {
+                    if (incoming.packets.empty())
+                        return;
+                    if (reply_received || incoming.packets.size() != 1 || incoming.packets.front().peer != destination)
+                        throw std::invalid_argument("Foreign or duplicate Cartesian owner reply page.");
+                    Reader r{incoming.packets.front().bytes};
+                    const auto frame = read(r, Kind::CellOwnerReply, destination);
+                    if (frame.query || frame.page != expected_reply_page++)
+                        throw std::invalid_argument("Missing or duplicate Cartesian owner reply page.");
+                    const auto count = r.word();
+                    if (count > r.data.size() / 32)
+                        throw std::invalid_argument("Invalid Cartesian owner reply count.");
+                    for (std::uint64_t i = 0; i != count; ++i)
+                    {
+                        std::array<std::uint64_t, 3> index{};
+                        for (auto& axis : index)
+                            axis = r.word();
+                        if (cartesian_fault_hook)
+                            cartesian_fault_hook(CartesianContactStage::BeforeOwnerInsert);
+                        const auto key = key_of(index);
+                        if (!std::ranges::binary_search(boundary, key) || !in_cover(destination, index))
+                            throw std::invalid_argument("Unsolicited Cartesian contact owner claim.");
+                        state.install_owner(key, destination, r.word());
+                    }
+                    r.done();
+                    reply_received = frame.final;
+                });
+            retire(incoming);
+        }
+        collective(*comm,
+            [&]
+            {
+                if (!reply_received)
+                    throw std::invalid_argument("Missing terminal Cartesian owner reply page.");
+            });
+    }
+    collective(*comm,
+        [&]
+        {
+            for (const auto& key : boundary)
+                if (!state.has_owner(key))
+                    throw std::invalid_argument("Missing Cartesian contact neighbour owner.");
+        });
+    statistics.resolved_remote_cells = state.remote_cells();
+}
+
+void DistributedAdaptiveContactHalo::Impl::apply_cartesian_delta(std::span<const ContactRetiredLeaf> retired,
+    std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const ContactOwnedLeafLookup& lookup)
+{
+    CartesianTransaction transaction(*this);
+    cartesian_detail::Allocation scratch(budget);
+    std::vector<AdaptiveCellKey> retiring;
+    std::vector<const AdaptiveLeaf*> rebuilt;
+    collective(*comm,
+        [&]
+        {
+            if (!cartesian || !ready || !evaluated)
+                throw std::invalid_argument("Incremental contact update needs a completed canonical session.");
+            if (next == context)
+                throw std::invalid_argument("Incremental contact context did not advance.");
+            if (cartesian_generation == std::numeric_limits<std::uint64_t>::max())
+                throw std::invalid_argument("Cartesian incidence generation overflow.");
+            if (cartesian_fault_hook)
+                cartesian_fault_hook(CartesianContactStage::PrepareReplacement);
+            scratch.reserve(retiring, retired.size());
+            for (const auto& item : retired)
+            {
+                if (!cartesian->owns(item.key) || cartesian->revision(item.key) != item.revision)
+                    throw std::invalid_argument("Retired Cartesian contact cell is absent or stale.");
+                if (std::ranges::find(retiring, item.key) != retiring.end())
+                    throw std::invalid_argument("Duplicate retired Cartesian contact cell.");
+                retiring.push_back(item.key);
+            }
+            for (std::size_t i = 0; i != inserted.size(); ++i)
+                if (cartesian->owns(inserted[i]) ||
+                    std::ranges::find(inserted.first(i), inserted[i]) != inserted.first(i).end())
+                    throw std::invalid_argument("Inserted Cartesian contact cell is already owned or duplicated.");
+            scratch.reserve(rebuilt, cartesian_detail::add(cartesian->keys().size(), inserted.size()));
+            auto append_leaf = [&](const AdaptiveCellKey& key)
+            {
+                const auto& leaf = lookup(key);
+                if (leaf.key != key)
+                    throw std::invalid_argument("Cartesian replacement lookup returned a foreign leaf.");
+                // An ineligible ancestry or supplied shell can own variable
+                // geometry/path payload. Decline it before any leaf copy; the
+                // uniform native class below has inline Cartesian keys only.
+                if (!CartesianIncidenceSource::eligible(leaf))
+                    throw std::invalid_argument(
+                        "Cartesian contact deltas need one uniform certified level; unsupported native recipe.");
+                rebuilt.push_back(&leaf);
+            };
+            for (const auto& key : cartesian->keys())
+                if (std::ranges::find(retiring, key) == retiring.end())
+                    append_leaf(key);
+            for (const auto& key : inserted)
+                append_leaf(key);
+        });
+    auto fresh = prepare_cartesian_state(rebuilt, cartesian_generation + 1);
+    collective(*comm,
+        [&]
+        {
+            if (!fresh)
+                throw std::invalid_argument(
+                    "Cartesian contact deltas need one uniform certified level; rebuild or use the explicit backend.");
+            context = next;
+        });
+    // This method contains communication and owns its local-only barriers.
+    // Never execute it inside collective(action).
+    initialize_collective();
+    resolve_cartesian_owners(*fresh);
+    auto published_statistics = statistics;
+    collective(*comm,
+        [&]
+        {
+            fresh->evaluate(options, transaction.saved_statistics.work);
+            published_statistics = statistics;
+            ++published_statistics.full_owned_scans_after_bootstrap;
+            published_statistics.delta_owned_visits += inserted.size();
+            published_statistics.owned_records = fresh->keys().size();
+            published_statistics.unique_cell_pairs = fresh->unique_pairs();
+            published_statistics.logical_contact_pairs += fresh->logical_pairs();
+            published_statistics.span_pair_evaluations += fresh->span_evaluations();
+            published_statistics.trace_pair_evaluations += fresh->trace_evaluations();
+            published_statistics.work = fresh->work();
+            published_statistics.source_membership_cells = fresh->keys().size();
+            published_statistics.source_coordinate_points = fresh->coordinate_points();
+            published_statistics.source_line_records = cartesian_detail::product(3, fresh->keys().size());
+            if (cartesian_fault_hook)
+                cartesian_fault_hook(CartesianContactStage::PreparePublication);
+        });
+    // All throwing work and the success reduction have completed. Shared-owner
+    // moves and scalar publication cannot allocate or throw.
+    cartesian = std::move(fresh);
+    sealed_contacts.reset();
+    cartesian_subfaces.reset();
+    ++cartesian_generation;
+    statistics = published_statistics;
+    diagnostics.cells = cartesian->keys().size();
+    evaluated = true;
+    diagnostic_phase = "ready";
+    transaction.committed = true;
+}
+
 std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool retain_charge)
 {
+    if (cartesian)
+    {
+        collective(*comm,
+            [&]
+            {
+                if (!ready || !evaluated)
+                    throw std::invalid_argument("Spatial closure session has no completed Cartesian bootstrap.");
+            });
+        cartesian_detail::Allocation result_admission(budget);
+        std::vector<AdaptiveMark> result;
+        collective(*comm, [&] { cartesian->collect_marks(result, result_admission); });
+        if (retain_charge)
+            result_admission.bytes = 0;
+        evaluated = true;
+        return result;
+    }
     if (!evaluated)
     {
         collective(*comm,
@@ -2347,15 +2923,13 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
                     ClosureRequirements required;
                     charge_work(1);
                     ++statistics.span_pair_evaluations;
-                    for (std::size_t axis = 0; axis < 3; ++axis)
+                    ContactClosureView view_a, view_b;
+                    if (!backend->closure_views(a.key(), b.key(), view_a, view_b))
                     {
-                        if (a.owner == rank && span_exceeds_ratio(first_body->spans[axis], second_body->spans[axis],
-                                                   options.maximum_span_ratio))
-                            join_closure_requirement(*first_body, required.first, first_body->factors[axis]);
-                        if (b.owner == rank && span_exceeds_ratio(second_body->spans[axis], first_body->spans[axis],
-                                                   options.maximum_span_ratio))
-                            join_closure_requirement(*second_body, required.second, second_body->factors[axis]);
+                        view_a = closure_view(*first_body, a.owner);
+                        view_b = closure_view(*second_body, b.owner);
                     }
+                    grade_contact_spans(view_a, view_b, options.maximum_span_ratio, rank, required);
                     auto traces = [&](const PhysicalPair& point)
                     {
                         if (!second_body->trace_faces().empty() &&
@@ -2379,17 +2953,8 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
                             point.flags & PhysicalPair::local_is_first ? local_physical : other_physical;
                         const auto& second_physical =
                             point.flags & PhysicalPair::local_is_first ? other_physical : local_physical;
-                        for (const auto& first : first_body->trace_faces())
-                            for (const auto& second : second_body->trace_faces())
-                            {
-                                const auto request = trace_pair_requirements(
-                                    first, second, first_physical, second_physical, options.maximum_trace_jump);
-                                if (a.owner == rank && request.first)
-                                    join_closure_requirement(*first_body, required.first, std::uint64_t(*request.first));
-                                if (b.owner == rank && request.second)
-                                    join_closure_requirement(
-                                        *second_body, required.second, std::uint64_t(*request.second));
-                            }
+                        grade_contact_trace_point(view_a, view_b, options.maximum_trace_jump, rank, first_physical,
+                            second_physical, required);
                     };
                     if (first_body->traces_point_independent && second_body->traces_point_independent)
                         traces(physical.front());
@@ -2494,6 +3059,7 @@ std::vector<AdaptiveMark> DistributedAdaptiveContactHalo::Impl::evaluate(bool re
     return result;
 }
 
+DistributedAdaptiveContactHalo::DistributedAdaptiveContactHalo(std::nullptr_t) noexcept {}
 DistributedAdaptiveContactHalo::DistributedAdaptiveContactHalo(const AdaptiveProviderKernel& kernel,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, AdaptiveClosureOptions options, ContactHaloContext context,
     ContactHaloBeforeSend before_send)
@@ -2537,6 +3103,11 @@ void DistributedAdaptiveContactHalo::visit_closed_contacts(
     if (state.sealed_contacts)
     {
         state.sealed_contacts->visit_closed_contacts(key, visitor);
+        return;
+    }
+    if (state.cartesian)
+    {
+        state.cartesian->visit_closed_contacts(key, visitor);
         return;
     }
     const auto found = state.query->find(key);
@@ -2591,6 +3162,35 @@ std::shared_ptr<const AdaptiveContactSnapshot> DistributedAdaptiveContactHalo::s
     }
     if (state.pending_contact_layout && !same_leaf_layout(state.pending_contact_layout, next))
         throw std::invalid_argument("Contact seal retry supplied a different owned selection.");
+    if (state.cartesian)
+    {
+        if (!state.cartesian->requirements_empty())
+            throw std::invalid_argument("Cartesian contact sealing requires completed grading.");
+        state.cartesian->validate_layout(next);
+        if (state.cartesian->pending_selection() && state.cartesian.use_count() != 1)
+            throw std::invalid_argument("An unsealed Cartesian candidate has escaped its transaction.");
+        ContactGroupAllocation storage_charge(state.arena);
+        storage_charge.add(sizeof(AdaptiveContactSnapshot::Storage) + 128);
+        auto storage = std::make_shared<AdaptiveContactSnapshot::Storage>(std::move(storage_charge), state.rank);
+        storage->layout = next;
+        storage->cartesian = state.cartesian;
+        ContactGroupAllocation snapshot_charge(state.arena);
+        snapshot_charge.add(sizeof(AdaptiveContactSnapshot) + 128);
+        auto snapshot = std::shared_ptr<const AdaptiveContactSnapshot>(
+            new AdaptiveContactSnapshot(std::move(snapshot_charge), storage, state.context));
+        auto subfaces = AdaptiveSubfaceSnapshot::cartesian(state.cartesian, next, state.context,
+            geometry_construction_controls(), state.rank, state.budget, state.arena);
+        // Every throwing allocation and validation above precedes publication.
+        // Pending overlay borrows are private and all readers reject them.
+        if (state.cartesian->pending_selection())
+            const_cast<CartesianContactState&>(*state.cartesian).bind_validated_layout(next);
+        state.query = std::move(storage);
+        state.pending_contact_layout.reset();
+        state.cartesian_subfaces = std::move(subfaces);
+        state.sealed_contacts = std::move(snapshot);
+        return state.sealed_contacts;
+    }
+
     if (transition)
         transition->visit_rebound_leaves(
             [&](const AdaptiveLeaf& leaf)
@@ -2647,6 +3247,11 @@ std::shared_ptr<const AdaptiveContactSnapshot> DistributedAdaptiveContactHalo::s
 
 void AdaptiveContactSnapshot::visit_closed_contacts(const AdaptiveCellKey& key, const ContactWitnessVisitor& visitor) const
 {
+    if (storage_->cartesian)
+    {
+        storage_->cartesian->visit_closed_contacts(key, visitor);
+        return;
+    }
     const auto found = storage_->find(key);
     if (!found || storage_->records[*found].owner != storage_->rank)
         throw std::out_of_range("Closed-contact query requires an owned leaf.");
@@ -2659,6 +3264,8 @@ void AdaptiveContactSnapshot::visit_closed_contacts(const AdaptiveCellKey& key, 
 const std::shared_ptr<const AdaptiveSubfaceSnapshot>& DistributedAdaptiveContactHalo::subface_snapshot() const
 {
     const auto& state = *impl_;
+    if (state.cartesian && state.cartesian_subfaces && state.ready && state.evaluated)
+        return state.cartesian_subfaces;
     if (!state.incidence || !state.ready || !state.evaluated)
         throw std::invalid_argument("Canonical subface snapshot needs a complete evaluated halo.");
     return state.incidence->subface_snapshot();
@@ -2674,31 +3281,62 @@ std::uint64_t DistributedAdaptiveContactHalo::transaction_watermark() const noex
 void DistributedAdaptiveContactHalo::for_each_incidence_row(
     const std::function<void(const ContactIncidenceRow&)>& visitor) const
 {
+    if (impl_->cartesian)
+    {
+        // On-demand compatibility export: one row per owned cell, constructed
+        // and borrowed for the callback only. Nothing is enrolled in groups or
+        // fans and no row object is retained.
+        const auto snapshot = impl_->cartesian;
+        for (std::size_t id = 0; id != snapshot->keys().size(); ++id)
+        {
+            cartesian_detail::Allocation scratch(impl_->budget);
+            auto row = snapshot->make_row(id, scratch);
+            visitor(row);
+        }
+        return;
+    }
     if (impl_->query->layout)
         throw std::invalid_argument("Owning incidence row visitor requires the compatibility route.");
     for (std::size_t i = 0; i < impl_->query->rows.size(); ++i)
         if (const auto& row = impl_->query->rows[i].row)
             visitor(*row);
 }
+ContactIncidenceRowsView DistributedAdaptiveContactHalo::pin_incidence_rows() const
+{
+    const auto snapshot = impl_->cartesian;
+    if (!snapshot || !impl_->ready || snapshot->pending_selection())
+        throw std::invalid_argument("Pinned procedural rows need an accepted Cartesian contact snapshot.");
+    return {snapshot, snapshot->keys().size(), &CartesianContactState::row_view};
+}
+void DistributedAdaptiveContactHalo::for_each_incidence_row_view(
+    const std::function<void(const ContactIncidenceRowView&)>& visitor) const
+{
+    const auto snapshot = pin_incidence_rows();
+    for (std::size_t id = 0; id != snapshot.size(); ++id)
+        visitor(snapshot.row(id));
+}
 namespace
 {
 void visit_contact_page(const std::function<void(const ContactPayloadAllocation&)>& visitor,
     const void* page, bool branch, std::size_t bytes)
 {
-    contact_payload_object(visitor, page, branch ? ContactPayloadRole::ContactSlotBranch :
-        ContactPayloadRole::ContactSlotLeaf, bytes - 128, true);
+    contact_payload_object(visitor, page,
+        branch ? GeometryContactPayloadRole::ContactSlotBranch : GeometryContactPayloadRole::ContactSlotLeaf,
+        bytes - 128, true);
 }
 void ContactRowGroups::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::ContactRowGroupObject, sizeof(*this), true);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::ContactRowGroupSlots, compact_);
-    contact_payload_buffer(visitor, this, ContactPayloadRole::ContactRowGroupSlots, wide_);
+    contact_payload_object(visitor, this, GeometryContactPayloadRole::ContactRowGroupObject, sizeof(*this), true);
+    contact_payload_buffer(visitor, this, GeometryContactPayloadRole::ContactRowGroupSlots, compact_);
+    contact_payload_buffer(visitor, this, GeometryContactPayloadRole::ContactRowGroupSlots, wide_);
 }
 } // namespace
 void AdaptiveContactSnapshot::Storage::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::ContactSnapshotStorage, sizeof(*this), true);
+    if (cartesian)
+        cartesian->visit_borrowed_payload(visitor);
+    contact_payload_object(visitor, this, GeometryContactPayloadRole::ContactSnapshotStorage, sizeof(*this), true);
     const auto page = [&](const void* value, bool branch, std::size_t bytes)
     { visit_contact_page(visitor, value, branch, bytes); };
     records.visit_pages(page);
@@ -2709,18 +3347,20 @@ void AdaptiveContactSnapshot::Storage::visit_borrowed_payload(
     for (std::size_t i = 0; i < records.size(); ++i)
         if (const auto& identity = records[i].owned)
         {
-            contact_payload_object(visitor, identity.get(), ContactPayloadRole::ContactOwnedIdentityObject,
+            contact_payload_object(visitor, identity.get(), GeometryContactPayloadRole::ContactOwnedIdentityObject,
                 sizeof(ContactOwnedIdentity), true);
             IdentityPoolBorrowedPayload<AdaptiveCellKey>::visit(identity->key, visitor);
-            contact_payload_buffer(visitor, identity.get(), ContactPayloadRole::ContactOwnedIdentityDomain, identity->domain);
+            contact_payload_buffer(
+                visitor, identity.get(), GeometryContactPayloadRole::ContactOwnedIdentityDomain, identity->domain);
         }
     for (std::size_t i = 0; i < rows.size(); ++i)
         if (const auto& row = rows[i].row)
         {
-            contact_payload_object(
-                visitor, row.get(), ContactPayloadRole::ContactIncidenceRowObject, sizeof(ContactIncidenceRow), true);
+            contact_payload_object(visitor, row.get(), GeometryContactPayloadRole::ContactIncidenceRowObject,
+                sizeof(ContactIncidenceRow), true);
             IdentityPoolBorrowedPayload<AdaptiveCellKey>::visit(row->key, visitor);
-            contact_payload_buffer(visitor, row.get(), ContactPayloadRole::ContactIncidenceRowDomain, row->domain);
+            contact_payload_buffer(
+                visitor, row.get(), GeometryContactPayloadRole::ContactIncidenceRowDomain, row->domain);
             row->points.visit_borrowed_payload(visitor);
             if (const auto& selectors = rows[i].groups)
                 selectors->visit_borrowed_payload(visitor);
@@ -2735,7 +3375,7 @@ void AdaptiveContactSnapshot::Storage::visit_borrowed_payload(
 void AdaptiveContactSnapshot::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, this, ContactPayloadRole::ContactSnapshotObject, sizeof(*this), true);
+    contact_payload_object(visitor, this, GeometryContactPayloadRole::ContactSnapshotObject, sizeof(*this), true);
     storage_->visit_borrowed_payload(visitor);
 }
 std::shared_ptr<const ContactRankCoverReceipts> DistributedAdaptiveContactHalo::rank_cover_receipts() const
@@ -2747,29 +3387,34 @@ std::shared_ptr<const ContactRankCoverReceipts> DistributedAdaptiveContactHalo::
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
-    contact_payload_object(visitor, impl_.get(), ContactPayloadRole::HaloControllerObject, sizeof(Impl));
-    contact_payload_object(visitor, impl_->arena.get(), ContactPayloadRole::HaloBudgetObject, sizeof(Budget), true);
-    contact_payload_object(visitor, impl_->external_lease_bytes.get(), ContactPayloadRole::HaloExternalLeaseCounter,
+    contact_payload_object(visitor, impl_.get(), ParallelSupportPayloadRole::HaloControllerObject, sizeof(Impl));
+    contact_payload_object(visitor, impl_->arena.get(), ParallelSupportPayloadRole::HaloBudgetObject, sizeof(Budget), true);
+    contact_payload_object(visitor, impl_->external_lease_bytes.get(), ParallelSupportPayloadRole::HaloExternalLeaseCounter,
         sizeof(std::size_t), true);
+    if (impl_->cartesian)
+        impl_->cartesian->visit_borrowed_payload(visitor);
+    if (impl_->cartesian_subfaces)
+        impl_->cartesian_subfaces->visit_borrowed_payload(visitor);
     if (impl_->physical_owners)
         impl_->physical_owners->usage().visit_pages(
             [&](ContactOwnerUsage::Page page)
             {
-                contact_payload_object(visitor, page.identity, ContactPayloadRole::ContactOwnerUsageNode,
-                    page.object_bytes, true);
+                contact_payload_object(
+                    visitor, page.identity, GeometryContactPayloadRole::ContactOwnerUsageNode, page.object_bytes, true);
             });
     if (impl_->persistent_groups)
     {
-        contact_payload_object(visitor, impl_->persistent_groups.get(), ContactPayloadRole::GroupObject,
+        contact_payload_object(visitor, impl_->persistent_groups.get(), ParallelSupportPayloadRole::GroupObject,
             sizeof(PersistentContactGroups));
         impl_->persistent_groups->visit_pages([&](const void* page, bool branch, std::size_t bytes)
             { visit_contact_page(visitor, page, branch, bytes); });
         impl_->persistent_groups->visit_domain_owners(
             [&](const auto& owner, const auto& domain, std::size_t)
             {
-                contact_payload_object(visitor, owner.get(), ContactPayloadRole::ContactOwnedIdentityObject,
-                    sizeof(*owner), true);
-                contact_payload_buffer(visitor, owner.get(), ContactPayloadRole::ContactOwnedIdentityDomain, domain);
+                contact_payload_object(
+                    visitor, owner.get(), GeometryContactPayloadRole::ContactOwnedIdentityObject, sizeof(*owner), true);
+                contact_payload_buffer(
+                    visitor, owner.get(), GeometryContactPayloadRole::ContactOwnedIdentityDomain, domain);
             });
         impl_->persistent_groups->facts.visit_point_pages(
             [&](const auto& page)
@@ -2781,12 +3426,12 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
                 else
                 {
                     const auto& credit = page.fallback;
-                    contact_payload_object(visitor, credit.get(), ContactPayloadRole::FallbackCreditObject,
-                        sizeof(*credit), true);
-                    contact_payload_object(visitor, credit->body.get(), ContactPayloadRole::FallbackBodyObject,
+                    contact_payload_object(
+                        visitor, credit.get(), BasicContactPayloadRole::FallbackCreditObject, sizeof(*credit), true);
+                    contact_payload_object(visitor, credit->body.get(), BasicContactPayloadRole::FallbackBodyObject,
                         sizeof(*credit->body), true);
-                    contact_payload_buffer(visitor, credit->body.get(), ContactPayloadRole::FallbackValues,
-                        credit->body->values);
+                    contact_payload_buffer(
+                        visitor, credit->body.get(), BasicContactPayloadRole::FallbackValues, credit->body->values);
                 }
             });
     }
@@ -2802,14 +3447,15 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
         { visit_contact_page(visitor, page, branch, bytes); });
     const auto trace_payload = [&](const void* owner, const auto& traces)
     {
-        contact_payload_buffer(visitor, owner, ContactPayloadRole::ContactTraceFaceSlots, traces);
+        contact_payload_buffer(visitor, owner, GeometryContactPayloadRole::ContactTraceFaceSlots, traces);
         for (const auto& face : traces)
-            contact_payload_buffer(visitor, owner, ContactPayloadRole::ContactTraceStem, face.stem);
+            contact_payload_buffer(visitor, owner, GeometryContactPayloadRole::ContactTraceStem, face.stem);
     };
     for (std::size_t slot = 0; slot < impl_->work->size(); ++slot)
         if (const auto& body = impl_->body(slot).contact)
         {
-            contact_payload_object(visitor, body.get(), ContactPayloadRole::ContactBodyObject, sizeof(*body), true);
+            contact_payload_object(
+                visitor, body.get(), GeometryContactPayloadRole::ContactBodyObject, sizeof(*body), true);
             trace_payload(body.get(), body->traces);
         }
     if (impl_->persistent_traces)
@@ -2819,7 +3465,8 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
         impl_->persistent_traces->visit_inventories(
             [&](const void* owner, std::size_t bytes, const auto& traces)
             {
-                contact_payload_object(visitor, owner, ContactPayloadRole::ContactTraceInventoryObject, bytes, true);
+                contact_payload_object(
+                    visitor, owner, GeometryContactPayloadRole::ContactTraceInventoryObject, bytes, true);
                 trace_payload(owner, traces);
             });
     }
@@ -2831,13 +3478,14 @@ void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     if (impl_->frozen_previous_neighbors)
         impl_->frozen_previous_neighbors->visit_borrowed_payload(visitor);
     impl_->deferred_owners.visit_borrowed_payload(visitor);
-    contact_payload_buffer(visitor, impl_.get(), ContactPayloadRole::HaloGroupEditPositions, impl_->pending_positions);
-    contact_payload_buffer(visitor, impl_.get(), ContactPayloadRole::HaloFanEdits, impl_->pending_edits);
+    contact_payload_buffer(
+        visitor, impl_.get(), ParallelSupportPayloadRole::HaloGroupEditPositions, impl_->pending_positions);
+    contact_payload_buffer(visitor, impl_.get(), ParallelSupportPayloadRole::HaloFanEdits, impl_->pending_edits);
     for (const auto& edit : impl_->pending_edits)
     {
-        contact_payload_buffer(visitor, &edit, ContactPayloadRole::HaloRemovedBindings, edit.removed);
-        contact_payload_buffer(visitor, &edit, ContactPayloadRole::HaloAppendedLocal, edit.appended);
-        contact_payload_buffer(visitor, &edit, ContactPayloadRole::HaloAppendedRemote, edit.remote);
+        contact_payload_buffer(visitor, &edit, ParallelSupportPayloadRole::HaloRemovedBindings, edit.removed);
+        contact_payload_buffer(visitor, &edit, ParallelSupportPayloadRole::HaloAppendedLocal, edit.appended);
+        contact_payload_buffer(visitor, &edit, ParallelSupportPayloadRole::HaloAppendedRemote, edit.remote);
     }
 }
 void DistributedAdaptiveContactHalo::for_each_borrowed_geometry_ledger(
@@ -3049,7 +3697,7 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
     collective(*state.comm,
         [&]
         {
-            if (state.ready || state.incidence)
+            if (state.ready || state.incidence || state.cartesian)
                 throw std::invalid_argument("Repeated canonical contact bootstrap.");
             if (layout && layout->size() != owned.size())
                 throw std::invalid_argument("Canonical contact source extent disagrees with the owned selection.");
@@ -3057,6 +3705,7 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
             if (state.query->layout)
             {
                 state.groups.reset();
+                state.header_admission.bytes -= sizeof(Impl::Groups);
                 state.budget.used -= sizeof(Impl::Groups);
                 state.budget.add(sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128);
                 state.physical_owners = geometry_detail::domain_shared<geometry_detail::AllocationDomain::ContactHalo, ContactPhysicalResidency>(
@@ -3065,6 +3714,50 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
                 state.persistent_traces.emplace(state.arena, *state.physical_owners);
                 state.persistent_groups = std::make_unique<PersistentContactGroups>(state.arena, *state.physical_owners);
             }
+        });
+    {
+        Impl::CartesianTransaction transaction(state);
+        int enabled = std::getenv("SIMPLEFLUID_CARTESIAN_CONTACT") != nullptr, all_enabled = 0;
+        Teuchos::reduceAll(*state.comm, Teuchos::REDUCE_MIN, 1, &enabled, &all_enabled);
+        auto fresh = all_enabled ? state.prepare_cartesian_state(owned, 1) : nullptr;
+        if (fresh)
+        {
+            state.resolve_cartesian_owners(*fresh);
+            auto published_statistics = state.statistics;
+            collective(*state.comm,
+                [&]
+                {
+                    fresh->evaluate(state.options);
+                    published_statistics = state.statistics;
+                    published_statistics.bootstrap_owned_visits = owned.size();
+                    published_statistics.owned_records = owned.size();
+                    published_statistics.unique_cell_pairs = fresh->unique_pairs();
+                    published_statistics.logical_contact_pairs = fresh->logical_pairs();
+                    published_statistics.span_pair_evaluations = fresh->span_evaluations();
+                    published_statistics.trace_pair_evaluations = fresh->trace_evaluations();
+                    published_statistics.work = fresh->work();
+                    published_statistics.source_owner_manifests = 1;
+                    published_statistics.source_membership_cells = owned.size();
+                    published_statistics.source_coordinate_points = fresh->coordinate_points();
+                    published_statistics.source_line_records = cartesian_detail::product(3, owned.size());
+                    if (state.cartesian_fault_hook)
+                        state.cartesian_fault_hook(CartesianContactStage::PreparePublication);
+                });
+            state.cartesian = std::move(fresh);
+            state.cartesian_generation = 1;
+            state.statistics = published_statistics;
+            state.diagnostics.cells = owned.size();
+            state.evaluated = true;
+            state.ready = true;
+            state.diagnostic_phase = "ready";
+            transaction.committed = true;
+            return;
+        }
+        transaction.committed = true;
+    }
+    collective(*state.comm,
+        [&]
+        {
             state.incidence = std::make_unique<DistributedAdaptiveIncidenceSession>(
                 state.kernel, state.comm, state.options, state.context, state.budget, state.identities, state.arena,
                 state.physical_owners);
@@ -3109,6 +3802,13 @@ void DistributedAdaptiveContactHalo::apply_delta(std::span<const ContactRetiredL
 {
     auto& state = *impl_;
     state.deferred_owners.reap();
+    if (state.cartesian)
+    {
+        // The certified backend rebuilds its frame from authoritative leaves and
+        // republishes only after the collective owner resolution and grading.
+        state.apply_cartesian_delta(retired, inserted, next, lookup);
+        return;
+    }
     std::vector<IncidenceCellVersion> versions;
     collective(*state.comm,
         [&]
@@ -3243,15 +3943,84 @@ std::unique_ptr<DistributedAdaptiveContactHalo> DistributedAdaptiveContactHalo::
 {
     impl_->deferred_owners.reap();
     const auto& source = *impl_;
+    if (source.cartesian)
+    {
+        // Every member of a Cartesian candidate family uses one arena. The
+        // immutable snapshot is admitted once; each controller and each draft
+        // consumes additional simultaneous credit from that same cap.
+        cartesian_detail::Allocation preparing(source.budget);
+        std::unique_ptr<DistributedAdaptiveContactHalo> candidate;
+        void* impl_storage = nullptr;
+        ContactHaloBeforeSend copied_sender;
+        CartesianContactFaultHook copied_fault;
+        try
+        {
+            collective(*source.comm,
+                [&]
+                {
+                    if (!source.ready || !source.evaluated)
+                        throw std::invalid_argument("Contact candidate needs an evaluated canonical source.");
+                    preparing.retain(cartesian_detail::add(Impl::fixed_admission_bytes(true), caller_live_bytes));
+                    copied_sender = source.before_send;
+                    copied_fault = source.cartesian_fault_hook;
+                    candidate.reset(new DistributedAdaptiveContactHalo(nullptr));
+                    impl_storage = ::operator new(sizeof(Impl));
+                });
+            collective(*source.comm,
+                [&]
+                {
+                    // After transfer the Impl's first admission member refunds
+                    // the header even when any later member construction fails.
+                    preparing.bytes -= Impl::fixed_admission_bytes(true);
+                    try
+                    {
+                        candidate->impl_.reset(new (impl_storage) Impl(source.kernel, source.comm, source.options,
+                            context, std::move(copied_sender), source.arena, true));
+                        impl_storage = nullptr;
+                    }
+                    catch (...)
+                    {
+                        ::operator delete(impl_storage);
+                        impl_storage = nullptr;
+                        throw;
+                    }
+                });
+            auto& state = *candidate->impl_;
+            state.initialize_collective();
+            collective(*source.comm,
+                [&]
+                {
+                    state.cartesian = source.cartesian;
+                    state.query->layout = source.query->layout;
+                    state.cartesian_generation = source.cartesian_generation;
+                    state.cartesian_fault_hook = std::move(copied_fault);
+                    state.external_retained_bytes = caller_live_bytes;
+                    state.statistics = source.statistics;
+                    state.diagnostics = source.diagnostics;
+                    state.ready = true;
+                    state.evaluated = true;
+                });
+            // Caller residency follows the existing explicit API: the caller
+            // refunds it through allocation() after its own owner dies.
+            preparing.bytes = 0;
+            return candidate;
+        }
+        catch (...)
+        {
+            if (impl_storage)
+                ::operator delete(impl_storage);
+            throw;
+        }
+    }
     std::unique_ptr<DistributedAdaptiveContactHalo> candidate;
     // Allocate the outer owner on every rank before its communicating ctor.
     collective(*source.comm,
         [&]
         {
-            if (!source.ready || !source.evaluated || !source.incidence)
+            if (!source.ready || !source.evaluated || (!source.incidence && !source.cartesian))
                 throw std::invalid_argument("Contact candidate needs an evaluated canonical source.");
             const auto metadata = source.metadata_bytes();
-            constexpr auto header = sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + 128 +
+            constexpr auto header = sizeof(Impl) + sizeof(Budget) + sizeof(std::size_t) + controller_allowance_bytes +
                                     sizeof(DistributedAdaptiveContactHalo) + sizeof(Impl::Groups) +
                                     Impl::Groups::empty_dynamic_admission_bytes();
             if (caller_live_bytes > source.options.byte_budget ||
@@ -3781,6 +4550,18 @@ ContactStorageBreakdown DistributedAdaptiveContactHalo::contact_storage_breakdow
 {
     return impl_->persistent_groups ? impl_->persistent_groups->storage_breakdown()
                                     : impl_->groups->storage_breakdown();
+}
+void DistributedAdaptiveContactHalo::set_cartesian_fault_hook(CartesianContactFaultHook hook)
+{
+    impl_->cartesian_fault_hook = std::move(hook);
+}
+bool DistributedAdaptiveContactHalo::uses_cartesian_contact() const noexcept
+{
+    return bool(impl_->cartesian);
+}
+std::uint64_t DistributedAdaptiveContactHalo::accepted_contact_generation() const noexcept
+{
+    return impl_->cartesian_generation;
 }
 const ContactHaloStatistics& DistributedAdaptiveContactHalo::statistics() const noexcept
 {

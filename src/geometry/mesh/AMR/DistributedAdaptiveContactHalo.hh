@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/mesh/AMR/AdaptiveContactQuery.hh"
 #include "geometry/mesh/AMR/ContactHaloContext.hh"
+#include "geometry/mesh/AMR/ContactIncidenceRowView.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/ContactPointArray.hh"
 #include "geometry/mesh/AMR/ContactStorageBreakdown.hh"
@@ -165,8 +166,18 @@ enum class ContactHaloMessageKind : std::uint64_t
     Fan,
     Records,
     RecordData,
-    DirtyPoints
+    DirtyPoints,
+    CellOwners,
+    CellOwnerReply
 };
+/** Local-only fault stages, invoked before accepted Cartesian publication. */
+enum class CartesianContactStage
+{
+    PrepareReplacement,
+    BeforeOwnerInsert,
+    PreparePublication
+};
+using CartesianContactFaultHook = std::function<void(CartesianContactStage)>;
 using ContactHaloBeforeSend =
     std::function<void(const ContactHaloContext&, ContactHaloMessageKind, std::vector<OwnerPacket>&)>;
 struct ContactHaloStatistics
@@ -175,6 +186,9 @@ struct ContactHaloStatistics
     std::size_t matched_occurrences = 0, logical_contact_pairs = 0, unique_cell_pairs = 0;
     std::size_t span_pair_evaluations = 0, trace_pair_evaluations = 0, query_bytes = 0, record_bytes = 0;
     std::size_t record_fetches = 0, decoded_record_replies = 0, point_query_pages = 0, record_pages = 0;
+    /** Cartesian owner resolution: logical-cover probes and the stencil cells
+     * whose owning rank was authenticated exactly once. */
+    std::size_t owner_query_pages = 0, owner_reply_pages = 0, resolved_remote_cells = 0;
     std::size_t pages = 0, work = 0, retained_bytes = 0, peak_bytes = 0, cumulative_bytes = 0;
     std::size_t bootstrap_owned_visits = 0, delta_owned_visits = 0, full_owned_scans_after_bootstrap = 0;
     std::size_t contact_record_pages_copied = 0, contact_row_pages_copied = 0, contact_work_pages_copied = 0;
@@ -277,6 +291,10 @@ public:
         std::shared_ptr<const AdaptiveLeafLayout> = {}, bool enable_native_source = true);
     void apply_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>, ContactHaloContext,
         const ContactOwnedLeafLookup&);
+    /** Test instrumentation; callbacks run inside a collective local-failure barrier. */
+    void set_cartesian_fault_hook(CartesianContactFaultHook);
+    [[nodiscard]] bool uses_cartesian_contact() const noexcept;
+    [[nodiscard]] std::uint64_t accepted_contact_generation() const noexcept;
     [[nodiscard]] Budget& allocation() noexcept;
     [[nodiscard]] const std::shared_ptr<Budget>& allocation_arena() const noexcept;
     [[nodiscard]] PLIC::details::geometry_demand::GeometryOwnerManifest source_owner_manifest() const;
@@ -285,6 +303,10 @@ public:
     [[nodiscard]] NativeContactSourceCoverage source_coverage(const geometry_detail::NativeConstructionAdmission&);
     [[nodiscard]] ContactExternalResidencyLease external_residency_lease() const;
     void bind_external_retained_bytes(std::size_t) noexcept;
+    /** Arena residency excluding this controller's declared external bytes.
+     * Cartesian siblings share an arena: the value then includes other live
+     * controllers and their external residency. Do not sum it across siblings;
+     * use allocation identities for a deduplicated physical payload census. */
     [[nodiscard]] std::size_t cache_storage_bytes() const noexcept;
     /** Direct group ledger categories; query/work fans and bindings are exposed by payload roles. */
     [[nodiscard]] ContactStorageBreakdown contact_storage_breakdown() const;
@@ -301,6 +323,12 @@ public:
         std::shared_ptr<const AdaptiveLeafLayout>, std::span<const AdaptiveLeaf* const> changed_leaf_pages = {});
     [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts(const AdaptiveLeafTransition&);
     void for_each_incidence_row(const std::function<void(const ContactIncidenceRow&)>&) const;
+    /** Pin the accepted Cartesian snapshot without materializing rows. All
+     * returned rows and copied generated point readers retain this exact
+     * snapshot through subsequent publication or controller destruction.
+     * The explicit backend retains its owning compatibility row interface. */
+    [[nodiscard]] ContactIncidenceRowsView pin_incidence_rows() const;
+    void for_each_incidence_row_view(const std::function<void(const ContactIncidenceRowView&)>&) const;
     /** Synchronous borrowed census. The caller keeps this controller alive and
      * prevents mutation; callbacks must not retain references or copy owners. */
     void for_each_borrowed_contact_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
@@ -326,6 +354,7 @@ public:
 private:
     [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts_impl(
         const std::shared_ptr<const AdaptiveLeafLayout>&, const AdaptiveLeafTransition*);
+    explicit DistributedAdaptiveContactHalo(std::nullptr_t) noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

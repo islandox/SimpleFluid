@@ -33,6 +33,10 @@ struct SubfaceIndexRoot;
 class SubfaceProvenanceBuilder;
 class SubfacePieceBuilder;
 class AdaptiveSubfaceSnapshot;
+class CartesianContactState;
+class CartesianSubfaceSource;
+class GeneratedSubfacePiece;
+class GeneratedSubfaceSnapshot;
 class ContactPhysicalResidency;
 namespace shared_ring_detail
 {
@@ -100,6 +104,11 @@ public:
 
 private:
     friend class CanonicalSubfaceView;
+    CanonicalSubfaceIncident(std::shared_ptr<const GeneratedSubfacePiece> source, bool second)
+        : generated_(std::move(source)), slot_(second)
+    {
+    }
+    std::shared_ptr<const GeneratedSubfacePiece> generated_;
     CanonicalSubfaceIncident(std::shared_ptr<const SubfaceProvenancePage> page, std::size_t slot)
         : page_(std::move(page)), slot_(slot)
     {
@@ -114,13 +123,37 @@ struct MaterializedCanonicalSubface
     AdaptiveBytes identity;
 };
 
+/** Private procedural counterpart of an authenticated provenance/piece page.
+ * Only the certified Cartesian source below can issue views of these objects. */
+struct GeneratedSubfaceIncident
+{
+    AdaptiveCellKey key;
+    int owner = -1;
+    std::uint64_t revision = 0, surface = 0;
+    std::optional<std::uint64_t> native;
+};
+class GeneratedSubfacePiece
+{
+public:
+    virtual ~GeneratedSubfacePiece() = default;
+    virtual const GeneratedSubfaceIncident& incident(bool second) const = 0;
+    virtual bool has_second() const noexcept = 0;
+    virtual std::span<const char> support() const noexcept = 0;
+    virtual std::span<const char> domain() const noexcept = 0;
+    virtual std::string_view boundary() const noexcept = 0;
+    virtual std::uint64_t generation() const noexcept = 0;
+    virtual std::uint64_t emission() const noexcept = 0;
+    virtual PLIC::PointIdentity<ArithmeticMode::Ordinary> point(std::size_t) const = 0;
+    virtual MaterializedCanonicalSubface materialize(Budget&, IdentityBudget&) const = 0;
+};
+
 /** Canonical first-cell physical loop, outward from first. The view pins
  * immutable point/provenance pages and is independent of the session. */
 class SIMPLEFLUID_LOCAL CanonicalSubfaceView
 {
 public:
     CanonicalSubfaceView() = default;
-    explicit operator bool() const noexcept { return bool(page_); }
+    explicit operator bool() const noexcept { return bool(page_) || bool(generated_); }
     [[nodiscard]] CanonicalSubfaceIncident first() const;
     [[nodiscard]] std::optional<CanonicalSubfaceIncident> second() const;
     [[nodiscard]] int outward_sign() const noexcept { return side_ ? -1 : 1; }
@@ -141,7 +174,10 @@ public:
     /** Persistent output overrides can transfer exact support into their own admission domain. */
     [[nodiscard]] PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> materialize_native(Budget&, IdentityBudget&,
         const geometry_detail::NativeConstructionAdmission&, bool detached_support = false) const;
-    [[nodiscard]] const void* page_identity() const noexcept { return page_.get(); }
+    [[nodiscard]] const void* page_identity() const noexcept
+    {
+        return generated_ ? static_cast<const void*>(generated_.get()) : static_cast<const void*>(page_.get());
+    }
     [[nodiscard]] PLIC::details::NativeWeakOwnerObservation weak_page_observation() const;
     /** Typed physical closure of this actual piece page, never the enclosing
      * snapshot/controller or all source contacts. */
@@ -152,6 +188,12 @@ private:
     friend class NativePublicationNumbering;
     friend class NativePublicationSession;
     friend class SubfacePieceBuilder;
+    friend class CartesianSubfaceSource;
+    CanonicalSubfaceView(std::shared_ptr<const GeneratedSubfacePiece> source, bool side = false)
+        : generated_(std::move(source)), side_(side)
+    {
+    }
+    std::shared_ptr<const GeneratedSubfacePiece> generated_;
     CanonicalSubfaceView(std::shared_ptr<const SubfacePiecePage> page, std::size_t slot)
         : page_(std::move(page)), slot_(slot)
     {
@@ -166,6 +208,17 @@ struct CanonicalSubfaceChange
 };
 using CanonicalSubfaceEmit = CartesianBorrowedCallback<const CanonicalSubfaceView&>;
 using SubfaceOwnerVisit = CartesianBorrowedCallback<const std::shared_ptr<const void>&, const Budget*, std::size_t>;
+
+class GeneratedSubfaceSnapshot
+{
+public:
+    virtual ~GeneratedSubfaceSnapshot() = default;
+    virtual void visit_pieces(const CanonicalSubfaceEmit&) const = 0;
+    virtual void visit_face_pieces(const AdaptiveCellKey&, std::uint64_t, const CanonicalSubfaceEmit&) const = 0;
+    virtual void visit_owners(const SubfaceOwnerVisit&) const = 0;
+    virtual bool imports_source_owner(const void*) const noexcept = 0;
+    virtual void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const = 0;
+};
 
 struct SubfaceIndexWork
 {
@@ -221,11 +274,15 @@ public:
 
 private:
     friend class NativeContactFundingAccess;
+    friend class DistributedAdaptiveContactHalo;
     [[nodiscard]] NativeContactOwnerFunding native_funding(
         const std::shared_ptr<const AdaptiveSubfaceSnapshot>&, std::size_t) const;
     void seal_legacy_scope(const AdaptiveSubfaceSnapshot* previous,
         const std::shared_ptr<const geometry_detail::NativeAllocationState>&);
     void project_legacy_scope(PLIC::details::GeometryOwnerGraphEditor&, bool retain, const Budget* foreign_to) const;
+    [[nodiscard]] static std::shared_ptr<const AdaptiveSubfaceSnapshot> cartesian(
+        std::shared_ptr<const CartesianContactState>, std::shared_ptr<const AdaptiveLeafLayout>, ContactHaloContext,
+        GeometryConstructionControls, int resident, Budget&, std::shared_ptr<Budget>);
     AdaptiveSubfaceSnapshot(
         ContactHaloContext context, GeometryConstructionControls controls, int resident, std::shared_ptr<Budget> arena)
         : context_(context), controls_(controls), arena_(std::move(arena)), resident_(resident)
@@ -241,6 +298,7 @@ private:
     bool native_index_ = false;
     std::shared_ptr<const SubfaceIndexRoot> indexes_;
     PLIC::details::geometry_demand::GeometryOwnerManifest legacy_, inherited_legacy_;
+    std::shared_ptr<const GeneratedSubfaceSnapshot> generated_;
 };
 
 /** Receives only fully authenticated support groups and never retains a live

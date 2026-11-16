@@ -268,20 +268,21 @@ struct SubfaceProvenancePage
     }
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visit) const
     {
-        contact_payload_object(visit, this, ContactPayloadRole::SubfaceProvenancePageObject, sizeof(*this), true);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceProvenanceRecords, records);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceMembers, members);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceGroups, groups);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceForeignKeys, foreign_keys);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceBoundaryNames, boundaries);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceShifts, shifts);
+        contact_payload_object(
+            visit, this, GeometryContactPayloadRole::SubfaceProvenancePageObject, sizeof(*this), true);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceProvenanceRecords, records);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceMembers, members);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceGroups, groups);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceForeignKeys, foreign_keys);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceBoundaryNames, boundaries);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceShifts, shifts);
         for (const auto& record : records)
             contact_payload_buffer(
-                visit, this, ContactPayloadRole::SubfaceAuthorityKeyBytes, record.authority_identity);
+                visit, this, GeometryContactPayloadRole::SubfaceAuthorityKeyBytes, record.authority_identity);
         for (const auto& key : foreign_keys)
             IdentityPoolBorrowedPayload<AdaptiveCellKey>::visit(key, visit);
         for (const auto& boundary : boundaries)
-            contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceBoundaryBytes, boundary);
+            contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceBoundaryBytes, boundary);
         keys->visit_borrowed_payload(visit);
         if (supports)
             supports->visit_borrowed_payload(visit);
@@ -522,11 +523,11 @@ SharedSubfaceRing::~SharedSubfaceRing()
 
 void SharedSubfaceRing::visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visit) const
 {
-    contact_payload_object(visit, this, ContactPayloadRole::SubfaceRingObject, sizeof(*this), true);
-    contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceRingSlots, slots_);
+    contact_payload_object(visit, this, GeometryContactPayloadRole::SubfaceRingObject, sizeof(*this), true);
+    contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfaceRingSlots, slots_);
     if (const auto actual = self_.lock())
         if (const auto* deleter = control_deleter(actual); deleter && deleter->control)
-            contact_payload_object(visit, deleter->control.get(), ContactPayloadRole::CartesianControlCreditObject,
+            contact_payload_object(visit, deleter->control.get(), GeometryContactPayloadRole::CartesianControlCreditObject,
                 sizeof(SharedRingControlCredit), true);
 }
 
@@ -716,9 +717,9 @@ struct SubfacePiecePage
     }
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>& visit) const
     {
-        contact_payload_object(visit, this, ContactPayloadRole::SubfacePiecePageObject, sizeof(*this), true);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfacePieceRecords, records);
-        contact_payload_buffer(visit, this, ContactPayloadRole::SubfacePointRanges, points);
+        contact_payload_object(visit, this, GeometryContactPayloadRole::SubfacePiecePageObject, sizeof(*this), true);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfacePieceRecords, records);
+        contact_payload_buffer(visit, this, GeometryContactPayloadRole::SubfacePointRanges, points);
         planes->visit_borrowed_payload(visit);
         normals->visit_borrowed_payload(visit);
         images->visit_borrowed_payload(visit);
@@ -846,22 +847,32 @@ void SubfacePieceBuilder::freeze()
 
 const AdaptiveCellKey& CanonicalSubfaceIncident::key() const
 {
+    if (generated_)
+        return generated_->incident(slot_).key;
     return page_->key(page_->members.at(slot_));
 }
 int CanonicalSubfaceIncident::owner() const
 {
+    if (generated_)
+        return generated_->incident(slot_).owner;
     return page_->members.at(slot_).owner;
 }
 std::uint64_t CanonicalSubfaceIncident::revision() const
 {
+    if (generated_)
+        return generated_->incident(slot_).revision;
     return page_->members.at(slot_).revision;
 }
 std::uint64_t CanonicalSubfaceIncident::source_surface() const
 {
+    if (generated_)
+        return generated_->incident(slot_).surface;
     return page_->members.at(slot_).surface;
 }
 std::optional<std::uint64_t> CanonicalSubfaceIncident::native_face() const
 {
+    if (generated_)
+        return generated_->incident(slot_).native;
     const auto value = page_->members.at(slot_).native_face;
     return value == no_native_face ? std::nullopt : std::optional(value);
 }
@@ -884,11 +895,15 @@ const Group& group(const Piece& record)
 } // namespace
 CanonicalSubfaceIncident CanonicalSubfaceView::first() const
 {
+    if (generated_)
+        return {generated_, false};
     const auto& record = piece(page_, slot_);
     return {record.provenance.page, provenance(record).first};
 }
 std::optional<CanonicalSubfaceIncident> CanonicalSubfaceView::second() const
 {
+    if (generated_)
+        return generated_->has_second() ? std::optional(CanonicalSubfaceIncident(generated_, true)) : std::nullopt;
     const auto& record = piece(page_, slot_);
     const auto slot = provenance(record).second;
     if (slot == absent_provenance_slot)
@@ -923,16 +938,22 @@ void CanonicalSubfaceView::append_identity(AdaptiveBytes& destination) const
 }
 IncidenceSupportKey CanonicalSubfaceView::support() const
 {
+    if (generated_)
+        return generated_->support();
     const auto& record = piece(page_, slot_);
     return record.provenance.page->support_key(group(record).support);
 }
 std::span<const char> CanonicalSubfaceView::domain() const
 {
+    if (generated_)
+        return generated_->domain();
     const auto& record = piece(page_, slot_);
     return record.provenance.page->domains->get({group(record).domain});
 }
 std::string_view CanonicalSubfaceView::boundary() const
 {
+    if (generated_)
+        return generated_->boundary();
     const auto& record = piece(page_, slot_);
     const auto boundary = group(record).boundary;
     if (boundary == absent)
@@ -942,19 +963,27 @@ std::string_view CanonicalSubfaceView::boundary() const
 }
 std::uint64_t CanonicalSubfaceView::generation() const
 {
+    if (generated_)
+        return generated_->generation();
     return group(piece(page_, slot_)).generation;
 }
 std::uint64_t CanonicalSubfaceView::emission() const
 {
+    if (generated_)
+        return generated_->emission();
     return provenance(piece(page_, slot_)).emission;
 }
 PLIC::DisplacementIdentity<ordinary> CanonicalSubfaceView::second_image() const
 {
+    if (generated_)
+        return {};
     const auto& record = piece(page_, slot_);
     return page_->images->get({record.image});
 }
 std::size_t CanonicalSubfaceView::point_count() const
 {
+    if (generated_)
+        return 4;
     const auto& record = piece(page_, slot_);
     if (record.certified)
         return record.certified->size();
@@ -964,6 +993,8 @@ std::size_t CanonicalSubfaceView::point_count() const
 }
 PLIC::PointIdentity<ordinary> CanonicalSubfaceView::point(std::size_t slot) const
 {
+    if (generated_)
+        return generated_->point(slot);
     const auto& record = piece(page_, slot_);
     if (slot >= point_count())
         throw std::out_of_range("Canonical subface loop point is out of range.");
@@ -974,6 +1005,8 @@ PLIC::PointIdentity<ordinary> CanonicalSubfaceView::point(std::size_t slot) cons
 }
 MaterializedCanonicalSubface CanonicalSubfaceView::materialize(Budget& budget, IdentityBudget& identities) const
 {
+    if (generated_)
+        return generated_->materialize(budget, identities);
     struct RestoreEnvironment
     {
         std::fenv_t previous{};
@@ -1384,6 +1417,7 @@ void AdaptiveSubfaceSnapshot::seal_legacy_scope(const AdaptiveSubfaceSnapshot* p
 AdaptiveSubfaceSnapshot::~AdaptiveSubfaceSnapshot()
 {
     indexes_.reset();
+    generated_.reset();
     arena_->used -= charge_;
 }
 std::shared_ptr<const AdaptiveSubfaceSnapshot> AdaptiveSubfaceSnapshot::seal(ContactHaloContext context,
@@ -1686,6 +1720,11 @@ void AdaptiveSubfaceSnapshot::project_owners(const std::shared_ptr<const Adaptiv
 }
 void AdaptiveSubfaceSnapshot::visit_pieces(const CanonicalSubfaceEmit& emit) const
 {
+    if (generated_)
+    {
+        generated_->visit_pieces(emit);
+        return;
+    }
     using subface_index_detail::PieceIndex;
     PieceIndex::visit_from(
         indexes_->pieces, [](const auto&) { return false; },
@@ -1698,6 +1737,11 @@ void AdaptiveSubfaceSnapshot::visit_pieces(const CanonicalSubfaceEmit& emit) con
 void AdaptiveSubfaceSnapshot::visit_face_pieces(
     const AdaptiveCellKey& key, std::uint64_t surface, const CanonicalSubfaceEmit& emit) const
 {
+    if (generated_)
+    {
+        generated_->visit_face_pieces(key, surface, emit);
+        return;
+    }
     using namespace subface_index_detail;
     const auto before = [&](const FaceRow& row)
     { return std::tuple<const AdaptiveCellKey&, std::uint64_t>(row.key(), row.surface()) < std::tie(key, surface); };
@@ -1721,6 +1765,11 @@ void AdaptiveSubfaceSnapshot::visit_face_pieces(
 }
 void AdaptiveSubfaceSnapshot::visit_owners(const SubfaceOwnerVisit& visit) const
 {
+    if (generated_)
+    {
+        generated_->visit_owners(visit);
+        return;
+    }
     using namespace subface_index_detail;
     visit_owner(indexes_, indexes_->charge.arena.get(), indexes_->charged_bytes(), visit);
     const auto index_owner = [&](const auto& page)
@@ -1745,6 +1794,11 @@ void AdaptiveSubfaceSnapshot::visit_owners(const SubfaceOwnerVisit& visit) const
 }
 void AdaptiveSubfaceSnapshot::visit_payload_owners(const SubfaceOwnerVisit& visit) const
 {
+    if (generated_)
+    {
+        generated_->visit_owners(visit);
+        return;
+    }
     indexes_->visit_piece_pages(
         [&](const auto& page)
         {
@@ -1757,6 +1811,8 @@ void AdaptiveSubfaceSnapshot::retain_source_dependencies(cartesian_detail::Credi
     std::vector<std::shared_ptr<cartesian_detail::AuthorityOwnerCredit>>& leases,
     cartesian_detail::Allocation& memory) const
 {
+    if (generated_)
+        return;
     indexes_->visit_piece_pages(
         [&](const auto& page)
         {
@@ -1766,28 +1822,38 @@ void AdaptiveSubfaceSnapshot::retain_source_dependencies(cartesian_detail::Credi
 }
 bool AdaptiveSubfaceSnapshot::imports_source_owner(const void* identity) const noexcept
 {
+    if (generated_)
+        return generated_->imports_source_owner(identity);
     return !indexes_->visit_piece_pages([&](const auto& page) { return !page->imports_source_owner(identity); });
 }
 void AdaptiveSubfaceSnapshot::visit_borrowed_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visit) const
 {
+    if (generated_)
+    {
+        contact_payload_object(visit, this, GeometryContactPayloadRole::SubfaceSnapshotObject, sizeof(*this), true);
+        generated_->visit_borrowed_payload(visit);
+        return;
+    }
     using namespace subface_index_detail;
-    contact_payload_object(visit, this, ContactPayloadRole::SubfaceSnapshotObject, sizeof(*this), true);
-    contact_payload_object(visit, indexes_.get(), ContactPayloadRole::SubfaceIndexRootObject, sizeof(*indexes_), true);
+    contact_payload_object(visit, this, GeometryContactPayloadRole::SubfaceSnapshotObject, sizeof(*this), true);
+    contact_payload_object(
+        visit, indexes_.get(), GeometryContactPayloadRole::SubfaceIndexRootObject, sizeof(*indexes_), true);
     const auto index_page = [&](const auto& page, ContactPayloadRole role)
     {
-        contact_payload_object(visit, page.get(), ContactPayloadRole::SubfaceIndexPageObject, sizeof(*page), true);
+        contact_payload_object(
+            visit, page.get(), GeometryContactPayloadRole::SubfaceIndexPageObject, sizeof(*page), true);
         contact_payload_buffer(visit, page.get(), role, page->rows);
-        contact_payload_buffer(visit, page.get(), ContactPayloadRole::SubfaceIndexChildren, page->children);
+        contact_payload_buffer(visit, page.get(), GeometryContactPayloadRole::SubfaceIndexChildren, page->children);
     };
     PieceIndex::visit_pages(
-        indexes_->pieces, [&](const auto& page) { index_page(page, ContactPayloadRole::SubfacePieces); });
+        indexes_->pieces, [&](const auto& page) { index_page(page, GeometryContactPayloadRole::SubfacePieces); });
     FaceIndex::visit_pages(
-        indexes_->faces, [&](const auto& page) { index_page(page, ContactPayloadRole::SubfaceSelectors); });
-    OwnerIndex::visit_pages(
-        indexes_->owners, [&](const auto& page) { index_page(page, ContactPayloadRole::SubfacePieceOwnerIndexRows); });
+        indexes_->faces, [&](const auto& page) { index_page(page, GeometryContactPayloadRole::SubfaceSelectors); });
+    OwnerIndex::visit_pages(indexes_->owners,
+        [&](const auto& page) { index_page(page, GeometryContactPayloadRole::SubfacePieceOwnerIndexRows); });
     ProvenanceIndex::visit_pages(indexes_->provenance_owners,
-        [&](const auto& page) { index_page(page, ContactPayloadRole::SubfaceProvenanceOwnerIndexRows); });
+        [&](const auto& page) { index_page(page, GeometryContactPayloadRole::SubfaceProvenanceOwnerIndexRows); });
     indexes_->visit_piece_pages(
         [&](const auto& page)
         {

@@ -13,8 +13,9 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
 
-/** Holds only an immutable leaf selection, point and fan pages, and their
- * routing metadata. Its queries are local and independent of any controller. */
+/** Pins an immutable leaf selection with explicit point/fan pages or a
+ * certified procedural Cartesian state. Queries are local and independent of
+ * any hierarchy, provider or mutable candidate overlay. */
 class SIMPLEFLUID_LOCAL AdaptiveContactSnapshot
 {
 public:

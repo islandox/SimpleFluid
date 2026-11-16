@@ -32,6 +32,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
+    mesh/AMR/CartesianContactSnapshots.cc
     mesh/AMR/AdaptiveSubfaceSnapshot.cc
     mesh/AMR/CompleteSupportOverlay.cc
     mesh/AMR/AdaptiveBoundaryProof.cc
@@ -222,7 +223,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/AMR/DistributedAdaptiveClosureRecords.cc
         mesh/AMR/DistributedAdaptiveContactHalo.cc
         mesh/AMR/DistributedAdaptiveIncidence.cc
-        mesh/AMR/AdaptiveSubfaceSnapshot.cc
+        mesh/AMR/CartesianContactSnapshots.cc
+    mesh/AMR/AdaptiveSubfaceSnapshot.cc
         mesh/AMR/CompleteSupportOverlay.cc
         mesh/AMR/AdaptiveBoundaryProof.cc
         mesh/AMR/SupportCandidateIndex.cc
@@ -350,6 +352,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/DistributedAdaptiveClosureRecords.cc
     mesh/AMR/DistributedAdaptiveContactHalo.cc
     mesh/AMR/DistributedAdaptiveIncidence.cc
+    mesh/AMR/CartesianContactSnapshots.cc
     mesh/AMR/AdaptiveSubfaceSnapshot.cc
     mesh/AMR/CompleteSupportOverlay.cc
     mesh/AMR/AdaptiveBoundaryProof.cc

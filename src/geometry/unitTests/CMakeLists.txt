@@ -69,6 +69,8 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testPooledLineExchange"
       OR TEST_NAME STREQUAL "testPooledLineRegistryPersistence"
       OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|ManifestReceipt|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
+      OR TEST_NAME MATCHES "^testCartesian(Incidence|AuthorityCredits|Source|NativeLine|LineControls|CachedLineControls|CompactFamilies)"
+      OR TEST_NAME MATCHES "^testCartesianContact"
       OR TEST_NAME STREQUAL "testIncidencePointDirectory"
       OR TEST_NAME STREQUAL "testContactPointValueIndex"
       OR TEST_NAME STREQUAL "testFrozenTopology"
@@ -508,4 +510,32 @@ foreach(_publication_ranks IN ITEMS 2 4)
     TARGET testNativePublicationOperation PROCS ${_publication_ranks}
     ARGS "--gtest_filter=NativePublicationOperation.UnionAdmissionRejectsCollectivelyAndPreservesAcceptedPublication"
     LABELS "mpi;amr;native;admission;empty_rank" TIMEOUT 60)
+endforeach()
+
+# Implicit Cartesian contact backend: opt-in owner resolution and explicit parity.
+set(_cartesian_contact_failure_cases
+  "CartesianContactHaloMPITest.RankLocal*"
+  "CartesianContactHaloMPITest.PublicationAllocation*"
+  "CartesianContactHaloMPITest.DroppedTerminal*"
+  "CartesianContactHaloMPITest.DuplicateOwner*"
+  "CartesianContactHaloMPITest.ConflictingClaim*")
+list(JOIN _cartesian_contact_failure_cases ":" _cartesian_contact_failure_filter)
+foreach(_cartesian_contact_ranks 2 4)
+  simplefluid_add_mpi_test(NAME CartesianContactHalo_${_cartesian_contact_ranks}procs
+    TARGET testCartesianContactHaloMPI PROCS ${_cartesian_contact_ranks}
+    ARGS "--gtest_filter=CartesianContactHaloMPITest.*"
+    LABELS "mpi;geometry;amr;collective;storage" TIMEOUT 240)
+  simplefluid_add_mpi_test(NAME CartesianContactHaloFailures_${_cartesian_contact_ranks}procs
+    TARGET testCartesianContactHaloMPI PROCS ${_cartesian_contact_ranks}
+    ARGS "--gtest_filter=${_cartesian_contact_failure_filter}"
+    LABELS "mpi;geometry;amr;collective;protocol" TIMEOUT 40)
+endforeach()
+unset(_cartesian_contact_failure_cases)
+unset(_cartesian_contact_failure_filter)
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME CartesianContactSnapshots_${PROCS}procs
+    TARGET testCartesianContactSnapshots PROCS ${PROCS}
+    ARGS "--gtest_filter=CartesianContactSnapshots.*"
+    LABELS "mpi;amr;cartesian;contact;snapshot;native;empty_rank" TIMEOUT 300)
 endforeach()
