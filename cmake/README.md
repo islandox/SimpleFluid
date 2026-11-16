@@ -90,6 +90,10 @@ symbols beside each object on cache hits and recompiles when a matching symbol
 record is missing or corrupt. Its ccache namespace includes the object output
 path, preserving the skeleton DWARF filename identity otherwise handled by
 ccache's split-DWARF support. Non-split/IPO compilations use ordinary ccache.
+PCH-producing header commands (`-x c++-header`/`c-header`, including compact
+`-x` spelling, or `.gch`/`.pch` outputs) also use ordinary ccache: the launcher
+does not hash the PCH, create symbol records, or force recompilation for an
+absent `.dwo`. Ordinary translation units consuming a PCH retain DWO recovery.
 This launcher supports the workflow's expanded GCC/Clang CMake compile commands
 with plain `-gsplit-dwarf` and explicit `-o`; response files and custom DWARF
 output destinations are outside its supported scope.

@@ -49,6 +49,33 @@ class SplitDwarfTest(unittest.TestCase):
         return sum(int(line.split()[1]) for line in stats.splitlines()
                    if line.startswith(("direct_cache_hit\t", "preprocessed_cache_hit\t")))
 
+    def test_pch_producers_pass_through_without_symbol_recovery(self):
+        from unittest.mock import patch
+        cases = [
+            (["-x", "c++-header"], "header.gch"),
+            (["-xc++-header"], "header.gch"),
+            (["-x", "c-header"], "header.gch"),
+            ([], "header.gch"),
+            (["-x", "c++-header"], "header.pch"),
+        ]
+        for index, (flags, name) in enumerate(cases):
+            with self.subTest(flags=flags, output=name):
+                work = self.root / str(index)
+                work.mkdir()
+                output = work / name
+                output.write_bytes(b"precompiled header")
+                sidecar = output.with_suffix(".dwo")
+                sidecar.write_bytes(b"leave unrelated sidecar untouched")
+                command = ["ccache", "g++", "-g", "-gsplit-dwarf", *flags,
+                           "-c", str(work / "header.hh"), "-o", str(output)]
+                with patch.object(MODULE.subprocess, "call", return_value=0) as call:
+                    self.assertEqual(MODULE.launch(self.store, command), 0)
+                    self.assertEqual(call.call_count, 1)
+                    self.assertEqual(call.call_args.args, (command,))
+                    self.assertEqual(list(call.call_args.kwargs), [])
+                self.assertEqual(sidecar.read_bytes(), b"leave unrelated sidecar untouched")
+                self.assertFalse(self.store.exists())
+
     def test_compiler_roundtrips_and_recovery(self):
         compilers = [compiler for compiler in ("g++", "clang++") if shutil.which(compiler)]
         self.assertTrue(compilers, "requires GCC or Clang")
@@ -157,7 +184,13 @@ class SplitDwarfTest(unittest.TestCase):
                     *(["-DCMAKE_CXX_FLAGS=-Xclang -fno-pch-timestamp"] if compiler == "clang++" else []),
                 ])
                 command = ["cmake", "--build", str(build), "--config", "Debug", "--parallel", "2"]
-                self.run_command(command)
+                previous_records = {path.name for path in self.store.iterdir()} if self.store.exists() else set()
+                cold = self.run_command(command)
+                self.assertNotIn("Split DWARF bundle miss", cold.stdout + cold.stderr)
+                # PCH-producing commands must not hash/store the header as a
+                # translation unit; only ordinary object files own DWO records.
+                object_keys = {hashlib.sha256(path.read_bytes()).hexdigest() for path in build.rglob("*.o")}
+                self.assertEqual({path.name for path in self.store.iterdir()}, previous_records | object_keys)
                 original = {path.relative_to(build): path.read_bytes() for path in build.rglob("*.dwo")}
                 self.assertTrue(original)
                 bundle = project / "bundle.tar.zst"
@@ -167,7 +200,8 @@ class SplitDwarfTest(unittest.TestCase):
                     path.unlink()
                 self.run_command(["python3", str(SCRIPT), "unpack", str(bundle)])
                 hits = self.hits()
-                self.run_command(command)
+                warm = self.run_command(command)
+                self.assertNotIn("Split DWARF bundle miss", warm.stdout + warm.stderr)
                 self.assertGreater(self.hits(), hits)
                 for relative, data in original.items():
                     self.assertEqual(data, (build / relative).read_bytes())

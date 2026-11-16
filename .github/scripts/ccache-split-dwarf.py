@@ -29,11 +29,27 @@ def atomic_write(path, data):
     temporary.replace(path)
 
 
+def produces_pch(arguments):
+    language = None
+    output = None
+    for index, argument in enumerate(arguments):
+        if argument == "-x" and index + 1 < len(arguments):
+            language = arguments[index + 1]
+        elif argument.startswith("-x") and len(argument) > 2:
+            language = argument[2:]
+        elif argument == "-o" and index + 1 < len(arguments):
+            output = arguments[index + 1]
+    return (language is not None and language.endswith("-header")) or (
+        output is not None and Path(output).suffix in (".gch", ".pch")
+    )
+
+
 def launch(store, command):
     # CMake supplies: ccache compiler [compiler arguments]. Non-split and IPO
-    # compilations retain ordinary ccache behavior, including on macOS.
+    # compilations retain ordinary ccache behavior, including on macOS. PCH
+    # generation has no translation-unit DWO to recover; PCH consumers still do.
     arguments = command[2:]
-    if "-gsplit-dwarf" not in arguments:
+    if "-gsplit-dwarf" not in arguments or produces_pch(arguments):
         return subprocess.call(command)
     if "-o" not in arguments or any(arg.startswith("@") for arg in arguments):
         raise ValueError("split DWARF launcher requires an explicit -o and expanded arguments")
