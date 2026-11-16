@@ -21,8 +21,9 @@ Remaining acceptance and multiphysics work is tracked in `TODO.md`.
 The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
 run directly on `MeshHandle`/`FieldStored` data, retaining the exact native
 handle supplied by the caller. The production `Mesh` class, legacy mesh
-snapshots, `STKMeshAdapter` and mirrored solver path are removed. Independent geometry,
-storage and partition oracles remain confined to tests; there is no public
+snapshots, `STKMeshAdapter` and mirrored solver path are removed. Geometry
+and partition regressions use native fixtures with independent expectations;
+the frozen legacy test implementation is retired. There is no public
 `SimpleFluid::Mesh` type alias.
 
 The reacting stack has two distinct thermal owners: a weak Boussinesq field

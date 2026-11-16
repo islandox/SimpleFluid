@@ -10,7 +10,10 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
+#include <map>
 #include <set>
+#include <stdexcept>
+#include <string>
 
 namespace
 {
@@ -233,6 +236,41 @@ TEST(NativeMeshDistributionTest, OneRankInvalidSourceFailsCollectively)
     EXPECT_THROW(Partitioner::partition_native(std::move(source), comm), std::runtime_error);
 }
 
+TEST(NativeMeshDistributionTest, MissingSourceNeighborFailsCollectivelyInAdjacencyDirectory)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    MeshData source;
+    if (comm->getRank() == 0)
+    {
+        source = chain(2);
+        // Keep valid nodes, faces, and incidence for the first cell, including
+        // its interior neighbor ID. That neighbor has no owned source record.
+        // Local source validation succeeds; the distributed directory must fail.
+        source.cells.resize(1);
+    }
+    bool runtime_error = false;
+    std::string diagnostic;
+    try
+    {
+        (void)Partitioner::partition_native(std::move(source), comm);
+    }
+    catch (const std::runtime_error& error)
+    {
+        runtime_error = true;
+        diagnostic = error.what();
+    }
+    catch (const std::exception& error)
+    {
+        diagnostic = error.what();
+    }
+    const int local_missing = diagnostic.find("Missing source neighbor cell.") != std::string::npos;
+    int global_missing = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_missing, &global_missing);
+    EXPECT_TRUE(runtime_error) << diagnostic;
+    EXPECT_NE(diagnostic.find("Native mesh distribution adjacency directory:"), std::string::npos) << diagnostic;
+    EXPECT_GT(global_missing, 0);
+}
+
 TEST(NativeMeshDistributionTest, DuplicateOwnedSourcesFailCollectively)
 {
     const auto comm = Tpetra::getDefaultComm();
@@ -266,22 +304,80 @@ TEST(NativeMeshDistributionTest, InconsistentHaloOptionsFailCollectively)
 TEST(NativeMeshDistributionTest, ExplicitFactoryPolicyAssignsRankContiguousCellOrdinals)
 {
     const auto comm = Tpetra::getDefaultComm();
-    const auto reference = chain(2);
-    const auto partition = Partitioner::partition_native(comm->getRank() == 0 ? reference : MeshData{}, comm, 1, true);
-    const auto& mesh = *partition.geometry;
     using GO = DefaultTpetraTypes::global_ordinal_type;
-    GO count = mesh.num_owned_cells();
-    std::vector<GO> counts(comm->getSize());
-    Teuchos::gatherAll(*comm, 1, &count, comm->getSize(), counts.data());
-    GO first = 0;
-    for (int owner = 0; owner < comm->getRank(); ++owner)
-        first += counts[owner];
-    for (size_t c = 0; c < mesh.num_owned_cells(); ++c)
-        EXPECT_EQ(partition.indexer.local_to_global_cell_ordinal(c), first + static_cast<GO>(c));
-    for (size_t c = 0; c < mesh.num_cells(); ++c)
+    // Two cells leave empty destinations with four ranks. The larger odd
+    // chain guarantees unequal counts at two/four ranks regardless of which
+    // cells the partitioner assigns to each rank.
+    for (const size_t cell_count : {size_t{2}, 2 * static_cast<size_t>(comm->getSize()) + 1})
     {
-        EXPECT_LT(partition.indexer.local_to_global_cell_ordinal(c), 2);
-        EXPECT_GE(partition.indexer.cell_global_id(c), source_base);
+        SCOPED_TRACE(cell_count);
+        const auto reference = chain(cell_count);
+        const auto partition =
+            Partitioner::partition_native(comm->getRank() == 0 ? reference : MeshData{}, comm, 1, true);
+        const auto& mesh = *partition.geometry;
+        const GO local_counts[]{static_cast<GO>(mesh.num_owned_cells()),
+            static_cast<GO>(mesh.num_cells() - mesh.num_owned_cells())};
+        std::vector<GO> counts(2 * comm->getSize());
+        Teuchos::gatherAll(*comm, 2, local_counts, static_cast<int>(counts.size()), counts.data());
+
+        // Fixed-size padded rows keep the test exchange independent of the
+        // production sparse directory. Only owned rows provide the oracle.
+        const int row_size = static_cast<int>(2 * cell_count);
+        std::vector<GO> local_rows(row_size, -1), rows(row_size * comm->getSize());
+        for (size_t c = 0; c < std::min(mesh.num_owned_cells(), cell_count); ++c)
+        {
+            local_rows[2 * c] = static_cast<GO>(partition.indexer.cell_global_id(c));
+            local_rows[2 * c + 1] = partition.indexer.local_to_global_cell_ordinal(c);
+        }
+        Teuchos::gatherAll(*comm, row_size, local_rows.data(), static_cast<int>(rows.size()), rows.data());
+
+        // All test collectives have completed before checking local results.
+        std::map<GO, std::pair<GO, int>> authority;
+        GO first = 0, ghosts = 0;
+        int empty_ranks = 0;
+        bool unequal_counts = false;
+        for (int owner = 0; owner < comm->getSize(); ++owner)
+        {
+            const auto owned = counts[2 * owner];
+            EXPECT_GE(owned, 0);
+            EXPECT_LE(owned, static_cast<GO>(cell_count));
+            empty_ranks += owned == 0;
+            unequal_counts |= owned != counts[0];
+            ghosts += counts[2 * owner + 1];
+            for (GO c = 0; c < std::min(owned, static_cast<GO>(cell_count)); ++c)
+            {
+                const auto source_id = rows[owner * row_size + 2 * c];
+                const auto ordinal = rows[owner * row_size + 2 * c + 1];
+                EXPECT_EQ(ordinal, first + c);
+                EXPECT_TRUE(authority.emplace(source_id, std::make_pair(ordinal, owner)).second);
+            }
+            first += owned;
+        }
+        EXPECT_EQ(first, static_cast<GO>(cell_count));
+        EXPECT_EQ(authority.size(), cell_count);
+        for (size_t c = 0; c < cell_count; ++c)
+            EXPECT_TRUE(authority.contains(static_cast<GO>(cell_id(c))));
+        if (comm->getSize() > 1)
+        {
+            EXPECT_GT(ghosts, 0);
+            if (cell_count > static_cast<size_t>(comm->getSize()))
+                EXPECT_TRUE(unequal_counts);
+        }
+        if (cell_count < static_cast<size_t>(comm->getSize()))
+            EXPECT_EQ(empty_ranks, comm->getSize() - static_cast<int>(cell_count));
+        EXPECT_EQ(partition.cell_owner_ranks.size(), mesh.num_cells());
+        for (size_t c = mesh.num_owned_cells(); c < mesh.num_cells(); ++c)
+        {
+            const auto source_id = partition.indexer.cell_global_id(c);
+            const auto owner = authority.find(static_cast<GO>(source_id));
+            EXPECT_NE(owner, authority.end());
+            if (owner == authority.end())
+                continue;
+            EXPECT_NE(owner->second.second, comm->getRank());
+            EXPECT_EQ(partition.indexer.local_to_global_cell_ordinal(c), owner->second.first);
+            if (c < partition.cell_owner_ranks.size())
+                EXPECT_EQ(partition.cell_owner_ranks[c], owner->second.second);
+        }
     }
 }
 

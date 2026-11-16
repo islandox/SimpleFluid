@@ -145,10 +145,12 @@ mirrors, CRTP field bases, deprecation opt-outs and mesh-specific overloads
 are unavailable. The complete vector-boundary transport contract has a native
 provider; its conservative boundary outflow is counted once.
 
-A frozen `test::LegacyMesh`, STK geometry fixture and partition oracle exist
-only in the `BUILD_TESTING` fixture target. They supply independent geometric
-reference data; production fields, handles and solvers cannot wrap or execute
-that storage. Tests may compare authoritative oracle records with native data.
+The frozen legacy mesh/STK/partition test implementation is retired. Native
+regressions use analytic geometry expectations and explicitly supplied sparse
+source records to check metric/identity preservation, owned/ghost algebraic
+ordinal resolution, empty ranks, and collective failure handling. These tests
+do not retain a second mesh storage or partition implementation. Native STK/Ioss
+input, topology-rejection and output tests remain part of the supported path.
 
 STK/Ioss property construction stays inside the single static-Trilinos archive
 owner through a narrow versioned I/O bridge. Reusing an older backend without

@@ -17,8 +17,8 @@
 namespace SimpleFluid::test
 {
 /** Build the established affine-skewed prism source directly as native records.
- * Cells/nodes retain the one-based source IDs and HEX/WEDGE side numbering used
- * by the independent frozen STK oracle. Distribution retains factory numbering.
+ * Cells/nodes retain explicit one-based source IDs and HEX/WEDGE side numbering.
+ * Distribution retains factory numbering.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 SP<MeshHandle<Pack>> make_skewed_prism_mesh(size_t n_x = 3, size_t n_y = 3, size_t n_z = 3)

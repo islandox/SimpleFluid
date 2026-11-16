@@ -41,7 +41,9 @@ mesh-first constructors must supply them explicitly. Global field operations
 use native algebraic map IDs, independently of geometry/source identifiers.
 `MeshFactory::build_handle()` and `from_stk_file()` construct native handles;
 `build()` and `build_empty()` are removed. STK is transient input machinery,
-with independent geometry/storage/partition oracles confined to tests.
+with native tests using analytic geometry and explicit source-record
+expectations. The frozen legacy geometry/storage/partition test implementation
+is retired.
 Native structured periodicity and declared composite periodic interfaces remain
 supported. Manual post-construction pairing of imported exterior faces is
 retired.

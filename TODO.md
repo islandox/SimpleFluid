@@ -85,8 +85,9 @@ VoF, AMR and their geometry/remap qualification are maintained on the separate
 - The complete vector-boundary assembly contract remains available on the
   native runtime handle. Arbitrary manually paired imported periodic faces
   are retired; native Cartesian and composite periodicity remain supported.
-- The independent frozen geometry/storage/partition oracle is test-only.
-  It is not a production field or solver backend.
+- The frozen legacy geometry/storage/partition test implementation is retired.
+  Native tests retain analytic geometry and source-record identity, metric,
+  owned/ghost ordinal, empty-rank, and collective-failure checks.
 - Earlier checked phases that mention native/legacy parity describe the
   pre-retirement baseline. They do not qualify the migrated native defaults;
   new build/runtime evidence belongs in the validation artifacts.

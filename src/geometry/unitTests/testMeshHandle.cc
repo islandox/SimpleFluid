@@ -12,22 +12,16 @@
 #include <gtest/gtest.h>
 
 #include "geometry/MeshHandle.hh"
-#include "geometry/unitTests/fixtures/LegacySTKFixture.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
-#include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
-#include <stk_mesh/base/FEMHelpers.hpp>
-#include <stk_mesh/base/Field.hpp>
 
 #include <algorithm>
 #include <array>
-#include <exception>
 #include <filesystem>
 #include <memory>
-#include <map>
 #include <numbers>
 #include <span>
 #include <stdexcept>
@@ -43,78 +37,12 @@ using Cartesian = SimpleFluid::Meshes::OrthogonalCartesian3D;
 using Cylindrical = SimpleFluid::Meshes::OrthogonalCylindrial3D;
 using SemiStructured = SimpleFluid::Meshes::SemiStructuredXY_Z;
 using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
-using ConcreteSTK = SimpleFluid::test::LegacySTKFixture<Pack>;
 using PartitionedUnstructured =
     SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
 
 using utils_test::KokkosEnvironment;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
-
-/** Build the frozen derived-class oracle independently of the native factory. */
-SimpleFluid::SP<ConcreteSTK> make_frozen_two_hex_fixture()
-{
-    auto mesh = std::make_shared<ConcreteSTK>();
-    const auto comm = Tpetra::getDefaultComm();
-    auto meta = mesh->meta();
-    auto bulk = mesh->bulk();
-    auto& coordinates = meta->declare_field<double>(stk::topology::NODE_RANK, "coordinates");
-    stk::mesh::put_field_on_mesh(coordinates, meta->universal_part(), 3, nullptr);
-    meta->set_coordinate_field(&coordinates);
-    auto& hexes = meta->declare_part_with_topology("hexes", stk::topology::HEX_8);
-    const std::array<const char*, 6> names{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
-    std::array<stk::mesh::Part*, 6> boundaries{};
-    for (size_t b = 0; b < boundaries.size(); ++b)
-        boundaries[b] = &meta->declare_part(names[b], meta->side_rank());
-    meta->commit();
-    std::exception_ptr error;
-    bulk->modification_begin();
-    if (comm->getRank() == 0)
-    {
-        try
-        {
-            const auto first = stk::mesh::declare_element(*bulk, hexes, 1, {1, 2, 3, 4, 5, 6, 7, 8});
-            const auto second = stk::mesh::declare_element(*bulk, hexes, 2, {2, 9, 10, 3, 6, 11, 12, 7});
-            const auto side = [&](stk::mesh::Entity cell, unsigned ordinal, size_t boundary)
-            { bulk->declare_element_side(cell, ordinal, stk::mesh::PartVector{boundaries[boundary]}); };
-            side(first, 3, 0);
-            side(second, 1, 1);
-            for (const auto cell : {first, second})
-            {
-                side(cell, 0, 2);
-                side(cell, 2, 3);
-                side(cell, 4, 4);
-                side(cell, 5, 5);
-            }
-            const std::array<std::array<double, 3>, 12> points{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1},
-                {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}}};
-            for (size_t n = 0; n < points.size(); ++n)
-            {
-                const auto node = bulk->get_entity(stk::topology::NODE_RANK, n + 1);
-                auto* values = stk::mesh::field_data(coordinates, node);
-                if (!values)
-                    throw std::runtime_error("Frozen two-HEX fixture has no coordinate storage.");
-                std::copy(points[n].begin(), points[n].end(), values);
-            }
-        }
-        catch (...)
-        {
-            error = std::current_exception();
-        }
-    }
-    bulk->modification_end();
-    const int failed = error ? 1 : 0;
-    int any_failed = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
-    if (any_failed)
-    {
-        if (error)
-            std::rethrow_exception(error);
-        throw std::runtime_error("Frozen two-HEX fixture population failed on rank zero.");
-    }
-    mesh->assemble();
-    return mesh;
-}
 
 } // namespace
 
@@ -218,6 +146,9 @@ TEST(MeshHandleTest, VisitsEveryConcreteMeshAlternative)
  */
 TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
 {
+    struct UnsupportedMesh
+    {
+    };
     static_assert(std::is_same_v<
                   Mesh::MutableCartesianPtr,
                   SimpleFluid::SP<Cartesian>>);
@@ -230,8 +161,8 @@ TEST(MeshHandleTest, RetainsMutableGeometryWithConstObserverVisitation)
     static_assert(std::is_same_v<
                   Mesh::MutableUnstructuredPtr,
                   SimpleFluid::SP<Unstructured>>);
-    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<ConcreteSTK>>);
-    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<const ConcreteSTK>>);
+    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<UnsupportedMesh>>);
+    static_assert(!std::is_constructible_v<Mesh, SimpleFluid::SP<const UnsupportedMesh>>);
     static_assert(std::is_constructible_v<
                   PartitionedUnstructured,
                   std::nullptr_t,
@@ -413,49 +344,111 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
     }
 }
 
-/** Native factories retain geometry, IDs and maps independently of the frozen STK oracle. */
-TEST(MeshHandleTest, NativeFactoryMatchesIndependentSTKGeometryOracle)
+/** Native factories retain geometry, IDs and maps for two adjacent unit hexahedra. */
+TEST(MeshHandleTest, NativeFactoryMatchesAnalyticTwoHexGeometry)
 {
-    const auto oracle = make_frozen_two_hex_fixture();
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "The analytic two-cell geometry checks use serial ownership.";
+
     const auto handle = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    ASSERT_TRUE(oracle);
     ASSERT_TRUE(handle);
     ASSERT_TRUE(std::holds_alternative<Mesh::UnstructuredPtr>(handle->variant()));
     const auto geometry = std::get<Mesh::UnstructuredPtr>(handle->variant());
     EXPECT_TRUE(handle->has_mutable_geometry());
     EXPECT_EQ(handle->visit_mutable([](auto& mesh) -> const void* { return &mesh; }), geometry.get());
-    EXPECT_EQ(handle->num_owned_cells(), oracle->num_owned_cells());
-    EXPECT_EQ(handle->num_faces(), oracle->num_faces());
+    ASSERT_EQ(handle->num_owned_cells(), 2U);
+    ASSERT_EQ(handle->num_local_cells(), 2U);
+    ASSERT_EQ(handle->num_faces(), 11U);
+    const std::array<Mesh::Vec3, 2> cell_centers{{{0.5, 0.5, 0.5}, {1.5, 0.5, 0.5}}};
+    std::array<bool, 2> seen_cells{};
     for (size_t cell = 0; cell < handle->num_local_cells(); ++cell)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(cell);
         const auto source = handle->cell_geometry_global_id(lid);
-        const auto reference = oracle->global_to_local_cell(source);
-        ASSERT_NE(reference, SimpleFluid::invalid_id<Pack::local_ordinal_type>());
-        EXPECT_EQ(handle->cell_centroid(lid), oracle->cell_centroid(reference));
-        EXPECT_EQ(handle->cell_volume(lid), oracle->cell_volume(reference));
-        EXPECT_EQ(handle->faces(lid).size(), oracle->faces(reference).size());
+        ASSERT_GE(source, 1);
+        ASSERT_LE(source, 2);
+        const auto expected = static_cast<size_t>(source - 1);
+        EXPECT_FALSE(seen_cells[expected]);
+        seen_cells[expected] = true;
+        const auto center = handle->cell_centroid(lid);
+        for (size_t axis = 0; axis < 3; ++axis)
+            EXPECT_DOUBLE_EQ(center.component(axis), cell_centers[expected].component(axis));
+        EXPECT_DOUBLE_EQ(handle->cell_volume(lid), 1.0);
+        const auto cell_faces = handle->faces(lid);
+        EXPECT_EQ(cell_faces.size(), 6U);
+        std::vector<Pack::local_ordinal_type> faces(cell_faces.begin(), cell_faces.end());
+        std::sort(faces.begin(), faces.end());
+        EXPECT_EQ(std::adjacent_find(faces.begin(), faces.end()), faces.end());
+        for (const auto face : faces)
+            EXPECT_TRUE(handle->owner_cell(face) == lid || handle->neighbor_cell(face) == lid);
         EXPECT_EQ(handle->cell_global_id(lid), handle->overlap_cell_map()->getGlobalElement(lid));
         EXPECT_EQ(handle->indexer().cell_local_id(source), lid);
     }
-    std::map<Pack::global_ordinal_type, Pack::local_ordinal_type> oracle_faces;
-    for (size_t face = 0; face < oracle->num_faces(); ++face)
+    EXPECT_TRUE(std::ranges::all_of(seen_cells, [](bool seen) { return seen; }));
+
+    struct ExpectedFace
     {
-        const auto lid = static_cast<Pack::local_ordinal_type>(face);
-        oracle_faces.emplace(oracle->face_global_id(lid), lid);
-    }
+        Mesh::Vec3 center;
+        const char* boundary;
+        Pack::global_ordinal_type first_cell;
+        Pack::global_ordinal_type second_cell;
+    };
+    const std::array<ExpectedFace, 11> expected_faces{{
+        {{0.0, 0.5, 0.5}, "xmin", 1, 0},
+        {{1.0, 0.5, 0.5}, "", 1, 2},
+        {{2.0, 0.5, 0.5}, "xmax", 2, 0},
+        {{0.5, 0.0, 0.5}, "ymin", 1, 0},
+        {{1.5, 0.0, 0.5}, "ymin", 2, 0},
+        {{0.5, 1.0, 0.5}, "ymax", 1, 0},
+        {{1.5, 1.0, 0.5}, "ymax", 2, 0},
+        {{0.5, 0.5, 0.0}, "zmin", 1, 0},
+        {{1.5, 0.5, 0.0}, "zmin", 2, 0},
+        {{0.5, 0.5, 1.0}, "zmax", 1, 0},
+        {{1.5, 0.5, 1.0}, "zmax", 2, 0}}};
+    std::array<bool, 11> seen_faces{};
     for (size_t face = 0; face < handle->num_faces(); ++face)
     {
         const auto lid = static_cast<Pack::local_ordinal_type>(face);
-        const auto found = oracle_faces.find(handle->face_geometry_global_id(lid));
-        ASSERT_NE(found, oracle_faces.end());
-        const auto reference = found->second;
-        EXPECT_EQ(handle->face_centroid(lid), oracle->face_centroid(reference));
-        EXPECT_EQ(handle->face_area(lid), oracle->face_area(reference));
-        EXPECT_EQ(handle->is_boundary_face(lid), oracle->is_boundary_face(reference));
-        if (handle->is_boundary_face(lid))
-            EXPECT_EQ(handle->boundary_batch_name(handle->boundary_id(lid)), oracle->boundary_name(reference));
+        const auto center = handle->face_centroid(lid);
+        const auto found = std::ranges::find_if(expected_faces, [&](const auto& expected)
+        { return center == expected.center; });
+        ASSERT_NE(found, expected_faces.end());
+        const auto expected_index = static_cast<size_t>(found - expected_faces.begin());
+        EXPECT_FALSE(seen_faces[expected_index]);
+        seen_faces[expected_index] = true;
+        EXPECT_DOUBLE_EQ(handle->face_area(lid), 1.0);
+        const bool boundary = found->second_cell == 0;
+        EXPECT_EQ(handle->is_boundary_face(lid), boundary);
+        EXPECT_EQ(handle->is_interior_face(lid), !boundary);
+        const auto owner = handle->owner_cell(lid);
+        ASSERT_GE(owner, 0);
+        ASSERT_LT(static_cast<size_t>(owner), handle->num_local_cells());
+        const auto owner_source = handle->cell_geometry_global_id(owner);
+        ASSERT_GE(owner_source, 1);
+        ASSERT_LE(owner_source, 2);
+        if (boundary)
+        {
+            EXPECT_EQ(owner_source, found->first_cell);
+            EXPECT_EQ(handle->neighbor_cell(lid), SimpleFluid::invalid_id<Pack::local_ordinal_type>());
+            EXPECT_EQ(handle->boundary_batch_name(handle->boundary_id(lid)), found->boundary);
+        }
+        else
+        {
+            const auto neighbor = handle->neighbor_cell(lid);
+            ASSERT_GE(neighbor, 0);
+            ASSERT_LT(static_cast<size_t>(neighbor), handle->num_local_cells());
+            const auto neighbor_source = handle->cell_geometry_global_id(neighbor);
+            ASSERT_GE(neighbor_source, 1);
+            ASSERT_LE(neighbor_source, 2);
+            EXPECT_EQ(std::min(owner_source, neighbor_source), found->first_cell);
+            EXPECT_EQ(std::max(owner_source, neighbor_source), found->second_cell);
+            EXPECT_EQ(handle->face_normal_outward(lid, neighbor),
+                      (found->center - cell_centers[static_cast<size_t>(neighbor_source - 1)]) * 2.0);
+        }
+        EXPECT_EQ(handle->face_normal_outward(lid, owner),
+                  (found->center - cell_centers[static_cast<size_t>(owner_source - 1)]) * 2.0);
     }
+    EXPECT_TRUE(std::ranges::all_of(seen_faces, [](bool seen) { return seen; }));
     const auto topology = handle->vtu_topology();
     ASSERT_TRUE(topology);
     EXPECT_EQ(topology->cell_offsets.size(), handle->num_owned_cells());
