@@ -115,6 +115,19 @@ struct AdaptiveLeafBodyUsage::Node
     }
 };
 
+void AdaptiveLeafBodyUsage::visit_storage(const std::function<void(const void*, std::size_t)>& visitor) const
+{
+    const auto visit = [&](const auto& self, const NodePtr& node) -> void
+    {
+        if (!node)
+            return;
+        visitor(node.get(), sizeof(Node));
+        self(self, node->left);
+        self(self, node->right);
+    };
+    visit(visit, root_);
+}
+
 struct AdaptiveLeafBodyBuilder
 {
     using Node = AdaptiveLeafBodyUsage::Node;

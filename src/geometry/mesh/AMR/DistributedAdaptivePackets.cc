@@ -351,6 +351,7 @@ AdaptiveFamily read_family(Reader& r, Decoder& decoder)
 AdaptiveBytes encode_adaptive_batch(
     std::span<const AdaptiveLeaf> leaves, std::span<const AdaptiveFamily> families, std::size_t budget)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
     Dictionary dict{{}, {}, budget};
     for (const auto& leaf : leaves)
         dict.add(leaf);
@@ -363,15 +364,22 @@ AdaptiveBytes encode_adaptive_batch(
     w.word(leaves.size());
     w.word(families.size());
     for (const auto& leaf : leaves)
+    {
+        adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireEncodedLeaves);
         write_leaf(w, leaf, dict);
+    }
     for (const auto& family : families)
+    {
+        adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireEncodedFamilies);
         write_family(w, family, dict);
+    }
     if (w.data.size() > budget)
         throw std::invalid_argument("Adaptive batch wire budget exhausted.");
     return std::move(w.data);
 }
 AdaptiveBatch decode_adaptive_batch(std::span<const char> bytes, std::size_t budget)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
     if (bytes.size() > budget)
         throw std::invalid_argument("Adaptive batch wire budget exhausted.");
     Reader r{bytes};
@@ -404,9 +412,15 @@ AdaptiveBatch decode_adaptive_batch(std::span<const char> bytes, std::size_t bud
         leaves > budget / sizeof(AdaptiveLeaf) || families > budget / sizeof(AdaptiveFamily))
         throw std::invalid_argument("Invalid adaptive batch record count.");
     for (std::uint64_t i = 0; i < leaves; ++i)
+    {
+        adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedLeaves);
         batch.leaves.push_back(decoder.leaf(r));
+    }
     for (std::uint64_t i = 0; i < families; ++i)
+    {
+        adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedFamilies);
         batch.families.push_back(read_family(r, decoder));
+    }
     r.done();
     return batch;
 }

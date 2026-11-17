@@ -387,6 +387,89 @@ public:
     }
     [[nodiscard]] std::size_t overlap_bytes() const noexcept { return imported_.bytes() - inherited_bytes(); }
     void finish_overlap() noexcept { imported_.release(overlap_bytes()); }
+    /** Explicit borrowed C++ payload census; never used for admission. */
+    template<class Visit> void visit_payload(const Visit& visit) const
+    {
+        const auto buffer = [&](const auto& rows)
+        {
+            if (rows.capacity())
+                visit(rows.data(), rows.capacity() * sizeof(typename std::remove_cvref_t<decltype(rows)>::value_type));
+        };
+        const auto key = [&](const AdaptiveCellKey& cell)
+        {
+            std::visit(
+                [&](const auto& ancestry)
+                {
+                    if constexpr (requires { ancestry.path; })
+                        buffer(ancestry.path);
+                    else if constexpr (requires { ancestry.base.path; })
+                    {
+                        buffer(ancestry.base.path);
+                        buffer(ancestry.axial.path);
+                    }
+                },
+                cell.ancestry);
+        };
+        const auto page = [&](const auto& node)
+        {
+            visit(node.get(), sizeof(*node));
+            buffer(node->rows);
+            buffer(node->children);
+            visit(node->charge.arena.get(), sizeof(Budget));
+        };
+        visit(this, sizeof(*this));
+        Members::visit_pages(members_,
+            [&](const auto& node)
+            {
+                page(node);
+                for (const auto& row : node->rows)
+                {
+                    visit(row.get(), sizeof(*row));
+                    buffer(row->family);
+                    key(row->leaf);
+                }
+            });
+        Revisions::visit_pages(revisions_, page);
+        Groups::visit_pages(groups_,
+            [&](const auto& node)
+            {
+                page(node);
+                for (const auto& row : node->rows)
+                {
+                    visit(row.get(), sizeof(*row));
+                    buffer(row->family);
+                    buffer(row->proposals);
+                    for (const auto& proposal : row->proposals)
+                    {
+                        visit(proposal.get(), sizeof(*proposal));
+                        key(proposal->anchor);
+                        visit(proposal->proof.get(), sizeof(Proof));
+                        buffer(proposal->proof->fragment.record);
+                        buffer(proposal->proof->fragment.parts);
+                    }
+                }
+            });
+        Parts::visit_pages(parts_,
+            [&](const auto& node)
+            {
+                page(node);
+                for (const auto& row : node->rows)
+                {
+                    visit(row.owner.get(), sizeof(Part));
+                    buffer(row.owner->value);
+                }
+            });
+        ElectedParts::visit_pages(elected_parts_,
+            [&](const auto& node)
+            {
+                page(node);
+                for (const auto& row : node->rows)
+                {
+                    visit(row.owner.get(), sizeof(AdaptiveBytes));
+                    buffer(*row.owner);
+                }
+            });
+    }
     [[nodiscard]] const Work& work() const noexcept { return work_; }
     [[nodiscard]] std::size_t dictionary_size() const noexcept { return parts_ ? parts_->size : 0; }
     [[nodiscard]] std::size_t dictionary_bytes() const noexcept { return parts_ ? parts_->weights.total : 0; }

@@ -1163,7 +1163,8 @@ FrozenNativeModel::Plan FrozenNativeModel::plan_migration(const PreparedMigratio
         plan.candidate_ = std::shared_ptr<const FrozenNativeModel>(new FrozenNativeModel(data_));
         return plan;
     }
-    auto received = exchange_owner_packets(prepared.packets_, data_->comm, data_->options.byte_budget);
+    auto received = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        prepared.packets_, data_->comm, data_->options.byte_budget);
     plan.packet_phase_peak_ = received.stats.peak_scratch_bytes;
     std::vector<std::shared_ptr<const BundleData>> records;
     std::vector<int> peers;
@@ -1303,7 +1304,8 @@ FrozenNativePublication FrozenNativeModel::publication(std::span<const AdaptiveC
                     requests.push_back({owners[i].owner, std::move(w.data)});
                 }
             });
-        auto incoming = exchange_owner_packets(requests, data_->comm, data_->options.byte_budget);
+        auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+            requests, data_->comm, data_->options.byte_budget);
         std::vector<OwnerPacket> replies;
         collective(*data_->comm,
             [&]
@@ -1352,7 +1354,8 @@ FrozenNativePublication FrozenNativeModel::publication(std::span<const AdaptiveC
                     replies.push_back({peer, std::move(w.data)});
                 }
             });
-        auto returned = exchange_owner_packets(replies, data_->comm, data_->options.byte_budget);
+        auto returned = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+            replies, data_->comm, data_->options.byte_budget);
         std::map<AdaptiveCellKey, std::shared_ptr<const BundleData>> result;
         collective(*data_->comm,
             [&]

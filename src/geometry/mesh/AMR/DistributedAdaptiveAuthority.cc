@@ -315,7 +315,8 @@ static void number_completed_adaptive_nodes(std::vector<AdaptiveTile>& result,
             }
         });
     diagnostics.stage = "node_exchange";
-    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(requests), comm, budget);
     diagnostics.stage = "node_decode";
     struct NodeAuthority
     {
@@ -378,7 +379,8 @@ static void number_completed_adaptive_nodes(std::vector<AdaptiveTile>& result,
             }
         });
     diagnostics.stage = "node_reply_exchange";
-    auto returned = consume_owner_packets(std::move(replies), comm, budget);
+    auto returned =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(replies), comm, budget);
     diagnostics.stage = "node_reply_decode";
     collective(*comm,
         [&]
@@ -604,7 +606,8 @@ std::vector<AdaptiveTile> adaptive_detail::publish_adaptive_subfaces(const Adapt
                     result.push_back(std::move(tile));
                 });
         });
-    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(requests), comm, budget);
     struct FaceAddress
     {
         AdaptiveBytes definition;
@@ -718,7 +721,8 @@ std::vector<AdaptiveTile> adaptive_detail::publish_adaptive_subfaces(const Adapt
             }
         });
     incoming = {};
-    auto returned = consume_owner_packets(std::move(replies), comm, budget);
+    auto returned =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(replies), comm, budget);
     collective(*comm,
         [&]
         {
@@ -820,7 +824,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 }
         });
     diagnostics.stage = "support_exchange";
-    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(requests), comm, budget);
     diagnostics.stage = "support_decode_overlay";
     std::vector<OwnerPacket> replies;
     std::uint64_t authority_faces = 0;
@@ -1055,7 +1060,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             }
         });
     diagnostics.stage = "tile_exchange";
-    auto returned = consume_owner_packets(std::move(replies), comm, budget);
+    auto returned =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(replies), comm, budget);
     std::vector<AdaptiveTile> result;
     collective(*comm,
         [&]
@@ -1245,7 +1251,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             for (const auto& packet : requests)
                 statistics->edge_request_bytes += packet.bytes.size();
         diagnostics.stage = "edge_exchange";
-        incoming = consume_owner_packets(std::move(requests), comm, budget);
+        incoming =
+            ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(requests), comm, budget);
         diagnostics.stage = "edge_decode";
         replies.clear();
         collective(*comm,
@@ -1446,7 +1453,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             });
         std::vector<OwnerPacket>().swap(incoming.packets);
         diagnostics.stage = "edge_reply_exchange";
-        returned = consume_owner_packets(std::move(replies), comm, budget);
+        returned =
+            ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(std::move(replies), comm, budget);
         diagnostics.stage = "edge_reply_decode";
         collective(*comm,
             [&]

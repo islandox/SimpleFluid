@@ -2,6 +2,7 @@
  * @brief Compiled persistent exact owner bindings and first/last reference accounting.
  */
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
 #include <limits>
 
@@ -270,6 +271,7 @@ void GeometryOwnerManifest::visit(const std::function<void(const OwnerRecord&)>&
 {
     if (state_ && state_->inline_row())
     {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestVisitRow);
         visitor(state_->single);
         return;
     }
@@ -278,9 +280,27 @@ void GeometryOwnerManifest::visit(const std::function<void(const OwnerRecord&)>&
             state_->root, [](const auto&) { return false; },
             [&](const auto& row)
             {
+                GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestVisitRow);
                 visitor(row);
                 return true;
             });
+}
+void GeometryOwnerManifest::visit_payload(const std::function<void(const void*, std::size_t)>& visitor) const
+{
+    if (!state_)
+        return;
+    visitor(state_.get(), sizeof(State));
+    if (state_->inline_row())
+        return;
+    Pages::visit_pages(state_->root,
+        [&](const auto& page)
+        {
+            visitor(page.get(), sizeof(*page));
+            if (page->rows.capacity())
+                visitor(page->rows.data(), page->rows.capacity() * sizeof(OwnerRecord));
+            if (page->children.capacity())
+                visitor(page->children.data(), page->children.capacity() * sizeof(Pages::Ptr));
+        });
 }
 void GeometryOwnerManifest::visit_metadata(const std::function<void(const void*, std::size_t)>& visitor) const
 {

@@ -102,6 +102,23 @@ public:
         return groups_.storage_bytes() + domains_.storage_bytes() + group_ids_.storage_bytes() +
                domain_ids_.storage_bytes() + facts.storage_bytes();
     }
+    /** Group ledger categories exclude query/work fans and bindings. */
+    [[nodiscard]] ContactStorageBreakdown storage_breakdown() const
+    {
+        ContactStorageBreakdown result;
+        result.group_metadata = groups_.storage_bytes();
+        result.owner_index_metadata = group_ids_.storage_bytes();
+        result.domain_metadata = domains_.storage_bytes() + domain_ids_.storage_bytes();
+        std::set<const void*> owners;
+        visit_domain_owners(
+            [&](const auto& owner, const auto&, std::size_t bytes)
+            {
+                if (owners.insert(owner.get()).second)
+                    result.domain_shared_body += bytes;
+            });
+        facts.contribute_breakdown(result);
+        return result;
+    }
     [[nodiscard]] std::size_t copied_pages() const noexcept
     {
         return groups_.copied_pages() + domains_.copied_pages() + group_ids_.copied_pages() +

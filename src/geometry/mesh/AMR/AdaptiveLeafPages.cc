@@ -2,6 +2,7 @@
  * @brief Immutable ordered page construction, traversal and sparse edits.
  */
 #include "geometry/mesh/AMR/AdaptiveLeafPages.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 
 #include <algorithm>
@@ -179,6 +180,7 @@ struct AdaptiveLeafPageBuilder
         PageCharge charge(arena);
         charge.add(sizeof(Node) + 4 * sizeof(void*));
         auto node = std::make_shared<Node>(std::move(charge));
+        record_pipeline_work(PipelineWork::LeafPageCreated);
         ++stats.new_nodes;
         return node;
     }
@@ -440,6 +442,7 @@ void AdaptiveLeafPages::const_iterator::descend(const Node* node) noexcept
 
 AdaptiveLeafPages::const_iterator::reference AdaptiveLeafPages::const_iterator::operator*() const noexcept
 {
+    record_pipeline_work(PipelineWork::LeafRowDereference);
     return leaf_->rows[row_];
 }
 
@@ -604,6 +607,22 @@ void AdaptiveLeafPages::visit_pages(const std::function<void(const void*, std::s
     const auto visit = [&](const auto& self, const Node& node) -> void
     {
         visitor(&node, node.charge.bytes());
+        for (const auto& child : node.children)
+            self(self, *child);
+    };
+    if (root_)
+        visit(visit, *root_);
+}
+
+void AdaptiveLeafPages::visit_payload(const std::function<void(const void*, std::size_t)>& visitor) const
+{
+    const auto visit = [&](const auto& self, const Node& node) -> void
+    {
+        visitor(&node, sizeof(node));
+        if (node.rows.capacity())
+            visitor(node.rows.data(), node.rows.capacity() * sizeof(AdaptiveLeaf));
+        if (node.children.capacity())
+            visitor(node.children.data(), node.children.capacity() * sizeof(NodePtr));
         for (const auto& child : node.children)
             self(self, *child);
     };

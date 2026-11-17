@@ -78,6 +78,8 @@ public:
     /** Explicit diagnostic export. Source/cache mutation uses typed deltas. */
     void visit(const std::function<void(const OwnerRecord&)>&) const;
     void visit_metadata(const std::function<void(const void*, std::size_t)>&) const;
+    /** Exact separate C++ object and backing-buffer addresses for offline census. */
+    void visit_payload(const std::function<void(const void*, std::size_t)>&) const;
 
 private:
     struct State;

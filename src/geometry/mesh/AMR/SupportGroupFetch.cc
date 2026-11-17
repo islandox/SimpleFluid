@@ -1,6 +1,7 @@
 #include "geometry/mesh/AMR/SupportGroupFetch.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosureRecords.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/PooledSupportRegistry.hh"
 #include "geometry/mesh/AMR/SupportSurfaceCodec.hh"
 #include <algorithm>
@@ -95,7 +96,7 @@ OwnerExchange exchange(std::span<const OwnerPacket> packets, Teuchos::RCP<const 
                 throw std::invalid_argument("Support fetch transport lease exhausted.");
             scope.add(cap);
         });
-    auto result = exchange_owner_packets(packets, comm, cap);
+    auto result = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(packets, comm, cap);
     collective(*comm,
         [&]
         {

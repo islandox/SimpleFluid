@@ -2,6 +2,7 @@
  * @brief Procedural native fragments and certified explicit local poly shards.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
 #include <algorithm>
@@ -285,6 +286,8 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                     {
                         for (auto face : r.topology().cell_faces(address.second))
                         {
+                            adaptive_detail::record_pipeline_work(
+                                adaptive_detail::PipelineWork::NativeFaceCertificateRequest);
                             const auto certificate = native_face(region, face);
                             for (const auto& point : certificate->vertex_identities())
                             {
@@ -362,6 +365,8 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                         {
                             for (auto face : provider.topology().cell_faces(address.second))
                             {
+                                adaptive_detail::record_pipeline_work(
+                                    adaptive_detail::PipelineWork::NativeFaceCertificateRequest);
                                 auto certificate = native_face(region, face);
                                 if (provider.topology().owner_cell(face) != address.second)
                                     certificate = certificate->reversed();

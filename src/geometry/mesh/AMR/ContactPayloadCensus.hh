@@ -228,7 +228,11 @@ enum class ContactPayloadRole : std::uint8_t
     IdentityPersistentIndex,
     RankCoverSnapshot,
     RankCoverPage,
-    RankCoverDomain
+    RankCoverDomain,
+    HaloControllerObject,
+    HaloBudgetObject,
+    HaloExternalLeaseCounter,
+    Count
 };
 enum class ContactPayloadKind : std::uint8_t
 {

@@ -72,6 +72,7 @@ constexpr std::uint64_t product_fragment_magic = 0x534650524f4f4631ULL;
 void encode_product_frames(std::span<ProductProofFrame> frames, std::uint64_t phase, ProductProofContext context,
     ClosureScratch& memory, std::vector<OwnerPacket>& packets)
 {
+    const PipelinePhaseScope audit(PipelinePhase::Transport);
     using persistent_ordered_detail::checked_product;
     using persistent_ordered_detail::checked_sum;
     std::sort(frames.begin(), frames.end(),
@@ -128,6 +129,7 @@ void encode_product_frames(std::span<ProductProofFrame> frames, std::uint64_t ph
         writer.word(last - first);
         for (const auto& row : frames.subspan(first, last - first))
         {
+            record_pipeline_work(PipelineWork::WireEncodedProductFrames);
             writer.bytes(row.family);
             writer.bytes(row.anchor);
             writer.word(row.revision);
@@ -149,6 +151,7 @@ void decode_product_frames(const OwnerPacket& packet, std::uint64_t phase, Produ
     ProductWaveDictionary& shared, ClosureScratch& memory, Receive&& receive,
     const ProductFamilyElectionState* accepted_elected = nullptr)
 {
+    const PipelinePhaseScope audit(PipelinePhase::Transport);
     using persistent_ordered_detail::checked_product;
     Reader reader{packet.bytes};
     if (reader.word() != product_fragment_magic || reader.word() != phase || reader.word() != context.topology ||
@@ -180,6 +183,7 @@ void decode_product_frames(const OwnerPacket& packet, std::uint64_t phase, Produ
         throw std::invalid_argument("Product proof record count exceeds its frame.");
     for (std::size_t i = 0; i < records; ++i)
     {
+        record_pipeline_work(PipelineWork::WireDecodedProductFrames);
         const auto family = reader.bytes_view(), anchor = reader.bytes_view();
         const auto revision = reader.word(), maximum = reader.word();
         const auto record = reader.bytes_view();

@@ -17,7 +17,8 @@ inline OwnerExchange consume_budgeted_owner_packets(std::vector<OwnerPacket>&& o
     Teuchos::RCP<const Teuchos::Comm<int>> comm, Budget& budget, std::size_t outgoing_charge)
 {
     const auto resident = budget.used;
-    auto incoming = consume_owner_packets(std::move(outgoing), comm, budget.limit - budget.used);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(
+        std::move(outgoing), comm, budget.limit - budget.used);
     collective(*comm, [&]
         {
             if (incoming.stats.peak_scratch_bytes > budget.limit - resident || outgoing_charge > budget.used ||

@@ -2,6 +2,7 @@
  * @brief Owner-directed exact registration and lookup without global catalogs.
  */
 #include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DirectoryFactPages.hh"
 #include "geometry/mesh/AMR/DirectoryRegistrationAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
@@ -58,6 +59,8 @@ template<class Find>
 std::vector<AdaptiveOwner> directory_lookup_leased(std::span<const AdaptiveBytes> keys, bool require_all,
     std::size_t cap, const Teuchos::RCP<const Teuchos::Comm<int>>& comm, Find&& find)
 {
+    const PipelinePhaseScope audit(PipelinePhase::Transport);
+    record_pipeline_work(PipelineWork::RequiredWireRecord, keys.size());
     // Disjoint service arenas: persistent results R=cap/4, caller packets
     // P=cap/4, transport E=cap/2. Logical encodings B=cap/16 leave capacity
     // growth/lookup-copy margin in P and give E the packed-send +two-receive
@@ -108,7 +111,8 @@ std::vector<AdaptiveOwner> directory_lookup_leased(std::span<const AdaptiveBytes
             }
             (void) directory_packets(requests, packet_cap);
         });
-    auto incoming = exchange_owner_packets(requests, comm, exchange_cap);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(requests, comm, exchange_cap);
     std::vector<OwnerPacket>().swap(requests);
     std::vector<OwnerPacket> replies;
     collective(*comm,
@@ -167,7 +171,8 @@ std::vector<AdaptiveOwner> directory_lookup_leased(std::span<const AdaptiveBytes
         });
     incoming = {}; // Release old return buffers BEFORE reply exchange.
     collective(*comm, [&] { (void) directory_packets(replies, packet_cap); });
-    auto incoming_replies = exchange_owner_packets(replies, comm, exchange_cap);
+    auto incoming_replies =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(replies, comm, exchange_cap);
     std::vector<OwnerPacket>().swap(replies);
     collective(*comm,
         [&]
@@ -342,7 +347,8 @@ DistributedAncestryDirectory::DistributedAncestryDirectory(std::span<const Adapt
                 exchange_cap = cap - resident;
             }
         });
-    auto incoming = exchange_owner_packets(packets, comm_, exchange_cap);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(packets, comm_, exchange_cap);
     registration_ = incoming.stats;
     std::vector<OwnerPacket>().swap(packets);
     collective(*comm_,
@@ -482,7 +488,7 @@ std::vector<AdaptiveOwner> DistributedAncestryDirectory::lookup(
                 requests.push_back({authority(keys[i], comm_->getSize()), std::move(w.data)});
             }
         });
-    auto incoming = exchange_owner_packets(requests, comm_, budget_);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(requests, comm_, budget_);
     std::vector<OwnerPacket> replies;
     collective(*comm_,
         [&]
@@ -511,7 +517,8 @@ std::vector<AdaptiveOwner> DistributedAncestryDirectory::lookup(
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
-    auto incoming_replies = exchange_owner_packets(replies, comm_, budget_);
+    auto incoming_replies =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(replies, comm_, budget_);
     std::vector<AdaptiveOwner> result;
     std::vector<bool> seen;
     collective(*comm_,

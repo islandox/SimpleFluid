@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
@@ -160,6 +161,7 @@ struct GeometryAllocationLedger::Impl
     {
         if (!pointer)
             return;
+        details::GeometryAllocationOwnerAccess::observe_work(details::GeometryAllocationOwnerAccess::Work::Push);
         if (const auto found = owners.find({kind, pointer.get()}); found != owners.end())
         {
             if (found->second.pin.owner_before(pointer) || pointer.owner_before(found->second.pin))
@@ -188,6 +190,7 @@ struct GeometryAllocationLedger::Impl
     bool admit(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit,
         bool prepaid = false)
     {
+        details::GeometryAllocationOwnerAccess::observe_work(details::GeometryAllocationOwnerAccess::Work::Admit);
         using namespace allocation_detail;
         // An owner installed by an operation import is already in this ledger's
         // exact count and pin set; every entry point must see that before it
@@ -254,6 +257,7 @@ struct GeometryAllocationLedger::Impl
         { return admit(item, bytes, counter, cap, prepaid && prepaid->contains(item.kind, item.owner.get())); };
         while (!pending.empty())
         {
+            GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::PendingVisit);
             const auto item = std::move(pending.back());
             pending.pop_back();
             if (const auto found = owners.find({item.kind, item.owner.get()}); found != owners.end())

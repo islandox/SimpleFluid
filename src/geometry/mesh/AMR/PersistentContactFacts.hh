@@ -2,9 +2,10 @@
  * @brief Sparse copy-on-write exact point references for live contact fans.
  */
 #pragma once
-#include "IncidencePhysicalOwners.hh"
 #include "ContactPointFacts.hh"
 #include "ContactSlotIndex.hh"
+#include "IncidencePhysicalOwners.hh"
+#include <set>
 
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
@@ -157,6 +158,41 @@ public:
     [[nodiscard]] std::size_t storage_bytes() const noexcept
     {
         return pages_.storage_bytes() + facts_.storage_bytes() + page_ids_.storage_bytes() + fact_ids_.storage_bytes();
+    }
+    /** Diagnostic ledger categories. Slot counters and exact fact lookup are
+     * fact metadata; page selectors are view metadata. Credit owners and point
+     * bodies are deduplicated by their explicit identities. */
+    void contribute_breakdown(ContactStorageBreakdown& result) const
+    {
+        result.fact_metadata += facts_.storage_bytes() + fact_ids_.storage_bytes();
+        result.fact_view_metadata += pages_.storage_bytes() + page_ids_.storage_bytes();
+        std::set<const void*> metadata, bodies;
+        const auto credit = [&](const void* owner, const void* body, std::size_t bytes, std::size_t payload)
+        {
+            if (owner && metadata.insert(owner).second)
+                result.point_credit_metadata += bytes;
+            if (body && bodies.insert(body).second)
+                result.point_shared_body += payload;
+        };
+        visit_point_pages(
+            [&](const auto& page)
+            {
+                if (page.view)
+                {
+                    if (metadata.insert(page.view->metadata_identity()).second)
+                        result.fact_view_metadata += page.view->metadata_bytes();
+                    page.view->visit_page_admissions(credit);
+                }
+                else if (page.source_view)
+                {
+                    if (metadata.insert(page.source_view->metadata_identity()).second)
+                        result.fact_view_metadata += page.source_view->metadata_bytes();
+                    page.source_view->visit_source_admissions(credit);
+                }
+                else if (page.fallback)
+                    credit(page.fallback->metadata.identity(), page.fallback->body.get(),
+                        page.fallback->metadata.bytes(), page.fallback->body_admission.bytes());
+            });
     }
     [[nodiscard]] std::size_t copied_pages() const noexcept
     {

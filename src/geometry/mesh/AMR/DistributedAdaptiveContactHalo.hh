@@ -2,14 +2,15 @@
  * @brief Private exact-incidence spatial closure session.
  */
 #pragma once
-#include "utils/export_helper.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/mesh/AMR/AdaptiveContactQuery.hh"
 #include "geometry/mesh/AMR/ContactHaloContext.hh"
 #include "geometry/mesh/AMR/ContactPayloadCensus.hh"
 #include "geometry/mesh/AMR/ContactPointArray.hh"
+#include "geometry/mesh/AMR/ContactStorageBreakdown.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
 #include "parallel/SparseOwnerExchange.hh"
+#include "utils/export_helper.hh"
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -215,6 +216,8 @@ public:
     [[nodiscard]] ContactExternalResidencyLease external_residency_lease() const;
     void bind_external_retained_bytes(std::size_t) noexcept;
     [[nodiscard]] std::size_t cache_storage_bytes() const noexcept;
+    /** Direct group ledger categories; query/work fans and bindings are exposed by payload roles. */
+    [[nodiscard]] ContactStorageBreakdown contact_storage_breakdown() const;
     [[nodiscard]] std::vector<AdaptiveMark> required_refinements();
     [[nodiscard]] ContactMarkLease lease_required_refinements();
     /** Visit the complete canonical contact witnesses of one owned leaf.

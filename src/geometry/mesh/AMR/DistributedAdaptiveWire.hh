@@ -2,6 +2,7 @@
  * @brief Internal bounded owner-message primitives, independent of MPI layout.
  */
 #pragma once
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -17,6 +18,32 @@
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 using std::uint8_t;
+/** Observe the actual packet boundary shared by AMR protocols. Byte extents
+ * and packets are distinct from nested record encoding calls. The underlying
+ * exchange retains its original finite admission and collective order. */
+inline void record_adaptive_exchange(const OwnerExchangeStats& stats) noexcept
+{
+    record_pipeline_work(PipelineWork::WireSentPackets, stats.sent_packets);
+    record_pipeline_work(PipelineWork::WireReceivedPackets, stats.received_packets);
+    record_pipeline_work(PipelineWork::WireSentBytes, stats.sent_bytes);
+    record_pipeline_work(PipelineWork::WireReceivedBytes, stats.received_bytes);
+}
+inline OwnerExchange exchange_adaptive_packets(
+    std::span<const OwnerPacket> packets, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t limit)
+{
+    const PipelinePhaseScope phase(PipelinePhase::Transport);
+    auto result = exchange_owner_packets(packets, std::move(comm), limit);
+    record_adaptive_exchange(result.stats);
+    return result;
+}
+inline OwnerExchange consume_adaptive_packets(
+    std::vector<OwnerPacket>&& packets, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t limit)
+{
+    const PipelinePhaseScope phase(PipelinePhase::Transport);
+    auto result = consume_owner_packets(std::move(packets), std::move(comm), limit);
+    record_adaptive_exchange(result.stats);
+    return result;
+}
 struct Budget
 {
     std::size_t limit, used = 0, peak = 0, cumulative = 0;

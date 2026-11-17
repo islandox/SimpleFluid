@@ -2,6 +2,7 @@
  * @brief Owner-authenticated complete native halos with metric-only outer cells.
  */
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
@@ -99,7 +100,7 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
                 requests.push_back({owners[i].owner, std::move(w.data)});
             }
         });
-    auto incoming = exchange_owner_packets(requests, comm, limit);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(requests, comm, limit);
     std::vector<OwnerPacket>().swap(requests);
     std::vector<OwnerPacket> responses;
     adaptive_detail::collective(*comm,
@@ -147,7 +148,7 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
             }
         });
     std::vector<OwnerPacket>().swap(incoming.packets);
-    auto returned = exchange_owner_packets(responses, comm, limit);
+    auto returned = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(responses, comm, limit);
     adaptive_detail::collective(*comm,
         [&]
         {
@@ -220,7 +221,9 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
             for (auto& leaf : ghosts)
             {
                 const bool compact = adaptive_detail::compact_native_geometry(leaf, compact_procedural);
+                adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::CellGeometryRequest);
                 leaf.geometry = hierarchy.geometry(leaf);
+                adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::SurfaceGeometryRequest);
                 leaf.surfaces = hierarchy.surfaces(leaf);
                 if (compact)
                     leaf.geometry.reset();
@@ -265,6 +268,7 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
             {
                 if (records[i].key != keys[i] || records[i].revision != locations[i].revision)
                     throw std::invalid_argument("Native metric owner record mismatch.");
+                adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::NumericOutput);
                 const auto metric = hierarchy.metrics(records[i]);
                 AdaptiveNativeCellBinding binding;
                 binding.key = keys[i];
@@ -281,7 +285,9 @@ AdaptiveNativeDraft fetch_native_draft(const DistributedAdaptiveHierarchy& hiera
                 if (binding.full)
                 {
                     auto full_record = records[i];
+                    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::CellGeometryRequest);
                     full_record.geometry = hierarchy.geometry(full_record);
+                    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::SurfaceGeometryRequest);
                     full_record.surfaces = hierarchy.surfaces(full_record);
                     if (adaptive_detail::compact_native_geometry(records[i], compact_procedural))
                         full_record.geometry.reset();
@@ -309,6 +315,7 @@ AdaptiveNativeDraft adaptive_detail::fetch_compact_adaptive_native_draft(
 AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
     std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts)
 {
+    const adaptive_detail::PipelinePhaseScope audit(adaptive_detail::PipelinePhase::NativePublication);
     auto draft = adaptive_detail::fetch_compact_adaptive_native_draft(hierarchy, additional_full_ghosts);
     return assemble_adaptive_native(
         std::move(draft), root_schema, hierarchy.communicator(), hierarchy.options().byte_budget);

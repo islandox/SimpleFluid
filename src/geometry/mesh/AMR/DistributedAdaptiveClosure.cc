@@ -599,7 +599,8 @@ std::vector<AdaptiveMark> adaptive_detail::legacy_required_adaptive_refinements(
     // their complete closed point incidence has been authenticated and packed.
     std::vector<AdaptiveLeaf>().swap(transient);
     std::vector<AdaptiveTile>().swap(tiles);
-    auto incoming = consume_owner_packets(std::move(requests), comm, options.byte_budget);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(
+        std::move(requests), comm, options.byte_budget);
     std::vector<OwnerPacket>().swap(requests);
     diagnostics.stage = "contact_decode_compare";
     std::vector<OwnerPacket> replies;
@@ -868,7 +869,8 @@ std::vector<AdaptiveMark> adaptive_detail::legacy_required_adaptive_refinements(
     diagnostics.stage = "contact_reply_exchange";
     // Complete point groups and consumed request storage have been destroyed;
     // only the detached replies and Expected controls cross this handoff.
-    auto returned = consume_owner_packets(std::move(replies), comm, options.byte_budget);
+    auto returned = ::SimpleFluid::Meshes::AMR::adaptive_detail::consume_adaptive_packets(
+        std::move(replies), comm, options.byte_budget);
     std::vector<OwnerPacket>().swap(replies);
     std::vector<AdaptiveMark> result;
     collective(*comm,

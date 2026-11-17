@@ -22,6 +22,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/ScalarPacket.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -667,6 +668,7 @@ struct DistributedAdaptiveContactHalo::Impl
     }
     void discover_neighbors()
     {
+        const PipelinePhaseScope audit(PipelinePhase::Transport);
         std::optional<ContactRankCoverReceiptBuilder> builder;
         collective(*comm,
             [&]
@@ -2719,6 +2721,10 @@ std::shared_ptr<const ContactRankCoverReceipts> DistributedAdaptiveContactHalo::
 void DistributedAdaptiveContactHalo::for_each_borrowed_contact_payload(
     const std::function<void(const ContactPayloadAllocation&)>& visitor) const
 {
+    contact_payload_object(visitor, impl_.get(), ContactPayloadRole::HaloControllerObject, sizeof(Impl));
+    contact_payload_object(visitor, impl_->arena.get(), ContactPayloadRole::HaloBudgetObject, sizeof(Budget), true);
+    contact_payload_object(visitor, impl_->external_lease_bytes.get(), ContactPayloadRole::HaloExternalLeaseCounter,
+        sizeof(std::size_t), true);
     if (impl_->physical_owners)
         impl_->physical_owners->usage().visit_pages(
             [&](ContactOwnerUsage::Page page)
@@ -3551,6 +3557,11 @@ ContactMarkLease DistributedAdaptiveContactHalo::lease_required_refinements()
     for (const auto& mark : marks)
         bytes += key_capacity(mark.key);
     return ContactMarkLease(std::move(marks), state.budget, bytes);
+}
+ContactStorageBreakdown DistributedAdaptiveContactHalo::contact_storage_breakdown() const
+{
+    return impl_->persistent_groups ? impl_->persistent_groups->storage_breakdown()
+                                    : impl_->groups->storage_breakdown();
 }
 const ContactHaloStatistics& DistributedAdaptiveContactHalo::statistics() const noexcept
 {

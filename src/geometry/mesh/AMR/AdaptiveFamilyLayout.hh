@@ -357,6 +357,29 @@ public:
     }
     static void finish_overlap(Layout& layout) noexcept { layout.inherited_.release(overlap_bytes(layout)); }
 
+    template<class Visit> static void visit_payload(const Layout& layout, const Visit& visit)
+    {
+        const auto page = [&](const auto& node)
+        {
+            visit(node.get(), sizeof(*node));
+            if (node->rows.capacity())
+                visit(node->rows.data(),
+                    node->rows.capacity() * sizeof(typename std::remove_reference_t<decltype(node->rows)>::value_type));
+            if (node->children.capacity())
+                visit(node->children.data(),
+                    node->children.capacity() *
+                        sizeof(typename std::remove_reference_t<decltype(node->children)>::value_type));
+        };
+        Primary::visit_pages(layout.primary_,
+            [&](const auto& node)
+            {
+                page(node);
+                for (const auto& row : node->rows)
+                    visit(row.get(), sizeof(Record));
+            });
+        Secondary::visit_pages(layout.anchors_, page);
+    }
+
     /** Diagnostic physical union, including the admission allowance for each
      * allocated node/control. Parent bodies are a separate census. */
     template<class Visit> static void visit_storage(const Layout& layout, const Visit& visit)

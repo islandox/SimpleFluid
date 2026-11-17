@@ -67,6 +67,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testFrozenTopology"
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"
+      OR TEST_NAME STREQUAL "testAdaptivePipelineStorage"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryStorage"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryDemandSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryDemandScaling"
@@ -426,4 +427,12 @@ foreach(_directory_ranks IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME DirectoryPersistence_${_directory_ranks}procs
     TARGET testDirectoryPersistence PROCS ${_directory_ranks}
     LABELS "mpi;amr;directory;empty_rank" TIMEOUT 300)
+endforeach()
+
+# Whole-pipeline baseline: scaling observations are not future-stage gates.
+foreach(_pipeline_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME AdaptivePipelineStorage_${_pipeline_ranks}procs
+    TARGET testAdaptivePipelineStorage PROCS ${_pipeline_ranks}
+    ARGS "--gtest_filter=AdaptivePipelineStorage.WholePipelineBaselineReportsExistingWork:AdaptivePipelineStorage.WarmAcceptedCacheAdmissionExactLimitAndOneByteShort"
+    LABELS "mpi;amr;storage;baseline;empty_rank" TIMEOUT 900)
 endforeach()

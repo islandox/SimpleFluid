@@ -381,7 +381,8 @@ AdaptiveBalancePlan balance_owned_cells(std::span<const AdaptiveBalanceCell> cel
         });
     DistributedAncestryDirectory assignment_directory(assignments, comm, options.byte_budget);
     auto after_owners = assignment_directory.lookup(neighbors);
-    auto transferred = exchange_owner_packets(load_packets, comm, options.byte_budget);
+    auto transferred =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(load_packets, comm, options.byte_budget);
     double proposed_compute = 0;
     std::uint64_t new_cut = 0;
     collective(*comm,

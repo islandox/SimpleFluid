@@ -2,12 +2,13 @@
  * @brief Versioned bounded lossless ancestry and owner-record encoding.
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
-#include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
+#include "geometry/VoFWireProtocol.hh"
+#include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNativeRetention.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
-#include "geometry/VoFWireProtocol.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -373,6 +374,8 @@ void emit_adaptive_leaf(PacketWriter& w, const AdaptiveLeaf& leaf, std::size_t s
 } // namespace
 AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
+    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireEncodedLeaves);
     Writer w;
     emit_adaptive_leaf(w, leaf, PLIC::geometry_packet_default_budget);
     return std::move(w.data);
@@ -446,6 +449,8 @@ void adaptive_detail::validate_adaptive_leaf_boundary(const AdaptiveLeaf& leaf, 
 
 AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
+    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedLeaves);
     Reader r{packet};
     packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Leaf);
     AdaptiveLeaf leaf;
@@ -521,6 +526,8 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
 }
 AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
+    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireEncodedFamilies);
     if (family.key.empty() || family.children.empty())
         throw std::invalid_argument("Invalid adaptive family.");
     Writer w;
@@ -542,6 +549,8 @@ AdaptiveBytes encode_adaptive_family(const AdaptiveFamily& family)
 }
 AdaptiveFamily decode_adaptive_family(std::span<const char> packet)
 {
+    const adaptive_detail::PipelinePhaseScope phase(adaptive_detail::PipelinePhase::Transport);
+    adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::WireDecodedFamilies);
     Reader r{packet};
     packet_codec::read_header(r, packet_codec::Family::AdaptiveRecords, record_version, RecordKind::Family);
     AdaptiveFamily family;
@@ -772,6 +781,7 @@ bool CompactNativeOwnedBudget::append_bounded(
         state.destination_admission(destination);
         state.budget.add(bound);
         state.stats.materialization_peak_bytes = std::max(state.stats.materialization_peak_bytes, bound);
+        record_pipeline_work(PipelineWork::NativeMaterializationRequest);
         auto transient = kernel.compact_native_materialize(source);
         // Keep the construction envelope leased while append admits the
         // returned graph and allocates its tracking metadata. This deliberately

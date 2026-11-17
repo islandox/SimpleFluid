@@ -24,6 +24,8 @@ public:
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t leaf_payload_bytes() const noexcept;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
+    /** Borrow exact index object payload, excluding control/admission allowance. */
+    void visit_storage(const std::function<void(const void*, std::size_t)>&) const;
 
 private:
     friend struct AdaptiveLeafBodyBuilder;

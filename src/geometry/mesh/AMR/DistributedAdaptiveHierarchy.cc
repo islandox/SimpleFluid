@@ -3,8 +3,8 @@
  */
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
-#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/AdaptiveContactSnapshot.hh"
@@ -12,6 +12,7 @@
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafBodyUsage.hh"
 #include "geometry/mesh/AMR/AdaptiveLeafOverlay.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DirectoryRegistrationAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
@@ -234,11 +235,17 @@ struct DistributedAdaptiveHierarchy::Data
         if (const auto* map = std::get_if<LeafMap>(&leaves))
         {
             for (const auto& [key, row] : *map)
+            {
+                record_pipeline_work(PipelineWork::ActiveLeafVisit);
                 visit(row);
+            }
         }
         else
             for (const auto& row : *layout())
+            {
+                record_pipeline_work(PipelineWork::ActiveLeafVisit);
                 visit(row);
+            }
     }
     void set_layout(AdaptiveLeafPages pages, std::shared_ptr<const ContactExternalResidencyLease> admission)
     {
@@ -737,6 +744,7 @@ std::shared_ptr<const DistributedAncestryDirectory> register_directory(Distribut
 void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr,
     const DistributedAdaptiveHierarchy::Data* source = nullptr, ClosureScratch* source_overlap = nullptr)
 {
+    const PipelinePhaseScope audit(PipelinePhase::Directory);
     Budget fallback{state.options.byte_budget};
     ClosureScratch scratch{retained ? retained->budget : fallback};
     const std::uint64_t local = state.active_size();
@@ -847,6 +855,7 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
 void register_families(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* retained = nullptr,
     const DistributedAdaptiveHierarchy::Data* source = nullptr, ClosureScratch* source_overlap = nullptr)
 {
+    const PipelinePhaseScope audit(PipelinePhase::Directory);
     Budget fallback{state.options.byte_budget};
     ClosureScratch scratch{retained ? retained->budget : fallback};
     std::vector<AdaptiveOwner> families;
@@ -987,7 +996,7 @@ OwnerExchange closure_exchange(
                 throw std::invalid_argument("Closure request transport budget exhausted.");
             memory.add(cap);
         });
-    auto result = exchange_owner_packets(packets, comm, cap);
+    auto result = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(packets, comm, cap);
     collective(*comm,
         [&]
         {
@@ -2092,6 +2101,7 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 if ((leaf.provider == AdaptiveProviderKind::Cartesian && family != RegionLayout::Family::Rectilinear) ||
                     (leaf.provider == AdaptiveProviderKind::Product && family != RegionLayout::Family::Extruded))
                     throw std::invalid_argument("Procedural adaptive family was flattened in native binding.");
+                record_pipeline_work(PipelineWork::CellGeometryRequest);
                 if (!partition->geometry()->certified_sparse_provider_cell_geometry(id)->equivalent(
                         *data_->kernel->geometry(leaf)))
                     throw std::invalid_argument("Native binding differs from actual typed cell geometry.");
@@ -2349,7 +2359,8 @@ AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std
             }
         });
     collective(*state.comm, [&] { check_packets(packets); });
-    auto incoming = exchange_owner_packets(packets, state.comm, exchange_cap);
+    auto incoming =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(packets, state.comm, exchange_cap);
     packets.clear();
     collective(*state.comm,
         [&]
@@ -2487,7 +2498,8 @@ AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std
     if (leased)
         incoming = {};
     collective(*state.comm, [&] { check_packets(packets); });
-    auto replies = exchange_owner_packets(packets, state.comm, exchange_cap);
+    auto replies =
+        ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(packets, state.comm, exchange_cap);
     if (leased)
         std::vector<OwnerPacket>().swap(packets);
     AdaptiveBatch result;
@@ -3258,7 +3270,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 group_requests.push_back({group_owners[i].owner, std::move(w.data)});
             }
         });
-    auto group_incoming = exchange_owner_packets(group_requests, data_->comm, data_->options.byte_budget);
+    auto group_incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        group_requests, data_->comm, data_->options.byte_budget);
     collective(*data_->comm,
         [&]
         {
@@ -3306,7 +3319,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 requests.push_back({owner.owner, std::move(w.data)});
             }
         });
-    auto incoming = exchange_owner_packets(requests, data_->comm, data_->options.byte_budget);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        requests, data_->comm, data_->options.byte_budget);
     std::set<AdaptiveBytes> requested;
     collective(*data_->comm,
         [&]
@@ -3359,7 +3373,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 requests.push_back({owner.owner, std::move(w.data)});
             }
         });
-    incoming = exchange_owner_packets(requests, data_->comm, data_->options.byte_budget);
+    incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        requests, data_->comm, data_->options.byte_budget);
     collective(*data_->comm,
         [&]
         {
@@ -3407,7 +3422,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 requests.push_back({owners[i].owner, std::move(w.data)});
             }
         });
-    incoming = exchange_owner_packets(requests, data_->comm, data_->options.byte_budget);
+    incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        requests, data_->comm, data_->options.byte_budget);
     std::vector<OwnerPacket> replies;
     std::set<AdaptiveCellKey> retiring;
     collective(*data_->comm,
@@ -3432,7 +3448,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
-    auto children = exchange_owner_packets(replies, data_->comm, data_->options.byte_budget);
+    auto children = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        replies, data_->comm, data_->options.byte_budget);
     std::vector<AdaptiveBytes>().swap(family_keys);
     std::vector<AdaptiveBytes>().swap(group_keys);
     std::vector<AdaptiveSplit>().swap(group_splits);
@@ -3733,7 +3750,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_migration(
             diagnostics.peak_native_packet_buffers += packets.capacity() * sizeof(OwnerPacket);
             diagnostics.remote_sent_peers = peers.size();
         });
-    auto incoming = exchange_owner_packets(packets, data_->comm, data_->options.byte_budget);
+    auto incoming = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(
+        packets, data_->comm, data_->options.byte_budget);
     collective(*data_->comm,
         [&]
         {
@@ -3981,6 +3999,7 @@ AdaptiveNativeDraft adaptive_detail::compact_adaptive_native_draft(const Distrib
 }
 AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact_procedural) const
 {
+    const PipelinePhaseScope audit(PipelinePhase::NativePublication);
     collective(*data_->comm,
         [&]
         {
@@ -4037,7 +4056,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
                 for (const auto& leaf : owned_leaves())
                 {
                     auto transient = leaf;
+                    record_pipeline_work(PipelineWork::CellGeometryRequest);
                     transient.geometry = data_->kernel->geometry(leaf);
+                    record_pipeline_work(PipelineWork::SurfaceGeometryRequest);
                     transient.surfaces = data_->kernel->surfaces(leaf);
                     budget.add(encode_adaptive_leaf(transient).size());
                     if (adaptive_detail::compact_native_geometry(leaf, compact_procedural))
@@ -4056,6 +4077,7 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             {
                 const auto& key = leaf.key;
                 budget.add(sizeof(AdaptiveNativeCellBinding) + encoded_adaptive_key_size(key));
+                record_pipeline_work(PipelineWork::NumericOutput);
                 const auto values = data_->kernel->metrics(leaf);
                 AdaptiveNativeCellBinding binding;
                 binding.key = key;
@@ -4119,15 +4141,206 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             {
                 // Regenerate from the original provider record, never from an
                 // expanded draft that could remap a procedural cell ordinal.
+                if (!leaf.geometry)
+                    record_pipeline_work(PipelineWork::CellGeometryRequest);
                 const auto geometry =
                     leaf.geometry ? leaf.geometry : data_->kernel->geometry(owned_leaves().at(leaf.key));
                 const auto& boundary = incidence.at(leaf.key);
                 if (boundary.periodic_image || leaf.surfaces.size() != geometry->num_faces())
                     certify_adaptive_physical_boundary(geometry, boundary.pieces, data_->options.byte_budget);
-                else if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(boundary.pieces)->equivalent(*geometry))
+                else if ((record_pipeline_work(PipelineWork::PhysicalShellReconstruction),
+                             !PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(boundary.pieces)
+                                 ->equivalent(*geometry)))
                     throw std::invalid_argument("Authority tiles do not form complete exact local shell.");
             }
         });
     return result;
 }
 } // namespace SimpleFluid::Meshes::AMR
+
+namespace SimpleFluid::Meshes::AMR::adaptive_detail
+{
+namespace
+{
+thread_local PipelineObserver pipeline_observer;
+thread_local PipelinePhase pipeline_phase = PipelinePhase::Candidate;
+} // namespace
+PipelineObserver set_pipeline_observer(PipelineObserver next) noexcept
+{
+    const auto previous = pipeline_observer;
+    pipeline_observer = next;
+    if (next.enter)
+        next.enter(next.context, pipeline_phase);
+    return previous;
+}
+void record_pipeline_work(PipelineWork work, std::size_t count) noexcept
+{
+    if (pipeline_observer.work)
+        pipeline_observer.work(pipeline_observer.context, work, count);
+}
+PipelinePhase switch_pipeline_phase(PipelinePhase next) noexcept
+{
+    const auto previous = pipeline_phase;
+    pipeline_phase = next;
+    if (pipeline_observer.enter)
+        pipeline_observer.enter(pipeline_observer.context, next);
+    return previous;
+}
+} // namespace SimpleFluid::Meshes::AMR::adaptive_detail
+
+namespace SimpleFluid::Meshes::AMR::adaptive_detail
+{
+PLIC::GeometryStatistics GeometrySnapshotAccess::pipeline_geometry_statistics()
+{
+    return PLIC::geometry_statistics();
+}
+const void* GeometrySnapshotAccess::pipeline_geometry_statistics_domain()
+{
+    return PLIC::geometry_statistics_domain();
+}
+void GeometrySnapshotAccess::reset_pipeline_geometry_statistics()
+{
+    PLIC::reset_geometry_statistics();
+}
+void GeometrySnapshotAccess::visit_pipeline_graph(
+    const DistributedAdaptiveHierarchy& hierarchy, const PipelineGraphVisit& visitor)
+{
+    const auto& state = *hierarchy.data_;
+    using Kind = PipelineGraphOwner::Kind;
+    const auto object = [&](const void* owner, std::size_t bytes) { visitor({owner, bytes, Kind::Object}); };
+    const auto buffer = [&](const auto& values)
+    {
+        if (values.capacity())
+            visitor({values.data(),
+                values.capacity() * sizeof(typename std::remove_cvref_t<decltype(values)>::value_type), Kind::Buffer});
+    };
+    const auto key = [&](const AdaptiveCellKey& value)
+    {
+        std::visit(
+            [&](const auto& ancestry)
+            {
+                if constexpr (requires { ancestry.path; })
+                    buffer(ancestry.path);
+                else if constexpr (requires { ancestry.base.path; })
+                {
+                    buffer(ancestry.base.path);
+                    buffer(ancestry.axial.path);
+                }
+            },
+            value.ancestry);
+    };
+    object(&state, sizeof(state));
+    object(state.token.get(), sizeof(char));
+    object(state.topology_token.get(), sizeof(char));
+    object(state.partition_token.get(), sizeof(char));
+    object(state.geometry_cache.get(), sizeof(AdaptiveGeometrySnapshotCache));
+    object(state.layout().get(), sizeof(AdaptiveLeafLayout));
+    state.pages().visit_payload(object);
+    state.body_usage.visit_storage(object);
+    if (state.family_layout)
+    {
+        object(state.family_layout.get(), sizeof(AdaptiveFamilyLayout));
+        AdaptiveFamilyStorage::visit_payload(*state.family_layout, object);
+    }
+    const auto directory = [&](const auto& value)
+    {
+        DirectoryRegistrationAccess::visit_storage(*value, [&](const void* address, std::size_t bytes, bool numeric)
+            { visitor({address, bytes, numeric ? Kind::NumericOutput : Kind::Object}); });
+    };
+    directory(state.cells);
+    directory(state.family_directory);
+    if (state.product_election)
+        state.product_election->visit_payload(object);
+    for (const auto& channels : state.geometry_cache->manifests)
+        for (const auto& manifest : channels)
+            manifest.visit_payload(object);
+    if (state.admission)
+        object(state.admission.get(), sizeof(AdaptivePublishedAdmission));
+    PLIC::GeometryAllocationLedger ordinary, bounded;
+    std::size_t used = 0;
+    const auto shared_bytes = [&](const auto& owner)
+    {
+        if (owner)
+            ordinary.retain_external_owner(
+                owner, sizeof(AdaptiveBytes) + owner->capacity(), used, std::numeric_limits<std::size_t>::max());
+    };
+    const auto leaf = [&](const AdaptiveLeaf& value)
+    {
+        key(value.key);
+        buffer(value.domain);
+        buffer(value.parent_family);
+        buffer(value.surfaces);
+        if (value.native_recipe)
+        {
+            ordinary.retain_external_owner(value.native_recipe,
+                sizeof(NativeFragmentDescriptor) + value.native_recipe->view.capacity() +
+                    value.native_recipe->parts.capacity() * sizeof(std::shared_ptr<const AdaptiveBytes>),
+                used, std::numeric_limits<std::size_t>::max());
+            buffer(value.native_recipe->view);
+            buffer(value.native_recipe->parts);
+            for (const auto& part : value.native_recipe->parts)
+            {
+                shared_bytes(part);
+                if (part)
+                    buffer(*part);
+            }
+        }
+        shared_bytes(value.join_recipe);
+        if (value.join_recipe)
+            buffer(*value.join_recipe);
+        if (value.factor_recipe)
+        {
+            ordinary.retain_external_owner(
+                value.factor_recipe, sizeof(AdaptiveFactorRecipe), used, std::numeric_limits<std::size_t>::max());
+            shared_bytes(value.factor_recipe->root);
+            shared_bytes(value.factor_recipe->base);
+            shared_bytes(value.factor_recipe->axis);
+        }
+        if (value.geometry)
+            ordinary.retain(value.geometry, used, std::numeric_limits<std::size_t>::max());
+        for (const auto& surface : value.surfaces)
+        {
+            buffer(surface.key);
+            if (surface.boundary.capacity())
+                visitor({surface.boundary.data(), surface.boundary.capacity(), Kind::Buffer});
+            if (surface.geometry)
+                ordinary.retain_planar_face(surface.geometry, used, std::numeric_limits<std::size_t>::max());
+            if (surface.native_whole_geometry)
+                ordinary.retain_planar_face(
+                    surface.native_whole_geometry, used, std::numeric_limits<std::size_t>::max());
+        }
+    };
+    for (const auto& value : hierarchy.owned_leaves())
+        leaf(value);
+    for (const auto family : hierarchy.owned_families())
+    {
+        leaf(family.parent);
+        buffer(family.key);
+        buffer(family.anchor);
+        buffer(family.children);
+        for (const auto& child : family.children)
+            key(child);
+    }
+    hierarchy.visit_geometry_snapshots(
+        [&](const AdaptiveGeometrySnapshot& snapshot)
+        {
+            snapshot.visit_external_owners(
+                [&](const void* identity, std::size_t bytes) { visitor({identity, bytes, Kind::Geometry}); });
+            snapshot.retain(ordinary, bounded, used, std::numeric_limits<std::size_t>::max());
+        });
+    const auto geometries = [&](const PLIC::GeometryAllocationLedger& ledger)
+    {
+        PLIC::details::GeometryAllocationOwnerAccess::visit(ledger,
+            [&](std::uint8_t, const void* identity, std::size_t bytes) { visitor({identity, bytes, Kind::Geometry}); });
+    };
+    geometries(ordinary);
+    geometries(bounded);
+    if (state.contact_halo)
+    {
+        object(state.contact_halo.get(), sizeof(DistributedAdaptiveContactHalo));
+        state.contact_halo->for_each_borrowed_contact_payload([&](const ContactPayloadAllocation& allocation)
+            { visitor({allocation.identity.address, allocation.payload_bytes, Kind::Object}); });
+        state.contact_halo->for_each_borrowed_geometry_ledger(geometries);
+    }
+}
+} // namespace SimpleFluid::Meshes::AMR::adaptive_detail

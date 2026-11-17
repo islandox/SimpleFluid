@@ -2,6 +2,7 @@
  * @brief Immutable ordered metadata pages with exact subtree allocation totals.
  */
 #pragma once
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 
 #include <algorithm>
@@ -244,6 +245,8 @@ private:
     }
     void record(const Node& node) const
     {
+        record_pipeline_work(PipelineWork::OrderedPageCreated);
+        record_pipeline_work(PipelineWork::OrderedPageAdmittedBytes, node.charge.bytes);
         if (work_)
         {
             ++work_->copied_pages;

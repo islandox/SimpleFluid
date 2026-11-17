@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/GeometryPacketCodec.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/ContactGroupAllocation.hh"
 #include "geometry/mesh/AMR/PersistentOrderedPages.hh"
 
@@ -145,6 +146,7 @@ public:
         }
         if (candidate.size() != rows.size())
             throw std::logic_error("Directory numeric projection count differs from its exact facts.");
+        record_pipeline_work(PipelineWork::NumericOutput, rows.size());
         candidate.uniform_address_ = rows.empty() ? std::numeric_limits<std::uint64_t>::max() : rows.front().address;
         const bool uniform = std::all_of(
             rows.begin(), rows.end(), [&](const auto& row) { return row.address == candidate.uniform_address_; });

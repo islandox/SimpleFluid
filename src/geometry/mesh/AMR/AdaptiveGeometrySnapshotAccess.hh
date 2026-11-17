@@ -10,6 +10,21 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
 struct Budget;
+struct PipelineGraphOwner
+{
+    enum class Kind
+    {
+        Object,
+        Buffer,
+        Geometry,
+        AdmissionIdentity,
+        NumericOutput
+    };
+    const void* identity;
+    std::size_t bytes;
+    Kind kind;
+};
+using PipelineGraphVisit = std::function<void(const PipelineGraphOwner&)>;
 /** Admission diagnostics read scalars and six exact weak root controls. A root
  * census counter advances only when replacement actually traverses snapshots.
  * Independent explicit payload censuses remain available on the hierarchy. */
@@ -35,6 +50,15 @@ public:
     [[nodiscard]] static const DistributedAdaptiveContactHalo& contact_cache(const DistributedAdaptiveHierarchy&);
     [[nodiscard]] static GeometryCacheAdmissionStatistics cache_admission_statistics(
         const DistributedAdaptiveHierarchy&);
+    /** Partial borrowed accepted-owner attribution for offline diagnostics.
+     * Aggregate geometry payload identities do not enumerate every child buffer;
+     * generic provider internals and separate shared controls may be unmatched.
+     * Visitors acquire no pins. Raw allocation tracing remains authoritative. */
+    static void visit_pipeline_graph(const DistributedAdaptiveHierarchy&, const PipelineGraphVisit&);
+    /** Observe the Mesh library image's actual PLIC domain without double counting callers. */
+    [[nodiscard]] static PLIC::GeometryStatistics pipeline_geometry_statistics();
+    [[nodiscard]] static const void* pipeline_geometry_statistics_domain();
+    static void reset_pipeline_geometry_statistics();
     /** Same source-cache admission used by adapt, migrate and native binding.
      * Separate caller Budget retains its existing monotonic spent prefix. */
     static void admit_cache_residency(const DistributedAdaptiveHierarchy&, Budget&);

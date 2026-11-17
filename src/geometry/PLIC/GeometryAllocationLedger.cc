@@ -12,6 +12,48 @@
 
 namespace SimpleFluid::PLIC
 {
+namespace
+{
+thread_local details::GeometryAllocationWork allocation_work;
+}
+details::GeometryAllocationWork details::GeometryAllocationOwnerAccess::work_statistics() noexcept
+{
+    return allocation_work;
+}
+void details::GeometryAllocationOwnerAccess::reset_work_statistics() noexcept
+{
+    allocation_work = {};
+}
+void details::GeometryAllocationOwnerAccess::observe_work(Work kind, std::size_t count) noexcept
+{
+    switch (kind)
+    {
+        case Work::Push:
+            allocation_work.pushes += count;
+            break;
+        case Work::Admit:
+            allocation_work.admissions += count;
+            break;
+        case Work::PendingVisit:
+            allocation_work.pending_visits += count;
+            break;
+        case Work::Import:
+            allocation_work.import_calls += count;
+            break;
+        case Work::ImportRow:
+            allocation_work.import_rows += count;
+            break;
+        case Work::Export:
+            allocation_work.export_calls += count;
+            break;
+        case Work::ExportRow:
+            allocation_work.export_rows += count;
+            break;
+        case Work::ManifestVisitRow:
+            allocation_work.manifest_visit_rows += count;
+            break;
+    }
+}
 std::size_t details::identity_ledger_bookkeeping_bound(std::size_t owners)
 {
     return allocation_detail::add(sizeof(GeometryAllocationLedger::Impl),
@@ -495,6 +537,7 @@ template std::size_t geometry_allocation_footprint<ArithmeticMode::BoundedCertif
 std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger& ledger,
     const geometry_demand::GeometryOwnerManifest& owners, std::size_t& cumulative_bytes, std::size_t byte_limit)
 {
+    GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::Import);
     try
     {
         ledger.begin_admission(cumulative_bytes, byte_limit);
@@ -530,6 +573,7 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
         owners.visit(
             [&](const geometry_demand::OwnerRecord& row)
             {
+                GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ImportRow);
                 ++enumerated;
                 const auto kind = static_cast<allocation_detail::Kind>(row.key.kind);
                 (void) ledger.impl_->admit(
@@ -549,6 +593,7 @@ geometry_demand::GeometryOwnerManifest details::GeometryOwnerImportAccess::expor
     const GeometryAllocationLedger& ledger, geometry_demand::Admission admission, geometry_demand::PageWork* work,
     std::uint8_t channel)
 {
+    GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::Export);
     using geometry_demand::OwnerRecord;
     if (ledger.failed_)
         allocation_detail::exhausted("Cannot export a rejected geometry owner census.");
@@ -566,11 +611,18 @@ geometry_demand::GeometryOwnerManifest details::GeometryOwnerImportAccess::expor
     if (rows.capacity() != count)
         allocation_detail::exhausted("Geometry owner export row capacity is unqualified.");
     if (ledger.impl_->imported)
-        ledger.impl_->imported->visit([&](const OwnerRecord& row)
-            { rows.push_back({{channel, row.key.kind, row.owner.get()}, row.owner, row.bytes, row.references}); });
+        ledger.impl_->imported->visit(
+            [&](const OwnerRecord& row)
+            {
+                GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ExportRow);
+                rows.push_back({{channel, row.key.kind, row.owner.get()}, row.owner, row.bytes, row.references});
+            });
     for (const auto& [key, entry] : ledger.impl_->owners)
+    {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ExportRow);
         rows.push_back(
             {{channel, static_cast<std::uint8_t>(key.kind), entry.pin.get()}, entry.pin, entry.payload_bytes, 1});
+    }
     std::sort(rows.begin(), rows.end(),
         [](const OwnerRecord& first, const OwnerRecord& second)
         {

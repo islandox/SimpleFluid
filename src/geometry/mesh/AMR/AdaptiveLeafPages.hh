@@ -134,6 +134,8 @@ public:
     /** Visit each page owner while this value is pinned. The charge covers the
      * page and exclusive buffers, and excludes shared provider bodies. */
     void visit_pages(const std::function<void(const void*, std::size_t)>&) const;
+    /** Actual object and vector buffers. No admission/control allowance. */
+    void visit_payload(const std::function<void(const void*, std::size_t)>&) const;
     [[nodiscard]] Storage storage() const;
     [[nodiscard]] std::size_t retained_bytes() const noexcept;
     [[nodiscard]] const void* page_identity(const AdaptiveCellKey&) const;

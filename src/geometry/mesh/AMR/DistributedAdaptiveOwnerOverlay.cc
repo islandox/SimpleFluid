@@ -1,4 +1,5 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveOwnerOverlay.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -89,7 +90,7 @@ OwnerExchange exchange(
                 throw std::invalid_argument("Adaptive overlay transport lease exhausted.");
             live.add(cap);
         });
-    auto result = exchange_owner_packets(input, comm, cap);
+    auto result = ::SimpleFluid::Meshes::AMR::adaptive_detail::exchange_adaptive_packets(input, comm, cap);
     collective(*comm,
         [&]
         {
