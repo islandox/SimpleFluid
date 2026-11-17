@@ -570,7 +570,7 @@ private:
                     // Preserve one predicate evaluation per changed row, even
                     // when a caller supplies a stateful observation predicate.
                     for (std::size_t index = 0; index < changes.size(); ++index)
-                        disposition[index] = keep(changes[index]);
+                        disposition[index] = static_cast<bool>(keep(changes[index]));
                     const auto kept = [&](std::size_t index) { return disposition[index] != 0; };
                     std::size_t count = 0;
                     merge(kept, [&](const Row&) { ++count; });

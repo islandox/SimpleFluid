@@ -540,3 +540,36 @@ TEST(GeometryDemandPages, GenericThrowingDefaultRowKeepsItsNoDefaultPatchContrac
     EXPECT_EQ(Pages::at(accepted, 1).payload, 30);
     EXPECT_EQ(ThrowingDefaultRow::default_calls, 0u);
 }
+
+TEST(GeometryDemandPages, BatchedEditsKeepNonzeroPredicatesAcrossByteBoundaries)
+{
+    struct Row
+    {
+        int key;
+        int payload;
+        bool operator==(const Row&) const = default;
+    };
+    const auto less = [](const Row& first, const Row& second) { return first.key < second.key; };
+    using Pages = G::OrderedPages<Row, decltype(less)>;
+    static_assert(std::is_trivially_default_constructible_v<Row>);
+    static_assert(G::stack_safe_default<Row>);
+
+    const std::array accepted_rows{Row{1, 10}, Row{2, 20}, Row{4, 40}};
+    const std::array changes{Row{1, 8704}, Row{2, 0}, Row{3, 256}};
+    Counter initial;
+    const auto accepted = Pages(initial.admission()).build(accepted_rows);
+
+    Counter edited;
+    const auto updated =
+        Pages(edited.admission()).patched(accepted, changes, [](const Row& row) { return row.payload; });
+
+    const std::array expected{Row{1, 8704}, Row{3, 256}, Row{4, 40}};
+    ASSERT_TRUE(updated);
+    ASSERT_EQ(updated->size, expected.size());
+    ASSERT_EQ(accepted->size, accepted_rows.size());
+    for (std::size_t index = 0; index < expected.size(); ++index)
+    {
+        EXPECT_EQ(Pages::at(updated, index), expected[index]);
+        EXPECT_EQ(Pages::at(accepted, index), accepted_rows[index]);
+    }
+}
