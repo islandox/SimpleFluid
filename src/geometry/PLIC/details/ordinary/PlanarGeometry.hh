@@ -5,6 +5,11 @@
 #include "geometry/PLIC/PlanarGeometryDeclarations.hh"
 #include <array>
 #include <span>
+namespace SimpleFluid::geometry_detail
+{
+class NativeConstructionAdmission;
+} // namespace SimpleFluid::geometry_detail
+
 namespace SimpleFluid::PLIC
 {
 namespace details
@@ -113,6 +118,10 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
+namespace details
+{
+class NativePlanarOwnerAccess;
+}
 template<> class PlanarFace<ArithmeticMode::Ordinary>
 {
 public:
@@ -172,6 +181,7 @@ public:
     [[nodiscard]] const std::vector<WidePoint>& points() const;
 
 private:
+    friend class details::NativePlanarOwnerAccess;
     friend std::vector<char> canonical_face_key<ArithmeticMode::Ordinary>(const PlanarFace&);
     friend class details::NativeSupportAccess;
     friend class details::RetentionAccess;
@@ -186,6 +196,8 @@ private:
     template<ArithmeticMode> friend class ConvexCellGeometry;
     [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Ordinary> from_retained_support(
         std::span<const WidePoint>, WidePoint normal, PlaneSupportIdentity<ArithmeticMode::Ordinary> support);
+    void certify_partition_impl(std::span<const PlanarFacePtr<ArithmeticMode::Ordinary>>,
+        const geometry_detail::NativeConstructionAdmission*) const;
     explicit PlanarFace(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
     std::shared_ptr<const Impl> impl_;
 };

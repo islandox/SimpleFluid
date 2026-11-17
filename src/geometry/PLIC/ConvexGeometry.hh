@@ -30,6 +30,7 @@ template<ArithmeticMode> struct PointSnapshotPayload;
 namespace details
 {
 class NativeSupportAccess;
+class NativeCellCodecAccess;
 class NativeFaceConstraintAccess;
 class OriginalSupportAuthorityAccess;
 class RetentionAccess;
@@ -128,6 +129,7 @@ struct DynamicPoint
 
 private:
     friend class DynamicGeometryAccess;
+    friend class details::NativeCellCodecAccess;
     friend class details::RetentionAccess;
     friend class GeometryAllocationLedger;
     template<ArithmeticMode> friend class Point;
@@ -256,6 +258,7 @@ struct DynamicPhaseMeasures
  * never selects an arithmetic kernel. */
 class DynamicConvexGeometry
 {
+    friend class details::NativeCellCodecAccess;
 public:
     struct Impl;
     [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept;
@@ -423,6 +426,13 @@ public:
      * Excludes allocator/shared control blocks, as retained storage does. */
     [[nodiscard]] static std::size_t box_construction_capacity_bound()
         requires(Mode == ArithmeticMode::Ordinary);
+    /** Exact qualified allocation-request envelope for product_poly's unit
+     * prism validation, including its caller vectors and every real control/node.
+     * The base must contain q original Ordinary points without attached authority;
+     * the caller reserves base/vertices/faces/cap loops to their exact counts.
+     * Requires a fresh numerical operation; any pre-existing Work rejects. */
+    [[nodiscard]] static std::size_t unit_prism_construction_capacity_bound(std::size_t q)
+        requires(Mode == ArithmeticMode::Ordinary);
     [[nodiscard]] static ConvexGeometryPtr<Mode> tetrahedron(const std::array<Point<Mode>, 4>&, GeometryLimits = {});
     [[nodiscard]] static NativeConvexShell native_cell_shell(const MultiRegionMesh&, std::uint64_t)
         requires(Mode == ArithmeticMode::Ordinary);
@@ -519,6 +529,7 @@ public:
 private:
     template<ArithmeticMode> friend class PlanarFace;
     friend class details::NativeSupportAccess;
+    friend class details::NativeCellCodecAccess;
     friend std::vector<char> canonical_cell_key(const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
     [[nodiscard]] ConvexGeometryPtr<Mode> with_native_supports(
         std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>>) const

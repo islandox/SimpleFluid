@@ -2,6 +2,11 @@
  * @brief Ordinary planar ownership, checked native support and shared span queries.
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/details/NativePlanarCodecAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/details/NativeObjectOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
@@ -39,6 +44,37 @@ struct OrdinaryFace::Impl
     std::optional<OrdinarySupport> support;
     bool retained_support = false;
 };
+bool details::NativePlanarOwnerAccess::admitted(const Pointer& face)
+{
+    return face && face->impl_ && geometry_detail::NativeObjectOwnerAccess<Face>::admitted(face) &&
+           geometry_detail::NativeObjectOwnerAccess<Face::Impl>::admitted(face->impl_);
+}
+const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&
+details::NativePlanarOwnerAccess::wrapper_envelope(const Pointer& face)
+{
+    if (!admitted(face))
+        throw std::invalid_argument("Foreign native planar wrapper/control.");
+    return geometry_detail::NativeObjectOwnerAccess<Face>::envelope(face);
+}
+std::shared_ptr<const void> details::NativePlanarOwnerAccess::payload_owner(const Pointer& face)
+{
+    if (!admitted(face))
+        throw std::invalid_argument("Foreign native planar payload/control.");
+    return face->impl_;
+}
+const std::shared_ptr<const geometry_detail::NativeAllocationEnvelope>&
+details::NativePlanarOwnerAccess::payload_envelope(const Pointer& face)
+{
+    if (!admitted(face))
+        throw std::invalid_argument("Foreign native planar payload envelope.");
+    return geometry_detail::NativeObjectOwnerAccess<Face::Impl>::envelope(face->impl_);
+}
+const geometry_detail::NativeConstructorStorageOwner& details::NativePlanarOwnerAccess::storage(const Pointer& face)
+{
+    if (!admitted(face))
+        throw std::invalid_argument("Foreign native planar storage receipt.");
+    return geometry_detail::NativeObjectOwnerAccess<Face::Impl>::storage(face->impl_);
+}
 std::shared_ptr<const void> details::RetentionAccess::planar_payload_owner(const OrdinaryFace& face) noexcept
 {
     return face.impl_;
@@ -105,13 +141,16 @@ using planar_queries::DefiningPlane;
 using planar_queries::norm;
 using planar_queries::on_plane;
 using planar_queries::point_inside;
-void validate(const Polygon& p)
+void validate(const Polygon& p, const geometry_detail::NativeConstructionAdmission* admission = nullptr)
 {
     if (p.size() > vertex_cap)
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary native planar vertex cap exhausted.");
     if (p.size() < 3)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary native planar polygon has too few vertices.");
-    std::set<on::WidePoint> seen;
+    const auto storage = admission ? geometry_detail::native_constructor_storage(*admission)
+                                   : geometry_detail::NativeConstructorStorageOwner{};
+    std::set<on::WidePoint, std::less<on::WidePoint>, geometry_detail::NativeStorageAllocator<on::WidePoint>> seen(
+        std::less<on::WidePoint>{}, geometry_detail::NativeStorageAllocator<on::WidePoint>(storage.owner));
     for (const auto& v : p)
     {
         for (auto x : v)
@@ -134,15 +173,16 @@ void validate(const Polygon& p)
                 throw GeometryError(GeometryErrorCode::InvalidTopology, "Ordinary native face is nonconvex.");
     }
 }
-bool coplanar(const Polygon& a, const Polygon& b)
+bool coplanar(std::span<const on::WidePoint> a, std::span<const on::WidePoint> b)
 {
     const auto plane = defining_plane(a);
     return std::all_of(b.begin(), b.end(), [&](const auto& p) { return on_plane(a, plane, p); });
 }
-Polygon clip_loop(
-    const Polygon& source, const on::WidePoint& a, const on::WidePoint& b, const on::WidePoint& n, bool inside)
+template<class Vector>
+Vector clip_loop_storage(
+    const Vector& source, const on::WidePoint& a, const on::WidePoint& b, const on::WidePoint& n, bool inside)
 {
-    Polygon result;
+    Vector result(source.get_allocator());
     if (source.empty())
         return result;
     const auto edge = on::sub(b, a);
@@ -182,6 +222,11 @@ Polygon clip_loop(
     if (result.size() < 3 || norm(on::polygon_vector(result)) == 0)
         result.clear();
     return result;
+}
+Polygon clip_loop(
+    const Polygon& source, const on::WidePoint& a, const on::WidePoint& b, const on::WidePoint& n, bool inside)
+{
+    return clip_loop_storage(source, a, b, n, inside);
 }
 Polygon intersect_loop(Polygon a, const Polygon& b, bool retained_support = false)
 {
@@ -239,6 +284,107 @@ OrdinaryFacePtr OrdinaryFace::from_retained_support(
     impl->support = std::move(support);
     impl->retained_support = true;
     return OrdinaryFacePtr(new OrdinaryFace(std::move(impl)));
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::retained(
+    std::span<const Face::WidePoint> vertices, Face::WidePoint normal,
+    PlaneSupportIdentity<ArithmeticMode::Ordinary> support,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    planar_queries::validate_retained_loop(vertices, normal);
+    auto payload = geometry_detail::NativeObjectOwnerAccess<Face::Impl>::make(admission);
+    geometry_detail::NativeObjectOwnerAccess<Face::Impl>::storage(payload.owner)
+        .owner->copy(payload.owner->polygon, vertices);
+    payload.owner->normal = normal;
+    payload.owner->support = std::move(support);
+    payload.owner->retained_support = true;
+    auto wrapper = geometry_detail::NativeObjectOwnerAccess<Face>::construct_without_buffers(
+        admission, [&](Face* target) { ::new (static_cast<void*>(target)) Face(payload.owner); });
+    return std::move(wrapper.owner);
+}
+
+namespace
+{
+OrdinarySupport native_source_support(
+    std::span<const on::WidePoint> points, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    // Preserve make_source_support's axis test, collinear removal and sorted
+    // source-point order while admitting its concrete polygon scratch.
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (std::all_of(
+                points.begin(), points.end(), [&](const auto& point) { return point[axis] == points.front()[axis]; }))
+            return IdentityAccess::support_axis_admitted(axis, points.front()[axis], admission);
+    const auto storage = geometry_detail::native_constructor_storage(admission);
+    Polygon polygon;
+    storage.owner->copy(polygon, points);
+    bool changed = true;
+    while (changed && polygon.size() > 3)
+    {
+        changed = false;
+        for (std::size_t i = 0; i < polygon.size(); ++i)
+            if (on::cross(on::sub(polygon[i], polygon[(i + polygon.size() - 1) % polygon.size()]),
+                    on::sub(polygon[(i + 1) % polygon.size()], polygon[i])) == on::WidePoint{})
+            {
+                polygon.erase(polygon.begin() + i);
+                changed = true;
+                break;
+            }
+    }
+    std::sort(polygon.begin(), polygon.end());
+    return IdentityAccess::support_source_admitted(polygon, admission);
+}
+} // namespace
+PlaneSupportIdentity<ArithmeticMode::Ordinary> details::NativePlanarOwnerAccess::source_support(
+    std::span<const Face::WidePoint> points, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    return native_source_support(points, admission);
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::make_wide(
+    std::span<const Face::WidePoint> points, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    if (points.size() > vertex_cap)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary native planar vertex cap exhausted.");
+    // The original validation and normal arithmetic run before support issuance.
+    // Its uniqueness tree uses the actual native node allocator.
+    const auto scratch = geometry_detail::native_constructor_storage(admission);
+    Polygon polygon;
+    scratch.owner->copy(polygon, points);
+    validate(polygon, &admission);
+    const auto normal = on::polygon_vector(polygon);
+    auto support = native_source_support(polygon, admission);
+    auto result = retained(polygon, normal, std::move(support), admission);
+    std::const_pointer_cast<Face::Impl>(result->impl_)->retained_support = false;
+    return result;
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::make(
+    std::span<const GeometryPoint> points, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto storage = geometry_detail::native_constructor_storage(admission);
+    Polygon polygon;
+    storage.owner->reserve(polygon, points.size());
+    for (const auto& point : points)
+        polygon.push_back(on::wide(point));
+    return make_wide(polygon, admission);
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::translated(const Face& face,
+    const OrdinaryDisplacement& displacement, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto shift = IdentityAccess::displacement(displacement);
+    auto support = IdentityAccess::translated_support_admitted(*face.impl_->support, shift, admission);
+    auto result = retained(face.points(), face.impl_->normal, std::move(support), admission);
+    auto payload = std::const_pointer_cast<Face::Impl>(result->impl_);
+    for (auto& point : payload->polygon)
+        point = on::add(point, shift);
+    planar_queries::validate_retained_loop(payload->polygon, payload->normal);
+    return result;
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::reversed(
+    const Face& face, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    // Construct exactly one final polygon; no independently allocated reverse temporary.
+    auto result = retained(face.points(), face.impl_->normal, *face.impl_->support, admission);
+    auto payload = std::const_pointer_cast<Face::Impl>(result->impl_);
+    std::reverse(payload->polygon.begin(), payload->polygon.end());
+    return result;
 }
 OrdinaryIncidenceFrame capture_incidence_frame(const OrdinaryFace& face)
 {
@@ -358,6 +504,31 @@ OrdinaryFacePtr OrdinaryFace::intersection(const OrdinaryFace& other) const
     const bool common = *impl_->support == *other.impl_->support;
     auto p = intersect_loop(impl_->polygon, other.impl_->polygon, common);
     return p.empty() ? OrdinaryFacePtr{} : from_retained_support(p, impl_->normal, *impl_->support);
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::oriented_like(
+    const Pointer& face, GeometryPoint direction, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    if (!face)
+        throw std::invalid_argument("Null native planar orientation input.");
+    const auto sign = on::dot(on::polygon_vector(face->points()), on::wide(direction));
+    if (sign == 0)
+        on::reject("native face orientation is unresolved.");
+    return sign < 0 ? reversed(*face, admission) : face;
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::intersection(
+    const Face& first, const Face& second, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const bool common = *first.impl_->support == *second.impl_->support;
+    if (!common && !coplanar(first.points(), second.points()))
+        on::reject("native planar intersection has distinct supports.");
+    geometry_detail::NativeAdministrationVector<on::WidePoint> polygon(
+        geometry_detail::NativeAdministrationAllocator<on::WidePoint>(admission.state()));
+    polygon.assign(first.points().begin(), first.points().end());
+    const auto normal = on::polygon_vector(second.points());
+    for (std::size_t i = 0; i < second.points().size() && !polygon.empty(); ++i)
+        polygon = clip_loop_storage(
+            polygon, second.points()[i], second.points()[(i + 1) % second.points().size()], normal, true);
+    return polygon.empty() ? Pointer{} : retained(polygon, first.impl_->normal, *first.impl_->support, admission);
 }
 std::vector<OrdinaryPoint> OrdinaryFace::vertex_identities() const
 {
@@ -500,6 +671,16 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> OrdinaryFace::cell_shell(std::span<c
 }
 void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) const
 {
+    certify_partition_impl(tiles, nullptr);
+}
+void details::NativePlanarOwnerAccess::certify_partition(
+    const Face& face, std::span<const Pointer> tiles, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    face.certify_partition_impl(tiles, &admission);
+}
+void OrdinaryFace::certify_partition_impl(
+    std::span<const OrdinaryFacePtr> tiles, const geometry_detail::NativeConstructionAdmission* admission) const
+{
     constexpr std::size_t byte_budget = 64 * 1024 * 1024, pair_cap = 262144, tile_cap = 65536;
     constexpr long double physical_budget = 8e-15L;
     if (tiles.empty() || tiles.size() > tile_cap)
@@ -518,7 +699,10 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
             on::reject("native planar partition pair-test cap exhausted.");
     };
     charge(impl_->polygon.size(), sizeof(on::WidePoint) + 4 * sizeof(void*));
-    std::set<on::WidePoint> vertices(impl_->polygon.begin(), impl_->polygon.end());
+    const auto state = admission ? admission->state() : std::shared_ptr<const geometry_detail::NativeAllocationState>{};
+    std::set<on::WidePoint, std::less<on::WidePoint>, geometry_detail::NativeAdministrationAllocator<on::WidePoint>>
+        vertices(impl_->polygon.begin(), impl_->polygon.end(), std::less<on::WidePoint>{},
+            geometry_detail::NativeAdministrationAllocator<on::WidePoint>(state));
     for (std::size_t i = 0; i < tiles.size(); ++i)
     {
         if (!tiles[i] || !contains(*tiles[i]))
@@ -528,14 +712,18 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
         for (std::size_t j = 0; j < i; ++j)
         {
             pair();
-            if (tiles[i]->intersection(*tiles[j]))
+            if (admission ? details::NativePlanarOwnerAccess::intersection(*tiles[i], *tiles[j], *admission)
+                          : tiles[i]->intersection(*tiles[j]))
                 on::reject("native planar partition interiors overlap.");
         }
     }
     // Compare oriented boundaries after splitting at every admitted represented
     // vertex. No area tolerance can authorize a missing sliver or duplicate edge.
     using Edge = std::pair<on::WidePoint, on::WidePoint>;
-    std::map<Edge, std::int64_t> chain;
+    std::map<Edge, std::int64_t, std::less<Edge>,
+        geometry_detail::NativeAdministrationAllocator<std::pair<const Edge, std::int64_t>>>
+        chain(std::less<Edge>{},
+            geometry_detail::NativeAdministrationAllocator<std::pair<const Edge, std::int64_t>>(state));
     const auto source_normal = on::polygon_vector(impl_->polygon);
     const auto add_boundary = [&](const Polygon& polygon, int contribution)
     {
@@ -547,7 +735,8 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
             const auto a = polygon[e], b = polygon[(e + 1) % polygon.size()], delta = on::sub(b, a);
             const auto axis = axis_of(delta);
             charge(vertices.size(), sizeof(on::WidePoint));
-            std::vector<on::WidePoint> points;
+            geometry_detail::NativeAdministrationVector<on::WidePoint> points{
+                geometry_detail::NativeAdministrationAllocator<on::WidePoint>(state)};
             for (const auto& point : vertices)
             {
                 pair();
@@ -632,9 +821,21 @@ void OrdinaryFace::certify_partition(std::span<const OrdinaryFacePtr> tiles) con
 namespace
 {
 template<class Writer>
-void emit_face_key(Writer& w, const OrdinaryFace& face, const on::WidePoint& normal, bool incidence)
+void emit_face_key(Writer& w, const OrdinaryFace& face, const on::WidePoint& normal, bool incidence,
+    const geometry_detail::NativeConstructionAdmission* admission = nullptr)
 {
-    auto polygon = incidence ? Polygon{} : face.points();
+    // Each concrete polygon is the only dynamic scratch in this traversal.
+    // Its receipt precedes the vector, hence retires after the real buffer.
+    const auto scratch = admission ? geometry_detail::native_constructor_storage(*admission)
+                                   : geometry_detail::NativeConstructorStorageOwner{};
+    Polygon polygon;
+    if (!incidence)
+    {
+        if (scratch.owner)
+            scratch.owner->copy(polygon, std::span(face.points()));
+        else
+            polygon = face.points();
+    }
     if (!incidence)
     {
         bool changed = true;
@@ -694,6 +895,59 @@ std::vector<char> OrdinaryFace::encode_incidence(std::size_t byte_budget) const
     emit_face_key(w, *this, impl_->normal, true);
     return encode_geometry_packet(
         GeometryPacketKind::PlanarFaceIncidence, ArithmeticMode::Ordinary, w.bytes, byte_budget);
+}
+std::vector<char> details::NativePlanarCodecAccess::canonical(
+    const OrdinaryFace& face, const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native canonical face key needs its concrete storage owner.");
+    const auto& admission = storage.owner->admission();
+    const auto frame = capture_incidence_frame(face);
+    on::CountingWriter count;
+    emit_face_key(count, face, frame.normal, false, &admission);
+    std::vector<char> result;
+    storage.owner->reserve(result, count.bytes.size());
+    on::BasicWriter<details::NativeGeometryByteWriter> writer{{&result, &admission}};
+    emit_face_key(writer, face, frame.normal, false, &admission);
+    if (result.size() != count.bytes.size())
+        throw std::invalid_argument("Native canonical face length differs.");
+    return result;
+}
+std::size_t details::NativePlanarCodecAccess::size(
+    const OrdinaryFace& face, bool incidence, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto frame = capture_incidence_frame(face);
+    on::CountingWriter count;
+    emit_face_key(count, face, frame.normal, incidence, &admission);
+    return face_packet_size(count.bytes.size());
+}
+void details::NativePlanarCodecAccess::append(std::vector<char>& bytes, const OrdinaryFace& face, bool incidence,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(face, incidence, admission);
+    if (extent > bytes.capacity() - bytes.size())
+        throw std::invalid_argument("Native planar destination was not preadmitted.");
+    const auto initial = bytes.size();
+    const auto frame = capture_incidence_frame(face);
+    const auto header = details::geometry_packet_header(
+        incidence ? GeometryPacketKind::PlanarFaceIncidence : GeometryPacketKind::PlanarFace, ArithmeticMode::Ordinary,
+        extent - geometry_packet_header_bytes, geometry_packet_default_budget);
+    bytes.insert(bytes.end(), header.begin(), header.end());
+    on::BasicWriter<details::NativeGeometryByteWriter> writer{{&bytes, &admission}};
+    emit_face_key(writer, face, frame.normal, incidence, &admission);
+    if (bytes.size() - initial != extent)
+        throw std::invalid_argument("Native planar packet length differs from its exact count.");
+}
+std::vector<char> details::NativePlanarCodecAccess::encode(
+    const OrdinaryFace& face, bool incidence, const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native planar encoding needs its concrete storage owner.");
+    const auto& admission = storage.owner->admission();
+    std::vector<char> bytes;
+    storage.owner->reserve(bytes, size(face, incidence, admission));
+    append(bytes, face, incidence, admission);
+    return bytes;
 }
 std::size_t OrdinaryFace::encoding_scratch_bytes() const
 {
@@ -791,6 +1045,7 @@ OrdinaryFacePtr OrdinaryFace::decode(std::span<const char> bytes, std::size_t by
         throw std::invalid_argument("Noncanonical planar face packet.");
     return result;
 }
+
 template<> OrdinarySupport planar_support<ArithmeticMode::Ordinary>(const OrdinaryFace& face)
 {
     return *face.impl_->support;

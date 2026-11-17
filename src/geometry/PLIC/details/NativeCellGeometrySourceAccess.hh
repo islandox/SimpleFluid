@@ -35,11 +35,24 @@ struct NativeCartesianCellReference
     std::shared_ptr<const CartesianCellSource> source;
     std::size_t cell_slot = 0;
 };
+struct NativeOriginalCellMetrics
+{
+    double volume;
+    GeometryPoint centroid;
+};
 /** The native adapter establishes recipe/key/revision/owner and original support
  * ancestry before adoption. Public geometry construction cannot attach keys. */
 class NativeCellGeometrySourceAccess
 {
 public:
+    /** Read original Ordinary volume/centroid without growing or priming the
+     * retained source geometry's query caches. */
+    [[nodiscard]] static NativeOriginalCellMetrics original_convex_metrics(
+        const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
+    /** Read original world points in original face-loop order. The visitor
+     * receives borrowed values for this call and cannot issue geometry. */
+    static void visit_original_convex_face_points(const ConvexCellGeometry<ArithmeticMode::Ordinary>&, void*,
+        void (*)(void*, const PointIdentity<ArithmeticMode::Ordinary>&));
     /** Explicit borrowed object/buffer census; no source geometry is evaluated. */
     static void visit_payload(const CartesianCellSource&, const std::function<void(const void*, std::size_t)>&);
     template<ArithmeticMode M>

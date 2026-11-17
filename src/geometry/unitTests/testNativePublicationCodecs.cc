@@ -1,10 +1,13 @@
 #include "geometry/details/NativeObjectOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeCellCodecAccess.hh"
 #include "native_constructor_allocation_operators.inc"
 #include <gtest/gtest.h>
 #include <array>
 namespace
 {
 namespace G = SimpleFluid::geometry_detail;
+namespace P = SimpleFluid::PLIC;
+using Mode = SimpleFluid::ArithmeticMode;
 struct Counter
 {
     std::size_t limit = 0, used = 0, peak = 0, cumulative = 0;
@@ -27,6 +30,38 @@ struct Domain
     {
     }
 };
+TEST(NativePublicationCodecs, RetainedCellDecodeCopiesActualOwnersAndPreservesCertificateAndMetrics)
+{
+    auto original = P::ConvexCellGeometry<Mode::Ordinary>::box({-3, 5, 7}, {11, 13, 17});
+    const auto packet = original->encode_certificate();
+    const auto volume = original->volume().value;
+    const auto center = original->centroid();
+    std::weak_ptr<const P::ConvexCellGeometry<Mode::Ordinary>> old = original;
+    Domain domain;
+    const auto prefix = domain.counter.owner()->used;
+    native_constructor_test::Capture capture(domain.counter.owner()->used);
+    auto decoded = P::details::NativeCellCodecAccess::decode(packet, 64 * 1024 * 1024, domain.admission);
+    const auto live = domain.counter.owner()->used - prefix;
+    const auto trace = capture.finish();
+    EXPECT_EQ(native_constructor_test::uncovered, 0u);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(live, trace.all_live);
+    EXPECT_EQ(domain.admission.statistics().reserved_live, 0u);
+    EXPECT_EQ(domain.admission.statistics().profiled_live, 0u);
+    EXPECT_GT(domain.admission.statistics().profiled_cumulative_upper, 0u);
+    EXPECT_EQ(decoded->encode_certificate(), packet);
+    EXPECT_EQ(decoded->volume().value, volume);
+    EXPECT_EQ(decoded->centroid(), center);
+    original.reset();
+    EXPECT_TRUE(old.expired());
+    EXPECT_EQ(decoded->encode_certificate(), packet);
+    std::weak_ptr<const P::ConvexCellGeometry<Mode::Ordinary>> weak = decoded;
+    decoded.reset();
+    EXPECT_TRUE(weak.expired());
+    EXPECT_GT(domain.counter.owner()->used, prefix);
+    weak.reset();
+    EXPECT_EQ(domain.counter.owner()->used, prefix);
+}
 TEST(NativePublicationCodecs, SeparateVectorControlKeepsOnlyRawObjectMemoryThroughWeakLifetime)
 {
     Domain domain;

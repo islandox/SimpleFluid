@@ -2,6 +2,15 @@
  * @brief Native finite cell import, refinement, and source-coordinate packets.
  */
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/LocalCoordinates.hh"
+#include "geometry/PLIC/details/NativeCellCodecAccess.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/NativeBoxSourceAccess.hh"
+#include "geometry/details/NativeObjectOwnerAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/PLIC/details/NativeGeometryByteWriter.hh"
+#include "geometry/PLIC/details/GeometryPacketHeader.hh"
+#include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -346,6 +355,51 @@ PlanarFacePtr<Mode> ConvexCellGeometry<Mode>::face_geometry(std::size_t face) co
         support = details::ordinary_native::make_source_support(loop);
     return PlanarFace<Mode>::from_retained_support(loop, normal, std::move(*support));
 }
+details::NativeOriginalCellMetrics details::NativeCellGeometrySourceAccess::original_convex_metrics(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
+{
+    namespace ordinary = details::ordinary_kernel;
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    const auto stored = checked_geometry_storage<mode>(DynamicGeometryAccess::implementation(*cell.dynamic_geometry()));
+    const details::Operation scope(stored->limits);
+    if (stored->partition_proof_only)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Private partition witness has no source metrics.");
+    const auto integrals = stored->moment_cache->ready.load(std::memory_order_acquire)
+        ? *stored->moment_cache->integrals : ordinary::integrate<mode>(*stored, true);
+    const auto moments = ordinary::represented_moments(integrals, stored->frame, stored->reference_origin);
+    return {GeometryValue<mode>{moments.volume.value}.as_double(),
+        ordinary::represented_centroid(moments, stored->volume, stored->reference_origin)};
+}
+void details::NativeCellGeometrySourceAccess::visit_original_convex_face_points(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, void* context,
+    void (*visit)(void*, const PointIdentity<ArithmeticMode::Ordinary>&))
+{
+    const NativeOrdinaryExportCoordinates coordinates(cell);
+    for (const auto& face : cell.faces())
+        for (const auto vertex : face)
+            visit(context, GeometryIdentityAccess::point(coordinates.at(vertex)));
+}
+details::NativePlanarOwnerAccess::Pointer details::NativePlanarOwnerAccess::cell_face(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, std::size_t face,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const NativeOrdinaryExportCoordinates coordinates(cell);
+    geometry_detail::NativeConstructorVector<Face::WidePoint> loop(admission.allocator<Face::WidePoint>());
+    const auto row = cell.faces().at(face);
+    loop.reserve(row.size());
+    for (const auto vertex : row)
+        loop.push_back(coordinates.at(vertex));
+    const auto stored = checked_geometry_storage<ArithmeticMode::Ordinary>(
+        DynamicGeometryAccess::implementation(*cell.dynamic_geometry()));
+    const auto& surface = stored->surfaces.at(face);
+    Face::WidePoint normal;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        normal[axis] = surface.orientation * surface.plane->normal[axis].value;
+    auto support = surface.plane->native_support;
+    if (!support)
+        support = source_support(loop, admission);
+    return retained(loop, normal, std::move(*support), admission);
+}
 template<ArithmeticMode Mode> bool ConvexCellGeometry<Mode>::quality_above(double minimum) const
 {
     if (!std::isfinite(minimum) || minimum < 0)
@@ -464,18 +518,257 @@ std::size_t ConvexCellGeometry<Mode>::box_construction_capacity_bound()
     return bytes;
 }
 
+std::size_t details::NativeBoxSourceAccess::scratch_bound()
+{
+    constexpr auto M = ArithmeticMode::Ordinary;
+    namespace on = details::ordinary_native;
+    using namespace details;
+    geometry_detail::NativeConstructorStorage::require_profile();
+    if (active_work)
+        on::reject("native box source proof requires a fresh numerical operation.");
+#if defined(__GLIBCXX__)
+    constexpr std::size_t V = 8, F = 6, I = 24, E = 12;
+    std::size_t bytes = 0;
+    const auto add = [&](std::size_t count, std::size_t width)
+    { bytes = on::encoding_add(bytes, on::encoding_product(count, width)); };
+    const auto growth = [](std::size_t count)
+    {
+        std::size_t total = 0, capacity = 1;
+        while (count)
+        {
+            total = on::encoding_add(total, capacity);
+            if (capacity >= count)
+                break;
+            capacity = on::encoding_product(capacity, 2);
+        }
+        return total;
+    };
+    const auto combined = [&]<class T>(std::size_t count)
+    { add(count, sizeof(std::_Sp_counted_ptr_inplace<T, std::allocator<void>, __gnu_cxx::__default_lock_policy>)); };
+    const auto split = [&]<class T>()
+    {
+        add(1, sizeof(T));
+        add(1, sizeof(std::_Sp_counted_ptr<T*, __gnu_cxx::__default_lock_policy>));
+    };
+    // fixed_box_face_rows and GeometryKernel::make's two growing input tables.
+    add(F, sizeof(Face));
+    add(I, sizeof(std::size_t));
+    add(growth(V), sizeof(DynamicPoint) + sizeof(PointProvenanceView));
+    combined.template operator()<PointSnapshotContext<M>>(1);
+    combined.template operator()<NativePointFactBlock<M>>(1);
+    add(1, sizeof(std::shared_ptr<const NativePointFactBlock<M>>));
+    add(growth(V), sizeof(PointCoordinates<M>) + sizeof(NativePointRefRow<M>));
+    // Original error-free points have no witnesses, generated ancestry,
+    // foreign context, authority, alias, recipe or dependency tables.
+    combined.template operator()<GeometryDraft<M>>(1);
+    combined.template operator()<Ancestry>(1);
+    add(growth(V), sizeof(StoredPoint<M>) + sizeof(StoredVertex<M>));
+    add(F, sizeof(Face));
+    add(I, sizeof(std::size_t));
+    using Edge = std::pair<const std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>>;
+    add(E, sizeof(std::_Rb_tree_node<Edge>));
+    add(I, sizeof(std::_Rb_tree_node<std::size_t>));
+    combined.template operator()<StoredPlane<M>>(F);
+    add(F * growth(4), sizeof(on::WidePoint));
+    add(F, on::source_support_exact_allocation_bound(4, true));
+    add(V * growth(3), sizeof(StoredPlanePtr<M>));
+    add(I, sizeof(StoredPointRef<M>));
+    add(growth(F), sizeof(StoredSurface<M>));
+    // Complete connected-boundary edge/adjacency/BFS scratch.
+    add(V + F, sizeof(char));
+    add(F, sizeof(std::vector<std::size_t>));
+    using FirstFace = std::pair<const std::pair<std::size_t, std::size_t>, std::size_t>;
+    add(E, sizeof(std::_Rb_tree_node<FirstFace>));
+    add(F * growth(4) + growth(F), sizeof(std::size_t));
+    combined.template operator()<StoredMomentCache<M>>(1);
+    combined.template operator()<PointExportCache>(1);
+    add(V, sizeof(DynamicStoredPointRef));
+    add(F, sizeof(std::_Rb_tree_node<StoredPlanePtr<M>>));
+    // One outer operation holds the Context/FactBlock and six supports until
+    // all callbacks finish. Its pending stack never exceeds one original row.
+    add(1, sizeof(GeometryAllocationLedger::Impl));
+    using LedgerEntry = typename decltype(GeometryAllocationLedger::Impl::owners)::value_type;
+    add(F + 2, sizeof(std::_Rb_tree_node<LedgerEntry>));
+    add(1, sizeof(allocation_detail::Item));
+    using Slot = std::pair<const StoredPlane<M>* const, std::size_t>;
+    add(F, sizeof(std::_Rb_tree_node<Slot>));
+    combined.template operator()<FrozenTopology<M>>(1);
+    add(F, sizeof(StoredPlanePtr<M>));
+    add(F + 1 + I + V + 1 + I + F, sizeof(std::uint32_t));
+    add(F, sizeof(int));
+    add(V, sizeof(FrozenVertex<M>));
+    combined.template operator()<GeometryStorage<M>>(1);
+    split.template operator()<DynamicConvexGeometry>();
+    split.template operator()<ConvexCellGeometry<M>>();
+    return bytes;
+#else
+    on::reject("unsupported native box source allocation profile.");
+#endif
+}
+void details::NativeBoxSourceAccess::verify(GeometryPoint lower, GeometryPoint upper,
+    const geometry_detail::NativeConstructionAdmission& admission, void* context,
+    void (*callback)(void*, const ConvexCellGeometry<ArithmeticMode::Ordinary>&))
+{
+    if (!callback)
+        throw std::invalid_argument("Native box source proof needs its synchronous verifier.");
+    auto phase = admission.reserve_profile({scratch_bound()});
+    {
+        // Preserve the original predicates, support ancestry, coordinate
+        // publication and representability checks; no alternative box algebra.
+        Operation operation(mode_limits(ArithmeticMode::Ordinary));
+        const auto canonical = ConvexCellGeometry<ArithmeticMode::Ordinary>::box(lower, upper);
+        callback(context, *canonical);
+    }
+    phase.finish_scratch();
+}
+
+/** This is deliberately a separate inventory from the retained-payload box
+ * helper above. It includes allocation controls and qualified node layouts. */
+template<ArithmeticMode Mode>
+std::size_t ConvexCellGeometry<Mode>::unit_prism_construction_capacity_bound(std::size_t q)
+    requires(Mode == ArithmeticMode::Ordinary)
+{
+    namespace on = details::ordinary_native;
+    on::require_encoding_capacity_profile();
+    // A pre-existing numerical ledger pins newly constructed snapshot/fact/
+    // support owners after the temporary prism dies. This reservation cannot
+    // retire those retained bytes, so only a fresh numerical scope qualifies.
+    // Public legacy constructor nesting retains its original behavior.
+    if (details::active_work)
+        on::reject("unit-prism admission requires a fresh numerical operation.");
+    const GeometryLimits limits;
+    if (q < 3 || q > limits.maximum_vertices / 2 || limits.maximum_faces < 2 || q > limits.maximum_faces - 2)
+        on::reject("unit prism exceeds existing native geometry vertex/face caps.");
+#if defined(__GLIBCXX__)
+    using namespace details;
+    const auto V = on::encoding_product(2, q), F = on::encoding_add(q, 2);
+    const auto E = on::encoding_product(3, q), I = on::encoding_product(6, q);
+    std::size_t bytes = 0;
+    const auto add = [&](std::size_t count, std::size_t size)
+    { bytes = on::encoding_add(bytes, on::encoding_product(count, size)); };
+    const auto growth = [&](std::size_t count)
+    {
+        std::size_t total = 0, capacity = 1;
+        while (count)
+        {
+            total = on::encoding_add(total, capacity);
+            if (capacity >= count) break;
+            capacity = on::encoding_product(capacity, 2);
+        }
+        return total;
+    };
+    const auto combined = [&]<class T>(std::size_t count)
+    {
+        add(count, sizeof(std::_Sp_counted_ptr_inplace<T, std::allocator<void>, __gnu_cxx::__default_lock_policy>));
+    };
+    const auto split = [&]<class T>()
+    {
+        add(1, sizeof(T));
+        add(1, sizeof(std::_Sp_counted_ptr<T*, __gnu_cxx::__default_lock_policy>));
+    };
+    // The admitted caller reserves Product.base and product_geometry's exact
+    // vertex/face/cap-loop buffers. Side initializer-list rows each allocate 4.
+    add(q, sizeof(on::WidePoint));
+    add(V, sizeof(Point<Mode>));
+    add(F, sizeof(Face));
+    add(on::encoding_add(on::encoding_product(2, q), on::encoding_product(4, q)), sizeof(std::size_t));
+    // ConvexCellGeometry::make_points -> dynamic_points -> make_bounded.
+    add(V, sizeof(DynamicPoint));
+    add(growth(V), sizeof(DynamicPoint));
+    add(V, sizeof(PointProvenanceView));
+    combined.template operator()<PointSnapshotContext<Mode>>(1);
+    combined.template operator()<NativePointFactBlock<Mode>>(1);
+    add(1, sizeof(std::shared_ptr<const NativePointFactBlock<Mode>>));
+    add(growth(V), sizeof(PointCoordinates<Mode>));
+    add(growth(V), sizeof(NativePointRefRow<Mode>));
+    // No authorities, witnesses, foreign dependencies, generated recipes or
+    // publication aliases are reachable for these original error-free points.
+    // ordinary_kernel::import; faces copies allocate exact outer/inner sizes.
+    combined.template operator()<GeometryDraft<Mode>>(1);
+    combined.template operator()<Ancestry>(1);
+    add(growth(V), sizeof(StoredPoint<Mode>));
+    add(growth(V), sizeof(StoredVertex<Mode>));
+    add(F, sizeof(Face)); add(I, sizeof(std::size_t));
+    using EdgeEntry = std::pair<const std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>>;
+    add(E, sizeof(std::_Rb_tree_node<EdgeEntry>));
+    add(I, sizeof(std::_Rb_tree_node<std::size_t>)); // Per-face distinct sets, including cap rows.
+    combined.template operator()<StoredPlane<Mode>>(F);
+    const auto face_growth = on::encoding_add(on::encoding_product(2, growth(q)),
+        on::encoding_product(q, growth(4)));
+    add(face_growth, sizeof(on::WidePoint)); // native_points in every face.
+    add(2, on::source_support_exact_allocation_bound(q, true)); // Both caps are known Z axes.
+    add(q, on::source_support_exact_allocation_bound(4)); // Vertical side: exact max of Axis/Source branches.
+    add(on::encoding_product(V, growth(3)), sizeof(StoredPlanePtr<Mode>));
+    add(I, sizeof(StoredPointRef<Mode>));
+    add(growth(F), sizeof(StoredSurface<Mode>));
+    // Every nonincident convexity query collects the original points of its
+    // face: four for a side and q for a cap. The original prism has distinct
+    // points and no keyed authorities. The intersection of any two planes'
+    // source-vertex lists at the queried vertex is one edge containing that
+    // vertex. A nonincident face excludes it, so infer_edges' result stays empty.
+    const auto side_queries = on::encoding_product(q, V - 4);
+    const auto cap_queries = on::encoding_product(2, V - q);
+    add(on::encoding_product(side_queries, growth(4)), sizeof(PointProvenanceView));
+    add(on::encoding_product(cap_queries, growth(q)), sizeof(PointProvenanceView));
+    // validate_connected_boundary. The inspected std::map::emplace's usable-key
+    // fast path rejects a repeated edge BEFORE allocating a node, so E nodes.
+    add(V, sizeof(char)); add(F, sizeof(char));
+    add(F, sizeof(std::vector<std::size_t>));
+    using FirstFaceEntry = std::pair<const std::pair<std::size_t, std::size_t>, std::size_t>;
+    add(E, sizeof(std::_Rb_tree_node<FirstFaceEntry>));
+    add(face_growth, sizeof(std::size_t)); // Face adjacency degree equals its loop size.
+    add(growth(F), sizeof(std::size_t)); // Connected-boundary BFS.
+    // prepare_finish; integrate uses fixed-stack compensated predicates only.
+    combined.template operator()<StoredMomentCache<Mode>>(1);
+    combined.template operator()<PointExportCache>(1);
+    add(V, sizeof(DynamicStoredPointRef));
+    add(F, sizeof(std::_Rb_tree_node<StoredPlanePtr<Mode>>));
+    // The active ledger admits one Context, one NativeFactBlock and one
+    // depth-one support backing per plane. Its pending stack needs one slot.
+    add(1, sizeof(GeometryAllocationLedger::Impl));
+    using LedgerEntry = typename decltype(GeometryAllocationLedger::Impl::owners)::value_type;
+    add(on::encoding_add(F, 2), sizeof(std::_Rb_tree_node<LedgerEntry>));
+    add(1, sizeof(allocation_detail::Item));
+    // freeze_geometry retains all draft buffers while allocating frozen ones.
+    using SlotEntry = std::pair<const StoredPlane<Mode>* const, std::size_t>;
+    add(F, sizeof(std::_Rb_tree_node<SlotEntry>));
+    combined.template operator()<FrozenTopology<Mode>>(1);
+    add(F, sizeof(StoredPlanePtr<Mode>));
+    add(on::encoding_add(on::encoding_add(F + 1, I),
+        on::encoding_add(on::encoding_add(V + 1, I), F)), sizeof(std::uint32_t));
+    add(F, sizeof(int));
+    add(V, sizeof(FrozenVertex<Mode>));
+    combined.template operator()<GeometryStorage<Mode>>(1);
+    split.template operator()<DynamicConvexGeometry>();
+    split.template operator()<ConvexCellGeometry<Mode>>();
+    return bytes;
+#else
+    on::reject("unsupported unit-prism allocation layout.");
+#endif
+}
+
 namespace native_cell_detail
 {
-template<class Writer> void emit_cell_key(Writer& w, const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
+template<class Writer>
+void emit_cell_key(Writer& w, const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, bool admitted = false)
 {
     constexpr auto Mode = ArithmeticMode::Ordinary;
     namespace on = details::ordinary_native;
     w.tag(GeometryTag::OrdinaryCell);
     w.point(on::wide(cell.origin()));
-    const auto vertices = cell.local_points();
-    w.word(vertices.size());
-    for (const auto& p : vertices)
-        w.point(p.value);
+    if (admitted)
+    {
+        w.word(cell.vertex_count());
+        details::visit_local_coordinates<Mode>(
+            cell, [&](std::size_t, const PointCoordinates<Mode>& point) { w.point(point.value); });
+    }
+    else
+    {
+        const auto vertices = cell.local_points();
+        w.word(vertices.size());
+        for (const auto& p : vertices)
+            w.point(p.value);
+    }
     w.word(cell.faces().size());
     const auto stored =
         details::checked_geometry_storage<Mode>(DynamicGeometryAccess::implementation(*cell.dynamic_geometry()));
@@ -487,7 +780,11 @@ template<class Writer> void emit_cell_key(Writer& w, const ConvexCellGeometry<Ar
             w.word(i);
         auto support = stored->surfaces.at(index).plane->native_support;
         if (!support)
+        {
+            if (admitted)
+                throw std::invalid_argument("Native cell codec needs its retained source support.");
             support = planar_support<Mode>(*cell.face_geometry(index));
+        }
         w.word(canonical_key_size(*support));
         w.identity(*support);
     }
@@ -505,6 +802,350 @@ std::vector<char> ConvexCellGeometry<Mode>::encode_certificate(std::size_t byte_
     requires(Mode == ArithmeticMode::Ordinary)
 {
     return encode_geometry_packet(GeometryPacketKind::CellCertificate, Mode, canonical_cell_key(*this), byte_budget);
+}
+std::size_t details::NativeCellCodecAccess::size(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, const geometry_detail::NativeConstructionAdmission&)
+{
+    details::ordinary_native::CountingWriter count;
+    native_cell_detail::emit_cell_key(count, cell, true);
+    (void) details::geometry_packet_header(GeometryPacketKind::CellCertificate, ArithmeticMode::Ordinary,
+        count.bytes.size(), geometry_packet_default_budget);
+    return details::ordinary_native::encoding_add(geometry_packet_header_bytes, count.bytes.size());
+}
+void details::NativeCellCodecAccess::append(std::vector<char>& bytes,
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto extent = size(cell, admission);
+    if (extent > bytes.capacity() - bytes.size())
+        throw std::invalid_argument("Native cell destination was not preadmitted.");
+    const auto initial = bytes.size();
+    const auto header = details::geometry_packet_header(GeometryPacketKind::CellCertificate, ArithmeticMode::Ordinary,
+        extent - geometry_packet_header_bytes, geometry_packet_default_budget);
+    bytes.insert(bytes.end(), header.begin(), header.end());
+    details::ordinary_native::BasicWriter<details::NativeGeometryByteWriter> writer{{&bytes, &admission}};
+    native_cell_detail::emit_cell_key(writer, cell, true);
+    if (bytes.size() - initial != extent)
+        throw std::invalid_argument("Native cell certificate length differs from its exact count.");
+}
+std::vector<char> details::NativeCellCodecAccess::encode(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell,
+    const geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!storage.owner)
+        throw std::invalid_argument("Native cell encoding needs its concrete storage owner.");
+    const auto& admission = storage.owner->admission();
+    std::vector<char> bytes;
+    storage.owner->reserve(bytes, size(cell, admission));
+    append(bytes, cell, admission);
+    return bytes;
+}
+namespace native_cell_detail
+{
+struct DecodeCppPlan
+{
+    std::size_t vertices = 0, faces = 0, incidence = 0, support_nodes = 0, support_depth = 0;
+    std::size_t support_retained = 0, support_scratch = 0, bytes = 0;
+};
+DecodeCppPlan decode_cpp_plan(std::span<const char> packet, std::size_t byte_budget)
+{
+    constexpr auto M = ArithmeticMode::Ordinary;
+    const auto envelope = decode_geometry_packet(packet, M, byte_budget);
+    if (envelope.kind != GeometryPacketKind::CellCertificate)
+        on::reject("foreign cell certificate kind.");
+    on::Reader reader{envelope.body, 0, true};
+    if (reader.tag() != GeometryTag::OrdinaryCell)
+        on::reject("foreign finite cell packet mode.");
+    (void) reader.point();
+    DecodeCppPlan plan;
+    plan.vertices = reader.count(4096);
+    for (std::size_t i = 0; i < plan.vertices; ++i)
+        (void) reader.point();
+    plan.faces = reader.count(4096);
+    for (std::size_t f = 0; f < plan.faces; ++f)
+    {
+        const auto count = reader.count(plan.vertices);
+        plan.incidence = on::encoding_add(plan.incidence, count);
+        for (std::size_t i = 0; i < count; ++i)
+            if (reader.word() >= plan.vertices)
+                on::reject("invalid finite cell packet vertex.");
+        const auto support = details::ordinary_support_import_cpp_profile(reader.packet());
+        plan.support_nodes = on::encoding_add(plan.support_nodes, support.nodes);
+        plan.support_depth = std::max(plan.support_depth, support.depth);
+        plan.support_retained = on::encoding_add(plan.support_retained, support.retained);
+        plan.support_scratch = std::max(plan.support_scratch, support.scratch);
+    }
+    reader.finish();
+    geometry_detail::NativeConstructorStorage::require_profile();
+#if defined(__GLIBCXX__)
+    using namespace details;
+    const auto V = plan.vertices, F = plan.faces, I = plan.incidence;
+    const auto add = [&](std::size_t count, std::size_t width)
+    { plan.bytes = on::encoding_add(plan.bytes, on::encoding_product(count, width)); };
+    const auto growth = [&](std::size_t count)
+    {
+        std::size_t total = 0, capacity = 1;
+        while (count)
+        {
+            total = on::encoding_add(total, capacity);
+            if (capacity >= count)
+                break;
+            capacity = on::encoding_product(capacity, 2);
+        }
+        return total;
+    };
+    const auto combined = [&]<class T>(std::size_t count)
+    { add(count, sizeof(std::_Sp_counted_ptr_inplace<T, std::allocator<void>, __gnu_cxx::__default_lock_policy>)); };
+    const auto split = [&]<class T>(std::size_t count)
+    {
+        add(count, sizeof(T));
+        add(count, sizeof(std::_Sp_counted_ptr<T*, __gnu_cxx::__default_lock_policy>));
+    };
+    // Original decode rows and make_local's typed/dynamic conversion and framed input.
+    add(V, sizeof(Point<M>));
+    add(F, sizeof(Face));
+    add(I, sizeof(std::size_t));
+    add(F, sizeof(PlaneSupportIdentity<M>));
+    add(on::encoding_add(V, growth(V)), sizeof(DynamicPoint));
+    add(V, sizeof(PointProvenanceView));
+    combined.template operator()<PointSnapshotContext<M>>(1);
+    combined.template operator()<NativePointFactBlock<M>>(1);
+    add(1, sizeof(std::shared_ptr<const NativePointFactBlock<M>>));
+    add(growth(V), sizeof(PointCoordinates<M>) + sizeof(NativePointRefRow<M>));
+    combined.template operator()<GeometryDraft<M>>(1);
+    combined.template operator()<Ancestry>(1);
+    add(growth(V), sizeof(StoredPoint<M>) + sizeof(StoredVertex<M>));
+    add(F, sizeof(Face));
+    add(I, sizeof(std::size_t));
+    // Sum of per-row vector growth histories is below four times total incidence.
+    add(on::encoding_product(4, I), sizeof(StoredPlanePtr<M>));
+    add(on::encoding_product(2, I), sizeof(StoredPointRef<M>));
+    add(growth(F), sizeof(StoredSurface<M>));
+    combined.template operator()<StoredPlane<M>>(on::encoding_product(2, F));
+    using Edge = std::pair<const std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>>;
+    add(I, sizeof(std::_Rb_tree_node<Edge>));
+    add(I, sizeof(std::_Rb_tree_node<std::size_t>));
+    add(on::encoding_product(4, I), sizeof(on::WidePoint));
+    // Each initially constructed plane has one original source support. This
+    // exact per-face inventory includes its unique payload, backing/control,
+    // original-point buffer and depth-one canonical pointer scratch.
+    on::Reader face_reader{envelope.body, 0, true};
+    (void) face_reader.tag();
+    (void) face_reader.point();
+    const auto points = face_reader.count(4096);
+    for (std::size_t i = 0; i < points; ++i)
+        (void) face_reader.point();
+    (void) face_reader.count(4096);
+    for (std::size_t f = 0; f < F; ++f)
+    {
+        const auto degree = face_reader.count(V);
+        for (std::size_t i = 0; i < degree; ++i)
+            (void) face_reader.word();
+        (void) face_reader.packet();
+        add(1, on::source_support_exact_allocation_bound(degree));
+    }
+    // Connected-boundary vertices, face adjacency, edge map and BFS work.
+    add(on::encoding_add(V, F), sizeof(char));
+    add(F, sizeof(std::vector<std::size_t>));
+    using FirstFace = std::pair<const std::pair<std::size_t, std::size_t>, std::size_t>;
+    add(I, sizeof(std::_Rb_tree_node<FirstFace>));
+    add(on::encoding_add(on::encoding_product(4, I), growth(F)), sizeof(std::size_t));
+    combined.template operator()<StoredMomentCache<M>>(1);
+    combined.template operator()<PointExportCache>(1);
+    add(V, sizeof(DynamicStoredPointRef));
+    add(F, sizeof(std::_Rb_tree_node<StoredPlanePtr<M>>));
+    // Initial freeze plus with_native_supports' exact immutable metadata clone.
+    using Slot = std::pair<const StoredPlane<M>* const, std::size_t>;
+    add(F, sizeof(std::_Rb_tree_node<Slot>));
+    combined.template operator()<FrozenTopology<M>>(2);
+    add(on::encoding_product(2, F), sizeof(StoredPlanePtr<M>));
+    const auto indices = on::encoding_add(
+        on::encoding_add(V, on::encoding_product(2, F)), on::encoding_add(2, on::encoding_product(2, I)));
+    const auto width = compact_topology({V, F, F, I, I}) ? sizeof(std::uint32_t) : sizeof(std::uint64_t);
+    add(on::encoding_product(2, indices), width);
+    add(on::encoding_product(2, F), sizeof(int));
+    add(on::encoding_product(2, V), sizeof(FrozenVertex<M>));
+    combined.template operator()<GeometryStorage<M>>(2);
+    split.template operator()<DynamicConvexGeometry>(2);
+    split.template operator()<ConvexCellGeometry<M>>(2);
+    // The one active numerical ledger pins parsed supports and both immutable
+    // construction generations. Fresh source points have no dependency,
+    // authority, alias, witness, split, recipe or partition-certificate owners.
+    const auto owner_rows = on::encoding_add(plan.support_nodes, on::encoding_add(on::encoding_product(3, F), 13));
+    add(1, sizeof(GeometryAllocationLedger::Impl));
+    using LedgerEntry = typename decltype(GeometryAllocationLedger::Impl::owners)::value_type;
+    add(owner_rows, sizeof(std::_Rb_tree_node<LedgerEntry>));
+    add(growth(owner_rows), sizeof(allocation_detail::Item));
+    add(1, plan.support_retained);
+    add(1, plan.support_scratch);
+    // Final canonical byte validation owns a growth writer and the two local
+    // coordinate conversion vectors, plus the largest identity ancestry stack.
+    add(on::encoding_product(4, envelope.body.size()), sizeof(char));
+    add(V, sizeof(DynamicPoint) + sizeof(Point<M>));
+    add(plan.support_depth, sizeof(const GeometryIdentityBacking*));
+    return plan;
+#else
+    throw std::invalid_argument("Unsupported native cell decoding C++ allocation profile.");
+#endif
+}
+} // namespace native_cell_detail
+ConvexGeometryPtr<ArithmeticMode::Ordinary> details::NativeCellCodecAccess::decode(std::span<const char> packet,
+    std::size_t byte_budget, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    constexpr auto M = ArithmeticMode::Ordinary;
+    using namespace details;
+    namespace O = geometry_detail;
+    using Cell = ConvexCellGeometry<M>;
+    if (details::active_work)
+        throw std::invalid_argument("Native certificate admission requires a fresh numerical operation.");
+    const auto plan = native_cell_detail::decode_cpp_plan(packet, byte_budget);
+    // Keep every original verifier allocation inside this finite closed phase.
+    // None of its opaque owners is allowed to escape the deep admitted copy.
+    auto phase = admission.reserve_profile({plan.bytes});
+    ConvexGeometryPtr<M> result;
+    {
+        const auto verified = Cell::decode_certificate(packet, byte_budget);
+        const auto old =
+            checked_geometry_storage<M>(DynamicGeometryAccess::implementation(*verified->dynamic_geometry()));
+        if (!old->point_context || !old->point_export_cache || !old->moment_cache || !old->ancestry ||
+            old->construction || old->export_source || old->native_export_source || old->partition_certificate ||
+            old->ancestry->parent || old->ancestry->split || old->vertices.borrowed())
+            throw std::invalid_argument("Native certificate decoder produced a foreign source closure.");
+        const auto& context = *old->point_context;
+        if (!context.dependencies.empty() || !context.generated_recipes.empty() || !context.export_aliases.empty() ||
+            !context.generated_points.empty() || !context.export_points.empty() || !context.numerical_points.empty() ||
+            !context.witnesses.empty() || !context.authority_table.empty() || !context.incidence.empty() ||
+            !context.edges.empty())
+            throw std::invalid_argument("Native certificate decoder has non-original point dependencies.");
+        auto ancestry = O::NativeObjectOwnerAccess<Ancestry>::make_without_buffers(admission);
+        ancestry.owner->outside = old->ancestry->outside;
+        ancestry.owner->depth = old->ancestry->depth;
+        auto point_context = O::NativeObjectOwnerAccess<PointSnapshotContext<M>>::make(admission);
+        auto& point_storage = O::NativeObjectOwnerAccess<PointSnapshotContext<M>>::storage(point_context.owner);
+        point_storage.owner->reserve(point_context.owner->native_fact_blocks, context.native_fact_blocks.size());
+        for (const auto& block : context.native_fact_blocks)
+        {
+            if (!block || !block->witnesses.empty())
+                throw std::invalid_argument("Native certificate source facts contain foreign error witnesses.");
+            auto next = O::NativeObjectOwnerAccess<NativePointFactBlock<M>>::make(admission);
+            O::NativeObjectOwnerAccess<NativePointFactBlock<M>>::storage(next.owner)
+                .owner->copy(next.owner->points, std::span(block->points));
+            point_context.owner->native_fact_blocks.push_back(std::move(next.owner));
+        }
+        point_storage.owner->copy(point_context.owner->native_refs, std::span(context.native_refs));
+        point_context.owner->frozen = context.frozen;
+        auto cache = O::NativeObjectOwnerAccess<PointExportCache>::make(admission);
+        cache.owner->environment = old->point_export_cache->environment;
+        O::NativeObjectOwnerAccess<PointExportCache>::storage(cache.owner)
+            .owner->copy(cache.owner->vertex_provenance,
+                std::span<const DynamicStoredPointRef>(old->point_export_cache->vertex_provenance));
+        cache.owner->provenance_root = point_context.owner;
+        auto moments = O::NativeObjectOwnerAccess<StoredMomentCache<M>>::make_without_buffers(admission);
+        if (old->moment_cache->integrals)
+            std::call_once(moments.owner->prepared, [&] { moments.owner->integrals = old->moment_cache->integrals; });
+        moments.owner->ready.store(old->moment_cache->ready.load(std::memory_order_acquire), std::memory_order_release);
+        auto topology = O::NativeObjectOwnerAccess<FrozenTopology<M>>::make(admission);
+        const auto& topology_storage = O::NativeObjectOwnerAccess<FrozenTopology<M>>::storage(topology.owner);
+        topology_storage.owner->reserve(topology.owner->planes, old->topology->planes.size());
+        // Decode original support packets directly into their independently
+        // admitted immutable DAG owners, retaining the original face/slot map.
+        O::NativeConstructorVector<PlaneSupportIdentity<M>> supports(admission.allocator<PlaneSupportIdentity<M>>());
+        supports.reserve(plan.faces);
+        const auto envelope = decode_geometry_packet(packet, M, byte_budget);
+        ordinary_native::Reader reader{envelope.body, 0, true};
+        (void) reader.tag();
+        (void) reader.point();
+        const auto n = reader.count(4096);
+        for (std::size_t i = 0; i < n; ++i)
+            (void) reader.point();
+        (void) reader.count(4096);
+        for (std::size_t f = 0; f < plan.faces; ++f)
+        {
+            const auto count = reader.count(n);
+            for (std::size_t i = 0; i < count; ++i)
+                (void) reader.word();
+            supports.push_back(
+                GeometryIdentityAccess::decode_support_admitted(reader.packet(), byte_budget, admission));
+        }
+        for (std::size_t slot = 0; slot < old->topology->planes.size(); ++slot)
+        {
+            const auto& source = *old->topology->planes[slot];
+            if (source.point_context != old->point_context.get() || !source.authorities.empty())
+                throw std::invalid_argument("Native certificate plane has a foreign source context.");
+            auto plane = O::NativeObjectOwnerAccess<StoredPlane<M>>::make(admission);
+            plane.owner->frame = source.frame;
+            plane.owner->normal = source.normal;
+            plane.owner->anchor = source.anchor;
+            plane.owner->offset = source.offset;
+            plane.owner->input = source.input;
+            plane.owner->normal_error = source.normal_error;
+            plane.owner->point_context = point_context.owner.get();
+            O::NativeObjectOwnerAccess<StoredPlane<M>>::storage(plane.owner)
+                .owner->copy(plane.owner->source_vertices, std::span(source.source_vertices));
+            std::optional<std::size_t> face;
+            std::visit(
+                [&](const auto& arrays)
+                {
+                    for (std::size_t f = 0; f < arrays.surface_planes.size(); ++f)
+                        if (arrays.surface_planes[f] == slot)
+                        {
+                            face = f;
+                            break;
+                        }
+                },
+                old->topology->arrays);
+            if (!face)
+                throw std::invalid_argument("Native certificate plane lacks its original face support.");
+            plane.owner->native_support = supports[*face];
+            topology.owner->planes.push_back(std::move(plane.owner));
+        }
+        std::visit(
+            [&](const auto& source)
+            {
+                using Arrays = std::remove_cvref_t<decltype(source)>;
+                auto& copy = topology.owner->arrays.template emplace<Arrays>();
+                topology_storage.owner->copy(copy.face_offsets, std::span(source.face_offsets));
+                topology_storage.owner->copy(copy.face_vertices, std::span(source.face_vertices));
+                topology_storage.owner->copy(copy.incident_offsets, std::span(source.incident_offsets));
+                topology_storage.owner->copy(copy.incident_planes, std::span(source.incident_planes));
+                topology_storage.owner->copy(copy.surface_planes, std::span(source.surface_planes));
+                topology_storage.owner->copy(copy.surface_orientations, std::span(source.surface_orientations));
+            },
+            old->topology->arrays);
+        auto geometry = O::NativeObjectOwnerAccess<GeometryStorage<M>>::make(
+            admission, std::shared_ptr<const Ancestry>(ancestry.owner));
+        const auto& geometry_storage = O::NativeObjectOwnerAccess<GeometryStorage<M>>::storage(geometry.owner);
+        std::vector<FrozenVertex<M>> vertices;
+        geometry_storage.owner->reserve(vertices, old->vertices.size());
+        for (std::size_t i = 0; i < old->vertices.size(); ++i)
+        {
+            auto vertex = old->vertices[i];
+            vertex.incident = topology.owner->incidence(i);
+            vertices.push_back(std::move(vertex));
+        }
+        geometry.owner->vertices = FrozenVertexBuffer<M>(std::move(vertices));
+        geometry.owner->frame = old->frame;
+        geometry.owner->reference_origin = old->reference_origin;
+        geometry.owner->limits = old->limits;
+        geometry.owner->bounds = old->bounds;
+        geometry.owner->partition_proof_only = old->partition_proof_only;
+        geometry.owner->numerical_only = old->numerical_only;
+        geometry.owner->export_seal = old->export_seal;
+        geometry.owner->topology = topology.owner;
+        geometry.owner->faces = topology.owner->faces();
+        geometry.owner->surfaces = SurfaceRange<M>(topology.owner.get());
+        geometry.owner->point_context = point_context.owner;
+        geometry.owner->volume = old->volume;
+        geometry.owner->moment_cache = moments.owner;
+        geometry.owner->point_export_cache = cache.owner;
+        auto dynamic = O::NativeObjectOwnerAccess<DynamicConvexGeometry>::construct_without_buffers(admission,
+            [&](DynamicConvexGeometry* target)
+            { ::new (static_cast<void*>(target)) DynamicConvexGeometry(geometry.owner); });
+        auto typed = O::NativeObjectOwnerAccess<Cell>::construct_without_buffers(
+            admission, [&](Cell* target) { ::new (static_cast<void*>(target)) Cell(dynamic.owner); });
+        result = std::move(typed.owner);
+    } // Every default decoder object dies before its closed physical phase retires.
+    phase.finish_scratch();
+    return result;
 }
 template<ArithmeticMode Mode>
 std::size_t ConvexCellGeometry<Mode>::certificate_encoding_scratch_bytes() const
