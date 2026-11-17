@@ -143,12 +143,8 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_view(std::shared_ptr<cons
         begin >= axis->impl_->axis->zactive.size() || layers >= axis->impl_->axis->zactive.size() - begin ||
         topology->encode_base() != base->impl_->base->topology)
         throw std::invalid_argument("Shared product view has foreign base topology or invalid axial extent.");
-    auto impl = std::make_shared<Impl>();
-    impl->topology = std::move(topology);
-    impl->base = base->impl_->base;
-    impl->axis = axis->impl_->axis;
-    impl->begin = begin;
-    impl->layers = layers;
+    auto impl = std::make_shared<Impl>(
+        std::move(topology), base->impl_->base, axis->impl_->axis, begin, layers);
     auto result = std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Ordinary>>(
         new ExtrudedConstruction<ArithmeticMode::Ordinary>(std::move(impl)));
     // Base visibility and axis representability were certified independently;
@@ -186,11 +182,8 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_axis_selection(std::share
     if (!topology || !base || !coordinate_anchor || active.size() != std::size_t(topology->indexer().num_layers) + 1 ||
         topology->encode_base() != base->impl_->base->topology)
         throw std::invalid_argument("Shared axis selection belongs to a different base or layer layout.");
-    auto impl = std::make_shared<Impl>();
-    impl->topology = std::move(topology);
-    impl->base = base->impl_->base;
-    impl->axis = std::make_shared<ExtrudedAxisData>();
-    impl->axis->values = coordinate_anchor->impl_->axis->values;
+    auto selected_axis = std::make_shared<ExtrudedAxisData>(coordinate_anchor->impl_->axis->values);
+    auto impl = std::make_shared<Impl>(std::move(topology), base->impl_->base, std::move(selected_axis), 0, 0);
     impl->axis->zactive = std::move(active);
     impl->layers = impl->axis->zactive.size() - 1;
     for (std::size_t k = 0; k < impl->axis->zactive.size(); ++k)

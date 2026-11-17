@@ -301,7 +301,7 @@ TEST(LocalProductAMRTest, RawSharedAxisSelectionChecksPairedMetricRepresentabili
     EXPECT_THROW(
         (void) SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::shared_axis_selection(
             topology, tiny_base, thin_axis, axial),
-        std::runtime_error);
+        std::invalid_argument);
     EXPECT_NO_THROW(
         (void) SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::shared_axis_selection(
             topology, tiny_base, tiny_base, axial));

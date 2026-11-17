@@ -143,7 +143,9 @@ struct ExtrudedAxisValues
 };
 struct ExtrudedAxisData
 {
-    std::shared_ptr<ExtrudedAxisValues> values = std::make_shared<ExtrudedAxisValues>();
+    ExtrudedAxisData() : values(std::make_shared<ExtrudedAxisValues>()) {}
+    explicit ExtrudedAxisData(std::shared_ptr<ExtrudedAxisValues> shared_values) : values(std::move(shared_values)) {}
+    std::shared_ptr<ExtrudedAxisValues> values;
     std::vector<std::size_t> zactive;
     std::vector<double> display;
 };
@@ -159,9 +161,15 @@ using Meshes::SemiStructMeshTopo;
 using Meshes::SemiStructuredIndexer;
 struct ExtrudedConstruction<ArithmeticMode::Ordinary>::Impl
 {
+    Impl() : base(std::make_shared<ExtrudedBaseData>()), axis(std::make_shared<ExtrudedAxisData>()) {}
+    Impl(std::shared_ptr<const Meshes::ExtrudedTopology> retained_topology,
+        std::shared_ptr<ExtrudedBaseData> retained_base, std::shared_ptr<ExtrudedAxisData> retained_axis,
+        std::size_t first, std::size_t count)
+        : topology(std::move(retained_topology)), base(std::move(retained_base)), axis(std::move(retained_axis)),
+          begin(first), layers(count) {}
     std::shared_ptr<const Meshes::ExtrudedTopology> topology;
-    std::shared_ptr<ExtrudedBaseData> base = std::make_shared<ExtrudedBaseData>();
-    std::shared_ptr<ExtrudedAxisData> axis = std::make_shared<ExtrudedAxisData>();
+    std::shared_ptr<ExtrudedBaseData> base;
+    std::shared_ptr<ExtrudedAxisData> axis;
     std::size_t begin = 0, layers = 0;
 };
 } // namespace SimpleFluid::PLIC
