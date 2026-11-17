@@ -2,6 +2,7 @@
  * @brief Internal bounded owner-message primitives, independent of MPI layout.
  */
 #pragma once
+#include "geometry/details/NativeAllocationExtent.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "parallel/SparseOwnerExchange.hh"
@@ -47,6 +48,7 @@ inline OwnerExchange consume_adaptive_packets(
 struct Budget
 {
     std::size_t limit, used = 0, peak = 0, cumulative = 0;
+    geometry_detail::NativeCounterAllocationEnvelope native_allocation;
     void add(std::size_t bytes)
     {
         if (bytes > limit - used)

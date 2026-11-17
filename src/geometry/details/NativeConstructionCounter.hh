@@ -22,6 +22,7 @@ public:
     NativeMirrorOwnerProof() noexcept = default;
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
     [[nodiscard]] NativeMirrorExtentKind kind() const noexcept { return kind_; }
+    [[nodiscard]] bool publication_requests() const noexcept { return publication_requests_; }
     [[nodiscard]] bool matches(const std::shared_ptr<void>& owner) const noexcept
     {
         return owner && owner.get() == address_ && bytes_ && !control_.expired() &&
@@ -31,12 +32,14 @@ private:
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativePublicationOperation;
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativeSourceOwnerStore;
     NativeMirrorOwnerProof(const std::shared_ptr<void>& owner, std::size_t bytes,
-        NativeMirrorExtentKind kind = NativeMirrorExtentKind::Actual)
-        : address_(owner.get()), control_(owner), bytes_(bytes), kind_(kind) {}
+        NativeMirrorExtentKind kind = NativeMirrorExtentKind::Actual, bool publication_requests = false)
+        : address_(owner.get()), control_(owner), bytes_(bytes), kind_(kind),
+          publication_requests_(publication_requests) {}
     const void* address_ = nullptr;
     std::weak_ptr<const void> control_;
     std::size_t bytes_ = 0;
     NativeMirrorExtentKind kind_ = NativeMirrorExtentKind::Actual;
+    bool publication_requests_ = false;
 };
 /** Optional mirror into an already owned detached source/halo scalar arena.
  * Callbacks never allocate, throw, or reenter NativeAllocationState. Prefix

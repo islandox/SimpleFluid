@@ -9,6 +9,7 @@
 namespace SimpleFluid::geometry_detail
 {
 class NativeAllocationEnvelopeAccess;
+class NativeAllocationEnvelope;
 namespace native_envelope_detail
 {
 inline bool contains(NativeAllocationExtent extent, const void* object, std::size_t bytes) noexcept
@@ -23,15 +24,28 @@ enum class Block : unsigned
     RecordObject,
     RecordControl,
     Target,
-    Envelope
+    Envelope,
+    TargetControl
 };
 /** No target/controller ownership here: only allocation extents and the
  * detached scalar admission domain shared by the allocation's allocators.
  */
 struct SIMPLEFLUID_LOCAL Record
 {
-    std::array<NativeAllocationExtent, 4> blocks{};
+    std::array<NativeAllocationExtent, 5> blocks{};
     std::shared_ptr<const NativeAllocationState> state;
+    unsigned active_blocks = 4;
+    void (*deallocate_target)(const void*) noexcept = nullptr;
+    void release_target() noexcept
+    {
+        if (!deallocate_target)
+            return;
+        const auto target = std::exchange(blocks[static_cast<unsigned>(Block::Target)], {});
+        auto release = std::exchange(deallocate_target, nullptr);
+        release(target.address);
+        state->retire(target.bytes);
+    }
+    ~Record() { release_target(); }
 };
 
 /** Record-control allocation captures into the heap Record. Its deallocator
@@ -101,7 +115,12 @@ public:
         extent = {address, count * sizeof(T)};
         return address;
     }
-    void deallocate(T* address, std::size_t count) noexcept { allocator_.deallocate(address, count); }
+    void deallocate(T* address, std::size_t count) noexcept
+    {
+        allocator_.deallocate(address, count);
+        if (block_ == Block::TargetControl)
+            record_->release_target();
+    }
     template<class U> bool operator==(const BlockAllocator<U>& other) const noexcept
     {
         return allocator_ == other.allocator_ && record_ == other.record_ && block_ == other.block_;
@@ -111,6 +130,20 @@ private:
     NativeConstructionAllocator<T> allocator_;
     std::shared_ptr<Record> record_;
     Block block_;
+};
+template<class T> struct DestroyObject
+{
+    void operator()(T* value) noexcept { std::destroy_at(value); }
+};
+template<class T, class Destroy> struct SeparateDelete
+{
+    Destroy destroy;
+    std::shared_ptr<const NativeAllocationEnvelope> envelope;
+    void operator()(T* value) noexcept
+    {
+        destroy(value);   // T's real child buffers die before their receipts.
+        envelope.reset(); // Break the strong-control -> envelope -> weak-control cycle.
+    }
 };
 } // namespace native_envelope_detail
 
@@ -166,8 +199,11 @@ public:
                 sizeof(NativeAllocationEnvelope)))
             throw std::logic_error("Native allocation envelope is copied or foreign to its actual recorded block.");
         std::size_t bytes = 0;
-        for (const auto& extent : record_->blocks)
+        if (record_->active_blocks != 4 && record_->active_blocks != 5)
+            throw std::logic_error("Native envelope has a foreign active-block inventory.");
+        for (unsigned index = 0; index < record_->active_blocks; ++index)
         {
+            const auto& extent = record_->blocks[index];
             if (!extent.address || extent.bytes > std::numeric_limits<std::size_t>::max() - bytes)
                 throw std::logic_error("Native fixed allocation envelope is incomplete or excessive.");
             bytes += extent.bytes;
@@ -177,8 +213,8 @@ public:
     template<class Visit> void visit_allocations(const Visit& visit) const
     {
         (void) fixed_allocation_bytes();
-        for (const auto& extent : record_->blocks)
-            visit(extent);
+        for (unsigned index = 0; index < record_->active_blocks; ++index)
+            visit(record_->blocks[index]);
     }
     [[nodiscard]] const std::shared_ptr<const NativeAllocationState>& state() const noexcept { return record_->state; }
 
@@ -201,6 +237,61 @@ template<class T> struct SIMPLEFLUID_LOCAL NativeTrackedOwner
 class SIMPLEFLUID_LOCAL NativeAllocationEnvelopeAccess
 {
 public:
+    /** A separate object block stays allocated until the target control's last
+     * weak release, matching fixed-envelope lifetime. Destroy must destroy T and
+     * retire its already-freed direct buffer receipts; it must not free T's raw
+     * object block. It may retain detached scalar/storage owners only. */
+    template<class T, class Destroy, class Construct>
+    [[nodiscard]] static NativeTrackedOwner<T> make_separate_constructed(
+        const NativeConstructionAdmission& admission, Destroy destroy, Construct construct)
+    {
+        namespace detail = native_envelope_detail;
+        auto memory = admission.unique<detail::Record>();
+        memory->state = admission.state();
+        memory->active_blocks = 5;
+        memory->blocks[static_cast<unsigned>(detail::Block::RecordObject)] = {memory.get(), sizeof(detail::Record)};
+        auto* raw_record = memory.release();
+        auto record_delete = std::move(memory.get_deleter());
+        std::shared_ptr<detail::Record> record(raw_record, std::move(record_delete),
+            detail::RecordAllocator<detail::Record>(admission.allocator<detail::Record>(), raw_record));
+        auto* target = admission.allocator<T>().allocate(1);
+        record->blocks[static_cast<unsigned>(detail::Block::Target)] = {target, sizeof(T)};
+        record->deallocate_target = [](const void* address) noexcept
+        { std::allocator<T>{}.deallocate(static_cast<T*>(const_cast<void*>(address)), 1); };
+        construct(target); // On constructor failure Record releases raw storage without destroying T.
+        using Delete = detail::SeparateDelete<T, Destroy>;
+        std::shared_ptr<T> owner;
+        try
+        {
+            owner = std::shared_ptr<T>(target, Delete{std::move(destroy), {}},
+                detail::BlockAllocator<T>(admission.allocator<T>(), record, detail::Block::TargetControl));
+        }
+        catch (...)
+        {
+            // shared_ptr invokes Delete on failed control allocation. No control
+            // can own the still-allocated object block, so retire it now.
+            record->release_target();
+            throw;
+        }
+        auto envelope = std::allocate_shared<NativeAllocationEnvelope>(
+            detail::BlockAllocator<NativeAllocationEnvelope>(
+                admission.allocator<NativeAllocationEnvelope>(), record, detail::Block::Envelope),
+            NativeAllocationEnvelope::ConstructionKey{}, std::shared_ptr<const void>(owner), owner.get(), record);
+        envelope->self_ = envelope;
+        auto* stored = std::get_deleter<Delete>(owner);
+        if (!stored)
+            throw std::logic_error("Native target control lost its exact typed deleter.");
+        stored->envelope = envelope;
+        (void) envelope->fixed_allocation_bytes();
+        return {std::move(owner), std::move(envelope)};
+    }
+    template<class T, class Destroy, class... Args>
+    [[nodiscard]] static NativeTrackedOwner<T> make_separate(
+        const NativeConstructionAdmission& admission, Destroy destroy, Args&&... args)
+    {
+        return make_separate_constructed<T>(
+            admission, std::move(destroy), [&](T* target) { std::construct_at(target, std::forward<Args>(args)...); });
+    }
     template<class T, class... Args>
     [[nodiscard]] static NativeTrackedOwner<T> make(const NativeConstructionAdmission& admission, Args&&... args)
     {

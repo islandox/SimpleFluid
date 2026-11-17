@@ -149,6 +149,22 @@ public:
         admission_.release(bytes);
         admission_.allocator<Buffer>().deallocate(receipt, 1);
     }
+    void retire_all_freed_buffers() noexcept
+    {
+        if (nodes_)
+            std::terminate();
+        while (buffers_)
+        {
+            auto* receipt = buffers_;
+            buffers_ = receipt->next;
+            exclusive_bytes_ -= sizeof(Buffer) + receipt->allocation.bytes;
+            changed();
+            admission_.release(receipt->allocation.bytes);
+            admission_.allocator<Buffer>().deallocate(receipt, 1);
+        }
+        if (exclusive_bytes_)
+            std::terminate();
+    }
     /** Default-deleter native payloads keep their public unique_ptr type.
      * Their scalar allocation is precharged and pinned by this storage receipt;
      * the containing backing destroys the payload before its storage field. */
