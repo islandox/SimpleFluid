@@ -951,11 +951,14 @@ bool details::GeometryOwnerImportAccess::retain_weak_control(GeometryAllocationL
         return false;
     if (root.authenticates(ledger.impl_->derived_head))
         return ledger.impl_->derived_control_reserved;
-    for (const auto& certificate : ledger.impl_->subsets)
+    for (std::size_t index = 0; index < GeometryAllocationLedger::Impl::subset_capacity; ++index)
     {
-        if ((certificate.reserved_controls & 1) && root.authenticates(certificate.authority))
+        const auto* certificate = ledger.impl_->subset_at(index);
+        if (!certificate)
+            continue;
+        if ((certificate->reserved_controls & 1) && root.authenticates(certificate->authority))
             return true;
-        if ((certificate.reserved_controls & 2) && root.authenticates(certificate.subset))
+        if ((certificate->reserved_controls & 2) && root.authenticates(certificate->subset))
             return true;
     }
     // This reserve follows a weak control after the peer ordinary ledger or
@@ -987,14 +990,24 @@ void details::GeometryOwnerImportAccess::certify_subset(GeometryAllocationLedger
             ledger.impl_->mode = mode;
         const auto reserved = std::uint8_t((retain_weak_control(ledger, authority, used, limit) ? 1 : 0) |
                                            (retain_weak_control(ledger, subset, used, limit) ? 2 : 0));
-        for (auto& certificate : ledger.impl_->subsets)
-            if (subset.authenticates(certificate.subset))
+        for (std::size_t index = 0; index < GeometryAllocationLedger::Impl::subset_capacity; ++index)
+            if (auto* certificate = ledger.impl_->subset_at(index);
+                certificate && subset.authenticates(certificate->subset))
             {
-                certificate = {authority.root_control(), subset.root_control(), generation, *channel, reserved};
+                *certificate = {authority.root_control(), subset.root_control(), generation, *channel, reserved};
                 ledger.impl_->last_counter = used;
                 return;
             }
-        auto& certificate = ledger.impl_->subsets[ledger.impl_->next_subset++ % ledger.impl_->subsets.size()];
+        const auto index = ledger.impl_->next_subset % GeometryAllocationLedger::Impl::subset_capacity;
+        if (index && ledger.impl_->additional_subsets.empty())
+        {
+            ledger.impl_->account(GeometryAllocationLedger::Impl::subset_overflow_bytes(), true, used, limit);
+            ledger.impl_->additional_subsets.resize(GeometryAllocationLedger::Impl::subset_capacity - 1);
+            if (ledger.impl_->additional_subsets.capacity() != GeometryAllocationLedger::Impl::subset_capacity - 1)
+                allocation_detail::exhausted("Unqualified subset certificate overflow capacity.");
+        }
+        ++ledger.impl_->next_subset;
+        auto& certificate = *ledger.impl_->subset_at(index);
         certificate = {authority.root_control(), subset.root_control(), generation, *channel, reserved};
         ledger.impl_->last_counter = used;
     }

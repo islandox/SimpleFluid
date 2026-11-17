@@ -726,7 +726,9 @@ TEST(GeometryAllocationLedgerTest, ImmutableOwnerSetImportsIntoFreshAndPopulated
     const auto external = static_cast<std::uint8_t>(P::allocation_detail::Kind::ExternalOwner);
     const OwnerRecord first_row{{0, external, first.get()}, first, sizeof(Payload), 1};
     const OwnerRecord second_row{{0, external, second.get()}, second, sizeof(Payload), 3};
-    const std::array<OwnerRecord, 2> rows{first_row, second_row};
+    std::array<OwnerRecord, 2> rows{first_row, second_row};
+    std::sort(rows.begin(), rows.end(),
+        [](const auto& a, const auto& b) { return std::less<const void*>{}(a.key.address, b.key.address); });
     const auto owners = GeometryOwnerManifest::built(rows, admission);
 
     // Fresh ledger: the immutable set is installed, not enumerated, and a

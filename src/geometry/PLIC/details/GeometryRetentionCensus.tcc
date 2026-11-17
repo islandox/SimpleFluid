@@ -1076,9 +1076,14 @@ Report inspect_retention(std::span<const BorrowedRoot> roots, std::span<const Ge
             report.ledger_bookkeeping_admission = census_add(report.ledger_bookkeeping_admission, impl->bookkeeping);
             auto tracking =
                 census_add(sizeof(*impl), census_mul(impl->pending.capacity(), sizeof(allocation_detail::Item)));
+            tracking = census_add(tracking, census_mul(impl->additional_subsets.capacity(),
+                                                sizeof(GeometryAllocationLedger::Impl::SubsetCertificate)));
             tracking =
                 census_add(tracking, census_mul(impl->owners.size(),
                                          sizeof(typename decltype(impl->owners)::value_type) + 4 * sizeof(void*)));
+            tracking = census_add(
+                tracking, census_mul(impl->metadata_credits.size(),
+                              sizeof(typename decltype(impl->metadata_credits)::value_type) + 4 * sizeof(void*)));
             report.ledger_tracking_bytes = census_add(report.ledger_tracking_bytes, tracking);
             const auto mode = impl->mode.value_or(ArithmeticMode::Ordinary);
             for (const auto& [key, value] : impl->owners)

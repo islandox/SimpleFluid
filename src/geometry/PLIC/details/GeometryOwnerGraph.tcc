@@ -302,7 +302,10 @@ std::size_t GeometryOwnerGraphEditor::edit_byte_bound(
     const auto bookkeeping_per_owner =
         sizeof(typename decltype(GeometryAllocationLedger::Impl::owners)::value_type) + 4 * sizeof(void*) +
         sizeof(typename decltype(GeometryAllocationLedger::Impl::metadata_credits)::value_type) + 4 * sizeof(void*);
-    return add(bytes, product(accepted.batch_edit_metadata_owner_bound(changed_keys), bookkeeping_per_owner));
+    bytes = add(bytes, product(accepted.batch_edit_metadata_owner_bound(changed_keys), bookkeeping_per_owner));
+    // A second distinct graph certificate materializes the ledger's bounded
+    // overflow buffer. Reserve it before optional graph mutation can begin.
+    return add(bytes, GeometryAllocationLedger::Impl::subset_overflow_bytes());
 }
 bool GeometryOwnerGraphEditor::external(
     const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)

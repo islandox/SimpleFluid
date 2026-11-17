@@ -1,9 +1,12 @@
 /** Independent graph-set, provenance, lifetime and observational checks. */
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryIdentityRetention.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include "geometry/PLIC/details/exact/GeometryIdentity.hh"
+#include "pipeline_allocation_operators.inc"
 #include <algorithm>
 #include <array>
 #include <cfenv>
@@ -765,4 +768,63 @@ TEST(GeometryRetentionCensus, PopulatedClipRetainedPointsSeedAllRecipeDependenci
     EXPECT_EQ(P::geometry_statistics().floating_operations, statistics.floating_operations);
     EXPECT_EQ(std::fegetround(), rounding);
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), flags);
+}
+
+TEST(GeometryRetentionCensus, LedgerTrackingIncludesLazyCertificateStorageMeasuredByRawAllocations)
+{
+    namespace D = P::details;
+    namespace G = D::geometry_demand;
+    const auto owner = std::make_shared<const std::array<unsigned char, 32>>();
+    const auto other = std::make_shared<const std::array<unsigned char, 32>>();
+    G::GeometryOwnerManifest first, second;
+    P::GeometryAllocationLedger ledger;
+    std::size_t used = 37;
+    pipeline_trace::Summary actual;
+    bool overflow = false;
+    {
+        pipeline_trace::begin();
+        struct Stop
+        {
+            ~Stop() { pipeline_trace::recording.store(false); }
+        } stop;
+        // Both terminal graphs are closed. Keeping two rows makes every
+        // created index allocation reachable from its returned manifest.
+        D::GeometryOwnerGraphEditor one({}, 0, used, cap, &ledger);
+        one.external(owner, sizeof(*owner), true);
+        one.external(other, sizeof(*other), true);
+        first = one.finish();
+        D::GeometryOwnerGraphEditor two({}, 0, used, cap, &ledger);
+        two.external(owner, sizeof(*owner), true);
+        two.external(other, sizeof(*other), true);
+        second = two.finish();
+        actual = pipeline_trace::summary();
+        overflow = pipeline_trace::overflow.load();
+    }
+    ASSERT_FALSE(overflow);
+    ASSERT_GT(actual.live_allocations, 1u);
+    // Remove the actual manifest allocations from the raw total. The
+    // remaining live C++ extents are only the ledger's own tracking storage.
+    pipeline_trace::prepare_census();
+    std::array<std::uint64_t, 16> seen{};
+    std::size_t count = 0, metadata_bytes = 0;
+    const auto mark = [&](const void* address, std::size_t)
+    {
+        const auto* extent = pipeline_trace::mark(address, 1);
+        ASSERT_TRUE(extent);
+        if (std::find(seen.begin(), seen.begin() + count, extent->serial) == seen.begin() + count)
+        {
+            ASSERT_LT(count, seen.size());
+            seen[count++] = extent->serial;
+            metadata_bytes += extent->bytes;
+        }
+    };
+    first.visit_payload(mark);
+    second.visit_payload(mark);
+    const std::array roots{
+        R::external_root(owner.get(), sizeof(*owner)), R::external_root(other.get(), sizeof(*other))};
+    const std::array<const P::GeometryAllocationLedger*, 1> ledgers{&ledger};
+    Scratch scratch;
+    const auto report = R::inspect_retention(roots, ledgers, scratch.resource, {1000, 1000, true});
+    ASSERT_TRUE(report.complete()) << report.detail;
+    EXPECT_EQ(report.ledger_tracking_bytes, actual.all_live - metadata_bytes);
 }

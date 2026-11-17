@@ -388,8 +388,27 @@ struct GeometryAllocationLedger::Impl
         std::uint64_t generation = 0;
         std::uint8_t channel = 0, reserved_controls = 0;
     };
-    std::array<SubsetCertificate, 12> subsets;
+    static constexpr std::size_t subset_capacity = 12;
+    // A plain retain needs no certificates; a graph normally issues one self
+    // certificate. Keep that common case inline without reserving eleven
+    // unused slots in every unrelated payload ledger.
+    std::array<SubsetCertificate, 1> subsets;
+    std::vector<SubsetCertificate> additional_subsets;
     std::size_t next_subset = 0;
+    [[nodiscard]] static constexpr std::size_t subset_overflow_bytes() noexcept
+    {
+        return (subset_capacity - 1) * sizeof(SubsetCertificate);
+    }
+    [[nodiscard]] const SubsetCertificate* subset_at(std::size_t index) const noexcept
+    {
+        if (!index)
+            return &subsets[0];
+        return index - 1 < additional_subsets.size() ? &additional_subsets[index - 1] : nullptr;
+    }
+    [[nodiscard]] SubsetCertificate* subset_at(std::size_t index) noexcept
+    {
+        return const_cast<SubsetCertificate*>(static_cast<const Impl&>(*this).subset_at(index));
+    }
     std::weak_ptr<const void> derived_head, control_grant_authority;
     bool derived_control_reserved = false;
     std::size_t weak_control_allowance = 0;
@@ -398,9 +417,10 @@ struct GeometryAllocationLedger::Impl
         if (!root.owner_count() || (imported && imported->same_root(root)) ||
             (!derived_head.expired() && root.authenticates(derived_head)))
             return true;
-        for (const auto& certificate : subsets)
-            if (!certificate.authority.expired() && !certificate.subset.expired() &&
-                root.authenticates(certificate.subset))
+        for (std::size_t index = 0; index < subset_capacity; ++index)
+            if (const auto* certificate = subset_at(index); certificate && !certificate->authority.expired() &&
+                                                            !certificate->subset.expired() &&
+                                                            root.authenticates(certificate->subset))
                 return true;
         return false;
     }
