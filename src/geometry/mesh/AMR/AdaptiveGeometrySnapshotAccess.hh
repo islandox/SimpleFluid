@@ -39,6 +39,7 @@ struct GeometryCacheAdmissionStatistics
     std::size_t admission_queries = 0, union_censuses = 0, census_root_visits = 0;
     /** Cumulative persistent-catalog construction work over the cache lifetime. */
     std::size_t catalog_copied_metadata_bytes = 0, catalog_copied_pages = 0, catalog_visited_pages = 0;
+    std::size_t catalog_copied_source_rows = 0, catalog_visited_source_rows = 0;
     std::size_t union_updates = 0, union_edge_visits = 0, union_dependency_entries = 0;
     std::size_t union_first_transitions = 0, union_last_transitions = 0;
     std::size_t union_index_copied_pages = 0, union_index_copied_bytes = 0, union_index_visited_pages = 0;

@@ -696,7 +696,7 @@ bool AdaptiveGeometrySnapshot::can_rebind_prepared_slots(
 
 void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t> ordinals,
     std::span<const PreparedSourceSlot> physical, PLIC::GeometryAllocationLedger& ordinary_owners, std::size_t& used,
-    std::size_t limit)
+    std::size_t limit, PLIC::details::CellCatalogDemandWork* demand_work)
 {
     using Access = PLIC::details::CellCatalogDemandAccess;
     namespace G = PLIC::details::geometry_demand;
@@ -735,13 +735,13 @@ void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t
     if (ordinary)
     {
         ordinary = Access::rebound_precharged(ordinary, ordinals, slots,
-            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction);
+            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction, demand_work);
         editor.catalog(ordinary, true, true);
     }
     if (finite)
     {
         finite = Access::rebound_precharged(finite, ordinals, slots,
-            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction);
+            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction, demand_work);
         editor.catalog(finite, true, true);
     }
     editor.catalog(ordinary_, false);
@@ -1033,12 +1033,12 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
                 CatalogAccess::extended_precharged(
                     previous->finite_ordinary_ ? previous->finite_ordinary_ : previous->ordinary_,
                     result.finite_ordinary_ ? result.finite_ordinary_ : requested_ordinary, previous_slots,
-                    limits(ArithmeticMode::Ordinary), nullptr, construction, ordinary_created),
+                    limits(ArithmeticMode::Ordinary), demand_work, construction, ordinary_created),
                 ordinary_owners);
         if (result.bounded_)
             result.bounded_ = retain_catalog(
                 CatalogAccess::extended_precharged(previous->bounded_, result.bounded_, previous_slots,
-                    limits(ArithmeticMode::BoundedCertification), nullptr, construction, bounded_created),
+                    limits(ArithmeticMode::BoundedCertification), demand_work, construction, bounded_created),
                 bounded_owners);
         result.bindings_ = geometry_snapshot_detail::Bindings::extended(
             *previous->bindings_, leaves, facts, *hierarchy.leaf_layout(), budget);
@@ -1050,11 +1050,11 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
             ordinary_owners);
         if (result.finite_ordinary_)
             result.finite_ordinary_ = retain_catalog(CatalogAccess::initialize_precharged(result.finite_ordinary_,
-                                                         limits(ArithmeticMode::Ordinary), nullptr, construction),
+                                                         limits(ArithmeticMode::Ordinary), demand_work, construction),
                 ordinary_owners);
         if (result.bounded_)
             result.bounded_ = retain_catalog(CatalogAccess::initialize_precharged(result.bounded_,
-                                                 limits(ArithmeticMode::BoundedCertification), nullptr, construction),
+                                                 limits(ArithmeticMode::BoundedCertification), demand_work, construction),
                 bounded_owners);
         const auto same_raw_bindings = [&]
         {

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <numeric>
+#include <set>
 
 namespace
 {
@@ -171,6 +172,254 @@ template<ArithmeticMode M> void explicit_streams()
         // Probe boundary children stay bounded by one 32-child branch page.
         EXPECT_LE(visited[1], visited[0] + 40 * 32);
     }
+}
+namespace G = A::geometry_demand;
+struct CapturedSelector
+{
+    std::shared_ptr<const void> control;
+    const void* parent;
+    std::vector<G::OrderedSourceSlot> rows;
+    std::vector<G::DemandPageBuffer> buffers;
+};
+struct CapturedSource
+{
+    std::shared_ptr<const void> control;
+    std::map<const void*, std::size_t> buffers;
+};
+struct DemandGraph
+{
+    std::map<const void*, const void*> parent;
+    std::map<const void*, std::size_t> bytes, depth;
+    std::map<const void*, std::shared_ptr<const void>> controls;
+    std::map<const void*, CapturedSelector> selectors;
+    std::map<const void*, CapturedSource> sources;
+};
+template<class T, class U> bool same_control(const std::shared_ptr<T>& a, const std::shared_ptr<U>& b)
+{
+    return a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
+}
+template<ArithmeticMode M> DemandGraph demand_graph(const P::CellGeometryCatalog<M>& catalog)
+{
+    using Catalog = P::CellGeometryCatalog<M>;
+    DemandGraph graph;
+    A::CellCatalogDemandAccess::visit_borrowed_dependencies(catalog,
+        {&graph,
+            [](void* raw, const void* owner, const void* parent, std::size_t bytes)
+            {
+                auto& graph = *static_cast<DemandGraph*>(raw);
+                graph.parent.emplace(owner, parent);
+                graph.depth.emplace(owner, parent ? graph.depth.at(parent) + 1 : 1);
+                return graph.bytes.emplace(owner, bytes).second;
+            }},
+        {nullptr, [](void*, const void*, G::SourceKind, const void*) {}});
+    A::CellCatalogDemandAccess::visit_dependencies(catalog,
+        {&graph, [](void* raw, const std::shared_ptr<const void>& owner, std::size_t, std::size_t)
+            { return static_cast<DemandGraph*>(raw)->controls.emplace(owner.get(), owner).second; }},
+        {&graph, [](void* raw, G::SourceKind kind, const std::shared_ptr<const void>& owner)
+            {
+                auto& sources = static_cast<DemandGraph*>(raw)->sources;
+                if (sources.contains(owner.get()))
+                    return;
+                CapturedSource source{owner, {}};
+                if (kind == G::SourceKind::Explicit)
+                {
+                    const auto& page = *static_cast<const typename Catalog::ExplicitPage*>(owner.get());
+                    source.buffers.emplace(page.cells.data(), page.cells.capacity() * sizeof(page.cells[0]));
+                }
+                else
+                    A::NativeCellGeometrySourceAccess::visit_payload(
+                        *static_cast<const P::CartesianCellSource*>(owner.get()),
+                        [&](const void* data, std::size_t bytes) { source.buffers.emplace(data, bytes); });
+                sources.emplace(owner.get(), std::move(source));
+            }});
+    A::CellCatalogDemandAccess::visit_selector_pages(catalog,
+        [&](const G::BorrowedSelectorPage& page)
+        {
+            graph.selectors.emplace(page.control.get(),
+                CapturedSelector{page.control, page.index_parent, {page.rows.begin(), page.rows.end()},
+                    {page.buffers.begin(), page.buffers.end()}});
+        });
+    return graph;
+}
+std::vector<const void*> index_path(const DemandGraph& graph, const CapturedSelector& page)
+{
+    std::vector<const void*> result;
+    // Catalog demand State and demand-order State occupy depths one and two.
+    for (auto owner = page.parent; owner && graph.depth.at(owner) > 2; owner = graph.parent.at(owner))
+        result.push_back(owner);
+    return result;
+}
+void expect_selector_unchanged(const CapturedSelector& before, const CapturedSelector& after)
+{
+    EXPECT_TRUE(same_control(before.control, after.control));
+    EXPECT_EQ(before.buffers, after.buffers);
+    ASSERT_EQ(before.rows.size(), after.rows.size());
+    for (std::size_t slot = 0; slot < before.rows.size(); ++slot)
+    {
+        EXPECT_EQ(before.rows[slot].stamp, after.rows[slot].stamp);
+        EXPECT_EQ(before.rows[slot].physical.row, after.rows[slot].physical.row);
+        EXPECT_EQ(before.rows[slot].physical.kind, after.rows[slot].physical.kind);
+        EXPECT_TRUE(same_control(before.rows[slot].physical.source, after.rows[slot].physical.source));
+    }
+}
+template<ArithmeticMode M> void fixed_catalog_frontier()
+{
+    using Catalog = P::CellGeometryCatalog<M>;
+    using Geometry = P::ConvexCellGeometry<M>;
+    const auto box = Geometry::box({0, 0, 0}, {1, 1, 1});
+    constexpr std::size_t capacity = 64, changed = 4, replacement_groups = 2, ordered_edits = 3;
+    for (const std::size_t count : {8192, 16384})
+    {
+        SCOPED_TRACE(static_cast<unsigned>(M));
+        SCOPED_TRACE(count);
+        A::CellCatalogDemandWork initialized;
+        const auto warm = A::CellCatalogDemandAccess::initialize(
+            Catalog::materialized(std::vector<P::ConvexGeometryPtr<M>>(count, box), limits()), limits(), &initialized);
+        const auto before = demand_graph(*warm);
+        ASSERT_EQ(before.selectors.size(), count / capacity);
+        EXPECT_EQ(initialized.pages.copied_source_rows, count);
+        EXPECT_EQ(initialized.pages.visited_source_rows, count + count / capacity);
+        const auto first = std::find_if(before.selectors.begin(), before.selectors.end(),
+            [](const auto& value) { return value.second.rows.front().stamp == G::OrderStamp{1, 0}; });
+        ASSERT_NE(first, before.selectors.end());
+        ASSERT_EQ(first->second.rows.size(), capacity);
+        const auto path = index_path(before, first->second);
+        ASSERT_EQ(path.size(), 2u); // 128/256 selector groups, 64-row/32-child index.
+        // One deletion may repair its immediate right sibling. All other index
+        // nodes, selectors and physical source pages are outside the frontier.
+        std::map<std::size_t, const void*> ordered_leaves;
+        for (const auto& [identity, page] : before.selectors)
+        {
+            const auto rank = page.rows.front().stamp.position;
+            const auto found = ordered_leaves.find(rank);
+            if (found == ordered_leaves.end())
+                ordered_leaves.emplace(rank, page.parent);
+        }
+        std::vector<const void*> leaf_order;
+        for (const auto& [rank, leaf] : ordered_leaves)
+            if (std::find(leaf_order.begin(), leaf_order.end(), leaf) == leaf_order.end())
+                leaf_order.push_back(leaf);
+        ASSERT_GE(leaf_order.size(), 2u);
+        std::set<const void*> affected(path.begin(), path.end());
+        affected.insert(leaf_order[1]);
+        affected.insert(first->first);
+        for (const auto& [owner, depth] : before.depth)
+            if (depth <= 2)
+                affected.insert(owner);
+
+        const auto request = Catalog::materialized(std::vector<P::ConvexGeometryPtr<M>>(changed, box), limits());
+        const std::array<std::optional<std::size_t>, changed> previous{};
+        A::CellCatalogDemandWork work;
+        const auto active = A::CellCatalogDemandAccess::extended(warm, request, previous, limits(), &work);
+        const auto after = demand_graph(*active);
+        ASSERT_EQ(active->size(), count + changed);
+        ASSERT_EQ(after.selectors.size(), before.selectors.size() + replacement_groups - 1);
+        EXPECT_FALSE(after.selectors.contains(first->first));
+        std::map<std::pair<std::uint64_t, std::uint64_t>, G::SourceSlot> current_rows;
+        for (const auto& [owner, page] : after.selectors)
+            for (const auto& row : page.rows)
+                EXPECT_TRUE(
+                    current_rows.emplace(std::pair{row.stamp.generation, row.stamp.position}, row.physical).second);
+        for (const auto& [owner, page] : before.selectors)
+            for (const auto& row : page.rows)
+            {
+                const auto found = current_rows.find({row.stamp.generation, row.stamp.position});
+                ASSERT_NE(found, current_rows.end());
+                EXPECT_TRUE(same_control(row.physical.source, found->second.source));
+                EXPECT_EQ(row.physical.row, found->second.row);
+                EXPECT_EQ(row.physical.kind, found->second.kind);
+            }
+        for (const auto& [owner, source] : before.sources)
+        {
+            const auto found = after.sources.find(owner);
+            ASSERT_NE(found, after.sources.end());
+            EXPECT_TRUE(same_control(source.control, found->second.control));
+            EXPECT_EQ(source.buffers, found->second.buffers);
+        }
+        for (const auto& [owner, page] : before.selectors)
+            if (owner != first->first)
+            {
+                const auto found = after.selectors.find(owner);
+                ASSERT_NE(found, after.selectors.end());
+                expect_selector_unchanged(page, found->second);
+            }
+        for (const auto& [owner, control] : before.controls)
+            if (!affected.contains(owner))
+            {
+                const auto found = after.controls.find(owner);
+                ASSERT_NE(found, after.controls.end());
+                EXPECT_TRUE(same_control(control, found->second));
+                EXPECT_EQ(before.bytes.at(owner), after.bytes.at(owner));
+            }
+        // Expectations come from the input: copy the old first64 plus new4;
+        // decode each requested row, the first64, and two new group maxima.
+        EXPECT_EQ(work.pages.copied_source_rows, capacity + changed);
+        EXPECT_EQ(work.pages.visited_source_rows, changed + capacity + replacement_groups);
+        EXPECT_EQ(work.pages.visited_pages, (ordered_edits + 1) * path.size());
+        const auto copied_page_bound = 6 * ordered_edits * path.size() + replacement_groups;
+        ASSERT_LT(copied_page_bound, before.selectors.size());
+        EXPECT_LE(work.pages.copied_pages, copied_page_bound);
+        EXPECT_LT(work.pages.copied_source_rows, count);
+        EXPECT_LT(work.pages.visited_source_rows, count);
+        // All original geometries stay reachable at unchanged order stamps.
+        for (const auto slot : {changed, count / 2 + changed, count + changed - 1})
+            EXPECT_EQ(A::NativeCellGeometrySourceAccess::existing_geometry(P::CellGeometryView<M>(active, slot)), box);
+    }
+}
+template<ArithmeticMode M> void persistent_requested_work()
+{
+    using Catalog = P::CellGeometryCatalog<M>;
+    const auto box = P::ConvexCellGeometry<M>::box({0, 0, 0}, {1, 1, 1});
+    constexpr std::size_t count = 8192, requested_height = 2;
+    const auto accepted = A::CellCatalogDemandAccess::initialize(
+        Catalog::materialized(std::vector<P::ConvexGeometryPtr<M>>(64, box), limits()), limits());
+    const auto flat = Catalog::materialized(std::vector<P::ConvexGeometryPtr<M>>(count, box), limits());
+    const auto persistent = A::CellCatalogDemandAccess::initialize(flat, limits());
+    const auto graph = demand_graph(*persistent);
+    ASSERT_EQ(graph.selectors.size(), count / 64);
+    for (const auto& [owner, selector] : graph.selectors)
+        ASSERT_EQ(index_path(graph, selector).size(), requested_height);
+    const std::vector<std::optional<std::size_t>> previous(count);
+    A::CellCatalogDemandWork flat_work, persistent_work;
+    const auto flat_result = A::CellCatalogDemandAccess::extended(accepted, flat, previous, limits(), &flat_work);
+    const auto persistent_result =
+        A::CellCatalogDemandAccess::extended(accepted, persistent, previous, limits(), &persistent_work);
+    EXPECT_EQ(flat_result->size(), persistent_result->size());
+    EXPECT_EQ(persistent_work.pages.visited_pages, flat_work.pages.visited_pages + count * requested_height);
+    EXPECT_EQ(persistent_work.pages.visited_source_rows, flat_work.pages.visited_source_rows);
+    EXPECT_EQ(persistent_work.pages.copied_source_rows, flat_work.pages.copied_source_rows);
+    EXPECT_EQ(persistent_work.pages.copied_pages, flat_work.pages.copied_pages);
+}
+template<ArithmeticMode M> void rebound_work()
+{
+    using Catalog = P::CellGeometryCatalog<M>;
+    const auto first = native_source(128), replacement = native_source(128);
+    std::vector<typename Catalog::Entry> entries;
+    for (std::size_t slot = 0; slot < 128; ++slot)
+        entries.emplace_back(P::NativeCellGeometrySlot{0, slot});
+    const auto accepted = A::CellCatalogDemandAccess::initialize(
+        Catalog::make(typename Catalog::SourceTable{first}, std::move(entries), limits()), limits());
+    const auto before = demand_graph(*accepted);
+    const std::array<std::size_t, 1> ordinal{0};
+    const std::array physical{G::SourceSlot{replacement, 0, G::SourceKind::Cartesian}};
+    A::CellCatalogDemandWork work;
+    const auto active = A::CellCatalogDemandAccess::rebound(accepted, ordinal, physical, limits(), &work);
+    const auto after = demand_graph(*active);
+    // Two direct old-order reads, two binary searches of first of64 (7+1),
+    // one full64 selector copy and its maximum read. No old row count enters it.
+    EXPECT_EQ(work.pages.copied_source_rows, 64u);
+    EXPECT_EQ(work.pages.visited_source_rows, 2u + 2 * 8 + 64 + 1);
+    for (const auto& [owner, page] : before.selectors)
+        if (page.rows.front().stamp.position != 0)
+        {
+            const auto found = after.selectors.find(owner);
+            ASSERT_NE(found, after.selectors.end());
+            expect_selector_unchanged(page, found->second);
+        }
+    EXPECT_TRUE(after.sources.contains(first.get()));
+    EXPECT_TRUE(after.sources.contains(replacement.get()));
+    EXPECT_TRUE(same_control(before.sources.at(first.get()).control, after.sources.at(first.get()).control));
+    EXPECT_EQ(before.sources.at(first.get()).buffers, after.sources.at(first.get()).buffers);
 }
 } // namespace
 
@@ -362,4 +611,39 @@ TEST(GeometryDemandCatalog, NativeExportsKeepDistinctControlsAndReplacementRelea
     EXPECT_TRUE(lifetime.expired());
     for (std::size_t slot = 0; slot < next->size(); ++slot)
         EXPECT_EQ(A::NativeCellGeometrySourceAccess::source_cell(View(next, slot)).source, first);
+}
+
+TEST(GeometryDemandCatalog, FixedFourCellAppendPreservesTheIndependentFrontierInEveryArithmeticMode)
+{
+    fixed_catalog_frontier<ArithmeticMode::Ordinary>();
+    fixed_catalog_frontier<ArithmeticMode::BoundedCertification>();
+    fixed_catalog_frontier<ArithmeticMode::Exact>();
+}
+TEST(GeometryDemandCatalog, PersistentRequestedCatalogCountsEveryInputTreeLookup)
+{
+    persistent_requested_work<ArithmeticMode::Ordinary>();
+    persistent_requested_work<ArithmeticMode::BoundedCertification>();
+    persistent_requested_work<ArithmeticMode::Exact>();
+}
+TEST(GeometryDemandCatalog, OrdinaryCartesianSourceReboundCountsEveryDecodedSelector)
+{
+    rebound_work<ArithmeticMode::Ordinary>();
+}
+
+TEST(GeometryDemandCatalog, BoundedCartesianSourceReboundRejectsUnsupportedExplicitSourceWithoutCopyingSelectors)
+{
+    constexpr auto bounded = ArithmeticMode::BoundedCertification;
+    using Catalog = P::CellGeometryCatalog<bounded>;
+    const auto box = P::ConvexCellGeometry<bounded>::box({0, 0, 0}, {1, 1, 1});
+    const auto accepted = A::CellCatalogDemandAccess::initialize(
+        Catalog::materialized(std::vector<P::ConvexGeometryPtr<bounded>>(128, box), limits()), limits());
+    const auto source = native_source(128);
+    const std::array<std::size_t, 1> ordinal{0};
+    const std::array physical{G::SourceSlot{source, 0, G::SourceKind::Cartesian}};
+    A::CellCatalogDemandWork work;
+    EXPECT_THROW(
+        (void) A::CellCatalogDemandAccess::rebound(accepted, ordinal, physical, limits(), &work), P::GeometryError);
+    EXPECT_EQ(work.pages.copied_source_rows, 0u);
+    EXPECT_EQ(work.pages.visited_source_rows, 1u);
+    EXPECT_EQ(accepted->size(), 128u);
 }

@@ -118,6 +118,14 @@ template<class T> struct Column
         }
         return pattern(row);
     }
+    DemandPageBuffer buffer() const noexcept
+    {
+        if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
+            return {dense->data(), dense->capacity() * sizeof(T)};
+        if (const auto* overrides = std::get_if<std::vector<Override>>(&exceptions))
+            return {overrides->data(), overrides->capacity() * sizeof(Override)};
+        return {};
+    }
     std::size_t payload_bytes() const noexcept
     {
         if (const auto* dense = std::get_if<std::vector<T>>(&exceptions))
@@ -232,9 +240,9 @@ struct GroupLess
     bool operator()(const Group& a, const Group& b) const noexcept { return before(a.maximum, b.maximum); }
 };
 using Pages = OrderedPages<Group, GroupLess>;
-Group group(std::shared_ptr<const SelectorPage> page)
+Group group(std::shared_ptr<const SelectorPage> page, PageWork* work)
 {
-    const auto last = page->at(page->count - 1).stamp;
+    const auto last = page->at(page->count - 1, work).stamp;
     return {std::move(page), last};
 }
 const Group* containing(const Pages::Ptr& root, OrderStamp stamp, PageWork* work)
@@ -267,7 +275,7 @@ Pages::Ptr replace(Pages::Ptr root, std::span<const Group> retired, std::span<co
     for (std::size_t index = 0; index < groups; ++index)
     {
         const auto count = values.size() / groups + (index < values.size() % groups);
-        auto value = group(SelectorPage::make(values.subspan(start, count), admission, work));
+        auto value = group(SelectorPage::make(values.subspan(start, count), admission, work), work);
         root = editor.edit(root, value, &value, false);
         start += count;
     }
@@ -443,7 +451,7 @@ GeometryDemandOrder GeometryDemandOrder::rebound(
             const auto& value = updates[cursor++];
             rows[position(old, value.stamp, work)].physical = value.physical;
         } while (cursor < updates.size() && !before(old.maximum, updates[cursor].stamp));
-        auto replacement = group(SelectorPage::make(std::span(rows).first(old.page->count), admission, work));
+        auto replacement = group(SelectorPage::make(std::span(rows).first(old.page->count), admission, work), work);
         root = editor.edit(root, old, &replacement, true);
     }
     admission.charge(1, sizeof(State) + control_bytes);
@@ -483,10 +491,10 @@ std::size_t GeometryDemandOrder::size() const noexcept
 {
     return state_ && state_->root ? state_->root->logical_size : 0;
 }
-OrderedSourceSlot GeometryDemandOrder::at(std::size_t slot) const
+OrderedSourceSlot GeometryDemandOrder::at(std::size_t slot, PageWork* work) const
 {
-    const auto value = Pages::logical_at(state_ ? state_->root : nullptr, slot);
-    return value.row->page->at(value.offset);
+    const auto value = Pages::logical_at(state_ ? state_->root : nullptr, slot, work);
+    return value.row->page->at(value.offset, work);
 }
 const std::shared_ptr<const CartesianCellSource>& GeometryDemandOrder::native_owner(std::size_t slot) const
 {
@@ -545,5 +553,27 @@ void GeometryDemandOrder::visit_source_pages(
                     visitor(source.kind(), source.pin());
                 return true;
             });
+}
+void GeometryDemandOrder::visit_selector_pages(const SelectorPageVisit& visit) const
+{
+    if (!state_)
+        return;
+    Pages::visit_pages(state_->root,
+        [&](const Pages::Ptr& node)
+        {
+            if (!node->leaf())
+                return;
+            for (const auto& group : node->rows)
+            {
+                const auto& page = group.page;
+                std::array<OrderedSourceSlot, leaf_capacity> rows;
+                for (std::size_t slot = 0; slot < page->count; ++slot)
+                    rows[slot] = page->at(slot);
+                const std::array buffers{
+                    DemandPageBuffer{page->sources.data(), page->sources.capacity() * sizeof(page->sources[0])},
+                    page->owner.buffer(), page->row.buffer(), page->generation.buffer(), page->position.buffer()};
+                visit({page, node.get(), std::span(rows).first(page->count), buffers});
+            }
+        });
 }
 } // namespace SimpleFluid::PLIC::details::geometry_demand

@@ -1237,6 +1237,40 @@ slots, and later deferred clones preserve that mapping through repeated raw
 acquisition. Prepared bodies retain neither an older catalog, snapshot,
 hierarchy nor controller chain.
 
+The prepared-page policy retains the existing 64-cell block. Its row mask is one
+64-bit word, so the policy and the exact physical-slot lookup use the same block
+boundary. There is no separately qualified alternative page size. The supported
+qualification workload is serial native Cartesian State demand with one region,
+matched complete-block selections, forward/reverse/interleaved-half requests in
+batches of 1, 2 and 4, and the same four-cell demand after a warm selection and a
+selection twice as large. This workload does not establish MPI, mixed-provider
+or whole-pipeline scaling qualification.
+
+The policy's deterministic acceptance preserves the 128-cell source-owner
+allowance, metadata-owner allowance and stream/batch retained-byte ratio, the
+required-candidate admission margin, and the OriginalSources selection cap.
+Larger matched selections preserve the retained-byte and owner-count per-cell
+gates. Warm fixed-demand checks require every unrelated source control, physical
+row and payload buffer to survive. Their bounds follow the permitted input edits,
+borrowed metadata graph depth, and 64-row/32-child capacities; observed rewrites
+never enlarge an allowance. Separate 8192/16384-row repeated-box catalogs in
+Ordinary, BoundedCertification and Exact arithmetic require the unchanged
+selector controls and buffers outside the first-group/ancestor repair frontier.
+A four-row prefix copies exactly the old first 64 selectors plus the four inputs,
+so these checks exclude a complete catalog rebuild without constructing a large
+adaptive hierarchy. Catalog diagnostics include initialization, expansion and
+prepared source rebinding, including finite and bounded arithmetic catalogs when
+present. Persistent requested-catalog lookups and new selector-group maximum
+reads are included. These counters describe catalog construction and physical selector
+accesses, not every geometry evaluation or all pipeline allocations. Raw deferred
+subsets and actual finite-ordinary/bounded evaluation catalogs exercise their
+own acquisition paths; arithmetic mode names alone do not establish coverage.
+Each order, batch and fixture size has a distinct report key. Elapsed
+`steady_clock` times support review of this policy; timing never substitutes for
+deterministic gates.
+Qualification status must be read from fresh focused test artifacts matched to
+the source and build; documenting this policy does not itself establish a pass.
+
 Physical ownership is stored in a controlled persistent owner manifest keyed by
 channel, allocation kind, address and full shared control. A row keeps its exact
 exclusive byte count; reference multiplicity records how many slots or parent

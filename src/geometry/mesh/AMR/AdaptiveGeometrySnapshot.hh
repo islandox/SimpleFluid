@@ -191,9 +191,10 @@ private:
     [[nodiscard]] PreparedSourceSlot prepared_slot(const AdaptiveLeaf&) const;
     /** Adopt prepared page sources for already selected cells. */
     void rebind_prepared_slots(std::span<const std::size_t> ordinals, std::span<const PreparedSourceSlot> physical,
-        PLIC::GeometryAllocationLedger& ordinary_owners, std::size_t& used, std::size_t limit);
-    [[nodiscard]] bool can_rebind_prepared_slots(
-        std::size_t count, std::size_t available, geometry_snapshot_detail::OptionalOwnerReservation) const;
+        PLIC::GeometryAllocationLedger& ordinary_owners, std::size_t& used, std::size_t limit,
+        PLIC::details::CellCatalogDemandWork* demand_work = nullptr);
+    [[nodiscard]] bool can_rebind_prepared_slots(std::size_t count, std::size_t available,
+        geometry_snapshot_detail::OptionalOwnerReservation) const;
     /** Exact immutable owner set of this snapshot, excluding its own header.
      * `bounded` selects the bounded-certification ledger's owners. */
     [[nodiscard]] geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(

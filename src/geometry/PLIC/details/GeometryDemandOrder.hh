@@ -50,6 +50,23 @@ struct OrderedSourceSlot
     OrderStamp stamp;
     SourceSlot physical;
 };
+struct DemandPageBuffer
+{
+    const void* data = nullptr;
+    std::size_t bytes = 0;
+    bool operator==(const DemandPageBuffer&) const = default;
+};
+/** Synchronous diagnostic borrow. Spans expire when the visitor returns. The
+ * shared control names the actual selector allocation; buffers are its actual
+ * vector allocations, and rows carry exact source controls and physical slots. */
+struct BorrowedSelectorPage
+{
+    std::shared_ptr<const void> control;
+    const void* index_parent;
+    std::span<const OrderedSourceSlot> rows;
+    std::span<const DemandPageBuffer> buffers;
+};
+using SelectorPageVisit = std::function<void(const BorrowedSelectorPage&)>;
 /** Owns source-only data pages and metadata. Consumers authenticate a source
  * page's exact geometry type, layout, epoch and controls before selecting it.
  * Returned selectors preserve their actual shared owner and original row.
@@ -73,7 +90,7 @@ public:
     void visit_dependencies(MetadataSink, SourceSink) const;
     void visit_borrowed_dependencies(BorrowedMetadataSink, BorrowedSourceSink, const void* parent = nullptr) const;
     [[nodiscard]] std::size_t size() const noexcept;
-    [[nodiscard]] OrderedSourceSlot at(std::size_t) const;
+    [[nodiscard]] OrderedSourceSlot at(std::size_t, PageWork* = nullptr) const;
     [[nodiscard]] const std::shared_ptr<const CartesianCellSource>& native_owner(std::size_t) const;
     [[nodiscard]] std::size_t rank(OrderStamp) const;
     [[nodiscard]] std::uint64_t generation() const noexcept;
@@ -82,6 +99,7 @@ public:
     /** Explicit borrowed physical-owner census, independent of cached totals. */
     void visit_metadata(const std::function<void(const void*, std::size_t)>&) const;
     void visit_source_pages(const std::function<void(SourceKind, const std::shared_ptr<const void>&)>&) const;
+    void visit_selector_pages(const SelectorPageVisit&) const;
 
 private:
     struct State;

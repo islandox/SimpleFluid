@@ -2960,7 +2960,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
             if (candidate->can_rebind_prepared_slots(count, remaining, publication))
             {
                 candidate->rebind_prepared_slots(std::span(ordinals).first(count), std::span(prepared).first(count),
-                    operation_ordinary, pending_used, pending_used + remaining);
+                    operation_ordinary, pending_used, pending_used + remaining, &data_->geometry_cache->catalog_work);
                 refresh_candidate();
             }
         }
@@ -3144,7 +3144,8 @@ adaptive_detail::GeometryCacheAdmissionStatistics adaptive_detail::GeometrySnaps
     std::lock_guard lock(cache.mutex);
     return {sizeof(cache), cache.root_bytes(), cache.lease ? cache.lease->bytes() : 0, cache.admission_queries,
         cache.union_censuses, cache.census_root_visits, cache.catalog_work.cumulative_metadata_bytes,
-        cache.catalog_work.pages.copied_pages, cache.catalog_work.pages.visited_pages, cache.union_updates,
+        cache.catalog_work.pages.copied_pages, cache.catalog_work.pages.visited_pages,
+        cache.catalog_work.pages.copied_source_rows, cache.catalog_work.pages.visited_source_rows, cache.union_updates,
         cache.union_work.channels[0].edge_visits + cache.union_work.channels[1].edge_visits,
         cache.union_work.channels[0].dependency_entries + cache.union_work.channels[1].dependency_entries,
         cache.union_work.channels[0].first_transitions + cache.union_work.channels[1].first_transitions,

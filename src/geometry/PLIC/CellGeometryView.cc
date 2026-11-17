@@ -1432,6 +1432,13 @@ template class CellGeometryCatalog<ArithmeticMode::Ordinary>;
 template class CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
 template class CellGeometryCatalog<ArithmeticMode::Exact>;
 
+template void details::CellCatalogDemandAccess::visit_selector_pages<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&, const details::geometry_demand::SelectorPageVisit&);
+template void details::CellCatalogDemandAccess::visit_selector_pages<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&, const details::geometry_demand::SelectorPageVisit&);
+template void details::CellCatalogDemandAccess::visit_selector_pages<ArithmeticMode::Exact>(
+    const CellGeometryCatalog<ArithmeticMode::Exact>&, const details::geometry_demand::SelectorPageVisit&);
+
 template details::CellCatalogRebindBound details::CellCatalogDemandAccess::rebound_bound<ArithmeticMode::Ordinary>(
     const CellGeometryCatalog<ArithmeticMode::Ordinary>&, std::size_t);
 template details::CellCatalogRebindBound
@@ -1455,6 +1462,11 @@ template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
         std::span<const details::geometry_demand::SourceSlot>, GeometryLimits);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+    details::CellCatalogDemandAccess::rebound<ArithmeticMode::Ordinary>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::CellCatalogDemandWork*);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
 details::CellCatalogDemandAccess::exported<ArithmeticMode::Ordinary>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>, bool,
     GeometryLimits);
@@ -1474,6 +1486,12 @@ template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
         std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
         std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission);
 
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+    details::CellCatalogDemandAccess::rebound_precharged<ArithmeticMode::Ordinary>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission,
+        details::CellCatalogDemandWork*);
+
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
 details::CellCatalogDemandAccess::initialize_precharged<ArithmeticMode::BoundedCertification>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, GeometryLimits,
@@ -1488,6 +1506,12 @@ template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertif
     details::CellCatalogDemandAccess::rebound_precharged<ArithmeticMode::BoundedCertification>(
         std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
         std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+    details::CellCatalogDemandAccess::rebound_precharged<ArithmeticMode::BoundedCertification>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission,
+        details::CellCatalogDemandWork*);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
 details::CellCatalogDemandAccess::initialize_precharged<ArithmeticMode::Exact>(
@@ -1528,6 +1552,11 @@ template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertif
     details::CellCatalogDemandAccess::rebound<ArithmeticMode::BoundedCertification>(
         std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
         std::span<const details::geometry_demand::SourceSlot>, GeometryLimits);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+    details::CellCatalogDemandAccess::rebound<ArithmeticMode::BoundedCertification>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::CellCatalogDemandWork*);
 
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
 details::CellCatalogDemandAccess::exported<ArithmeticMode::BoundedCertification>(

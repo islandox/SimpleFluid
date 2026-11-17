@@ -68,6 +68,29 @@ template<ArithmeticMode M> std::size_t CellGeometryCatalog<M>::physical_row(std:
 }
 namespace details
 {
+struct DemandMeasurement
+{
+    CellCatalogAdmission& memory;
+    CellCatalogDemandWork* output;
+    geometry_demand::PageWork pages;
+    ~DemandMeasurement()
+    {
+        if (output)
+        {
+            // Cumulative construction work over the operation, not the
+            // last conversion alone.
+            output->cumulative_metadata_bytes += memory.used_bytes();
+            output->pages.copied_pages += pages.copied_pages;
+            output->pages.copied_bytes += pages.copied_bytes;
+            output->pages.copied_payload_bytes += pages.copied_payload_bytes;
+            output->pages.visited_pages += pages.visited_pages;
+            output->pages.retired_page_visits += pages.retired_page_visits;
+            output->pages.visited_source_rows += pages.visited_source_rows;
+            output->pages.copied_source_rows += pages.copied_source_rows;
+        }
+    }
+};
+
 namespace catalog_demand_detail
 {
 geometry_demand::Admission admission(CellCatalogAdmission& value)
@@ -111,6 +134,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
     if (original->demand_)
         return original;
     CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
+    DemandMeasurement measure{memory, measured, {}};
     const auto admitted = catalog_demand_detail::admission(memory);
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
@@ -148,6 +172,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
     std::map<const void*, std::size_t> owner_slots;
     for (std::size_t slot = 0; slot < original->size(); ++slot)
     {
+        ++measure.pages.visited_source_rows;
         auto value = original->physical_reference(slot);
         if (value.kind == G::SourceKind::Cartesian)
         {
@@ -185,10 +210,8 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
                        : (a.key.kind != b.key.kind ? a.key.kind < b.key.kind
                                                    : std::less<const void*>{}(a.key.address, b.key.address));
         });
-    state->native_sources = G::GeometryOwnerManifest::built(std::span(owners, owner_count), admitted);
-    state->order = G::GeometryDemandOrder{}.prepended(slots, {}, admitted);
-    if (measured)
-        measured->cumulative_metadata_bytes += memory.used_bytes();
+    state->native_sources = G::GeometryOwnerManifest::built(std::span(owners, owner_count), admitted, &measure.pages);
+    state->order = G::GeometryDemandOrder{}.prepended(slots, {}, admitted, &measure.pages);
     if (tail)
     {
         memory.charge(tail->cells.size(), sizeof(G::OrderStamp));
@@ -201,7 +224,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
             {
                 auto& stamp = state->tail_stamps.at(slots[slot].row);
                 unique = unique && stamp.generation == 0;
-                stamp = state->order.at(slot).stamp;
+                stamp = state->order.at(slot, &measure.pages).stamp;
             }
         if (unique && std::all_of(state->tail_stamps.begin(), state->tail_stamps.end(),
                           [](const auto& value) { return value.generation != 0; }))
@@ -242,28 +265,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
             throw GeometryError(GeometryErrorCode::InvalidInput, "Persistent catalog demand ordinal is absent.");
 
     CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
-    struct Measure
-    {
-        CellCatalogAdmission& memory;
-        CellCatalogDemandWork* output;
-        G::PageWork pages;
-        ~Measure()
-        {
-            if (output)
-            {
-                // Cumulative construction work over the operation, not the
-                // last conversion alone.
-                output->cumulative_metadata_bytes += memory.used_bytes();
-                output->pages.copied_pages += pages.copied_pages;
-                output->pages.copied_bytes += pages.copied_bytes;
-                output->pages.copied_payload_bytes += pages.copied_payload_bytes;
-                output->pages.visited_pages += pages.visited_pages;
-                output->pages.retired_page_visits += pages.retired_page_visits;
-                output->pages.visited_source_rows += pages.visited_source_rows;
-                output->pages.copied_source_rows += pages.copied_source_rows;
-            }
-        }
-    } measure{memory, measured, {}};
+    DemandMeasurement measure{memory, measured, {}};
     const auto admitted = catalog_demand_detail::admission(memory);
     const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
     {
@@ -288,12 +290,19 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
     reserve(pack, requested->size());
     for (std::size_t slot = 0; slot < requested->size(); ++slot)
     {
-        auto current = requested->physical_reference(slot);
+        const auto current_reference = [&]
+        {
+            if (requested->demand_)
+                return requested->demand_->order.at(slot, &measure.pages).physical;
+            ++measure.pages.visited_source_rows;
+            return requested->physical_reference(slot);
+        };
+        auto current = current_reference();
         bool same = false;
         if (const auto prior = previous_slots[slot])
         {
-            const auto previous = accepted->physical_reference(*prior);
-            retired.push_back(old.order.at(*prior).stamp);
+            const auto previous = old.order.at(*prior, &measure.pages).physical;
+            retired.push_back(old.order.at(*prior, &measure.pages).stamp);
             changes_tail = changes_tail || (old.tail && previous.kind == G::SourceKind::Explicit &&
                                                previous.source.get() == old.tail.get());
             if (previous.kind == G::SourceKind::Cartesian)
@@ -443,10 +452,25 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
     return rebound_precharged(std::move(accepted), ordinals, physical, limits, {nullptr, nullptr});
 }
 template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
+    std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
+    std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits, CellCatalogDemandWork* measured)
+{
+    return rebound_precharged(std::move(accepted), ordinals, physical, limits, {nullptr, nullptr}, measured);
+}
+template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_precharged(
     std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
     std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits,
     geometry_demand::Admission construction)
+{
+    return rebound_precharged(std::move(accepted), ordinals, physical, limits, construction, nullptr);
+}
+template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_precharged(
+    std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
+    std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits,
+    geometry_demand::Admission construction, CellCatalogDemandWork* measured)
 {
     using Catalog = CellGeometryCatalog<M>;
     namespace G = geometry_demand;
@@ -462,6 +486,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_p
             !physical[index].source)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid persistent catalog rebind ordinal.");
     CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
+    DemandMeasurement measure{memory, measured, {}};
     const auto admitted = catalog_demand_detail::admission(memory);
     const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
     {
@@ -484,16 +509,16 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_p
     reserve(rebound, ordinals.size());
     for (std::size_t index = 0; index < ordinals.size(); ++index)
     {
-        const auto previous = accepted->physical_reference(ordinals[index]);
+        const auto previous = old.order.at(ordinals[index], &measure.pages).physical;
         if (previous.kind != G::SourceKind::Cartesian || !previous.source)
             throw GeometryError(
                 GeometryErrorCode::InvalidInput, "Persistent catalog rebind ordinal is not procedural.");
-        state->native_sources = state->native_sources.retired(0, 0, previous.source, admitted);
-        state->native_sources = state->native_sources.retained(
-            0, 0, physical[index].source, catalog_demand_detail::native_body_bytes(physical[index].source), admitted);
-        rebound.push_back({old.order.at(ordinals[index]).stamp, physical[index]});
+        state->native_sources = state->native_sources.retired(0, 0, previous.source, admitted, &measure.pages);
+        state->native_sources = state->native_sources.retained(0, 0, physical[index].source,
+            catalog_demand_detail::native_body_bytes(physical[index].source), admitted, &measure.pages);
+        rebound.push_back({old.order.at(ordinals[index], &measure.pages).stamp, physical[index]});
     }
-    state->order = old.order.rebound(rebound, admitted);
+    state->order = old.order.rebound(rebound, admitted, &measure.pages);
     auto result = std::shared_ptr<Catalog>(new Catalog);
     result->size_ = state->order.size();
     result->demand_ = std::move(state);
@@ -571,6 +596,14 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::exported(
             entries.emplace_back(original->explicit_entry(slot));
     }
     return Catalog::build(std::move(sources), std::move(entries), memory, true);
+}
+template<ArithmeticMode M>
+void CellCatalogDemandAccess::visit_selector_pages(
+    const CellGeometryCatalog<M>& catalog, const geometry_demand::SelectorPageVisit& visit)
+{
+    if (!catalog.demand_)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Catalog has no persistent selector pages.");
+    catalog.demand_->order.visit_selector_pages(visit);
 }
 template<ArithmeticMode M>
 void CellCatalogDemandAccess::visit_borrowed_dependencies(const CellGeometryCatalog<M>& catalog,
