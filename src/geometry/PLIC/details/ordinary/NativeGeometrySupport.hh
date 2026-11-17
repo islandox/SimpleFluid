@@ -217,11 +217,23 @@ struct Reader
         v = descriptor & 1 ? -v : v;
         if (canonical_encoding)
         {
-            Writer canonical;
-            canonical.real(v);
             const auto encoded = bytes.subspan(start, cursor - start);
-            if (canonical.bytes.size() != encoded.size() ||
-                !std::equal(canonical.bytes.begin(), canonical.bytes.end(), encoded.begin()))
+            struct Comparison
+            {
+                std::span<const char> expected;
+                std::size_t offset = 0;
+                bool equal = true;
+                void word(std::uint64_t value) noexcept
+                {
+                    for (unsigned i = 0; i < 8; ++i, ++offset)
+                        equal = equal && offset < expected.size() &&
+                                static_cast<unsigned char>(expected[offset]) == ((value >> (8 * i)) & 255);
+                }
+            } canonical{encoded};
+            // Preserve the exact scalar emitter and byte-for-byte canonical
+            // gate without constructing an owning packet during preflight.
+            emit_canonical_scalar(v, canonical);
+            if (canonical.offset != encoded.size() || !canonical.equal)
                 reject("noncanonical finite scalar encoding.");
         }
         return v;
