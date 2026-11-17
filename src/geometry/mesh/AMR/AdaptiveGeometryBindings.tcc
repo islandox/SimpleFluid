@@ -736,11 +736,15 @@ public:
         const auto value = order.at(slot).physical;
         return {std::static_pointer_cast<const BindingPage>(value.source), std::uint8_t(value.row)};
     }
+    std::size_t exclusive_bytes() const noexcept
+    {
+        return sizeof(*this) + trails.capacity() * sizeof(FluidTrail);
+    }
     std::size_t metadata_bytes() const noexcept
     {
         const auto groups = keys ? keys->subtree_payload_bytes + keys->subtree_owner_bytes
                                  : (single_group ? single_group->page->bytes() : 0);
-        return sizeof(*this) + order.metadata_payload_bytes() + data_pages.metadata_payload_bytes() +
+        return exclusive_bytes() + order.metadata_payload_bytes() + data_pages.metadata_payload_bytes() +
                data_pages.payload_bytes() + groups;
     }
     void patch_keys(std::span<SelectedBinding> changed, adaptive_detail::Budget& budget)
@@ -948,7 +952,7 @@ public:
 
     template<class Visitor> void visit_children(const Visitor& visitor, bool recipes = true) const
     {
-        visitor(selection_, sizeof(BindingSelection));
+        visitor(selection_, selection_->exclusive_bytes());
         selection_->visit_metadata(visitor);
         struct Context
         {
@@ -970,12 +974,11 @@ public:
                     visit(page, page->bytes());
                     // A binding source object is construction-charged with its
                     // page; only its immutable recipe children were not.
-                    for (const auto& source : page->sources)
-                    {
-                        visit(source, source->bytes());
-                        if (static_cast<Context*>(raw)->recipes)
-                            source->visit_children(visit);
-                    }
+                    if (static_cast<Context*>(raw)->recipes)
+                        page->visit_children(visit);
+                    else
+                        for (const auto& source : page->sources)
+                            visit(source, source->bytes());
                 }});
         selection_->order.visit_dependencies(metadata, {nullptr, [](void*, G::SourceKind,
             const std::shared_ptr<const void>&) {}});
@@ -1149,8 +1152,12 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
         if (leaves[sorted[row - 1]]->key == leaves[sorted[row]]->key)
             throw std::invalid_argument("Duplicate geometry demand key.");
     budget.add(sizeof(Bindings) + sizeof(BindingSelection));
+    charge_items(budget, previous.selection_->trails.size(), sizeof(BindingSelection::FluidTrail));
     auto result = std::make_shared<Bindings>();
     auto next = std::make_shared<BindingSelection>(*previous.selection_);
+    if (next->trails.capacity() != previous.selection_->trails.size())
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+            "Binding selection trail copy capacity is unqualified.");
     std::vector<SharedLocator> prefix;
     std::vector<std::optional<SelectedBinding>> original;
     std::vector<unsigned char> needs_data;

@@ -1,5 +1,6 @@
 /** Retention and binding regressions for source-only adaptive geometry. */
 #include "geometry/PLIC/details/GeometryRetentionCensus.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
@@ -686,4 +687,60 @@ TEST(AdaptiveGeometryStorage, RawSelectionFitsBelowThePreparedStatePageFactCost)
         for (unsigned axis = 0; axis < 3; ++axis)
             EXPECT_EQ(actual.first_moment[axis].value, expected.first_moment[axis].value);
     }
+}
+
+/** Product key capsules remain physical owners after their source controllers expire. */
+TEST(AdaptiveGeometryStorage, ProductKeyCapsulesRemainAttributedAfterControllersExpire)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable floating-point construction controls.";
+    auto source = product_source();
+    struct Expected
+    {
+        std::weak_ptr<const AMR::AdaptiveBytes> control;
+        std::size_t bytes;
+    };
+    std::map<const void*, Expected> expected;
+    std::vector<const AMR::AdaptiveLeaf*> rows;
+    for (const auto& row : source->owned_leaves())
+    {
+        rows.push_back(&row);
+        ASSERT_TRUE(row.factor_recipe);
+        for (const auto& capsule : {row.factor_recipe->base, row.factor_recipe->axis})
+        {
+            ASSERT_TRUE(capsule);
+            ASSERT_NE(capsule.get(), row.factor_recipe->root.get());
+            expected.emplace(capsule.get(), Expected{capsule, sizeof(*capsule) + capsule->capacity()});
+        }
+    }
+    ASSERT_GT(expected.size(), 1u);
+    auto accepted = snapshot(*source, rows);
+    std::weak_ptr<const AMR::AdaptiveLeafLayout> layout = source->leaf_layout();
+    std::weak_ptr<const Hierarchy> owner = source;
+    rows.clear();
+    source.reset();
+    EXPECT_TRUE(layout.expired());
+    EXPECT_TRUE(owner.expired());
+    std::map<const void*, std::size_t> attributed;
+    accepted->visit_external_owners(
+        [&](const void* address, std::size_t bytes) { attributed.emplace(address, bytes); });
+    PLIC::GeometryAllocationLedger ordinary, bounded;
+    std::size_t used = 0;
+    accepted->retain(ordinary, bounded, used, limit);
+    std::map<const void*, std::size_t> admitted;
+    PLIC::details::GeometryAllocationOwnerAccess::visit(
+        ordinary, [&](std::uint8_t, const void* address, std::size_t bytes) { admitted.emplace(address, bytes); });
+    for (const auto& [address, record] : expected)
+    {
+        ASSERT_FALSE(record.control.expired());
+        ASSERT_TRUE(attributed.contains(address));
+        EXPECT_EQ(attributed.at(address), record.bytes);
+        ASSERT_TRUE(admitted.contains(address));
+        EXPECT_EQ(admitted.at(address), record.bytes);
+    }
+    ordinary = {};
+    bounded = {};
+    accepted.reset();
+    for (const auto& [address, record] : expected)
+        EXPECT_TRUE(record.control.expired());
 }
