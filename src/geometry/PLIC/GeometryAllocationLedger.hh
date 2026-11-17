@@ -13,7 +13,9 @@ namespace details
 {
 class GeometryAllocationOwnerAccess;
 class GeometryOwnerImportAccess;
-}
+class GeometryOwnerUnion;
+class GeometryOwnerAdmissionPair;
+} // namespace details
 /** Counts immutable owners and their exclusively owned buffers once. Strong
  * pins prevent allocator address reuse from hiding later allocations. Rejected
  * admission poisons the ledger; create a new ledger for a new transaction.
@@ -62,10 +64,13 @@ public:
     template<GeometryIdentityKind Kind, ArithmeticMode Mode>
         requires(GeometryIdentity<Kind, Mode>::shared_storage)
     void retain(const GeometryIdentity<Kind, Mode>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
-    template<ArithmeticMode Mode> requires(Mode != ArithmeticMode::Exact)
-    void retain(const std::shared_ptr<const CellGeometryCatalog<Mode>>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    template<ArithmeticMode Mode>
+        requires(Mode != ArithmeticMode::Exact)
+    void retain(
+        const std::shared_ptr<const CellGeometryCatalog<Mode>>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Admit one immutable procedural context and its shared original supports. */
-    void retain(const std::shared_ptr<const CartesianCellSource>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
+    void retain(
+        const std::shared_ptr<const CartesianCellSource>&, std::size_t& cumulative_bytes, std::size_t byte_limit);
     /** Admit detached immutable application metadata by actual owner identity.
      * The byte count covers exclusively owned storage; admit child owners separately. */
     void retain_external_owner(const std::shared_ptr<const void>&, std::size_t exclusive_bytes,
@@ -83,6 +88,8 @@ private:
     friend class details::RetentionAccess;
     friend class details::GeometryAllocationOwnerAccess;
     friend class details::GeometryOwnerImportAccess;
+    friend class details::GeometryOwnerUnion;
+    friend class details::GeometryOwnerAdmissionPair;
     void begin_admission(std::size_t&, std::size_t, bool allocate_state = true);
     std::unique_ptr<Impl> impl_;
     bool failed_ = false;

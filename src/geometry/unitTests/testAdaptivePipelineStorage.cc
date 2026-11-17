@@ -597,6 +597,18 @@ TEST(AdaptivePipelineStorage, WholePipelineBaselineReportsExistingWork)
                 named("_export_calls", events.export_calls);
                 named("_actual_export_rows", events.export_rows);
                 named("_actual_manifest_visit_rows", events.manifest_visit_rows);
+                named("_metadata_credit_queries", events.metadata_credit_queries);
+                named("_metadata_credit_seed_rows", events.metadata_credit_seed_rows);
+                named("_metadata_credit_created", events.metadata_credit_created);
+                named("_paired_payload_credits", events.paired_payload_credits);
+                named("_import_fallbacks", events.import_fallbacks);
+                named("_import_delta_rows", events.import_delta_rows);
+                named("_import_delta_pages", events.import_delta_pages);
+                named("_certified_import_hits", events.certified_import_hits);
+                named("_manifest_lookup_pages", events.manifest_lookup_pages);
+                named("_index_control_lookup_pages", events.index_control_lookup_pages);
+                named("_control_table_enumeration_rows", events.control_table_enumeration_rows);
+                named("_reservation_path_pages", events.reservation_path_pages);
             }
             const auto& c = measured.contact;
             const auto property = [&](const char* label, std::size_t value)

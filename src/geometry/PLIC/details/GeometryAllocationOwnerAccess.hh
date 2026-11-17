@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/GeometryIndexControls.hh"
 
 #include <cstdint>
 #include <functional>
@@ -17,6 +18,11 @@ struct GeometryAllocationWork
     std::size_t pushes = 0, admissions = 0, pending_visits = 0;
     std::size_t import_calls = 0, import_rows = 0, export_calls = 0, export_rows = 0, manifest_visit_rows = 0;
     std::size_t metadata_credit_queries = 0, metadata_credit_seed_rows = 0, metadata_credit_created = 0;
+    std::size_t paired_payload_credits = 0, import_fallbacks = 0, import_delta_rows = 0;
+    std::size_t import_delta_pages = 0, certified_import_hits = 0;
+    std::size_t manifest_lookup_pages = 0, index_control_lookup_pages = 0;
+    std::size_t control_table_enumeration_rows = 0;
+    std::size_t reservation_path_pages = 0;
 };
 class GeometryAllocationOwnerAccess
 {
@@ -33,7 +39,16 @@ public:
         ManifestVisitRow,
         MetadataCreditQuery,
         MetadataCreditSeedRow,
-        MetadataCreditCreated
+        MetadataCreditCreated,
+        PairedPayloadCredit,
+        ImportFallback,
+        ImportDeltaRow,
+        ImportDeltaPage,
+        CertifiedImportHit,
+        ManifestLookupPage,
+        IndexControlLookupPage,
+        ControlTableEnumerationRow,
+        ReservationPathPage
     };
     /** Thread-local actual event counts; separate from logical retained owner counts. */
     [[nodiscard]] static GeometryAllocationWork work_statistics() noexcept;
@@ -72,8 +87,32 @@ public:
         std::size_t exclusive_bytes, std::size_t& used, std::size_t limit);
 
 private:
+    friend class GeometryOwnerUnion;
+    friend class GeometryOwnerAdmissionPair;
+    static GeometryAllocationLedger* paired_peer(const GeometryAllocationLedger&) noexcept;
+    static void retain_verified_metadata(GeometryAllocationLedger&, std::uint8_t, const std::shared_ptr<const void>&,
+        std::size_t, std::size_t, std::size_t&, std::size_t);
+    static void retain_metadata_impl(GeometryAllocationLedger&, std::uint8_t, const std::shared_ptr<const void>&,
+        std::size_t, std::size_t, std::size_t&, std::size_t, bool prepaid, bool verified);
     friend class SimpleFluid::PLIC::GeometryAllocationLedger;
     friend class GeometryOwnerImportAccess;
     static void seed_imported_metadata(GeometryAllocationLedger&, std::size_t& used, std::size_t limit);
+};
+/** Operation-local peer credit. This borrowed link is removed on every exit;
+ * it never survives in a snapshot/root or keeps another ledger/controller alive. */
+class GeometryOwnerAdmissionPair
+{
+public:
+    GeometryOwnerAdmissionPair(GeometryAllocationLedger&, GeometryAllocationLedger&);
+    ~GeometryOwnerAdmissionPair();
+    GeometryOwnerAdmissionPair(const GeometryOwnerAdmissionPair&) = delete;
+    GeometryOwnerAdmissionPair& operator=(const GeometryOwnerAdmissionPair&) = delete;
+
+private:
+    friend class GeometryAllocationOwnerAccess;
+    static thread_local GeometryOwnerAdmissionPair* active_;
+    GeometryAllocationLedger* first_;
+    GeometryAllocationLedger* second_;
+    GeometryOwnerAdmissionPair* previous_;
 };
 } // namespace SimpleFluid::PLIC::details

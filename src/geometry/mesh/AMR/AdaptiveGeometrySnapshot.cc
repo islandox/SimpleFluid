@@ -6,6 +6,7 @@
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
@@ -53,6 +54,12 @@ GeometryConstructionControls construction_controls()
     result.supported = true;
 #endif
     return result;
+}
+std::size_t checked_sum(std::size_t first, std::size_t second)
+{
+    if (second > std::numeric_limits<std::size_t>::max() - first)
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Native geometry storage sum overflows.");
+    return first + second;
 }
 std::size_t checked_product(std::size_t count, std::size_t width)
 {
@@ -282,7 +289,8 @@ std::optional<std::size_t> AdaptiveGeometrySnapshot::find(const AdaptiveLeaf& le
 }
 bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveHierarchy& hierarchy,
     const AdaptiveLeaf& requested, std::size_t& used, std::size_t operation_limit, std::size_t optional_headroom,
-    std::uint64_t block_first, PLIC::GeometryAllocationLedger& owners)
+    std::uint64_t block_first, PLIC::GeometryAllocationLedger& owners,
+    geometry_snapshot_detail::OptionalOwnerReservation publication)
 {
     using namespace geometry_snapshot_detail;
     using Access = PLIC::details::NativeCellGeometrySourceAccess;
@@ -318,7 +326,16 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
                             : geometry_snapshot_detail::PreparedCartesianPages{}.insertion_dependency_owner_bound();
     const auto enough_room = [&](std::size_t cells, std::size_t points)
     {
-        const auto available = std::min(optional_headroom, operation_limit - std::min(used, operation_limit));
+        auto available = std::min(optional_headroom, operation_limit - std::min(used, operation_limit));
+        const auto new_owners = PLIC::details::geometry_demand::checked_sum(graph_owners, points);
+        const auto frontier = PLIC::details::geometry_demand::checked_sum(
+            PreparedOwnerManifest::metadata_owner_count_bound(payload_owners_[0].owner_count()),
+            PreparedOwnerManifest::metadata_owner_count_bound(
+                PLIC::details::geometry_demand::checked_sum(payload_owners_[0].owner_count(), new_owners)));
+        const auto reserved = publication.bytes ? publication.bytes(publication.context, new_owners, frontier) : 0;
+        if (reserved > available)
+            return false;
+        available -= reserved;
         const auto graph_bound = PLIC::details::GeometryOwnerGraphEditor::edit_byte_bound(
             payload_owners_[0], graph_edges + points, graph_owners + points);
         return pool_bound <= available && graph_bound <= available - pool_bound &&
@@ -458,6 +475,18 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
     payload_owners_[0] = std::move(manifest);
     record_owner_work(work);
     return true;
+}
+PLIC::details::OwnerManifestPair adaptive_detail::GeometrySnapshotAccess::owner_pair(
+    const AdaptiveGeometrySnapshot& snapshot)
+{
+    return PLIC::details::OwnerManifestPair::sealed(snapshot.payload_owners_, snapshot.cross_payload_bytes_);
+}
+PLIC::details::GeometryOwnerRootBinding adaptive_detail::GeometrySnapshotAccess::owner_binding(
+    const std::shared_ptr<const AdaptiveGeometrySnapshot>& snapshot)
+{
+    if (!snapshot)
+        return {};
+    return {snapshot, sizeof(*snapshot), owner_pair(*snapshot)};
 }
 geometry_snapshot_detail::PreparedOwnerManifest adaptive_detail::GeometrySnapshotAccess::owner_manifest(
     const AdaptiveGeometrySnapshot& snapshot, adaptive_detail::Budget& budget, bool bounded)
@@ -631,6 +660,38 @@ AdaptiveGeometrySnapshot::PreparedSourceSlot AdaptiveGeometrySnapshot::prepared_
     if (slot >= page->source->size())
         return {};
     return {page->source, slot, true};
+}
+
+bool AdaptiveGeometrySnapshot::can_rebind_prepared_slots(
+    std::size_t count, std::size_t available, geometry_snapshot_detail::OptionalOwnerReservation publication) const
+{
+    using Access = PLIC::details::CellCatalogDemandAccess;
+    using Manifest = geometry_snapshot_detail::PreparedOwnerManifest;
+    namespace G = PLIC::details::geometry_demand;
+    if (!count)
+        return true;
+    if (count > 4)
+        return false;
+    std::size_t bytes = geometry_snapshot_detail::checked_product(count, sizeof(G::SourceSlot)), owners = 0;
+    for (const auto& catalog : {ordinary_, finite_ordinary_})
+        if (catalog)
+        {
+            const auto bound = Access::rebound_bound(*catalog, count);
+            bytes = G::checked_sum(bytes, bound.bytes);
+            owners = G::checked_sum(owners, bound.owners);
+        }
+    // Existing source DAGs may be deep. Their entire cached incoming-edge
+    // count bounds the retired frontier without walking any unrelated owner.
+    const auto edges = G::checked_sum(payload_owners_[0].physical_edge_count(),
+        G::checked_sum(4, geometry_snapshot_detail::checked_product(owners, G::leaf_capacity)));
+    const auto keys = G::checked_sum(payload_owners_[0].owner_count(), owners);
+    bytes = G::checked_sum(
+        bytes, PLIC::details::GeometryOwnerGraphEditor::edit_byte_bound(payload_owners_[0], edges, keys));
+    bytes = G::checked_sum(bytes, PLIC::details::identity_ledger_bookkeeping_bound(owners));
+    const auto frontier = G::checked_sum(Manifest::metadata_owner_count_bound(payload_owners_[0].owner_count()),
+        Manifest::metadata_owner_count_bound(keys));
+    const auto reserved = publication.bytes ? publication.bytes(publication.context, owners, frontier) : 0;
+    return reserved <= available && bytes <= available - reserved;
 }
 
 void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t> ordinals,
@@ -828,6 +889,7 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
             }
         }
     } reject_ledgers{ordinary_owners, bounded_owners};
+    PLIC::details::GeometryOwnerAdmissionPair paired_admission(ordinary_owners, bounded_owners);
     adaptive_detail::Budget budget{limit, used};
     struct SpentCounter
     {
@@ -927,6 +989,8 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     PLIC::details::GeometryOwnerGraphEditor bounded_graph(
         previous ? previous->payload_owners_[1] : geometry_snapshot_detail::PreparedOwnerManifest{}, 1, budget.used,
         budget.limit, &bounded_owners, &bounded_work);
+    std::size_t cross_payload = previous ? previous->cross_payload_bytes_ : 0;
+    ordinary_graph.pair_with(bounded_graph, cross_payload);
     const auto retain_catalog = [&]<ArithmeticMode M>(
                                     std::shared_ptr<const PLIC::CellGeometryCatalog<M>> catalog, auto&)
     {
@@ -1025,6 +1089,7 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
                 previous && previous->purpose_ == purpose ? previous->bindings_.get() : nullptr, false, budget);
     }
     result.update_owner_manifests(previous.get(), ordinary_graph, bounded_graph);
+    result.cross_payload_bytes_ = cross_payload;
     result.record_owner_work(ordinary_work);
     result.record_owner_work(bounded_work);
     budget.add(sizeof(AdaptiveGeometrySnapshot));

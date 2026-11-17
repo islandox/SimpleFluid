@@ -5,6 +5,7 @@
 #include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/AdaptiveContactSnapshot.hh"
@@ -29,6 +30,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -39,6 +41,22 @@ using namespace adaptive_detail;
 namespace
 {
 constexpr auto family_layout_header_bytes = sizeof(AdaptiveFamilyLayout) + 4 * sizeof(void*);
+struct RejectGeometryAdmission
+{
+    PLIC::GeometryAllocationLedger* ordinary;
+    PLIC::GeometryAllocationLedger* bounded;
+    int exceptions = std::uncaught_exceptions();
+    ~RejectGeometryAdmission()
+    {
+        if (std::uncaught_exceptions() > exceptions)
+        {
+            if (ordinary)
+                PLIC::details::GeometryAllocationOwnerAccess::poison(*ordinary);
+            if (bounded)
+                PLIC::details::GeometryAllocationOwnerAccess::poison(*bounded);
+        }
+    }
+};
 }
 // Keeps hierarchy-local admission alive exactly as long as its immutable Data.
 struct AdaptivePublishedAdmission
@@ -66,6 +84,38 @@ struct AdaptiveGeometrySnapshotCache
      * re-walking the snapshot dependency graph. */
     std::array<std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2>, 6> manifests;
     std::size_t manifest_bytes = 0;
+    std::array<PLIC::details::GeometryOwnerRootBinding, 6> bindings;
+    PLIC::details::GeometryOwnerUnion owner_union;
+    PLIC::details::GeometryOwnerUnionWork union_work;
+    std::size_t union_updates = 0;
+    PLIC::details::GeometryOwnerRootBinding binding(const std::shared_ptr<const AdaptiveGeometrySnapshot>& root) const
+    {
+        if (!root)
+            return {};
+        return {root, sizeof(*root), GeometrySnapshotAccess::owner_pair(*root)};
+    }
+    void record_union_work(const PLIC::details::GeometryOwnerUnionWork& work)
+    {
+        ++union_updates;
+        union_work.imported_rows += work.imported_rows;
+        for (unsigned channel = 0; channel < 2; ++channel)
+        {
+            auto& to = union_work.channels[channel];
+            const auto& from = work.channels[channel];
+            to.edge_visits += from.edge_visits;
+            to.dependency_entries += from.dependency_entries;
+            to.first_transitions += from.first_transitions;
+            to.last_transitions += from.last_transitions;
+            to.index.copied_pages += from.index.copied_pages;
+            to.index.copied_bytes += from.index.copied_bytes;
+            to.index.visited_pages += from.index.visited_pages;
+            to.lookup.visited_pages += from.lookup.visited_pages;
+        }
+        union_work.controls.copied_pages += work.controls.copied_pages;
+        union_work.controls.copied_bytes += work.controls.copied_bytes;
+        union_work.controls.visited_pages += work.controls.visited_pages;
+    }
+
     /** Cumulative persistent-catalog construction work since the last reset. */
     PLIC::details::CellCatalogDemandWork catalog_work;
 
@@ -77,6 +127,8 @@ struct AdaptiveGeometrySnapshotCache
             if (sealed_roots[slot].lock() != roots[slot] || sealed_roots[slot].owner_before(roots[slot]) ||
                 roots[slot].owner_before(sealed_roots[slot]))
                 throw std::logic_error("Geometry cache root set differs from its exact residency seal.");
+        if (owner_union.resident_bytes() != resident_bytes)
+            throw std::logic_error("Geometry cache owner union differs from residency seal.");
         if (lease && lease->bytes() != resident_bytes)
             throw std::logic_error("Geometry cache residency seal differs from its admitted lease.");
         return resident_bytes;
@@ -87,45 +139,6 @@ struct AdaptiveGeometrySnapshotCache
         const auto bytes = root_bytes();
         budget.add(sizeof(*this));
         budget.add(bytes);
-    }
-    // Stage 2 compatibility census. Stored snapshot manifests exclude their
-    // own administrative indexes and header. The full retain path accounts for
-    // those credits centrally, including exact repeated/imported controls.
-    // Stage 3 replaces this explicit full walk with maintained root transitions.
-    struct Census
-    {
-        std::size_t resident = 0, metadata = 0;
-    };
-    Census census_root_bytes(std::size_t replacement_slot,
-        const std::shared_ptr<const AdaptiveGeometrySnapshot>& replacement, Budget& budget)
-    {
-        ++union_censuses;
-        PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-        bool any_root = false, any_bounded = false;
-        for (std::size_t slot = 0; slot < roots.size(); ++slot)
-        {
-            const auto& root = slot == replacement_slot ? replacement : roots[slot];
-            any_root = any_root || bool(root);
-            any_bounded = any_bounded || (root && bool(root->bounded_catalog()));
-        }
-        if (any_root)
-            PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
-                ordinary_owners, budget.used, budget.limit);
-        if (any_bounded)
-            PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
-                bounded_owners, budget.used, budget.limit);
-        for (std::size_t slot = 0; slot < roots.size(); ++slot)
-        {
-            const auto& root = slot == replacement_slot ? replacement : roots[slot];
-            if (!root)
-                continue;
-            root->retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
-            census_root_visits += ordinary_owners.owner_count() + bounded_owners.owner_count();
-        }
-        // Cache-held manifest values share the same indexes retained by roots.
-        return {ordinary_owners.payload_bytes() + ordinary_owners.bookkeeping_bytes() + bounded_owners.payload_bytes() +
-                    bounded_owners.bookkeeping_bytes(),
-            0};
     }
     void seal_residency(std::size_t bytes) noexcept
     {
@@ -140,6 +153,9 @@ struct AdaptiveGeometrySnapshotCache
         predecessors = source.predecessors;
         manifests = source.manifests;
         manifest_bytes = source.manifest_bytes;
+        bindings = source.bindings;
+        owner_union = source.owner_union;
+
         seal_residency(bytes);
     }
 };
@@ -246,8 +262,8 @@ struct DistributedAdaptiveHierarchy::Data
     }
     void set_layout(AdaptiveLeafPages pages, std::shared_ptr<const ContactExternalResidencyLease> admission)
     {
-        leaves = std::shared_ptr<const AdaptiveLeafLayout>(new const AdaptiveLeafLayout(std::move(pages),
-            std::move(admission)));
+        leaves = std::shared_ptr<const AdaptiveLeafLayout>(
+            new const AdaptiveLeafLayout(std::move(pages), std::move(admission)));
     }
     [[nodiscard]] std::size_t staged_buffer_bytes() const
     {
@@ -259,8 +275,8 @@ struct DistributedAdaptiveHierarchy::Data
     void publish_bootstrap(const std::shared_ptr<Budget>& arena, std::size_t buffer_bytes)
     {
         auto row = edit_owned().begin();
-        auto pages = AdaptiveLeafPages::build_moving(owned().size(),
-            [&]() -> AdaptiveLeaf&& { return std::move((row++)->second); }, arena, buffer_bytes);
+        auto pages = AdaptiveLeafPages::build_moving(
+            owned().size(), [&]() -> AdaptiveLeaf&& { return std::move((row++)->second); }, arena, buffer_bytes);
         {
             AdaptiveLeafBodyDelta delta(arena);
             pages.visit_leaf_pages([&](auto rows) { delta.record(rows, true); });
@@ -403,7 +419,8 @@ void intern_state_legacy(DistributedAdaptiveHierarchy::Data& state)
     auto packet = encode_adaptive_batch(leaves, families, state.options.byte_budget);
     auto shared = decode_adaptive_batch(packet, state.options.byte_budget);
     std::size_t leaf_retained = 0;
-    const auto retained = fetch_retention(shared.leaves, shared.families, state.options.byte_budget, false, &leaf_retained);
+    const auto retained =
+        fetch_retention(shared.leaves, shared.families, state.options.byte_budget, false, &leaf_retained);
     state.staged_family_bound = retained - leaf_retained;
     Budget row_metadata{state.options.byte_budget};
     for (const auto& leaf : shared.leaves)
@@ -514,39 +531,40 @@ void full_product_family_reference(DistributedAdaptiveHierarchy::Data& state, Cl
             std::erase_if(state.staged_families,
                 [](const auto& entry) { return entry.second.parent.provider == AdaptiveProviderKind::Product; });
             std::map<AdaptiveBytes, AdaptiveFamily> local;
-            state.visit_active([&](const AdaptiveLeaf& leaf)
-            {
-                const auto& key = leaf.key;
-                if (leaf.provider == AdaptiveProviderKind::Product)
+            state.visit_active(
+                [&](const AdaptiveLeaf& leaf)
                 {
-                    const auto cap = remaining();
-                    auto ancestry = state.kernel->ancestry_families(leaf);
-                    const auto size = fetch_retention({}, ancestry, cap, false);
-                    work.drop(cap - size);
-                    for (auto& family : ancestry)
+                    const auto& key = leaf.key;
+                    if (leaf.provider == AdaptiveProviderKind::Product)
                     {
-                        family.revision = state.topology;
-                        const auto dynamic = fetch_key_bytes(key);
-                        if (work.budget.limit < 256 || dynamic > work.budget.limit / 4 - 64)
-                            throw std::invalid_argument("Product family anchor exceeds lease.");
-                        work.add(4 * (dynamic + 64));
-                        family.anchor = encode_adaptive_key(key);
-                        auto found = local.find(family.key);
-                        if (found == local.end())
+                        const auto cap = remaining();
+                        auto ancestry = state.kernel->ancestry_families(leaf);
+                        const auto size = fetch_retention({}, ancestry, cap, false);
+                        work.drop(cap - size);
+                        for (auto& family : ancestry)
                         {
-                            work.add(sizeof(decltype(local)::value_type) + 4 * sizeof(void*) + family.key.size());
-                            local.emplace(family.key, std::move(family));
-                        }
-                        else
-                        {
-                            const auto revision = std::max(found->second.parent.revision, family.parent.revision);
-                            if (decode_adaptive_key(family.anchor) < decode_adaptive_key(found->second.anchor))
-                                found->second = std::move(family);
-                            found->second.parent.revision = revision;
+                            family.revision = state.topology;
+                            const auto dynamic = fetch_key_bytes(key);
+                            if (work.budget.limit < 256 || dynamic > work.budget.limit / 4 - 64)
+                                throw std::invalid_argument("Product family anchor exceeds lease.");
+                            work.add(4 * (dynamic + 64));
+                            family.anchor = encode_adaptive_key(key);
+                            auto found = local.find(family.key);
+                            if (found == local.end())
+                            {
+                                work.add(sizeof(decltype(local)::value_type) + 4 * sizeof(void*) + family.key.size());
+                                local.emplace(family.key, std::move(family));
+                            }
+                            else
+                            {
+                                const auto revision = std::max(found->second.parent.revision, family.parent.revision);
+                                if (decode_adaptive_key(family.anchor) < decode_adaptive_key(found->second.anchor))
+                                    found->second = std::move(family);
+                                found->second.parent.revision = revision;
+                            }
                         }
                     }
-                }
-            });
+                });
             std::map<int, std::vector<AdaptiveFamily>> groups;
             for (auto& [key, family] : local)
             {
@@ -761,33 +779,35 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
         {
             Budget budget{state.options.byte_budget};
             std::uint64_t ordinal = 0;
-            state.visit_active([&](const AdaptiveLeaf& leaf)
-            {
-                const auto& key = leaf.key;
-                state.active_product |= leaf.provider == AdaptiveProviderKind::Product;
-                // Admit the owning vector capacity and the exact encoded key copy
-                // BEFORE either allocation is materialized.
-                const auto key_bytes = encoded_adaptive_key_size(key);
-                if (retained)
+            state.visit_active(
+                [&](const AdaptiveLeaf& leaf)
                 {
-                    scratch.append(cells);
-                    // Preserve the established small-budget threshold: it is a
-                    // policy guard on key dynamic storage, not on wire size.
-                    const auto dynamic = fetch_key_bytes(key);
-                    if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
-                        throw std::invalid_argument("Directory cell key exceeds shared lease.");
-                    scratch.add(key_bytes);
-                }
-                else
-                {
-                    budget.append_capacity(cells);
-                    budget.add(key_bytes);
-                }
-                auto bytes = encode_adaptive_key(key);
-                if (bytes.size() != key_bytes)
-                    throw std::logic_error("Directory cell key encoding differs from its admitted size.");
-                cells.push_back({std::move(bytes), state.comm->getRank(), leaf.revision, state.cell_begin + ordinal++});
-            });
+                    const auto& key = leaf.key;
+                    state.active_product |= leaf.provider == AdaptiveProviderKind::Product;
+                    // Admit the owning vector capacity and the exact encoded key copy
+                    // BEFORE either allocation is materialized.
+                    const auto key_bytes = encoded_adaptive_key_size(key);
+                    if (retained)
+                    {
+                        scratch.append(cells);
+                        // Preserve the established small-budget threshold: it is a
+                        // policy guard on key dynamic storage, not on wire size.
+                        const auto dynamic = fetch_key_bytes(key);
+                        if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
+                            throw std::invalid_argument("Directory cell key exceeds shared lease.");
+                        scratch.add(key_bytes);
+                    }
+                    else
+                    {
+                        budget.append_capacity(cells);
+                        budget.add(key_bytes);
+                    }
+                    auto bytes = encode_adaptive_key(key);
+                    if (bytes.size() != key_bytes)
+                        throw std::logic_error("Directory cell key encoding differs from its admitted size.");
+                    cells.push_back(
+                        {std::move(bytes), state.comm->getRank(), leaf.revision, state.cell_begin + ordinal++});
+                });
         });
     std::optional<DirectorySourceCredit> credit;
     if (source)
@@ -804,32 +824,33 @@ void register_cells(DistributedAdaptiveHierarchy::Data& state, ClosureScratch* r
         [&]
         {
             Budget budget{state.options.byte_budget};
-            state.visit_active([&](const AdaptiveLeaf& leaf)
-            {
-                for (const auto& partner : state.kernel->matching_partners(leaf))
+            state.visit_active(
+                [&](const AdaptiveLeaf& leaf)
                 {
-                    const auto key_bytes = encoded_adaptive_key_size(partner);
-                    if (retained)
+                    for (const auto& partner : state.kernel->matching_partners(leaf))
                     {
-                        scratch.append(partner_keys);
-                        // Same policy guard as register_cells: key dynamic storage,
-                        // not the encoded wire size.
-                        const auto dynamic = fetch_key_bytes(partner);
-                        if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
-                            throw std::invalid_argument("Directory partner key exceeds shared lease.");
-                        scratch.add(key_bytes);
+                        const auto key_bytes = encoded_adaptive_key_size(partner);
+                        if (retained)
+                        {
+                            scratch.append(partner_keys);
+                            // Same policy guard as register_cells: key dynamic storage,
+                            // not the encoded wire size.
+                            const auto dynamic = fetch_key_bytes(partner);
+                            if (scratch.budget.limit < 256 || dynamic > scratch.budget.limit / 4 - 64)
+                                throw std::invalid_argument("Directory partner key exceeds shared lease.");
+                            scratch.add(key_bytes);
+                        }
+                        else
+                        {
+                            budget.append_capacity(partner_keys);
+                            budget.add(key_bytes);
+                        }
+                        auto bytes = encode_adaptive_key(partner);
+                        if (bytes.size() != key_bytes)
+                            throw std::logic_error("Directory partner key encoding differs from its admitted size.");
+                        partner_keys.push_back(std::move(bytes));
                     }
-                    else
-                    {
-                        budget.append_capacity(partner_keys);
-                        budget.add(key_bytes);
-                    }
-                    auto bytes = encode_adaptive_key(partner);
-                    if (bytes.size() != key_bytes)
-                        throw std::logic_error("Directory partner key encoding differs from its admitted size.");
-                    partner_keys.push_back(std::move(bytes));
-                }
-            });
+                });
         });
     if (retained)
     {
@@ -1301,7 +1322,8 @@ void normalize_candidate(DistributedAdaptiveHierarchy::Data& candidate, ClosureS
         selected.push_back(row);
     };
     if (candidate.kernel->supports_leaf_local_repack())
-        candidate.overlay().visit_edits([&](const AdaptiveLeafPages::EditView& edit)
+        candidate.overlay().visit_edits(
+            [&](const AdaptiveLeafPages::EditView& edit)
             {
                 if (edit.leaf)
                     append(*edit.leaf);
@@ -2730,6 +2752,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     std::size_t& operation_used, std::size_t operation_limit, PLIC::GeometryAllocationLedger* supplied_ordinary,
     PLIC::GeometryAllocationLedger* supplied_bounded) const
 {
+    const RejectGeometryAdmission reject{supplied_ordinary, supplied_bounded};
     if (!geometry_unchanged())
         throw std::invalid_argument("Distributed geometry snapshot source moved.");
     for (const auto* leaf : leaves)
@@ -2775,10 +2798,8 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     if (compatible && purpose == GeometrySnapshotPurpose::State &&
         std::all_of(leaves.begin(), leaves.end(), [&](const auto* leaf) { return leaf && current->find(*leaf); }))
     {
-        // Stored payload manifests omit their own indexes and snapshot header.
-        // Full retention preserves operation-ledger credit deduplication until
-        // authenticated cache imports replace this compatibility path.
-        current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
+        data_->geometry_cache->owner_union.import_subset(data_->geometry_cache->bindings[slot], operation_ordinary,
+            operation_bounded, operation_used, operation_limit);
         return current;
     }
     // Failed construction preserves the spent admission prefix while leaving
@@ -2795,8 +2816,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     if (!current && controls.supported && purpose == GeometrySnapshotPurpose::State)
     {
         predecessor = data_->geometry_cache->predecessors[slot].lock();
-        if (predecessor &&
-            (!predecessor->stable_controls() || predecessor->construction_controls() != controls))
+        if (predecessor && (!predecessor->stable_controls() || predecessor->construction_controls() != controls))
             predecessor.reset();
         historical = bool(predecessor);
     }
@@ -2812,16 +2832,70 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
         hierarchy_budget.add(data_->contact_halo->cache_storage_bytes());
     PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
     const auto base_bytes = hierarchy_budget.used;
-    for (const auto& root : data_->geometry_cache->roots)
-        if (root)
-            root->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
+    auto candidate_binding = data_->geometry_cache->binding(candidate);
+    PLIC::details::GeometryOwnerRootBinding historical_binding;
+    auto overlap = data_->geometry_cache->owner_union;
     if (historical)
-        predecessor->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
-    candidate->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
+    {
+        historical_binding = data_->geometry_cache->binding(predecessor);
+        PLIC::details::GeometryOwnerUnionWork work;
+        overlap = overlap.staged(nullptr, &historical_binding, ordinary_owners, bounded_owners, hierarchy_budget.used,
+            hierarchy_budget.limit, &work);
+        data_->geometry_cache->record_union_work(work);
+    }
+    PLIC::details::GeometryOwnerUnionWork owner_work;
+    overlap = overlap.staged(nullptr, &candidate_binding, ordinary_owners, bounded_owners, hierarchy_budget.used,
+        hierarchy_budget.limit, &owner_work);
+    data_->geometry_cache->record_union_work(owner_work);
     auto overlap_bytes = hierarchy_budget.used - base_bytes;
+    const auto refresh_candidate = [&]
+    {
+        auto updated = data_->geometry_cache->binding(candidate);
+        PLIC::details::GeometryOwnerUnionWork work;
+        overlap = overlap.staged(&candidate_binding, &updated, ordinary_owners, bounded_owners, hierarchy_budget.used,
+            hierarchy_budget.limit, &work);
+        candidate_binding = std::move(updated);
+        data_->geometry_cache->record_union_work(work);
+        overlap_bytes = hierarchy_budget.used - base_bytes;
+    };
     if (!data_->geometry_cache->lease)
         data_->geometry_cache->lease.emplace(data_->contact_halo->external_residency_lease());
     auto& lease = *data_->geometry_cache->lease;
+    auto optional_reservation = [&](std::size_t new_owners, std::size_t index_frontier)
+    {
+        namespace G = PLIC::details::geometry_demand;
+        using Manifest = G::GeometryOwnerManifest;
+        const auto incoming = geometry_snapshot_detail::checked_sum(new_owners, index_frontier);
+        const auto rows = geometry_snapshot_detail::checked_sum(overlap.manifests().owners[0].owner_count(), incoming);
+        const auto refresh_edges = geometry_snapshot_detail::checked_sum(
+            4, geometry_snapshot_detail::checked_product(index_frontier, G::leaf_capacity));
+        auto reserve =
+            overlap.administration_byte_bound(refresh_edges, std::min(refresh_edges, rows), index_frontier, incoming);
+        const auto retire = [&](const PLIC::details::GeometryOwnerRootBinding& binding)
+        {
+            if (!binding)
+                return std::size_t(0);
+            // Optional preparation is Ordinary-only. A future producer that
+            // adds another channel must supply its separate mutation envelope.
+            if (binding.payload().owners[1].owner_count())
+                return std::numeric_limits<std::size_t>::max();
+            const auto metadata = Manifest::metadata_owner_count_bound(binding.payload().owners[0].owner_count());
+            const auto edges = geometry_snapshot_detail::checked_sum(
+                2, geometry_snapshot_detail::checked_product(metadata, G::leaf_capacity));
+            return overlap.administration_byte_bound(edges, std::min(edges, rows), metadata, 0, incoming);
+        };
+        for (const auto* binding : {&data_->geometry_cache->bindings[slot], &historical_binding})
+        {
+            const auto bytes = retire(*binding);
+            if (bytes == std::numeric_limits<std::size_t>::max())
+                return bytes;
+            reserve = geometry_snapshot_detail::checked_sum(reserve, bytes);
+        }
+        return reserve;
+    };
+    const geometry_snapshot_detail::OptionalOwnerReservation publication{&optional_reservation,
+        [](void* raw, std::size_t owners, std::size_t frontier)
+        { return (*static_cast<const decltype(optional_reservation)*>(raw))(owners, frontier); }};
     constexpr std::size_t maximum_stream_batch = 4;
     if (compatible && mode == ArithmeticMode::Ordinary && purpose == GeometrySnapshotPurpose::State &&
         leaves.size() <= maximum_stream_batch)
@@ -2829,22 +2903,16 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
         {
             if (current->find(*leaf))
                 continue;
-            const auto demand_growth = overlap_bytes - std::min(overlap_bytes, lease.bytes());
-            const auto arena_available = lease.available();
-            const auto optional_headroom = std::min(hierarchy_budget.limit - hierarchy_budget.used,
-                arena_available - std::min(demand_growth, arena_available));
             const auto prepare = [&](std::uint64_t first)
             {
-                if (candidate->prepare_cartesian_page(
-                        *this, *leaf, pending_used, operation_limit, optional_headroom, first, operation_ordinary))
+                const auto demand_growth = overlap_bytes - std::min(overlap_bytes, lease.bytes());
+                const auto arena_available = lease.available();
+                const auto optional_headroom = std::min(hierarchy_budget.limit - hierarchy_budget.used,
+                    arena_available - std::min(demand_growth, arena_available));
+                if (candidate->prepare_cartesian_page(*this, *leaf, pending_used, operation_limit, optional_headroom,
+                        first, operation_ordinary, publication))
                 {
-                    // Preparation already admitted its exact operation owners
-                    // through graph construction receipts; avoid a generic seed.
-                    const auto before = hierarchy_budget.used;
-                    // The stored owner index also changed. Include its metadata
-                    // and controls in old/new overlap before the prepaid census.
-                    candidate->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
-                    overlap_bytes += hierarchy_budget.used - before;
+                    refresh_candidate();
                 }
             };
             const auto block = leaf->native_cell / geometry_snapshot_detail::prepared_cartesian_page_size *
@@ -2885,42 +2953,53 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
         }
         if (count)
         {
-            const auto remaining =
-                std::min(operation_limit - pending_used, hierarchy_budget.limit - hierarchy_budget.used);
-            candidate->rebind_prepared_slots(std::span(ordinals).first(count), std::span(prepared).first(count),
-                operation_ordinary, pending_used, pending_used + remaining);
-            // Rebinding allocates new persistent catalog pages after the first
-            // overlap walk. Admit those pages before capturing or publishing.
-            const auto before = hierarchy_budget.used;
-            candidate->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
-            overlap_bytes += hierarchy_budget.used - before;
+            const auto growth = overlap_bytes - std::min(overlap_bytes, lease.bytes());
+            const auto arena_available = lease.available();
+            const auto remaining = std::min({operation_limit - std::min(pending_used, operation_limit),
+                hierarchy_budget.limit - hierarchy_budget.used, arena_available - std::min(growth, arena_available)});
+            if (candidate->can_rebind_prepared_slots(count, remaining, publication))
+            {
+                candidate->rebind_prepared_slots(std::span(ordinals).first(count), std::span(prepared).first(count),
+                    operation_ordinary, pending_used, pending_used + remaining);
+                refresh_candidate();
+            }
         }
     }
     if (!geometry_unchanged())
         throw std::invalid_argument("Distributed geometry snapshot source moved before publication.");
-    // Stage every throwing capture, union and budget operation while the
-    // accepted roots, manifests, predecessors and residency seal remain intact.
-    std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2> manifests;
-    adaptive_detail::GeometrySnapshotAccess::owner_manifests(
-        *candidate, hierarchy_budget, manifests[0], manifests[1], true);
-    const auto census = data_->geometry_cache->census_root_bytes(slot, candidate, hierarchy_budget);
-    const auto overlap_residency = overlap_bytes;
+    PLIC::details::GeometryOwnerUnion final_union = overlap;
+    if (data_->geometry_cache->bindings[slot])
+    {
+        PLIC::details::GeometryOwnerUnionWork work;
+        final_union = overlap.staged(&data_->geometry_cache->bindings[slot], nullptr, ordinary_owners, bounded_owners,
+            hierarchy_budget.used, hierarchy_budget.limit, &work);
+        data_->geometry_cache->record_union_work(work);
+    }
+    if (historical_binding)
+    {
+        PLIC::details::GeometryOwnerUnionWork work;
+        final_union = final_union.staged(&historical_binding, nullptr, ordinary_owners, bounded_owners,
+            hierarchy_budget.used, hierarchy_budget.limit, &work);
+        data_->geometry_cache->record_union_work(work);
+    }
+    const auto overlap_residency = std::max(overlap.resident_bytes(), hierarchy_budget.used - base_bytes);
     const auto previous_lease_bytes = lease.bytes();
     try
     {
-        lease.resize(std::max(overlap_residency, census.resident));
-        lease.resize(census.resident);
+        lease.resize(std::max(overlap_residency, final_union.resident_bytes()));
+        lease.resize(final_union.resident_bytes());
     }
     catch (...)
     {
         lease.resize(previous_lease_bytes);
         throw;
     }
-    // Shared-owner assignments and seal updates below cannot allocate or fail.
     current = candidate;
-    data_->geometry_cache->manifests[slot] = std::move(manifests);
-    data_->geometry_cache->manifest_bytes = census.metadata;
-    data_->geometry_cache->seal_residency(census.resident);
+    data_->geometry_cache->bindings[slot] = std::move(candidate_binding);
+    data_->geometry_cache->manifests[slot] = data_->geometry_cache->bindings[slot].payload().owners;
+    data_->geometry_cache->owner_union = std::move(final_union);
+    data_->geometry_cache->manifest_bytes = 0;
+    data_->geometry_cache->seal_residency(data_->geometry_cache->owner_union.resident_bytes());
     data_->geometry_cache->predecessors[slot].reset();
     operation_used = pending_used;
     return candidate;
@@ -2931,6 +3010,7 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapsho
     GeometrySnapshotPurpose purpose, std::size_t& used, std::size_t limit,
     PLIC::GeometryAllocationLedger& ordinary_owners, PLIC::GeometryAllocationLedger& bounded_owners)
 {
+    const RejectGeometryAdmission reject{&ordinary_owners, &bounded_owners};
     const auto& state = *hierarchy.data_;
     if (!hierarchy.geometry_unchanged() || hierarchy.observation() != source_observation)
         throw std::invalid_argument("Native geometry draft has a stale source observation.");
@@ -3049,10 +3129,10 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> adaptive_detail::GeometrySnapsho
     charge_source_base_residency(hierarchy_budget, state);
     hierarchy_budget.add(state.contact_halo->cache_storage_bytes());
     PLIC::GeometryAllocationLedger hierarchy_ordinary, hierarchy_bounded;
-    for (const auto& root : state.geometry_cache->roots)
-        if (root)
-            root->retain(hierarchy_ordinary, hierarchy_bounded, hierarchy_budget.used, hierarchy_budget.limit);
-    result->retain(hierarchy_ordinary, hierarchy_bounded, hierarchy_budget.used, hierarchy_budget.limit);
+    const auto result_binding = state.geometry_cache->binding(result);
+    const auto overlap = state.geometry_cache->owner_union.staged(
+        nullptr, &result_binding, hierarchy_ordinary, hierarchy_bounded, hierarchy_budget.used, hierarchy_budget.limit);
+    (void) overlap;
     if (!hierarchy.geometry_unchanged() || hierarchy.observation() != source_observation)
         throw std::invalid_argument("Native geometry draft source changed during snapshot acquisition.");
     return result;
@@ -3064,7 +3144,29 @@ adaptive_detail::GeometryCacheAdmissionStatistics adaptive_detail::GeometrySnaps
     std::lock_guard lock(cache.mutex);
     return {sizeof(cache), cache.root_bytes(), cache.lease ? cache.lease->bytes() : 0, cache.admission_queries,
         cache.union_censuses, cache.census_root_visits, cache.catalog_work.cumulative_metadata_bytes,
-        cache.catalog_work.pages.copied_pages, cache.catalog_work.pages.visited_pages};
+        cache.catalog_work.pages.copied_pages, cache.catalog_work.pages.visited_pages, cache.union_updates,
+        cache.union_work.channels[0].edge_visits + cache.union_work.channels[1].edge_visits,
+        cache.union_work.channels[0].dependency_entries + cache.union_work.channels[1].dependency_entries,
+        cache.union_work.channels[0].first_transitions + cache.union_work.channels[1].first_transitions,
+        cache.union_work.channels[0].last_transitions + cache.union_work.channels[1].last_transitions,
+        cache.union_work.channels[0].index.copied_pages + cache.union_work.channels[1].index.copied_pages +
+            cache.union_work.controls.copied_pages,
+        cache.union_work.channels[0].index.copied_bytes + cache.union_work.channels[1].index.copied_bytes +
+            cache.union_work.controls.copied_bytes,
+        cache.union_work.channels[0].index.visited_pages + cache.union_work.channels[1].index.visited_pages +
+            cache.union_work.controls.visited_pages,
+        cache.union_work.channels[0].lookup.visited_pages + cache.union_work.channels[1].lookup.visited_pages,
+        cache.union_work.imported_rows};
+}
+void adaptive_detail::GeometrySnapshotAccess::visit_cache_owner_union(const DistributedAdaptiveHierarchy& hierarchy,
+    const std::function<void(const PLIC::details::geometry_demand::OwnerRecord&)>& rows,
+    PLIC::details::geometry_demand::MetadataSink metadata)
+{
+    const auto& cache = *hierarchy.data_->geometry_cache;
+    std::lock_guard lock(cache.mutex);
+    for (const auto& root : cache.owner_union.manifests().owners)
+        root.visit(rows);
+    cache.owner_union.visit_administration(metadata);
 }
 void adaptive_detail::GeometrySnapshotAccess::admit_cache_residency(
     const DistributedAdaptiveHierarchy& hierarchy, Budget& budget)
@@ -3431,8 +3533,7 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 auto revision = r.word();
                 r.done();
                 const auto* leaf = owned_leaves().find(key);
-                if (!leaf || leaf->revision != revision || marks.contains(key) ||
-                    !retiring.insert(key).second)
+                if (!leaf || leaf->revision != revision || marks.contains(key) || !retiring.insert(key).second)
                     throw std::invalid_argument("Incomplete, conflicting or stale source sibling family.");
                 Writer w;
                 w.bytes(family);
@@ -3562,8 +3663,8 @@ DistributedAdaptiveHierarchy::Plan DistributedAdaptiveHierarchy::plan_adaptation
                 initial_memory.add(cap);
                 auto result = data_->kernel->split(owned_leaves().at(key), kind);
                 std::size_t leaf_bytes = 0;
-                const auto retained = fetch_retention(result.children,
-                    std::span<const AdaptiveFamily>(&result.family, 1), cap, false, &leaf_bytes);
+                const auto retained = fetch_retention(
+                    result.children, std::span<const AdaptiveFamily>(&result.family, 1), cap, false, &leaf_bytes);
                 initial_memory.drop(cap - retained);
                 initial_memory.held -= retained;
                 leaf_memory.held += leaf_bytes;
@@ -4008,10 +4109,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
             // kernel's explicit bounded materialization capability can select
             // the capacity contract. Any unsupported/supplied record preserves
             // the complete call's original cumulative expanded-size guard.
-            const bool bounded =
-                compact_procedural && !owned_leaves().empty() &&
-                std::all_of(owned_leaves().begin(), owned_leaves().end(), [&](const auto& leaf)
-                    { return data_->kernel->compact_native_materialization_bound(leaf) != 0; });
+            const bool bounded = compact_procedural && !owned_leaves().empty() &&
+                                 std::all_of(owned_leaves().begin(), owned_leaves().end(), [&](const auto& leaf)
+                                     { return data_->kernel->compact_native_materialization_bound(leaf) != 0; });
             if (bounded)
             {
                 adaptive_detail::CompactNativeOwnedBudget budget(data_->options.byte_budget);
@@ -4124,9 +4224,9 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft_impl(bool compact
                 {
                     auto& second = incidence[*tile.second];
                     second.pieces.push_back(!image ? tile.geometry->reversed()
-                                                  : tile.geometry->reversed()->translated(
-                                                        PLIC::displacement_difference<ArithmeticMode::Ordinary>(
-                                                            {}, tile.second_image_identity)));
+                                                   : tile.geometry->reversed()->translated(
+                                                         PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                                             {}, tile.second_image_identity)));
                     second.periodic_image = second.periodic_image || image;
                 }
             }

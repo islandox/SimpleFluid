@@ -23,6 +23,7 @@ struct OwnerRecord
     std::shared_ptr<const void> owner;
     std::size_t bytes = 0, references = 0;
     [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return bytes; }
+    [[nodiscard]] std::size_t logical_size() const noexcept { return references; }
 };
 // OwnerRecord defaults only zero scalars and an empty shared_ptr; it performs
 // no allocation and cannot throw. Its copies also preserve shared controls.
@@ -38,6 +39,11 @@ class GeometryOwnerManifest
 {
 public:
     GeometryOwnerManifest() = default;
+    [[nodiscard]] bool same_root(const GeometryOwnerManifest&) const noexcept;
+    [[nodiscard]] bool authenticates(const std::weak_ptr<const void>&) const noexcept;
+    [[nodiscard]] std::shared_ptr<const void> root_control() const noexcept;
+    [[nodiscard]] std::size_t root_metadata_bytes() const noexcept;
+
     struct RecordSink
     {
         void* context;
@@ -45,6 +51,10 @@ public:
         void operator()(const OwnerRecord& value) const { visit(context, value); }
     };
     void visit_dependencies(MetadataSink, RecordSink) const;
+    void visit_records(RecordSink) const;
+    /** Pruned unique-owner delta; exact shared B+ controls stop traversal. */
+    void visit_added(const GeometryOwnerManifest&, RecordSink, PageWork* = nullptr) const;
+
     struct BorrowedRecordSink
     {
         void* context;
@@ -82,6 +92,14 @@ public:
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_payload_bytes() const noexcept;
     [[nodiscard]] std::size_t owner_count() const noexcept;
+    /** Cached physical pointer-slot count, separate from unique owners. */
+    [[nodiscard]] std::size_t physical_edge_count() const noexcept;
+    /** Retained State/page count for any valid index of at most rows keys.
+     * Includes a possible indexed singleton from individual retained/retired edits. */
+    [[nodiscard]] static std::size_t metadata_owner_count_bound(std::size_t rows);
+    /** Ratio bounding all height-linear batch costs after possible growth.
+     * Walks one accepted path; does not enumerate records or metadata. */
+    [[nodiscard]] std::size_t edit_height_scale_bound(std::size_t anticipated_additions) const;
     /** Conservative allocation envelope for one sorted batch of changed keys. */
     [[nodiscard]] std::size_t batch_edit_byte_bound(std::size_t changed_keys) const;
     /** New index allocations: changed search/rebalance paths, root State and

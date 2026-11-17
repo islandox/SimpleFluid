@@ -7,9 +7,12 @@
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
+#include "geometry/PLIC/details/GeometryIndexControls.tcc"
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerGraph.tcc"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.tcc"
 #include "geometry/PLIC/details/GeometryRetentionCensus.tcc"
 #include <type_traits>
 
@@ -64,7 +67,65 @@ void details::GeometryAllocationOwnerAccess::observe_work(Work kind, std::size_t
         case Work::MetadataCreditCreated:
             allocation_work.metadata_credit_created += count;
             break;
+        case Work::PairedPayloadCredit:
+            allocation_work.paired_payload_credits += count;
+            break;
+        case Work::ImportFallback:
+            allocation_work.import_fallbacks += count;
+            break;
+        case Work::ImportDeltaRow:
+            allocation_work.import_delta_rows += count;
+            break;
+        case Work::ImportDeltaPage:
+            allocation_work.import_delta_pages += count;
+            break;
+        case Work::CertifiedImportHit:
+            allocation_work.certified_import_hits += count;
+            break;
+        case Work::ManifestLookupPage:
+            allocation_work.manifest_lookup_pages += count;
+            break;
+        case Work::IndexControlLookupPage:
+            allocation_work.index_control_lookup_pages += count;
+            break;
+        case Work::ControlTableEnumerationRow:
+            allocation_work.control_table_enumeration_rows += count;
+            break;
+        case Work::ReservationPathPage:
+            allocation_work.reservation_path_pages += count;
+            break;
     }
+}
+thread_local details::GeometryOwnerAdmissionPair* details::GeometryOwnerAdmissionPair::active_ = nullptr;
+GeometryAllocationLedger* details::GeometryAllocationOwnerAccess::paired_peer(
+    const GeometryAllocationLedger& ledger) noexcept
+{
+    for (auto* scope = GeometryOwnerAdmissionPair::active_; scope; scope = scope->previous_)
+    {
+        if (scope->first_ == &ledger && scope->second_ != &ledger)
+            return scope->second_;
+        if (scope->second_ == &ledger && scope->first_ != &ledger)
+            return scope->first_;
+    }
+    return nullptr;
+}
+details::GeometryOwnerAdmissionPair::GeometryOwnerAdmissionPair(
+    GeometryAllocationLedger& first, GeometryAllocationLedger& second)
+    : first_(&first), second_(&second), previous_(active_)
+{
+    active_ = this;
+    if (first.impl_)
+        first.impl_->peer = GeometryAllocationOwnerAccess::paired_peer(first);
+    if (second.impl_)
+        second.impl_->peer = GeometryAllocationOwnerAccess::paired_peer(second);
+}
+details::GeometryOwnerAdmissionPair::~GeometryOwnerAdmissionPair()
+{
+    active_ = previous_;
+    if (first_->impl_)
+        first_->impl_->peer = GeometryAllocationOwnerAccess::paired_peer(*first_);
+    if (second_->impl_)
+        second_->impl_->peer = GeometryAllocationOwnerAccess::paired_peer(*second_);
 }
 std::size_t details::identity_ledger_bookkeeping_bound(std::size_t owners)
 {
@@ -109,6 +170,8 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
         impl_->bookkeeping = sizeof(Impl);
         impl_->last_counter = used;
     }
+    if (impl_)
+        impl_->peer = details::GeometryAllocationOwnerAccess::paired_peer(*this);
 }
 
 void details::GeometryAllocationOwnerAccess::begin(
@@ -208,6 +271,18 @@ void details::GeometryAllocationOwnerAccess::retain_manifest_metadata(GeometryAl
     std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
     std::size_t& used, std::size_t limit, bool prepaid)
 {
+    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, prepaid, false);
+}
+void details::GeometryAllocationOwnerAccess::retain_verified_metadata(GeometryAllocationLedger& ledger,
+    std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
+    std::size_t& used, std::size_t limit)
+{
+    retain_metadata_impl(ledger, channel, owner, payload, admitted, used, limit, false, true);
+}
+void details::GeometryAllocationOwnerAccess::retain_metadata_impl(GeometryAllocationLedger& ledger,
+    std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
+    std::size_t& used, std::size_t limit, bool prepaid, bool verified)
+{
     observe_work(Work::MetadataCreditQuery);
     try
     {
@@ -223,7 +298,7 @@ void details::GeometryAllocationOwnerAccess::retain_manifest_metadata(GeometryAl
             ledger.impl_->mode = mode;
         // An actual new allocation cannot alias still-pinned imported index
         // storage. Its trusted constructor receipt needs no old-root census.
-        if (!prepaid)
+        if (!prepaid && !verified)
             seed_imported_metadata(ledger, used, limit);
         const allocation_detail::Key key{allocation_detail::Kind::ExternalOwner, owner.get()};
         auto& credits = ledger.impl_->metadata_credits;
@@ -237,6 +312,14 @@ void details::GeometryAllocationOwnerAccess::retain_manifest_metadata(GeometryAl
         }
         (void) ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, payload, used, limit, prepaid);
         const auto control = admitted - payload;
+        const bool granted = ledger.impl_->control_grant.contains(owner, payload, control) ||
+                             (ledger.impl_->peer && ledger.impl_->peer->impl_ &&
+                                 ledger.impl_->peer->impl_->control_grant.contains(owner, payload, control));
+        if (granted)
+        {
+            ledger.impl_->last_counter = used;
+            return;
+        }
         if (prepaid || ledger.impl_->prepaid_payload)
             ledger.impl_->bookkeeping = allocation_detail::add(ledger.impl_->bookkeeping, control);
         else
@@ -722,6 +805,12 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
             else
                 ledger.impl_->mode = mode;
         }
+        if (ledger.impl_->covers(owners))
+        {
+            GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::CertifiedImportHit);
+            ledger.impl_->last_counter = cumulative_bytes;
+            return 0;
+        }
         if (ledger.impl_->owners.empty() && !ledger.impl_->imported)
         {
             // Capture shares an already admitted manifest index. Its retained
@@ -739,10 +828,22 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
         }
         // A populated ledger needs the exact union, including overlap with an
         // earlier immutable import. Any failure below poisons partial rows.
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ImportFallback);
         std::size_t enumerated = 0;
-        owners.visit(
-            [&](const geometry_demand::OwnerRecord& row)
+        struct Capture
+        {
+            GeometryAllocationLedger& ledger;
+            std::size_t& cumulative_bytes;
+            std::size_t byte_limit;
+            std::size_t& enumerated;
+        } capture{ledger, cumulative_bytes, byte_limit, enumerated};
+        owners.visit_records({&capture, [](void* raw, const geometry_demand::OwnerRecord& row)
             {
+                auto& c = *static_cast<Capture*>(raw);
+                auto& ledger = c.ledger;
+                auto& cumulative_bytes = c.cumulative_bytes;
+                const auto byte_limit = c.byte_limit;
+                auto& enumerated = c.enumerated;
                 GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ImportRow);
                 ++enumerated;
                 const auto kind = static_cast<allocation_detail::Kind>(row.key.kind);
@@ -763,12 +864,231 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
                 (void) ledger.impl_->admit(
                     {kind, row.owner}, row.exclusive_payload_bytes(), cumulative_bytes, byte_limit);
                 ledger.impl_->last_counter = cumulative_bytes;
-            });
+            }});
+        ledger.impl_->derived_control_reserved = retain_weak_control(ledger, owners, cumulative_bytes, byte_limit);
+        ledger.impl_->derived_head = owners.root_control();
         return enumerated;
     }
     catch (...)
     {
         ledger.failed_ = true;
+        throw;
+    }
+}
+
+std::size_t details::GeometryOwnerImportAccess::import_derived(GeometryAllocationLedger& ledger,
+    const geometry_demand::GeometryOwnerManifest& previous, const geometry_demand::GeometryOwnerManifest& next,
+    std::size_t& used, std::size_t limit, geometry_demand::PageWork* measured)
+{
+    try
+    {
+        ledger.begin_admission(used, limit);
+        if (!ledger.impl_->covers(previous))
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Geometry delta lacks its exact credited predecessor root.");
+        const auto channel = next.uniform_channel();
+        if (channel)
+        {
+            if (*channel > 1)
+                throw GeometryError(
+                    GeometryErrorCode::InvalidInput, "Geometry delta has an unknown arithmetic channel.");
+            const auto mode = *channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+            if (ledger.impl_->mode)
+                details::require_mode(*ledger.impl_->mode, mode);
+            else
+                ledger.impl_->mode = mode;
+        }
+        struct Context
+        {
+            GeometryAllocationLedger& ledger;
+            std::size_t& used;
+            std::size_t limit, rows = 0;
+        } context{ledger, used, limit};
+        geometry_demand::PageWork work;
+        next.visit_added(previous,
+            {&context,
+                [](void* raw, const geometry_demand::OwnerRecord& row)
+                {
+                    auto& value = *static_cast<Context*>(raw);
+                    GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ImportDeltaRow);
+                    ++value.rows;
+                    (void) value.ledger.impl_->admit({static_cast<allocation_detail::Kind>(row.key.kind), row.owner},
+                        row.bytes, value.used, value.limit);
+                    value.ledger.impl_->last_counter = value.used;
+                }},
+            &work);
+        GeometryAllocationOwnerAccess::observe_work(
+            GeometryAllocationOwnerAccess::Work::ImportDeltaPage, work.visited_pages);
+        if (measured)
+            measured->visited_pages += work.visited_pages;
+        ledger.impl_->derived_control_reserved = retain_weak_control(ledger, next, used, limit);
+        ledger.impl_->derived_head = next.root_control();
+        ledger.impl_->last_counter = used;
+        return context.rows;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+bool details::GeometryOwnerImportAccess::retain_weak_control(GeometryAllocationLedger& ledger,
+    const geometry_demand::GeometryOwnerManifest& root, std::size_t& used, std::size_t limit)
+{
+    if (!root.owner_count() || (ledger.impl_->imported && ledger.impl_->imported->same_root(root)))
+        return false;
+    const auto owner = root.root_control();
+    const allocation_detail::Key key{allocation_detail::Kind::ExternalOwner, owner.get()};
+    if (const auto found = ledger.impl_->owners.find(key); found != ledger.impl_->owners.end())
+    {
+        if (found->second.payload_bytes != root.root_metadata_bytes() || owner.owner_before(found->second.pin) ||
+            found->second.pin.owner_before(owner))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Weak index control conflicts with a strong pin.");
+        return false;
+    }
+    if (ledger.impl_->imported && ledger.impl_->imported->admits(ledger.impl_->imported_channel,
+                                      static_cast<std::uint8_t>(key.kind), owner, root.root_metadata_bytes()))
+        return false;
+    if (root.authenticates(ledger.impl_->derived_head))
+        return ledger.impl_->derived_control_reserved;
+    for (const auto& certificate : ledger.impl_->subsets)
+    {
+        if ((certificate.reserved_controls & 1) && root.authenticates(certificate.authority))
+            return true;
+        if ((certificate.reserved_controls & 2) && root.authenticates(certificate.subset))
+            return true;
+    }
+    // This reserve follows a weak control after the peer ordinary ledger or
+    // source cache disappears, without pinning its State or controller graph.
+    ledger.impl_->account(geometry_demand::control_bytes, true, used, limit);
+    ledger.impl_->weak_control_allowance =
+        allocation_detail::add(ledger.impl_->weak_control_allowance, geometry_demand::control_bytes);
+    return true;
+}
+void details::GeometryOwnerImportAccess::certify_subset(GeometryAllocationLedger& ledger,
+    const geometry_demand::GeometryOwnerManifest& authority, const geometry_demand::GeometryOwnerManifest& subset,
+    std::uint64_t generation, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        ledger.begin_admission(used, limit);
+        if (!ledger.impl_->covers(authority))
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Geometry subset issuer has an uncredited union root.");
+        const auto channel = subset.uniform_channel();
+        if (!channel)
+            return;
+        if (*channel > 1)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry subset issuer has an unknown channel.");
+        const auto mode = *channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, mode);
+        else
+            ledger.impl_->mode = mode;
+        const auto reserved = std::uint8_t((retain_weak_control(ledger, authority, used, limit) ? 1 : 0) |
+                                           (retain_weak_control(ledger, subset, used, limit) ? 2 : 0));
+        for (auto& certificate : ledger.impl_->subsets)
+            if (subset.authenticates(certificate.subset))
+            {
+                certificate = {authority.root_control(), subset.root_control(), generation, *channel, reserved};
+                ledger.impl_->last_counter = used;
+                return;
+            }
+        auto& certificate = ledger.impl_->subsets[ledger.impl_->next_subset++ % ledger.impl_->subsets.size()];
+        certificate = {authority.root_control(), subset.root_control(), generation, *channel, reserved};
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+
+bool details::GeometryOwnerImportAccess::credited(
+    const GeometryAllocationLedger& ledger, const geometry_demand::GeometryOwnerManifest& root) noexcept
+{
+    return !root.owner_count() || (ledger.impl_ && !ledger.failed_ && ledger.impl_->covers(root));
+}
+void details::GeometryOwnerImportAccess::certify_constructed(GeometryAllocationLedger& ledger,
+    const geometry_demand::GeometryOwnerManifest& root, std::size_t& used, std::size_t limit)
+{
+    // Only the closed graph editor reaches this after every retained dependency
+    // was admitted and its accepted predecessor had exact issuer credit.
+    ledger.begin_admission(used, limit);
+    ledger.impl_->derived_control_reserved = retain_weak_control(ledger, root, used, limit);
+    ledger.impl_->derived_head = root.root_control();
+    certify_subset(ledger, root, root, 0, used, limit);
+}
+std::size_t details::GeometryOwnerImportAccess::import_pair(GeometryAllocationLedger& ordinary,
+    GeometryAllocationLedger& bounded, const OwnerManifestPair& pair, std::size_t& used, std::size_t limit)
+{
+    try
+    {
+        GeometryOwnerAdmissionPair scope(ordinary, bounded);
+        pair.require_seal();
+        const auto overlap = pair.overlap_bytes();
+        const bool fresh0 = !ordinary.impl_ || (!ordinary.impl_->imported && ordinary.impl_->owners.empty());
+        const bool fresh1 = !bounded.impl_ || (!bounded.impl_->imported && bounded.impl_->owners.empty());
+        std::size_t rows = 0;
+        if (fresh0 && fresh1)
+        {
+            rows += import(ordinary, pair.owners[0], used, limit);
+            if (pair.owners[1].owner_count())
+            {
+                bounded.begin_admission(used, limit);
+                const auto channel = pair.owners[1].uniform_channel();
+                if (channel != 1 || overlap > pair.owners[1].payload_bytes())
+                    throw GeometryError(
+                        GeometryErrorCode::InvalidInput, "Paired import has a foreign channel/overlap.");
+                if (bounded.impl_->mode)
+                    require_mode(*bounded.impl_->mode, ArithmeticMode::BoundedCertification);
+                else
+                    bounded.impl_->mode = ArithmeticMode::BoundedCertification;
+                const auto metadata = pair.owners[1].metadata_admission_bytes();
+                if (bounded.impl_->prepaid_payload)
+                    bounded.impl_->bookkeeping = allocation_detail::add(bounded.impl_->bookkeeping, metadata);
+                else
+                    bounded.impl_->account(metadata, true, used, limit);
+                const auto total = pair.owners[1].payload_bytes(), physical = total - overlap;
+                if (!bounded.impl_->prepaid_payload)
+                {
+                    if (used > limit || physical > limit - used)
+                        allocation_detail::exhausted("Paired owner payload exceeds remaining admission.");
+                    used += physical;
+                }
+                bounded.impl_->payload = allocation_detail::add(bounded.impl_->payload, total);
+                bounded.impl_->shared_payload_credit =
+                    allocation_detail::add(bounded.impl_->shared_payload_credit, overlap);
+                bounded.impl_->imported = pair.owners[1];
+                bounded.impl_->imported_channel = 1;
+                bounded.impl_->last_counter = used;
+            }
+        }
+        else
+        {
+            // A mixed fresh/unrelated pair must enumerate the fresh side too:
+            // only exact per-owner peer evidence can discount its old payload.
+            if (fresh0)
+            {
+                ordinary.begin_admission(used, limit);
+                ordinary.impl_->imported = geometry_demand::GeometryOwnerManifest{};
+            }
+            if (fresh1 && pair.owners[1].owner_count())
+            {
+                bounded.begin_admission(used, limit);
+                bounded.impl_->imported = geometry_demand::GeometryOwnerManifest{};
+            }
+            rows += import(ordinary, pair.owners[0], used, limit);
+            if (pair.owners[1].owner_count())
+                rows += import(bounded, pair.owners[1], used, limit);
+        }
+        return rows;
+    }
+    catch (...)
+    {
+        GeometryAllocationOwnerAccess::poison(ordinary);
+        GeometryAllocationOwnerAccess::poison(bounded);
         throw;
     }
 }

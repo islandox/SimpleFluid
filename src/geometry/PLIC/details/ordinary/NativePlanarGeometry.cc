@@ -9,12 +9,12 @@
 #include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
-#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
-#include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/PLIC/details/ordinary/NativePlanarQueries.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
 #include <limits>
@@ -64,7 +64,8 @@ void GeometryAllocationLedger::retain_planar_face(const OrdinaryFacePtr& face, s
         else
             impl_->mode = ArithmeticMode::Ordinary;
         impl_->admit({allocation_detail::Kind::PlanarWrapper, face}, sizeof(OrdinaryFace), used, limit);
-        impl_->admit({allocation_detail::Kind::PlanarPayload, face->impl_}, face->exclusive_storage_bytes(), used, limit);
+        impl_->admit(
+            {allocation_detail::Kind::PlanarPayload, face->impl_}, face->exclusive_storage_bytes(), used, limit);
         if (face->impl_->support)
             impl_->retain_identity(*face->impl_->support, used, limit);
         impl_->last_counter = used;
@@ -97,13 +98,13 @@ using Polygon = std::vector<on::WidePoint>;
 namespace predicates = details::ordinary_predicates;
 constexpr std::size_t vertex_cap = 4096;
 namespace planar_queries = details::ordinary_planar_queries;
-using planar_queries::norm;
 using planar_queries::axis_of;
-using planar_queries::DefiningPlane;
+using planar_queries::center;
 using planar_queries::defining_plane;
+using planar_queries::DefiningPlane;
+using planar_queries::norm;
 using planar_queries::on_plane;
 using planar_queries::point_inside;
-using planar_queries::center;
 void validate(const Polygon& p)
 {
     if (p.size() > vertex_cap)

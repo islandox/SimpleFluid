@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensusAccess.hh"
 #include <algorithm>
 #include <exception>
@@ -58,6 +59,33 @@ geometry_demand::Admission GeometryOwnerGraphEditor::Impl::admission()
                 GeometryAllocationOwnerAccess::retain_manifest_metadata(
                     *self.ledger, self.channel, owner, payload, admitted, self.used, self.limit, true);
         }};
+}
+template<class Kind>
+std::size_t GeometryOwnerGraphEditor::Impl::references(
+    Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
+{
+    const auto key = static_cast<std::uint8_t>(kind);
+    const geometry_demand::OwnerKey lookup{channel, key, owner.get()};
+    const geometry_demand::OwnerRecord* found = nullptr;
+    for (std::size_t index = 0; index < row_count; ++index)
+        if (rows[index].key.channel == channel && rows[index].key.kind == key && rows[index].key.address == owner.get())
+        {
+            found = &rows[index];
+            break;
+        }
+    if (!found)
+        if (const auto row = overlay.find(lookup); row != overlay.end())
+            found = &row->second;
+    if (found)
+    {
+        if (found->bytes != bytes || owner.owner_before(found->owner) || found->owner.owner_before(owner))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Paired graph owner changes control or size.");
+        return found->references;
+    }
+    const auto count = result.references(channel, key, owner, work ? &work->lookup : nullptr);
+    if (count && !result.admits(channel, key, owner, bytes, work ? &work->lookup : nullptr))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Paired graph owner changes immutable size.");
+    return count;
 }
 template<class Kind>
 bool GeometryOwnerGraphEditor::Impl::edge(
@@ -122,6 +150,17 @@ bool GeometryOwnerGraphEditor::Impl::edge(
         transition = --record.references == 0;
         if (transition && work)
             ++work->last_transitions;
+    }
+    if (transition && partner && partner->references(kind, owner, bytes))
+    {
+        if (retain)
+            *cross_payload_bytes = allocation_detail::add(*cross_payload_bytes, bytes);
+        else
+        {
+            if (bytes > *cross_payload_bytes)
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Paired graph overlap underflows.");
+            *cross_payload_bytes -= bytes;
+        }
     }
     return transition;
 }
@@ -196,6 +235,7 @@ GeometryOwnerGraphEditor::GeometryOwnerGraphEditor(geometry_demand::GeometryOwne
         if (const auto existing = impl_->result.uniform_channel(work ? &work->lookup : nullptr);
             existing && *existing != channel)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry owner graph has a foreign channel.");
+        impl_->credited_predecessor = !ledger || GeometryOwnerImportAccess::credited(*ledger, impl_->result);
         // All fixed editor state and bounded scratch live on the caller stack.
         impl_->last_counter = used;
     }
@@ -206,8 +246,25 @@ GeometryOwnerGraphEditor::GeometryOwnerGraphEditor(geometry_demand::GeometryOwne
         throw;
     }
 }
+void GeometryOwnerGraphEditor::pair_with(GeometryOwnerGraphEditor& other, std::size_t& overlap)
+{
+    const Impl::Call first(*impl_), second(*other.impl_);
+    if (this == &other || impl_->channel == other.impl_->channel || &impl_->used != &other.impl_->used ||
+        impl_->limit != other.impl_->limit || impl_->partner || other.impl_->partner ||
+        overlap > std::min(impl_->result.payload_bytes(), other.impl_->result.payload_bytes()))
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid paired graph overlap context.");
+    impl_->partner = other.impl_;
+    other.impl_->partner = impl_;
+    impl_->cross_payload_bytes = &overlap;
+    other.impl_->cross_payload_bytes = &overlap;
+}
 GeometryOwnerGraphEditor::~GeometryOwnerGraphEditor()
 {
+    if (impl_->partner)
+    {
+        impl_->partner->partner = nullptr;
+        impl_->partner->cross_payload_bytes = nullptr;
+    }
     // A catalog constructor or outer preflight can reject between editor calls.
     // Its unpublished candidate still shares this operation's admission ledger.
     if (impl_ && impl_->ledger && std::uncaught_exceptions() > impl_->construction_exceptions)
@@ -260,6 +317,12 @@ bool GeometryOwnerGraphEditor::owner(const geometry_demand::OwnerRecord& row, bo
         throw GeometryError(
             GeometryErrorCode::InvalidInput, "Geometry owner graph record has a foreign channel or key.");
     return impl_->edge(static_cast<allocation_detail::Kind>(row.key.kind), row.owner, row.bytes, retain, prepaid);
+}
+std::size_t GeometryOwnerGraphEditor::references(const geometry_demand::OwnerRecord& row) const
+{
+    if (row.key.channel != impl_->channel || row.key.address != row.owner.get())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Graph reference query has a foreign key.");
+    return impl_->references(static_cast<allocation_detail::Kind>(row.key.kind), row.owner, row.bytes);
 }
 template<ArithmeticMode M> void GeometryOwnerGraphEditor::geometry(const ConvexGeometryPtr<M>& owner, bool retain)
 {
@@ -406,6 +469,8 @@ geometry_demand::GeometryOwnerManifest GeometryOwnerGraphEditor::finish()
         row = {};
     impl_->row_count = 0;
     impl_->overlay.clear();
+    if (impl_->ledger && impl_->credited_predecessor && impl_->result.owner_count())
+        GeometryOwnerImportAccess::certify_constructed(*impl_->ledger, impl_->result, impl_->used, impl_->limit);
     impl_->finished = true;
     return impl_->result;
 }

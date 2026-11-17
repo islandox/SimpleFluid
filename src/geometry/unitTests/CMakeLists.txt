@@ -68,6 +68,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testAdaptiveContactSnapshot"
       OR TEST_NAME STREQUAL "testAdaptiveSubfaceSnapshot"
       OR TEST_NAME STREQUAL "testAdaptivePipelineStorage"
+      OR TEST_NAME STREQUAL "testGeometryOwnerUnion"
       OR TEST_NAME STREQUAL "testGeometryOwnerGraph"
       OR TEST_NAME STREQUAL "testAdaptiveSnapshotOwnerManifest"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryStorage"

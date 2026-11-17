@@ -33,6 +33,7 @@ struct Builder
         bool transient_catalog = false);
 };
 GeometryConstructionControls construction_controls();
+std::size_t checked_sum(std::size_t, std::size_t);
 std::size_t checked_product(std::size_t, std::size_t);
 void charge_items(adaptive_detail::Budget&, std::size_t, std::size_t);
 bool eligible(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, ArithmeticMode);

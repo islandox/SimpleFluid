@@ -2,6 +2,7 @@
 #include "adaptive_storage_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
@@ -15,6 +16,8 @@
 #include <gtest/gtest.h>
 #include <map>
 #include <numeric>
+#include <optional>
+#include <string_view>
 #include <tuple>
 
 namespace
@@ -56,22 +59,113 @@ struct UnionReconstruction
 {
     std::size_t scalar = 0, payload = 0;
 };
+using PhysicalKey = std::pair<std::uint8_t, const void*>;
+struct PhysicalOwner
+{
+    std::shared_ptr<const void> owner;
+    std::size_t bytes;
+};
+using PhysicalOwners = std::map<PhysicalKey, PhysicalOwner>;
+PhysicalOwners walked_owners(const Hierarchy& source)
+{
+    PhysicalOwners result;
+    source.visit_geometry_snapshots(
+        [&](const auto& snapshot)
+        {
+            P::GeometryAllocationLedger ordinary, bounded;
+            std::size_t used = 0;
+            snapshot.retain(ordinary, bounded, used, ample);
+            const P::details::geometry_demand::Admission allocation{
+                &used, [](void* raw, std::size_t bytes) { *static_cast<std::size_t*>(raw) += bytes; }};
+            for (unsigned channel = 0; channel < 2; ++channel)
+                P::details::GeometryOwnerImportAccess::export_manifest(
+                    channel ? bounded : ordinary, allocation, nullptr, channel)
+                    .visit(
+                        [&](const auto& row)
+                        {
+                            auto [at, added] = result.emplace(
+                                PhysicalKey{row.key.kind, row.owner.get()}, PhysicalOwner{row.owner, row.bytes});
+                            if (!added)
+                            {
+                                EXPECT_EQ(at->second.bytes, row.bytes);
+                                EXPECT_FALSE(row.owner.owner_before(at->second.owner));
+                                EXPECT_FALSE(at->second.owner.owner_before(row.owner));
+                            }
+                        });
+        });
+    return result;
+}
 UnionReconstruction fresh_union(const Hierarchy& source)
 {
-    P::GeometryAllocationLedger ordinary_owners, bounded_owners;
-    std::size_t used = 0;
+    const auto expected = walked_owners(source);
+    PhysicalOwners actual;
+    struct Metadata
+    {
+        std::shared_ptr<const void> owner;
+        std::size_t admitted;
+    };
+    std::map<const void*, Metadata> administration;
+    Access::visit_cache_owner_union(source,
+        [&](const auto& row)
+        {
+            auto [at, added] =
+                actual.emplace(PhysicalKey{row.key.kind, row.owner.get()}, PhysicalOwner{row.owner, row.bytes});
+            if (!added)
+            {
+                EXPECT_EQ(at->second.bytes, row.bytes);
+                EXPECT_FALSE(row.owner.owner_before(at->second.owner));
+                EXPECT_FALSE(at->second.owner.owner_before(row.owner));
+            }
+        },
+        {&administration, [](void* raw, const std::shared_ptr<const void>& owner, std::size_t, std::size_t admitted)
+            {
+                auto& rows = *static_cast<decltype(administration)*>(raw);
+                EXPECT_TRUE(rows.emplace(owner.get(), Metadata{owner, admitted}).second);
+                return true;
+            }});
+    EXPECT_EQ(actual.size(), expected.size());
+    std::size_t payload = 0;
+    for (const auto& [key, row] : expected)
+    {
+        const auto found = actual.find(key);
+        EXPECT_NE(found, actual.end());
+        if (found != actual.end())
+        {
+            EXPECT_EQ(found->second.bytes, row.bytes);
+            EXPECT_FALSE(found->second.owner.owner_before(row.owner));
+            EXPECT_FALSE(row.owner.owner_before(found->second.owner));
+        }
+        payload += row.bytes;
+    }
+    std::map<const void*, Metadata> controls;
     source.visit_geometry_snapshots(
-        [&](const auto& snapshot) { snapshot.retain(ordinary_owners, bounded_owners, used, ample); });
-    return {used, ordinary_owners.payload_bytes() + bounded_owners.payload_bytes()};
+        [&](const auto& snapshot)
+        {
+            Access::visit_owner_manifest_metadata(snapshot,
+                {&controls,
+                    [](void* raw, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted)
+                    {
+                        auto& rows = *static_cast<decltype(controls)*>(raw);
+                        auto [at, added] = rows.emplace(owner.get(), Metadata{owner, admitted - payload});
+                        if (!added)
+                            EXPECT_EQ(at->second.admitted, admitted - payload);
+                        return true;
+                    }});
+        });
+    std::size_t admin = 0;
+    for (const auto& [owner, row] : administration)
+        admin += row.admitted;
+    for (const auto& [owner, row] : controls)
+        admin += row.admitted;
+    return {payload + admin, payload};
 }
-/** The same exact union reached by walking the snapshot dependency graph. */
 std::size_t walked_payload(const Hierarchy& source)
 {
-    P::GeometryAllocationLedger ordinary_owners, bounded_owners;
+    const auto rows = walked_owners(source);
     std::size_t bytes = 0;
-    source.visit_geometry_snapshots(
-        [&](const auto& snapshot) { snapshot.retain(ordinary_owners, bounded_owners, bytes, ample); });
-    return ordinary_owners.payload_bytes() + bounded_owners.payload_bytes();
+    for (const auto& [key, row] : rows)
+        bytes += row.bytes;
+    return bytes;
 }
 std::size_t shared_owner_count(const Hierarchy& source)
 {
@@ -138,13 +232,13 @@ TEST(AdaptiveGeometryCacheAdmission, WarmProviderSourcesAdmitTheExactUnionWithou
             EXPECT_EQ(after.census_root_visits, before.census_root_visits);
             EXPECT_EQ(after.resident_bytes, before.resident_bytes);
 
-            // Replacement remains a full exact union census in this stage.
-            // The subsequent accepted-source query reuses its resulting seal.
+            // Replacement stages only the changed immutable root frontier.
             const auto replacement = acquire(*source, selected, AMR::GeometrySnapshotPurpose::State);
             EXPECT_NE(replacement, first);
             const auto changed = Access::cache_admission_statistics(*source);
-            EXPECT_EQ(changed.union_censuses, after.union_censuses + 1);
-            EXPECT_GT(changed.census_root_visits, after.census_root_visits);
+            EXPECT_EQ(changed.union_censuses, after.union_censuses);
+            EXPECT_EQ(changed.census_root_visits, after.census_root_visits);
+            EXPECT_GT(changed.union_updates, after.union_updates);
             expect_exact_seal(*source);
             D::Budget after_replacement{ample};
             Access::admit_cache_residency(*source, after_replacement);
@@ -261,17 +355,33 @@ TEST(AdaptiveGeometryCacheAdmission, WarmHitInstallsTheMaintainedExactOwnerSetIn
         P::GeometryAllocationLedger census_ordinary, census_bounded;
         std::size_t census_used = 0;
         hit->retain(census_ordinary, census_bounded, census_used, ample);
-        EXPECT_EQ(ordinary_owners.payload_bytes(), census_ordinary.payload_bytes());
-        EXPECT_EQ(ordinary_owners.owner_count(), census_ordinary.owner_count());
+        const auto pair = Access::owner_pair(*hit);
+        // Imported own-index storage is bookkeeping; the payload set contains
+        // the complete stored body plus the explicitly admitted snapshot header.
+        EXPECT_EQ(ordinary_owners.payload_bytes(), pair.owners[0].payload_bytes() + sizeof(*hit));
+        EXPECT_EQ(ordinary_owners.owner_count(), pair.owners[0].owner_count() + 1);
         EXPECT_LE(used, census_used);
 
         // Imported owners are recognized by later retention of the same root:
         // no additional owner, no additional cumulative admission.
         const auto owners_before = ordinary_owners.owner_count();
         const auto used_before = used;
+        P::details::GeometryAllocationOwnerAccess::reset_work_statistics();
+        EXPECT_EQ(source->geometry_snapshot(selected, ordinary, AMR::GeometrySnapshotPurpose::State, used, ample,
+                      &ordinary_owners, &bounded_owners),
+            hit);
+        EXPECT_EQ(used, used_before);
+        const auto qualified = P::details::GeometryAllocationOwnerAccess::work_statistics();
+        EXPECT_EQ(qualified.import_fallbacks, 0u);
+        EXPECT_EQ(qualified.metadata_credit_seed_rows, 0u);
+        const auto bookkeeping_before = ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes();
         hit->retain(ordinary_owners, bounded_owners, used, ample);
         EXPECT_EQ(ordinary_owners.owner_count(), owners_before);
-        EXPECT_EQ(used, used_before);
+        EXPECT_EQ(used - used_before,
+            ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes() - bookkeeping_before);
+        const auto retained = used;
+        hit->retain(ordinary_owners, bounded_owners, used, ample);
+        EXPECT_EQ(used, retained);
         expect_exact_seal(*source);
     }
 }
@@ -341,12 +451,19 @@ TEST(AdaptiveGeometryCacheAdmission, LateLeaseRejectionPreservesManifestSealAndA
         auto blocker = Access::contact_cache(*source).external_residency_lease();
         blocker.resize(blocker.available());
         std::size_t used = 0;
-        EXPECT_THROW((void) source->geometry_snapshot(
-                         selected, ordinary, AMR::GeometrySnapshotPurpose::State, used, ample),
+        P::GeometryAllocationLedger operation_ordinary, operation_bounded;
+        EXPECT_THROW((void) source->geometry_snapshot(selected, ordinary, AMR::GeometrySnapshotPurpose::State, used,
+                         ample, &operation_ordinary, &operation_bounded),
             std::exception);
         EXPECT_GT(used, 0u);
+        const auto after_failure = used;
+        const auto owner = std::make_shared<const int>(1);
+        EXPECT_THROW(operation_ordinary.retain_external_owner(owner, sizeof(int), used, ample), P::GeometryError);
+        EXPECT_THROW(operation_bounded.retain_external_owner(owner, sizeof(int), used, ample), P::GeometryError);
+        EXPECT_EQ(used, after_failure);
         const auto after = Access::cache_admission_statistics(*source);
-        EXPECT_GT(after.union_censuses, before.union_censuses);
+        EXPECT_EQ(after.union_censuses, before.union_censuses);
+        EXPECT_GT(after.union_updates, before.union_updates);
         EXPECT_EQ(after.resident_bytes, before.resident_bytes);
         EXPECT_EQ(after.lease_bytes, before.lease_bytes);
         EXPECT_EQ(walked_payload(*source), payload_before);
@@ -386,4 +503,160 @@ TEST(AdaptiveGeometryCacheAdmission, StoredSnapshotManifestSharesItsIndexWithout
     EXPECT_FALSE(first_root.owner_before(second_root));
     EXPECT_FALSE(second_root.owner_before(first_root));
     expect_exact_seal(*source);
+}
+
+TEST(AdaptiveGeometryCacheAdmission, OptionalTwoBlockLookaheadReservesUnionAndRetirementWithOtherRoots)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1 || !AMR::geometry_construction_controls().supported)
+        GTEST_SKIP() << "Requires one rank and inspectable construction controls.";
+    struct Result
+    {
+        bool accepted = false;
+        std::size_t prepared = 0;
+    };
+    const auto attempt = [&](std::size_t headroom)
+    {
+        AMR::AMRGrid grid;
+        grid.block_cells = {8, 4, 4};
+        AMR::CartesianAMR native(grid);
+        std::vector<std::uint64_t> ids(native.geometry()->num_cells());
+        std::iota(ids.begin(), ids.end(), 0);
+        auto input = native.detach_owned(ids, {'b', 'o', 'u', 'n', 'd', 'a', 'r', 'y'});
+        auto source = std::make_shared<const Hierarchy>(
+            std::move(input.owned), std::move(input.families), std::move(input.kernel), Tpetra::getDefaultComm());
+        const AMR::AdaptiveLeaf *initial = nullptr, *requested = nullptr, *unrelated = nullptr;
+        for (const auto& leaf : source->owned_leaves())
+        {
+            if (leaf.native_cell == 0)
+                initial = &leaf;
+            if (leaf.native_cell == 60)
+                requested = &leaf;
+            if (leaf.native_cell == 127)
+                unrelated = &leaf;
+        }
+        EXPECT_TRUE(initial && requested && unrelated);
+        if (!initial || !requested || !unrelated)
+            return Result{};
+        const auto accepted = acquire(*source, std::array{initial}, AMR::GeometrySnapshotPurpose::State);
+        const auto raw = acquire(*source, std::array{unrelated}, AMR::GeometrySnapshotPurpose::OriginalSources);
+        const auto bounded = acquire(
+            *source, std::array{unrelated}, AMR::GeometrySnapshotPurpose::State, ArithmeticMode::BoundedCertification);
+        const auto before = Access::cache_admission_statistics(*source);
+        auto blocker = Access::contact_cache(*source).external_residency_lease();
+        const auto available = blocker.available();
+        blocker.resize(available - std::min(available, headroom));
+        P::GeometryAllocationLedger zero, one;
+        std::size_t used = 37;
+        P::details::GeometryAllocationOwnerAccess::reset_work_statistics();
+        std::shared_ptr<const AMR::AdaptiveGeometrySnapshot> candidate;
+        try
+        {
+            candidate = source->geometry_snapshot(
+                std::array{requested}, ordinary, AMR::GeometrySnapshotPurpose::State, used, ample, &zero, &one);
+        }
+        catch (const std::invalid_argument& error)
+        {
+            // Only the constrained backing-arena rejection is a budget outcome.
+            // Geometry/identity/control failures remain test failures.
+            if (!std::string_view(error.what()).starts_with("Distributed adaptive payload budget exhausted:"))
+                throw;
+            const auto after = Access::cache_admission_statistics(*source);
+            EXPECT_EQ(after.resident_bytes, before.resident_bytes);
+            EXPECT_EQ(after.lease_bytes, before.lease_bytes);
+            const auto spent = used;
+            const auto probe = std::make_shared<const int>(1);
+            EXPECT_THROW(zero.retain_external_owner(probe, sizeof(int), used, ample), P::GeometryError);
+            EXPECT_THROW(one.retain_external_owner(probe, sizeof(int), used, ample), P::GeometryError);
+            EXPECT_EQ(used, spent);
+            EXPECT_EQ(acquire(*source, std::array{initial}, AMR::GeometrySnapshotPurpose::State), accepted);
+            expect_exact_seal(*source);
+            return Result{};
+        }
+        const auto work = P::details::GeometryAllocationOwnerAccess::work_statistics();
+        EXPECT_EQ(work.import_fallbacks, 0u);
+        EXPECT_EQ(work.metadata_credit_seed_rows, 0u);
+        EXPECT_EQ(candidate->ordinary_catalog()->size(), 2u);
+        const auto selected = candidate->find(*requested);
+        EXPECT_TRUE(selected.has_value());
+        if (selected)
+            EXPECT_DOUBLE_EQ(candidate->native_metrics().at(*selected).volume, 1.0 / 128.0);
+        std::size_t prepared = 0;
+        candidate->visit_prepared_cartesian_sources(
+            [&](const auto& page)
+            {
+                EXPECT_EQ(page.size(), 64u);
+                ++prepared;
+            });
+        EXPECT_LE(prepared, 2u);
+        // Their exact header controls must still be part of the maintained
+        // root union after this independent Ordinary replacement.
+        std::array<bool, 2> found{};
+        const std::array<std::shared_ptr<const AMR::AdaptiveGeometrySnapshot>, 2> preserved{raw, bounded};
+        Access::visit_cache_owner_union(*source,
+            [&](const auto& row)
+            {
+                for (std::size_t i = 0; i < preserved.size(); ++i)
+                    if (row.owner.get() == preserved[i].get())
+                    {
+                        EXPECT_FALSE(row.owner.owner_before(preserved[i]));
+                        EXPECT_FALSE(preserved[i].owner_before(row.owner));
+                        found[i] = true;
+                    }
+            },
+            {nullptr, [](void*, const auto&, std::size_t, std::size_t) { return true; }});
+        EXPECT_TRUE(found[0]);
+        EXPECT_TRUE(found[1]);
+        expect_exact_seal(*source);
+        return Result{true, prepared};
+    };
+    std::optional<std::size_t> demand_only, one_page, two_pages;
+    for (std::size_t headroom = 64 * 1024; headroom <= 32 * 1024 * 1024; headroom *= 2)
+    {
+        SCOPED_TRACE(headroom);
+        const auto result = attempt(headroom);
+        // Once required publication fits, optional work must never turn a
+        // larger finite arena into a rejection of that same required demand.
+        if (demand_only)
+            EXPECT_TRUE(result.accepted);
+        if (!result.accepted)
+            continue;
+        if (result.prepared == 0)
+            demand_only = headroom;
+        else if (result.prepared == 1)
+            one_page = headroom;
+        else
+        {
+            two_pages = headroom;
+            break;
+        }
+    }
+    ASSERT_TRUE(demand_only);
+    ASSERT_TRUE(two_pages);
+    if (!one_page)
+    {
+        auto lower = *demand_only, upper = *two_pages;
+        while (upper - lower > 1)
+        {
+            const auto middle = lower + (upper - lower) / 2;
+            SCOPED_TRACE(middle);
+            const auto result = attempt(middle);
+            ASSERT_TRUE(result.accepted);
+            if (result.prepared == 1)
+            {
+                one_page = middle;
+                break;
+            }
+            if (result.prepared == 0)
+                lower = middle;
+            else
+                upper = middle;
+        }
+    }
+    EXPECT_TRUE(one_page);
+    if (demand_only)
+        RecordProperty("DemandOnlyArenaHeadroom", std::to_string(*demand_only));
+    if (one_page)
+        RecordProperty("SinglePreparedBlockHeadroom", std::to_string(*one_page));
+    if (two_pages)
+        RecordProperty("TwoPreparedBlocksHeadroom", std::to_string(*two_pages));
 }

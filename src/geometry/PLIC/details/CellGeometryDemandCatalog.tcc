@@ -406,6 +406,36 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_
     return result;
 }
 template<ArithmeticMode M>
+CellCatalogRebindBound CellCatalogDemandAccess::rebound_bound(const CellGeometryCatalog<M>& catalog, std::size_t count)
+{
+    using Catalog = CellGeometryCatalog<M>;
+    namespace G = geometry_demand;
+    if (!count)
+        return {};
+    if (!catalog.demand_ || count > 4)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid AMR catalog rebound reservation.");
+    const auto multiply = [](std::size_t rows, std::size_t width)
+    {
+        if (width && rows > std::numeric_limits<std::size_t>::max() / width)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Catalog rebound envelope overflows.");
+        return rows * width;
+    };
+    const auto& old = *catalog.demand_;
+    // At most four inserted source keys can grow this already nonempty index
+    // by one level. Doubling its path envelope covers that possible new level
+    // for each sequential retire/retain, including all intermediate indexes.
+    const auto native_bytes = multiply(4 * count, old.native_sources.batch_edit_byte_bound(1));
+    auto bytes =
+        G::checked_sum(sizeof(Catalog) + G::control_bytes, sizeof(typename Catalog::DemandState) + G::control_bytes);
+    bytes = G::checked_sum(bytes, multiply(old.tail_stamps.size(), sizeof(G::OrderStamp)));
+    bytes = G::checked_sum(bytes, multiply(count, sizeof(G::OrderedSourceSlot)));
+    bytes = G::checked_sum(bytes, G::checked_sum(native_bytes, old.order.rebound_byte_bound(count)));
+    const auto owners = G::checked_sum(2, G::checked_sum(old.order.rebound_owner_bound(count),
+                                              G::GeometryOwnerManifest::metadata_owner_count_bound(
+                                                  G::checked_sum(old.native_sources.owner_count(), count))));
+    return {bytes, owners};
+}
+template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
     std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
     std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits)

@@ -66,6 +66,9 @@ public:
         std::span<const SourceSlot> prefix, std::span<const OrderStamp> retired, Admission, PageWork* = nullptr) const;
     /** Repack source pointer arrays without moving their logical cells. */
     [[nodiscard]] GeometryDemandOrder rebound(std::span<const OrderedSourceSlot>, Admission, PageWork* = nullptr) const;
+    /** Same-stamp source replacements preserve tree height and row counts. */
+    [[nodiscard]] std::size_t rebound_byte_bound(std::size_t changed_slots) const;
+    [[nodiscard]] std::size_t rebound_owner_bound(std::size_t changed_slots) const;
     /** First/last dependency traversal skips complete inherited subtrees. */
     void visit_dependencies(MetadataSink, SourceSink) const;
     void visit_borrowed_dependencies(BorrowedMetadataSink, BorrowedSourceSink, const void* parent = nullptr) const;

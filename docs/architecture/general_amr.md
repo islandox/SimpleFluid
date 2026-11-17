@@ -1297,8 +1297,9 @@ total still includes the previously admitted control allowance.
 A fresh operation ledger can import an authenticated immutable owner set: it
 shares the root, charges that set's cached union without enumerating retained
 geometry, and preserves a nonzero caller cumulative counter. Importing into a
-populated ledger requires the exact union, enumerates the imported rows once and
-reports that work. Imported owners participate in later retention, duplicate and
+populated ledger with an exact credited predecessor or subset capability uses a
+pruned derived import. An unrelated populated ledger enumerates the imported
+rows once and reports that fallback. Imported owners participate in later retention, duplicate and
 control detection, payload and bookkeeping queries and the borrowed physical
 census exactly like locally admitted owners; the admission entry points consult
 the imported root before charging or publishing anything. A ledger import accepts
@@ -1309,20 +1310,48 @@ The published geometry cache keeps one exact owner manifest per root slot and pe
 owner channel (ordinary and bounded certification). A root manifest is built once
 when that root is published, copied when a cache is rebound, and charged as cache
 metadata. A warm State cache hit with a fresh caller ledger installs the
-maintained ordinary manifest instead of re-walking the snapshot's dependency
-graph; a populated caller ledger keeps the complete walk so its exact union is
-preserved.
+maintained pair instead of re-walking the snapshot's dependency graph. Exact
+credited reuse also avoids that walk; an unrelated populated caller keeps the
+enumeration fallback so its complete union is preserved.
 
-Root replacement currently obtains the exact cache union from an explicit full
-graph census of every live snapshot root. This independent compatibility path
-includes each snapshot header and both stored payload-manifest index graphs;
-sharing a root manifest value itself allocates no new index. The residency seal
-and lease include that union's payload and the union ledger's own bookkeeping,
-counting shared physical metadata once. Per-snapshot payload-manifest creation
-is incremental; cache union replacement still walks the retained roots. Capture
-and export admit transient buffers and persistent index allocations before
-allocation under the remaining finite budget. Prepared-slot rebinding also
-admits replacement catalog pages into the hierarchy overlap.
+Root replacement edits a maintained physical owner union by adding replacement
+bindings before retiring accepted bindings. Each binding supplies its separately
+owned header and two sealed payload manifests. Administrative index nodes prune
+shared subtrees before their record pins are visited; each record contributes
+one physical pointer regardless of its payload reference count. A linked pair
+of editors maintains exact cross-channel physical overlap, including neutral
+owners shared by Ordinary and bounded certification. The resident seal counts
+physical payload once, the union's own indexes, and a persistent control-credit
+index that keeps each stored-index allowance once until its last owner leaves.
+Explicit snapshot/index graphs remain available as an independent census.
+
+Whole-union imports are operation-local. A scoped peer link validates exact
+kind, address, shared control and size before reusing a physical allocation's
+credit across ledgers; no link survives the operation. Fresh sealed pairs use
+cached overlap totals; unrelated populated ledgers use an explicit counted row
+fallback. Derived imports authenticate their exact credited predecessor State
+and visit added rows while pruning shared index pages. Closed producer edits
+issue weak root/subset capabilities only after dependency admission completes.
+Weak control lifetime has an explicit bookkeeping allowance and cannot pin a
+source controller through its issuer.
+
+Persistent caller/publication results import only a binding authenticated by
+the current issuer root set, never the operation's whole source union. The
+binding's header and payload pair exclude unrelated source projections. Body
+projections may not retain another binding's administrative manifest value;
+this keeps physical index closure and payload ownership separate. Preparation,
+rebinding and native publication stage new captured bindings, so a candidate
+header reused during construction never hides a changed index root.
+Optional preparation recomputes headroom for each block. Before changing a
+candidate it reserves source/catalog construction, the following owner/control
+index updates, and final retirement of accepted and historical bindings. Source
+rebinding has its own construction and publication reservation. A finite arena
+that fits required demand but not that complete optional transaction keeps the
+demand-only candidate. Reservation queries read cached counts and tree heights;
+they do not enumerate retained geometry.
+The owning GeneralVoF evaluation-catalog reuse interface still retains its prior
+snapshot and catalogs explicitly before acquisition. It therefore uses the
+populated-ledger fallback and is outside this incremental cache-import contract.
 Publication stages the replacement manifests, complete union and final lease
 admission before changing the accepted roots, manifests or seal. The cache also
 accumulates the persistent-catalog construction work of each replacement (copied metadata bytes, copied pages and visited

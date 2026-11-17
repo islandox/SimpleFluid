@@ -9,6 +9,10 @@
 
 namespace SimpleFluid::PLIC::details
 {
+struct CellCatalogRebindBound
+{
+    std::size_t bytes = 0, owners = 0;
+};
 struct CellCatalogDemandWork
 {
     std::size_t cumulative_metadata_bytes = 0;
@@ -48,6 +52,9 @@ public:
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> rebound_precharged(
         std::shared_ptr<const CellGeometryCatalog<M>>, std::span<const std::size_t>,
         std::span<const geometry_demand::SourceSlot>, GeometryLimits, geometry_demand::Admission);
+    /** Construction and final new-owner envelope for AMR batches of at most four. */
+    template<ArithmeticMode M>
+    [[nodiscard]] static CellCatalogRebindBound rebound_bound(const CellGeometryCatalog<M>&, std::size_t count);
     template<ArithmeticMode M>
     [[nodiscard]] static geometry_demand::OrderStamp stamp(const CellGeometryCatalog<M>&, std::size_t);
     template<ArithmeticMode M> [[nodiscard]] static bool persistent(const CellGeometryCatalog<M>&) noexcept;

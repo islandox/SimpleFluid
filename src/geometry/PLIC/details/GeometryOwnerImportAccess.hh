@@ -15,6 +15,8 @@ namespace SimpleFluid::PLIC::details
 /** A manifest row names a ledger allocation kind in its `kind` byte and the
  * arithmetic channel 0 (Ordinary) or 1 (BoundedCertification). One import
  * must have a uniform channel, which selects/checks the ledger numerical mode. */
+struct OwnerManifestPair;
+class GeometryOwnerUnion;
 class GeometryOwnerImportAccess
 {
 public:
@@ -25,6 +27,12 @@ public:
      * ledger, including failures after a partial union was admitted. */
     static std::size_t import(GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest&,
         std::size_t& cumulative_bytes, std::size_t byte_limit);
+    /** A sealed pair discounts exact cross-channel physical aliases once. */
+    static std::size_t import_pair(GeometryAllocationLedger&, GeometryAllocationLedger&, const OwnerManifestPair&,
+        std::size_t& used, std::size_t limit);
+    static std::size_t import_derived(GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest& previous,
+        const geometry_demand::GeometryOwnerManifest& next, std::size_t& used, std::size_t limit,
+        geometry_demand::PageWork* = nullptr);
     /** Rows installed as the immutable import root, distinct from the mutable
      * map rows this ledger admitted itself. */
     [[nodiscard]] static std::size_t imported_owners(const GeometryAllocationLedger&) noexcept;
@@ -37,5 +45,18 @@ public:
     /** Borrowed diagnostic traversal of the imported rows only. */
     static void visit_imported(const GeometryAllocationLedger&,
         const std::function<void(std::uint8_t kind, const void* owner, std::size_t bytes)>&);
+
+private:
+    friend class GeometryOwnerUnion;
+    friend class GeometryOwnerGraphEditor;
+    static bool credited(const GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest&) noexcept;
+    static void certify_constructed(
+        GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest&, std::size_t& used, std::size_t limit);
+
+    static bool retain_weak_control(
+        GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest&, std::size_t& used, std::size_t limit);
+    static void certify_subset(GeometryAllocationLedger&, const geometry_demand::GeometryOwnerManifest& authority,
+        const geometry_demand::GeometryOwnerManifest& subset, std::uint64_t generation, std::size_t& used,
+        std::size_t limit);
 };
 } // namespace SimpleFluid::PLIC::details

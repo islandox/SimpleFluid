@@ -1432,6 +1432,12 @@ template class CellGeometryCatalog<ArithmeticMode::Ordinary>;
 template class CellGeometryCatalog<ArithmeticMode::BoundedCertification>;
 template class CellGeometryCatalog<ArithmeticMode::Exact>;
 
+template details::CellCatalogRebindBound details::CellCatalogDemandAccess::rebound_bound<ArithmeticMode::Ordinary>(
+    const CellGeometryCatalog<ArithmeticMode::Ordinary>&, std::size_t);
+template details::CellCatalogRebindBound
+details::CellCatalogDemandAccess::rebound_bound<ArithmeticMode::BoundedCertification>(
+    const CellGeometryCatalog<ArithmeticMode::BoundedCertification>&, std::size_t);
+
 template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
 details::CellCatalogDemandAccess::initialize<ArithmeticMode::Ordinary>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, GeometryLimits,

@@ -374,10 +374,37 @@ struct GeometryAllocationLedger::Impl
     bool imported_metadata_seeded = false;
 
     std::vector<allocation_detail::Item> pending;
+    GeometryAllocationLedger* peer = nullptr;
+    std::size_t shared_payload_credit = 0;
+    details::GeometryIndexControls control_grant;
+
     /** Immutable authenticated owner set installed by an operation import. The
      * mutable map above only holds this ledger's own admissions. */
     std::optional<geometry_demand::GeometryOwnerManifest> imported;
     std::uint8_t imported_channel = 0;
+    struct SubsetCertificate
+    {
+        std::weak_ptr<const void> authority, subset;
+        std::uint64_t generation = 0;
+        std::uint8_t channel = 0, reserved_controls = 0;
+    };
+    std::array<SubsetCertificate, 12> subsets;
+    std::size_t next_subset = 0;
+    std::weak_ptr<const void> derived_head, control_grant_authority;
+    bool derived_control_reserved = false;
+    std::size_t weak_control_allowance = 0;
+    [[nodiscard]] bool covers(const geometry_demand::GeometryOwnerManifest& root) const noexcept
+    {
+        if (!root.owner_count() || (imported && imported->same_root(root)) ||
+            (!derived_head.expired() && root.authenticates(derived_head)))
+            return true;
+        for (const auto& certificate : subsets)
+            if (!certificate.authority.expired() && !certificate.subset.expired() &&
+                root.authenticates(certificate.subset))
+                return true;
+        return false;
+    }
+
     bool prepaid_payload = false;
     [[nodiscard]] bool imported_admits(
         allocation_detail::Kind kind, const std::shared_ptr<const void>& owner, std::size_t bytes) const
@@ -439,6 +466,40 @@ struct GeometryAllocationLedger::Impl
         }
         pending.push_back({kind, pointer});
     }
+    bool peer_owns(const allocation_detail::Item& item, std::size_t bytes, std::size_t used) const
+    {
+        if (!peer || !peer->impl_)
+            return false;
+        if (peer->failed_ || used < peer->impl_->last_counter)
+            allocation_detail::exhausted("Paired allocation credit has a rejected or incoherent counter.");
+        const auto& other = *peer->impl_;
+        const allocation_detail::Key key{item.kind, item.owner.get()};
+        if (const auto found = other.owners.find(key); found != other.owners.end())
+        {
+            if (found->second.payload_bytes != bytes || item.owner.owner_before(found->second.pin) ||
+                found->second.pin.owner_before(item.owner))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Paired owner changes immutable control or size.");
+            return true;
+        }
+        if (other.imported &&
+            other.imported->references(other.imported_channel, static_cast<std::uint8_t>(item.kind), item.owner))
+        {
+            if (!other.imported->admits(
+                    other.imported_channel, static_cast<std::uint8_t>(item.kind), item.owner, bytes))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Paired imported owner changes immutable size.");
+            return true;
+        }
+        if (item.kind == allocation_detail::Kind::ExternalOwner)
+            if (const auto found = other.metadata_credits.find(key); found != other.metadata_credits.end())
+            {
+                if (found->second.payload != bytes || item.owner.owner_before(found->second.owner) ||
+                    found->second.owner.owner_before(item.owner))
+                    throw GeometryError(
+                        GeometryErrorCode::InvalidInput, "Paired index credit changes immutable storage.");
+                return true;
+            }
+        return false;
+    }
     bool admit(const allocation_detail::Item& item, std::size_t bytes, std::size_t& used, std::size_t limit,
         bool prepaid = false)
     {
@@ -473,8 +534,17 @@ struct GeometryAllocationLedger::Impl
         }
         // Charge before publishing the seen identity. A failed call cannot
         // make an uncharged allocation disappear from a later admission.
-        if (prepaid)
-            payload = add(payload, bytes); // Allocation was charged before construction; retain its strong pin below.
+        const bool paired = !prepaid && peer_owns(item, bytes, used);
+        if (prepaid || paired)
+        {
+            payload = add(payload, bytes);
+            if (paired)
+            {
+                shared_payload_credit = add(shared_payload_credit, bytes);
+                details::GeometryAllocationOwnerAccess::observe_work(
+                    details::GeometryAllocationOwnerAccess::Work::PairedPayloadCredit);
+            }
+        }
         else
             account(bytes, false, used, limit);
         account(sizeof(typename decltype(owners)::value_type) + 4 * sizeof(void*), true, used, limit);

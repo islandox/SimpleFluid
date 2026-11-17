@@ -2,6 +2,7 @@
  * @brief Bounded compressed selector-page rewrites for sparse requested prefixes.
  */
 #include "geometry/PLIC/details/GeometryDemandOrder.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
 #include <limits>
 #include <variant>
@@ -312,6 +313,51 @@ struct GeometryDemandOrder::State
     std::uint64_t generation;
     State(Pages::Ptr value, std::uint64_t stamp) : root(std::move(value)), generation(stamp) {}
 };
+std::size_t GeometryDemandOrder::rebound_owner_bound(std::size_t changed_slots) const
+{
+    if (!changed_slots)
+        return 0;
+    if (!state_ || !state_->root)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Missing geometry order for rebound reservation.");
+    std::size_t height = 1;
+    for (auto node = state_->root.get();; node = node->children.front().get())
+    {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
+        if (node->leaf())
+            break;
+        ++height;
+    }
+    const auto per_slot = checked_sum(height, 1); // path nodes and one selector page
+    if (changed_slots > (std::numeric_limits<std::size_t>::max() - 1) / per_slot)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry rebound owner envelope overflows.");
+    return 1 + changed_slots * per_slot; // plus the new State
+}
+std::size_t GeometryDemandOrder::rebound_byte_bound(std::size_t changed_slots) const
+{
+    if (!changed_slots)
+        return 0;
+    const auto multiply = [](std::size_t count, std::size_t width)
+    {
+        if (width && count > std::numeric_limits<std::size_t>::max() / width)
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry rebound byte envelope overflows.");
+        return count * width;
+    };
+    const auto owners = rebound_owner_bound(changed_slots);
+    const auto nodes = owners - changed_slots - 1;
+    const auto node_bytes = sizeof(Pages::Node) + control_bytes +
+                            std::max(leaf_capacity * sizeof(Group), branch_capacity * sizeof(Pages::Ptr));
+    // Each column chooses overrides only when they cost less than a dense
+    // column. Source rebinding preserves every stamp, group size and key, so
+    // each changed selector rewrites one path without splitting or rebalancing.
+    const auto selector_bytes =
+        sizeof(SelectorPage) + control_bytes +
+        leaf_capacity * (sizeof(SourceOwner) + sizeof(std::uint8_t) + 3 * sizeof(std::uint64_t));
+    auto result = checked_sum(sizeof(State) + control_bytes,
+        checked_sum(multiply(nodes, node_bytes), multiply(changed_slots, selector_bytes)));
+    if (changed_slots > leaf_capacity)
+        result = checked_sum(result, multiply(changed_slots, sizeof(OrderedSourceSlot)));
+    return result;
+}
 GeometryDemandOrder GeometryDemandOrder::prepended(
     std::span<const SourceSlot> prefix, std::span<const OrderStamp> retired, Admission admission, PageWork* work) const
 {

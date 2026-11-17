@@ -36,6 +36,12 @@ inline constexpr std::size_t prepared_cartesian_page_size = 64;
 /** One immutable prepared State page: exact recipe control, 64-cell block and
  * the actual source-only physical page. */
 using PreparedOwnerManifest = PLIC::details::geometry_demand::GeometryOwnerManifest;
+/** Borrowed preflight for the remaining cache-index and publication work. */
+struct OptionalOwnerReservation
+{
+    void* context = nullptr;
+    std::size_t (*bytes)(void*, std::size_t new_owners, std::size_t index_frontier) = nullptr;
+};
 struct PreparedCartesianPage
 {
     std::shared_ptr<const NativeFragmentDescriptor> recipe;
@@ -163,6 +169,7 @@ private:
     /** Payload-only physical graph, excluding header and these index graphs. */
     std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2> payload_owners_;
     std::array<std::size_t, 9> owner_work_{};
+    std::size_t cross_payload_bytes_ = 0;
     void record_owner_work(const PLIC::details::GeometryOwnerGraphWork&);
     void update_owner_manifests(const AdaptiveGeometrySnapshot*, PLIC::details::GeometryOwnerGraphEditor&,
         PLIC::details::GeometryOwnerGraphEditor&);
@@ -172,7 +179,7 @@ private:
      * the same recipe and region) as an optional immutable State source page. */
     bool prepare_cartesian_page(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, std::size_t& used,
         std::size_t operation_limit, std::size_t optional_headroom, std::uint64_t block_first,
-        PLIC::GeometryAllocationLedger&);
+        PLIC::GeometryAllocationLedger&, geometry_snapshot_detail::OptionalOwnerReservation);
     void retain_prepared_cartesian_sources(PLIC::GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     /** Physical prepared page slot for a cell, if the page covers it. */
     struct PreparedSourceSlot
@@ -185,6 +192,8 @@ private:
     /** Adopt prepared page sources for already selected cells. */
     void rebind_prepared_slots(std::span<const std::size_t> ordinals, std::span<const PreparedSourceSlot> physical,
         PLIC::GeometryAllocationLedger& ordinary_owners, std::size_t& used, std::size_t limit);
+    [[nodiscard]] bool can_rebind_prepared_slots(
+        std::size_t count, std::size_t available, geometry_snapshot_detail::OptionalOwnerReservation) const;
     /** Exact immutable owner set of this snapshot, excluding its own header.
      * `bounded` selects the bounded-certification ledger's owners. */
     [[nodiscard]] geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(

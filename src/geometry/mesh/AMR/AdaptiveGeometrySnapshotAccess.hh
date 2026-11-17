@@ -6,6 +6,11 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+namespace SimpleFluid::PLIC::details
+{
+struct OwnerManifestPair;
+class GeometryOwnerRootBinding;
+} // namespace SimpleFluid::PLIC::details
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class DistributedAdaptiveContactHalo;
@@ -34,6 +39,11 @@ struct GeometryCacheAdmissionStatistics
     std::size_t admission_queries = 0, union_censuses = 0, census_root_visits = 0;
     /** Cumulative persistent-catalog construction work over the cache lifetime. */
     std::size_t catalog_copied_metadata_bytes = 0, catalog_copied_pages = 0, catalog_visited_pages = 0;
+    std::size_t union_updates = 0, union_edge_visits = 0, union_dependency_entries = 0;
+    std::size_t union_first_transitions = 0, union_last_transitions = 0;
+    std::size_t union_index_copied_pages = 0, union_index_copied_bytes = 0, union_index_visited_pages = 0;
+    std::size_t union_lookup_pages = 0;
+    std::size_t union_delta_import_rows = 0;
 };
 struct GeometrySnapshotOwnerStatistics
 {
@@ -47,6 +57,10 @@ struct GeometrySnapshotOwnerStatistics
 class GeometrySnapshotAccess
 {
 public:
+    [[nodiscard]] static PLIC::details::OwnerManifestPair owner_pair(const AdaptiveGeometrySnapshot&);
+    [[nodiscard]] static PLIC::details::GeometryOwnerRootBinding owner_binding(
+        const std::shared_ptr<const AdaptiveGeometrySnapshot>&);
+
     /** Independent quiescent pointer-slot census for native Cartesian Raw roots.
      * Rejects other graph families; records every incoming edge before pruning
      * a physical owner already expanded by this diagnostic. No geometry work. */
@@ -82,6 +96,11 @@ public:
     /** Same source-cache admission used by adapt, migrate and native binding.
      * Separate caller Budget retains its existing monotonic spent prefix. */
     static void admit_cache_residency(const DistributedAdaptiveHierarchy&, Budget&);
+    /** Explicit offline diagnostic; qualified admission never calls this census. */
+    static void visit_cache_owner_union(const DistributedAdaptiveHierarchy&,
+        const std::function<void(const PLIC::details::geometry_demand::OwnerRecord&)>&,
+        PLIC::details::geometry_demand::MetadataSink);
+
     static void visit_binding_sources(const AdaptiveGeometrySnapshot&, const std::function<void(const void*)>&);
     /** Borrow the stored payload-only owner set in constant work; excludes the
      * snapshot header and both owner-manifest index graphs. `budget` is untouched. */

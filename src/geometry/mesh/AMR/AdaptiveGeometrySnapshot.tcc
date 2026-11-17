@@ -6,7 +6,9 @@
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include <algorithm>
 #include <array>
@@ -51,11 +53,8 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     const auto observe_controls = [&] { stable_controls = stable_controls && construction_controls() == controls; };
     if (reuse)
     {
-        result.owner_work_[7] += PLIC::details::GeometryOwnerImportAccess::import(
-            ordinary_owners, reuse->payload_owners_[0], budget.used, budget.limit);
-        if (reuse->payload_owners_[1].owner_count())
-            result.owner_work_[7] += PLIC::details::GeometryOwnerImportAccess::import(
-                bounded_owners, reuse->payload_owners_[1], budget.used, budget.limit);
+        result.owner_work_[7] += PLIC::details::GeometryOwnerImportAccess::import_pair(ordinary_owners, bounded_owners,
+            adaptive_detail::GeometrySnapshotAccess::owner_pair(*reuse), budget.used, budget.limit);
         // A typed snapshot header cannot be an imported index node. Admit its
         // storage directly without the generic legacy index-credit census.
         PLIC::details::GeometryAllocationOwnerAccess::admit_graph_owner(ordinary_owners, 0,

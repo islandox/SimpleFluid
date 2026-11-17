@@ -31,6 +31,10 @@ public:
     GeometryOwnerGraphEditor(geometry_demand::GeometryOwnerManifest, std::uint8_t channel, std::size_t& used,
         std::size_t limit, GeometryAllocationLedger* = nullptr, GeometryOwnerGraphWork* = nullptr);
     ~GeometryOwnerGraphEditor();
+    /** Borrow a paired graph and scalar only while both editors live. Index
+     * owner aliases keep exact physical cross-channel bytes without a census. */
+    void pair_with(GeometryOwnerGraphEditor&, std::size_t& cross_payload_bytes);
+
     GeometryOwnerGraphEditor(const GeometryOwnerGraphEditor&) = delete;
     GeometryOwnerGraphEditor& operator=(const GeometryOwnerGraphEditor&) = delete;
     GeometryOwnerGraphEditor(GeometryOwnerGraphEditor&&) = delete;
@@ -44,6 +48,7 @@ public:
     /** Admit the one physical shared pointer held by a manifest record.
      * Stored payload reference multiplicity describes its graph, not this edge. */
     bool owner(const geometry_demand::OwnerRecord&, bool retain, bool prepaid = false);
+    [[nodiscard]] std::size_t references(const geometry_demand::OwnerRecord&) const;
     template<ArithmeticMode M> void geometry(const ConvexGeometryPtr<M>&, bool retain);
     template<ArithmeticMode M>
     void catalog(const std::shared_ptr<const CellGeometryCatalog<M>>&, bool retain, bool metadata_prepaid = false);
@@ -73,16 +78,20 @@ private:
         std::size_t limit;
         GeometryAllocationLedger* ledger;
         GeometryOwnerGraphWork* work;
+
         std::span<geometry_demand::OwnerRecord> rows;
         std::span<PendingOwner> inline_pending;
         std::size_t row_count = 0, pending_count = 0;
+        Impl* partner = nullptr;
+        std::size_t* cross_payload_bytes = nullptr;
+
         std::vector<PendingOwner> pending;
         struct KeyLess
         {
             bool operator()(const geometry_demand::OwnerKey&, const geometry_demand::OwnerKey&) const noexcept;
         };
         std::map<geometry_demand::OwnerKey, geometry_demand::OwnerRecord, KeyLess> overlay;
-        bool adding = true, failed = false, finished = false;
+        bool adding = true, failed = false, finished = false, credited_predecessor = false;
         std::size_t last_counter = 0;
         int construction_exceptions = std::uncaught_exceptions();
         struct Call
@@ -93,6 +102,8 @@ private:
             ~Call();
         };
         geometry_demand::Admission admission();
+        template<class Kind> std::size_t references(Kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
+
         template<class Kind>
         bool edge(Kind, const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false);
         template<class Kind, class T> void push(Kind, const std::shared_ptr<const T>&, std::size_t&, std::size_t);

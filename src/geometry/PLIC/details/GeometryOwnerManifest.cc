@@ -35,7 +35,12 @@ bool same_owner(const std::shared_ptr<const void>& first, const std::shared_ptr<
 }
 const OwnerRecord* find(const Pages::Ptr& root, const OwnerRecord& key, PageWork* work = nullptr)
 {
-    const auto* row = Pages::lower_bound(root, [&](const auto& value) { return OwnerLess{}(value, key); }, work);
+    PageWork local;
+    auto& measured = work ? *work : local;
+    const auto before = measured.visited_pages;
+    const auto* row = Pages::lower_bound(root, [&](const auto& value) { return OwnerLess{}(value, key); }, &measured);
+    GeometryAllocationOwnerAccess::observe_work(
+        GeometryAllocationOwnerAccess::Work::ManifestLookupPage, measured.visited_pages - before);
     if (!row || OwnerLess{}(key, *row))
         return nullptr;
     if (!same_owner(row->owner, key.owner))
@@ -59,6 +64,76 @@ struct GeometryOwnerManifest::State
         return owner;
     }
 };
+bool GeometryOwnerManifest::same_root(const GeometryOwnerManifest& other) const noexcept
+{
+    return same_owner(state_, other.state_);
+}
+bool GeometryOwnerManifest::authenticates(const std::weak_ptr<const void>& other) const noexcept
+{
+    return other.lock().get() == state_.get() && !other.owner_before(state_) && !state_.owner_before(other);
+}
+std::shared_ptr<const void> GeometryOwnerManifest::root_control() const noexcept
+{
+    return state_;
+}
+std::size_t GeometryOwnerManifest::root_metadata_bytes() const noexcept
+{
+    return state_ ? sizeof(State) : 0;
+}
+void GeometryOwnerManifest::visit_added(const GeometryOwnerManifest& previous, RecordSink records, PageWork* work) const
+{
+    if (!state_ || same_root(previous))
+        return;
+    const auto row = [&](const OwnerRecord& value)
+    {
+        const auto count = previous.references(value.key.channel, value.key.kind, value.owner, work);
+        if (count)
+        {
+            if (!previous.admits(value.key.channel, value.key.kind, value.owner, value.bytes, work))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry delta changes an immutable owner size.");
+        }
+        else
+            records(value);
+    };
+    const auto shared = [&](const Pages::Ptr& candidate)
+    {
+        auto old = previous.state_ && !previous.state_->inline_row() ? previous.state_->root : Pages::Ptr{};
+        while (old)
+        {
+            if (work)
+                ++work->visited_pages;
+            GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestLookupPage);
+            if (same_owner(old, candidate))
+                return true;
+            if (old->leaf() || OwnerLess{}(*old->maximum, *candidate->maximum))
+                return false;
+            const auto child = std::lower_bound(old->children.begin(), old->children.end(), *candidate->maximum,
+                [](const Pages::Ptr& item, const OwnerRecord& key) { return OwnerLess{}(*item->maximum, key); });
+            if (child == old->children.end())
+                return false;
+            old = *child;
+        }
+        return false;
+    };
+    const auto visit = [&](const auto& self, const Pages::Ptr& node) -> void
+    {
+        if (work)
+            ++work->visited_pages;
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestLookupPage);
+        if (shared(node))
+            return;
+        if (node->leaf())
+            for (const auto& value : node->rows)
+                row(value);
+        else
+            for (const auto& child : node->children)
+                self(self, child);
+    };
+    if (state_->inline_row())
+        row(state_->single);
+    else
+        visit(visit, state_->root);
+}
 void GeometryOwnerManifest::visit_dependencies(MetadataSink metadata, RecordSink records) const
 {
     if (!state_ || !metadata(state_, sizeof(State), sizeof(State) + control_bytes))
@@ -104,6 +179,48 @@ GeometryOwnerManifest GeometryOwnerManifest::built(
         result.state_ = State::created(Pages(admission, work).build(rows), admission);
     return result;
 }
+std::size_t GeometryOwnerManifest::metadata_owner_count_bound(std::size_t rows)
+{
+    if (!rows)
+        return 0;
+    // Every non-root leaf has at least 32 rows, and every non-root
+    // branch at least 16 children. The root alone may be underfull.
+    auto level = std::max(std::size_t{1}, rows / (leaf_capacity / 2));
+    auto owners = checked_sum(1, level); // State plus leaves (including indexed singleton).
+    while (level > 1)
+    {
+        level = std::max(std::size_t{1}, level / (branch_capacity / 2));
+        owners = checked_sum(owners, level);
+    }
+    return owners;
+}
+std::size_t GeometryOwnerManifest::edit_height_scale_bound(std::size_t anticipated_additions) const
+{
+    std::size_t accepted_height = 1;
+    auto node = state_ && !state_->inline_row() ? state_->root.get() : nullptr;
+    while (node && !node->leaf())
+    {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
+        accepted_height = checked_sum(accepted_height, 1);
+        node = node->children.front().get();
+    }
+    if (node)
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
+    const auto rows = checked_sum(owner_count(), anticipated_additions);
+    auto level = std::max(std::size_t{1}, rows / (leaf_capacity / 2));
+    std::size_t future_height = 1;
+    while (level > 1)
+    {
+        level = std::max(std::size_t{1}, level / (branch_capacity / 2));
+        future_height = checked_sum(future_height, 1);
+    }
+    future_height = std::max(future_height, accepted_height);
+    const auto denominator = checked_sum(accepted_height, 1);
+    const auto numerator = checked_sum(future_height, 1);
+    // The legacy bound's only height terms are H+1 and H+2. This
+    // ceiling ratio dominates both without changing that bound's policy.
+    return numerator / denominator + (numerator % denominator != 0);
+}
 std::size_t GeometryOwnerManifest::batch_edit_metadata_owner_bound(std::size_t changed_keys) const
 {
     if (!changed_keys)
@@ -112,9 +229,12 @@ std::size_t GeometryOwnerManifest::batch_edit_metadata_owner_bound(std::size_t c
     auto node = state_ && !state_->inline_row() ? state_->root.get() : nullptr;
     while (node && !node->leaf())
     {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
         ++height;
         node = node->children.front().get();
     }
+    if (node)
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
     const auto paths = checked_sum(changed_keys, 1);
     if (paths > (std::numeric_limits<std::size_t>::max() - 2) / 2 / checked_sum(height, 1))
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Geometry index-owner envelope overflows.");
@@ -128,9 +248,12 @@ std::size_t GeometryOwnerManifest::batch_edit_byte_bound(std::size_t changed_key
     auto node = state_ && !state_->inline_row() ? state_->root.get() : nullptr;
     while (node && !node->leaf())
     {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
         ++height;
         node = node->children.front().get();
     }
+    if (node)
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ReservationPathPage);
     const auto multiply = [](std::size_t count, std::size_t width)
     {
         if (width && count > std::numeric_limits<std::size_t>::max() / width)
@@ -287,6 +410,7 @@ bool GeometryOwnerManifest::admits(std::uint8_t channel, std::uint8_t kind, cons
     {
         if (work)
             ++work->visited_pages;
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestLookupPage);
         if (OwnerLess{}(state_->single, wanted) || OwnerLess{}(wanted, state_->single))
             return false;
         if (!same_owner(state_->single.owner, wanted.owner))
@@ -305,6 +429,7 @@ std::size_t GeometryOwnerManifest::references(
     {
         if (work)
             ++work->visited_pages;
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestLookupPage);
         if (OwnerLess{}(state_->single, wanted) || OwnerLess{}(wanted, state_->single))
             return 0;
         if (!same_owner(state_->single.owner, wanted.owner))
@@ -323,9 +448,15 @@ std::optional<std::uint8_t> GeometryOwnerManifest::uniform_channel(PageWork* wor
     {
         if (work)
             ++work->visited_pages;
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestLookupPage);
         return state_->single.key.channel;
     }
-    const auto first = Pages::lower_bound(state_->root, [](const auto&) { return false; }, work);
+    PageWork local;
+    auto& measured = work ? *work : local;
+    const auto before = measured.visited_pages;
+    const auto first = Pages::lower_bound(state_->root, [](const auto&) { return false; }, &measured);
+    GeometryAllocationOwnerAccess::observe_work(
+        GeometryAllocationOwnerAccess::Work::ManifestLookupPage, measured.visited_pages - before);
     if (first->key.channel != state_->root->maximum->key.channel)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry owner manifest mixes arithmetic channels.");
     return first->key.channel;
@@ -353,6 +484,27 @@ std::size_t GeometryOwnerManifest::owner_count() const noexcept
     if (!state_)
         return 0;
     return state_->inline_row() ? 1 : state_->root->size;
+}
+std::size_t GeometryOwnerManifest::physical_edge_count() const noexcept
+{
+    if (!state_)
+        return 0;
+    return state_->inline_row() ? state_->single.references : state_->root->logical_size;
+}
+void GeometryOwnerManifest::visit_records(RecordSink records) const
+{
+    if (!state_)
+        return;
+    const auto row = [&](const OwnerRecord& value)
+    {
+        GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ManifestVisitRow);
+        records(value);
+        return true;
+    };
+    if (state_->inline_row())
+        row(state_->single);
+    else
+        Pages::visit_from(state_->root, [](const auto&) { return false; }, row);
 }
 void GeometryOwnerManifest::visit(const std::function<void(const OwnerRecord&)>& visitor) const
 {
