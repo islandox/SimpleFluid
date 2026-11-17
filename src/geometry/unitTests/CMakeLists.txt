@@ -76,6 +76,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testAdaptiveGeometryDemandScaling"
       OR TEST_NAME STREQUAL "testAdaptiveGeometryCacheAdmission"
       OR TEST_NAME STREQUAL "testNativeProductViewAllocations"
+      OR TEST_NAME STREQUAL "testNativeAdmissionLifetime"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testGeometryDemandCatalog"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"
