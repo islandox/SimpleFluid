@@ -127,6 +127,8 @@ template<class Bytes> struct BasicWriter
     {
         if constexpr (std::is_same_v<Bytes, CountingBytes>)
             bytes.add(canonical_key_size(identity));
+        else if constexpr (requires { bytes.native_identity(identity); })
+            bytes.native_identity(identity);
         else
             GeometryIdentityAccess::emit_canonical(identity, this,
                 [](void* context, std::span<const char> fragment)
@@ -146,6 +148,9 @@ inline void require_encoding_capacity_profile()
 /** Owning-implementation bounds used before the original fallback face
  * construction. Payload/capacity accounting excludes allocator/control blocks. */
 [[nodiscard]] std::size_t source_support_allocation_bound(std::size_t points);
+/** All allocation requests in the source-support branch: real payload,
+ * backing/control, canonical hash pointer scratch and optional polygon copy. */
+[[nodiscard]] std::size_t source_support_exact_allocation_bound(std::size_t points, bool known_axis = false);
 [[nodiscard]] std::size_t fallback_face_allocation_bound(std::size_t points);
 inline std::size_t encoding_add(std::size_t first, std::size_t second)
 {

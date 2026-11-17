@@ -1,9 +1,11 @@
 #include "geometry/PLIC/GeometryIdentity.hh"
+#include "geometry/PLIC/GeometryPacketCodec.hh"
 #include "geometry/PLIC/details/CanonicalScalarEncoding.hh"
 #include "geometry/PLIC/details/GeometryIdentityBacking.hh"
 #include "geometry/PLIC/details/OrdinaryIdentitySupport.hh"
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <stdexcept>
 
 namespace SimpleFluid::PLIC::details
@@ -100,9 +102,34 @@ std::strong_ordering compare_geometry_identity_native(GeometryIdentityKind kind,
     throw std::invalid_argument("Unsupported native identity ordering mode or kind.");
 }
 
-namespace
+GeometryIdentityBacking::~GeometryIdentityBacking()
 {
-void dispose_identity_backing(const GeometryIdentityBacking* immutable) noexcept
+    // allocate_shared native controls cannot use the legacy split deleter.
+    // Drain parent strong releases iteratively for both allocation forms.
+    static thread_local GeometryIdentityBackingPtr pending;
+    static thread_local bool draining = false;
+    auto next = std::move(parent);
+    if (!next)
+        return;
+    if (draining)
+    {
+        pending = std::move(next);
+        return;
+    }
+    draining = true;
+    pending = std::move(next);
+    while (pending)
+    {
+        auto owner = std::move(pending);
+        owner.reset();
+    }
+    draining = false;
+}
+std::size_t GeometryIdentityBacking::allocation_bytes() const noexcept
+{
+    return disposal_next == this ? sizeof(NativeGeometryIdentityBacking) : sizeof(GeometryIdentityBacking);
+}
+SIMPLEFLUID_LOCAL void dispose_identity_backing(const GeometryIdentityBacking* immutable) noexcept
 {
     // Only zero-strong-count owners enter this queue: weak locks can no longer
     // resurrect them. A parent released by delete appends to the active drain
@@ -110,6 +137,8 @@ void dispose_identity_backing(const GeometryIdentityBacking* immutable) noexcept
     static thread_local GeometryIdentityBacking* pending = nullptr;
     static thread_local bool draining = false;
     auto* owner = const_cast<GeometryIdentityBacking*>(immutable);
+    if (owner->disposal_next == owner)
+        std::terminate();
     owner->disposal_next = pending;
     pending = owner;
     if (draining)
@@ -123,7 +152,6 @@ void dispose_identity_backing(const GeometryIdentityBacking* immutable) noexcept
     }
     draining = false;
 }
-} // namespace
 void emit_geometry_identity_canonical(
     const GeometryIdentityBackingPtr& owner, const GeometryIdentityCanonicalWriter& writer, std::size_t scratch_budget)
 {
@@ -202,6 +230,18 @@ std::uint64_t GeometryIdentityCanonicalCursor::next_word()
     }
     return word;
 }
+std::size_t geometry_identity_backing_allocation_bound()
+{
+    if (!geometry_encoding_capacity_profile_supported())
+        throw std::invalid_argument("Unsupported native identity allocation profile.");
+#if defined(__GLIBCXX__)
+    using Control = std::_Sp_counted_deleter<GeometryIdentityBacking*, decltype(&dispose_identity_backing),
+        std::allocator<void>, __gnu_cxx::__default_lock_policy>;
+    return sizeof(GeometryIdentityBacking) + sizeof(Control);
+#else
+    throw std::invalid_argument("Unsupported native identity control layout.");
+#endif
+}
 GeometryIdentityBackingPtr make_geometry_identity_backing(std::unique_ptr<const GeometryIdentityNativePayload> native,
     GeometryIdentityBackingPtr parent, std::size_t scratch_budget)
 {
@@ -242,6 +282,59 @@ GeometryIdentityBackingPtr make_geometry_identity_backing(std::unique_ptr<const 
     };
     emit_geometry_identity_canonical(result, {&result->cached_hash, hash}, scratch_budget);
     return result;
+}
+GeometryIdentityBackingPtr make_geometry_identity_backing_admitted(
+    std::unique_ptr<const GeometryIdentityNativePayload>&& native,
+    geometry_detail::NativeConstructorStorageOwner&& storage,
+    const geometry_detail::NativeConstructionAdmission& admission, GeometryIdentityBackingPtr parent)
+{
+    if (!native || !storage.owner || storage.owner->admission().state() != admission.state())
+        throw std::invalid_argument("Admitted identity requires its exact detached constructor storage.");
+    if (parent && parent->depth == std::numeric_limits<std::size_t>::max())
+        throw std::length_error("Canonical identity ancestry depth overflows size_t.");
+    auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<NativeGeometryIdentityBacking>(
+        admission, NativeGeometryIdentityBacking::ConstructionKey{});
+    auto& result = tracked.owner;
+    result->admitted_storage = std::move(storage);
+    result->allocation_envelope = std::move(tracked.envelope);
+    result->native = std::move(native);
+    result->parent = std::move(parent);
+    const auto count = [](void* context, std::span<const char> bytes)
+    {
+        auto& size = *static_cast<std::size_t*>(context);
+        if (bytes.size() > std::numeric_limits<std::size_t>::max() - size)
+            throw std::length_error("Canonical identity length overflows size_t.");
+        size += bytes.size();
+    };
+    const auto parent_size = result->parent ? result->parent->canonical_size : 0;
+    result->native->emit_prefix({&result->prefix_size, count}, parent_size);
+    result->native->emit_suffix({&result->suffix_size, count});
+    result->canonical_size = parent_size;
+    for (const auto bytes : {result->prefix_size, result->suffix_size})
+    {
+        if (bytes > std::numeric_limits<std::size_t>::max() - result->canonical_size)
+            throw std::length_error("Canonical identity length overflows size_t.");
+        result->canonical_size += bytes;
+    }
+    result->depth = result->parent ? result->parent->depth + 1 : 1;
+    const auto hash = [](void* context, std::span<const char> bytes)
+    {
+        auto& value = *static_cast<std::uint64_t*>(context);
+        for (const char byte : bytes) { value ^= static_cast<unsigned char>(byte); value *= 1099511628211ULL; }
+    };
+    // The pointer traversal has its own exact allocator lifetime; parent owners
+    // and canonical prefix/suffix order remain the original immutable DAG.
+    geometry_detail::NativeConstructorVector<const GeometryIdentityBacking*> ancestry(
+        admission.allocator<const GeometryIdentityBacking*>());
+    ancestry.reserve(result->depth);
+    for (const GeometryIdentityBacking* owner = result.get(); owner; owner = owner->parent.get())
+    {
+        owner->native->emit_prefix({&result->cached_hash, hash}, owner->parent ? owner->parent->canonical_size : 0);
+        ancestry.push_back(owner);
+    }
+    for (auto owner = ancestry.rbegin(); owner != ancestry.rend(); ++owner)
+        (*owner)->native->emit_suffix({&result->cached_hash, hash});
+    return std::move(result);
 }
 const GeometryIdentityNativePayload& geometry_identity_native(const GeometryIdentityBackingPtr& owner)
 {
@@ -340,7 +433,7 @@ std::size_t geometry_identity_payload_bytes(const GeometryIdentityBackingPtr& ow
 {
     // Match retained-construction accounting: backing structs and buffer
     // capacities, excluding allocator/control-block overhead and RSS.
-    return owner ? sizeof(GeometryIdentityBacking) + (owner->native ? owner->native->storage_bytes() : 0) : 0;
+    return owner ? owner->allocation_bytes() + (owner->native ? owner->native->storage_bytes() : 0) : 0;
 }
 GeometryIdentityBackingPtr geometry_identity_parent(const GeometryIdentityBackingPtr& owner) noexcept
 {

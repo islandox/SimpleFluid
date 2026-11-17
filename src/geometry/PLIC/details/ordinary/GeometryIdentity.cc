@@ -411,14 +411,14 @@ bool NativeSupport::encoded_fields_equal(const GeometryIdentityNativePayload& ot
     }
     return false;
 }
-std::size_t node_size(std::size_t native) noexcept
+std::size_t node_size(std::size_t native, const geometry_detail::NativeConstructionAdmission* admission = nullptr) noexcept
 {
-    return add(sizeof(GeometryIdentityBacking), native);
+    return add(admission ? sizeof(NativeGeometryIdentityBacking) : sizeof(GeometryIdentityBacking), native);
 }
 
 // Preflight uses no persistent owners or per-parent key caches. It keeps the
 // original expression layers and estimates native allocations and live scratch.
-std::size_t leaf_size(std::span<const char> key)
+std::size_t leaf_size(std::span<const char> key, const geometry_detail::NativeConstructionAdmission* admission = nullptr)
 {
     on::Reader reader{key};
     const auto tag = reader.tag();
@@ -450,21 +450,47 @@ std::size_t leaf_size(std::span<const char> key)
             break;
         }
         case exact_support_tag:
-            return add(node_size(sizeof(RetainedExact)),
+            return add(node_size(sizeof(RetainedExact), admission),
                 exact_identity_import_storage_bound(GeometryIdentityKind::PlaneSupport, key));
         default:
             throw std::invalid_argument("Unknown native support import kind.");
     }
-    return node_size(native);
+    return node_size(native, admission);
 }
 struct Layer
 {
     Point shift;
 };
-GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t budget)
+template<class T, class... Args>
+std::unique_ptr<const T> import_payload(const geometry_detail::NativeConstructionAdmission* admission,
+    geometry_detail::NativeConstructorStorageOwner& storage, Args&&... args)
+{
+    if (!admission)
+        return std::make_unique<const T>(std::forward<Args>(args)...);
+    if (!storage.owner)
+        storage = geometry_detail::native_constructor_storage(*admission);
+    return storage.owner->object<const T>(std::forward<Args>(args)...);
+}
+template<class T>
+void import_reserve(std::vector<T>& values, std::size_t count,
+    const geometry_detail::NativeConstructionAdmission* admission,
+    geometry_detail::NativeConstructorStorageOwner& storage)
+{
+    if (!admission)
+    {
+        values.reserve(count);
+        return;
+    }
+    if (!storage.owner)
+        storage = geometry_detail::native_constructor_storage(*admission);
+    storage.owner->reserve(values, count);
+}
+GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t budget,
+    const geometry_detail::NativeConstructionAdmission* admission = nullptr)
 {
     on::Reader reader{key};
     const auto tag = reader.tag();
+    geometry_detail::NativeConstructorStorageOwner storage;
     std::unique_ptr<const GeometryIdentityNativePayload> native;
     GeometryIdentityBackingPtr parent;
     switch (tag)
@@ -472,35 +498,35 @@ GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t bu
         case axis_tag: {
             const auto axis = reader.word();
             const auto location = reader.real();
-            native = std::make_unique<const Axis>(axis, location);
+            native = import_payload<Axis>(admission, storage, axis, location);
             break;
         }
         case input_tag: {
             const auto normal = reader.point(), anchor = reader.point();
             const auto offset = reader.real();
-            native = std::make_unique<const Input>(normal, anchor, offset);
+            native = import_payload<Input>(admission, storage, normal, anchor, offset);
             break;
         }
         case plane_tag: {
             const auto axis = reader.word();
             const auto normal = reader.point();
             const auto location = reader.real();
-            native = std::make_unique<const Plane>(axis, normal, location);
+            native = import_payload<Plane>(admission, storage, axis, normal, location);
             break;
         }
         case source_tag: {
             const auto count = reader.count(4096);
             std::vector<Point> points;
-            points.reserve(count);
+            import_reserve(points, count, admission, storage);
             for (std::size_t i = 0; i < count; ++i)
                 points.push_back(reader.point());
-            native = std::make_unique<const Source>(std::move(points));
+            native = import_payload<Source>(admission, storage, std::move(points));
             break;
         }
         case dag_tag: {
             const auto count = reader.count(key.size());
             std::vector<OrdinarySupportRecipe> records;
-            records.reserve(count);
+            import_reserve(records, count, admission, storage);
             for (std::size_t i = 0; i < count; ++i)
             {
                 on::Reader record{reader.packet()};
@@ -511,32 +537,37 @@ GeometryIdentityBackingPtr import_leaf(std::span<const char> key, std::size_t bu
                 else
                 {
                     const auto parents = record.count(record.bytes.size());
-                    value.parents.reserve(parents);
+                    import_reserve(value.parents, parents, admission, storage);
                     for (std::size_t j = 0; j < parents; ++j)
                         value.parents.push_back(record.word());
                 }
                 records.push_back(std::move(value));
             }
             const auto first = reader.word(), second = reader.word();
-            native = std::make_unique<const Dag>(std::move(records), first, second);
+            native = import_payload<Dag>(admission, storage, std::move(records), first, second);
             break;
         }
         case exact_support_tag: {
+            if (admission)
+                throw std::invalid_argument("Native Ordinary support import has unqualified Exact ancestry.");
             const auto retained = node_size(sizeof(RetainedExact));
             if (retained > budget)
                 throw std::invalid_argument("Retained Exact support exceeds its native import budget.");
             parent = import_exact_identity_backing(GeometryIdentityKind::PlaneSupport, key, budget - retained);
-            native = std::make_unique<const RetainedExact>();
+            native = import_payload<RetainedExact>(admission, storage);
             break;
         }
         default:
             throw std::invalid_argument("Unknown native support import kind.");
     }
-    std::size_t retained = node_size(native->storage_bytes());
+    std::size_t retained = node_size(native->storage_bytes(), admission);
     for (auto ancestor = parent; ancestor; ancestor = geometry_identity_parent(ancestor))
         admit(geometry_identity_payload_bytes(ancestor), retained, budget);
     if (retained > budget)
         throw std::invalid_argument("Native support import exceeds its retained payload budget.");
+    if (admission)
+        return make_geometry_identity_backing_admitted(
+            std::move(native), std::move(storage), *admission, std::move(parent));
     return make_geometry_identity_backing(std::move(native), std::move(parent), budget - retained);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_identity_detail
@@ -600,6 +631,16 @@ std::size_t ordinary_native::source_support_allocation_bound(std::size_t points)
         ordinary_native::encoding_add(std::max(sizeof(Axis), sizeof(Source)), sizeof(GeometryIdentityBacking)),
         ordinary_native::encoding_add(
             ordinary_native::encoding_product(points, sizeof(NativePoint)), sizeof(const GeometryIdentityBacking*)));
+}
+std::size_t ordinary_native::source_support_exact_allocation_bound(std::size_t points, bool known_axis)
+{
+    ordinary_native::require_encoding_capacity_profile();
+    auto payload = sizeof(Axis);
+    if (!known_axis)
+        payload = std::max(payload, ordinary_native::encoding_add(sizeof(Source),
+            ordinary_native::encoding_product(points, sizeof(NativePoint))));
+    return ordinary_native::encoding_add(ordinary_native::encoding_add(payload,
+        geometry_identity_backing_allocation_bound()), sizeof(const GeometryIdentityBacking*));
 }
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_axis(
     std::uint64_t axis, long double location)
@@ -667,6 +708,45 @@ PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_d
             on::reject("invalid native support recipe parents.");
     }
     return ordinary_identity_detail::make(std::make_unique<const Dag>(std::move(records), first, second));
+}
+PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_axis_admitted(
+    std::uint64_t axis, long double location, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    if (axis > 2) on::reject("invalid native support axis.");
+    location = scalar(location);
+    auto storage = geometry_detail::native_constructor_storage(admission);
+    auto payload = storage.owner->object<const Axis>(axis, location);
+    return Support(make_geometry_identity_backing_admitted(std::move(payload), std::move(storage), admission));
+}
+PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_source_admitted(
+    std::span<const NativePoint> points, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    auto storage = geometry_detail::native_constructor_storage(admission);
+    std::vector<NativePoint> owned;
+    storage.owner->reserve(owned, points.size());
+    for (auto point : points) owned.push_back(normalize_identity_point(std::move(point)));
+    if (owned.size() < 3 || !std::is_sorted(owned.begin(), owned.end()))
+        on::reject("invalid native source support points.");
+    auto payload = storage.owner->object<const Source>(std::move(owned));
+    return Support(make_geometry_identity_backing_admitted(std::move(payload), std::move(storage), admission));
+}
+PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_dag_admitted(
+    std::vector<OrdinarySupportRecipe>&& records, size_t first, size_t second,
+    geometry_detail::NativeConstructorStorageOwner&& storage,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    if (first > second || second >= records.size()) on::reject("invalid native support recipe endpoints.");
+    for (size_t i = 0; i < records.size(); ++i)
+    {
+        auto& record = records[i];
+        if (record.original) record.root = normalize_identity_point(std::move(record.root));
+        else if (record.parents.empty() || !std::is_sorted(record.parents.begin(), record.parents.end()) ||
+            record.parents.back() >= i) on::reject("invalid native support recipe parents.");
+    }
+    if (!storage.owner || storage.owner->admission().state() != admission.state())
+        throw std::invalid_argument("Support DAG requires its exact admitted record buffers.");
+    auto payload = storage.owner->object<const Dag>(std::move(records), first, second);
+    return Support(make_geometry_identity_backing_admitted(std::move(payload), std::move(storage), admission));
 }
 OrdinarySupportKind ordinary_support_kind(const Support& support)
 {
@@ -812,7 +892,10 @@ std::strong_ordering compare_ordinary_support_native(
     return std::strong_ordering::equal;
 }
 
-GeometryIdentityBackingPtr import_ordinary_support_backing(std::span<const char> checked_key, std::size_t budget)
+namespace
+{
+GeometryIdentityBackingPtr import_support(std::span<const char> checked_key, std::size_t budget,
+    const geometry_detail::NativeConstructionAdmission* admission)
 {
     auto current = std::span<const char>(checked_key);
     std::size_t planned = 0, depth = 0;
@@ -821,20 +904,23 @@ GeometryIdentityBackingPtr import_ordinary_support_backing(std::span<const char>
         on::Reader reader{current};
         if (reader.tag() != translation_tag)
             break;
-        admit(node_size(sizeof(Translation)), planned, budget);
+        admit(node_size(sizeof(Translation), admission), planned, budget);
         const auto parent = reader.packet();
         (void) reader.point();
         current = parent;
         ++depth;
     }
-    admit(leaf_size(current), planned, budget);
+    if (admission && static_cast<GeometryTag>(current.front()) == exact_support_tag)
+        throw std::invalid_argument("Native Ordinary support import has unqualified Exact ancestry.");
+    admit(leaf_size(current, admission), planned, budget);
     const auto leaf_depth = static_cast<GeometryTag>(current.front()) == exact_support_tag ? 2u : 1u;
     const auto pointer_scratch = product(add(depth, leaf_depth), sizeof(const GeometryIdentityBacking*));
     const auto layer_scratch = product(depth, sizeof(Layer));
     admit(add(layer_scratch, pointer_scratch), planned, budget); // Wire has its own envelope limit.
     charge_geometry_identity_scratch(depth, sizeof(Layer));
+    geometry_detail::NativeConstructorStorageOwner scratch;
     std::vector<Layer> layers;
-    layers.reserve(depth);
+    import_reserve(layers, depth, admission, scratch);
     const auto actual_layer_scratch = product(layers.capacity(), sizeof(Layer));
     if (layers.capacity() > depth)
     {
@@ -851,18 +937,96 @@ GeometryIdentityBackingPtr import_ordinary_support_backing(std::span<const char>
         layers.push_back({shift});
         current = parent;
     }
-    auto result = import_leaf(current, budget - actual_layer_scratch);
+    auto result = import_leaf(current, budget - actual_layer_scratch, admission);
     std::size_t actual = actual_layer_scratch;
     for (auto owner = result; owner; owner = geometry_identity_parent(owner))
         admit(geometry_identity_payload_bytes(owner), actual, budget);
     for (auto layer = layers.rbegin(); layer != layers.rend(); ++layer)
     {
-        const auto retained = node_size(sizeof(Translation));
+        const auto retained = node_size(sizeof(Translation), admission);
         admit(retained, actual, budget);
-        auto next =
-            make_geometry_identity_backing(std::make_unique<const Translation>(layer->shift), result, budget - actual);
+        GeometryIdentityBackingPtr next;
+        if (admission)
+        {
+            auto storage = geometry_detail::native_constructor_storage(*admission);
+            std::unique_ptr<const GeometryIdentityNativePayload> payload =
+                storage.owner->object<const Translation>(layer->shift);
+            next = make_geometry_identity_backing_admitted(std::move(payload), std::move(storage), *admission, result);
+        }
+        else
+            next = make_geometry_identity_backing(
+                std::make_unique<const Translation>(layer->shift), result, budget - actual);
         result = std::move(next);
     }
     return result;
+}
+} // namespace
+OrdinarySupportImportProfile ordinary_support_import_cpp_profile(std::span<const char> key)
+{
+    // The public full decoder has one split backing/control plus one unique
+    // concrete payload at each layer. Layer and pointer vectors are sequential
+    // scratch; the immutable preceding layers remain alive during later hashes.
+    auto current = key;
+    std::size_t translations = 0;
+    for (;;)
+    {
+        on::Reader reader{current};
+        if (reader.tag() != translation_tag)
+            break;
+        current = reader.packet();
+        ++translations;
+    }
+    if (static_cast<GeometryTag>(current.front()) == exact_support_tag)
+        throw std::invalid_argument("Native Ordinary source profile has unqualified Exact ancestry.");
+    const auto checked = checked_identity_key(GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary, key);
+    (void) checked;
+    OrdinarySupportImportProfile result;
+    result.nodes = result.depth = add(translations, 1);
+    const auto leaf = leaf_size(current);
+    result.retained = add(leaf - sizeof(GeometryIdentityBacking), geometry_identity_backing_allocation_bound());
+    result.retained = add(
+        result.retained, product(translations, add(sizeof(Translation), geometry_identity_backing_allocation_bound())));
+    result.scratch =
+        add(product(translations, sizeof(Layer)), product(result.depth, sizeof(const GeometryIdentityBacking*)));
+    if (result.retained == SIZE_MAX || result.scratch == SIZE_MAX)
+        throw std::invalid_argument("Native Ordinary identity profile overflows.");
+    return result;
+}
+GeometryIdentityBackingPtr import_ordinary_support_backing(std::span<const char> key, std::size_t budget)
+{
+    return import_support(key, budget, nullptr);
+}
+GeometryIdentityBackingPtr import_ordinary_support_backing_admitted(
+    std::span<const char> key, std::size_t budget, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    return import_support(key, budget, &admission);
+}
+PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::translated_support_admitted(
+    const Support& parent, NativePoint shift, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    shift = normalize_identity_point(std::move(shift));
+    if (shift == NativePoint{})
+        return parent;
+    auto storage = geometry_detail::native_constructor_storage(admission);
+    std::unique_ptr<const GeometryIdentityNativePayload> payload = storage.owner->object<const Translation>(shift);
+    return Support(
+        make_geometry_identity_backing_admitted(std::move(payload), std::move(storage), admission, backing(parent)));
+}
+PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::decode_support_admitted(
+    std::span<const char> key, std::size_t budget, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    // Reject unsupported Exact ancestry before its public validator allocates.
+    auto leaf = key;
+    for (;;)
+    {
+        on::Reader reader{leaf};
+        if (reader.tag() != translation_tag)
+            break;
+        leaf = reader.packet();
+    }
+    if (!leaf.empty() && static_cast<GeometryTag>(leaf.front()) == exact_support_tag)
+        throw std::invalid_argument("Native Ordinary support import has unqualified Exact ancestry.");
+    const auto checked = checked_identity_key(GeometryIdentityKind::PlaneSupport, ArithmeticMode::Ordinary, key);
+    return Support(import_ordinary_support_backing_admitted(checked, budget, admission));
 }
 } // namespace SimpleFluid::PLIC::details

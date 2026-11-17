@@ -95,6 +95,18 @@ public:
         const PlaneSupportIdentity<ArithmeticMode::Exact>&);
     [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> support_dag(
         std::vector<OrdinarySupportRecipe>, std::size_t first, std::size_t second);
+    [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> support_axis_admitted(
+        std::uint64_t, long double, const geometry_detail::NativeConstructionAdmission&);
+    [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> support_source_admitted(
+        std::span<const OrdinaryIdentityPoint>, const geometry_detail::NativeConstructionAdmission&);
+    [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> support_dag_admitted(
+        std::vector<OrdinarySupportRecipe>&&, size_t first, size_t second,
+        geometry_detail::NativeConstructorStorageOwner&&, const geometry_detail::NativeConstructionAdmission&);
+    [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> translated_support_admitted(
+        const PlaneSupportIdentity<ArithmeticMode::Ordinary>&, OrdinaryIdentityPoint,
+        const geometry_detail::NativeConstructionAdmission&);
+    [[nodiscard]] static PlaneSupportIdentity<ArithmeticMode::Ordinary> decode_support_admitted(
+        std::span<const char>, std::size_t, const geometry_detail::NativeConstructionAdmission&);
     /** Checked canonical-key bodies are admitted only by untrusted record decoders. */
     template<class Identity> [[nodiscard]] static Identity decode_key(std::span<const char> key, std::size_t budget)
     {
