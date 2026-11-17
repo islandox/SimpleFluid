@@ -32,6 +32,22 @@ public:
     [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> rebound(
         std::shared_ptr<const CellGeometryCatalog<M>>, std::span<const std::size_t> ordinals,
         std::span<const geometry_demand::SourceSlot> physical, GeometryLimits = {});
+    /** Synchronous construction receipts. Every local allocation and scratch
+     * charge reaches the borrowed outer allowance before allocation. Created
+     * source callbacks name only newly allocated explicit shell pages. */
+    template<ArithmeticMode M>
+    [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> initialize_precharged(
+        std::shared_ptr<const CellGeometryCatalog<M>>, GeometryLimits, CellCatalogDemandWork*,
+        geometry_demand::Admission);
+    template<ArithmeticMode M>
+    [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> extended_precharged(
+        std::shared_ptr<const CellGeometryCatalog<M>>, std::shared_ptr<const CellGeometryCatalog<M>>,
+        std::span<const std::optional<std::size_t>>, GeometryLimits, CellCatalogDemandWork*, geometry_demand::Admission,
+        geometry_demand::SourceSink created = {nullptr, nullptr});
+    template<ArithmeticMode M>
+    [[nodiscard]] static std::shared_ptr<const CellGeometryCatalog<M>> rebound_precharged(
+        std::shared_ptr<const CellGeometryCatalog<M>>, std::span<const std::size_t>,
+        std::span<const geometry_demand::SourceSlot>, GeometryLimits, geometry_demand::Admission);
     template<ArithmeticMode M>
     [[nodiscard]] static geometry_demand::OrderStamp stamp(const CellGeometryCatalog<M>&, std::size_t);
     template<ArithmeticMode M> [[nodiscard]] static bool persistent(const CellGeometryCatalog<M>&) noexcept;

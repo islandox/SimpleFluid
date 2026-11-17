@@ -680,14 +680,14 @@ public:
 
     [[nodiscard]] const FluidTrail* trail(std::size_t kind) const
     {
-        const auto found = std::find_if(trails.begin(), trails.end(),
-            [&](const auto& value) { return value.kind == kind; });
+        const auto found =
+            std::find_if(trails.begin(), trails.end(), [&](const auto& value) { return value.kind == kind; });
         return found == trails.end() ? nullptr : &*found;
     }
     FluidTrail& trail_for(std::size_t kind, adaptive_detail::Budget& budget)
     {
-        if (const auto found = std::find_if(trails.begin(), trails.end(),
-                [&](const auto& value) { return value.kind == kind; });
+        if (const auto found =
+                std::find_if(trails.begin(), trails.end(), [&](const auto& value) { return value.kind == kind; });
             found != trails.end())
             return *found;
         if (trails.size() == trails.capacity())
@@ -736,10 +736,7 @@ public:
         const auto value = order.at(slot).physical;
         return {std::static_pointer_cast<const BindingPage>(value.source), std::uint8_t(value.row)};
     }
-    std::size_t exclusive_bytes() const noexcept
-    {
-        return sizeof(*this) + trails.capacity() * sizeof(FluidTrail);
-    }
+    std::size_t exclusive_bytes() const noexcept { return sizeof(*this) + trails.capacity() * sizeof(FluidTrail); }
     std::size_t metadata_bytes() const noexcept
     {
         const auto groups = keys ? keys->subtree_payload_bytes + keys->subtree_owner_bytes
@@ -950,6 +947,213 @@ public:
     void append_unselected(std::span<const AdaptiveLeaf* const>, const AdaptiveLeafLayout&,
         std::vector<std::unique_ptr<AdaptiveLeaf>>&, std::vector<const AdaptiveLeaf*>&, adaptive_detail::Budget&) const;
 
+    /** Independent full diagnostic graph; never invokes the delta editor. */
+    template<class Edge, class Buffers, class PageKeys>
+    void visit_cartesian_edges(const Edge& edge, const Buffers& buffers, const PageKeys& page_keys) const
+    {
+        if (!edge(this, selection_.get(), selection_->exclusive_bytes()))
+            return;
+        const auto source = [&](const BindingSource& value)
+        {
+            if (value.join || value.factor || value.product_root)
+                throw std::logic_error("Cartesian edge probe cannot inspect auxiliary factor graphs.");
+            if (value.native && edge(&value, value.native.get(),
+                                    sizeof(*value.native) + value.native->view.capacity() +
+                                        value.native->parts.capacity() * sizeof(value.native->parts[0])))
+                for (const auto& part : value.native->parts)
+                    if (part)
+                        (void) edge(value.native.get(), part.get(), sizeof(*part) + part->capacity());
+        };
+        const auto page = [&](const void* parent, const BindingPage* value)
+        {
+            if (!value || !edge(parent, value, value->bytes()))
+                return;
+            if (!value->certificates.empty() || std::holds_alternative<ProductBindingKeys>(value->keys))
+                throw std::logic_error("Cartesian edge probe cannot inspect certificate/factor graphs.");
+            const auto* cartesian = std::get_if<CartesianBindingKeys>(&value->keys);
+            if (!cartesian)
+                throw std::logic_error("Cartesian edge probe encountered non-Cartesian binding keys.");
+            if (page_keys && value->row_count)
+            {
+                const auto key = [&](std::size_t row)
+                { return AdaptiveCellKey{value->sources[value->source.at(row)]->region, cartesian->at(row)}; };
+                auto maximum = key(0);
+                for (std::size_t row = 1; row < value->row_count; ++row)
+                    maximum = std::max(maximum, key(row));
+                page_keys(value, maximum);
+            }
+            if (buffers)
+            {
+                const auto buffer = [&](const auto& items)
+                {
+                    if (items.capacity())
+                        buffers(value, items.data(), items.capacity() * sizeof(items[0]));
+                };
+                const auto column = [&](const auto& item)
+                {
+                    std::visit(
+                        [&](const auto& exceptions)
+                        {
+                            if constexpr (requires { exceptions.capacity(); })
+                                buffer(exceptions);
+                        },
+                        item.exceptions);
+                };
+                buffer(value->sources);
+                column(value->source);
+                column(value->policy);
+                column(value->native_cell);
+                const auto* keys = std::get_if<CartesianBindingKeys>(&value->keys);
+                if (!keys)
+                    throw std::logic_error("Cartesian edge probe encountered non-Cartesian binding keys.");
+                column(keys->level);
+                for (const auto& item : keys->indices)
+                    column(item);
+                if (value->metrics)
+                    for (const auto& item : *value->metrics)
+                        column(item);
+            }
+            for (const auto& child : value->sources)
+                if (edge(value, child.get(), child->bytes()))
+                    source(*child);
+        };
+        const auto key = [&](const void* parent, const BindingKeyGroup& value)
+        {
+            if (edge(parent, value.page.get(), value.page->bytes()))
+                for (const auto& child : value.page->sources)
+                    page(value.page.get(), child.get());
+        };
+        struct Context
+        {
+            const Edge& emit_edge;
+            const decltype(page)& emit_page;
+        } context{edge, page};
+        const G::BorrowedMetadataSink metadata{&context,
+            [](void* raw, const void* owner, const void* parent, std::size_t bytes)
+            { return static_cast<Context*>(raw)->emit_edge(parent, owner, bytes); }};
+        if (selection_->single_group)
+            key(selection_.get(), *selection_->single_group);
+        else
+            BindingSelection::Pages::visit_borrowed_dependencies(
+                selection_->keys, metadata,
+                [&](const BindingKeyGroup& value, const void* parent) { key(parent, value); }, selection_.get());
+        selection_->data_pages.visit_borrowed_dependencies(metadata,
+            {&context, [](void* raw, const void* parent, const G::OwnerRecord& row)
+                { static_cast<Context*>(raw)->emit_page(parent, static_cast<const BindingPage*>(row.owner.get())); }},
+            selection_.get());
+        selection_->order.visit_borrowed_dependencies(metadata,
+            {&context, [](void* raw, const void* parent, G::SourceKind, const void* owner)
+                { static_cast<Context*>(raw)->emit_page(parent, static_cast<const BindingPage*>(owner)); }},
+            selection_.get());
+        for (const auto& trail : selection_->trails)
+        {
+            page(selection_.get(), trail.below.get());
+            page(selection_.get(), trail.tail.get());
+        }
+    }
+
+    /** Physical pointer edges, with first/last pruning before every subtree. */
+    void visit_dependencies(PLIC::details::GeometryOwnerGraphEditor& editor, bool retain) const
+    {
+        if (!editor.external(selection_, selection_->exclusive_bytes(), retain, true))
+            return;
+        const auto visit_recipe = [&](const auto& owner, std::size_t bytes)
+        { return owner && editor.external(owner, bytes, retain); };
+        const auto visit_source = [&](const std::shared_ptr<const BindingSource>& source)
+        {
+            if (!editor.external(source, source->bytes(), retain, true))
+                return;
+            if (source->native &&
+                visit_recipe(source->native, sizeof(*source->native) + source->native->view.capacity() +
+                                                 source->native->parts.capacity() * sizeof(source->native->parts[0])))
+                for (const auto& part : source->native->parts)
+                    if (part)
+                        (void) visit_recipe(part, sizeof(*part) + part->capacity());
+            const auto bytes = [&](const auto& owner)
+            {
+                if (owner)
+                    (void) visit_recipe(owner, sizeof(*owner) + owner->capacity());
+            };
+            bytes(source->join);
+            bytes(source->product_root);
+            if (source->factor && visit_recipe(source->factor, sizeof(*source->factor)))
+            {
+                bytes(source->factor->root);
+                bytes(source->factor->base);
+                bytes(source->factor->axis);
+            }
+        };
+        const auto visit_page = [&](const std::shared_ptr<const BindingPage>& page)
+        {
+            if (!page || !editor.external(page, page->bytes(), retain, true))
+                return;
+            for (const auto& source : page->sources)
+                visit_source(source);
+            if (const auto* product = std::get_if<ProductBindingKeys>(&page->keys))
+            {
+                const auto factors = [&](const auto& values)
+                {
+                    for (const auto& value : values)
+                        if (value.capsule)
+                            (void) visit_recipe(value.capsule, sizeof(*value.capsule) + value.capsule->capacity());
+                };
+                factors(product->bases);
+                factors(product->axes);
+            }
+            for (const auto& certificate : page->certificates)
+            {
+                if (certificate.geometry)
+                    editor.geometry(certificate.geometry, retain);
+                for (const auto& value : certificate.surfaces)
+                {
+                    if (value.surface.geometry)
+                        editor.planar(value.surface.geometry, retain);
+                    if (value.surface.native_whole_geometry)
+                        editor.planar(value.surface.native_whole_geometry, retain);
+                }
+            }
+        };
+        const auto visit_key = [&](const BindingKeyGroup& group)
+        {
+            if (editor.external(group.page, group.page->bytes(), retain, true))
+                for (const auto& page : group.page->sources)
+                    visit_page(page);
+        };
+        struct Context
+        {
+            PLIC::details::GeometryOwnerGraphEditor& editor;
+            const decltype(visit_page)& page;
+            bool retain;
+        } context{editor, visit_page, retain};
+        const G::MetadataSink metadata{&context,
+            [](void* raw, const std::shared_ptr<const void>& owner, std::size_t bytes, std::size_t)
+            {
+                auto& value = *static_cast<Context*>(raw);
+                return value.editor.external(owner, bytes, value.retain, true);
+            }};
+        if (selection_->single_group)
+            visit_key(*selection_->single_group);
+        else
+            BindingSelection::Pages::visit_dependencies(selection_->keys, metadata, visit_key);
+        selection_->data_pages.visit_dependencies(
+            metadata, {&context, [](void* raw, const G::OwnerRecord& row)
+                          {
+                              auto& value = *static_cast<Context*>(raw);
+                              value.page(std::static_pointer_cast<const BindingPage>(row.owner));
+                          }});
+        selection_->order.visit_dependencies(
+            metadata, {&context, [](void* raw, G::SourceKind, const std::shared_ptr<const void>& owner)
+                          {
+                              auto& value = *static_cast<Context*>(raw);
+                              value.page(std::static_pointer_cast<const BindingPage>(owner));
+                          }});
+        for (const auto& trail : selection_->trails)
+        {
+            visit_page(trail.below);
+            visit_page(trail.tail);
+        }
+    }
+
     template<class Visitor> void visit_children(const Visitor& visitor, bool recipes = true) const
     {
         visitor(selection_, selection_->exclusive_bytes());
@@ -965,23 +1169,22 @@ public:
                 static_cast<Context*>(raw)->visitor(owner, payload);
                 return true;
             }};
-        selection_->data_pages.visit_dependencies(metadata,
-            {&context,
-                [](void* raw, const G::OwnerRecord& row)
-                {
-                    const auto& visit = static_cast<Context*>(raw)->visitor;
-                    const auto page = std::static_pointer_cast<const BindingPage>(row.owner);
-                    visit(page, page->bytes());
-                    // A binding source object is construction-charged with its
-                    // page; only its immutable recipe children were not.
-                    if (static_cast<Context*>(raw)->recipes)
-                        page->visit_children(visit);
-                    else
-                        for (const auto& source : page->sources)
-                            visit(source, source->bytes());
-                }});
-        selection_->order.visit_dependencies(metadata, {nullptr, [](void*, G::SourceKind,
-            const std::shared_ptr<const void>&) {}});
+        selection_->data_pages.visit_dependencies(
+            metadata, {&context, [](void* raw, const G::OwnerRecord& row)
+                          {
+                              const auto& visit = static_cast<Context*>(raw)->visitor;
+                              const auto page = std::static_pointer_cast<const BindingPage>(row.owner);
+                              visit(page, page->bytes());
+                              // A binding source object is construction-charged with its
+                              // page; only its immutable recipe children were not.
+                              if (static_cast<Context*>(raw)->recipes)
+                                  page->visit_children(visit);
+                              else
+                                  for (const auto& source : page->sources)
+                                      visit(source, source->bytes());
+                          }});
+        selection_->order.visit_dependencies(
+            metadata, {nullptr, [](void*, G::SourceKind, const std::shared_ptr<const void>&) {}});
     }
     template<class Visitor> void visit_certificates(const Visitor& visitor) const
     {
@@ -1059,7 +1262,8 @@ std::shared_ptr<const Bindings> Bindings::build(std::span<const AdaptiveLeaf* co
     auto result = std::make_shared<Bindings>();
     G::ScratchRows<std::size_t, binding_page_size> order(leaves.size(), budget.used, budget.limit);
     std::iota(order.data(), order.data() + order.size(), std::size_t{0});
-    std::sort(order.data(), order.data() + order.size(), [&](auto a, auto b) { return leaves[a]->key < leaves[b]->key; });
+    std::sort(
+        order.data(), order.data() + order.size(), [&](auto a, auto b) { return leaves[a]->key < leaves[b]->key; });
     for (std::size_t slot = 1; slot < order.size(); ++slot)
         if (leaves[order[slot - 1]]->key == leaves[order[slot]]->key)
             throw std::invalid_argument("Geometry snapshot contains a duplicate persistent cell key.");
@@ -1152,12 +1356,12 @@ std::shared_ptr<const Bindings> Bindings::extended(const Bindings& previous,
         if (leaves[sorted[row - 1]]->key == leaves[sorted[row]]->key)
             throw std::invalid_argument("Duplicate geometry demand key.");
     budget.add(sizeof(Bindings) + sizeof(BindingSelection));
-    charge_items(budget, previous.selection_->trails.size(), sizeof(BindingSelection::FluidTrail));
     auto result = std::make_shared<Bindings>();
+    charge_items(budget, previous.selection_->trails.size(), sizeof(BindingSelection::FluidTrail));
     auto next = std::make_shared<BindingSelection>(*previous.selection_);
     if (next->trails.capacity() != previous.selection_->trails.size())
-        throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
-            "Binding selection trail copy capacity is unqualified.");
+        throw PLIC::GeometryError(
+            PLIC::GeometryErrorCode::ResourceLimit, "Binding selection trail copy capacity is unqualified.");
     std::vector<SharedLocator> prefix;
     std::vector<std::optional<SelectedBinding>> original;
     std::vector<unsigned char> needs_data;

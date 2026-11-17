@@ -3,6 +3,9 @@
  */
 #pragma once
 #include "geometry/PLIC/details/CellGeometryEvaluation.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
+#include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotInternal.hh"
 #include <algorithm>
@@ -47,7 +50,18 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     bool stable_controls = controls.supported;
     const auto observe_controls = [&] { stable_controls = stable_controls && construction_controls() == controls; };
     if (reuse)
-        reuse->retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
+    {
+        result.owner_work_[7] += PLIC::details::GeometryOwnerImportAccess::import(
+            ordinary_owners, reuse->payload_owners_[0], budget.used, budget.limit);
+        if (reuse->payload_owners_[1].owner_count())
+            result.owner_work_[7] += PLIC::details::GeometryOwnerImportAccess::import(
+                bounded_owners, reuse->payload_owners_[1], budget.used, budget.limit);
+        // A typed snapshot header cannot be an imported index node. Admit its
+        // storage directly without the generic legacy index-credit census.
+        PLIC::details::GeometryAllocationOwnerAccess::admit_graph_owner(ordinary_owners, 0,
+            PLIC::details::GeometryOwnerGraphEditor::external_kind(), reuse->shared_from_this(), sizeof(*reuse),
+            budget.used, budget.limit);
+    }
     const bool reuse_bindings = reuse && reuse->stable_controls_ && controls.supported && reuse->controls_ == controls;
     std::vector<Catalog::Entry> entries;
     reserve_checked(entries, leaves.size(), budget);
@@ -386,8 +400,8 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
     {
         reserve_checked(group.slots, group.count, budget);
         for (auto& coordinates : group.raw_coordinates)
-            std::sort(coordinates.begin(), coordinates.end(),
-                [](const auto& a, const auto& b) { return a.first < b.first; });
+            std::sort(
+                coordinates.begin(), coordinates.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     }
     for (std::size_t slot = 0; slot < leaves.size(); ++slot)
         if (native_slots[slot] && !reused_slots[slot])
@@ -421,16 +435,16 @@ CatalogBuild Builder::build(const DistributedAdaptiveHierarchy& hierarchy, std::
             for (const auto row : rows)
                 cells.push_back(subset_requests[row].cell);
             std::sort(cells.begin(), cells.end());
-            auto clone = PLIC::CartesianCellSource::clone_deferred_subset(
-                subset_requests[rows.front()].source, cells, geometry_limits(ordinary_mode, budget.limit - budget.used));
+            auto clone = PLIC::CartesianCellSource::clone_deferred_subset(subset_requests[rows.front()].source, cells,
+                geometry_limits(ordinary_mode, budget.limit - budget.used));
             ordinary_owners.retain(clone, budget.used, budget.limit);
             const auto ordinal = sources.size();
             budget.append_capacity(sources);
             sources.push_back(clone);
             for (const auto row : rows)
             {
-                const auto rank = std::lower_bound(cells.begin(), cells.end(), subset_requests[row].cell) -
-                                  cells.begin();
+                const auto rank =
+                    std::lower_bound(cells.begin(), cells.end(), subset_requests[row].cell) - cells.begin();
                 entries[subset_requests[row].slot] = PLIC::NativeCellGeometrySlot{ordinal, std::size_t(rank)};
                 if (separate_ordinary)
                     finite_ordinary_entries[subset_requests[row].slot] =

@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/PLIC/CellGeometryView.hh"
+#include <functional>
 #include <utility>
 namespace SimpleFluid::PLIC::details
 {
@@ -39,6 +40,8 @@ struct NativeCartesianCellReference
 class NativeCellGeometrySourceAccess
 {
 public:
+    /** Explicit borrowed object/buffer census; no source geometry is evaluated. */
+    static void visit_payload(const CartesianCellSource&, const std::function<void(const void*, std::size_t)>&);
     template<ArithmeticMode M>
     [[nodiscard]] static ConvexGeometryPtr<M> existing_geometry(const CellGeometryView<M>& view)
     {
@@ -77,8 +80,7 @@ public:
     [[nodiscard]] static bool state_compatible(GeometryPoint lower, GeometryPoint upper, GeometryLimits limits = {});
     /** Conservative admission for a bounded page with canonical box supports. */
     [[nodiscard]] static std::size_t regular_page_byte_bound(std::size_t cells, std::size_t axis_points);
-    [[nodiscard]] static std::pair<GeometryPoint, GeometryPoint> raw_bounds(
-        const NativeCartesianCellReference&);
+    [[nodiscard]] static std::pair<GeometryPoint, GeometryPoint> raw_bounds(const NativeCartesianCellReference&);
     [[nodiscard]] static GeometryLimits source_limits(const NativeCartesianCellReference& ref)
     {
         return ref.source->query_limits();

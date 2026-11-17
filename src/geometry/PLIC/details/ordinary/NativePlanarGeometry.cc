@@ -39,6 +39,10 @@ struct OrdinaryFace::Impl
     std::optional<OrdinarySupport> support;
     bool retained_support = false;
 };
+std::shared_ptr<const void> details::RetentionAccess::planar_payload_owner(const OrdinaryFace& face) noexcept
+{
+    return face.impl_;
+}
 std::size_t details::RetentionAccess::planar_metadata_bytes() noexcept
 {
     return sizeof(OrdinaryFace::Impl);

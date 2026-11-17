@@ -88,47 +88,44 @@ struct AdaptiveGeometrySnapshotCache
         budget.add(sizeof(*this));
         budget.add(bytes);
     }
-    // Root replacement rebuilds the exact union from the maintained immutable
-    // owner manifests: each root contributes its own authenticated set, so the
-    // replacement does not re-walk any snapshot dependency graph.
+    // Stage 2 compatibility census. Stored snapshot manifests exclude their
+    // own administrative indexes and header. The full retain path accounts for
+    // those credits centrally, including exact repeated/imported controls.
+    // Stage 3 replaces this explicit full walk with maintained root transitions.
     struct Census
     {
         std::size_t resident = 0, metadata = 0;
     };
     Census census_root_bytes(std::size_t replacement_slot,
-        const std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2>& replacement, Budget& budget)
+        const std::shared_ptr<const AdaptiveGeometrySnapshot>& replacement, Budget& budget)
     {
         ++union_censuses;
         PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-        // Payload and all old/new manifest allocations were admitted before
-        // this census. Only its new ledger bookkeeping needs fresh admission.
-        Census result;
-        std::size_t imported_metadata = 0;
-        std::array<bool, 2> imported{};
+        bool any_root = false, any_bounded = false;
         for (std::size_t slot = 0; slot < roots.size(); ++slot)
-            for (std::size_t channel = 0; channel < 2; ++channel)
-            {
-                const auto& manifest = slot == replacement_slot ? replacement[channel] : manifests[slot][channel];
-                result.metadata += manifest.metadata_admission_bytes();
-                if (!manifest.owner_count())
-                    continue;
-                auto& ledger = channel ? bounded_owners : ordinary_owners;
-                if (!imported[channel])
-                {
-                    PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
-                        ledger, budget.used, budget.limit);
-                    imported_metadata += manifest.metadata_admission_bytes();
-                    imported[channel] = true;
-                }
-                PLIC::details::GeometryOwnerImportAccess::import(ledger, manifest, budget.used, budget.limit);
-                census_root_visits += manifest.owner_count();
-            }
-        // The first imported index in each channel is already included in the
-        // ledger's bookkeeping. Every other cache-held manifest also stays live.
-        result.resident = ordinary_owners.payload_bytes() + ordinary_owners.bookkeeping_bytes() +
-                          bounded_owners.payload_bytes() + bounded_owners.bookkeeping_bytes() +
-                          result.metadata - imported_metadata;
-        return result;
+        {
+            const auto& root = slot == replacement_slot ? replacement : roots[slot];
+            any_root = any_root || bool(root);
+            any_bounded = any_bounded || (root && bool(root->bounded_catalog()));
+        }
+        if (any_root)
+            PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
+                ordinary_owners, budget.used, budget.limit);
+        if (any_bounded)
+            PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
+                bounded_owners, budget.used, budget.limit);
+        for (std::size_t slot = 0; slot < roots.size(); ++slot)
+        {
+            const auto& root = slot == replacement_slot ? replacement : roots[slot];
+            if (!root)
+                continue;
+            root->retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
+            census_root_visits += ordinary_owners.owner_count() + bounded_owners.owner_count();
+        }
+        // Cache-held manifest values share the same indexes retained by roots.
+        return {ordinary_owners.payload_bytes() + ordinary_owners.bookkeeping_bytes() + bounded_owners.payload_bytes() +
+                    bounded_owners.bookkeeping_bytes(),
+            0};
     }
     void seal_residency(std::size_t bytes) noexcept
     {
@@ -2778,15 +2775,10 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     if (compatible && purpose == GeometrySnapshotPurpose::State &&
         std::all_of(leaves.begin(), leaves.end(), [&](const auto* leaf) { return leaf && current->find(*leaf); }))
     {
-        // A fresh caller ledger installs the maintained immutable owner set and
-        // charges its exact cached union. A populated ledger keeps the existing
-        // complete walk so its exact union is preserved.
-        if (mode == ArithmeticMode::Ordinary && operation_ordinary.owner_count() == 0 &&
-            data_->geometry_cache->manifests[slot][0].owner_count())
-            PLIC::details::GeometryOwnerImportAccess::import(
-                operation_ordinary, data_->geometry_cache->manifests[slot][0], operation_used, operation_limit);
-        else
-            current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
+        // Stored payload manifests omit their own indexes and snapshot header.
+        // Full retention preserves operation-ledger credit deduplication until
+        // authenticated cache imports replace this compatibility path.
+        current->retain(operation_ordinary, operation_bounded, operation_used, operation_limit);
         return current;
     }
     // Failed construction preserves the spent admission prefix while leaving
@@ -2844,12 +2836,14 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
             const auto prepare = [&](std::uint64_t first)
             {
                 if (candidate->prepare_cartesian_page(
-                        *this, *leaf, pending_used, operation_limit, optional_headroom, first))
+                        *this, *leaf, pending_used, operation_limit, optional_headroom, first, operation_ordinary))
                 {
-                    candidate->retain_prepared_cartesian_sources(operation_ordinary, pending_used, operation_limit);
+                    // Preparation already admitted its exact operation owners
+                    // through graph construction receipts; avoid a generic seed.
                     const auto before = hierarchy_budget.used;
-                    candidate->retain_prepared_cartesian_sources(
-                        ordinary_owners, hierarchy_budget.used, hierarchy_budget.limit);
+                    // The stored owner index also changed. Include its metadata
+                    // and controls in old/new overlap before the prepaid census.
+                    candidate->retain(ordinary_owners, bounded_owners, hierarchy_budget.used, hierarchy_budget.limit);
                     overlap_bytes += hierarchy_budget.used - before;
                 }
             };
@@ -2909,9 +2903,8 @@ std::shared_ptr<const AdaptiveGeometrySnapshot> DistributedAdaptiveHierarchy::ge
     std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2> manifests;
     adaptive_detail::GeometrySnapshotAccess::owner_manifests(
         *candidate, hierarchy_budget, manifests[0], manifests[1], true);
-    const auto census = data_->geometry_cache->census_root_bytes(slot, manifests, hierarchy_budget);
-    const auto candidate_metadata = manifests[0].metadata_admission_bytes() + manifests[1].metadata_admission_bytes();
-    const auto overlap_residency = overlap_bytes + data_->geometry_cache->manifest_bytes + candidate_metadata;
+    const auto census = data_->geometry_cache->census_root_bytes(slot, candidate, hierarchy_budget);
+    const auto overlap_residency = overlap_bytes;
     const auto previous_lease_bytes = lease.bytes();
     try
     {

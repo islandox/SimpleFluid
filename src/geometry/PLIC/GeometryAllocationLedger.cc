@@ -7,8 +7,11 @@
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryDemandPages.tcc"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.tcc"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/GeometryRetentionCensus.tcc"
+#include <type_traits>
 
 namespace SimpleFluid::PLIC
 {
@@ -51,6 +54,15 @@ void details::GeometryAllocationOwnerAccess::observe_work(Work kind, std::size_t
             break;
         case Work::ManifestVisitRow:
             allocation_work.manifest_visit_rows += count;
+            break;
+        case Work::MetadataCreditQuery:
+            allocation_work.metadata_credit_queries += count;
+            break;
+        case Work::MetadataCreditSeedRow:
+            allocation_work.metadata_credit_seed_rows += count;
+            break;
+        case Work::MetadataCreditCreated:
+            allocation_work.metadata_credit_created += count;
             break;
     }
 }
@@ -145,6 +157,140 @@ void details::GeometryAllocationOwnerAccess::admit_prepaid(GeometryAllocationLed
     }
 }
 
+void details::GeometryAllocationOwnerAccess::poison(GeometryAllocationLedger& ledger) noexcept
+{
+    ledger.failed_ = true;
+}
+
+void details::GeometryAllocationOwnerAccess::seed_imported_metadata(
+    GeometryAllocationLedger& ledger, std::size_t& used, std::size_t limit)
+{
+    if (!ledger.impl_->imported || ledger.impl_->imported_metadata_seeded)
+        return;
+    struct Context
+    {
+        GeometryAllocationLedger& ledger;
+        std::size_t& used;
+        std::size_t limit;
+    } context{ledger, used, limit};
+    // Explicit Stage2 compatibility census, once per imported root/ledger. A
+    // later incremental union protocol can authenticate shared index frontiers.
+    ledger.impl_->imported->visit_dependencies(
+        {&context,
+            [](void* raw, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted)
+            {
+                auto& value = *static_cast<Context*>(raw);
+                observe_work(Work::MetadataCreditSeedRow);
+                const allocation_detail::Key key{allocation_detail::Kind::ExternalOwner, owner.get()};
+                auto& credits = value.ledger.impl_->metadata_credits;
+                if (const auto found = credits.find(key); found != credits.end())
+                {
+                    if (found->second.payload != payload || found->second.admitted != admitted ||
+                        owner.owner_before(found->second.owner) || found->second.owner.owner_before(owner))
+                        throw GeometryError(
+                            GeometryErrorCode::InvalidInput, "Imported index credit changes owner or size.");
+                }
+                else
+                {
+                    value.ledger.impl_->account(
+                        sizeof(typename std::remove_reference_t<decltype(credits)>::value_type) + 4 * sizeof(void*),
+                        true, value.used, value.limit);
+                    credits.emplace(
+                        key, GeometryAllocationLedger::Impl::MetadataCredit{owner, payload, admitted, true});
+                }
+                return true;
+            }},
+        {nullptr, [](void*, const geometry_demand::OwnerRecord&) {}});
+    ledger.impl_->imported_metadata_seeded = true;
+    ledger.impl_->last_counter = used;
+}
+void details::GeometryAllocationOwnerAccess::retain_manifest_metadata(GeometryAllocationLedger& ledger,
+    std::uint8_t channel, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted,
+    std::size_t& used, std::size_t limit, bool prepaid)
+{
+    observe_work(Work::MetadataCreditQuery);
+    try
+    {
+        const std::shared_ptr<const void> empty;
+        if (channel > 1 || !owner || admitted < payload || admitted - payload != geometry_demand::control_bytes ||
+            (!owner.owner_before(empty) && !empty.owner_before(owner)))
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid own-index metadata receipt.");
+        ledger.begin_admission(used, limit);
+        const auto mode = channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, mode);
+        else
+            ledger.impl_->mode = mode;
+        // An actual new allocation cannot alias still-pinned imported index
+        // storage. Its trusted constructor receipt needs no old-root census.
+        if (!prepaid)
+            seed_imported_metadata(ledger, used, limit);
+        const allocation_detail::Key key{allocation_detail::Kind::ExternalOwner, owner.get()};
+        auto& credits = ledger.impl_->metadata_credits;
+        if (const auto found = credits.find(key); found != credits.end())
+        {
+            if (found->second.payload != payload || found->second.admitted != admitted ||
+                owner.owner_before(found->second.owner) || found->second.owner.owner_before(owner))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable index credit changes owner or size.");
+            ledger.impl_->last_counter = used;
+            return;
+        }
+        (void) ledger.impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, payload, used, limit, prepaid);
+        const auto control = admitted - payload;
+        if (prepaid || ledger.impl_->prepaid_payload)
+            ledger.impl_->bookkeeping = allocation_detail::add(ledger.impl_->bookkeeping, control);
+        else
+            ledger.impl_->account(control, true, used, limit);
+        ledger.impl_->account(
+            sizeof(typename std::remove_reference_t<decltype(credits)>::value_type) + 4 * sizeof(void*), true, used,
+            limit);
+        credits.emplace(key, GeometryAllocationLedger::Impl::MetadataCredit{owner, payload, admitted, false});
+        observe_work(Work::MetadataCreditCreated);
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
+bool details::GeometryAllocationOwnerAccess::imported_metadata_seeded(const GeometryAllocationLedger& ledger) noexcept
+{
+    return !ledger.impl_ || !ledger.impl_->imported || ledger.impl_->imported_metadata_seeded;
+}
+void details::GeometryAllocationOwnerAccess::visit_metadata_credits(const GeometryAllocationLedger& ledger,
+    const std::function<void(const std::shared_ptr<const void>&, std::size_t, std::size_t, bool)>& visitor)
+{
+    if (ledger.failed_)
+        allocation_detail::exhausted("Cannot inspect rejected index metadata credits.");
+    if (ledger.impl_)
+        for (const auto& [key, credit] : ledger.impl_->metadata_credits)
+            visitor(credit.owner, credit.payload, credit.admitted, credit.imported_bookkeeping);
+}
+
+void details::GeometryAllocationOwnerAccess::admit_graph_owner(GeometryAllocationLedger& ledger, std::uint8_t channel,
+    std::uint8_t kind, const std::shared_ptr<const void>& owner, std::size_t bytes, std::size_t& used,
+    std::size_t limit, bool prepaid)
+{
+    try
+    {
+        if (channel > 1 || !owner)
+            throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid typed geometry graph owner.");
+        ledger.begin_admission(used, limit);
+        const auto mode = channel ? ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        if (ledger.impl_->mode)
+            details::require_mode(*ledger.impl_->mode, mode);
+        else
+            ledger.impl_->mode = mode;
+        (void) ledger.impl_->admit({static_cast<allocation_detail::Kind>(kind), owner}, bytes, used, limit, prepaid);
+        ledger.impl_->last_counter = used;
+    }
+    catch (...)
+    {
+        ledger.failed_ = true;
+        throw;
+    }
+}
 void details::GeometryAllocationOwnerAccess::visit(
     const GeometryAllocationLedger& ledger, const std::function<void(std::uint8_t, const void*, std::size_t)>& visitor)
 {
@@ -163,6 +309,15 @@ void GeometryAllocationLedger::retain_external_owner(
         if (!owner)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Null external allocation owner.");
         begin_admission(used, limit);
+        if (const auto credit = impl_->metadata_credits.find({allocation_detail::Kind::ExternalOwner, owner.get()});
+            credit != impl_->metadata_credits.end())
+        {
+            if (credit->second.payload != exclusive_bytes || owner.owner_before(credit->second.owner) ||
+                credit->second.owner.owner_before(owner))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "External index credit changes owner or size.");
+            impl_->last_counter = used;
+            return;
+        }
         // An imported owner is already in this ledger's count and pin set. An
         // exact size match proves identity; a changed size is a real conflict.
         if (impl_->imported)
@@ -178,9 +333,24 @@ void GeometryAllocationLedger::retain_external_owner(
                 return;
             }
         }
-        const auto found = impl_->owners.find({allocation_detail::Kind::ExternalOwner, owner.get()});
-        if (found != impl_->owners.end() && found->second.payload_bytes != exclusive_bytes)
-            throw GeometryError(GeometryErrorCode::InvalidInput, "Immutable external allocation size changed.");
+        if (impl_->owners.contains({allocation_detail::Kind::ExternalOwner, owner.get()}))
+        {
+            // Authenticate existing mutable credit before any compatibility
+            // allocation; a foreign control/size rejection spends no new bytes.
+            impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, exclusive_bytes, used, limit);
+            impl_->last_counter = used;
+            return;
+        }
+        details::GeometryAllocationOwnerAccess::seed_imported_metadata(*this, used, limit);
+        if (const auto credit = impl_->metadata_credits.find({allocation_detail::Kind::ExternalOwner, owner.get()});
+            credit != impl_->metadata_credits.end())
+        {
+            if (credit->second.payload != exclusive_bytes || owner.owner_before(credit->second.owner) ||
+                credit->second.owner.owner_before(owner))
+                throw GeometryError(GeometryErrorCode::InvalidInput, "External index credit changes owner or size.");
+            impl_->last_counter = used;
+            return;
+        }
         impl_->admit({allocation_detail::Kind::ExternalOwner, owner}, exclusive_bytes, used, limit);
         impl_->last_counter = used;
     }
@@ -576,6 +746,20 @@ std::size_t details::GeometryOwnerImportAccess::import(GeometryAllocationLedger&
                 GeometryAllocationOwnerAccess::observe_work(GeometryAllocationOwnerAccess::Work::ImportRow);
                 ++enumerated;
                 const auto kind = static_cast<allocation_detail::Kind>(row.key.kind);
+                if (kind == allocation_detail::Kind::ExternalOwner)
+                {
+                    // Only an unknown external destination can alias imported
+                    // index bookkeeping. Validate known payload credits first,
+                    // preserving no-op imports and reject-before-spend behavior.
+                    const allocation_detail::Key key{kind, row.owner.get()};
+                    const bool imported =
+                        ledger.impl_->imported &&
+                        ledger.impl_->imported->references(ledger.impl_->imported_channel, row.key.kind, row.owner);
+                    if (!imported && !ledger.impl_->owners.contains(key) &&
+                        !ledger.impl_->metadata_credits.contains(key))
+                        details::GeometryAllocationOwnerAccess::seed_imported_metadata(
+                            ledger, cumulative_bytes, byte_limit);
+                }
                 (void) ledger.impl_->admit(
                     {kind, row.owner}, row.exclusive_payload_bytes(), cumulative_bytes, byte_limit);
                 ledger.impl_->last_counter = cumulative_bytes;

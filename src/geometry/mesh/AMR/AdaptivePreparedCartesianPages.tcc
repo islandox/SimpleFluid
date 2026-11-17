@@ -77,12 +77,38 @@ std::size_t PreparedCartesianPages::insertion_byte_bound() const
         node = node->children.front().get();
     }
     const auto nodes = 2 * (2 * height + 1);
-    const auto maximum =
-        sizeof(Pages::Node) + G::control_bytes + std::max(G::leaf_capacity * sizeof(Row), G::branch_capacity * sizeof(Root));
+    const auto maximum = sizeof(Pages::Node) + G::control_bytes +
+                         std::max(G::leaf_capacity * sizeof(Row), G::branch_capacity * sizeof(Root));
     const auto construction = checked_product(nodes, maximum);
     // Admit construction and retained node payload/bookkeeping before optional
     // source work. Two tagged inserts preserve exact source membership lookup.
     return 2 * (G::control_bytes + construction) + PLIC::details::identity_ledger_bookkeeping_bound(nodes + 2);
+}
+std::size_t PreparedCartesianPages::insertion_dependency_edge_bound() const
+{
+    using namespace prepared_detail;
+    std::size_t height = 1;
+    auto node = root(root_).get();
+    while (node && !node->leaf())
+    {
+        ++height;
+        node = node->children.front().get();
+    }
+    // Both tagged insertions can split each path. Add and retire walks touch
+    // every child edge on those paths, plus the two leaf-row source tables.
+    return checked_product(4 * (2 * height + 1), G::branch_capacity) + 4 * G::leaf_capacity + 8;
+}
+std::size_t PreparedCartesianPages::insertion_dependency_owner_bound() const
+{
+    using namespace prepared_detail;
+    std::size_t height = 1;
+    auto node = root(root_).get();
+    while (node && !node->leaf())
+    {
+        ++height;
+        node = node->children.front().get();
+    }
+    return 4 * (2 * height + 1) + 2;
 }
 PreparedCartesianPages PreparedCartesianPages::appended(
     const PreparedCartesianPages* previous, PreparedCartesianPage page, adaptive_detail::Budget& budget)
@@ -116,13 +142,41 @@ void PreparedCartesianPages::visit_pages(const std::function<void(const Prepared
             return true;
         });
 }
+void PreparedCartesianPages::visit_dependencies(PLIC::details::GeometryOwnerGraphEditor& editor, bool retain) const
+{
+    if (!root_)
+        return;
+    struct Context
+    {
+        PLIC::details::GeometryOwnerGraphEditor& editor;
+        bool retain;
+    } context{editor, retain};
+    prepared_detail::Pages::visit_dependencies(prepared_detail::root(root_),
+        {&context,
+            [](void* raw, const std::shared_ptr<const void>& owner, std::size_t bytes, std::size_t)
+            {
+                auto& value = *static_cast<Context*>(raw);
+                return value.editor.external(owner, bytes, value.retain, true);
+            }},
+        [&](const prepared_detail::Row& row)
+        {
+            const auto& recipe = row.page.recipe;
+            if (editor.external(recipe,
+                    sizeof(*recipe) + recipe->view.capacity() + recipe->parts.capacity() * sizeof(recipe->parts[0]),
+                    retain))
+                for (const auto& part : recipe->parts)
+                    if (part)
+                        (void) editor.external(part, sizeof(*part) + part->capacity(), retain);
+            editor.cartesian(row.page.source, retain);
+        });
+}
 void PreparedCartesianPages::visit_metadata(
     const std::function<void(const std::shared_ptr<const void>&, std::size_t)>& visitor) const
 {
     if (!root_)
         return;
-    prepared_detail::Pages::visit_pages(prepared_detail::root(root_),
-        [&](const auto& node) { visitor(node, node->payload_bytes); });
+    prepared_detail::Pages::visit_pages(
+        prepared_detail::root(root_), [&](const auto& node) { visitor(node, node->payload_bytes); });
 }
 std::size_t PreparedCartesianPages::metadata_bytes() const noexcept
 {

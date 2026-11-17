@@ -7,15 +7,28 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace SimpleFluid::PLIC::details::geometry_demand
 {
+/** Qualified private page capacities and conservative shared-control allowance. */
+inline constexpr std::size_t control_bytes = 128, leaf_capacity = 64, branch_capacity = 32;
+/** Defaulting bounded scratch must neither allocate nor execute user code.
+ * Nontrivial component rows may explicitly attest their empty initialization. */
+template<class Row> inline constexpr bool stack_safe_default = std::is_trivially_default_constructible_v<Row>;
+
 /** Borrowed only while editing. Immutable pages retain no counter or caller. */
 struct Admission
 {
     void* context;
     void (*retain_bytes)(void*, std::size_t);
+    void (*owner_created)(void*, const std::shared_ptr<const void>&, std::size_t, std::size_t) = nullptr;
+    void created(const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted) const
+    {
+        if (owner_created)
+            owner_created(context, owner, payload, admitted);
+    }
     void charge(std::size_t count, std::size_t width) const;
 };
 /** Borrowed first/last physical-owner visitor. Returning false proves this

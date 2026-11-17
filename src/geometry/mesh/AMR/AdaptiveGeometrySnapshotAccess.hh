@@ -35,10 +35,30 @@ struct GeometryCacheAdmissionStatistics
     /** Cumulative persistent-catalog construction work over the cache lifetime. */
     std::size_t catalog_copied_metadata_bytes = 0, catalog_copied_pages = 0, catalog_visited_pages = 0;
 };
+struct GeometrySnapshotOwnerStatistics
+{
+    std::size_t dependency_entries = 0, edge_visits = 0, first_transitions = 0, last_transitions = 0;
+    std::size_t index_copied_pages = 0, index_copied_bytes = 0, index_visited_pages = 0;
+    std::size_t imported_entries = 0;
+    std::size_t index_lookup_pages = 0;
+    std::size_t stored_metadata_payload_bytes = 0, stored_metadata_admission_bytes = 0;
+};
 /** Narrow internal acquisition from an authenticated hierarchy. */
 class GeometrySnapshotAccess
 {
 public:
+    /** Independent quiescent pointer-slot census for native Cartesian Raw roots.
+     * Rejects other graph families; records every incoming edge before pruning
+     * a physical owner already expanded by this diagnostic. No geometry work. */
+    static void visit_cartesian_payload_edges(const AdaptiveGeometrySnapshot&,
+        const std::function<void(const void* parent, const void* owner, std::size_t bytes)>&,
+        const std::function<void(const void* binding_page, const void* buffer, std::size_t bytes)>& = {},
+        const std::function<void(const void* binding_page, const AdaptiveCellKey& maximum_key)>& = {});
+    [[nodiscard]] static GeometrySnapshotOwnerStatistics owner_statistics(const AdaptiveGeometrySnapshot&);
+    /** Immutable binding-data control, independent of snapshot and hierarchy lifetime. */
+    [[nodiscard]] static std::shared_ptr<const void> binding_owner(const AdaptiveGeometrySnapshot&);
+    static void visit_owner_manifest_metadata(
+        const AdaptiveGeometrySnapshot&, PLIC::details::geometry_demand::MetadataSink);
     /** Only native-publication consumers may call this seam, after the owner
      * fetch and authority phases have produced the complete draft. Supplied row
      * addresses must belong to that draft. This is not provider-input admission. */
@@ -63,12 +83,12 @@ public:
      * Separate caller Budget retains its existing monotonic spent prefix. */
     static void admit_cache_residency(const DistributedAdaptiveHierarchy&, Budget&);
     static void visit_binding_sources(const AdaptiveGeometrySnapshot&, const std::function<void(const void*)>&);
-    /** Exact immutable owner set of a published root, charged to `budget`. */
+    /** Borrow the stored payload-only owner set in constant work; excludes the
+     * snapshot header and both owner-manifest index graphs. `budget` is untouched. */
     [[nodiscard]] static geometry_snapshot_detail::PreparedOwnerManifest owner_manifest(
         const AdaptiveGeometrySnapshot&, Budget&, bool bounded = false);
-    /** Finite capture of both channels. `payload_prepaid` requires prior full
-     * graph admission in the same hierarchy overlap; new bookkeeping and index
-     * construction are always charged to the remaining budget. */
+    /** Borrow both stored payload channels by value. No census, new index or
+     * admission is performed; payload_prepaid remains a compatibility argument. */
     static void owner_manifests(const AdaptiveGeometrySnapshot&, Budget&,
         geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
         geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid = false);

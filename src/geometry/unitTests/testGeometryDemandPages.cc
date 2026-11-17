@@ -8,6 +8,7 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <stdexcept>
 
 namespace
 {
@@ -101,6 +102,35 @@ auto physical_metadata(const Selection& selection)
     append(selection.keys);
     return result;
 }
+struct ThrowingDefaultRow
+{
+    inline static std::size_t default_calls = 0;
+    int key, payload;
+    ThrowingDefaultRow()
+    {
+        ++default_calls;
+        throw std::runtime_error("Generic Row default construction must not run.");
+    }
+    explicit ThrowingDefaultRow(int key, int payload) noexcept : key(key), payload(payload) {}
+    ThrowingDefaultRow(const ThrowingDefaultRow& other) noexcept : key(other.key), payload(other.payload) {}
+    ThrowingDefaultRow& operator=(const ThrowingDefaultRow& other) noexcept
+    {
+        key = other.key;
+        payload = other.payload;
+        return *this;
+    }
+};
+struct ThrowingDefaultLess
+{
+    bool operator()(const ThrowingDefaultRow& first, const ThrowingDefaultRow& second) const noexcept
+    {
+        return first.key < second.key;
+    }
+};
+static_assert(std::is_nothrow_copy_constructible_v<ThrowingDefaultRow>);
+static_assert(std::is_nothrow_copy_assignable_v<ThrowingDefaultRow>);
+static_assert(!G::stack_safe_default<ThrowingDefaultRow>);
+
 } // namespace
 
 TEST(GeometryDemandPages, SmallRequestedPrefixesKeepExactOrderAndBoundedCopiedMetadata)
@@ -481,4 +511,32 @@ TEST(GeometryDemandPages, EmptyOrderKeepsItsGenerationAndRejectsRetiredStampsAft
     EXPECT_THROW((void) next.rebound(std::span(&rebound, 1), rejected.admission()), SimpleFluid::PLIC::GeometryError);
     EXPECT_EQ(first.at(0).physical.row, 1u);
     EXPECT_EQ(next.at(0).physical.row, 2u);
+}
+
+TEST(GeometryDemandPages, GenericThrowingDefaultRowKeepsItsNoDefaultPatchContract)
+{
+    using Pages = G::OrderedPages<ThrowingDefaultRow, ThrowingDefaultLess>;
+    ThrowingDefaultRow::default_calls = 0;
+    const std::array input{ThrowingDefaultRow{1, 10}, ThrowingDefaultRow{3, 30}};
+    const std::array changes{ThrowingDefaultRow{3, 31}};
+    Counter initial{37};
+    const auto accepted = Pages(initial.admission()).build(input);
+    const auto apply = [&](Counter& counter)
+    { return Pages(counter.admission()).patched(accepted, changes, [](const auto&) { return true; }); };
+    Counter measured{37};
+    const auto updated = apply(measured);
+    EXPECT_EQ(Pages::at(updated, 0).payload, 10);
+    EXPECT_EQ(Pages::at(updated, 1).payload, 31);
+    EXPECT_EQ(Pages::at(accepted, 1).payload, 30);
+    Counter exact{37, measured.used};
+    const auto completed = apply(exact);
+    EXPECT_EQ(exact.used, measured.used);
+    EXPECT_EQ(Pages::at(completed, 1).payload, 31);
+    Counter short_limit{37, measured.used - 1};
+    EXPECT_THROW((void) apply(short_limit), SimpleFluid::PLIC::GeometryError);
+    EXPECT_GE(short_limit.used, 37u);
+    EXPECT_LE(short_limit.used, short_limit.limit);
+    EXPECT_EQ(Pages::at(accepted, 0).payload, 10);
+    EXPECT_EQ(Pages::at(accepted, 1).payload, 30);
+    EXPECT_EQ(ThrowingDefaultRow::default_calls, 0u);
 }

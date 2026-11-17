@@ -50,9 +50,8 @@ auto make_source(F::Provider provider, std::size_t components)
     return std::make_shared<const Hierarchy>(std::move(fixture.owned), std::vector<AMR::AdaptiveFamily>{},
         std::move(fixture.kernel), Tpetra::getDefaultComm());
 }
-/** Exact union rebuilt from each cached root's own immutable owner manifests in
- * the cache's slot/channel order. Empty channels are not imported, exactly like
- * the cache. Independent of the cache's maintained set. */
+/** Independent full graph and administrative-credit census. It includes
+ * snapshot headers and stored index controls without consulting the cache. */
 struct UnionReconstruction
 {
     std::size_t scalar = 0, payload = 0;
@@ -60,33 +59,10 @@ struct UnionReconstruction
 UnionReconstruction fresh_union(const Hierarchy& source)
 {
     P::GeometryAllocationLedger ordinary_owners, bounded_owners;
-    std::size_t ordinary_used = 0, bounded_used = 0, metadata = 0, imported_metadata = 0;
-    std::array<bool, 2> imported{};
+    std::size_t used = 0;
     source.visit_geometry_snapshots(
-        [&](const auto& snapshot)
-        {
-            for (const bool bounded : {false, true})
-            {
-                D::Budget budget{ample};
-                const auto manifest = D::GeometrySnapshotAccess::owner_manifest(snapshot, budget, bounded);
-                metadata += manifest.metadata_admission_bytes();
-                if (!manifest.owner_count())
-                    continue;
-                if (!imported[bounded])
-                {
-                    imported_metadata += manifest.metadata_admission_bytes();
-                    imported[bounded] = true;
-                }
-                auto& ledger = bounded ? bounded_owners : ordinary_owners;
-                auto& used = bounded ? bounded_used : ordinary_used;
-                P::details::GeometryOwnerImportAccess::import(ledger, manifest, used, ample);
-            }
-        });
-    UnionReconstruction result;
-    result.payload = ordinary_owners.payload_bytes() + bounded_owners.payload_bytes();
-    result.scalar = result.payload + ordinary_owners.bookkeeping_bytes() + bounded_owners.bookkeeping_bytes() +
-                    metadata - imported_metadata;
-    return result;
+        [&](const auto& snapshot) { snapshot.retain(ordinary_owners, bounded_owners, used, ample); });
+    return {used, ordinary_owners.payload_bytes() + bounded_owners.payload_bytes()};
 }
 /** The same exact union reached by walking the snapshot dependency graph. */
 std::size_t walked_payload(const Hierarchy& source)
@@ -382,12 +358,32 @@ TEST(AdaptiveGeometryCacheAdmission, LateLeaseRejectionPreservesManifestSealAndA
     expect_exact_seal(*source);
 }
 
-TEST(AdaptiveGeometryCacheAdmission, SnapshotManifestCaptureUsesTheProvidedFiniteBudget)
+TEST(AdaptiveGeometryCacheAdmission, StoredSnapshotManifestSharesItsIndexWithoutCaptureAllocation)
 {
     const auto source = make_source(F::Provider::Static, 2);
     const auto snapshot = acquire(*source, rows(*source), AMR::GeometrySnapshotPurpose::State);
-    D::Budget too_small{1};
-    EXPECT_THROW((void) Access::owner_manifest(*snapshot, too_small), P::GeometryError);
-    EXPECT_LE(too_small.used, too_small.limit);
+    D::Budget no_allocation{0};
+    const auto first = Access::owner_manifest(*snapshot, no_allocation);
+    const auto second = Access::owner_manifest(*snapshot, no_allocation);
+    EXPECT_GT(first.owner_count(), 0u);
+    EXPECT_EQ(no_allocation.used, 0u);
+    EXPECT_EQ(no_allocation.peak, 0u);
+    const auto root = [](const auto& manifest)
+    {
+        std::shared_ptr<const void> result;
+        manifest.visit_dependencies(
+            {&result,
+                [](void* raw, const std::shared_ptr<const void>& owner, std::size_t, std::size_t)
+                {
+                    *static_cast<std::shared_ptr<const void>*>(raw) = owner;
+                    return false;
+                }},
+            {nullptr, [](void*, const auto&) {}});
+        return result;
+    };
+    const auto first_root = root(first), second_root = root(second);
+    EXPECT_EQ(first_root.get(), second_root.get());
+    EXPECT_FALSE(first_root.owner_before(second_root));
+    EXPECT_FALSE(second_root.owner_before(first_root));
     expect_exact_seal(*source);
 }

@@ -6,6 +6,7 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/details/GeometryOwnerManifest.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -16,6 +17,8 @@
 namespace SimpleFluid::PLIC::details
 {
 struct CellCatalogDemandWork;
+class GeometryOwnerGraphEditor;
+struct GeometryOwnerGraphWork;
 } // namespace SimpleFluid::PLIC::details
 namespace SimpleFluid::Meshes::AMR
 {
@@ -50,9 +53,12 @@ public:
     [[nodiscard]] bool contains_source(const std::shared_ptr<const PLIC::CartesianCellSource>&) const;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] std::size_t insertion_byte_bound() const;
+    [[nodiscard]] std::size_t insertion_dependency_edge_bound() const;
+    [[nodiscard]] std::size_t insertion_dependency_owner_bound() const;
     [[nodiscard]] static PreparedCartesianPages appended(
         const PreparedCartesianPages*, PreparedCartesianPage, adaptive_detail::Budget&);
     void visit_pages(const std::function<void(const PreparedCartesianPage&)>&) const;
+    void visit_dependencies(PLIC::details::GeometryOwnerGraphEditor&, bool retain) const;
     void visit_metadata(const std::function<void(const std::shared_ptr<const void>&, std::size_t)>&) const;
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
 
@@ -154,10 +160,19 @@ private:
     ArithmeticMode mode_ = ArithmeticMode::Ordinary;
     GeometrySnapshotPurpose purpose_ = GeometrySnapshotPurpose::State;
     bool stable_controls_ = false;
+    /** Payload-only physical graph, excluding header and these index graphs. */
+    std::array<geometry_snapshot_detail::PreparedOwnerManifest, 2> payload_owners_;
+    std::array<std::size_t, 9> owner_work_{};
+    void record_owner_work(const PLIC::details::GeometryOwnerGraphWork&);
+    void update_owner_manifests(const AdaptiveGeometrySnapshot*, PLIC::details::GeometryOwnerGraphEditor&,
+        PLIC::details::GeometryOwnerGraphEditor&);
+    void visit_payload_dependencies(PLIC::details::GeometryOwnerGraphEditor& ordinary,
+        PLIC::details::GeometryOwnerGraphEditor& bounded, bool retain) const;
     /** Prepare the 64-cell block of `requested` (or an explicitly named block of
      * the same recipe and region) as an optional immutable State source page. */
     bool prepare_cartesian_page(const DistributedAdaptiveHierarchy&, const AdaptiveLeaf&, std::size_t& used,
-        std::size_t operation_limit, std::size_t optional_headroom, std::uint64_t block_first = ~std::uint64_t{0});
+        std::size_t operation_limit, std::size_t optional_headroom, std::uint64_t block_first,
+        PLIC::GeometryAllocationLedger&);
     void retain_prepared_cartesian_sources(PLIC::GeometryAllocationLedger&, std::size_t& used, std::size_t limit) const;
     /** Physical prepared page slot for a cell, if the page covers it. */
     struct PreparedSourceSlot

@@ -97,13 +97,20 @@ template<ArithmeticMode M>
 std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initialize(
     std::shared_ptr<const CellGeometryCatalog<M>> original, GeometryLimits limits, CellCatalogDemandWork* measured)
 {
+    return initialize_precharged(std::move(original), limits, measured, {nullptr, nullptr});
+}
+template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initialize_precharged(
+    std::shared_ptr<const CellGeometryCatalog<M>> original, GeometryLimits limits, CellCatalogDemandWork* measured,
+    geometry_demand::Admission construction)
+{
     using Catalog = CellGeometryCatalog<M>;
     namespace G = geometry_demand;
     if (!original)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Missing persistent catalog initialization source.");
     if (original->demand_)
         return original;
-    CellCatalogAdmission memory(limits);
+    CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
     const auto admitted = catalog_demand_detail::admission(memory);
     memory.charge(1, sizeof(Catalog));
     memory.charge(1, sizeof(typename Catalog::DemandState) + G::control_bytes);
@@ -175,9 +182,8 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::initializ
         {
             return a.key.channel != b.key.channel
                        ? a.key.channel < b.key.channel
-                       : (a.key.kind != b.key.kind
-                                 ? a.key.kind < b.key.kind
-                                 : std::less<const void*>{}(a.key.address, b.key.address));
+                       : (a.key.kind != b.key.kind ? a.key.kind < b.key.kind
+                                                   : std::less<const void*>{}(a.key.address, b.key.address));
         });
     state->native_sources = G::GeometryOwnerManifest::built(std::span(owners, owner_count), admitted);
     state->order = G::GeometryDemandOrder{}.prepended(slots, {}, admitted);
@@ -213,6 +219,15 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended(
     std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::shared_ptr<const CellGeometryCatalog<M>> requested,
     std::span<const std::optional<std::size_t>> previous_slots, GeometryLimits limits, CellCatalogDemandWork* measured)
 {
+    return extended_precharged(std::move(accepted), std::move(requested), previous_slots, limits, measured,
+        {nullptr, nullptr}, {nullptr, nullptr});
+}
+template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended_precharged(
+    std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::shared_ptr<const CellGeometryCatalog<M>> requested,
+    std::span<const std::optional<std::size_t>> previous_slots, GeometryLimits limits, CellCatalogDemandWork* measured,
+    geometry_demand::Admission construction, geometry_demand::SourceSink created)
+{
     using Catalog = CellGeometryCatalog<M>;
     namespace G = geometry_demand;
     if (!accepted || !accepted->demand_ || !requested || previous_slots.size() != requested->size())
@@ -226,7 +241,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended(
         if (slot && *slot >= accepted->size())
             throw GeometryError(GeometryErrorCode::InvalidInput, "Persistent catalog demand ordinal is absent.");
 
-    CellCatalogAdmission memory(limits);
+    CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
     struct Measure
     {
         CellCatalogAdmission& memory;
@@ -355,6 +370,8 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::extended(
             reserve(page->cells, count);
             for (std::size_t row = 0; row < count; ++row)
                 page->cells.push_back(cells[offset + row].geometry);
+            if (created.visit)
+                created(G::SourceKind::Explicit, page);
             for (std::size_t row = 0; row < count; ++row)
             {
                 const auto& value = cells[offset + row];
@@ -393,6 +410,14 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
     std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
     std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits)
 {
+    return rebound_precharged(std::move(accepted), ordinals, physical, limits, {nullptr, nullptr});
+}
+template<ArithmeticMode M>
+std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound_precharged(
+    std::shared_ptr<const CellGeometryCatalog<M>> accepted, std::span<const std::size_t> ordinals,
+    std::span<const geometry_demand::SourceSlot> physical, GeometryLimits limits,
+    geometry_demand::Admission construction)
+{
     using Catalog = CellGeometryCatalog<M>;
     namespace G = geometry_demand;
     if (!accepted || !accepted->demand_ || ordinals.size() != physical.size())
@@ -406,7 +431,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
         if (ordinals[index] >= accepted->size() || physical[index].kind != G::SourceKind::Cartesian ||
             !physical[index].source)
             throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid persistent catalog rebind ordinal.");
-    CellCatalogAdmission memory(limits);
+    CellCatalogAdmission memory(limits, construction.context, construction.retain_bytes);
     const auto admitted = catalog_demand_detail::admission(memory);
     const auto reserve = [&]<class T>(std::vector<T>& target, std::size_t count)
     {
@@ -433,8 +458,7 @@ std::shared_ptr<const CellGeometryCatalog<M>> CellCatalogDemandAccess::rebound(
         if (previous.kind != G::SourceKind::Cartesian || !previous.source)
             throw GeometryError(
                 GeometryErrorCode::InvalidInput, "Persistent catalog rebind ordinal is not procedural.");
-        state->native_sources =
-            state->native_sources.retired(0, 0, previous.source, admitted);
+        state->native_sources = state->native_sources.retired(0, 0, previous.source, admitted);
         state->native_sources = state->native_sources.retained(
             0, 0, physical[index].source, catalog_demand_detail::native_body_bytes(physical[index].source), admitted);
         rebound.push_back({old.order.at(ordinals[index]).stamp, physical[index]});

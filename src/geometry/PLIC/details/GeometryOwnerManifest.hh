@@ -24,6 +24,10 @@ struct OwnerRecord
     std::size_t bytes = 0, references = 0;
     [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return bytes; }
 };
+// OwnerRecord defaults only zero scalars and an empty shared_ptr; it performs
+// no allocation and cannot throw. Its copies also preserve shared controls.
+template<> inline constexpr bool stack_safe_default<OwnerRecord> = true;
+
 /** Contains only immutable physical owner pins and shared index pages.
  * A caller constructing an accepted snapshot controls when the returned root
  * publishes. Failed edits preserve that caller's accepted root and spent prefix.
@@ -52,6 +56,9 @@ public:
      * Rows must be in (channel, kind, address) order, carry their final
      * reference multiplicity and admit no alias with conflicting controls. */
     [[nodiscard]] static GeometryOwnerManifest built(std::span<const OwnerRecord>, Admission, PageWork* = nullptr);
+    /** Apply sorted final records in one batch. Zero references retire a row. */
+    [[nodiscard]] GeometryOwnerManifest edited(
+        std::span<const OwnerRecord>, Admission, PageWork* = nullptr, PageWork* lookup_work = nullptr) const;
     [[nodiscard]] GeometryOwnerManifest retained(std::uint8_t channel, std::uint8_t kind, std::shared_ptr<const void>,
         std::size_t bytes, Admission, PageWork* = nullptr) const;
     /** Add `references` slot holds in one persistent edit. A repeated exact
@@ -64,17 +71,23 @@ public:
     /** Release `references` slot holds in one persistent edit. */
     [[nodiscard]] GeometryOwnerManifest retired(std::uint8_t channel, std::uint8_t kind,
         const std::shared_ptr<const void>&, std::size_t references, Admission, PageWork* = nullptr) const;
-    [[nodiscard]] bool admits(
-        std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&, std::size_t bytes) const;
+    [[nodiscard]] bool admits(std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&,
+        std::size_t bytes, PageWork* = nullptr) const;
     [[nodiscard]] std::size_t references(
-        std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&) const;
+        std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>&, PageWork* = nullptr) const;
     /** Empty sets have no channel. Mixed-channel sets cannot enter one
      * arithmetic ledger and are rejected by this query. */
-    [[nodiscard]] std::optional<std::uint8_t> uniform_channel() const;
+    [[nodiscard]] std::optional<std::uint8_t> uniform_channel(PageWork* = nullptr) const;
     [[nodiscard]] std::size_t payload_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_admission_bytes() const noexcept;
     [[nodiscard]] std::size_t metadata_payload_bytes() const noexcept;
     [[nodiscard]] std::size_t owner_count() const noexcept;
+    /** Conservative allocation envelope for one sorted batch of changed keys. */
+    [[nodiscard]] std::size_t batch_edit_byte_bound(std::size_t changed_keys) const;
+    /** New index allocations: changed search/rebalance paths, root State and
+     * the possible inline-to-index promotion page. */
+    [[nodiscard]] std::size_t batch_edit_metadata_owner_bound(std::size_t changed_keys) const;
+
     /** Explicit diagnostic export. Source/cache mutation uses typed deltas. */
     void visit(const std::function<void(const OwnerRecord&)>&) const;
     void visit_metadata(const std::function<void(const void*, std::size_t)>&) const;

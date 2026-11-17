@@ -67,6 +67,7 @@ public:
         return p.boundary_.geometry.get();
     }
     static const PlaneAuthority& boundary_authority(const OrdinaryBoundary& p) noexcept { return p.native_authority_; }
+    static std::shared_ptr<const void> planar_payload_owner(const PlanarFace<ArithmeticMode::Ordinary>&) noexcept;
     static std::size_t planar_metadata_bytes() noexcept;
     static const PlaneSupportIdentity<ArithmeticMode::Ordinary>* planar_support_borrowed(
         const PlanarFace<ArithmeticMode::Ordinary>&) noexcept;

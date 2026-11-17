@@ -10,6 +10,35 @@ namespace SimpleFluid::PLIC::details::geometry_demand
 {
 namespace
 {
+/** Bounded editing scratch is caller-stack storage; large requests retain an
+ * exactly admitted heap fallback. No page/State retains this helper. */
+template<class T> class EditRows
+{
+public:
+    EditRows(std::size_t count, Admission admission) : count_(count)
+    {
+        if (count > leaf_capacity)
+        {
+            admission.charge(count, sizeof(T));
+            heap_.resize(count);
+            if (heap_.capacity() != count)
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified geometry edit scratch capacity.");
+        }
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return count_; }
+    [[nodiscard]] std::span<T> span() noexcept
+    {
+        return count_ <= leaf_capacity ? std::span<T>(inline_).first(count_) : std::span<T>(heap_);
+    }
+    auto begin() noexcept { return span().begin(); }
+    auto end() noexcept { return span().end(); }
+    T& operator[](std::size_t index) noexcept { return span()[index]; }
+
+private:
+    std::size_t count_;
+    std::array<T, leaf_capacity> inline_{};
+    std::vector<T> heap_;
+};
 bool before(OrderStamp a, OrderStamp b) noexcept
 {
     return a.generation != b.generation ? a.generation > b.generation : a.position < b.position;
@@ -293,12 +322,8 @@ GeometryDemandOrder GeometryDemandOrder::prepended(
     for (const auto& value : prefix)
         if (!actual_owner(value.source) || (value.kind != SourceKind::Explicit && value.kind != SourceKind::Cartesian))
             throw GeometryError(GeometryErrorCode::InvalidInput, "Geometry demand source owner/kind is invalid.");
-    std::vector<OrderStamp> sorted;
-    admission.charge(retired.size(), sizeof(OrderStamp));
-    sorted.reserve(retired.size());
-    if (sorted.capacity() != retired.size())
-        throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified geometry retirement capacity.");
-    sorted.assign(retired.begin(), retired.end());
+    EditRows<OrderStamp> sorted(retired.size(), admission);
+    std::copy(retired.begin(), retired.end(), sorted.begin());
     std::sort(sorted.begin(), sorted.end(), before);
     for (std::size_t index = 0; index < sorted.size(); ++index)
     {
@@ -322,17 +347,13 @@ GeometryDemandOrder GeometryDemandOrder::prepended(
             retired_front[0] = Pages::at(root, 0, work);
             front = retired_front[0].page->count;
         }
-        std::vector<OrderedSourceSlot> values;
         const auto count = checked_sum(prefix.size(), front);
-        admission.charge(count, sizeof(OrderedSourceSlot));
-        values.reserve(count);
-        if (values.capacity() != count)
-            throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified geometry prefix capacity.");
+        EditRows<OrderedSourceSlot> values(count, admission);
         for (std::size_t index = 0; index < prefix.size(); ++index)
-            values.push_back({{next_generation, index}, prefix[index]});
+            values[index] = {{next_generation, index}, prefix[index]};
         for (std::size_t index = 0; index < front; ++index)
-            values.push_back(retired_front[0].page->at(index, work));
-        root = replace(std::move(root), std::span(retired_front).first(front ? 1 : 0), values, admission, work);
+            values[prefix.size() + index] = retired_front[0].page->at(index, work);
+        root = replace(std::move(root), std::span(retired_front).first(front ? 1 : 0), values.span(), admission, work);
     }
     GeometryDemandOrder result;
     if (root || next_generation)
@@ -347,12 +368,8 @@ GeometryDemandOrder GeometryDemandOrder::rebound(
 {
     if (supplied.empty())
         return *this;
-    std::vector<OrderedSourceSlot> updates;
-    admission.charge(supplied.size(), sizeof(OrderedSourceSlot));
-    updates.reserve(supplied.size());
-    if (updates.capacity() != supplied.size())
-        throw GeometryError(GeometryErrorCode::ResourceLimit, "Unqualified geometry rebound capacity.");
-    updates.assign(supplied.begin(), supplied.end());
+    EditRows<OrderedSourceSlot> updates(supplied.size(), admission);
+    std::copy(supplied.begin(), supplied.end(), updates.begin());
     std::sort(updates.begin(), updates.end(), [](const auto& a, const auto& b) { return before(a.stamp, b.stamp); });
     for (std::size_t index = 0; index < updates.size(); ++index)
     {

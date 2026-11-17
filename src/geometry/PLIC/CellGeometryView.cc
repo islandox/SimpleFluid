@@ -504,7 +504,7 @@ std::size_t CartesianCellSource::storage_bytes() const
 {
     const auto base = base_retention_bytes();
     return sizeof(*this) + sizeof(Impl) + impl_->slots.capacity() * sizeof(impl_->slots[0]) +
-        impl_->facts.capacity() * sizeof(Impl::Facts) + base[0] + base[1] + base[2];
+           impl_->facts.capacity() * sizeof(Impl::Facts) + base[0] + base[1] + base[2];
 }
 std::array<std::size_t, 3> CartesianCellSource::retention_bytes() const
 {
@@ -541,6 +541,34 @@ std::array<std::size_t, 3> CartesianCellSource::base_retention_bytes() const
         for (const auto& column : page)
             count(column.explicit_intervals);
     return {sizeof(Impl::Base), populated, unused};
+}
+void details::NativeCellGeometrySourceAccess::visit_payload(
+    const CartesianCellSource& source, const std::function<void(const void*, std::size_t)>& visitor)
+{
+    const auto& impl = *source.impl_;
+    const auto& base = *impl.base;
+    visitor(&source, sizeof(source));
+    visitor(&impl, sizeof(impl));
+    visitor(&base, sizeof(base));
+    const auto buffer = [&](const auto& values)
+    {
+        if (values.capacity())
+            visitor(values.data(), values.capacity() * sizeof(values[0]));
+    };
+    buffer(impl.slots);
+    if (impl.facts.capacity())
+        visitor(impl.facts.data, impl.facts.capacity() * sizeof(CartesianCellSource::Impl::Facts));
+    buffer(base.original_supports);
+    buffer(base.initial);
+    buffer(base.intervals);
+    buffer(base.support_overrides);
+    for (const auto& values : base.axes)
+        buffer(values);
+    for (const auto& values : base.canonical_support_slots)
+        buffer(values);
+    for (const auto& page : base.intervals)
+        for (const auto& column : page)
+            buffer(column.explicit_intervals);
 }
 std::shared_ptr<const CartesianCellSource> CartesianCellSource::clone_deferred_subset(
     const std::shared_ptr<const CartesianCellSource>& original, std::span<const std::uint64_t> cells,
@@ -834,6 +862,8 @@ void details::CellCatalogAdmission::charge(std::size_t count, std::size_t width)
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Cell geometry catalog storage exhausted.");
     if (details::active_work)
         details::active_work->charge(count, width);
+    if (charge_)
+        charge_(context_, count * width);
     used_ += count * width;
 }
 struct CellGeometryOperationWorkspace::Impl
@@ -1423,6 +1453,46 @@ details::CellCatalogDemandAccess::exported<ArithmeticMode::Ordinary>(
     std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>, bool,
     GeometryLimits);
 
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+details::CellCatalogDemandAccess::initialize_precharged<ArithmeticMode::Ordinary>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, GeometryLimits,
+    details::CellCatalogDemandWork*, details::geometry_demand::Admission);
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+details::CellCatalogDemandAccess::extended_precharged<ArithmeticMode::Ordinary>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::optional<std::size_t>>,
+    GeometryLimits, details::CellCatalogDemandWork*, details::geometry_demand::Admission,
+    details::geometry_demand::SourceSink);
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>
+    details::CellCatalogDemandAccess::rebound_precharged<ArithmeticMode::Ordinary>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Ordinary>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+details::CellCatalogDemandAccess::initialize_precharged<ArithmeticMode::BoundedCertification>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, GeometryLimits,
+    details::CellCatalogDemandWork*, details::geometry_demand::Admission);
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+details::CellCatalogDemandAccess::extended_precharged<ArithmeticMode::BoundedCertification>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>,
+    std::span<const std::optional<std::size_t>>, GeometryLimits, details::CellCatalogDemandWork*,
+    details::geometry_demand::Admission, details::geometry_demand::SourceSink);
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>
+    details::CellCatalogDemandAccess::rebound_precharged<ArithmeticMode::BoundedCertification>(
+        std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::BoundedCertification>>, std::span<const std::size_t>,
+        std::span<const details::geometry_demand::SourceSlot>, GeometryLimits, details::geometry_demand::Admission);
+
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
+details::CellCatalogDemandAccess::initialize_precharged<ArithmeticMode::Exact>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, GeometryLimits, details::CellCatalogDemandWork*,
+    details::geometry_demand::Admission);
+template std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>
+details::CellCatalogDemandAccess::extended_precharged<ArithmeticMode::Exact>(
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>,
+    std::shared_ptr<const CellGeometryCatalog<ArithmeticMode::Exact>>, std::span<const std::optional<std::size_t>>,
+    GeometryLimits, details::CellCatalogDemandWork*, details::geometry_demand::Admission,
+    details::geometry_demand::SourceSink);
 template details::geometry_demand::OrderStamp details::CellCatalogDemandAccess::stamp<ArithmeticMode::Ordinary>(
     const CellGeometryCatalog<ArithmeticMode::Ordinary>&, std::size_t);
 

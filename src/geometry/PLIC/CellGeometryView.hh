@@ -2,11 +2,11 @@
  * @brief Owning immutable indexed geometry views and explicit shell materialization.
  */
 #pragma once
-#include "utils/export_helper.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "utils/export_helper.hh"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -169,13 +169,19 @@ namespace details
 class SIMPLEFLUID_LOCAL CellCatalogAdmission
 {
 public:
-    explicit CellCatalogAdmission(GeometryLimits limits) : limits_(limits) {}
+    explicit CellCatalogAdmission(
+        GeometryLimits limits, void* context = nullptr, void (*charge)(void*, std::size_t) = nullptr)
+        : limits_(limits), context_(context), charge_(charge)
+    {
+    }
     void charge(std::size_t count, std::size_t width);
     [[nodiscard]] std::size_t used_bytes() const noexcept { return used_; }
 
 private:
     GeometryLimits limits_;
     std::size_t used_ = 0;
+    void* context_ = nullptr;
+    void (*charge_)(void*, std::size_t) = nullptr;
 };
 } // namespace details
 

@@ -1248,6 +1248,52 @@ twice when the published root is retained; a catalog that is immediately
 replaced by a persistent demand catalog is charged as construction scratch
 rather than silently omitted. Bounded construction scratch is not retained.
 
+Each snapshot maintains two payload owner manifests, for Ordinary and bounded
+certification allocations. A payload manifest excludes the snapshot header and
+its own persistent index metadata. Explicit full retention includes those
+administrative allocations separately. Incremental construction adds replacement
+bindings, catalog and prepared-page roots before retiring previous roots. Every
+physical shared pointer contributes an incoming reference, including duplicate
+holds in selection indices, fluid trails and tagged prepared-page records. The
+first incoming reference visits children; the last outgoing reference retires
+children. Shared subtrees retain their exact controls and backing buffers without
+being traversed. Payload reference multiplicity and index metadata are distinct.
+No manifest retains a predecessor snapshot, hierarchy, controller or editor.
+
+An Ordinary procedural OriginalSources context may share the immutable State
+binding root when the exact layout, expanded selection order, construction
+controls and captured false evaluation policies agree. Its catalog and deferred
+evaluation context remain independent. Raw exposes no native metrics; reordered
+or nonprocedural selections rebuild their bindings through normal admission.
+
+Owner graph edits authenticate arithmetic channel, allocation kind, address,
+shared control and exclusive size before updating a row. Persistent path copies,
+overlay map entries and pending/final-row scratch are admitted before allocation.
+A rejected edit poisons its editor and any supplied operation ledger, preserves
+the accepted immutable manifest and leaves the spent cumulative prefix charged.
+Both arithmetic results are completed before the candidate snapshot publishes.
+Scalar diagnostics distinguish incoming-edge visits, first/last transitions,
+imported dependency rows, copied owner-index pages, patch traversal and separate
+validation-lookup page visits. Each catalog construction synchronously forwards
+all allocation, control-block allowance and scratch charges into its borrowed
+outer budget before allocation. Catalog metadata and newly created shell pages
+carry exact prepaid receipts into later ledger admission; inherited source pages
+and geometric payloads still use normal owner deduplication. The callback is
+stack-bound and never retained by a catalog or persistent page. Explicit full
+retention remains a separate census for validating the complete owner set.
+
+Stored payload-manifest index administration follows its manifest channel in
+caller ledgers. This is an internal bookkeeping partition; geometry arithmetic
+and physical payload do not change. Each ledger keeps exact shared-control,
+exclusive-byte and admitted-byte credits for those index owners. Constructor
+receipts prepay newly allocated index nodes and States without scanning an
+imported predecessor. A repeated retain reuses those credits. An explicit legacy
+retain after a fresh manifest import seeds that imported index's credits once;
+this compatibility metadata census has its own work counter and is separate
+from incremental snapshot construction. Fully prepaid overlap capture charges
+only newly allocated ledger/registry/scratch storage, while its bookkeeping
+total still includes the previously admitted control allowance.
+
 A fresh operation ledger can import an authenticated immutable owner set: it
 shares the root, charges that set's cached union without enumerating retained
 geometry, and preserves a nonzero caller cumulative counter. Importing into a
@@ -1267,15 +1313,16 @@ maintained ordinary manifest instead of re-walking the snapshot's dependency
 graph; a populated caller ledger keeps the complete walk so its exact union is
 preserved.
 
-Root replacement rebuilds the exact cache union from those manifests: each root
-contributes its own authenticated set, empty channels are skipped, and no
-snapshot dependency graph is re-walked. The residency seal and lease are that
-union's payload plus the union ledger's own bookkeeping and all cache-held
-manifest metadata, counting an index shared with an imported ledger once. Thus
-every later source/rebinding query consumes the complete seal without another
-census. Capture and export admit their transient buffers and persistent index
-allocations before allocation under the remaining finite budget. Prepared-slot
-rebinding also admits replacement catalog pages into the hierarchy overlap.
+Root replacement currently obtains the exact cache union from an explicit full
+graph census of every live snapshot root. This independent compatibility path
+includes each snapshot header and both stored payload-manifest index graphs;
+sharing a root manifest value itself allocates no new index. The residency seal
+and lease include that union's payload and the union ledger's own bookkeeping,
+counting shared physical metadata once. Per-snapshot payload-manifest creation
+is incremental; cache union replacement still walks the retained roots. Capture
+and export admit transient buffers and persistent index allocations before
+allocation under the remaining finite budget. Prepared-slot rebinding also
+admits replacement catalog pages into the hierarchy overlap.
 Publication stages the replacement manifests, complete union and final lease
 admission before changing the accepted roots, manifests or seal. The cache also
 accumulates the persistent-catalog construction work of each replacement (copied metadata bytes, copied pages and visited

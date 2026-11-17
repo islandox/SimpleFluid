@@ -4,6 +4,7 @@
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.tcc"
 #include "geometry/PLIC/details/CellCatalogDemandAccess.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
@@ -14,9 +15,11 @@
 #include <cfenv>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 #include <tuple>
 #include <type_traits>
 namespace SimpleFluid::Meshes::AMR::geometry_snapshot_detail
@@ -279,7 +282,7 @@ std::optional<std::size_t> AdaptiveGeometrySnapshot::find(const AdaptiveLeaf& le
 }
 bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveHierarchy& hierarchy,
     const AdaptiveLeaf& requested, std::size_t& used, std::size_t operation_limit, std::size_t optional_headroom,
-    std::uint64_t block_first)
+    std::uint64_t block_first, PLIC::GeometryAllocationLedger& owners)
 {
     using namespace geometry_snapshot_detail;
     using Access = PLIC::details::NativeCellGeometrySourceAccess;
@@ -289,6 +292,8 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
         construction_controls() != controls_ || !matches_layout(hierarchy.leaf_layout()) ||
         !eligible(hierarchy, requested, ordinary))
         return false;
+    // Optional own-index receipts are actual new allocations, so their
+    // reservation never needs an imported-index compatibility census.
     const auto* anchor = exact_owned_cartesian_source(hierarchy, requested);
     if (!anchor || anchor->native_recipe != requested.native_recipe ||
         anchor->native_recipe.owner_before(requested.native_recipe) ||
@@ -305,10 +310,19 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
     const auto pool_bound = prepared_cartesian_
                                 ? prepared_cartesian_->insertion_byte_bound()
                                 : geometry_snapshot_detail::PreparedCartesianPages{}.insertion_byte_bound();
+    const auto graph_edges = prepared_cartesian_
+                                 ? prepared_cartesian_->insertion_dependency_edge_bound()
+                                 : geometry_snapshot_detail::PreparedCartesianPages{}.insertion_dependency_edge_bound();
+    const auto graph_owners =
+        prepared_cartesian_ ? prepared_cartesian_->insertion_dependency_owner_bound()
+                            : geometry_snapshot_detail::PreparedCartesianPages{}.insertion_dependency_owner_bound();
     const auto enough_room = [&](std::size_t cells, std::size_t points)
     {
         const auto available = std::min(optional_headroom, operation_limit - std::min(used, operation_limit));
-        return pool_bound <= available && Access::regular_page_byte_bound(cells, points) <= available - pool_bound;
+        const auto graph_bound = PLIC::details::GeometryOwnerGraphEditor::edit_byte_bound(
+            payload_owners_[0], graph_edges + points, graph_owners + points);
+        return pool_bound <= available && graph_bound <= available - pool_bound &&
+               Access::regular_page_byte_bound(cells, points) <= available - pool_bound - graph_bound;
     };
     if (!enough_room(2, 6))
         return false;
@@ -432,8 +446,17 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
     }
     auto source = Access::make(std::move(description), geometry_limits(ordinary, budget.limit - budget.used),
         PLIC::details::NativeCellGeometryMoments::PrimedState);
-    prepared_cartesian_ = PreparedCartesianPages::appended(prepared_cartesian_ ? &*prepared_cartesian_ : nullptr,
+    auto replacement = PreparedCartesianPages::appended(prepared_cartesian_ ? &*prepared_cartesian_ : nullptr,
         {anchor->native_recipe, std::move(source), first, mask}, budget);
+    PLIC::details::GeometryOwnerGraphWork work;
+    PLIC::details::GeometryOwnerGraphEditor editor(payload_owners_[0], 0, budget.used, budget.limit, &owners, &work);
+    replacement.visit_dependencies(editor, true);
+    if (prepared_cartesian_)
+        prepared_cartesian_->visit_dependencies(editor, false);
+    auto manifest = editor.finish();
+    prepared_cartesian_ = std::move(replacement);
+    payload_owners_[0] = std::move(manifest);
+    record_owner_work(work);
     return true;
 }
 geometry_snapshot_detail::PreparedOwnerManifest adaptive_detail::GeometrySnapshotAccess::owner_manifest(
@@ -448,26 +471,138 @@ void adaptive_detail::GeometrySnapshotAccess::owner_manifests(const AdaptiveGeom
     snapshot.owner_manifests(budget, ordinary, bounded, payload_prepaid);
 }
 
-void AdaptiveGeometrySnapshot::owner_manifests(adaptive_detail::Budget& budget,
-    geometry_snapshot_detail::PreparedOwnerManifest& ordinary,
-    geometry_snapshot_detail::PreparedOwnerManifest& bounded, bool payload_prepaid) const
+void adaptive_detail::GeometrySnapshotAccess::visit_cartesian_payload_edges(const AdaptiveGeometrySnapshot& snapshot,
+    const std::function<void(const void*, const void*, std::size_t)>& visitor,
+    const std::function<void(const void*, const void*, std::size_t)>& buffers,
+    const std::function<void(const void*, const AdaptiveCellKey&)>& page_keys)
 {
-    namespace G = PLIC::details::geometry_demand;
-    PLIC::GeometryAllocationLedger ordinary_owners, bounded_owners;
-    if (payload_prepaid)
+    if (snapshot.mode_ != ArithmeticMode::Ordinary || snapshot.purpose_ != GeometrySnapshotPurpose::OriginalSources ||
+        snapshot.finite_ordinary_ || snapshot.bounded_ || snapshot.prepared_cartesian_)
+        throw std::logic_error("Cartesian edge probe requires an Ordinary Raw native root.");
+    std::set<const void*> expanded;
+    const auto edge = [&](const void* parent, const void* owner, std::size_t bytes)
     {
-        // The hierarchy overlap ledger has already admitted this entire graph.
-        // This separate capture pays only its new map/scratch allocations.
-        PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
-            ordinary_owners, budget.used, budget.limit);
-        PLIC::details::GeometryAllocationOwnerAccess::begin_prepaid_capture(
-            bounded_owners, budget.used, budget.limit);
+        if (!owner)
+            return false;
+        visitor(parent, owner, bytes);
+        return expanded.insert(owner).second;
+    };
+    if (edge(nullptr, snapshot.bindings_.get(), snapshot.bindings_->exclusive_bytes()))
+        snapshot.bindings_->visit_cartesian_edges(edge, buffers, page_keys);
+    if (!snapshot.ordinary_ || !edge(nullptr, snapshot.ordinary_.get(), snapshot.ordinary_->storage_bytes()))
+        return;
+    const auto source = [&](const void* parent, const PLIC::CartesianCellSource& value)
+    {
+        using Access = PLIC::details::NativeCellGeometrySourceAccess;
+        const auto bytes = Access::exclusive_bytes(value);
+        if (!edge(parent, &value, bytes[0] + bytes[1] + bytes[2]))
+            return;
+        const auto base = Access::base_owner(value);
+        const auto base_bytes = Access::base_bytes(value);
+        if (!edge(&value, base.get(), base_bytes[0] + base_bytes[1] + base_bytes[2]))
+            return;
+        for (const auto& support : Access::retained_supports(value))
+        {
+            const void* identity_parent = base.get();
+            PLIC::visit_identity_allocations(support,
+                [&](const PLIC::GeometryIdentityAllocation& allocation)
+                {
+                    const bool descend = edge(identity_parent, allocation.owner.get(), allocation.payload_bytes);
+                    identity_parent = allocation.owner.get();
+                    return descend;
+                });
+        }
+    };
+    struct Context
+    {
+        const decltype(edge)& emit_edge;
+        const decltype(source)& emit_source;
+        const void* catalog;
+    } context{edge, source, snapshot.ordinary_.get()};
+    PLIC::details::CellCatalogDemandAccess::visit_borrowed_dependencies(*snapshot.ordinary_,
+        {&context,
+            [](void* raw, const void* owner, const void* parent, std::size_t bytes)
+            {
+                auto& value = *static_cast<Context*>(raw);
+                return value.emit_edge(parent ? parent : value.catalog, owner, bytes);
+            }},
+        {&context, [](void* raw, const void* parent, PLIC::details::geometry_demand::SourceKind kind, const void* owner)
+            {
+                if (kind != PLIC::details::geometry_demand::SourceKind::Cartesian)
+                    throw std::logic_error("Cartesian edge probe encountered an explicit shell page.");
+                static_cast<Context*>(raw)->emit_source(parent, *static_cast<const PLIC::CartesianCellSource*>(owner));
+            }});
+}
+
+adaptive_detail::GeometrySnapshotOwnerStatistics adaptive_detail::GeometrySnapshotAccess::owner_statistics(
+    const AdaptiveGeometrySnapshot& snapshot)
+{
+    const auto& work = snapshot.owner_work_;
+    GeometrySnapshotOwnerStatistics result{
+        work[0], work[1], work[2], work[3], work[4], work[5], work[6], work[7], work[8]};
+    for (const auto& manifest : snapshot.payload_owners_)
+    {
+        result.stored_metadata_payload_bytes += manifest.metadata_payload_bytes();
+        result.stored_metadata_admission_bytes += manifest.metadata_admission_bytes();
     }
-    retain(ordinary_owners, bounded_owners, budget.used, budget.limit);
-    const G::Admission admission{
-        &budget, [](void* raw, std::size_t bytes) { static_cast<adaptive_detail::Budget*>(raw)->add(bytes); }};
-    ordinary = PLIC::details::GeometryOwnerImportAccess::export_manifest(ordinary_owners, admission, nullptr, 0);
-    bounded = PLIC::details::GeometryOwnerImportAccess::export_manifest(bounded_owners, admission, nullptr, 1);
+    return result;
+}
+std::shared_ptr<const void> adaptive_detail::GeometrySnapshotAccess::binding_owner(
+    const AdaptiveGeometrySnapshot& snapshot)
+{
+    return snapshot.bindings_;
+}
+void adaptive_detail::GeometrySnapshotAccess::visit_owner_manifest_metadata(
+    const AdaptiveGeometrySnapshot& snapshot, PLIC::details::geometry_demand::MetadataSink metadata)
+{
+    for (const auto& manifest : snapshot.payload_owners_)
+        manifest.visit_dependencies(metadata, {nullptr, [](void*, const auto&) {}});
+}
+void AdaptiveGeometrySnapshot::record_owner_work(const PLIC::details::GeometryOwnerGraphWork& work)
+{
+    owner_work_[0] += work.dependency_entries;
+    owner_work_[1] += work.edge_visits;
+    owner_work_[2] += work.first_transitions;
+    owner_work_[3] += work.last_transitions;
+    owner_work_[4] += work.index.copied_pages;
+    owner_work_[5] += work.index.copied_bytes;
+    owner_work_[6] += work.index.visited_pages;
+    owner_work_[8] += work.lookup.visited_pages;
+}
+void AdaptiveGeometrySnapshot::visit_payload_dependencies(PLIC::details::GeometryOwnerGraphEditor& ordinary,
+    PLIC::details::GeometryOwnerGraphEditor& bounded, bool retain) const
+{
+    if (ordinary.external(bindings_, bindings_->exclusive_bytes(), retain, true))
+        bindings_->visit_dependencies(ordinary, retain);
+    ordinary.catalog(ordinary_, retain);
+    ordinary.catalog(finite_ordinary_, retain);
+    bounded.catalog(bounded_, retain);
+    if (prepared_cartesian_)
+        prepared_cartesian_->visit_dependencies(ordinary, retain);
+}
+void AdaptiveGeometrySnapshot::update_owner_manifests(const AdaptiveGeometrySnapshot* previous,
+    PLIC::details::GeometryOwnerGraphEditor& ordinary, PLIC::details::GeometryOwnerGraphEditor& bounded)
+{
+    // Catalog roots were admitted immediately after each construction, before
+    // the next independent catalog can consume the remaining operation budget.
+    if (ordinary.external(bindings_, bindings_->exclusive_bytes(), true, true))
+        bindings_->visit_dependencies(ordinary, true);
+    if (prepared_cartesian_)
+        prepared_cartesian_->visit_dependencies(ordinary, true);
+    if (previous)
+        previous->visit_payload_dependencies(ordinary, bounded, false);
+    auto ordinary_manifest = ordinary.finish();
+    auto bounded_manifest = bounded.finish();
+    payload_owners_ = {std::move(ordinary_manifest), std::move(bounded_manifest)};
+}
+void AdaptiveGeometrySnapshot::owner_manifests(adaptive_detail::Budget& budget,
+    geometry_snapshot_detail::PreparedOwnerManifest& ordinary, geometry_snapshot_detail::PreparedOwnerManifest& bounded,
+    bool payload_prepaid) const
+{
+    (void) payload_prepaid;
+    (void) budget;
+    ordinary = payload_owners_[0];
+    bounded = payload_owners_[1];
 }
 
 geometry_snapshot_detail::PreparedOwnerManifest AdaptiveGeometrySnapshot::owner_manifest(
@@ -520,18 +655,41 @@ void AdaptiveGeometrySnapshot::rebind_prepared_slots(std::span<const std::size_t
     for (const auto& value : physical)
         slots.push_back({value.source, value.row, value.valid ? G::SourceKind::Cartesian : G::SourceKind::Explicit});
     const auto remaining = [&] { return limit - std::min(used, limit); };
-    if (ordinary_)
+    PLIC::details::GeometryOwnerGraphWork work;
+    PLIC::details::GeometryOwnerGraphEditor editor(payload_owners_[0], 0, used, limit, &ordinary_owners, &work);
+    struct Counter
     {
-        ordinary_ = Access::rebound(ordinary_, ordinals, slots,
-            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()));
-        ordinary_owners.retain(ordinary_, used, limit);
-    }
-    if (finite_ordinary_)
+        std::size_t& used;
+        std::size_t limit;
+    } counter{used, limit};
+    const G::Admission construction{&counter, [](void* raw, std::size_t bytes)
+        {
+            auto& value = *static_cast<Counter*>(raw);
+            if (value.used > value.limit || bytes > value.limit - value.used)
+                throw PLIC::GeometryError(
+                    PLIC::GeometryErrorCode::ResourceLimit, "Prepared catalog construction receipt exceeds admission.");
+            value.used += bytes;
+        }};
+    auto ordinary = ordinary_, finite = finite_ordinary_;
+    if (ordinary)
     {
-        finite_ordinary_ = Access::rebound(finite_ordinary_, ordinals, slots,
-            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()));
-        ordinary_owners.retain(finite_ordinary_, used, limit);
+        ordinary = Access::rebound_precharged(ordinary, ordinals, slots,
+            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction);
+        editor.catalog(ordinary, true, true);
     }
+    if (finite)
+    {
+        finite = Access::rebound_precharged(finite, ordinals, slots,
+            geometry_snapshot_detail::geometry_limits(ArithmeticMode::Ordinary, remaining()), construction);
+        editor.catalog(finite, true, true);
+    }
+    editor.catalog(ordinary_, false);
+    editor.catalog(finite_ordinary_, false);
+    auto manifest = editor.finish();
+    ordinary_ = std::move(ordinary);
+    finite_ordinary_ = std::move(finite);
+    payload_owners_[0] = std::move(manifest);
+    record_owner_work(work);
 }
 
 void AdaptiveGeometrySnapshot::retain_prepared_cartesian_sources(
@@ -617,6 +775,30 @@ void AdaptiveGeometrySnapshot::retain(PLIC::GeometryAllocationLedger& ordinary_o
         ordinary_owners.retain(finite_ordinary_, used, limit);
     if (bounded_)
         bounded_owners.retain(bounded_, used, limit);
+    // Index administration follows the manifest's arithmetic channel. This
+    // lets a previous import credit its own index exactly once in that ledger.
+    struct MetadataContext
+    {
+        PLIC::GeometryAllocationLedger* ledger;
+        std::uint8_t channel;
+        std::size_t& used;
+        std::size_t limit;
+    } metadata{&ordinary_owners, 0, used, limit};
+    for (unsigned channel = 0; channel < payload_owners_.size(); ++channel)
+    {
+        metadata.ledger = channel ? &bounded_owners : &ordinary_owners;
+        metadata.channel = std::uint8_t(channel);
+        payload_owners_[channel].visit_dependencies(
+            {&metadata,
+                [](void* raw, const std::shared_ptr<const void>& owner, std::size_t payload, std::size_t admitted)
+                {
+                    auto& value = *static_cast<MetadataContext*>(raw);
+                    PLIC::details::GeometryAllocationOwnerAccess::retain_manifest_metadata(
+                        *value.ledger, value.channel, owner, payload, admitted, value.used, value.limit);
+                    return true;
+                }},
+            {nullptr, [](void*, const auto&) {}});
+    }
 }
 std::size_t AdaptiveGeometrySnapshot::retained_bytes() const
 {
@@ -632,6 +814,20 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     std::span<const geometry_snapshot_detail::PublicationSource> publication,
     PLIC::details::CellCatalogDemandWork* demand_work)
 {
+    struct RejectOperationLedgers
+    {
+        PLIC::GeometryAllocationLedger& ordinary;
+        PLIC::GeometryAllocationLedger& bounded;
+        int exceptions = std::uncaught_exceptions();
+        ~RejectOperationLedgers() noexcept
+        {
+            if (std::uncaught_exceptions() > exceptions)
+            {
+                PLIC::details::GeometryAllocationOwnerAccess::poison(ordinary);
+                PLIC::details::GeometryAllocationOwnerAccess::poison(bounded);
+            }
+        }
+    } reject_ledgers{ordinary_owners, bounded_owners};
     adaptive_detail::Budget budget{limit, used};
     struct SpentCounter
     {
@@ -724,67 +920,117 @@ std::shared_ptr<AdaptiveGeometrySnapshot> AdaptiveGeometrySnapshot::build(const 
     using CatalogAccess = PLIC::details::CellCatalogDemandAccess;
     const auto limits = [&](ArithmeticMode arithmetic)
     { return geometry_snapshot_detail::geometry_limits(arithmetic, budget.limit - budget.used); };
-    // Constructor scratch is scoped to its preflight. Its returned owners
-    // coexist with every subsequent catalog and binding allocation.
-    const auto retain_catalog = [&](auto catalog, auto& ledger)
+    PLIC::details::GeometryOwnerGraphWork ordinary_work, bounded_work;
+    PLIC::details::GeometryOwnerGraphEditor ordinary_graph(
+        previous ? previous->payload_owners_[0] : geometry_snapshot_detail::PreparedOwnerManifest{}, 0, budget.used,
+        budget.limit, &ordinary_owners, &ordinary_work);
+    PLIC::details::GeometryOwnerGraphEditor bounded_graph(
+        previous ? previous->payload_owners_[1] : geometry_snapshot_detail::PreparedOwnerManifest{}, 1, budget.used,
+        budget.limit, &bounded_owners, &bounded_work);
+    const auto retain_catalog = [&]<ArithmeticMode M>(
+                                    std::shared_ptr<const PLIC::CellGeometryCatalog<M>> catalog, auto&)
     {
-        ledger.retain(catalog, budget.used, budget.limit);
+        if constexpr (M == ArithmeticMode::BoundedCertification)
+            bounded_graph.catalog(catalog, true, true);
+        else
+            ordinary_graph.catalog(catalog, true, true);
         return catalog;
     };
+    namespace G = PLIC::details::geometry_demand;
+    const G::Admission construction{
+        &budget, [](void* raw, std::size_t bytes) { static_cast<adaptive_detail::Budget*>(raw)->add(bytes); }};
+    const G::SourceSink ordinary_created{&ordinary_graph,
+        [](void* raw, G::SourceKind kind, const std::shared_ptr<const void>& owner)
+        {
+            if (kind != G::SourceKind::Explicit)
+                throw std::logic_error("Catalog constructor issued a foreign source receipt.");
+            static_cast<PLIC::details::GeometryOwnerGraphEditor*>(raw)->prepay_catalog_page<ArithmeticMode::Ordinary>(
+                std::static_pointer_cast<const PLIC::CellGeometryCatalog<ArithmeticMode::Ordinary>::ExplicitPage>(
+                    owner));
+        }};
+    const G::SourceSink bounded_created{&bounded_graph,
+        [](void* raw, G::SourceKind kind, const std::shared_ptr<const void>& owner)
+        {
+            if (kind != G::SourceKind::Explicit)
+                throw std::logic_error("Catalog constructor issued a foreign source receipt.");
+            static_cast<PLIC::details::GeometryOwnerGraphEditor*>(raw)
+                ->prepay_catalog_page<ArithmeticMode::BoundedCertification>(std::static_pointer_cast<
+                    const PLIC::CellGeometryCatalog<ArithmeticMode::BoundedCertification>::ExplicitPage>(owner));
+        }};
     if (sparse)
     {
         const auto requested_ordinary = result.ordinary_;
-        result.ordinary_ = retain_catalog(CatalogAccess::extended(previous->ordinary_, requested_ordinary,
-                                              previous_slots, limits(ArithmeticMode::Ordinary), demand_work),
-            ordinary_owners);
+        result.ordinary_ =
+            retain_catalog(CatalogAccess::extended_precharged(previous->ordinary_, requested_ordinary, previous_slots,
+                               limits(ArithmeticMode::Ordinary), demand_work, construction, ordinary_created),
+                ordinary_owners);
         if (previous->finite_ordinary_ || result.finite_ordinary_)
             result.finite_ordinary_ = retain_catalog(
-                CatalogAccess::extended(previous->finite_ordinary_ ? previous->finite_ordinary_ : previous->ordinary_,
+                CatalogAccess::extended_precharged(
+                    previous->finite_ordinary_ ? previous->finite_ordinary_ : previous->ordinary_,
                     result.finite_ordinary_ ? result.finite_ordinary_ : requested_ordinary, previous_slots,
-                    limits(ArithmeticMode::Ordinary)),
+                    limits(ArithmeticMode::Ordinary), nullptr, construction, ordinary_created),
                 ordinary_owners);
         if (result.bounded_)
-            result.bounded_ = retain_catalog(CatalogAccess::extended(previous->bounded_, result.bounded_,
-                                                 previous_slots, limits(ArithmeticMode::BoundedCertification)),
+            result.bounded_ = retain_catalog(
+                CatalogAccess::extended_precharged(previous->bounded_, result.bounded_, previous_slots,
+                    limits(ArithmeticMode::BoundedCertification), nullptr, construction, bounded_created),
                 bounded_owners);
         result.bindings_ = geometry_snapshot_detail::Bindings::extended(
             *previous->bindings_, leaves, facts, *hierarchy.leaf_layout(), budget);
     }
     else
     {
-        result.ordinary_ =
-            retain_catalog(CatalogAccess::initialize(result.ordinary_, limits(ArithmeticMode::Ordinary), demand_work),
-                ordinary_owners);
+        result.ordinary_ = retain_catalog(CatalogAccess::initialize_precharged(result.ordinary_,
+                                              limits(ArithmeticMode::Ordinary), demand_work, construction),
+            ordinary_owners);
         if (result.finite_ordinary_)
-            result.finite_ordinary_ = retain_catalog(
-                CatalogAccess::initialize(result.finite_ordinary_, limits(ArithmeticMode::Ordinary)), ordinary_owners);
+            result.finite_ordinary_ = retain_catalog(CatalogAccess::initialize_precharged(result.finite_ordinary_,
+                                                         limits(ArithmeticMode::Ordinary), nullptr, construction),
+                ordinary_owners);
         if (result.bounded_)
-            result.bounded_ =
-                retain_catalog(CatalogAccess::initialize(result.bounded_, limits(ArithmeticMode::BoundedCertification)),
-                    bounded_owners);
-        result.bindings_ = geometry_snapshot_detail::Bindings::build(expanded, facts,
-            previous && previous->purpose_ == purpose ? previous->bindings_.get() : nullptr, false, budget);
+            result.bounded_ = retain_catalog(CatalogAccess::initialize_precharged(result.bounded_,
+                                                 limits(ArithmeticMode::BoundedCertification), nullptr, construction),
+                bounded_owners);
+        const auto same_raw_bindings = [&]
+        {
+            if (!publication.empty() || !extend || mode != ArithmeticMode::Ordinary ||
+                purpose != GeometrySnapshotPurpose::OriginalSources ||
+                previous->purpose_ != GeometrySnapshotPurpose::State || !result.stable_controls_ ||
+                !previous->stable_controls_ || result.controls_ != previous->controls_ ||
+                previous->bindings_->size() != expanded.size() || result.ordinary_->size() != expanded.size())
+                return false;
+            for (std::size_t slot = 0; slot < expanded.size(); ++slot)
+            {
+                const auto old_slot = previous->find(*expanded[slot]);
+                if (!old_slot || *old_slot != slot ||
+                    !PLIC::CellGeometryView<ArithmeticMode::Ordinary>(result.ordinary_, slot).is_procedural() ||
+                    !PLIC::CellGeometryView<ArithmeticMode::Ordinary>(previous->ordinary_, slot).is_procedural())
+                    return false;
+                const auto old_policy = previous->evaluation_policy(slot);
+                const auto new_policy = facts.policy[slot];
+                if (old_policy.original_integrals || old_policy.ordinary_integrals || old_policy.bounded_integrals ||
+                    new_policy.original_integrals || new_policy.ordinary_integrals || new_policy.bounded_integrals)
+                    return false;
+            }
+            return true;
+        };
+        // Purpose changes the evaluation contexts, not authenticated key and
+        // recipe bindings. Raw catalogs remain independent deferred contexts;
+        // their public metric range is empty regardless of shared metadata.
+        if (same_raw_bindings())
+            result.bindings_ = previous->bindings_;
+        else
+            result.bindings_ = geometry_snapshot_detail::Bindings::build(expanded, facts,
+                previous && previous->purpose_ == purpose ? previous->bindings_.get() : nullptr, false, budget);
     }
+    result.update_owner_manifests(previous.get(), ordinary_graph, bounded_graph);
+    result.record_owner_work(ordinary_work);
+    result.record_owner_work(bounded_work);
     budget.add(sizeof(AdaptiveGeometrySnapshot));
     auto snapshot = std::make_shared<AdaptiveGeometrySnapshot>(std::move(result));
-    // Bindings and source roots join the same caller ledger used throughout
-    // construction. Existing payload owners are deduplicated; new caller ledger
-    // metadata is admitted normally without resetting the cumulative counter.
-    // Bindings, prepared-page index pages and this header were charged while
-    // they were constructed from the same cumulative counter. Record their
-    // immutable pins as prepaid so final retention does not charge identical
-    // persistent bytes twice; genuine owners that were never construction-
-    // charged (recipes, catalogs, source pages) still enter normally below.
-    const auto admit_prepaid = [&](const std::shared_ptr<const void>& owner, std::size_t bytes)
-    { PLIC::details::GeometryAllocationOwnerAccess::admit_prepaid(ordinary_owners, owner, bytes, budget.used, limit); };
-    admit_prepaid(snapshot, sizeof(*snapshot));
-    admit_prepaid(snapshot->bindings_, snapshot->bindings_->exclusive_bytes());
-    snapshot->bindings_->visit_children(
-        [&](const auto& owner, std::size_t bytes) { admit_prepaid(owner, bytes); }, false);
-    if (snapshot->prepared_cartesian_)
-        snapshot->prepared_cartesian_->visit_metadata(
-            [&](const auto& owner, std::size_t bytes) { admit_prepaid(owner, bytes); });
-    snapshot->retain(ordinary_owners, bounded_owners, budget.used, limit);
+    PLIC::details::GeometryAllocationOwnerAccess::admit_prepaid(
+        ordinary_owners, snapshot, sizeof(*snapshot), budget.used, limit);
     return snapshot;
 }
 } // namespace SimpleFluid::Meshes::AMR
