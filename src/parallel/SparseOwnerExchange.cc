@@ -2,11 +2,15 @@
  * @brief Two-phase, peer-coalesced variable packet exchange with collective gates.
  */
 #include "parallel/SparseOwnerExchange.hh"
+#include "parallel/NativePacketAdmission.hh"
+#include <Teuchos_DefaultMpiComm.hpp>
+#include <Teuchos_DefaultSerialComm.hpp>
 #include "parallel/SparseOwnerExchangeFraming.hh"
 #include <Kokkos_Core.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Distributor.hpp>
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -82,8 +86,10 @@ using StreamBlocks = owner_exchange_detail::OwnerStreamBlocks;
 class BlockCursor
 {
 public:
-    BlockCursor(const StreamBlocks& stream, StreamBlocks* destructive)
-        : blocks_(stream.blocks), destructive_(destructive)
+    BlockCursor(const StreamBlocks& stream, StreamBlocks* destructive, void* retirement_context = nullptr,
+        void (*after_deallocation)(void*, const char*, std::size_t) noexcept = nullptr)
+        : blocks_(stream.blocks), destructive_(destructive), retirement_context_(retirement_context),
+          after_deallocation_(after_deallocation)
     {
         for (const auto& block : blocks_)
             remaining_ = plus(remaining_, block.size());
@@ -126,18 +132,27 @@ private:
     {
         released_ = plus(released_, blocks_[block_].capacity());
         if (destructive_)
+        {
+            const auto* address = blocks_[block_].data();
+            const auto capacity = blocks_[block_].capacity();
             std::vector<char>().swap(destructive_->blocks[block_]);
+            if (after_deallocation_ && capacity)
+                after_deallocation_(retirement_context_, address, capacity);
+        }
         ++block_;
         offset_ = 0;
     }
     const std::vector<std::vector<char>>& blocks_;
     StreamBlocks* destructive_;
+    void* retirement_context_;
+    void (*after_deallocation_)(void*, const char*, std::size_t) noexcept;
     std::size_t block_ = 0, offset_ = 0, remaining_ = 0, released_ = 0;
 };
 template<class Visitor>
 owner_exchange_detail::StreamAudit walk_blocks(std::span<const StreamBlocks> streams,
     std::span<const std::size_t> sizes, std::span<const Word> headers, Visitor&& visit,
-    std::span<StreamBlocks> destructive = {})
+    std::span<StreamBlocks> destructive = {}, void* retirement_context = nullptr,
+    void (*after_deallocation)(void*, const char*, std::size_t) noexcept = nullptr)
 {
     if (streams.size() != sizes.size() || headers.size() != times(sizes.size(), 2) ||
         (!destructive.empty() && destructive.size() != streams.size()))
@@ -146,7 +161,8 @@ owner_exchange_detail::StreamAudit walk_blocks(std::span<const StreamBlocks> str
     std::size_t retired = 0;
     for (std::size_t stream = 0; stream < streams.size(); ++stream)
     {
-        BlockCursor cursor(streams[stream], destructive.empty() ? nullptr : &destructive[stream]);
+        BlockCursor cursor(streams[stream], destructive.empty() ? nullptr : &destructive[stream], retirement_context,
+            after_deallocation);
         const auto count = headers[2 * stream], bytes = headers[2 * stream + 1];
         if (!count || bytes < sizeof(Word) || count > bytes / sizeof(Word) || bytes != sizes[stream] ||
             cursor.remaining() != sizes[stream])
@@ -183,7 +199,8 @@ owner_exchange_detail::StreamAudit owner_exchange_detail::walk_owner_block_strea
 OwnerExchange owner_exchange_detail::decode_owner_block_streams(std::span<OwnerStreamBlocks> streams,
     std::span<const std::size_t> sizes, std::span<const Word> headers, std::span<const int> senders,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget, std::size_t retained_metadata,
-    void* observer_context, void (*before_payload_allocation)(void*, std::size_t))
+    void* observer_context, void (*before_payload_allocation)(void*, std::size_t),
+    void (*after_block_deallocation)(void*, const char*, std::size_t) noexcept)
 {
     if (comm.is_null())
         throw std::invalid_argument("Owner block decode needs a communicator.");
@@ -249,7 +266,7 @@ OwnerExchange owner_exchange_detail::decode_owner_block_streams(std::span<OwnerS
                     cursor.read(packet.bytes.data(), size);
                     output.stats.received_bytes = plus(output.stats.received_bytes, size);
                 },
-                streams);
+                streams, observer_context, after_block_deallocation);
             if (decoded.records != validated.records || decoded.payload_bytes != validated.payload_bytes)
                 throw std::invalid_argument("Owner block decode differs from complete audit.");
         });
@@ -805,6 +822,343 @@ OwnerExchange exchange_owner_packets(
     std::span<const OwnerPacket> input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
 {
     return owner_exchange_detail::exchange_owner_packets_with_round_limit(input, comm, budget, 16 * 1024 * 1024);
+}
+namespace
+{
+class NativePacketComm
+{
+public:
+    explicit NativePacketComm(const Teuchos::RCP<const Teuchos::Comm<int>>& comm)
+        : size(comm->getSize()), rank(comm->getRank())
+    {
+#ifdef HAVE_TEUCHOS_MPI
+        if (const auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(comm.getRawPtr()))
+        {
+            raw = *mpi->getRawMpiComm();
+            tag_ = const_cast<Teuchos::Comm<int>*>(comm.getRawPtr())->incrementTag();
+            mpi_ = true;
+            return;
+        }
+#endif
+        if (size != 1 || rank || !dynamic_cast<const Teuchos::SerialComm<int>*>(comm.getRawPtr()))
+            throw std::invalid_argument("Native packet adapter needs its actual MPI or serial communicator.");
+    }
+    template<class F> void gate(F&& action) const
+    {
+        std::exception_ptr error;
+        try
+        {
+            action();
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+        const int failed = bool(error);
+        int any = failed;
+#ifdef HAVE_TEUCHOS_MPI
+        if (mpi_)
+            check(MPI_Allreduce(&failed, &any, 1, MPI_INT, MPI_MAX, raw));
+#endif
+        if (any)
+        {
+            if (error)
+                std::rethrow_exception(error);
+            throw std::invalid_argument("Native owner packet allocation/validation failed on another rank.");
+        }
+    }
+    std::uint64_t maximum(std::uint64_t value) const
+    {
+#ifdef HAVE_TEUCHOS_MPI
+        if (mpi_)
+        {
+            std::uint64_t result = 0;
+            check(MPI_Allreduce(&value, &result, 1, MPI_UINT64_T, MPI_MAX, raw));
+            return result;
+        }
+#endif
+        return value;
+    }
+    void headers(const Word* send, Word* receive) const
+    {
+#ifdef HAVE_TEUCHOS_MPI
+        if (mpi_)
+        {
+            check(MPI_Alltoall(send, 2, MPI_UINT64_T, receive, 2, MPI_UINT64_T, raw));
+            return;
+        }
+#endif
+        std::copy_n(send, 2, receive);
+    }
+    void transfer(const char* send, int send_count, int destination, char* receive, int receive_count, int source) const
+    {
+#ifdef HAVE_TEUCHOS_MPI
+        if (mpi_)
+        {
+            check(MPI_Sendrecv(send, send_count, MPI_CHAR, destination, tag_, receive, receive_count, MPI_CHAR, source,
+                tag_, raw, MPI_STATUS_IGNORE));
+            return;
+        }
+#endif
+        if (send_count != receive_count || destination || source)
+            throw std::invalid_argument("Native serial packet counts differ.");
+        if (send_count)
+            std::memcpy(receive, send, static_cast<std::size_t>(send_count));
+    }
+    int size, rank;
+
+private:
+#ifdef HAVE_TEUCHOS_MPI
+    MPI_Comm raw = MPI_COMM_NULL;
+    bool mpi_ = false;
+    int tag_ = 0;
+    static void check(int status)
+    {
+        if (status != MPI_SUCCESS)
+            throw std::invalid_argument("Native owner packet MPI transport failed.");
+    }
+#endif
+};
+struct NativePacketSendCursor
+{
+    std::size_t record = 0, offset = 0;
+    void copy(std::span<const OwnerPacket> input, std::span<const std::size_t> indices, std::span<char> destination)
+    {
+        std::size_t written = 0;
+        while (written < destination.size())
+        {
+            if (record == indices.size())
+                throw std::invalid_argument("Native owner stream cursor exceeds records.");
+            const auto& packet = input[indices[record]].bytes;
+            const Word length = packet.size();
+            const auto extent = plus(sizeof(Word), packet.size());
+            const auto count = std::min(extent - offset, destination.size() - written);
+            const auto prefix = offset < sizeof(Word) ? std::min(sizeof(Word) - offset, count) : 0;
+            if (prefix)
+                std::memcpy(destination.data() + written, reinterpret_cast<const char*>(&length) + offset, prefix);
+            if (count > prefix)
+                std::memcpy(destination.data() + written + prefix, packet.data() + offset + prefix - sizeof(Word),
+                    count - prefix);
+            offset += count;
+            written += count;
+            if (offset == extent)
+            {
+                ++record;
+                offset = 0;
+            }
+        }
+    }
+};
+} // namespace
+NativeOwnerExchange exchange_owner_packets(std::span<const OwnerPacket> input,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, const geometry_detail::NativeConstructionAdmission& admission,
+    std::size_t round_limit)
+{
+    if (comm.is_null())
+        throw std::invalid_argument("Native owner exchange needs its communicator.");
+    const NativePacketComm transport(comm);
+    using geometry_detail::NativeConstructorVector;
+    NativeOwnerExchange output;
+    // Every phase owner precedes the concrete buffers it pays for.
+    geometry_detail::NativeConstructorStorageOwner receive_storage;
+    std::vector<StreamBlocks> streams;
+    NativeConstructorVector<Word> send_header(admission.allocator<Word>()), recv_header(admission.allocator<Word>());
+    NativeConstructorVector<std::size_t> sizes(admission.allocator<std::size_t>());
+    NativeConstructorVector<int> senders(admission.allocator<int>());
+    NativeConstructorVector<NativeConstructorVector<std::size_t>> groups(
+        admission.allocator<NativeConstructorVector<std::size_t>>());
+    NativeConstructorVector<NativePacketSendCursor> cursors(admission.allocator<NativePacketSendCursor>());
+    std::size_t sent_wire = 0, received_wire = 0, imports = 0, records = 0;
+    const auto observe = [&](unsigned phase, std::size_t send_chunk = 0)
+    {
+        const auto stored = [](const geometry_detail::NativeConstructorStorageOwner& storage)
+        {
+            return storage.owner ? plus(storage.owner->exclusive_bytes(), storage.envelope->fixed_allocation_bytes())
+                                 : 0;
+        };
+        std::size_t bytes = plus(stored(output.storage()), stored(receive_storage));
+        bytes = plus(bytes, times(send_header.capacity() + recv_header.capacity(), sizeof(Word)));
+        bytes = plus(bytes, times(sizes.capacity(), sizeof(std::size_t)));
+        bytes = plus(bytes, times(senders.capacity(), sizeof(int)));
+        bytes = plus(bytes, times(groups.capacity(), sizeof(NativeConstructorVector<std::size_t>)));
+        for (const auto& group : groups)
+            bytes = plus(bytes, times(group.capacity(), sizeof(std::size_t)));
+        bytes = plus(bytes, times(cursors.capacity(), sizeof(NativePacketSendCursor)));
+        bytes = plus(bytes, send_chunk);
+        auto& value = phase == 0   ? output.stats.planning_peak_bytes
+                      : phase == 1 ? output.stats.transfer_peak_bytes
+                                   : output.stats.decode_peak_bytes;
+        value = std::max(value, bytes);
+        output.stats.peak_scratch_bytes = std::max(output.stats.peak_scratch_bytes, bytes);
+    };
+    const auto quantum64 = transport.maximum(round_limit);
+    transport.gate(
+        [&]
+        {
+            geometry_detail::NativeConstructorStorage::require_profile();
+            if (!round_limit || quantum64 != round_limit || round_limit > static_cast<std::size_t>(INT_MAX))
+                throw std::invalid_argument("Native packet round limits must be identical, nonzero and represented.");
+            if (input.size() > static_cast<std::size_t>(INT_MAX))
+                throw std::length_error("Native packet count exceeds range.");
+            output.storage() = geometry_detail::native_constructor_storage(admission);
+            receive_storage = geometry_detail::native_constructor_storage(admission);
+            send_header.resize(times(transport.size, 2), 0);
+            recv_header.resize(times(transport.size, 2), 0);
+            groups.reserve(transport.size);
+            cursors.resize(transport.size);
+            for (int peer = 0; peer < transport.size; ++peer)
+                groups.emplace_back(admission.allocator<std::size_t>());
+            for (const auto& packet : input)
+            {
+                if (packet.peer < 0 || packet.peer >= transport.size)
+                    throw std::invalid_argument("Native packet peer is out of range.");
+                auto& count = send_header[2 * packet.peer];
+                auto& bytes = send_header[2 * packet.peer + 1];
+                ++count;
+                bytes = plus(bytes, plus(sizeof(Word), packet.bytes.size()));
+                sent_wire = plus(sent_wire, plus(sizeof(Word), packet.bytes.size()));
+                output.stats.sent_bytes = plus(output.stats.sent_bytes, packet.bytes.size());
+            }
+            if (sent_wire > static_cast<std::size_t>(INT_MAX))
+                throw std::length_error("Native packed exports exceed range.");
+            for (int peer = 0; peer < transport.size; ++peer)
+                groups[peer].reserve(send_header[2 * peer]);
+            for (std::size_t i = 0; i < input.size(); ++i)
+                groups[input[i].peer].push_back(i);
+            observe(0);
+        });
+    transport.headers(send_header.data(), recv_header.data());
+    transport.gate(
+        [&]
+        {
+            for (int peer = 0; peer < transport.size; ++peer)
+            {
+                const auto count = recv_header[2 * peer], bytes = recv_header[2 * peer + 1];
+                if ((!count) != (!bytes) || (count && (bytes < sizeof(Word) || count > bytes / sizeof(Word))))
+                    throw std::invalid_argument("Native peer stream declaration is invalid.");
+                if (!count)
+                    continue;
+                received_wire = plus(received_wire, bytes);
+                records = plus(records, count);
+                ++imports;
+            }
+            if (received_wire > static_cast<std::size_t>(INT_MAX) || records > static_cast<std::size_t>(INT_MAX))
+                throw std::length_error("Native packed imports exceed range.");
+            receive_storage.owner->reserve(streams, transport.size);
+            streams.resize(transport.size);
+            sizes.resize(transport.size);
+            senders.resize(transport.size);
+            for (int peer = 0; peer < transport.size; ++peer)
+            {
+                sizes[peer] = recv_header[2 * peer + 1];
+                senders[peer] = peer;
+                const auto count = sizes[peer] / round_limit + bool(sizes[peer] % round_limit);
+                receive_storage.owner->reserve(streams[peer].blocks, count);
+            }
+            output.stats.block_metadata_capacity = times(streams.capacity(), sizeof(StreamBlocks));
+            for (const auto& stream : streams)
+                output.stats.block_metadata_capacity = plus(
+                    output.stats.block_metadata_capacity, times(stream.blocks.capacity(), sizeof(std::vector<char>)));
+            observe(0);
+        });
+    // All ranks execute the same peer and round schedule, including empty owners.
+    for (int step = 0; step < transport.size; ++step)
+    {
+        const int destination = (transport.rank + step) % transport.size;
+        const int source = (transport.rank - step + transport.size) % transport.size;
+        const auto sending = send_header[2 * destination + 1], receiving = recv_header[2 * source + 1];
+        const auto rounds = transport.maximum(std::max(sending / round_limit + bool(sending % round_limit),
+            receiving / round_limit + bool(receiving % round_limit)));
+        for (std::size_t round = 0; round < rounds; ++round)
+        {
+            NativeConstructorVector<char> send(admission.allocator<char>());
+            std::vector<char>* receive = nullptr;
+            const auto offset = times(round, round_limit);
+            const auto send_count = std::min<std::size_t>(round_limit, sending > offset ? sending - offset : 0);
+            const auto receive_count = std::min<std::size_t>(round_limit, receiving > offset ? receiving - offset : 0);
+            transport.gate(
+                [&]
+                {
+                    send.resize(send_count);
+                    cursors[destination].copy(input, groups[destination], send);
+                    if (receive_count)
+                    {
+                        receive = &streams[source].blocks.emplace_back();
+                        receive_storage.owner->reserve(*receive, receive_count);
+                        receive->resize(receive_count);
+                    }
+                    observe(1, send.capacity());
+                });
+            transport.transfer(send.data(), static_cast<int>(send_count), destination,
+                receive ? receive->data() : nullptr, static_cast<int>(receive_count), source);
+            ++output.stats.transport_rounds;
+        } // The actual send chunk dies here, before the next phase allocation.
+    }
+    // Export-only ownership retires before decoded payloads are allocated.
+    groups.clear();
+    NativeConstructorVector<NativeConstructorVector<std::size_t>>(
+        admission.allocator<NativeConstructorVector<std::size_t>>())
+        .swap(groups);
+    NativeConstructorVector<NativePacketSendCursor>(admission.allocator<NativePacketSendCursor>()).swap(cursors);
+    NativeConstructorVector<Word>(admission.allocator<Word>()).swap(send_header);
+    // Compact empty peer streams without changing sender order or framing.
+    std::size_t active = 0;
+    for (int peer = 0; peer < transport.size; ++peer)
+        if (recv_header[2 * peer])
+        {
+            if (active != static_cast<std::size_t>(peer))
+                streams[active].blocks.swap(streams[peer].blocks);
+            sizes[active] = recv_header[2 * peer + 1];
+            senders[active] = peer;
+            recv_header[2 * active] = recv_header[2 * peer];
+            recv_header[2 * active + 1] = recv_header[2 * peer + 1];
+            ++active;
+        }
+    owner_exchange_detail::StreamAudit audit;
+    transport.gate(
+        [&]
+        {
+            audit = owner_exchange_detail::walk_owner_block_streams(std::span(streams).first(active),
+                std::span(sizes).first(active), std::span(recv_header).first(2 * active));
+            if (audit.records != records)
+                throw std::invalid_argument("Native complete stream record count differs.");
+            output.storage().owner->reserve(output.packets, records);
+            observe(2);
+        });
+    transport.gate(
+        [&]
+        {
+            (void) walk_blocks(
+                std::span(streams).first(active), std::span(sizes).first(active),
+                std::span(recv_header).first(2 * active),
+                [&](std::size_t stream, std::size_t size, BlockCursor& cursor, std::size_t)
+                {
+                    auto& packet = output.packets.emplace_back();
+                    packet.peer = senders[stream];
+                    output.storage().owner->reserve(packet.bytes, size);
+                    packet.bytes.resize(size);
+                    observe(2);
+                    cursor.read(packet.bytes.data(), size);
+                    output.stats.received_bytes = plus(output.stats.received_bytes, size);
+                },
+                std::span(streams).first(active), receive_storage.owner.get(),
+                [](void* storage, const char* address, std::size_t bytes) noexcept
+                {
+                    static_cast<geometry_detail::NativeConstructorStorage*>(storage)->retire_freed_buffer(
+                        address, bytes);
+                });
+        });
+    // Blocks and their descriptor arrays die before their receipt owner.
+    for (auto& stream : streams)
+        receive_storage.owner->reset_buffer(stream.blocks);
+    receive_storage.owner->reset_buffer(streams);
+    output.stats.sent_packets = input.size();
+    output.stats.received_packets = audit.records;
+    output.stats.largest_received_record = audit.largest_payload;
+    output.stats.segmented_receive = true;
+    output.stats.round_byte_limit = round_limit;
+    output.stats.receive_block_capacity = received_wire;
+    return output;
 }
 OwnerExchange consume_owner_packets(
     std::vector<OwnerPacket>&& input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)

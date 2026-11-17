@@ -94,3 +94,19 @@ foreach(_frozen_native_procs IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME FrozenNative_${_frozen_native_procs}procs
     TARGET testFrozenNative PROCS ${_frozen_native_procs} LABELS "mpi;amr;native;frozen" TIMEOUT 180)
 endforeach()
+
+add_executable(testNativeOwnerPacketAdmission testNativeOwnerPacketAdmission.cc)
+target_link_libraries(testNativeOwnerPacketAdmission SimpleFluid::Mesh GTest::gtest_main)
+simplefluid_configure_test_executable(testNativeOwnerPacketAdmission)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(testNativeOwnerPacketAdmission PRIVATE
+        -fno-fast-math -ffp-contract=off -frounding-math -fno-lto)
+    set_target_properties(testNativeOwnerPacketAdmission PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF DISABLE_PRECOMPILE_HEADERS ON)
+endif()
+simplefluid_discover_tests(testNativeOwnerPacketAdmission)
+foreach(_native_packet_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME NativeOwnerPacketAdmission_${_native_packet_ranks}procs
+        TARGET testNativeOwnerPacketAdmission PROCS ${_native_packet_ranks}
+        LABELS "mpi;amr;native;admission" TIMEOUT 120)
+endforeach()

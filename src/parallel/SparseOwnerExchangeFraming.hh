@@ -31,11 +31,15 @@ struct OwnerStreamBlocks
  * metadata counts the caller's live route/header/block-owner capacities and
  * excludes the output packet array, which this helper admits itself. The
  * observer is a private test seam, called immediately before each nonempty
- * payload allocation. Successful decode releases exhausted raw block owners. */
+ * payload allocation. Successful decode releases exhausted raw block owners.
+ * after_block_deallocation runs only after the real vector storage was freed;
+ * its address is an identity token and must never be dereferenced. It is
+ * allocation-free/noexcept so a rank cannot diverge after destructive decode. */
 [[nodiscard]] SIMPLEFLUID_LOCAL OwnerExchange decode_owner_block_streams(std::span<OwnerStreamBlocks>,
     std::span<const std::size_t> stream_sizes, std::span<const std::uint64_t> headers, std::span<const int> senders,
     Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget, std::size_t retained_metadata,
-    void* observer_context = nullptr, void (*before_payload_allocation)(void*, std::size_t) = nullptr);
+    void* observer_context = nullptr, void (*before_payload_allocation)(void*, std::size_t) = nullptr,
+    void (*after_block_deallocation)(void*, const char*, std::size_t) noexcept = nullptr);
 /** Headers contain (record count, framed byte count) for each stream. A null
  * visitor validates every complete stream without allocating output payloads.
  * Decoding calls the same traversal only after that full audit succeeds on all

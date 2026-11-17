@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "parallel/SparseOwnerExchange.hh"
+#include "parallel/NativePacketAdmission.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <array>
@@ -34,6 +35,14 @@ inline OwnerExchange exchange_adaptive_packets(
 {
     const PipelinePhaseScope phase(PipelinePhase::Transport);
     auto result = exchange_owner_packets(packets, std::move(comm), limit);
+    record_adaptive_exchange(result.stats);
+    return result;
+}
+inline NativeOwnerExchange exchange_adaptive_packets(std::span<const OwnerPacket> packets,
+    Teuchos::RCP<const Teuchos::Comm<int>> comm, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const PipelinePhaseScope phase(PipelinePhase::Transport);
+    auto result = exchange_owner_packets(packets, std::move(comm), admission);
     record_adaptive_exchange(result.stats);
     return result;
 }
@@ -220,8 +229,8 @@ template<class F> void collective(const Teuchos::Comm<int>& comm, F&& action)
     {
         error = std::current_exception();
     }
-    int bad = bool(error), any = 0;
-    Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &bad, &any);
+    const int bad = bool(error);
+    const int any = ::SimpleFluid::owner_packet_failure_agreement(comm, bad);
     if (any)
     {
         if (error)
