@@ -25,6 +25,7 @@ namespace SimpleFluid::Meshes
 {
 
 class PlanarALEGeometryAccess;
+namespace details { class NativeSemiStructuredAccess; }
 
 /**
  * @brief Serial mesh formed by extruding a polygonal XY topology through Z.
@@ -36,7 +37,23 @@ class PlanarALEGeometryAccess;
 class SemiStructuredXY_Z
     : public GeometryExecutionGuard, public MeshBase<SemiStructuredXY_Z, SemiStructuredMeshIndexTypes>
 {
+    struct AdmittedStorageTag {};
+    struct AdmittedStorage
+    {
+        geometry_detail::NativeConstructorStorageOwner receipt;
+        Arr<MeshUtils::Vec3> nodes, cell_centers, edge_centers, edge_normals;
+        Arr<Arr<unsigned>> loops;
+        Arr<real_t> z, widths, midpoints, areas, lengths;
+        SemiStructMeshTopo topology;
+        AdmittedStorage(geometry_detail::NativeConstructorStorageOwner storage, SemiStructMeshTopo base)
+            : receipt(std::move(storage)), topology(std::move(base)) {}
+    };
 public:
+    SemiStructuredXY_Z(AdmittedStorageTag, AdmittedStorage&&);
+    SemiStructuredXY_Z(const SemiStructuredXY_Z&);
+    SemiStructuredXY_Z& operator=(const SemiStructuredXY_Z&);
+    SemiStructuredXY_Z(SemiStructuredXY_Z&&);
+    SemiStructuredXY_Z& operator=(SemiStructuredXY_Z&&);
     using Indexer = SemiStructuredIndexer;
     using Topology = SemiStructMeshTopo;
     using CellID = Indexer::CellID;
@@ -131,6 +148,8 @@ public:
 private:
     friend Base;
     friend class PlanarALEGeometryAccess;
+    friend class details::NativeSemiStructuredAccess;
+    friend class details::NativeProviderOwnerAccess;
 
     void replace_axial_edges_fixed_topology(Arr<real_t> edges);
 
@@ -165,6 +184,8 @@ private:
 
     void initialize_xy_geometry();
 
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     Arr<Vec3> d_xy_nodes;
     Arr<Arr<unsigned>> d_xy_cell_nodes;
     Arr<real_t> d_z_edges;

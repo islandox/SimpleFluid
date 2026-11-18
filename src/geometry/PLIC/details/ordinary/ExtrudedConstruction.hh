@@ -1,11 +1,57 @@
 #pragma once
 #include "geometry/PLIC/ExtrudedConstructionTypes.hh"
+#include "geometry/details/NativeAllocationEnvelope.hh"
 namespace SimpleFluid::PLIC
 {
+namespace details
+{
+class ExtrudedConstructionAccess;
+class ExtrudedConstructionOwnerAccess;
+} // namespace details
 template<> class ExtrudedConstruction<ArithmeticMode::Ordinary>
 {
+    struct AdmittedStorageTag
+    {
+    };
+    enum class AllocationForm : unsigned char
+    {
+        Unqualified,
+        LegacySplit,
+        Admitted
+    };
+
 public:
     struct Impl;
+    ExtrudedConstruction(AdmittedStorageTag, std::shared_ptr<const Impl> impl)
+        : allocation_form_(AllocationForm::Admitted), impl_(std::move(impl))
+    {
+    }
+    /** Value operations preserve geometry functionality. A new object's shared
+     * allocation control must be established by a factory before exact projection. */
+    ExtrudedConstruction(const ExtrudedConstruction& source) : impl_(source.impl_) {}
+    ExtrudedConstruction(ExtrudedConstruction&& source) noexcept : impl_(std::move(source.impl_))
+    {
+        source.clear_allocation_provenance();
+    }
+    ExtrudedConstruction& operator=(const ExtrudedConstruction& source) noexcept
+    {
+        if (this != &source)
+        {
+            clear_allocation_provenance();
+            impl_ = source.impl_;
+        }
+        return *this;
+    }
+    ExtrudedConstruction& operator=(ExtrudedConstruction&& source) noexcept
+    {
+        if (this != &source)
+        {
+            clear_allocation_provenance();
+            impl_ = std::move(source.impl_);
+            source.clear_allocation_provenance();
+        }
+        return *this;
+    }
     /** make/decode require a valid embedded base supplied by the caller. They
      * validate the DAG, layout, individual convex cells and native metrics;
      * ExtrudedAMR certifies global root embedding, preserved by its ordinary templates.
@@ -67,7 +113,27 @@ public:
     [[nodiscard]] bool matches_topology(const std::shared_ptr<const ExtrudedTopology>& topology) const noexcept;
 
 private:
-    explicit ExtrudedConstruction(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
+    friend class details::ExtrudedConstructionAccess;
+    friend class details::ExtrudedConstructionOwnerAccess;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope_;
+    AllocationForm allocation_form_ = AllocationForm::Unqualified;
+    std::weak_ptr<const void> allocation_owner_;
+    void clear_allocation_provenance() noexcept
+    {
+        allocation_envelope_.reset();
+        allocation_owner_.reset();
+        allocation_form_ = AllocationForm::Unqualified;
+    }
+    explicit ExtrudedConstruction(std::shared_ptr<const Impl> impl)
+        : allocation_form_(AllocationForm::LegacySplit), impl_(std::move(impl))
+    {
+    }
+    static std::shared_ptr<const ExtrudedConstruction> legacy_wrapper(std::shared_ptr<const Impl> impl)
+    {
+        auto result = std::shared_ptr<ExtrudedConstruction>(new ExtrudedConstruction(std::move(impl)));
+        result->allocation_owner_ = result;
+        return result;
+    }
     std::shared_ptr<const Impl> impl_;
 };
 } // namespace SimpleFluid::PLIC

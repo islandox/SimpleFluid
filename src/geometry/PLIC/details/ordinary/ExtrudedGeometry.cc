@@ -1,5 +1,8 @@
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/details/ExtrudedConstructionAccess.hh"
+#include "geometry/PLIC/details/ExtrudedConstructionOwnerAccess.hh"
 #include "geometry/PLIC/details/ordinary/ExtrudedConstructionInternal.hh"
+#include "geometry/mesh/details/NativeTopologyAccess.hh"
 
 namespace SimpleFluid::PLIC
 {
@@ -143,10 +146,8 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_view(std::shared_ptr<cons
         begin >= axis->impl_->axis->zactive.size() || layers >= axis->impl_->axis->zactive.size() - begin ||
         topology->encode_base() != base->impl_->base->topology)
         throw std::invalid_argument("Shared product view has foreign base topology or invalid axial extent.");
-    auto impl = std::make_shared<Impl>(
-        std::move(topology), base->impl_->base, axis->impl_->axis, begin, layers);
-    auto result = std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Ordinary>>(
-        new ExtrudedConstruction<ArithmeticMode::Ordinary>(std::move(impl)));
+    auto impl = std::make_shared<Impl>(std::move(topology), base->impl_->base, axis->impl_->axis, begin, layers);
+    auto result = legacy_wrapper(std::move(impl));
     // Base visibility and axis representability were certified independently;
     // paired native volume/face outputs still require representable products.
     Scalar minimum = 0, maximum = 0;
@@ -203,8 +204,8 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_axis_selection(std::share
         }
         impl->axis->display.push_back(value);
     }
-    auto selection = std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Ordinary>>(
-        new ExtrudedConstruction<ArithmeticMode::Ordinary>(std::move(impl)));
+    freeze_constructor_buffer_bytes(*impl->axis);
+    auto selection = legacy_wrapper(std::move(impl));
     return shared_view(selection->impl_->topology, selection, selection, 0, selection->impl_->layers);
 }
 
@@ -349,3 +350,199 @@ std::size_t ExtrudedConstruction<ArithmeticMode::Ordinary>::axis_storage_bytes()
            impl_->axis->display.capacity() * sizeof(double) + axis_values_storage_bytes();
 }
 } // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC::details
+{
+namespace
+{
+template<class T> size_t combined_legacy_bytes()
+{
+    geometry_detail::NativeConstructorStorage::require_profile();
+#if defined(__GLIBCXX__)
+    // Exact inspected make_shared rebound control type, not a pointer allowance.
+    return sizeof(std::_Sp_counted_ptr_inplace<T, std::allocator<void>, __gnu_cxx::__default_lock_policy>);
+#else
+    throw std::invalid_argument("Unsupported native shared-control layout.");
+#endif
+}
+template<class T> size_t split_legacy_bytes()
+{
+    geometry_detail::NativeConstructorStorage::require_profile();
+#if defined(__GLIBCXX__)
+    return sizeof(T) + sizeof(std::_Sp_counted_ptr<T*, __gnu_cxx::__default_lock_policy>);
+#else
+    throw std::invalid_argument("Unsupported native shared-control layout.");
+#endif
+}
+template<class T> size_t buffer_bytes(const std::vector<T>& values)
+{
+    return values.capacity() * sizeof(T);
+}
+} // namespace
+void ExtrudedConstructionOwnerAccess::visit(
+    const std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Ordinary>>& owner,
+    const geometry_detail::NativeConstructorOwnerSink& sink, IdentityVisit identity, TopologyVisit topology)
+{
+    using Kind = geometry_detail::NativeConstructorOwnerKind;
+    using Construction = ExtrudedConstruction<ArithmeticMode::Ordinary>;
+    if (!owner)
+        return;
+    const auto& impl = owner->impl_;
+    if (!impl || owner->allocation_form_ == Construction::AllocationForm::Unqualified)
+        throw std::invalid_argument(
+            "Value-copied/moved construction requires an admitted rewrap for exact projection.");
+    const bool admitted = owner->allocation_form_ == Construction::AllocationForm::Admitted;
+    if (admitted)
+        geometry_detail::NativeConstructorOwnerSink::require_envelope(owner->allocation_envelope_, owner);
+    else if (owner->allocation_envelope_ || owner->allocation_owner_.lock().get() != owner.get() ||
+             owner->allocation_owner_.owner_before(owner) || owner.owner_before(owner->allocation_owner_))
+        throw std::invalid_argument("Foreign legacy construction wrapper control.");
+    if (!(admitted ? sink.semantic(owner, Kind::Construction, owner->allocation_envelope_)
+                   : sink.edge(owner, Kind::Construction, split_legacy_bytes<Construction>())))
+        return;
+    if (owner->allocation_envelope_)
+        sink.fixed(owner->allocation_envelope_);
+    if (impl->allocation_envelope)
+        geometry_detail::NativeConstructorOwnerSink::require_envelope(impl->allocation_envelope, impl);
+    if (!(impl->allocation_envelope
+                ? sink.semantic(impl, Kind::ConstructionImpl, impl->allocation_envelope)
+                : sink.edge(impl, Kind::ConstructionImpl, combined_legacy_bytes<Construction::Impl>())))
+        return;
+    if (impl->allocation_envelope)
+        sink.fixed(impl->allocation_envelope);
+    if (!topology || !identity)
+        throw std::invalid_argument("Incomplete native construction child visitor.");
+    topology(sink.context, impl->topology);
+    const auto& base = impl->base;
+    if (bool(base->storage.owner) != bool(base->allocation_envelope))
+        throw std::invalid_argument("Incomplete construction factor allocation provenance.");
+    if (base->allocation_envelope)
+        geometry_detail::NativeConstructorOwnerSink::require_envelope(base->allocation_envelope, base);
+    size_t bytes = 0;
+    if (!base->storage.owner)
+    {
+        bytes = combined_legacy_bytes<ExtrudedBaseData>() + base->legacy_buffer_bytes;
+    }
+    if (base->allocation_envelope ? sink.semantic(base, Kind::ConstructionBase, base->allocation_envelope)
+                                  : sink.edge(base, Kind::ConstructionBase, bytes))
+    {
+        if (base->allocation_envelope)
+            sink.fixed(base->allocation_envelope);
+        sink.storage(base->storage);
+        for (const auto& support : base->edge_supports)
+            identity(sink.context, support);
+    }
+    const auto& axis = impl->axis;
+    if (bool(axis->storage.owner) != bool(axis->allocation_envelope))
+        throw std::invalid_argument("Incomplete construction factor allocation provenance.");
+    if (axis->allocation_envelope)
+        geometry_detail::NativeConstructorOwnerSink::require_envelope(axis->allocation_envelope, axis);
+    bytes = axis->storage.owner ? 0 : combined_legacy_bytes<ExtrudedAxisData>() + axis->legacy_buffer_bytes;
+    if (axis->allocation_envelope ? sink.semantic(axis, Kind::ConstructionAxis, axis->allocation_envelope)
+                                  : sink.edge(axis, Kind::ConstructionAxis, bytes))
+    {
+        if (axis->allocation_envelope)
+            sink.fixed(axis->allocation_envelope);
+        sink.storage(axis->storage);
+        const auto& values = axis->values;
+        if (bool(values->storage.owner) != bool(values->allocation_envelope))
+            throw std::invalid_argument("Incomplete construction factor allocation provenance.");
+        if (values->allocation_envelope)
+            geometry_detail::NativeConstructorOwnerSink::require_envelope(values->allocation_envelope, values);
+        bytes = values->storage.owner ? 0 : combined_legacy_bytes<ExtrudedAxisValues>() + values->legacy_buffer_bytes;
+        if (values->allocation_envelope ? sink.semantic(values, Kind::ConstructionValues, values->allocation_envelope)
+                                        : sink.edge(values, Kind::ConstructionValues, bytes))
+        {
+            if (values->allocation_envelope)
+                sink.fixed(values->allocation_envelope);
+            sink.storage(values->storage);
+        }
+    }
+}
+} // namespace SimpleFluid::PLIC::details
+
+namespace SimpleFluid::PLIC::details
+{
+std::shared_ptr<const ExtrudedConstructionAccess::Construction> ExtrudedConstructionAccess::shared_view(
+    std::shared_ptr<const Meshes::ExtrudedTopology> topology, std::shared_ptr<const Construction> base,
+    std::shared_ptr<const Construction> axis, size_t begin, size_t layers,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    geometry_detail::NativeConstructorStorage::require_profile();
+    if (!topology || !base || !axis || !layers || topology->indexer().num_layers != layers ||
+        begin >= axis->impl_->axis->zactive.size() || layers >= axis->impl_->axis->zactive.size() - begin ||
+        !Meshes::details::NativeTopologyAccess::matches_base(*topology, base->impl_->base->topology))
+        throw std::invalid_argument("Shared product view has foreign base topology or invalid axial extent.");
+    auto tracked_impl = geometry_detail::NativeAllocationEnvelopeAccess::make<Construction::Impl>(
+        admission, std::move(topology), base->impl_->base, axis->impl_->axis, begin, layers);
+    tracked_impl.owner->allocation_envelope = std::move(tracked_impl.envelope);
+    auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<Construction>(
+        admission, Construction::AdmittedStorageTag{}, std::move(tracked_impl.owner));
+    tracked.owner->allocation_envelope_ = std::move(tracked.envelope);
+    const auto& impl = tracked.owner->impl_;
+    // These are the exact legacy representability expressions and loop order.
+    Scalar minimum = 0, maximum = 0;
+    for (size_t k = 0; k < layers; ++k)
+    {
+        const Scalar width = impl->axis->values->z[impl->axis->zactive[begin + k + 1]] -
+                             impl->axis->values->z[impl->axis->zactive[begin + k]];
+        if (k == 0 || width < minimum)
+            minimum = width;
+        if (width > maximum)
+            maximum = width;
+    }
+    for (size_t c = 0; c < impl->base->areas.size(); ++c)
+    {
+        (void) positive_measure(Scalar(impl->base->areas[c] * minimum)).as_double();
+        (void) positive_measure(Scalar(impl->base->areas[c] * maximum)).as_double();
+    }
+    for (const auto& edge : impl->base->deltas)
+    {
+        const Scalar length = dot(edge, edge);
+        (void) square_root(Scalar(length * minimum * minimum)).as_double();
+        (void) square_root(Scalar(length * maximum * maximum)).as_double();
+    }
+    return std::move(tracked.owner);
+}
+std::shared_ptr<const ExtrudedConstructionAccess::Construction> ExtrudedConstructionAccess::shared_axis_selection(
+    std::shared_ptr<const Meshes::ExtrudedTopology> topology, std::shared_ptr<const Construction> base,
+    std::shared_ptr<const Construction> coordinates, std::span<const size_t> active,
+    const geometry_detail::NativeConstructionAdmission& admission)
+{
+    if (!topology || !base || !coordinates || active.size() != size_t(topology->indexer().num_layers) + 1 ||
+        !Meshes::details::NativeTopologyAccess::matches_base(*topology, base->impl_->base->topology))
+        throw std::invalid_argument("Shared axis selection belongs to a different base or layer layout.");
+    auto storage = geometry_detail::native_constructor_storage(admission);
+    auto selected = geometry_detail::NativeAllocationEnvelopeAccess::make<ExtrudedAxisData>(
+        admission, coordinates->impl_->axis->values);
+    selected.owner->allocation_envelope = std::move(selected.envelope);
+    selected.owner->storage = std::move(storage);
+    selected.owner->storage.owner->copy(selected.owner->zactive, active);
+    selected.owner->storage.owner->reserve(selected.owner->display, active.size());
+    for (size_t k = 0; k < active.size(); ++k)
+    {
+        const auto id = active[k];
+        if (id >= selected.owner->values->z.size())
+            throw std::invalid_argument("Shared axis selection has an unknown ordinary point.");
+        const auto value = measured(selected.owner->values->z[id]).as_double();
+        if (k)
+        {
+            const auto previous = active[k - 1];
+            const auto lo = selected.owner->display.back();
+            const auto center =
+                measured(Scalar((selected.owner->values->z[id] + selected.owner->values->z[previous]) / 2)).as_double();
+            if (!(value > lo && center > lo && center < value))
+                throw std::invalid_argument("Shared axis selection has unrepresentable native widths/centers.");
+        }
+        selected.owner->display.push_back(value);
+    }
+    auto tracked_impl = geometry_detail::NativeAllocationEnvelopeAccess::make<Construction::Impl>(
+        admission, std::move(topology), base->impl_->base, std::move(selected.owner), 0, active.size() - 1);
+    tracked_impl.owner->allocation_envelope = std::move(tracked_impl.envelope);
+    auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<Construction>(
+        admission, Construction::AdmittedStorageTag{}, std::move(tracked_impl.owner));
+    tracked.owner->allocation_envelope_ = std::move(tracked.envelope);
+    // Match the legacy final paired-width/area validation via the admitted view.
+    return shared_view(tracked.owner->impl_->topology, tracked.owner, tracked.owner, 0, active.size() - 1, admission);
+}
+} // namespace SimpleFluid::PLIC::details

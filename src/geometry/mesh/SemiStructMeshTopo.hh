@@ -12,6 +12,7 @@
 #pragma once
 
 #include "utils/debug_check.hh"
+#include "geometry/details/NativeConstructorStorage.hh"
 
 #include "dataclass/typedefs.hh"
 #include "geometry/mesh/BoundaryFaceBatch.hh"
@@ -26,6 +27,7 @@
 
 namespace SimpleFluid::Meshes
 {
+namespace details { class NativeTopologyAccess; class NativeProviderOwnerAccess; }
 
 /**
  * @brief Connectivity and boundary batches for a layered semi-structured mesh.
@@ -74,7 +76,7 @@ public:
         int boundary_id = invalid_boundary_id;
     };
 
-    SemiStructMeshTopo() = default;
+    SemiStructMeshTopo();
     SemiStructMeshTopo(Ordinal nodes_per_layer, const Arr<Arr<Ordinal>>& cell_nodes, Ordinal layers,
         const Arr<BoundaryEdge>& boundary_edges = {}, bool axial_periodic = false);
 
@@ -131,6 +133,8 @@ public:
     int num_boundary_batches() const noexcept;
 
 private:
+    friend class details::NativeTopologyAccess;
+    friend class details::NativeProviderOwnerAccess;
     /** @brief Owner and neighbor ordinals for one face. */
     struct FaceCells
     {
@@ -151,17 +155,43 @@ private:
     void initialize_cell_adjacency();
     void initialize_boundary_batches();
 
+    template<class Value> using BaseMap = std::unordered_map<int, Value, std::hash<int>, std::equal_to<int>,
+        geometry_detail::NativeStorageAllocator<std::pair<const int, Value>>>;
     struct BaseData
     {
+        // First member: all concrete buffers/containers die before their receipts.
+        geometry_detail::NativeConstructorStorageOwner storage;
+        std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope;
+        BaseData() = default;
+        explicit BaseData(geometry_detail::NativeConstructorStorageOwner admitted)
+            : storage(std::move(admitted)),
+              boundary_names(0, std::hash<int>{}, std::equal_to<int>{},
+                  geometry_detail::NativeStorageAllocator<std::pair<const int, std::string>>(storage.owner)),
+              boundary_base_faces(0, std::hash<int>{}, std::equal_to<int>{},
+                  geometry_detail::NativeStorageAllocator<std::pair<const int, Arr<Ordinal>>>(storage.owner)) {}
+
         Arr<SideFace> side_faces;
         Arr<Arr<Ordinal>> cell_side_faces;
         Arr<Ordinal> interior_base_cells;
         Arr<Arr<Ordinal>> base_neighbor_cells;
-        BoundaryNames boundary_names;
-        std::unordered_map<int, Arr<Ordinal>> boundary_base_faces;
+        BaseMap<std::string> boundary_names;
+        BaseMap<Arr<Ordinal>> boundary_base_faces;
     };
+    struct AdmittedStorageTag {};
+    SemiStructMeshTopo(AdmittedStorageTag, std::shared_ptr<BaseData> base) : d_base(std::move(base)) {}
+    template<class T> void reserve_buffer(Arr<T>& destination, size_t count)
+    {
+        if (d_base->storage.owner) d_base->storage.owner->reserve(destination, count);
+        else destination.reserve(count);
+    }
+    template<class T> void resize_buffer(Arr<T>& destination, size_t count)
+    {
+        reserve_buffer(destination, count);
+        destination.resize(count);
+    }
+    void insert_boundary_name(int id, std::string_view name);
     Indexer d_indexer;
-    std::shared_ptr<BaseData> d_base = std::make_shared<BaseData>();
+    std::shared_ptr<BaseData> d_base;
 };
 
 } // namespace SimpleFluid::Meshes

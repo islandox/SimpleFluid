@@ -16,9 +16,19 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <string_view>
 
 namespace SimpleFluid::Meshes
 {
+SemiStructMeshTopo::SemiStructMeshTopo() : d_base(std::make_shared<BaseData>()) {}
+void SemiStructMeshTopo::insert_boundary_name(int id, std::string_view name)
+{
+    std::string value;
+    if (d_base->storage.owner) d_base->storage.owner->string(value, name);
+    else value = name;
+    d_base->boundary_names.emplace(id, std::move(value));
+}
+
 namespace
 {
 
@@ -60,6 +70,7 @@ EdgeKey edge_key(SemiStructMeshTopo::Ordinal node0, SemiStructMeshTopo::Ordinal 
  */
 SemiStructMeshTopo::SemiStructMeshTopo(Ordinal nodes_per_layer, const Arr<Arr<Ordinal>>& cell_nodes, Ordinal layers,
     const Arr<BoundaryEdge>& boundary_edges, bool axial_periodic)
+    : d_base(std::make_shared<BaseData>())
 {
     if (nodes_per_layer == 0)
     {
@@ -279,12 +290,18 @@ void SemiStructMeshTopo::initialize_face_adjacency() {}
 /** @brief Precompute base and axial cell neighbors and interior cells. */
 void SemiStructMeshTopo::initialize_cell_adjacency()
 {
-    d_base->base_neighbor_cells.resize(d_indexer.num_cells_per_layer);
+    resize_buffer(d_base->base_neighbor_cells, d_indexer.num_cells_per_layer);
     for (Ordinal cell = 0; cell < d_indexer.num_cells_per_layer; ++cell)
     {
         const auto& side_faces = d_base->cell_side_faces[cell];
         auto& neighbors = d_base->base_neighbor_cells[cell];
-        neighbors.reserve(side_faces.size());
+        size_t count = 0;
+        for (const auto face : side_faces)
+        {
+            const auto& edge = d_base->side_faces[face];
+            count += cell != edge.owner || edge.neighbor != invalid_ordinal;
+        }
+        reserve_buffer(neighbors, count);
         for (const auto side_face_id : side_faces)
         {
             const auto& side_face = d_base->side_faces[side_face_id];
@@ -302,6 +319,10 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
         }
     }
 
+    size_t interior_count = 0;
+    for (Ordinal cell = 0; cell < d_indexer.num_cells_per_layer; ++cell)
+        interior_count += d_base->base_neighbor_cells[cell].size() == d_base->cell_side_faces[cell].size();
+    reserve_buffer(d_base->interior_base_cells, interior_count);
     for (Ordinal cell = 0; cell < d_indexer.num_cells_per_layer; ++cell)
     {
         if (d_base->base_neighbor_cells[cell].size() == d_base->cell_side_faces[cell].size())
@@ -320,7 +341,11 @@ void SemiStructMeshTopo::initialize_cell_adjacency()
 void SemiStructMeshTopo::build_base_topology(
     Ordinal nodes_per_layer, const Arr<Arr<Ordinal>>& cell_nodes, const Arr<BoundaryEdge>& boundary_edges)
 {
-    std::unordered_map<EdgeKey, std::string, EdgeKeyHash> boundary_tags;
+    const auto domain = d_base->storage.owner;
+    using Tag = std::pair<const EdgeKey, std::string_view>;
+    std::unordered_map<EdgeKey, std::string_view, EdgeKeyHash, std::equal_to<EdgeKey>,
+        geometry_detail::NativeStorageAllocator<Tag>> boundary_tags(
+            0, EdgeKeyHash{}, std::equal_to<EdgeKey>{}, geometry_detail::NativeStorageAllocator<Tag>(domain));
     for (const auto& boundary : boundary_edges)
     {
         if (boundary.node0 >= nodes_per_layer || boundary.node1 >= nodes_per_layer || boundary.node0 == boundary.node1)
@@ -337,8 +362,13 @@ void SemiStructMeshTopo::build_base_topology(
         }
     }
 
-    d_base->cell_side_faces.resize(cell_nodes.size());
-    std::unordered_map<EdgeKey, Ordinal, EdgeKeyHash> side_face_ids;
+    resize_buffer(d_base->cell_side_faces, cell_nodes.size());
+    using EdgeID = std::pair<const EdgeKey, Ordinal>;
+    std::unordered_map<EdgeKey, Ordinal, EdgeKeyHash, std::equal_to<EdgeKey>,
+        geometry_detail::NativeStorageAllocator<EdgeID>> side_face_ids(
+            0, EdgeKeyHash{}, std::equal_to<EdgeKey>{}, geometry_detail::NativeStorageAllocator<EdgeID>(domain));
+    std::vector<SideFace, geometry_detail::NativeStorageAllocator<SideFace>> faces{
+        geometry_detail::NativeStorageAllocator<SideFace>(domain)};
     for (Ordinal cell = 0; cell < cell_nodes.size(); ++cell)
     {
         const auto& nodes = cell_nodes[cell];
@@ -347,9 +377,12 @@ void SemiStructMeshTopo::build_base_topology(
             throw std::invalid_argument("Semi-structured base cells require at least three nodes.");
         }
 
-        std::unordered_set<Ordinal> unique_nodes;
+        std::unordered_set<Ordinal, std::hash<Ordinal>, std::equal_to<Ordinal>,
+            geometry_detail::NativeStorageAllocator<Ordinal>> unique_nodes(
+                0, std::hash<Ordinal>{}, std::equal_to<Ordinal>{},
+                geometry_detail::NativeStorageAllocator<Ordinal>(domain));
         auto& cell_side_faces = d_base->cell_side_faces[cell];
-        cell_side_faces.reserve(nodes.size());
+        reserve_buffer(cell_side_faces, nodes.size());
         for (size_t side = 0; side < nodes.size(); ++side)
         {
             const auto node0 = nodes[side];
@@ -365,14 +398,14 @@ void SemiStructMeshTopo::build_base_topology(
             const auto existing = side_face_ids.find(key);
             if (existing == side_face_ids.end())
             {
-                const auto side_face = static_cast<Ordinal>(d_base->side_faces.size());
+                const auto side_face = static_cast<Ordinal>(faces.size());
                 side_face_ids.emplace(key, side_face);
-                d_base->side_faces.push_back({{{node0, node1}}, cell, invalid_ordinal, invalid_boundary_id});
+                faces.push_back({{{node0, node1}}, cell, invalid_ordinal, invalid_boundary_id});
                 cell_side_faces.push_back(side_face);
                 continue;
             }
 
-            auto& side_face = d_base->side_faces[existing->second];
+            auto& side_face = faces[existing->second];
             if (side_face.neighbor != invalid_ordinal || side_face.nodes[0] != node1 || side_face.nodes[1] != node0)
             {
                 throw std::invalid_argument("Semi-structured base topology is non-manifold or "
@@ -383,13 +416,21 @@ void SemiStructMeshTopo::build_base_topology(
         }
     }
 
-    d_base->boundary_names.emplace(0, "zmin");
-    d_base->boundary_names.emplace(1, "zmax");
-    std::unordered_map<std::string, int> boundary_ids{{"zmin", 0}, {"zmax", 1}};
+    insert_boundary_name(0, "zmin");
+    insert_boundary_name(1, "zmax");
+    using LabelID = std::pair<const std::string_view, int>;
+    std::unordered_map<std::string_view, int, std::hash<std::string_view>, std::equal_to<std::string_view>,
+        geometry_detail::NativeStorageAllocator<LabelID>> boundary_ids(
+            0, std::hash<std::string_view>{}, std::equal_to<std::string_view>{},
+            geometry_detail::NativeStorageAllocator<LabelID>(domain));
+    boundary_ids.emplace("zmin", 0);
+    boundary_ids.emplace("zmax", 1);
     int next_boundary_id = 2;
-    std::unordered_set<EdgeKey, EdgeKeyHash> used_boundary_tags;
+    std::unordered_set<EdgeKey, EdgeKeyHash, std::equal_to<EdgeKey>,
+        geometry_detail::NativeStorageAllocator<EdgeKey>> used_boundary_tags(
+            0, EdgeKeyHash{}, std::equal_to<EdgeKey>{}, geometry_detail::NativeStorageAllocator<EdgeKey>(domain));
 
-    for (auto& side_face : d_base->side_faces)
+    for (auto& side_face : faces)
     {
         const auto key = edge_key(side_face.nodes[0], side_face.nodes[1]);
         const auto tag = boundary_tags.find(key);
@@ -403,7 +444,7 @@ void SemiStructMeshTopo::build_base_topology(
             continue;
         }
 
-        const std::string batch_name = tag == boundary_tags.end() ? "side" : tag->second;
+        const std::string_view batch_name = tag == boundary_tags.end() ? "side" : tag->second;
         if (tag != boundary_tags.end())
         {
             used_boundary_tags.insert(key);
@@ -418,7 +459,7 @@ void SemiStructMeshTopo::build_base_topology(
 
         side_face.boundary_id = next_boundary_id;
         boundary_ids.emplace(batch_name, next_boundary_id);
-        d_base->boundary_names.emplace(next_boundary_id, batch_name);
+        insert_boundary_name(next_boundary_id, batch_name);
         ++next_boundary_id;
     }
 
@@ -427,6 +468,8 @@ void SemiStructMeshTopo::build_base_topology(
         throw std::invalid_argument("Semi-structured boundary tag does not match an exterior "
                                     "edge.");
     }
+    reserve_buffer(d_base->side_faces, faces.size());
+    d_base->side_faces.assign(faces.begin(), faces.end());
 }
 
 /** @brief Materialize axial and side boundary-face batches for all layers. */
@@ -434,7 +477,12 @@ void SemiStructMeshTopo::initialize_boundary_batches()
 {
     for (const auto& [id, name] : d_base->boundary_names)
         if (!d_indexer.axial_periodic || id > 1)
-            d_base->boundary_base_faces.emplace(id, Arr<Ordinal>{});
+        {
+            auto& destination = d_base->boundary_base_faces.emplace(id, Arr<Ordinal>{}).first->second;
+            size_t count = 0;
+            for (const auto& edge : d_base->side_faces) count += edge.boundary_id == id;
+            reserve_buffer(destination, count);
+        }
     for (Ordinal f = 0; f < d_base->side_faces.size(); ++f)
         if (d_base->side_faces[f].boundary_id != invalid_boundary_id)
             d_base->boundary_base_faces.at(d_base->side_faces[f].boundary_id).push_back(f);

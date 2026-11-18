@@ -128,6 +128,95 @@ SemiStructuredXY_Z::SemiStructuredXY_Z(
     Base::d_num_nodes = indexer.total_nodes();
 }
 
+SemiStructuredXY_Z::SemiStructuredXY_Z(const SemiStructuredXY_Z& source)
+    : GeometryExecutionGuard(source), Base(source), d_xy_nodes(source.d_xy_nodes),
+      d_xy_cell_nodes(source.d_xy_cell_nodes), d_z_edges(source.d_z_edges), d_z_widths(source.d_z_widths),
+      d_z_midpoints(source.d_z_midpoints), d_xy_cell_areas(source.d_xy_cell_areas),
+      d_xy_cell_centroids(source.d_xy_cell_centroids), d_xy_edge_lengths(source.d_xy_edge_lengths),
+      d_xy_edge_centroids(source.d_xy_edge_centroids), d_xy_edge_normals(source.d_xy_edge_normals),
+      d_topology(source.d_topology), d_geometry_state(source.d_geometry_state)
+{
+    // Public legacy value copies do not inherit another object's allocation receipts.
+}
+
+SemiStructuredXY_Z& SemiStructuredXY_Z::operator=(const SemiStructuredXY_Z& source)
+{
+    if (this == &source) return *this;
+    GeometryExecutionGuard::operator=(source);
+    SemiStructuredXY_Z replacement(source);
+    Base::operator=(source);
+    d_xy_nodes.swap(replacement.d_xy_nodes);
+    d_xy_cell_nodes.swap(replacement.d_xy_cell_nodes);
+    d_z_edges.swap(replacement.d_z_edges);
+    d_z_widths.swap(replacement.d_z_widths);
+    d_z_midpoints.swap(replacement.d_z_midpoints);
+    d_xy_cell_areas.swap(replacement.d_xy_cell_areas);
+    d_xy_cell_centroids.swap(replacement.d_xy_cell_centroids);
+    d_xy_edge_lengths.swap(replacement.d_xy_edge_lengths);
+    d_xy_edge_centroids.swap(replacement.d_xy_edge_centroids);
+    d_xy_edge_normals.swap(replacement.d_xy_edge_normals);
+    std::swap(d_storage, replacement.d_storage);
+    d_allocation_envelope.swap(replacement.d_allocation_envelope);
+    d_topology = source.d_topology;
+    d_geometry_state = source.d_geometry_state;
+    return *this;
+}
+SemiStructuredXY_Z::SemiStructuredXY_Z(SemiStructuredXY_Z&& source)
+    : GeometryExecutionGuard(std::move(source)), Base(std::move(source)), d_storage(std::move(source.d_storage)),
+      d_xy_nodes(std::move(source.d_xy_nodes)),
+      d_xy_cell_nodes(std::move(source.d_xy_cell_nodes)),
+      d_z_edges(std::move(source.d_z_edges)),
+      d_z_widths(std::move(source.d_z_widths)),
+      d_z_midpoints(std::move(source.d_z_midpoints)),
+      d_xy_cell_areas(std::move(source.d_xy_cell_areas)),
+      d_xy_cell_centroids(std::move(source.d_xy_cell_centroids)),
+      d_xy_edge_lengths(std::move(source.d_xy_edge_lengths)),
+      d_xy_edge_centroids(std::move(source.d_xy_edge_centroids)),
+      d_xy_edge_normals(std::move(source.d_xy_edge_normals)),
+      d_topology(std::move(source.d_topology)), d_geometry_state(std::move(source.d_geometry_state))
+{
+    // Value moves transfer buffer receipts but cannot transfer an exact-control envelope.
+}
+SemiStructuredXY_Z& SemiStructuredXY_Z::operator=(SemiStructuredXY_Z&& source)
+{
+    if (this == &source) return *this;
+    GeometryExecutionGuard::operator=(std::move(source));
+    SemiStructuredXY_Z replacement(std::move(source));
+    Base::operator=(std::move(replacement));
+    d_xy_nodes.swap(replacement.d_xy_nodes);
+    d_xy_cell_nodes.swap(replacement.d_xy_cell_nodes);
+    d_z_edges.swap(replacement.d_z_edges);
+    d_z_widths.swap(replacement.d_z_widths);
+    d_z_midpoints.swap(replacement.d_z_midpoints);
+    d_xy_cell_areas.swap(replacement.d_xy_cell_areas);
+    d_xy_cell_centroids.swap(replacement.d_xy_cell_centroids);
+    d_xy_edge_lengths.swap(replacement.d_xy_edge_lengths);
+    d_xy_edge_centroids.swap(replacement.d_xy_edge_centroids);
+    d_xy_edge_normals.swap(replacement.d_xy_edge_normals);
+    std::swap(d_storage, replacement.d_storage);
+    d_allocation_envelope.swap(replacement.d_allocation_envelope);
+    d_topology = std::move(replacement.d_topology);
+    d_geometry_state = std::move(replacement.d_geometry_state);
+    return *this;
+}
+
+SemiStructuredXY_Z::SemiStructuredXY_Z(AdmittedStorageTag, AdmittedStorage&& storage)
+    : d_storage(std::move(storage.receipt)), d_xy_nodes(std::move(storage.nodes)),
+      d_xy_cell_nodes(std::move(storage.loops)), d_z_edges(std::move(storage.z)),
+      d_z_widths(std::move(storage.widths)), d_z_midpoints(std::move(storage.midpoints)),
+      d_xy_cell_areas(std::move(storage.areas)), d_xy_cell_centroids(std::move(storage.cell_centers)),
+      d_xy_edge_lengths(std::move(storage.lengths)), d_xy_edge_centroids(std::move(storage.edge_centers)),
+      d_xy_edge_normals(std::move(storage.edge_normals)), d_topology(std::move(storage.topology))
+{
+    const auto& indexer = d_topology.indexer();
+    Base::d_num_cells = indexer.total_cells();
+    Base::d_num_local_cells = Base::d_num_cells;
+    Base::d_num_owned_cells = Base::d_num_cells;
+    Base::d_num_faces = indexer.total_faces();
+    Base::d_num_owned_faces = Base::d_num_faces;
+    Base::d_num_nodes = indexer.total_nodes();
+}
+
 /**
  * @brief Replace extrusion coordinates without changing XY or layer topology.
  * @param edges Strictly increasing axial edges with the existing size.

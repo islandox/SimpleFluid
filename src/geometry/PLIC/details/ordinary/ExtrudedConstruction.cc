@@ -1,4 +1,7 @@
+#include "geometry/PLIC/details/ExtrudedConstructionAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/PLIC/details/ordinary/ExtrudedConstructionInternal.hh"
+#include "geometry/PLIC/details/ordinary/ExtrudedConstructionAdmission.tcc"
 
 namespace SimpleFluid::PLIC
 {
@@ -332,8 +335,10 @@ ExtrudedConstruction<ArithmeticMode::Ordinary>::make(std::shared_ptr<const Extru
         impl->base->display.push_back(rounded_point(impl->base->points[id]));
     for (auto id : impl->axis->zactive)
         impl->axis->display.push_back(measured(impl->axis->values->z[id]).as_double());
-    return std::shared_ptr<const ExtrudedConstruction<ArithmeticMode::Ordinary>>(
-        new ExtrudedConstruction<ArithmeticMode::Ordinary>(std::move(impl)));
+    freeze_constructor_buffer_bytes(*impl->base);
+    freeze_constructor_buffer_bytes(*impl->axis);
+    freeze_constructor_buffer_bytes(*impl->axis->values);
+    return legacy_wrapper(std::move(impl));
 }
 
 bool ExtrudedConstruction<ArithmeticMode::Ordinary>::matches_topology(
@@ -663,6 +668,37 @@ PlanarFacePtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ord
     if (dot(details::ordinary_native::polygon_vector(points), normal) < 0)
         std::reverse(points.begin(), points.end());
     return details::NativeSupportAccess::face_support(points, normal, std::move(*support));
+}
+PlanarFacePtr<ArithmeticMode::Ordinary> details::ExtrudedConstructionAccess::face(
+    const Construction& source, std::size_t face, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    const auto& impl = source.impl_;
+    geometry_detail::NativeConstructorVector<P> points(admission.allocator<P>());
+    const auto nodes = impl->topology->face_nodes(face);
+    points.reserve(nodes.size());
+    for (const auto node : nodes)
+    {
+        const auto n = impl->topology->indexer().node_id(node);
+        auto point = impl->base->points.at(impl->base->active.at(n.ij));
+        point[2] = impl->axis->values->z.at(impl->axis->zactive.at(impl->begin + n.k));
+        points.push_back(point);
+    }
+    const auto outward = source.face_area_vector(face);
+    const auto id = impl->topology->indexer().face_id(face);
+    P normal{outward.x, outward.y, outward.z};
+    std::optional<PlaneSupportIdentity<ArithmeticMode::Ordinary>> support;
+    if (id.orientation == SemiStructuredIndexer::AXIAL)
+        support = details::NativePlanarOwnerAccess::source_support(points, admission);
+    else
+    {
+        normal = impl->base->support_normals.at(id.ij);
+        if (dot(normal, P{outward.x, outward.y, outward.z}) < 0)
+            normal = mul(normal, -1);
+        support = impl->base->edge_supports.at(id.ij);
+    }
+    if (dot(details::ordinary_native::polygon_vector(points), normal) < 0)
+        std::reverse(points.begin(), points.end());
+    return details::NativePlanarOwnerAccess::retained(points, normal, std::move(*support), admission);
 }
 ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedConstruction<ArithmeticMode::Ordinary>::atomic_cell_geometry(
     std::size_t cell) const

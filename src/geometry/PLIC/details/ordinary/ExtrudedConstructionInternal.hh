@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include "geometry/details/NativeConstructorStorage.hh"
 
 namespace SimpleFluid::PLIC::ordinary_extrusion_detail
 {
@@ -102,7 +103,10 @@ inline ConvexGeometryPtr<ArithmeticMode::Ordinary> product_geometry(const Produc
             vertices.emplace_back(p);
         }
     std::vector<std::vector<std::size_t>> faces;
+    faces.reserve(n + 2);
     std::vector<std::size_t> bottom, top;
+    bottom.reserve(n);
+    top.reserve(n);
     for (std::size_t i = 0; i < n; ++i)
     {
         bottom.push_back(n - 1 - i);
@@ -127,6 +131,9 @@ std::vector<char> topology_descriptor(const Meshes::ExtrudedTopology&);
 MeshUtils::Vec3 rounded_point(const P&);
 struct ExtrudedBaseData
 {
+    geometry_detail::NativeConstructorStorageOwner storage;
+    size_t legacy_buffer_bytes = 0;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope;
     std::vector<PointRecipe> recipes;
     std::vector<std::size_t> active;
     std::vector<P> points, centers, deltas, edge_centers;
@@ -138,17 +145,41 @@ struct ExtrudedBaseData
 };
 struct ExtrudedAxisValues
 {
+    geometry_detail::NativeConstructorStorageOwner storage;
+    size_t legacy_buffer_bytes = 0;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope;
     std::vector<ScalarRecipe> zrecipes;
     std::vector<Scalar> z;
 };
 struct ExtrudedAxisData
 {
+    geometry_detail::NativeConstructorStorageOwner storage;
+    size_t legacy_buffer_bytes = 0;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope;
     ExtrudedAxisData() : values(std::make_shared<ExtrudedAxisValues>()) {}
     explicit ExtrudedAxisData(std::shared_ptr<ExtrudedAxisValues> shared_values) : values(std::move(shared_values)) {}
     std::shared_ptr<ExtrudedAxisValues> values;
     std::vector<std::size_t> zactive;
     std::vector<double> display;
 };
+template<class T> inline size_t constructor_buffer_bytes(const std::vector<T>& values)
+{ return values.capacity() * sizeof(T); }
+inline void freeze_constructor_buffer_bytes(ExtrudedBaseData& base)
+{
+    base.legacy_buffer_bytes = constructor_buffer_bytes(base.recipes) + constructor_buffer_bytes(base.active) +
+        constructor_buffer_bytes(base.points) + constructor_buffer_bytes(base.centers) + constructor_buffer_bytes(base.deltas) +
+        constructor_buffer_bytes(base.edge_centers) + constructor_buffer_bytes(base.areas) +
+        constructor_buffer_bytes(base.edge_supports) + constructor_buffer_bytes(base.support_normals) +
+        constructor_buffer_bytes(base.display) + constructor_buffer_bytes(base.topology);
+    for (const auto& recipe : base.recipes) base.legacy_buffer_bytes += constructor_buffer_bytes(recipe.parents);
+}
+inline void freeze_constructor_buffer_bytes(ExtrudedAxisValues& values)
+{
+    values.legacy_buffer_bytes = constructor_buffer_bytes(values.zrecipes) + constructor_buffer_bytes(values.z);
+    for (const auto& recipe : values.zrecipes) values.legacy_buffer_bytes += constructor_buffer_bytes(recipe.parents);
+}
+inline void freeze_constructor_buffer_bytes(ExtrudedAxisData& axis)
+{ axis.legacy_buffer_bytes = constructor_buffer_bytes(axis.zactive) + constructor_buffer_bytes(axis.display); }
 void write_point_recipes(WireWriter&, const ExtrudedBaseData&);
 void read_point_recipes(WireReader&, std::vector<PointRecipe>&, std::vector<std::size_t>&);
 void read_axis_parts(std::span<const char>, std::vector<ScalarRecipe>&, std::vector<std::size_t>&);
@@ -161,6 +192,7 @@ using Meshes::SemiStructMeshTopo;
 using Meshes::SemiStructuredIndexer;
 struct ExtrudedConstruction<ArithmeticMode::Ordinary>::Impl
 {
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation_envelope;
     Impl() : base(std::make_shared<ExtrudedBaseData>()), axis(std::make_shared<ExtrudedAxisData>()) {}
     Impl(std::shared_ptr<const Meshes::ExtrudedTopology> retained_topology,
         std::shared_ptr<ExtrudedBaseData> retained_base, std::shared_ptr<ExtrudedAxisData> retained_axis,

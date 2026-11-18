@@ -148,6 +148,25 @@ MeshUtils::CellType ExtrudedTopology::cell_type(size_t c) const
 ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology, Arr<Vec3> nodes, ArrReal z)
     : d_topology(std::move(topology)), d_nodes(std::move(nodes)), d_z(std::move(z))
 {
+    initialize_plain_geometry();
+}
+ExtrudedGeometry::ExtrudedGeometry(AdmittedStorageTag, std::shared_ptr<const ExtrudedTopology> topology,
+    geometry_detail::NativeConstructorStorageOwner storage, Arr<Vec3> nodes, ArrReal z)
+    : d_storage(std::move(storage)), d_topology(std::move(topology)), d_nodes(std::move(nodes)), d_z(std::move(z))
+{
+    if (!d_topology || !d_storage.owner)
+        throw std::invalid_argument("Admitted extrusion requires topology and owned storage.");
+    const auto cells = d_topology->indexer().num_cells_per_layer;
+    const auto edges = d_topology->native_topology().side_faces().size();
+    d_storage.owner->reserve(d_areas, cells);
+    d_storage.owner->reserve(d_cell_centers, cells);
+    d_storage.owner->reserve(d_lengths, edges);
+    d_storage.owner->reserve(d_edge_centers, edges);
+    d_storage.owner->reserve(d_edge_normals, edges);
+    initialize_plain_geometry();
+}
+void ExtrudedGeometry::initialize_plain_geometry()
+{
     if (!d_topology || d_nodes.size() != d_topology->indexer().num_nodes_per_layer ||
         d_z.size() != static_cast<size_t>(d_topology->indexer().num_layers) + 1)
         throw std::invalid_argument("Extruded geometry and template extents mismatch.");
@@ -193,6 +212,17 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
         d_edge_centers.push_back({std::midpoint(a.x, b.x), std::midpoint(a.y, b.y), 0});
         d_edge_normals.push_back({d.y / length, -d.x / length, 0});
     }
+}
+ExtrudedGeometry::ExtrudedGeometry(AdmittedStorageTag, std::shared_ptr<const ExtrudedTopology> topology,
+    geometry_detail::NativeConstructorStorageOwner storage,
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> construction)
+    : d_storage(std::move(storage)), d_topology(std::move(topology)), d_construction(std::move(construction))
+{
+    if (!d_topology || !d_construction || !d_storage.owner || !d_construction->matches_topology(d_topology))
+        throw std::invalid_argument("Extruded construction and topology mismatch.");
+    // Seal compatibility storage before an immutable owner manifest is published.
+    const auto view = d_construction->z_view();
+    d_storage.owner->copy(d_z, view);
 }
 real_t ExtrudedGeometry::cell_volume(size_t c) const
 {
@@ -268,7 +298,7 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
 const ArrReal& ExtrudedGeometry::z_edges() const
 {
     if (d_construction)
-        std::call_once(d_z_once, [&] { d_z = d_construction->display_z(); });
+        std::call_once(d_z_once, [&] { if (d_z.empty()) d_z = d_construction->display_z(); });
     return d_z;
 }
 PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedGeometry::certified_cell_geometry(size_t cell) const

@@ -17,13 +17,19 @@ namespace SimpleFluid::Meshes
 /** @brief A single immutable base template, factored through the existing axial indexer. */
 class ExtrudedTopology
 {
+    struct AdmittedStorageTag {};
 public:
+    ExtrudedTopology(AdmittedStorageTag, SemiStructMeshTopo topology,
+        geometry_detail::NativeConstructorStorageOwner storage, Arr<std::pair<int, std::string>> aliases)
+        : d_storage(std::move(storage)), d_topology(std::move(topology)), d_boundary_aliases(std::move(aliases)) {}
     using index_type_pack = UnstructuredMeshIndexTypes;
     using ID = uint64_t;
     explicit ExtrudedTopology(SemiStructMeshTopo topology, std::map<std::string, std::string> boundary_aliases = {});
     ExtrudedTopology(unsigned nodes, const Arr<Arr<unsigned>>& cells, unsigned layers,
         const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries = {},
         std::map<std::string, std::string> boundary_aliases = {});
+    ExtrudedTopology(const ExtrudedTopology& source)
+        : d_topology(source.d_topology), d_boundary_aliases(source.d_boundary_aliases) {}
     ExtrudedTopology& operator=(const ExtrudedTopology&) = delete;
     ExtrudedTopology& operator=(ExtrudedTopology&&) = delete;
     RegionLayout layout() const;
@@ -50,6 +56,10 @@ public:
     const std::string& boundary_batch_name(int b) const;
 
 private:
+    friend class details::NativeTopologyAccess;
+    friend class details::NativeProviderOwnerAccess;
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     SemiStructMeshTopo d_topology;
     Arr<std::pair<int, std::string>> d_boundary_aliases;
 };
@@ -63,7 +73,13 @@ private:
  */
 class ExtrudedGeometry
 {
+    struct AdmittedStorageTag {};
 public:
+    ExtrudedGeometry(AdmittedStorageTag, std::shared_ptr<const ExtrudedTopology>,
+        geometry_detail::NativeConstructorStorageOwner, Arr<MeshUtils::Vec3>, ArrReal);
+    ExtrudedGeometry(AdmittedStorageTag, std::shared_ptr<const ExtrudedTopology>,
+        geometry_detail::NativeConstructorStorageOwner,
+        std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>>);
     using Vec3 = MeshUtils::Vec3;
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology, Arr<Vec3> xy_nodes, ArrReal z_edges);
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
@@ -97,6 +113,11 @@ public:
     EntityRange<EntityRange<uint64_t>> xy_cell_nodes() const;
 
 private:
+    friend class details::NativeTopologyAccess;
+    friend class details::NativeProviderOwnerAccess;
+    void initialize_plain_geometry();
+    geometry_detail::NativeConstructorStorageOwner d_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_allocation_envelope;
     std::shared_ptr<const ExtrudedTopology> d_topology;
     Arr<Vec3> d_nodes, d_cell_centers, d_edge_centers, d_edge_normals;
     mutable ArrReal d_z;
