@@ -1,6 +1,8 @@
 set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/NativePublicationProof.cc
     mesh/AMR/NativePublicationSession.cc
+    mesh/AMR/NativePublicationExchange.cc
+    mesh/AMR/NativePublicationRemoteIncidence.cc
     mesh/AMR/NativePublicationView.cc
     mesh/AMR/NativePublicationOwnerGraph.cc
     mesh/AMR/NativePublicationNumbering.cc
@@ -192,6 +194,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         mesh/OrthogonalCartesian3D.cc
         mesh/AMR/NativePublicationProof.cc
         mesh/AMR/NativePublicationSession.cc
+        mesh/AMR/NativePublicationExchange.cc
+        mesh/AMR/NativePublicationRemoteIncidence.cc
         mesh/AMR/NativePublicationView.cc
         mesh/AMR/NativePublicationOwnerGraph.cc
         mesh/AMR/NativePublicationNumbering.cc
@@ -315,6 +319,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
     mesh/AMR/NativePublicationProof.cc
     mesh/AMR/NativePublicationSession.cc
+    mesh/AMR/NativePublicationExchange.cc
+    mesh/AMR/NativePublicationRemoteIncidence.cc
     mesh/AMR/NativePublicationView.cc
     mesh/AMR/NativePublicationOwnerGraph.cc
     mesh/AMR/NativePublicationNumbering.cc

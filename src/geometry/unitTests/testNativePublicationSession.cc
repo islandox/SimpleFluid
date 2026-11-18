@@ -114,4 +114,14 @@ TEST(NativePublicationSession, StagedFailureLeavesAcceptedCacheUnchanged)
     EXPECT_EQ(inputs.cache->indexes, accepted);
     EXPECT_EQ(inputs.cache->revision, revision);
 }
+TEST(NativePublicationSession, EmptyRemoteSelectionStillParticipatesCollectively)
+{
+    const auto hierarchy = source();
+    D::NativePublicationSession session(D::NativePublicationSession::capture(*hierarchy));
+    D::NativePublicationExchangeStatistics statistics;
+    const auto result = D::NativePublicationExchange::fetch(session, *hierarchy, {}, &statistics);
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(statistics.full_replies, 0);
+    EXPECT_EQ(statistics.confirmed_reuse, 0);
+}
 } // namespace
