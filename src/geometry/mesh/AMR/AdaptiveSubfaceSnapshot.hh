@@ -33,6 +33,10 @@ class SubfaceProvenanceBuilder;
 class SubfacePieceBuilder;
 class AdaptiveSubfaceSnapshot;
 class ContactPhysicalResidency;
+namespace shared_ring_detail
+{
+struct SIMPLEFLUID_LOCAL SharedRingDelete;
+}
 namespace cartesian_detail
 {
 struct CreditConstruction;
@@ -68,6 +72,9 @@ public:
 
 private:
     friend class NativeContactFundingAccess;
+    using Deleter = shared_ring_detail::SharedRingDelete;
+    using DeleterReader = const Deleter* (*)(const std::shared_ptr<const SharedSubfaceRing>&) noexcept;
+    [[nodiscard]] const Deleter* control_deleter(const std::shared_ptr<const SharedSubfaceRing>&) const noexcept;
     [[nodiscard]] NativeContactOwnerFunding native_funding(
         const std::shared_ptr<const SharedSubfaceRing>&, std::size_t) const;
     explicit SharedSubfaceRing(std::shared_ptr<Budget> arena) : arena_(std::move(arena)) {}
@@ -75,6 +82,8 @@ private:
     std::weak_ptr<const SharedSubfaceRing> self_;
     std::vector<std::size_t> slots_;
     std::size_t charge_ = 0;
+    const Deleter* resident_deleter_ = nullptr;
+    DeleterReader read_deleter_ = nullptr;
 };
 
 /** A detached exact incident. Native face is present only if this resident

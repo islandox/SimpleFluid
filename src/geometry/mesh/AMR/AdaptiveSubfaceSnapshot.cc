@@ -341,16 +341,17 @@ void SubfaceProvenanceBuilder::freeze()
     impl_->frozen = true;
 }
 
-namespace
+// Geometry and FVM inspect the same ring control across image boundaries.
+namespace shared_ring_detail
 {
-struct SharedRingControlCredit
+struct SIMPLEFLUID_LOCAL SharedRingControlCredit
 {
     std::shared_ptr<Budget> keeper;
     std::size_t bytes = 0;
     static constexpr std::size_t allowance() noexcept { return control_bytes; }
     ~SharedRingControlCredit() { if (keeper) keeper->used -= bytes; }
 };
-struct SharedRingDelete
+struct SIMPLEFLUID_LOCAL SharedRingDelete
 {
     std::shared_ptr<SharedRingControlCredit> control;
     void operator()(SharedSubfaceRing* ring) const noexcept { delete ring; }
@@ -362,7 +363,9 @@ static_assert(sizeof(std::_Sp_counted_ptr_inplace<SharedRingControlCredit, std::
         __gnu_cxx::__default_lock_policy>) <= control_bytes,
     "Shared ring control requests exceed the existing unchanged control allowance.");
 #endif
-} // namespace
+} // namespace shared_ring_detail
+using shared_ring_detail::SharedRingControlCredit;
+using shared_ring_detail::SharedRingDelete;
 std::shared_ptr<const SharedSubfaceRing> SharedSubfaceRing::transfer(
     std::vector<std::size_t>& slots, Budget& budget, std::shared_ptr<Budget> arena, std::size_t& former_charge)
 {
@@ -379,24 +382,39 @@ std::shared_ptr<const SharedSubfaceRing> SharedSubfaceRing::transfer(
     raw->charge_ = std::exchange(memory.bytes, 0) + control_bytes;
     auto result = std::shared_ptr<SharedSubfaceRing>(raw, SharedRingDelete{std::move(control)});
     result->self_ = result;
+    // The typed RTTI query must run in the image that created this control.
+    result->read_deleter_ = +[](const std::shared_ptr<const SharedSubfaceRing>& ring) noexcept
+    { return static_cast<const SharedRingDelete*>(std::get_deleter<SharedRingDelete>(ring)); };
+    result->resident_deleter_ = result->read_deleter_(result);
+    if (!result->resident_deleter_)
+        throw std::logic_error("Subface ring lacks its actual deleter.");
     result->slots_.swap(slots);
     former_charge -= bytes;
     result->charge_ += bytes;
     return result;
 }
+const SharedRingDelete* SharedSubfaceRing::control_deleter(
+    const std::shared_ptr<const SharedSubfaceRing>& actual) const noexcept
+{
+    if (!read_deleter_ || actual.get() != this || self_.owner_before(actual) || actual.owner_before(self_))
+        return nullptr;
+    const auto* deleter = read_deleter_(actual);
+    return deleter == resident_deleter_ ? deleter : nullptr;
+}
 NativeContactOwnerFunding SharedSubfaceRing::native_funding(
     const std::shared_ptr<const SharedSubfaceRing>& actual, std::size_t bytes) const
 {
-    const auto* deleter = std::get_deleter<SharedRingDelete>(actual);
+    const auto* deleter = control_deleter(actual);
     const std::shared_ptr<const SharedRingControlCredit> group = deleter ? deleter->control : nullptr;
     return NativeContactFundingAccess::split(actual, bytes, group, control_bytes,
         [](const SharedSubfaceRing& ring) { return ring.charge_ - control_bytes; },
         [](const auto& ring, const auto& token)
         {
-            const auto* actual_deleter = std::get_deleter<SharedRingDelete>(ring);
-            return actual_deleter && actual_deleter->control == token && token->bytes == control_bytes &&
-                token->keeper == ring->arena_ && !ring->self_.owner_before(ring) &&
-                !ring.owner_before(ring->self_);
+            const auto* actual_deleter = ring->control_deleter(ring);
+            return actual_deleter && actual_deleter->control.get() == token.get() &&
+                !actual_deleter->control.owner_before(token) && !token.owner_before(actual_deleter->control) &&
+                token->bytes == control_bytes && token->keeper.get() == ring->arena_.get() &&
+                !token->keeper.owner_before(ring->arena_) && !ring->arena_.owner_before(token->keeper);
         });
 }
 void SharedSubfaceRing::project_owners(const std::shared_ptr<const SharedSubfaceRing>& ring,
@@ -418,7 +436,7 @@ void SharedSubfaceRing::visit_borrowed_payload(const std::function<void(const Co
     contact_payload_object(visit, this, ContactPayloadRole::SubfaceRingObject, sizeof(*this), true);
     contact_payload_buffer(visit, this, ContactPayloadRole::SubfaceRingSlots, slots_);
     if (const auto actual = self_.lock())
-        if (const auto* deleter = std::get_deleter<SharedRingDelete>(actual); deleter && deleter->control)
+        if (const auto* deleter = control_deleter(actual); deleter && deleter->control)
             contact_payload_object(visit, deleter->control.get(), ContactPayloadRole::CartesianControlCreditObject,
                 sizeof(SharedRingControlCredit), true);
 }

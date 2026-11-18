@@ -18,6 +18,7 @@ namespace
 constexpr std::size_t records_per_page = 16;
 constexpr std::size_t tile_control_bytes = 128;
 using contact_funding_detail::make_controlled;
+using TileControl = contact_funding_detail::FixedControlCredit<tile_control_bytes>;
 static_assert(std::numeric_limits<std::size_t>::digits <= std::numeric_limits<std::uint64_t>::digits);
 constexpr auto absent = PooledTile::absent_cell;
 std::size_t product(std::size_t a, std::size_t b)
@@ -32,13 +33,50 @@ std::size_t sum(std::size_t a, std::size_t b)
         throw std::invalid_argument("Tile body capacity sum overflows.");
     return a + b;
 }
-template<class UInt> struct BodyRecord
+} // namespace
+
+namespace tile_body_detail
+{
+/** Keep typed deleter lookup in the image that allocated the control. The
+ * expected group is itself held by that resident deleter. */
+template<class T> class SIMPLEFLUID_LOCAL ControlOrigin
+{
+    using Group = std::shared_ptr<const TileControl>;
+    using Reader = Group (*)(const std::shared_ptr<const T>&) noexcept;
+    Reader reader_ = nullptr;
+    const TileControl* expected_ = nullptr;
+
+public:
+    ControlOrigin() = default;
+    ControlOrigin(const ControlOrigin&) = delete;
+    ControlOrigin& operator=(const ControlOrigin&) = delete;
+    void bind(const std::shared_ptr<TileControl>& group, Reader reader) noexcept
+    {
+        expected_ = group.get();
+        reader_ = reader;
+    }
+    [[nodiscard]] Group observe(const std::shared_ptr<const T>& owner) const noexcept
+    {
+        auto group = reader_ ? reader_(owner) : Group{};
+        return group.get() == expected_ ? group : Group{};
+    }
+    [[nodiscard]] bool authentic(const std::shared_ptr<const T>& owner, const Group& token,
+        const Budget* budget, const std::shared_ptr<Budget>& keeper) const noexcept
+    {
+        const auto actual = observe(owner);
+        return actual && actual.get() == token.get() && !actual.owner_before(token) && !token.owner_before(actual) &&
+            token->budget == budget && token->keeper.get() == keeper.get() && !token->keeper.owner_before(keeper) &&
+            !keeper.owner_before(token->keeper);
+    }
+};
+
+template<class UInt> struct SIMPLEFLUID_LOCAL BodyRecord
 {
     std::uint64_t emission;
     UInt support, domain, plane, normal_slot, image_slot, first_cell, second_cell, offset, count;
     std::uint8_t present;
 };
-template<class UInt> struct BodyData
+template<class UInt> struct SIMPLEFLUID_LOCAL BodyData
 {
     using Index = UInt;
     std::vector<BodyRecord<UInt>> records;
@@ -47,13 +85,23 @@ template<class UInt> struct BodyData
 using CompactData = BodyData<std::uint32_t>;
 using WideData = BodyData<std::uint64_t>;
 using PageData = std::variant<CompactData, WideData>;
-struct BodyPage
+struct SIMPLEFLUID_LOCAL BodyPage
 {
+    ControlOrigin<BodyPage> control_origin;
     PageData data;
     std::shared_ptr<const ContactSourcePointSnapshot> source;
     unsigned source_bits = 0;
     bool sealed = false;
 };
+} // namespace tile_body_detail
+using tile_body_detail::BodyPage;
+
+namespace
+{
+using tile_body_detail::BodyData;
+using tile_body_detail::BodyRecord;
+using tile_body_detail::CompactData;
+using tile_body_detail::WideData;
 template<class UInt> BodyRecord<UInt> record(const PooledTile& source, std::size_t offset)
 {
     const auto checked = [](std::size_t value)
@@ -90,6 +138,7 @@ std::size_t ring_capacity(std::size_t old, std::size_t required)
 } // namespace
 struct TileSourceCredit
 {
+    tile_body_detail::ControlOrigin<TileSourceCredit> control_origin;
     Budget* budget = nullptr;
     std::shared_ptr<Budget> keeper;
     std::shared_ptr<const ContactSourcePointSnapshot> source;
@@ -98,9 +147,10 @@ struct TileSourceCredit
     [[nodiscard]] NativeContactOwnerFunding native_funding(
         const std::shared_ptr<const TileSourceCredit>& owner, std::size_t extent) const
     {
-        return NativeContactFundingAccess::split_named<tile_control_bytes>(owner, extent,
+        return NativeContactFundingAccess::split(owner, extent, control_origin.observe(owner), tile_control_bytes,
             [](const TileSourceCredit& value) { return value.bytes - tile_control_bytes; },
-            [](const TileSourceCredit& value) -> const auto& { return value.keeper; });
+            [](const auto& actual, const auto& token)
+            { return actual->control_origin.authentic(actual, token, actual->budget, actual->keeper); });
     }
     ~TileSourceCredit()
     {
@@ -112,6 +162,7 @@ struct TileSourceCredit
 };
 struct TileBodyPageCredit
 {
+    tile_body_detail::ControlOrigin<TileBodyPageCredit> control_origin;
     Budget* budget;
     std::shared_ptr<Budget> keeper;
     std::shared_ptr<BodyPage> page;
@@ -129,9 +180,10 @@ struct TileBodyPageCredit
     [[nodiscard]] NativeContactOwnerFunding native_funding(
         const std::shared_ptr<const TileBodyPageCredit>& owner, std::size_t extent) const
     {
-        return NativeContactFundingAccess::split_named<tile_control_bytes>(owner, extent,
+        return NativeContactFundingAccess::split(owner, extent, control_origin.observe(owner), tile_control_bytes,
             [](const TileBodyPageCredit&) { return sizeof(TileBodyPageCredit); },
-            [](const TileBodyPageCredit& value) -> const auto& { return value.keeper; });
+            [](const auto& actual, const auto& token)
+            { return actual->control_origin.authentic(actual, token, actual->budget, actual->keeper); });
     }
     [[nodiscard]] static NativeContactOwnerFunding body_funding(const std::shared_ptr<const TileBodyPageCredit>&);
     void admit(std::size_t amount)
@@ -148,6 +200,16 @@ struct TileBodyPageCredit
 };
 namespace
 {
+template<class Factory>
+auto make_tile_owner(Budget& budget, const std::shared_ptr<Budget>& keeper, Factory factory)
+{
+    using T = std::remove_pointer_t<decltype(factory())>;
+    auto [owner, group] = make_controlled<tile_control_bytes>(budget, keeper, factory);
+    owner->control_origin.bind(group, +[](const std::shared_ptr<const T>& actual) noexcept
+        { return contact_funding_detail::control<tile_control_bytes>(actual); });
+    return owner;
+}
+
 std::shared_ptr<TileSourceCredit> source_credit(std::shared_ptr<const ContactSourcePointSnapshot> source,
     Budget& budget, const std::shared_ptr<Budget>& keeper, const std::shared_ptr<CartesianAuthorityArena>& arena)
 {
@@ -156,7 +218,7 @@ std::shared_ptr<TileSourceCredit> source_credit(std::shared_ptr<const ContactSou
     cartesian_detail::Allocation memory(budget);
     memory.retain(sizeof(TileSourceCredit));
     cartesian_detail::CreditConstruction credits(arena);
-    auto result = make_controlled<tile_control_bytes>(budget, keeper, [] { return new TileSourceCredit; }).first;
+    auto result = make_tile_owner(budget, keeper, [] { return new TileSourceCredit; });
     result->source = std::move(source);
     credits.retain(result->source, result->source->allocation_budget(), result->source->metadata_bytes(),
         result->source->has_arena_keeper(), result->leases, memory);
@@ -260,8 +322,7 @@ std::shared_ptr<TileBodyPageCredit> make_credit(Budget& budget, const std::share
     std::shared_ptr<TileBodyPageCredit> credit;
     try
     {
-        credit = make_controlled<tile_control_bytes>(budget, keeper,
-            [&] { return new TileBodyPageCredit(budget, keeper); }).first;
+        credit = make_tile_owner(budget, keeper, [&] { return new TileBodyPageCredit(budget, keeper); });
     }
     catch (...)
     {
@@ -381,9 +442,10 @@ NativeContactOwnerFunding TileBodyPageCredit::body_funding(const std::shared_ptr
     if (!credit || !credit->page || !credit->page->sealed || !credit->keeper)
         return {};
     const std::shared_ptr<const BodyPage> page = credit->page;
-    const auto page_control = contact_funding_detail::control<tile_control_bytes>(page);
-    const auto credit_control = contact_funding_detail::control<tile_control_bytes>(credit);
-    if (!page_control || !page_control->keeper || !credit_control)
+    const auto page_control = page->control_origin.observe(page);
+    const auto credit_control = credit->control_origin.observe(credit);
+    if (!page_control || !page_control->keeper || page_control->budget != page_control->keeper.get() ||
+        !credit->control_origin.authentic(credit, credit_control, credit->budget, credit->keeper))
         throw std::invalid_argument("Tile body lacks its actual physical and financial controls.");
     const auto extent = physical_body_bytes(*page);
     return NativeContactFundingAccess::borrow_body(page, extent, extent - tile_control_bytes, credit, credit->keeper,
@@ -813,7 +875,7 @@ TileBodyHandle TileBodyPages::append(const PooledTile& source)
         const auto record_size = wide ? sizeof(BodyRecord<std::uint64_t>) : sizeof(BodyRecord<std::uint32_t>);
         const auto record_bytes = product(records_per_page, record_size);
         auto credit = make_credit(*budget_, keeper_, {}, sum(sizeof(BodyPage), record_bytes));
-        credit->page = make_controlled<tile_control_bytes>(*budget_, keeper_, [] { return new BodyPage; }).first;
+        credit->page = make_tile_owner(*budget_, keeper_, [] { return new BodyPage; });
         credit->bytes += tile_control_bytes;
         credit->funds_original_page_control = true;
         if (wide)

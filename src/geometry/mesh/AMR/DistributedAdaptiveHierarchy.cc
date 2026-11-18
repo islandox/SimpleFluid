@@ -1750,6 +1750,9 @@ struct SealedLeafStorage
     std::vector<AdaptiveCellKey> product_edits;
 };
 
+// This keeper has its own allocation outside the working arena it owns.
+constexpr std::size_t candidate_page_arena_keeper_bytes = sizeof(Budget) + 4 * sizeof(void*);
+
 SealedLeafStorage seal_candidate_layout(DistributedAdaptiveHierarchy::Data& candidate,
     const DistributedAdaptiveHierarchy::Data& source, ClosureScratch& source_overlap, ClosureScratch& candidate_memory,
     ClosureScratch& leaf_memory, ClosureScratch& family_memory, DistributedAdaptiveContactHalo& halo)
@@ -1781,6 +1784,7 @@ SealedLeafStorage seal_candidate_layout(DistributedAdaptiveHierarchy::Data& cand
             }
         });
 
+    candidate_memory.add(candidate_page_arena_keeper_bytes);
     const auto cap = page_memory.budget.limit - page_memory.budget.used;
     page_memory.add(cap);
     auto arena = std::make_shared<Budget>(Budget{cap});
@@ -1872,7 +1876,7 @@ bool same_family_bodies(const AdaptiveLeaf& left, const AdaptiveLeaf& right)
 }
 
 void seal_candidate_families(DistributedAdaptiveHierarchy::Data& candidate,
-    const DistributedAdaptiveHierarchy::Data& source, const SealedLeafStorage& leaf_storage, FamilyJournal& journal,
+    const DistributedAdaptiveHierarchy::Data& source, SealedLeafStorage& leaf_storage, FamilyJournal& journal,
     ClosureScratch& source_overlap, ClosureScratch& candidate_memory, ClosureScratch& leaf_memory,
     ClosureScratch& family_memory)
 {
@@ -1955,10 +1959,15 @@ void seal_candidate_families(DistributedAdaptiveHierarchy::Data& candidate,
     }
 
     const auto index_bytes = candidate.body_usage.storage_bytes();
+    // A body built in the candidate page arena can name this already
+    // precharged keeper. Only the remaining index storage can be inherited.
+    const auto new_keeper_index = candidate.body_usage.administration().uncovered_owner_bytes(
+        arena, candidate_page_arena_keeper_bytes, candidate.body_usage.owners());
     const auto family_bytes = candidate.body_usage.payload_bytes() - candidate.body_usage.leaf_payload_bytes();
-    if (new_index > index_bytes || new_payload > family_bytes || shared_family > source_family_bytes)
+    const auto allocated_index = checked_sum(new_index, new_keeper_index);
+    if (allocated_index > index_bytes || new_payload > family_bytes || shared_family > source_family_bytes)
         throw std::logic_error("Adaptive family residency differs from new allocations.");
-    const auto shared_index = index_bytes - new_index;
+    const auto shared_index = index_bytes - allocated_index;
     const auto shared_payload = family_bytes - new_payload;
     const auto shared = checked_sum(checked_sum(shared_index, shared_payload), shared_family);
     if (shared_index > source.body_usage.storage_bytes() || shared > source_overlap.held)
@@ -1975,6 +1984,10 @@ void seal_candidate_families(DistributedAdaptiveHierarchy::Data& candidate,
     // The outer source lease retains replaced allocations through acceptance.
     AdaptiveFamilyStorage::finish_overlap(layout);
     candidate.family_layout = std::make_shared<const AdaptiveFamilyLayout>(std::move(layout));
+    const bool retained_keeper = arena.use_count() > 1;
+    leaf_storage.arena.reset();
+    if (!retained_keeper)
+        candidate_memory.drop(candidate_page_arena_keeper_bytes);
     edits.clear();
     journal.clear();
     family_memory.drop(family_memory.held);
