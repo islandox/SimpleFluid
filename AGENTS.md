@@ -113,6 +113,21 @@ Multi-config executable paths include the configuration, such as
 - Honor documented support/rejection matrices. Component coverage does not
   establish support for every mesh, physics combination, or MPI rank count.
 
+## VoF, AMR, and loop circuit-breakers
+
+When working on `src/geometry/mesh/AMR`, `src/geometry/PLIC`, `src/FVM/*VoF*`, or `src/solvers/*VoF*`, read the active detailed contracts alongside `MAINTENANCE.md`:
+- [VoF solver verification contracts](docs/verification/vof_solver_contracts.md) (Stage 7 Q0–Q7 gates, negative controls, and triage rules)
+- [General VoF implementation boundaries](docs/architecture/general_vof_implementation.md) (`Ordinary`, `BoundedCertification`, and `Exact` modes, narrow solver components, and allocation ledgers)
+- [Spatial adaptive closure](docs/architecture/spatial_adaptive_closure.md) (persistent `OrderedPages`, `DirectoryFactPages`, and cross-rank contact/subface ownership)
+
+To prevent multi-hour review-debug-verification loops, strictly enforce these stopping and triage rules:
+
+- **Two-attempt cap on budget and symbol gates:** If a change passes functional and numerical correctness but fails a fixed byte/cell cap (such as `700 B/cell` or `64 MiB`), cumulative non-refunded scratch admission, an `exact / one-byte-short` probe, or an ELF export ceiling (`CheckElfExports.cmake` / `CheckFvmExports.cmake`) after **at most two focused optimization attempts**, **STOP** rewriting data structures or ownership graphs. Report the exact measured vs. allowed telemetry (`used`, `request`, `limit`, `cumulative_spent`, or symbol count) to the user and ask whether to adjust the gate or pursue a separate structural refactor.
+- **Model lower bound vs. optimizer failure:** Do not loop tuning Gauss-Newton/dogleg iteration limits, step bounds, or initial seeds when an `Ordinary` PLIC reconstruction fails the strict single-plane neighborhood RMS gate (`RequireModelAgreement`) on a curved or coarse-corner interface where the single-plane model residual has a positive mathematical lower bound. Use the documented `ConservativeApproximation` / `PolyhedralGradientSelection` path where applicable, or stop and report the model-gate collision.
+- **Preserve intentional negative-control oracles:** Several regressions and qualification fixtures intentionally assert that lower-order or strict uncleaned paths fail a specific gate (for example, `DonorCell` missing full displacement in Q3, or strict `relative_cutoff=0` microscopic offset rejection at step 4 of `full50` MPI). Before altering shared operators to make a failing test pass, verify whether the test is an intentional negative control.
+- **Fast inner-loop verification first:** During iterative debugging, build only the single affected test target and run the narrowest `--gtest_filter='<Suite.Case>'` in serial or 2-rank MPI with `--timeout 60`. Do not launch 300s–1800s `N32`/`N64`/`full50`/`Q3` campaigns or 4/9/33-rank oversubscribed MPI suites until the targeted fast check passes.
+- **MPI sandbox socket failures:** If `mpiexec` fails before `main()` due to PMIx or local socket creation restrictions in a sandboxed runner, classify it immediately as an environment/launcher restriction (rerun with host socket permissions or report it), never as a solver deadlock or code regression.
+
 ## Commit messages
 
 Follow the [commit-message format and workflow](MAINTENANCE.md#commit-messages)

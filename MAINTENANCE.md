@@ -161,6 +161,15 @@ This keeps every rank on the same numerical setup and recovery path.
 cover residual precision, bounded refinement, failure paths, and vector
 restoration after exceptions.
 
+### VoF, AMR, and geometry resource contracts
+
+Code under `src/geometry/mesh/AMR`, `src/geometry/PLIC`, `src/FVM`, and `src/solvers` is governed by strict memory-admission, ownership, and compilation-boundary contracts detailed in [general VoF implementation](docs/architecture/general_vof_implementation.md) and [spatial adaptive closure](docs/architecture/spatial_adaptive_closure.md):
+
+- **Dual-track allocation ledgers (`GeometryAllocationLedger` / `NativeAllocationEnvelope`):** Admit capacities *before* allocation, including simultaneous old-and-new buffer overlap during growth or root replacement. Destruction or buffer reuse reduces *live* bytes but **never refunds cumulative construction charges**. Never allocate and destroy temporary containers inside per-cell/per-face loops on ledger-governed paths; reuse pre-admitted workspace buffers or bounded stack storage. A failed admission poisons the ledger and must roll back cleanly without mutating the accepted state.
+- **Persistent pages and cross-DSO shared-control authentication:** Immutable B+ pages (`OrderedPages`, `DirectoryFactPages`) and contact/subface snapshots authenticate their allocating library image and funding keeper across `SimpleFluidMesh`, `SimpleFluidFVM`, and `SimpleFluidSolvers`. Stage paired source and output ownership replacements in a single owner-union edit so transient overlap does not exceed per-operation caps.
+- **Narrow solver component isolation and PLIC boundaries:** Independently compiled components under `src/solvers/details/GeneralVoF/` (`Execution`, `NodeVelocity`, `Curvature`, `PhaseStorage`, `Diagnostics`, `FaceRates`, `AdaptedFaceTransfer`, `OwnedFaceTransfer`, `StateTrace`) must not `#include "SolverImpl.hh"` or access the coordinator's `State` or `Resources` pointers. Public headers must never leak private PLIC backend definitions (`simplefluid_plic_backend_boundary`).
+- **Collective agreement across empty-owner ranks:** Ranks owning zero cells or faces must participate in every collective validation, error reduction (`Execution`), and communication control wave in the exact same order as populated ranks. Never early-return before a collective stage.
+
 ## Repository map and dependency direction
 
 Production code is layered from low-level data types toward applications:

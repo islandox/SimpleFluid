@@ -7,7 +7,7 @@ generic reacting-flow foundation.
 
 ### Current priorities
 
-Work through the [Stage 7 checklist](#stage-7--general-vof-and-flow-qualification)
+Work through the [Stage 7 checklist](docs/verification/vof_solver_contracts.md#stage-7-scope-and-priorities)
 in this dependency order:
 
 1. Preserve the implemented Ordinary compatible projection and its independent

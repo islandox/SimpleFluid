@@ -15,7 +15,7 @@ The framework integrates with core solvers and FVM consumers through:
 - **Geometric Interfaces:** `SimpleFluid::PLIC` for geometric transport/clipping.
 
 For detailed status, roadmap, and current validation coverage, please refer to:
-*   **Active Roadmap:** [TODO.md](../../TODO.md#phase-23--amr-for-native-extruded-polyhedral-and-mixed-region-meshes)
+*   **Active Roadmap:** [TODO.md](../../TODO.md#current-priorities)
 *   **Verification Contracts:** [vof_solver_contracts.md](../verification/vof_solver_contracts.md)
 
 ## Native Hierarchy and Identities

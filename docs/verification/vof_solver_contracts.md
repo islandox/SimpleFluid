@@ -44,6 +44,21 @@ runs with `--gtest_filter` and `--gtest_output=xml:<local-path>` preserve numeri
 properties. An MPI runtime unable to create local sockets must be rerun in an
 environment supporting normal host MPI; startup failure is not a numerical test.
 
+## Triage and loop-prevention rules
+
+When debugging a failing VoF or AMR check, classify the failure mode before editing production code:
+
+1. **Ledger admission vs. retention census mismatch:**
+   - If an `exact` or `one-byte-short` test fails, or `GeometryRetentionCensus` disagrees with ledger totals, inspect whether a new field, `std::shared_ptr` control block, array cookie, or non-SSO `std::string` allocation occurred before pre-admission, or whether a loop is burning non-refunded cumulative scratch.
+   - Do not endlessly compact unrelated structures to shave a few bytes if a legitimate new state requirement crosses a fixed gate (such as `700 B/cell` or `64 MiB`). Stop after two focused attempts and report the exact byte delta.
+2. **PLIC reconstruction rejection (`RequireModelAgreement` vs. `ConservativeApproximation`):**
+   - Check the failure diagnostic category first: `model_residual`, `optimizer_limit`, `target_volume`, or `support_rank`.
+   - Under `RequireModelAgreement`, curved interfaces or coarse-fine corners (e.g., `PlanarPatch` N32) can hit a positive mathematical lower bound on single-plane neighborhood RMS. Tuning optimizer iterations cannot bypass a model lower bound.
+   - Under `ConservativeApproximation`, if `angular iteration limit` is reached on a grazing or poorly conditioned stencil, inspect whether `PolyhedralGradientSelection` should select the supported gradient normal + safeguarded offset solve before exhausting angular iterations, while preserving strict target-volume and arithmetic gates.
+3. **Long-flow Q3 and projection consistency:**
+   - Do not shrink the timestep or relax limiter bounds to force Q3 completion. Use `SIMPLEFLUID_VOF_FLOW_TRACE=<path>` to inspect per-step canonical divergence, cell velocity representation, and pressure work vs. transport dissipation.
+   - Keep `DonorCell` displacement behavior intact as the low-order baseline comparison when modifying shared momentum or projection operators.
+
 ## Construction admission regressions
 
 These tests protect setup and rejection behavior; they do not qualify a motion
