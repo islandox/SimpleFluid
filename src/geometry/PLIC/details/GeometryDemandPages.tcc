@@ -33,11 +33,39 @@ inline ReceiptEdits::ReceiptEdits(Admission admission)
     : admission_(std::move(admission)), overflow_(admission_.allocator<NativeOwnerReceipts::Edit>())
 {
 }
+inline ReceiptEdits::~ReceiptEdits()
+{
+    clear();
+}
 inline void ReceiptEdits::append(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
+{
+    NativePaidExtentCharge* stored;
+    if (charges_ < inline_charges_.size())
+        stored = &inline_charges_[charges_];
+    else
+    {
+        constexpr auto block_size = std::tuple_size_v<decltype(ChargeBlock::charges)>;
+        const auto index = (charges_ - inline_charges_.size()) % block_size;
+        if (!index)
+        {
+            admission_.charge(1, sizeof(ChargeBlock));
+            auto allocate = admission_.allocator<ChargeBlock>();
+            auto* next = allocate.allocate(1);
+            std::construct_at(next);
+            next->previous = block_;
+            block_ = next;
+        }
+        stored = &block_->charges[index];
+    }
+    *stored = charge;
+    ++charges_;
+    append_borrowed(*stored, action);
+}
+inline void ReceiptEdits::append_borrowed(const NativePaidExtentCharge& charge, NativeOwnerReceipts::Action action)
 {
     if (overflow_.empty() && size_ < inline_.size())
     {
-        inline_[size_++] = {charge, action};
+        inline_[size_++] = {&charge, action};
         return;
     }
     if (overflow_.size() == overflow_.capacity())
@@ -51,14 +79,10 @@ inline void ReceiptEdits::append(const NativePaidExtentCharge& charge, NativeOwn
     }
     if (size_)
     {
-        for (auto& edit : std::span(inline_).first(size_))
-        {
-            overflow_.push_back(std::move(edit));
-            edit = {};
-        }
+        overflow_.insert(overflow_.end(), inline_.begin(), inline_.begin() + size_);
         size_ = 0;
     }
-    overflow_.push_back({charge, action});
+    overflow_.push_back({&charge, action});
 }
 inline std::span<NativeOwnerReceipts::Edit> ReceiptEdits::rows() noexcept
 {
@@ -68,8 +92,18 @@ inline std::span<NativeOwnerReceipts::Edit> ReceiptEdits::rows() noexcept
 inline void ReceiptEdits::clear() noexcept
 {
     overflow_.clear();
-    for (auto& edit : std::span(inline_).first(size_)) edit = {};
     size_ = 0;
+    for (auto& charge : std::span(inline_charges_).first(std::min(charges_, inline_charges_.size())))
+        charge = {};
+    charges_ = 0;
+    auto allocate = admission_.allocator<ChargeBlock>();
+    while (block_)
+    {
+        auto* released = block_;
+        block_ = block_->previous;
+        std::destroy_at(released);
+        allocate.deallocate(released, 1);
+    }
 }
 inline void visit_native_state(
     const std::shared_ptr<const geometry_detail::NativeAllocationState>& state, MetadataSink sink)
@@ -169,7 +203,7 @@ template<class T, class... Args> std::shared_ptr<T> Admission::shared(Args&&... 
     proof->constructed = true;
     return owner;
 }
-template<class Row, class Less> class OrderedPages
+template<class Row, class Less, bool CompactBranches> class OrderedPages
 {
 public:
     struct Node;
@@ -207,7 +241,10 @@ public:
 
     explicit OrderedPages(Admission admission, PageWork* work = nullptr) : admission_(admission), work_(work) {}
 
-    [[nodiscard]] Ptr build(std::span<const Row> sorted) const
+    [[nodiscard]] Ptr build(std::span<const Row> sorted) const { return build_from(sorted); }
+
+    /** Source rows may borrow the payload until the new leaves are filled. */
+    template<class Source> [[nodiscard]] Ptr build_from(std::span<const Source> sorted) const
     {
         if (sorted.empty())
             return {};
@@ -272,6 +309,12 @@ public:
     /** Apply sorted final rows in one path-copy edit. A false keep result
      * removes an existing row. Unchanged subtrees preserve exact controls. */
     template<class Keep> [[nodiscard]] Ptr patched(const Ptr& old, std::span<const Row> changes, const Keep& keep) const
+    {
+        return patched_from(old, changes, keep);
+    }
+
+    template<class Source, class Keep>
+    [[nodiscard]] Ptr patched_from(const Ptr& old, std::span<const Source> changes, const Keep& keep) const
     {
         if (changes.empty())
             return old;
@@ -615,7 +658,7 @@ private:
             node->subtree_owned_admission_bytes = bool(admission_.native);
         return node;
     }
-    [[nodiscard]] Ptr leaf(std::span<const Row> values) const
+    template<class Source> [[nodiscard]] Ptr leaf(std::span<Source> values) const
     {
         auto node = allocate();
         reserve(node->rows, values.size());
@@ -651,8 +694,9 @@ private:
     [[nodiscard]] Ptr branch(std::span<const Ptr> values) const
     {
         auto node = allocate();
-        reserve(node->children, branch_capacity);
-        node->bytes = checked_sum(node->bytes, branch_capacity * sizeof(Ptr));
+        const auto capacity = CompactBranches ? values.size() : branch_capacity;
+        reserve(node->children, capacity);
+        node->bytes = checked_sum(node->bytes, capacity * sizeof(Ptr));
         node->children.assign(values.begin(), values.end());
         node->payload_bytes = node->bytes - (admission_.native ? 0 : control_bytes);
         node->subtree_bytes = node->bytes;
@@ -780,9 +824,9 @@ private:
         }
         return result;
     }
-    template<class Keep>
+    template<class Source, class Keep>
     geometry_detail::NativeAdministrationVector<Ptr> patch_rewrite(
-        const Ptr& old, std::span<const Row> changes, const Keep& keep, bool root = false) const
+        const Ptr& old, std::span<const Source> changes, const Keep& keep, bool root = false) const
     {
         if (work_)
             ++work_->visited_pages;
@@ -792,11 +836,11 @@ private:
             // A bounded edit may replace/retire many old rows while leaving
             // <=64 final rows. Compute that exact result before allocating:
             // accepted.size()+changes.size() is only a loose scratch upper bound.
-            std::conditional_t<stack_safe_default<Row>, std::array<Row, leaf_capacity>, std::array<std::byte, 0>>
+            std::conditional_t<stack_safe_default<Source>, std::array<Source, leaf_capacity>, std::array<std::byte, 0>>
                 inline_rows{};
             std::array<unsigned char, leaf_capacity> disposition{};
-            geometry_detail::NativeAdministrationVector<Row> heap_rows(admission_.allocator<Row>());
-            std::span<const Row> rows;
+            geometry_detail::NativeAdministrationVector<Source> heap_rows(admission_.allocator<Source>());
+            std::span<const Source> rows;
             const auto merge = [&](const auto& keep_row, const auto& append)
             {
                 std::size_t left = 0, right = 0;
@@ -818,7 +862,7 @@ private:
                     }
                 }
             };
-            if constexpr (stack_safe_default<Row>)
+            if constexpr (stack_safe_default<Source>)
             {
                 if (changes.size() <= leaf_capacity)
                 {
@@ -828,17 +872,17 @@ private:
                         disposition[index] = static_cast<bool>(keep(changes[index]));
                     const auto kept = [&](std::size_t index) { return disposition[index] != 0; };
                     std::size_t count = 0;
-                    merge(kept, [&](const Row&) { ++count; });
+                    merge(kept, [&](const Source&) { ++count; });
                     if (count <= leaf_capacity)
                     {
                         std::size_t at = 0;
-                        merge(kept, [&](const Row& value) { inline_rows[at++] = value; });
-                        rows = std::span<const Row>(inline_rows).first(count);
+                        merge(kept, [&](const Source& value) { inline_rows[at++] = value; });
+                        rows = std::span<const Source>(inline_rows).first(count);
                     }
                     else
                     {
                         reserve(heap_rows, count);
-                        merge(kept, [&](const Row& value) { heap_rows.push_back(value); });
+                        merge(kept, [&](const Source& value) { heap_rows.push_back(value); });
                         rows = heap_rows;
                     }
                 }
@@ -846,7 +890,7 @@ private:
                 {
                     reserve(heap_rows, checked_sum(accepted.size(), changes.size()));
                     merge([&](std::size_t index) { return keep(changes[index]); },
-                        [&](const Row& value) { heap_rows.push_back(value); });
+                        [&](const Source& value) { heap_rows.push_back(value); });
                     rows = heap_rows;
                 }
             }
@@ -855,7 +899,7 @@ private:
                 // Preserve the generic non-default-constructible Row contract.
                 reserve(heap_rows, checked_sum(accepted.size(), changes.size()));
                 merge([&](std::size_t index) { return keep(changes[index]); },
-                    [&](const Row& value) { heap_rows.push_back(value); });
+                    [&](const Source& value) { heap_rows.push_back(value); });
                 rows = heap_rows;
             }
             if (old)

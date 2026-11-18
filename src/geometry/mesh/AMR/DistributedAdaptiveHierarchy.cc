@@ -2547,6 +2547,8 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 map->getGlobalNumElements() != data_->global_cells ||
                 map->getLocalNumElements() != owned_leaves().size() || map->getIndexBase() != 0)
                 throw std::invalid_argument("Foreign or incomplete actual distributed owned map.");
+            const bool exact_receipt =
+                NativePublicationSession::receipt_matches(NativePublicationSession::capture(*this), partition, map);
             std::uint64_t id = data_->cell_begin;
             std::size_t ordinal = 0;
             for (const auto& leaf : owned_leaves())
@@ -2561,8 +2563,9 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 if ((leaf.provider == AdaptiveProviderKind::Cartesian && family != RegionLayout::Family::Rectilinear) ||
                     (leaf.provider == AdaptiveProviderKind::Product && family != RegionLayout::Family::Extruded))
                     throw std::invalid_argument("Procedural adaptive family was flattened in native binding.");
-                record_pipeline_work(PipelineWork::CellGeometryRequest);
-                if (!partition->geometry()->certified_sparse_provider_cell_geometry(id)->equivalent(
+                if (!exact_receipt)
+                    record_pipeline_work(PipelineWork::CellGeometryRequest);
+                if (!exact_receipt && !partition->geometry()->certified_sparse_provider_cell_geometry(id)->equivalent(
                                           *data_->kernel->geometry(leaf)))
                     throw std::invalid_argument("Native binding differs from actual typed cell geometry.");
                 ++id;
@@ -2580,14 +2583,25 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
                 std::lock_guard lock(data_->geometry_cache->mutex);
                 if (data_->geometry_cache->revision != revision)
                     throw std::invalid_argument("Distributed source residency changed during native binding.");
+                if (exact_receipt)
+                {
+                    const auto& root = data_->geometry_cache->native_store.root();
+                    if (!root || !root->payload() || root->payload()->partition.get() != partition.get() ||
+                        root->payload()->partition.owner_before(partition) ||
+                        partition.owner_before(root->payload()->partition))
+                        throw std::invalid_argument("Native binding receipt is no longer the current output.");
+                }
                 bound->geometry_cache->copy_roots_from(*data_->geometry_cache);
             }
             bound->native = std::move(partition);
             bound->owned_map = map;
             bound->map_token.reset();
             bound->map_token_allocation.reset();
-            binding_overlap.add(sizeof(NativeSourceBoundInput::Map) + 4 * sizeof(void*));
-            bound->map_token = std::make_shared<const NativeSourceBoundInput::Map>(map);
+            if (!exact_receipt)
+            {
+                binding_overlap.add(sizeof(NativeSourceBoundInput::Map) + 4 * sizeof(void*));
+                bound->map_token = std::make_shared<const NativeSourceBoundInput::Map>(map);
+            }
             bound->native_epoch = bound->native->geometry()->geometry_epoch();
         });
     const auto& plan = bound->native->plan();
@@ -5046,6 +5060,184 @@ NativePublicationInputs NativePublicationSession::capture(const DistributedAdapt
         hierarchy.observation(), data.comm, data.cell_begin, data.global_cells, data.options.byte_budget,
         !data.native || data.map_token_allocation ? source.coverage() : nullptr, source.observations(),
         data.map_token ? std::shared_ptr<const void>(data.map_token) : data.partition_token};
+}
+} // namespace SimpleFluid::Meshes::AMR::adaptive_detail
+
+namespace SimpleFluid::Meshes::AMR::adaptive_detail
+{
+NativePublicationOperation::NativePublicationOperation(const DistributedAdaptiveHierarchy& hierarchy)
+    : hierarchy_(&hierarchy)
+{
+    if (hierarchy.communicator().is_null())
+        throw std::invalid_argument("Native operation lacks communicator.");
+    collective(*hierarchy.communicator(), [&]
+    {
+        if (!hierarchy.geometry_unchanged() || !hierarchy.data_->contact_halo)
+            throw std::invalid_argument("Native operation source is stale or incomplete.");
+        inputs_ = NativePublicationSession::capture(hierarchy);
+        source_data_ = hierarchy.data_;
+        cache_ = hierarchy.data_->geometry_cache;
+        const std::lock_guard geometry_lock(cache_->mutex);
+        const std::lock_guard publication_lock(inputs_.cache->mutex);
+        if (cache_->commit_token || inputs_.cache->commit_token || !inputs_.source_coverage ||
+            cache_->source_store.coverage() != inputs_.source_coverage)
+            throw std::invalid_argument("Native source accounting is absent or publication is in progress.");
+        (void) cache_->root_bytes();
+        accepted_union_ = cache_->owner_union;
+        staged_union_ = accepted_union_;
+        accepted_source_ = cache_->source_store;
+        accepted_native_ = cache_->native_store;
+        staged_source_ = accepted_source_;
+        staged_native_ = accepted_native_;
+        partition_ = cache_->source_partition;
+        // H changes when native outputs outside this current union retire.
+        // Only exact canonical direct-H extents inside U may leave that scalar
+        // category; external group/subset leases are already excluded by H.
+        partition_.exclusive_contact_admission = cache_->contact_residual(*hierarchy.data_->contact_halo);
+        cache_revision_ = cache_->revision;
+        publication_revision_ = inputs_.cache->revision;
+        prefix_.emplace(PLIC::details::SealedSourcePrefix(accepted_union_, persistent_ordered_detail::checked_sum(
+            partition_.residual_bytes(), sizeof(AdaptiveGeometrySnapshotCache))));
+        const auto& arena = hierarchy.data_->contact_halo->allocation_arena();
+        geometry_detail::NativeTpetraMapAdmission::capture_context_prefix(*prefix_, arena);
+        admission_.emplace(geometry_detail::NativeConstructionCounterAccess::create<Budget>(
+            hierarchy.options().byte_budget, prefix_->bytes(), NativeSourceOwnerStore::make_mirror(arena, true)));
+        accounting_.emplace(*admission_, *prefix_);
+        accounting_->import_current(accepted_union_);
+        coverage_tx_.emplace(cache_->coverage_broker, *admission_);
+    });
+}
+const geometry_detail::NativeConstructionAdmission& NativePublicationOperation::admission() const noexcept
+{
+    return *admission_;
+}
+PLIC::details::NativeGeometryAccounting& NativePublicationOperation::geometry_accounting() noexcept
+{
+    return *accounting_;
+}
+void NativePublicationOperation::prepare_source_coverage()
+{
+    if (token_ || !coverage_tx_)
+        throw std::logic_error("Source coverage transaction is absent or already locked.");
+    coverage_tx_->prepare();
+}
+void NativePublicationOperation::stage_source(NativeSourceOwnerStore source)
+{
+    if (token_ || source_staged_)
+        throw std::logic_error("Native source root was already staged or locked.");
+    auto next = source.replace_in(accepted_source_, staged_union_, *accounting_);
+    staged_source_.swap(source);
+    staged_union_ = std::move(next);
+    source_staged_ = true;
+}
+void NativePublicationOperation::stage_native_result(std::shared_ptr<const NativePublicationRoot> root)
+{
+    if (token_ || native_staged_ || !root)
+        throw std::logic_error("Native output root was already staged, locked or absent.");
+    staged_union_ = accepted_native_.stage(std::move(root), staged_union_, accounting_->ordinary(),
+        accounting_->bounded(), accounting_->cursor(), accounting_->limit(), staged_native_);
+    native_staged_ = true;
+}
+void NativePublicationOperation::prepare_commit(NativePublicationSession& session)
+{
+    if (!native_staged_ || token_ || session.admission_.state() != admission_->state() ||
+        session.inputs_.cache != inputs_.cache || !session.result_ || !session.receipt_)
+        throw std::logic_error("Native operation/session result is incomplete or foreign.");
+    session.recheck(*hierarchy_);
+    if (!source_staged_)
+    {
+        accepted_union_.import_subset(accepted_source_.binding(), accounting_->ordinary(), accounting_->bounded(),
+            accounting_->cursor(), accounting_->limit());
+        auto source = NativeSourceOwnerStore::assemble(accepted_source_, accepted_source_.components(),
+            *admission_, &*accounting_, session.indexes_, accepted_source_.input_administration(), {}, {}, {}, {}, {},
+            NativeSourcePublicationValues{inputs_.cache->allocation, session.receipt_, accepted_source_.bound_input(),
+                accepted_source_.observations(), coverage_tx_->staged_broker()});
+        stage_source(std::move(source));
+    }
+    const std::lock_guard geometry_lock(cache_->mutex);
+    const std::lock_guard publication_lock(inputs_.cache->mutex);
+    if (cache_->commit_token || inputs_.cache->commit_token || cache_->revision != cache_revision_ ||
+        inputs_.cache->revision != publication_revision_ || session.cache_revision_ != publication_revision_ ||
+        cache_revision_ == std::numeric_limits<std::uint64_t>::max() ||
+        publication_revision_ == std::numeric_limits<std::uint64_t>::max())
+        throw std::invalid_argument("Native publication cache changed during staging.");
+    (void) cache_->root_bytes();
+    const auto old = cache_->lease ? cache_->lease->bytes() : 0;
+    const auto& arena = hierarchy_->data_->contact_halo->allocation_arena();
+    const auto peak = std::max(AdaptiveGeometrySnapshotCache::uncovered_bytes(accepted_union_, arena),
+        AdaptiveGeometrySnapshotCache::uncovered_bytes(staged_union_, arena));
+    if (cache_->lease)
+        growth_.emplace(cache_->lease->prepare_mirror(peak > old ? peak - old : 0));
+    else
+    {
+        growth_.emplace(hierarchy_->data_->contact_halo->external_residency_lease());
+        growth_->resize(peak);
+    }
+    if (cache_->lease)
+        transfer_.emplace(cache_->lease->prepare_transfer(*growth_, growth_->bytes()));
+    cache_->commit_token = inputs_.cache->commit_token = this;
+    token_ = true;
+}
+void NativePublicationOperation::commit(NativePublicationSession& session) noexcept
+{
+    if (!token_ || committed_)
+        std::terminate();
+    const std::lock_guard geometry_lock(cache_->mutex);
+    const std::lock_guard publication_lock(inputs_.cache->mutex);
+    if (cache_->commit_token != this || inputs_.cache->commit_token != this)
+        std::terminate();
+    coverage_tx_->commit();
+    if (transfer_)
+        transfer_->commit();
+    else
+        cache_->lease.swap(growth_);
+    cache_->source_store.swap(staged_source_);
+    cache_->native_store.swap(staged_native_);
+    using std::swap;
+    swap(cache_->owner_union, staged_union_);
+    cache_->seal_residency(cache_->owner_union.resident_bytes());
+    ++cache_->revision;
+    session.commit_locked();
+    committed_ = true;
+    // Keep the short publication token until old operation pins retire and
+    // the mirrored overlap lease shrinks outside this no-throw swap phase.
+}
+NativePublicationOperation::~NativePublicationOperation()
+{
+    if (transfer_ || coverage_tx_)
+    {
+        const std::lock_guard geometry_lock(cache_->mutex);
+        transfer_.reset();
+        coverage_tx_.reset();
+    }
+    // The prefix outlives every ledger/root pin it authenticates. Output
+    // allocator charges retire at their actual allocation lifetimes.
+    accounting_.reset();
+    accepted_source_ = {};
+    staged_source_ = {};
+    accepted_native_ = {};
+    staged_native_ = {};
+    accepted_union_ = {};
+    staged_union_ = {};
+    inputs_.layout.reset();
+    inputs_.kernel.reset();
+    inputs_.subfaces.reset();
+    source_data_.reset();
+    if (token_)
+    {
+        const std::lock_guard geometry_lock(cache_->mutex);
+        const std::lock_guard publication_lock(inputs_.cache->mutex);
+        if (committed_ && cache_->lease)
+            cache_->lease->resize(AdaptiveGeometrySnapshotCache::uncovered_bytes(
+                cache_->owner_union, cache_->lease->arena_identity()));
+        if (committed_) cache_->lease_resident_bytes = cache_->lease ? cache_->lease->bytes() : 0;
+        cache_->commit_token = inputs_.cache->commit_token = nullptr;
+    }
+    inputs_ = {};
+    growth_.reset();
+    cache_.reset();
+    if (admission_ && prefix_)
+        admission_->release_prefix(prefix_->bytes());
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
 

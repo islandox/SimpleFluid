@@ -456,6 +456,121 @@ AdaptiveNativePublicationView NativeSparseAssembler::compatibility(const Distrib
         });
     return AdaptiveNativePublicationView(std::move(data));
 }
+AdaptiveNativePublicationView NativeSparseAssembler::publish(const DistributedAdaptiveHierarchy& hierarchy,
+    const AdaptiveNativeSchemaView& schema, std::span<const AdaptiveCellKey> additional)
+{
+    std::optional<NativePublicationInputs> captured;
+    collective(*hierarchy.communicator(), [&] { captured.emplace(NativePublicationSession::capture(hierarchy)); });
+    const auto& input = *captured;
+    // The private first-source verifier must cover every current owned row.
+    // Unsupported supplied physical inputs use the complete public verifier
+    // collectively; stable factory semantics alone cannot mint source facts.
+    const int local_qualified = bool(input.source_coverage) &&
+        NativeKernelAuthority::supports_source_validation(input.kernel) &&
+        std::all_of(input.layout->begin(), input.layout->end(), [&](const auto& leaf)
+            { return NativeKernelAuthority::supports_source_validation(input.kernel, leaf); }) ? 1 : 0;
+    const int all_qualified = 1 - ::SimpleFluid::owner_packet_failure_agreement(*input.comm, 1 - local_qualified);
+    if (!all_qualified)
+        return compatibility(hierarchy, schema.span(), additional);
+    collective(*input.comm,
+        [&]
+        {
+            const auto owner = NativeKernelAuthority::schema_observation(input.kernel);
+            const auto authority = NativeKernelAuthority::observation(input.kernel).lock();
+            const auto supplied = schema.authority_.lock();
+            if (!owner || !schema.owner_ || owner.get() != schema.owner_.get() || owner.owner_before(schema.owner_) ||
+                schema.owner_.owner_before(owner) || !authority || authority.get() != supplied.get() ||
+                authority.owner_before(supplied) || supplied.owner_before(authority))
+                throw std::invalid_argument("Foreign or stale detached native schema capability.");
+        });
+    NativePublicationOperation operation(hierarchy);
+    NativePublicationSession session(operation.inputs(), operation.admission(), &operation.geometry_accounting(),
+        &operation.source_coverage_transaction());
+    const auto& a = session.admission();
+    geometry_detail::NativeConstructorVector<const AdaptiveCellKey*> selection(a.allocator<const AdaptiveCellKey*>());
+    collective(*input.comm,
+        [&]
+        {
+            input.subfaces->visit_pieces(
+                [&](const CanonicalSubfaceView& view)
+                {
+                    const auto first = view.first();
+                    if (!input.layout->contains(first.key()))
+                        selection.push_back(&first.key());
+                    if (const auto second = view.second(); second && !input.layout->contains(second->key()))
+                        selection.push_back(&second->key());
+                });
+            for (const auto& key : additional)
+                if (!input.layout->contains(key))
+                    selection.push_back(&key);
+            std::sort(selection.begin(), selection.end(), [](const auto* a, const auto* b) { return *a < *b; });
+            selection.erase(
+                std::unique(selection.begin(), selection.end(), [](const auto* a, const auto* b) { return *a == *b; }),
+                selection.end());
+        });
+    auto full = NativePublicationExchange::fetch(session, hierarchy, selection);
+    auto numbering = number(session, full);
+    auto incidence = NativePublicationExchange::fetch_incidence(session, hierarchy, full, *numbering);
+    geometry_detail::NativeConstructorVector<const AdaptiveCellKey*> outer_keys(a.allocator<const AdaptiveCellKey*>());
+    collective(*input.comm,
+        [&]
+        {
+            auto full_contains = [&](const AdaptiveCellKey& key)
+            {
+                const auto at = std::lower_bound(full.begin(), full.end(), key,
+                    [](const auto& row, const auto& key) { return row.source->source().key < key; });
+                return at != full.end() && at->source->source().key == key;
+            };
+            auto add = [&](const AdaptiveCellKey& key)
+            {
+                if (!input.layout->contains(key) && !full_contains(key))
+                    outer_keys.push_back(&key);
+            };
+            for (const auto& record : incidence)
+                for (const auto& tile : record.proof->remote_tiles())
+                {
+                    add(tile.first);
+                    if (tile.second)
+                        add(*tile.second);
+                }
+            std::sort(outer_keys.begin(), outer_keys.end(), [](const auto* a, const auto* b) { return *a < *b; });
+            outer_keys.erase(std::unique(outer_keys.begin(), outer_keys.end(),
+                                 [](const auto* a, const auto* b) { return *a == *b; }),
+                outer_keys.end());
+        });
+    auto outer = NativePublicationExchange::fetch(session, hierarchy, outer_keys);
+    geometry_detail::NativeConstructorVector<std::shared_ptr<const NativeCellSourceProof>> membership(
+        a.allocator<std::shared_ptr<const NativeCellSourceProof>>());
+    collective(*input.comm,
+        [&]
+        {
+            membership.reserve(full.size() + outer.size());
+            for (const auto& row : full)
+                membership.push_back(row.source);
+            for (const auto& row : outer)
+                membership.push_back(row.source);
+            std::sort(membership.begin(), membership.end(),
+                [](const auto& a, const auto& b) { return a->source().key < b->source().key; });
+            session.stage_remote_membership(membership);
+        });
+    auto data = assemble(session, numbering, full, incidence, outer);
+    collective(*input.comm, [&] { operation.prepare_source_coverage(); });
+    collective(*input.comm,
+        [&]
+        {
+            session.stage_numbering(numbering);
+            session.stage_result(data, data->payload->mesh->owned_cell_map(),
+                data->payload->partition->plan().collective_identity());
+            data->proof_root = NativePublicationOutputGraph::make(data->payload, data->allocation,
+                operation.previous_native_root(), operation.geometry_accounting());
+            operation.stage_native_result(data->proof_root);
+        });
+    collective(*input.comm, [&] { operation.prepare_commit(session); });
+    // prepare_commit acquired immutable local cache tokens and admitted lease
+    // growth before the final all-rank agreement; commit contains no allocation.
+    operation.commit(session);
+    return session.view();
+}
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
 namespace SimpleFluid::Meshes::AMR
 {
@@ -463,5 +578,10 @@ AdaptiveNativePublicationView publish_adaptive_native(const DistributedAdaptiveH
     std::span<const char> schema, std::span<const AdaptiveCellKey> additional)
 {
     return adaptive_detail::NativeSparseAssembler::compatibility(hierarchy, schema, additional);
+}
+AdaptiveNativePublicationView publish_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
+    const AdaptiveNativeSchemaView& schema, std::span<const AdaptiveCellKey> additional)
+{
+    return adaptive_detail::NativeSparseAssembler::publish(hierarchy, schema, additional);
 }
 } // namespace SimpleFluid::Meshes::AMR

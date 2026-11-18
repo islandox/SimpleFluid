@@ -556,6 +556,12 @@ bool GeometryOwnerGraphEditor::external(
     const Impl::Call call(*impl_);
     return impl_->edge(allocation_detail::Kind::ExternalOwner, owner, bytes, retain, prepaid);
 }
+bool GeometryOwnerGraphEditor::external_with_children(
+    const std::shared_ptr<const void>& owner, std::size_t bytes, bool retain, bool prepaid)
+{
+    const Impl::Call call(*impl_);
+    return owner && impl_->typed_edge(owner, bytes, retain, prepaid).children;
+}
 bool GeometryOwnerGraphEditor::owner(const geometry_demand::OwnerRecord& row, bool retain, bool prepaid)
 {
     const Impl::Call call(*impl_);

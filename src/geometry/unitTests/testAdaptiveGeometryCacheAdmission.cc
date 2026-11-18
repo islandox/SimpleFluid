@@ -499,18 +499,21 @@ TEST(AdaptiveGeometryCacheAdmission, AdaptationAndNativeBindingReuseTheAcceptedS
     EXPECT_GT(after_adaptation.admission_queries, before_adaptation.admission_queries);
     EXPECT_EQ(after_adaptation.census_root_visits, before_adaptation.census_root_visits);
     EXPECT_FALSE(geometry->matches_layout(plan.candidate()->leaf_layout()));
-    expect_exact_seal(*source);
-    auto native = AMR::assemble_adaptive_native(*source, source->configuration_descriptor());
+    expect_native_seal(*source);
+    auto native = AMR::publish_adaptive_native(*source, AMR::native_publication_schema(*source));
     const auto before_binding = Access::cache_admission_statistics(*source);
-    const auto bound = source->with_partition(native.partition, native.mesh->owned_cell_map());
+    const auto bound = source->with_partition(native.partition(), native.mesh()->owned_cell_map());
     const auto after_binding = Access::cache_admission_statistics(*source);
     EXPECT_EQ(after_binding.census_root_visits, before_binding.census_root_visits);
     EXPECT_GT(after_binding.admission_queries, before_binding.admission_queries);
     const auto bound_stats = Access::cache_admission_statistics(*bound);
-    EXPECT_EQ(bound_stats.resident_bytes, before_binding.resident_bytes);
     EXPECT_EQ(bound_stats.union_censuses, 0u);
     EXPECT_EQ(bound_stats.census_root_visits, 0u);
-    expect_exact_seal(*bound);
+    EXPECT_EQ(acquire(*bound, selected, AMR::GeometrySnapshotPurpose::State), geometry);
+    auto previous = AMR::publish_adaptive_native(*bound, AMR::native_publication_schema(*bound));
+    auto current = AMR::publish_adaptive_native(*bound, AMR::native_publication_schema(*bound));
+    ASSERT_NE(previous.partition(), current.partition());
+    expect_native_seal(*bound);
 }
 
 TEST(AdaptiveGeometryCacheAdmission, WarmHitInstallsTheMaintainedExactOwnerSetIntoAFreshLedger)

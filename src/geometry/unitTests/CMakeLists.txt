@@ -99,6 +99,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   elseif(TEST_NAME STREQUAL "testCartesianAMR")
     simplefluid_discover_tests(${TEST_NAME}
         PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testNativePublicationProducer")
+    simplefluid_discover_tests(${TEST_NAME}
+        TEST_FILTER "NativePublicationProducer.*")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -442,4 +445,16 @@ foreach(_pipeline_ranks IN ITEMS 2 4)
     TARGET testAdaptivePipelineStorage PROCS ${_pipeline_ranks}
     ARGS "--gtest_filter=AdaptivePipelineStorage.WholePipelineBaselineReportsExistingWork:AdaptivePipelineStorage.WarmAcceptedCacheAdmissionExactLimitAndOneByteShort"
     LABELS "mpi;amr;storage;baseline;empty_rank" TIMEOUT 900)
+endforeach()
+
+# Run the distributed producer fixture at its registered communicator sizes.
+foreach(_publication_ranks IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME NativePublicationProducer_${_publication_ranks}procs
+    TARGET testNativePublicationProducer PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativePublicationProducerMPI.CartesianRemoteReuseRefinementMigrationAndEmptyOwners"
+    LABELS "mpi;amr;native;publication;empty_rank" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME NativePublicationOutputAccounting_${_publication_ranks}procs
+    TARGET testNativePublicationOutputAccounting PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativePublicationOutputAccounting.*"
+    LABELS "mpi;amr;native;admission" TIMEOUT 300)
 endforeach()

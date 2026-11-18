@@ -903,8 +903,10 @@ TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPag
         N::NativeConstructionCounterAccess::create<Counter>(cap, 0, A::NativeSourceOwnerStore::mirror(arena)));
     using Receipts = D::NativeOwnerReceipts;
     using Action = Receipts::Action;
-    std::array<N::NativeTrackedOwner<unsigned>, 32> actual;
-    std::array<Receipts::Edit, 32> edits;
+    constexpr auto count = G::leaf_capacity + 1;
+    std::array<N::NativeTrackedOwner<unsigned>, count> actual;
+    std::array<D::NativePaidExtentCharge, count> charges;
+    std::array<Receipts::Edit, count> edits;
     std::size_t work = 0;
     const G::Admission demand{&work, [](void* raw, std::size_t bytes)
         { *static_cast<std::size_t*>(raw) += bytes; }, nullptr, admission.state()};
@@ -912,9 +914,9 @@ TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPag
     for (std::size_t i = 0; i != actual.size(); ++i)
     {
         actual[i] = N::NativeAllocationEnvelopeAccess::make<unsigned>(admission, static_cast<unsigned>(i));
-        auto charge = D::NativePaidExtentCharge::fixed(actual[i].envelope);
-        edits[i] = {charge, Action::Retain};
-        sequential = sequential.retained(charge, demand);
+        charges[i] = D::NativePaidExtentCharge::fixed(actual[i].envelope);
+        edits[i] = {&charges[i], Action::Retain};
+        sequential = sequential.retained(charges[i], demand);
     }
     const auto sequential_work = work;
     work = 0;
@@ -948,12 +950,54 @@ TEST(NativeGeometryAccounting, PaidReceiptBatchChecksReferenceOrderAndReducesPag
         }});
     EXPECT_EQ(expected.rows, actual.size());
     const auto charge = D::NativePaidExtentCharge::fixed(actual.front().envelope);
-    std::array balanced{Receipts::Edit{charge, Action::Retire}, Receipts::Edit{charge, Action::Retain}};
+    std::array balanced{Receipts::Edit{&charge, Action::Retire}, Receipts::Edit{&charge, Action::Retain}};
     EXPECT_TRUE(batch.edited(balanced, demand).same_root(batch));
-    std::array invalid{Receipts::Edit{charge, Action::Retire}, Receipts::Edit{charge, Action::Retire},
-        Receipts::Edit{charge, Action::Retain}};
+    std::array invalid{Receipts::Edit{&charge, Action::Retire}, Receipts::Edit{&charge, Action::Retire},
+        Receipts::Edit{&charge, Action::Retain}};
     EXPECT_THROW((void) batch.edited(invalid, demand), SimpleFluid::PLIC::GeometryError);
     EXPECT_TRUE(batch.contains(charge));
+
+    const auto stage = [&](G::ReceiptEdits& scratch)
+    {
+        for (const auto& item : charges)
+        {
+            scratch.append_borrowed(item, Action::Retire);
+            scratch.append(item, Action::Retain);
+        }
+    };
+    work = 0;
+    std::size_t staged_work = 0;
+    {
+        G::ReceiptEdits scratch(demand);
+        stage(scratch);
+        staged_work = work;
+        EXPECT_TRUE(batch.edited(scratch.rows(), demand).same_root(batch));
+    }
+    ASSERT_GT(staged_work, 0u);
+    const auto attempt = [&]
+    {
+        G::ReceiptEdits scratch(short_demand);
+        stage(scratch);
+    };
+    short_batch = {0, staged_work - 1};
+    EXPECT_THROW(attempt(), std::bad_alloc);
+    EXPECT_GT(short_batch.used, 0u);
+    EXPECT_EQ(admission.statistics().actual_live, live);
+    EXPECT_TRUE(batch.contains(charge));
+
+    const auto incoming = N::NativeAllocationEnvelopeAccess::make<unsigned>(admission, count);
+    const auto changed = [&]
+    {
+        const auto donor = Receipts{}.edited(edits, demand);
+        G::ReceiptEdits scratch(demand);
+        scratch.append_borrowed(charges.front(), Action::Retire);
+        scratch.append(D::NativePaidExtentCharge::fixed(incoming.envelope), Action::Retain);
+        return donor.edited(scratch.rows(), demand);
+    }();
+    EXPECT_FALSE(changed.contains(charges.front()));
+    EXPECT_TRUE(changed.contains(D::NativePaidExtentCharge::fixed(incoming.envelope)));
+    for (const auto& unchanged : std::span(charges).subspan(1))
+        EXPECT_TRUE(changed.contains(unchanged));
 }
 SourceUnionFrame source_union_frame(const SourceUnionFrame& previous, const PhysicalSourceFixture& source,
     RealFloor& floor, pipeline_trace::Phase phase, std::size_t revision)

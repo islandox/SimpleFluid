@@ -17,28 +17,8 @@ namespace SimpleFluid::Meshes::AMR::adaptive_detail
 namespace
 {
 using ReceiptAllocation = cartesian_detail::Allocation;
-struct ReceiptControl
-{
-    Budget* budget = nullptr;
-    std::shared_ptr<Budget> keeper;
-    std::size_t charge = 0;
-    ~ReceiptControl()
-    {
-        if (budget)
-            budget->used -= charge;
-    }
-};
-constexpr std::size_t receipt_control_bytes = sizeof(ReceiptControl) + 2 * 128;
-std::shared_ptr<ReceiptControl> receipt_control(Budget& budget, const std::shared_ptr<Budget>& keeper)
-{
-    ReceiptAllocation memory(budget);
-    memory.retain(receipt_control_bytes);
-    auto result = std::make_shared<ReceiptControl>();
-    result->budget = &budget;
-    result->keeper = keeper;
-    result->charge = std::exchange(memory.bytes, 0);
-    return result;
-}
+using ReceiptControl = contact_funding_detail::ControlCredit;
+constexpr auto receipt_control_bytes = ReceiptControl::allowance();
 bool original_member_equal(const PooledLineSubscriber& a, const PooledLineSubscriber& b)
 {
     return a.resident == b.resident && a.support_authority == b.support_authority && a.support == b.support &&
@@ -693,6 +673,12 @@ std::size_t PooledLineCompletion::Proof::metadata_bytes() const noexcept
 {
     return charge_ + receipt_control_bytes;
 }
+NativeContactOwnerFunding PooledLineCompletion::Proof::native_funding(
+    const std::shared_ptr<const Proof>& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes, [](const Proof& value) { return value.charge_; },
+        [](const Proof& value) { return static_cast<const ReceiptControl*>(value.control_); });
+}
 std::size_t PooledLineCompletion::Proof::known_payload_bytes() const noexcept
 {
     return sizeof(Proof) + sizeof(ReceiptControl) + line_.capacity() + support_.capacity();
@@ -752,9 +738,8 @@ PooledLineCompletionView PooledLineCompletion::share_immutable() &&
         throw std::invalid_argument("Completed line reply has no unshared receiver-owned result.");
     ReceiptAllocation body(*output_budget_);
     body.retain(sizeof(PooledLineCompletion));
-    auto control = receipt_control(*output_budget_, output_keeper_);
-    auto result = std::shared_ptr<PooledLineCompletion>(
-        new PooledLineCompletion(std::move(*this)), [control](PooledLineCompletion* p) { delete p; });
+    auto [result, control] = contact_funding_detail::make_controlled(*output_budget_, output_keeper_,
+        [&] { return new PooledLineCompletion(std::move(*this)); });
     result->wrapper_control_ = control.get();
     result->wrapper_charge_ = std::exchange(body.bytes, 0);
     return result;
@@ -762,6 +747,13 @@ PooledLineCompletionView PooledLineCompletion::share_immutable() &&
 std::size_t PooledLineCompletion::metadata_bytes() const noexcept
 {
     return output_charge_ + wrapper_charge_ + (wrapper_control_ ? receipt_control_bytes : 0);
+}
+NativeContactOwnerFunding PooledLineCompletion::native_funding(
+    const PooledLineCompletionView& owner, std::size_t bytes) const
+{
+    return NativeContactFundingAccess::split_named(owner, bytes,
+        [](const PooledLineCompletion& value) { return value.output_charge_ + value.wrapper_charge_; },
+        [](const PooledLineCompletion& value) { return static_cast<const ReceiptControl*>(value.wrapper_control_); });
 }
 std::size_t PooledLineCompletion::known_payload_bytes() const noexcept
 {
@@ -799,9 +791,8 @@ PooledLineCompletion PooledLineCompletion::seal(std::size_t line, PooledLineSubs
         throw std::invalid_argument("Completed line replies require an original native request and lifetime keeper.");
     ReceiptAllocation body(budget);
     body.retain(sizeof(Proof));
-    auto control = receipt_control(budget, keeper);
-    auto proof = std::shared_ptr<Proof>(
-        new Proof(std::move(original), context, layer, pools), [control](Proof* value) { delete value; });
+    auto [proof, control] = contact_funding_detail::make_controlled(budget, keeper,
+        [&] { return new Proof(std::move(original), context, layer, pools); });
     proof->control_ = control.get();
     proof->kernel_layer_ = kernel_witness_layer;
     proof->cached_read_ = cached_read;

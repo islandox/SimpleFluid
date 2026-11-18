@@ -159,3 +159,24 @@ TEST(GeometryOwnerGraph, ManifestRecordContributesOnePhysicalEdgeRegardlessOfPay
     mismatched.key.channel = 1;
     EXPECT_THROW((void) foreign.owner(mismatched, true), P::GeometryError);
 }
+
+TEST(GeometryOwnerGraph, ImmutableManifestBranchAllocatesOnlyItsTwoChildSlots)
+{
+    std::size_t used = 0;
+    Editor editor({}, 0, used, graph_limit);
+    constexpr auto owners = G::leaf_capacity + 1;
+    for (std::size_t i = 0; i != owners; ++i)
+        editor.external(std::make_shared<const FixtureNode>(), sizeof(FixtureNode), true);
+    const auto root = editor.finish();
+    ASSERT_EQ(root.owner_count(), owners);
+    std::size_t child_buffers = 0, payload = 0;
+    root.visit_payload([&](const void*, std::size_t bytes)
+    {
+        // The head, node headers and both record buffers are larger than
+        // the two-child buffer. No physical body owners enter this census.
+        child_buffers += bytes == 2 * sizeof(std::shared_ptr<const void>);
+        payload += bytes;
+    });
+    EXPECT_EQ(child_buffers, 1u);
+    EXPECT_EQ(payload, root.metadata_payload_bytes());
+}

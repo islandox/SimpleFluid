@@ -193,6 +193,19 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::copy_cache(
     }
     return cache;
 }
+void NativePublicationSession::project_receipt(const std::shared_ptr<const NativePublicationReceipt>& receipt,
+    PLIC::details::GeometryOwnerGraphEditor& graph, bool retain, PLIC::details::NativeGeometryAccounting* accounting)
+{
+    if (!receipt) return;
+    NativePublicationOwnerGraph::Context context(graph, retain, bool(accounting), accounting);
+    if (!context.sink.semantic(receipt, geometry_detail::NativeConstructorOwnerKind::NativeMesh,
+            receipt->allocation)) return;
+    context.sink.fixed(receipt->allocation);
+    receipt->source.project(graph, retain);
+    graph.weak_observation(receipt->partition, retain);
+    graph.weak_observation(receipt->view, retain);
+    geometry_detail::NativeTpetraMapAdmission::visit_weak(receipt->map, graph, retain, accounting);
+}
 const NativePublicationIndexRow* NativePublicationIndexes::find(const AdaptiveCellKey& key) const
 {
     const auto row = Pages::lower_bound(sources, [&](const auto& value) { return value.key() < key; });
@@ -782,5 +795,135 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::edited(
     }
     result->indexes = std::move(next.owner);
     return result;
+}
+void NativePublicationSession::stage_result(std::shared_ptr<NativePublicationViewData> result,
+    Teuchos::RCP<const DefaultTpetraTypes::map_type> map, std::uint64_t collective_identity)
+{
+    if (!result || !result->payload || !result->payload->partition || !result->payload->mesh ||
+        map.is_null() || map->getComm().getRawPtr() != inputs_.comm.getRawPtr() ||
+        map->getGlobalNumElements() != inputs_.global_cells || map->getLocalNumElements() != inputs_.layout->size() ||
+        !result->payload->partition->geometry_unchanged() || !result->payload->partition->geometry()->sparse_native() ||
+        !result->payload->partition->plan().communicator().shares_resource(inputs_.comm) ||
+        result->payload->partition->plan().communicator().getRawPtr() != inputs_.comm.getRawPtr() ||
+        !collective_identity || result->payload->partition->plan().collective_identity() != collective_identity ||
+        !result->payload->mesh->owned_cell_map().shares_resource(map) ||
+        result->payload->mesh->owned_cell_map().getRawPtr() != map.getRawPtr())
+        throw std::invalid_argument("Incomplete exact native publication result.");
+    if (result->payload->owned.size() != inputs_.layout->size() ||
+        result->payload->cell_begin != inputs_.cell_begin || !same_control(result->payload->remote.root_, indexes_->remote.root_) ||
+        result->payload->keys.size() != inputs_.layout->size() + result->payload->remote.size())
+        throw std::invalid_argument("Native result routes have foreign current membership.");
+    for (std::size_t ordinal = 0; ordinal < inputs_.layout->size(); ++ordinal)
+    {
+        const auto gid = inputs_.cell_begin + ordinal;
+        const auto route = std::lower_bound(result->payload->keys.begin(), result->payload->keys.end(), gid,
+            [](const auto& route, std::uint64_t gid) { return route.gid < gid; });
+        if (result->payload->owned.at_ordinal(ordinal) != inputs_.layout->at_ordinal(ordinal).key ||
+            route == result->payload->keys.end() || route->gid != gid || route->remote || route->ordinal != ordinal ||
+            map->getGlobalElement(ordinal) != DefaultTpetraTypes::global_ordinal_type(gid) ||
+            result->payload->partition->plan().owned_cells()[ordinal] != gid)
+            throw std::invalid_argument("Native result owned routes differ from current typed-key map order.");
+    }
+    for (std::size_t ordinal = 0; ordinal < result->payload->keys.size(); ++ordinal)
+    {
+        const auto& route = result->payload->keys[ordinal];
+        if (route.gid >= inputs_.global_cells || (ordinal && result->payload->keys[ordinal - 1].gid >= route.gid) ||
+            (route.remote && route.ordinal >= result->payload->remote.size()))
+            throw std::invalid_argument("Native result has invalid, repeated or unsorted current routes.");
+    }
+    auto receipt = geometry_detail::NativeAllocationEnvelopeAccess::make<NativePublicationReceipt>(admission_);
+    auto& value = *receipt.owner;
+    value.source = inputs_.fixed_observations;
+    if (!value.source.layout.matches_live(inputs_.layout) ||
+        !value.source.identity.matches_live(inputs_.observation.identity) ||
+        !value.source.topology.matches_live(inputs_.observation.topology_identity) ||
+        !value.source.ownership.matches_live(inputs_.ownership_owner) ||
+        !value.source.authority.matches_live(NativeKernelAuthority::observation(inputs_.kernel).lock()) ||
+        !value.source.subfaces.matches_live(inputs_.subfaces))
+        throw std::invalid_argument("Native receipt lacks actual source layout and observation controls.");
+    value.partition = PLIC::details::NativeWeakOwnerObservation::native(result->payload->partition,
+        geometry_detail::NativePartitionAccess::allocation(result->payload->partition));
+    value.view = PLIC::details::NativeWeakOwnerObservation::native(result, result->allocation);
+    value.result = result;
+    value.map = map.create_weak();
+    value.controls = geometry_construction_controls();
+    value.source_topology = inputs_.observation.topology;
+    value.source_partition = inputs_.observation.partition;
+    value.source_geometry = inputs_.observation.geometry;
+    value.source_native_geometry = inputs_.observation.native_geometry;
+    value.source_ownership_address = inputs_.observation.partition_identity.get();
+    value.output_geometry = result->payload->partition->geometry()->geometry_epoch();
+    value.transaction = collective_identity;
+    value.cell_begin = inputs_.cell_begin;
+    value.cells = inputs_.global_cells;
+    value.faces = result->payload->partition->plan().global_faces();
+    value.nodes = result->payload->partition->plan().global_nodes();
+    value.local_cells = inputs_.layout->size();
+    value.allocation = receipt.envelope;
+    receipt_ = std::move(receipt.owner);
+    result_ = std::move(result);
+}
+void NativePublicationSession::commit_locked() noexcept
+{
+    if (!result_ || !receipt_ || inputs_.cache->revision != cache_revision_ ||
+        cache_revision_ == std::numeric_limits<std::uint64_t>::max())
+        std::terminate();
+    inputs_.cache->indexes = indexes_;
+    inputs_.cache->receipt = receipt_;
+    ++inputs_.cache->revision;
+}
+void NativePublicationSession::commit() noexcept
+{
+    const std::lock_guard lock(inputs_.cache->mutex);
+    if (inputs_.cache->commit_token)
+        std::terminate();
+    commit_locked();
+}
+AdaptiveNativePublicationView NativePublicationSession::view() const
+{
+    if (!result_)
+        throw std::invalid_argument("Native publication has no staged result.");
+    return AdaptiveNativePublicationView(result_);
+}
+bool NativePublicationSession::receipt_matches(const NativePublicationInputs& inputs,
+    const std::shared_ptr<const CompositePartition<>>& partition,
+    const Teuchos::RCP<const DefaultTpetraTypes::map_type>& map)
+{
+    if (!inputs.cache || !partition || map.is_null())
+        return false;
+    std::shared_ptr<const NativePublicationReceipt> receipt;
+    {
+        const std::lock_guard lock(inputs.cache->mutex);
+        receipt = inputs.cache->receipt;
+    }
+    if (!receipt || !receipt->allocation || !receipt->allocation->authentic_owner(receipt->allocation) ||
+        !receipt->allocation->matches(receipt) || !receipt->source.layout.matches_live(inputs.layout) ||
+        !receipt->source.identity.matches_live(inputs.observation.identity) ||
+        !receipt->source.topology.matches_live(inputs.observation.topology_identity) ||
+        !receipt->source.ownership.matches_live(inputs.ownership_owner) ||
+        !receipt->source.authority.matches_live(NativeKernelAuthority::observation(inputs.kernel).lock()) ||
+        !receipt->source.subfaces.matches_live(inputs.subfaces) ||
+        receipt->source_ownership_address != inputs.observation.partition_identity.get() ||
+        inputs.ownership_owner.owner_before(inputs.observation.partition_identity) ||
+        inputs.observation.partition_identity.owner_before(inputs.ownership_owner) ||
+        !receipt->partition.matches_live(partition) || receipt->map.is_null() || !receipt->map.is_valid_ptr() ||
+        !receipt->map.shares_resource(map) || receipt->map.getRawPtr() != map.getRawPtr() ||
+        !partition->plan().communicator().shares_resource(inputs.comm) ||
+        partition->plan().communicator().getRawPtr() != inputs.comm.getRawPtr() ||
+        receipt->controls != geometry_construction_controls() || !inputs.subfaces ||
+        receipt->controls != inputs.subfaces->controls() ||
+        receipt->source_topology != inputs.observation.topology ||
+        receipt->source_partition != inputs.observation.partition ||
+        receipt->source_geometry != inputs.observation.geometry ||
+        receipt->source_native_geometry != inputs.observation.native_geometry ||
+        receipt->cell_begin != inputs.cell_begin || receipt->cells != inputs.global_cells ||
+        receipt->local_cells != inputs.layout->size() || !partition->geometry_unchanged() ||
+        receipt->output_geometry != partition->geometry()->geometry_epoch() ||
+        receipt->transaction != partition->plan().collective_identity() ||
+        receipt->faces != partition->plan().global_faces() || receipt->nodes != partition->plan().global_nodes())
+        return false;
+    const auto result = receipt->result.lock();
+    return receipt->view.matches_live(result) && result->payload && result->payload->owned.size() == inputs.layout->size() &&
+        same_control(result->payload->partition, partition);
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

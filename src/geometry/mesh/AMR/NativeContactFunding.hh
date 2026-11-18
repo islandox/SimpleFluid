@@ -159,6 +159,7 @@ class SIMPLEFLUID_LOCAL NativeContactFundingAccess final
 {
     friend class ContactPhysicalResidency;
     friend class ContactSourcePointSnapshot;
+    friend class PooledLineCompletion;
     friend class CartesianIncidenceSource;
     friend class CartesianSourceInventory;
     friend class CartesianSourceManifestSet;
@@ -306,21 +307,26 @@ class SIMPLEFLUID_LOCAL NativeContactFundingAccess final
             return graph.external(body, original, retain);
         if (funding.index_owner)
         {
-            if (!graph.external(body, 0, retain)) return false;
-            if (graph.external(funding.index_accounting, 0, retain))
+            using OwnerSink = geometry_detail::NativeConstructorOwnerSink;
+            OwnerSink::require_envelope(funding.index_owner, body);
+            if (!graph.external_with_children(body, 0, retain)) return false;
+            OwnerSink::require_envelope(funding.index_extent, funding.index_accounting);
+            if (graph.external_with_children(funding.index_accounting, 0, retain))
             {
+                OwnerSink::require_envelope(funding.index_storage.envelope, funding.index_storage.owner);
                 graph.native_fixed(funding.index_extent, retain, false);
                 graph.native_fixed(funding.index_owner, retain, false);
                 graph.native_fixed(funding.index_storage.envelope, retain, false);
                 if (retain) graph.native_storage(funding.index_storage);
-                if (graph.external(funding.index_storage.owner, funding.index_storage.owner->exclusive_bytes(), retain))
+                if (graph.external_with_children(
+                        funding.index_storage.owner, funding.index_storage.owner->exclusive_bytes(), retain))
                     graph.native_state(funding.index_storage.owner->admission().state(), retain, false);
             }
             return true;
         }
         if (retain)
             graph.record_paid_extent(funding.body);
-        const auto changed = graph.external(body, funding.body.bytes(), retain);
+        const auto changed = graph.external_with_children(body, funding.body.bytes(), retain);
         if (changed)
         {
             graph.weak_observation(funding.body.physical_observation(), retain);

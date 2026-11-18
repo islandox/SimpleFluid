@@ -213,6 +213,8 @@ private:
 
 [[nodiscard]] AdaptiveNativePublicationView publish_adaptive_native(const DistributedAdaptiveHierarchy&,
     std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
+[[nodiscard]] AdaptiveNativePublicationView publish_adaptive_native(const DistributedAdaptiveHierarchy&,
+    const AdaptiveNativeSchemaView&, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
 /** Explicit O(N) rich metadata export. Complete map/key overlap is admitted
  * before allocation; qualified publication and normal native consumers use
  * the borrowed view API instead.

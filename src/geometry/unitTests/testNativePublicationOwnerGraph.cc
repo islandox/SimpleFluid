@@ -78,3 +78,32 @@ TEST(NativePublicationOwnerGraph, BorrowedUnreceiptedCounterCannotEnterQualified
     EXPECT_THROW((void) graph.finish(), P::GeometryError);
 }
 } // namespace
+
+TEST(NativePublicationOwnerGraph, FlatFragmentDescriptorPinDoesNotSuppressRecipeParts)
+{
+    auto descriptor = std::make_shared<SimpleFluid::Meshes::NativeFragmentDescriptor>();
+    const auto part = std::make_shared<const SimpleFluid::Meshes::NativeFragmentBytes>(99, 's');
+    descriptor->parts.push_back(part);
+    const auto descriptor_bytes =
+        sizeof(*descriptor) + descriptor->view.capacity() + descriptor->parts.capacity() * sizeof(descriptor->parts[0]);
+    const auto part_bytes = sizeof(*part) + part->capacity();
+    using Editor = P::details::GeometryOwnerGraphEditor;
+    const auto kind = Editor::external_kind();
+    std::size_t used = 0;
+    Editor build({}, 0, used, cap);
+    build.external(descriptor, descriptor_bytes, true);
+    D::NativePublicationOwnerGraph::descriptor(descriptor, build, true);
+    const auto both = build.finish();
+    EXPECT_EQ(both.references(0, kind, descriptor), 2u);
+    EXPECT_TRUE(both.admits(0, kind, part, part_bytes));
+
+    Editor index_retire(both, 0, used, cap);
+    EXPECT_FALSE(index_retire.external(descriptor, descriptor_bytes, false));
+    const auto typed = index_retire.finish();
+    EXPECT_EQ(typed.references(0, kind, descriptor), 1u);
+    EXPECT_EQ(typed.references(0, kind, part), 1u);
+
+    Editor typed_retire(typed, 0, used, cap);
+    D::NativePublicationOwnerGraph::descriptor(descriptor, typed_retire, false);
+    EXPECT_EQ(typed_retire.finish().owner_count(), 0u);
+}

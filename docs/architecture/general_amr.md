@@ -1645,14 +1645,30 @@ explicit polyhedral shards and native ordinal routes, not a replicated region
 entry per global active fragment. Full ghost shell packages and outer metric
 neighbors are fetched from authenticated actual owners.
 
-The expanded native-draft APIs retain full cell certificates. The explicit
-compact publication path instead retains procedural recipes and complete support
-faces for originally geometry-null Cartesian/Product records. It constructs and
-validates each full shell transiently before releasing it; supplied certificates,
-Static and Polyhedral records remain retained. Compact draft leaves are not
-migration wire records. Owner, revision, metric and shell-equivalence checks
-remain in force. FVM and the hierarchy-based native publisher select this compact
-path; construction success does not establish physical-flow qualification.
+The expanded native-draft APIs retain full cell certificates. The compact draft
+retains procedural recipes and complete support faces for originally
+geometry-null Cartesian and Product records. It validates their full shells
+transiently and retains the supplied, Static and Polyhedral certificates. Its
+owner, revision, metric and shell-equivalence checks also apply to the owning
+`assemble_adaptive_native()` publication. Migration uses its separate detached
+leaf and family records.
+
+Hierarchy callers can pass `native_publication_schema(hierarchy)` to
+`publish_adaptive_native()` to obtain an immutable publication view. A qualified
+built-in source supplies separate proofs of its original provider geometry and
+its current completed incidence. A changed face partition is verified against
+the original source faces even when the source proof and fragment are reused.
+The current partition, numbering and owned map still have to match the actual
+result receipt at `with_partition()`. Byte-schema callers and inputs outside the
+qualified source or allocation profile use full verification.
+
+The publication view borrows typed keys from its retained immutable indexes.
+Owning key maps are available through `export_adaptive_native_publication()`
+with explicit admission for the copies. Publication results retain the physical
+owners they use, with separate accounting for scalar routes and library map
+allowances. Their receipts carry exact weak source and result observations.
+The explicit General VoF draft and FrozenNative paths retain their existing
+verification and ownership contracts.
 
 Mixed import retains only needed original-root join capsules, including aliases
 needed by ancestors absent from a current interior leaf's faces. Those capsules

@@ -1,4 +1,5 @@
 #include "geometry/mesh/AMR/ContactPhysicalResidency.hh"
+#include "geometry/mesh/AMR/AdaptiveSubfaceSnapshot.hh"
 #include <gtest/gtest.h>
 
 namespace
@@ -170,4 +171,83 @@ TEST(ContactPhysicalResidency, MissingControlPreservesExpiredRetiredCredit)
     EXPECT_EQ(candidate.overlap_bytes(), overlap);
     EXPECT_EQ(budget->used, before);
     EXPECT_EQ(budget->cumulative, spent);
+}
+
+TEST(ContactPhysicalResidency, PlainRingIndexAndTypedOwnerRetireIndependently)
+{
+    namespace P = SimpleFluid::PLIC::details;
+    using Manifest = P::geometry_demand::GeometryOwnerManifest;
+    using Ring = D::SharedSubfaceRing;
+    const auto arena = std::make_shared<D::Budget>(D::Budget{ample});
+    std::vector<std::size_t> slots{4, 9, 13};
+    auto former_charge = slots.capacity() * sizeof(slots[0]);
+    arena->add(former_charge);
+    const auto ring = Ring::transfer(slots, *arena, arena, former_charge);
+    ASSERT_EQ(former_charge, 0u);
+
+    // Census the concrete ring, slots, and installed control without graph
+    // traversal. The transferred allowance covers the body and control group.
+    std::size_t body_bytes = 0;
+    const void* control = nullptr;
+    ring->visit_borrowed_payload([&](const D::ContactPayloadAllocation& row)
+    {
+        if (row.owner == ring.get())
+            body_bytes += row.payload_bytes;
+        else if (row.identity.role == D::ContactPayloadRole::CartesianControlCreditObject)
+            control = row.owner;
+    });
+    ASSERT_NE(control, nullptr);
+    ASSERT_GT(ring->charged_bytes(), body_bytes);
+    const auto control_bytes = ring->charged_bytes() - body_bytes;
+    const auto arena_bytes = sizeof(D::Budget) + 4 * sizeof(void*);
+    const auto kind = P::GeometryOwnerGraphEditor::external_kind();
+    const P::geometry_demand::OwnerRecord plain{{0, kind, ring.get()}, ring, body_bytes, 1};
+    const auto census = [&](const Manifest& root, bool flat, bool typed)
+    {
+        const auto body_references = std::size_t(flat) + std::size_t(typed);
+        EXPECT_EQ(root.owner_count(), std::size_t(body_references != 0) + (typed ? 2u : 0u));
+        EXPECT_EQ(root.typed_owner_count(), typed ? 2u : 0u);
+        EXPECT_EQ(root.payload_bytes(), (body_references ? body_bytes : 0) + (typed ? control_bytes + arena_bytes : 0));
+        std::array expected{
+            P::geometry_demand::OwnerRecord{{0, kind, ring.get()}, ring, body_bytes, body_references},
+            P::geometry_demand::OwnerRecord{{0, kind, control}, {}, control_bytes, std::size_t(typed)},
+            P::geometry_demand::OwnerRecord{{0, kind, arena.get()}, arena, arena_bytes, typed ? 2u : 0u}};
+        root.visit_records({&expected, [](void* raw, const auto& row)
+        {
+            const auto& wanted = *static_cast<const decltype(expected)*>(raw);
+            const auto at = std::find_if(wanted.begin(), wanted.end(),
+                [&](const auto& value) { return row.key.address == value.key.address; });
+            ASSERT_NE(at, wanted.end());
+            EXPECT_EQ(row.key.kind, at->key.kind);
+            EXPECT_EQ(row.bytes, at->bytes);
+            EXPECT_EQ(row.references, at->references);
+        }});
+    };
+
+    for (const bool retire_typed_first : {false, true})
+    {
+        SCOPED_TRACE(retire_typed_first);
+        std::size_t work = 0;
+        P::GeometryOwnerGraphEditor add({}, 0, work, ample);
+        add.owner(plain, true);
+        Ring::project_owners(ring, add, true);
+        const auto both = add.finish();
+        census(both, true, true);
+
+        P::GeometryOwnerGraphEditor first(both, 0, work, ample);
+        if (retire_typed_first)
+            Ring::project_owners(ring, first, false);
+        else
+            first.owner(plain, false);
+        const auto remaining = first.finish();
+        census(remaining, retire_typed_first, !retire_typed_first);
+
+        P::GeometryOwnerGraphEditor last(remaining, 0, work, ample);
+        if (retire_typed_first)
+            last.owner(plain, false);
+        else
+            Ring::project_owners(ring, last, false);
+        census(last.finish(), false, false);
+        census(both, true, true);
+    }
 }

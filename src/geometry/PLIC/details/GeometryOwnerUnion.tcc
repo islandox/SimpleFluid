@@ -370,7 +370,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     };
     geometry_detail::NativeAdministrationVector<Edge> pending{
         geometry_detail::NativeAdministrationAllocator<Edge>(state)};
-    struct FinancialEdge { NativePaidExtentCharge charge; bool retain; };
+    struct FinancialEdge { const NativePaidExtentCharge* charge; bool retain; };
     geometry_detail::NativeAdministrationVector<FinancialEdge> pending_financial{
         geometry_detail::NativeAdministrationAllocator<FinancialEdge>(state)};
     const auto charge_work = [&](std::size_t bytes)
@@ -461,7 +461,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
                 const NativePaidExtentCharge* previous = nullptr;
                 for (const auto& edit : changes)
                 {
-                    const auto& value = edit.charge;
+                    const auto& value = *edit.charge;
                     if (previous && previous->same_physical_origin(value))
                         continue;
                     previous = &value;
@@ -488,11 +488,16 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     {
         struct Context
         {
-            const decltype(paid_change)& apply;
+            geometry_demand::ReceiptEdits& edits;
             bool retain;
-        } add_context{paid_change, true}, retire_context{paid_change, false};
+        } add_context{receipt_edits, true}, retire_context{receipt_edits, false};
         const auto visit = [](void* raw, const NativePaidExtentCharge& value, std::size_t)
-        { auto& context = *static_cast<Context*>(raw); context.apply(value, context.retain); };
+        {
+            auto& context = *static_cast<Context*>(raw);
+            if (!value.source_only() && (!context.retain || value.valid()))
+                context.edits.append_borrowed(value, context.retain ? NativeOwnerReceipts::Action::Retain :
+                    NativeOwnerReceipts::Action::RetireIfRecorded);
+        };
         after.visit_added(before, {&add_context, visit}, &work.native_administration);
         before.visit_added(after, {&retire_context, visit}, &work.native_administration);
     };
@@ -528,7 +533,7 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             if (pending_financial.capacity() != count)
                 exhausted("Native financial projection scratch capacity is unqualified.");
         }
-        pending_financial.push_back({charge, retain});
+        pending_financial.push_back({&charge, retain});
     };
     struct Capture
     {
@@ -647,6 +652,10 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
     auto observed_owners = owners;
     auto observed_domain_paid = domain_paid;
     auto observed_paid = paid;
+    // Financial edges borrow immutable receipt rows. The first batch borrows
+    // the input roots. Subsequent batches also need the just-retired roots
+    // through consumption at the start of the next round.
+    NativeOwnerReceipts retired_domains, retired_paid;
     auto observed_origins = origins;
     auto observed_direct_origins = direct_origins;
     auto observed_publication_origins = publication_origins;
@@ -672,9 +681,9 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
                 if (!edge.retain)
                     editor.native_state_edges(edge.state, edge.references, false);
             for (const auto& edge : pending_financial)
-                if (edge.retain) editor.financial_pin(edge.charge, true);
+                if (edge.retain) editor.financial_pin(*edge.charge, true);
             for (const auto& edge : pending_financial)
-                if (!edge.retain) editor.financial_pin(edge.charge, false);
+                if (!edge.retain) editor.financial_pin(*edge.charge, false);
             result.owners = editor.finish();
             auto next_receipts = editor.paid_receipts();
             receipt_delta(result.domain_paid, next_receipts);
@@ -682,6 +691,8 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             result.domain_paid = std::move(next_receipts);
             pending.clear();
             pending_financial.clear();
+            retired_domains = {};
+            retired_paid = {};
         }
         const auto prior_owners = result.owners;
         const auto prior_domains = result.domain_paid;
@@ -711,8 +722,8 @@ GeometryNativeAdministration GeometryNativeAdministration::updated(const OwnerMa
             unchanged(prior_publication_origins, result.publication_origins) &&
             unchanged(prior_overlap, result.group_overlap);
         observed_owners = prior_owners;
-        observed_domain_paid = prior_domains;
-        observed_paid = prior_paid;
+        retired_domains = std::exchange(observed_domain_paid, prior_domains);
+        retired_paid = std::exchange(observed_paid, prior_paid);
         observed_origins = prior_origins;
         observed_direct_origins = prior_direct_origins;
         observed_publication_origins = prior_publication_origins;
@@ -971,7 +982,7 @@ GeometryOwnerUnion GeometryOwnerUnion::staged(const GeometryOwnerRootBinding* re
         {
             auto& context = *static_cast<PaidEdits*>(raw);
             if (!value.source_only() && (!context.retain || value.valid()))
-                context.edits.append(value, context.retain ? NativeOwnerReceipts::Action::Retain :
+                context.edits.append_borrowed(value, context.retain ? NativeOwnerReceipts::Action::Retain :
                     NativeOwnerReceipts::Action::RetireIfRecorded);
         };
         new_receipts.visit_added(old_receipts, {&paid_add, paid_edit}, &work.native_administration);

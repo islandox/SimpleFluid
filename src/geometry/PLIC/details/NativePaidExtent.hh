@@ -208,8 +208,8 @@ public:
     enum class Action : std::uint8_t { Record, Retain, Retire, RetireIfRecorded };
     struct Edit
     {
-        NativePaidExtentCharge charge;
-        Action action;
+        const NativePaidExtentCharge* charge = nullptr;
+        Action action = Action::Record;
         std::size_t sequence = 0;
     };
     NativeOwnerReceipts() = default;
@@ -224,7 +224,9 @@ public:
     [[nodiscard]] NativeOwnerReceipts retained(const NativePaidExtentCharge&, geometry_demand::Admission) const;
     [[nodiscard]] NativeOwnerReceipts retired(const NativePaidExtentCharge&, geometry_demand::Admission) const;
     /** Stage checked references in input order for each exact receipt, then
-     * copy the affected ordered pages once. Scratch is sorted in place. */
+     * copy the affected ordered pages once. Scratch is sorted in place.
+     * Charge references must remain valid through the edit and its caller's
+     * subsequent consumption of the sorted batch. */
     [[nodiscard]] NativeOwnerReceipts edited(std::span<Edit>, geometry_demand::Admission,
         std::span<const geometry_demand::OwnerRecord> owner_changes = {}) const;
     struct Sink

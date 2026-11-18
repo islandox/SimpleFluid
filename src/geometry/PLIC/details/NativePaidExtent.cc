@@ -352,6 +352,17 @@ struct Row
     std::size_t references = 0;
     [[nodiscard]] std::size_t exclusive_payload_bytes() const noexcept { return charge.source_only(); }
 };
+// The accepted leaf or the edit batch owns each referenced receipt. Borrow
+// through sorting and leaf merge, then copy only the published row payload.
+struct RowChange
+{
+    const NativePaidExtentCharge* charge = nullptr;
+    std::size_t references = 0;
+    RowChange() = default;
+    RowChange(const NativePaidExtentCharge* value, std::size_t count) : charge(value), references(count) {}
+    RowChange(const Row& value) : RowChange(&value.charge, value.references) {}
+    operator Row() const noexcept { return {*charge, references}; }
+};
 struct Less
 {
     bool operator()(const NativePaidExtentCharge& a, const NativePaidExtentCharge& b) const noexcept
@@ -368,12 +379,16 @@ struct Less
         return a.borrowed_financial() < b.borrowed_financial();
     }
     bool operator()(const Row& a, const Row& b) const noexcept { return (*this)(a.charge, b.charge); }
+    bool operator()(const Row& a, const RowChange& b) const noexcept { return (*this)(a.charge, *b.charge); }
+    bool operator()(const RowChange& a, const Row& b) const noexcept { return (*this)(*a.charge, b.charge); }
+    bool operator()(const RowChange& a, const RowChange& b) const noexcept { return (*this)(*a.charge, *b.charge); }
 };
 using Pages = geometry_demand::OrderedPages<Row, Less>;
 } // namespace paid_extent_detail
 namespace geometry_demand
 {
 template<> inline constexpr bool stack_safe_default<paid_extent_detail::Row> = true;
+template<> inline constexpr bool stack_safe_default<paid_extent_detail::RowChange> = true;
 template<> inline constexpr bool native_flag_in_owned_admission<paid_extent_detail::Row> = true;
 } // namespace geometry_demand
 struct NativeOwnerReceipts::State
@@ -547,12 +562,16 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
 {
     using namespace paid_extent_detail;
     for (std::size_t i = 0; i != edits.size(); ++i)
+    {
+        if (!edits[i].charge)
+            invalid_paid("Paid receipt edit has no charge reference.");
         edits[i].sequence = i;
+    }
     const Less less;
     std::sort(edits.begin(), edits.end(), [less](const Edit& a, const Edit& b)
         {
-            if (less(a.charge, b.charge)) return true;
-            if (less(b.charge, a.charge)) return false;
+            if (less(*a.charge, *b.charge)) return true;
+            if (less(*b.charge, *a.charge)) return false;
             return a.sequence < b.sequence;
         });
     const auto accepted = state_ ? state_->root : Pages::Ptr{};
@@ -585,17 +604,17 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
     };
     std::size_t maximum = 0;
     for (std::size_t i = 0; i != edits.size(); ++i)
-        if (!i || less(edits[i - 1].charge, edits[i].charge))
+        if (!i || less(*edits[i - 1].charge, *edits[i].charge))
             ++maximum;
     visit_removed([&](const Row&) { maximum = geometry_demand::checked_sum(maximum, 1); });
     if (!maximum)
         return *this;
-    std::array<Row, 8> local{};
-    geometry_detail::NativeAdministrationVector<Row> overflow(admission.allocator<Row>());
-    std::span<Row> rows = local;
+    std::array<RowChange, 8> local{};
+    geometry_detail::NativeAdministrationVector<RowChange> overflow(admission.allocator<RowChange>());
+    std::span<RowChange> rows = local;
     if (maximum > local.size())
     {
-        admission.charge(maximum, sizeof(Row));
+        admission.charge(maximum, sizeof(RowChange));
         overflow.resize(maximum);
         if (overflow.capacity() != maximum)
             invalid_paid("Paid receipt batch capacity is unqualified.");
@@ -604,17 +623,18 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
     std::size_t count = 0;
     for (std::size_t begin = 0; begin != edits.size();)
     {
-        const auto& key = edits[begin].charge;
+        const auto& key = *edits[begin].charge;
         const auto* old = Pages::lower_bound(accepted, [&](const Row& row) { return less(row.charge, key); });
         if (old && less(key, old->charge)) old = nullptr;
-        Row row = old ? *old : Row{key, 0};
+        RowChange row = old ? RowChange(*old) : RowChange(&key, 0);
         std::size_t end = begin;
         do
         {
             const auto& edit = edits[end++];
+            const auto& charge = *edit.charge;
             if (edit.action == Action::Retire || edit.action == Action::RetireIfRecorded)
             {
-                if (!row.references || !row.charge.same_receipt_fact(edit.charge))
+                if (!row.references || !row.charge->same_receipt_fact(charge))
                 {
                     if (edit.action == Action::Retire)
                         invalid_paid("Retired paid owner has no exact origin row.");
@@ -622,18 +642,18 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
                 }
                 --row.references;
             }
-            else if (edit.charge.valid())
+            else if (charge.valid())
             {
-                if ((old && !old->charge.same_receipt_fact(edit.charge)) ||
-                    (row.references && !row.charge.same_receipt_fact(edit.charge)))
+                if ((old && !old->charge.same_receipt_fact(charge)) ||
+                    (row.references && !row.charge->same_receipt_fact(charge)))
                     invalid_paid("Paid owner changes immutable control/extent/origin.");
-                if (!row.references) row.charge = edit.charge;
+                if (!row.references) row.charge = &charge;
                 if (edit.action == Action::Retain || !row.references)
                     row.references = geometry_demand::checked_sum(row.references, 1);
             }
-            else if (edit.charge.has_financial_pin())
+            else if (charge.has_financial_pin())
                 invalid_paid("Native financial receipt no longer authenticates live funding.");
-        } while (end != edits.size() && !less(key, edits[end].charge));
+        } while (end != edits.size() && !less(key, *edits[end].charge));
         if (row.references != (old ? old->references : 0))
         {
             const auto owner = std::lower_bound(owner_changes.begin(), owner_changes.end(), key,
@@ -644,21 +664,22 @@ NativeOwnerReceipts NativeOwnerReceipts::edited(std::span<Edit> edits, geometry_
                 });
             if (owner != owner_changes.end() && !owner->references && owner->key.kind == key.kind() &&
                 owner->key.address == key.owner_address())
-                check_removed_control(row.charge, *owner); // Already covered by the last-owner pass.
+                check_removed_control(*row.charge, *owner); // Already covered by the last-owner pass.
             else
                 rows[count++] = std::move(row);
         }
         begin = end;
     }
-    visit_removed([&](const Row& row) { rows[count++] = {row.charge, 0}; });
+    visit_removed([&](const Row& row) { rows[count++] = {&row.charge, 0}; });
     if (!count)
         return *this;
     auto changes = rows.first(count);
     if (!owner_changes.empty())
         std::sort(changes.begin(), changes.end(), less);
-    auto root = accepted ? Pages(admission).patched(accepted, changes,
-                               [](const Row& row) { return row.references; }) :
-                           Pages(admission).build(changes);
+    const auto input = std::span<const RowChange>(changes);
+    auto root = accepted ? Pages(admission).patched_from(accepted, input,
+                               [](const RowChange& row) { return row.references; }) :
+                           Pages(admission).build_from(input);
     if (!root)
         return {};
     admission.charge(1, sizeof(State) + geometry_demand::control_bytes);

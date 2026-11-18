@@ -1,6 +1,7 @@
 /** Independent concrete allocation and map-profile tests for the private output route. */
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/NativePublicationViewData.hh"
 #include "parallel/details/NativeTpetraMapAdmission.hh"
 #include "pipeline_allocation_operators.inc"
@@ -147,6 +148,38 @@ TEST(NativePublicationOutputAccounting, ActualMapWeakTailKeepsControlButReleases
     weak = Teuchos::null;
     EXPECT_LT(admission.statistics().actual_live, tail.actual_live);
     EXPECT_LT(admission.statistics().profiled_live, tail.profiled_live);
+}
+TEST(NativePublicationOutputAccounting, ThreeResultsOutliveEverySourceLayoutAndPreserveActualMapIdentity)
+{
+    ASSERT_NO_THROW(Maps::require_profile());
+    A::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.max_level = 2;
+    A::CartesianAMR source(grid);
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<std::uint64_t> cells;
+    for (std::uint64_t c = 0; c < 8; ++c)
+        if (c % comm->getSize() == std::uint64_t(comm->getRank()))
+            cells.push_back(c);
+    auto detached = source.detach_owned(cells, {'o', 'u', 't', 'p', 'u', 't'});
+    auto hierarchy = std::make_shared<const A::DistributedAdaptiveHierarchy>(
+        std::move(detached.owned), std::move(detached.families), std::move(detached.kernel), comm);
+    std::weak_ptr<const A::AdaptiveLeafLayout> weak_layout = hierarchy->leaf_layout();
+    std::array<A::AdaptiveNativePublicationView, 3> views;
+    for (auto& view : views)
+        view = A::publish_adaptive_native(*hierarchy, A::native_publication_schema(*hierarchy));
+    const auto actual = views.back().mesh()->owned_cell_map();
+    {
+        const auto accepted = hierarchy->with_partition(views.back().partition(), actual);
+        EXPECT_EQ(accepted->native_partition().get(), views.back().partition().get());
+        EXPECT_TRUE(views.back().mesh()->owned_cell_map().shares_resource(actual));
+        EXPECT_EQ(views.back().mesh()->owned_cell_map().getRawPtr(), actual.getRawPtr());
+    }
+    hierarchy.reset();
+    EXPECT_TRUE(weak_layout.expired());
+    for (const auto& view : views)
+        for (const auto [gid, typed_key] : view.local_keys())
+            EXPECT_EQ(view.local_keys().at(gid), typed_key);
 }
 TEST(NativePublicationOutputAccounting, ProfileBudgetFailurePrecedesTheFirstLibraryCollective)
 {

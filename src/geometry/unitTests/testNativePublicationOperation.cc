@@ -119,4 +119,55 @@ TEST(NativePublicationOperation, PersistentNodeReceiptsSurviveActualAllocationRe
     EXPECT_EQ(next->charge.bytes, next->charge.native->bytes());
     EXPECT_EQ(root->size, 1);
 }
+
+TEST(NativePublicationOperation, ActualBuiltInSourceStagingFailurePreservesRootsLeasesAndMirroredArena)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1)
+        GTEST_SKIP() << "The local rollback gate uses one actual owner; registered producer MPI gates are separate.";
+    A::AMRGrid config;
+    config.block_cells = {2, 2, 2};
+    config.max_level = 1;
+    A::CartesianAMR original(config);
+    const std::array<std::uint64_t, 8> selection{0, 1, 2, 3, 4, 5, 6, 7};
+    auto detached = original.detach_owned(selection, {'r', 'o', 'l', 'l', 'b', 'a', 'c', 'k'});
+    const auto source = std::make_shared<const A::DistributedAdaptiveHierarchy>(std::move(detached.owned),
+        std::move(detached.families), std::move(detached.kernel), Tpetra::getDefaultComm());
+    const auto before = D::GeometrySnapshotAccess::cache_admission_statistics(*source);
+    const auto input = D::NativePublicationSession::capture(*source);
+    const auto accepted_indexes = input.cache->indexes;
+    const auto accepted_revision = input.cache->revision;
+    const auto accepted_coverage = input.source_coverage;
+    const auto arena = D::GeometrySnapshotAccess::contact_cache(*source).allocation_arena();
+    const auto admitted_before = arena->used;
+    ASSERT_TRUE(accepted_coverage);
+    ASSERT_GT(before.resident_bytes, 0);
+    {
+        D::NativePublicationOperation operation(*source);
+        EXPECT_EQ(operation.admission().state()->mirror.owner.get(), arena.get());
+        D::NativePublicationSession staged(operation.inputs(), operation.admission(), &operation.geometry_accounting(),
+            &operation.source_coverage_transaction());
+        const auto proof = staged.source(*source->owned_leaves().begin());
+        ASSERT_TRUE(proof);
+        EXPECT_DOUBLE_EQ(proof->metrics().volume, .125);
+        EXPECT_EQ(input.cache->indexes, accepted_indexes);
+        EXPECT_EQ(input.cache->revision, accepted_revision);
+        // A later construction/collective failure abandons the staged source.
+        // Destruction must retire every real mirrored allocation, without
+        // installing the new index or consuming a source-floor transfer.
+    }
+    const auto after = D::GeometrySnapshotAccess::cache_admission_statistics(*source);
+    EXPECT_EQ(after.resident_bytes, before.resident_bytes);
+    EXPECT_EQ(after.lease_bytes, before.lease_bytes);
+    EXPECT_EQ(input.cache->indexes, accepted_indexes);
+    EXPECT_EQ(input.cache->revision, accepted_revision);
+    EXPECT_EQ(D::NativePublicationSession::capture(*source).source_coverage, accepted_coverage);
+    EXPECT_EQ(arena->used, admitted_before);
+    EXPECT_NO_THROW(accepted_coverage->require_current());
+    // The rejected operation did not poison a subsequent actual admitted
+    // first-source capture through the same closed built-in kernel control.
+    D::NativePublicationOperation retry(*source);
+    D::NativePublicationSession staged(retry.inputs(), retry.admission(), &retry.geometry_accounting(),
+        &retry.source_coverage_transaction());
+    EXPECT_DOUBLE_EQ(staged.source(*source->owned_leaves().begin())->metrics().volume, .125);
+}
 } // namespace

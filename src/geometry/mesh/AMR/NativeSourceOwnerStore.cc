@@ -295,6 +295,7 @@ NativeSourceOwnerStore NativeSourceOwnerStore::assemble(const NativeSourceOwnerS
                 geometry_detail::NativeTpetraMapAdmission::visit(*input.map_token, ordinary, retain, accounting);
             }
         }
+        NativePublicationSession::project_receipt(values.receipt, ordinary, retain, accounting);
     }
     if (previous.root_)
         ordinary.native_fixed(previous.root_->allocation, false, bool(accounting));

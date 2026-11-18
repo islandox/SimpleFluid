@@ -17,6 +17,7 @@ namespace SimpleFluid::geometry_detail
 struct NativeAllocationState;
 class NativeAllocationEnvelope;
 } // namespace SimpleFluid::geometry_detail
+namespace SimpleFluid::Meshes::AMR::adaptive_detail { class NativePublicationOwnerGraph; }
 namespace SimpleFluid::PLIC::allocation_detail { enum class Kind; }
 namespace SimpleFluid::PLIC::details
 {
@@ -89,6 +90,13 @@ public:
 
 private:
     friend class NativeGeometryAccounting;
+    friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativeContactFundingAccess;
+    friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativePublicationOwnerGraph;
+    /** Follow the first/last typed edge when plain physical pins may also
+     * hold this allocation without visiting its children. */
+    bool external_with_children(
+        const std::shared_ptr<const void>&, std::size_t bytes, bool retain, bool prepaid = false);
+
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativeSourceOwnerStore;
     friend class SimpleFluid::Meshes::AMR::adaptive_detail::NativePublicationOperation;
     void forget_paid_extent(const NativePaidExtentCharge&);

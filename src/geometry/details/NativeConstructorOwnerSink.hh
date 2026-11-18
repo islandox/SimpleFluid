@@ -33,6 +33,7 @@ struct NativeConstructorOwnerSink
     // financial holders can preserve existing typed identity/geometry closure.
     PLIC::details::GeometryOwnerGraphEditor* financial_graph = nullptr;
     bool financial_retain = true;
+    bool (*branch_edge)(void*, const std::shared_ptr<const void>&, NativeConstructorOwnerKind, size_t) = nullptr;
     void schema(const std::shared_ptr<const NativeSchemaOwner>& owner) const
     {
         if (!owner) return;
@@ -49,12 +50,16 @@ struct NativeConstructorOwnerSink
     /** Receipt authorization precedes the first/last semantic edge. It creates
      * no graph edge and never authorizes an arbitrary byte count. */
     bool semantic(const std::shared_ptr<const void>& owner, NativeConstructorOwnerKind kind,
-        const std::shared_ptr<const NativeAllocationEnvelope>& envelope) const
+        const std::shared_ptr<const NativeAllocationEnvelope>& envelope, bool branch = false) const
     {
         require_envelope(envelope, owner);
         if (semantic_receipt)
             semantic_receipt(context, owner, envelope);
-        return edge(owner, kind, 0);
+        return branch ? structural(owner, kind, 0) : edge(owner, kind, 0);
+    }
+    bool structural(const std::shared_ptr<const void>& owner, NativeConstructorOwnerKind kind, size_t bytes) const
+    {
+        return branch_edge ? branch_edge(context, owner, kind, bytes) : edge(owner, kind, bytes);
     }
     bool edge(const std::shared_ptr<const void>& owner, NativeConstructorOwnerKind kind, size_t bytes) const
     {

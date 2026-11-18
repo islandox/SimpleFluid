@@ -394,9 +394,10 @@ void NativeFragmentAccess::visit_descriptor(const std::shared_ptr<const NativeFr
     const bool native = DescriptorAccess::admitted(descriptor);
     const bool bound = origin_bound(descriptor);
     const bool transition =
-        native  ? sink.semantic(descriptor, Kind::NativeMesh, DescriptorAccess::envelope(descriptor))
-        : bound ? sink.semantic(descriptor, Kind::NativeMesh, descriptor->provenance.origin_->descriptor_allocation_)
-                : sink.edge(descriptor, Kind::NativeMesh,
+        native  ? sink.semantic(descriptor, Kind::NativeMesh, DescriptorAccess::envelope(descriptor), true)
+        : bound ? sink.semantic(descriptor, Kind::NativeMesh, descriptor->provenance.origin_->descriptor_allocation_,
+                      true)
+                : sink.structural(descriptor, Kind::NativeMesh,
                       sizeof(NativeFragmentDescriptor) + descriptor->view.capacity() +
                           descriptor->parts.capacity() * sizeof(descriptor->parts[0]));
     if (!transition)

@@ -22,13 +22,15 @@ struct OwnerLess
         return std::less<const void*>{}(a.key.address, b.key.address);
     }
 };
-using Pages = OrderedPages<OwnerRecord, OwnerLess>;
+// The immutable index owns only its current child slots. Mutations build
+// separate replacement branches and keep the full fanout in their bounds.
+using Pages = OrderedPages<OwnerRecord, OwnerLess, true>;
 struct TypedLess
 {
     bool operator()(const TypedOwnerReference& a, const TypedOwnerReference& b) const noexcept
     { return std::less<const void*>{}(a.address, b.address); }
 };
-using TypedPages = OrderedPages<TypedOwnerReference, TypedLess>;
+using TypedPages = OrderedPages<TypedOwnerReference, TypedLess, true>;
 OwnerRecord lookup(std::uint8_t channel, std::uint8_t kind, const std::shared_ptr<const void>& owner)
 {
     const std::shared_ptr<const void> empty;

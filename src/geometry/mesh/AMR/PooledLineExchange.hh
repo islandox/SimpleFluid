@@ -142,6 +142,8 @@ public:
         void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
 
     private:
+        friend class NativeContactFundingAccess;
+        [[nodiscard]] NativeContactOwnerFunding native_funding(const std::shared_ptr<const Proof>&, std::size_t) const;
         Proof(PooledLineSubscriber, ContactHaloContext, unsigned, const IncidencePools&);
         PooledLineSubscriber original_;
         ContactHaloContext context_;
@@ -180,6 +182,8 @@ public:
     void visit_borrowed_payload(const std::function<void(const ContactPayloadAllocation&)>&) const;
 
 private:
+    friend class NativeContactFundingAccess;
+    [[nodiscard]] NativeContactOwnerFunding native_funding(const PooledLineCompletionView&, std::size_t) const;
     PooledLineCompletion(std::shared_ptr<const Proof>, std::vector<std::size_t>&&, Budget&, std::shared_ptr<Budget>);
     [[nodiscard]] static PooledLineCompletion seal(std::size_t, PooledLineSubscriber, std::vector<std::size_t>&&,
         ContactHaloContext, unsigned, const IncidencePools&, Budget&, std::shared_ptr<Budget>,

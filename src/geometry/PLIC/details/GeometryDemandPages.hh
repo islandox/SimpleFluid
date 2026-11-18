@@ -47,20 +47,36 @@ struct Admission
     }
     void charge(std::size_t count, std::size_t width) const;
 };
-/** Borrows one operation's admission and keeps only its edited receipt rows. */
+/** Sort compact edit references. Generated charges live in fixed blocks;
+ * existing receipt pages can supply their own charge storage. */
 class ReceiptEdits
 {
 public:
     explicit ReceiptEdits(Admission);
+    ReceiptEdits(const ReceiptEdits&) = delete;
+    ReceiptEdits& operator=(const ReceiptEdits&) = delete;
+    ~ReceiptEdits();
+
     void append(const NativePaidExtentCharge&, NativeOwnerReceipts::Action);
+    // The caller keeps the receipt pages alive until the batch is consumed.
+    void append_borrowed(const NativePaidExtentCharge&, NativeOwnerReceipts::Action);
     [[nodiscard]] std::span<NativeOwnerReceipts::Edit> rows() noexcept;
     void clear() noexcept;
 
 private:
+    struct ChargeBlock
+    {
+        std::array<NativePaidExtentCharge, 8> charges;
+        ChargeBlock* previous;
+    };
+
     Admission admission_;
     std::array<NativeOwnerReceipts::Edit, 8> inline_{};
     std::size_t size_ = 0;
     geometry_detail::NativeAdministrationVector<NativeOwnerReceipts::Edit> overflow_;
+    std::array<NativePaidExtentCharge, 8> inline_charges_;
+    ChargeBlock* block_ = nullptr;
+    std::size_t charges_ = 0;
 };
 /** Borrowed first/last physical-owner visitor. Returning false proves this
  * exact owner's child edges are already held by the destination allowance.
@@ -196,5 +212,5 @@ private:
  * certificate data belong to immutable source owners referenced by rows.
  * Include GeometryDemandPages.tcc only from a compiled implementation provider
  * or a private component test that owns its template instantiation. */
-template<class Row, class Less> class OrderedPages;
+template<class Row, class Less, bool CompactBranches = false> class OrderedPages;
 } // namespace SimpleFluid::PLIC::details::geometry_demand

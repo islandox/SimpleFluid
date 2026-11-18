@@ -5,7 +5,6 @@
 #include "CertifiedIncidenceViews.hh"
 #include "ContactPointPageView.hh"
 #include "IncidencePhysicalOwners.hh"
-#include "NativePublicationOwnerGraph.hh"
 #include "IncidencePools.hh"
 #include "PersistentOrderedPages.hh"
 #include "TileBodyPages.hh"
@@ -1519,14 +1518,17 @@ void AdaptiveSubfaceSnapshot::project_owners(const std::shared_ptr<const Adaptiv
     {
         const auto& root = snapshot->indexes_;
         if (!SubfaceIndexRoot::project_body(root, graph, retain)) return;
-        NativePublicationOwnerGraph::Context context(graph, retain, false);
+        using Funding = NativeContactFundingAccess;
         const auto index = [&]<class Index>(std::type_identity<Index> tag, const auto& self, const typename Index::Ptr& page,
                                const auto& rows) -> void
         {
             if (!page) return;
             if (page->charge.native)
             {
-                if (!Index::visit_native_node(page, context.sink)) return;
+                const auto bytes = page->charge.bytes;
+                if (!Funding::project(graph, page, bytes, Funding::capture(page, bytes, page->charge.arena.get()),
+                        retain))
+                    return;
             }
             else
             {
