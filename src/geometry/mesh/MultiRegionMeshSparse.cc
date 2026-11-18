@@ -17,7 +17,7 @@ MeshUtils::Vec3 vector(PLIC::GeometryPoint p)
 {
     return {p[0], p[1], p[2]};
 }
-bool second_occurrence(const SparseNativeFace& face, RegionFace address, std::uint64_t cell)
+template<class Face> bool second_occurrence(const Face& face, RegionFace address, std::uint64_t cell)
 {
     if (cell != face.second)
         return false;
@@ -29,7 +29,7 @@ bool second_occurrence(const SparseNativeFace& face, RegionFace address, std::ui
         return !face.native_is_second;
     throw std::invalid_argument("Periodic self incidence lacks a native image address.");
 }
-PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> physical_incidence(const SparseNativeFace& face, bool second)
+template<class Face> PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> physical_incidence(const Face& face, bool second)
 {
     return second ? face.override_geometry->reversed()->translated(
                         PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, face.second_image_identity))
@@ -40,8 +40,140 @@ template<class Map> std::size_t map_bytes(const Map& map)
     return map.size() * (sizeof(typename Map::value_type) + 4 * sizeof(void*));
 }
 } // namespace
+namespace
+{
+template<class Rows, class Key, class Selector>
+const auto& numeric_find(const Rows& rows, const Key& key, Selector selector)
+{
+    const auto at = std::lower_bound(
+        rows.begin(), rows.end(), key, [&](const auto& row, const auto& value) { return selector(row) < value; });
+    if (at == rows.end() || selector(*at) != key)
+        throw std::out_of_range("Nonresident native numeric route.");
+    return *at;
+}
+} // namespace
+std::size_t NativeSparseNumericIndex::storage_bytes() const noexcept
+{
+    return sizeof(*this) + cells.capacity() * sizeof(cells[0]) + faces.capacity() * sizeof(faces[0]) +
+           nodes.capacity() * sizeof(nodes[0]) + native_cells.capacity() * sizeof(native_cells[0]) +
+           native_nodes.capacity() * sizeof(native_nodes[0]) + logical_faces.capacity() * sizeof(logical_faces[0]) +
+           flux_signs.capacity() * sizeof(flux_signs[0]) + loops.capacity() * sizeof(loops[0]) +
+           boundaries.capacity() * sizeof(boundaries[0]);
+}
+const SparseNativeCell& SparseNativeIndex::cell(std::uint64_t gid) const
+{
+    return numeric ? numeric_find(numeric->cells, gid, [](const auto& row) { return row.gid; }) : cells.at(gid);
+}
+SparseNativeNode SparseNativeIndex::node(std::uint64_t gid) const
+{
+    if (!numeric)
+        return nodes.at(gid);
+    const auto& row = numeric_find(numeric->nodes, gid, [](const auto& row) { return row.gid; });
+    std::optional<std::pair<std::size_t, std::uint64_t>> native;
+    if (row.native)
+        native = std::pair{row.native->region, row.native->ordinal};
+    return {row.gid, native, row.introduced_coordinate};
+}
+SparseNativeFaceView SparseNativeIndex::face(std::uint64_t gid) const
+{
+    if (!numeric)
+    {
+        const auto& f = faces.at(gid);
+        return {f.gid, f.first, f.second, f.native, f.second_native, f.second_image, f.second_image_identity,
+            f.second_node_gids, f.native_is_second, f.cut_incidence, f.boundary, f.override_geometry, f.override_nodes};
+    }
+    const auto& f = numeric_find(numeric->faces, gid, [](const auto& row) { return row.gid; });
+    const auto& physical = *f.physical;
+    const auto loops = std::span<const std::uint64_t>(numeric->loops);
+    return {f.gid, f.first, f.second, f.native, f.second_native,
+        PLIC::displacement_display<ArithmeticMode::Ordinary>(physical.second_image), physical.second_image,
+        loops.subspan(f.second_loop_begin, f.second_loop_size), f.native_is_second, physical.cut_incidence, f.boundary,
+        physical.override_geometry, loops.subspan(f.loop_begin, f.loop_size)};
+}
+std::uint64_t SparseNativeIndex::native_cell(std::pair<std::size_t, std::uint64_t> key) const
+{
+    return numeric ? numeric_find(numeric->native_cells, key,
+                         [](const auto& row) { return std::pair{row.first.region, row.first.ordinal}; })
+                         .second
+                   : native_cells.at(key);
+}
+std::uint64_t SparseNativeIndex::native_node(std::pair<std::size_t, std::uint64_t> key) const
+{
+    return numeric ? numeric_find(numeric->native_nodes, key,
+                         [](const auto& row) { return std::pair{row.first.region, row.first.ordinal}; })
+                         .second
+                   : native_nodes.at(key);
+}
+std::span<const std::uint64_t> SparseNativeIndex::logical(RegionFace key) const
+{
+    if (!numeric)
+        return logical_faces.at(key);
+    const auto& row = numeric_find(numeric->logical_faces, key, [](const auto& row) { return row.native; });
+    return std::span<const std::uint64_t>(numeric->loops).subspan(row.begin, row.size);
+}
+int SparseNativeIndex::sign(RegionFace native, std::uint64_t gid) const
+{
+    return numeric ? numeric_find(numeric->flux_signs, std::pair{native, gid},
+                         [](const auto& row) { return std::pair{row.native, row.gid}; })
+                         .sign
+                   : flux_signs.at({native, gid});
+}
+const std::string& SparseNativeIndex::boundary(int id) const
+{
+    return numeric ? *numeric_find(numeric->boundaries, id, [](const auto& row) { return row.first; }).second
+                   : boundaries.at(id);
+}
+std::vector<int> SparseNativeIndex::boundary_ids() const
+{
+    std::vector<int> result;
+    if (numeric)
+        for (const auto& row : numeric->boundaries)
+            result.push_back(row.first);
+    else
+        for (const auto& row : boundaries)
+            result.push_back(row.first);
+    return result;
+}
+std::size_t SparseNativeIndex::boundary_count() const noexcept
+{
+    return numeric ? numeric->boundaries.size() : boundaries.size();
+}
+std::size_t SparseNativeIndex::face_count() const noexcept
+{
+    return numeric ? numeric->faces.size() : faces.size();
+}
+std::uint64_t SparseNativeIndex::face_gid(std::size_t ordinal) const
+{
+    if (numeric)
+        return numeric->faces.at(ordinal).gid;
+    auto at = faces.begin();
+    std::advance(at, ordinal);
+    return at->first;
+}
+std::string SparseNativeIndex::configuration_signature(
+    std::uint64_t cells, std::uint64_t faces, std::uint64_t nodes) const
+{
+    if (!numeric)
+        return common_signature;
+    if (!schema_owner)
+        throw std::invalid_argument("Private sparse geometry has no detached source schema owner.");
+    AMR::adaptive_detail::Writer w;
+    w.word(cells);
+    w.word(faces);
+    w.word(nodes);
+    w.bytes(schema_owner->span());
+    w.word(numeric->boundaries.size());
+    for (const auto& [id, name] : numeric->boundaries)
+    {
+        w.word(id);
+        w.bytes(std::span(*name));
+    }
+    return {w.data.begin(), w.data.end()};
+}
 std::size_t SparseNativeIndex::storage_bytes() const
 {
+    if (numeric)
+        return sizeof(*this) + common_signature.capacity() + numeric->storage_bytes();
     std::size_t total = common_signature.capacity() + sizeof(*this) + map_bytes(cells) + map_bytes(faces) +
                         map_bytes(nodes) + map_bytes(native_cells) + map_bytes(native_nodes) +
                         map_bytes(logical_faces) + map_bytes(boundaries) + map_bytes(flux_signs);
@@ -454,13 +586,13 @@ int MultiRegionMesh::sparse_cell_owner(ID cell) const
 {
     if (!d_sparse_native)
         throw std::invalid_argument("Sparse ownership requires a sparse native shard.");
-    return d_sparse_native->cells.at(cell).owner;
+    return d_sparse_native->cell(cell).owner;
 }
 PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> MultiRegionMesh::certified_sparse_face_geometry(ID face) const
 {
     check_face_id(face);
     if(frozen_native())throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
-    const auto& route = d_sparse_native->faces.at(face);
+    const auto& route = d_sparse_native->face(face);
     if (route.override_geometry)
         return route.override_geometry;
     auto certificate = native_face_certificate(route.native);
@@ -472,7 +604,7 @@ MultiRegionMesh::certified_sparse_provider_cell_geometry(ID cell) const
     check_cell_id(cell);
     if (frozen_native())
         throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
-    const auto& route = d_sparse_native->cells.at(cell);
+    const auto& route = d_sparse_native->cell(cell);
     if (!route.full)
         throw std::invalid_argument("Metric-only sparse neighbor has no cell certificate.");
     const auto certificate = geometry(route.region,
@@ -499,16 +631,16 @@ MultiRegionMesh::certified_sparse_cell_geometry(ID cell) const
 {
     check_cell_id(cell);
     if(frozen_native())throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
-    const auto& route = d_sparse_native->cells.at(cell);
+    const auto& route = d_sparse_native->cell(cell);
     if (!route.full)
         throw std::invalid_argument("Metric-only sparse neighbor has no cell certificate.");
     std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
     for (auto native : topology(route.region, [&](const auto& t) { return t.cell_faces(route.native_cell); }))
     {
         const RegionFace address{route.region, native};
-        for (auto face : d_sparse_native->logical_faces.at(address))
+        for (auto face : d_sparse_native->logical(address))
         {
-            const auto& incidence = d_sparse_native->faces.at(face);
+            const auto& incidence = d_sparse_native->face(face);
             auto geometry = certified_sparse_face_geometry(face);
             if (second_occurrence(incidence, address, cell))
                 geometry = geometry->reversed()->translated(
@@ -521,7 +653,7 @@ MultiRegionMesh::certified_sparse_cell_geometry(ID cell) const
 MultiRegionMesh::ResolvedFace MultiRegionMesh::resolve_sparse_face(ID face) const
 {
     check_face_id(face);
-    const auto& route = d_sparse_native->faces.at(face);
+    const auto& route = d_sparse_native->face(face);
     ResolvedFace result;
     result.face = face;
     result.owner = route.first;
@@ -545,7 +677,7 @@ EntityRange<MultiRegionMesh::ID> MultiRegionMesh::sparse_cell_nodes(ID cell) con
     const auto [region, id] = native_cell(cell);
     bool changed = false;
     for (auto face : cell_faces(cell))
-        changed = changed || d_sparse_native->faces.at(face).cut_incidence;
+        changed = changed || d_sparse_native->face(face).cut_incidence;
     if (!changed)
         return {this, cell, topology(region, [&](const auto& t) { return t.cell_nodes(id).size(); }),
             [](const void* p, size_t cell, size_t i) -> ID
@@ -553,69 +685,104 @@ EntityRange<MultiRegionMesh::ID> MultiRegionMesh::sparse_cell_nodes(ID cell) con
                 const auto& mesh = *static_cast<const MultiRegionMesh*>(p);
                 const auto [r, id] = mesh.native_cell(cell);
                 const auto node = mesh.topology(r, [&](const auto& t) { return t.cell_nodes(id)[i]; });
-                return mesh.d_sparse_native->native_nodes.at({r, node});
+                return mesh.d_sparse_native->native_node({r, node});
             }};
-    // Only tiled cells need temporary first-occurrence uniqueness. Traverse
-    // native face addresses so a self-periodic face retains both physical
-    // occurrences; no cell-face or cell-node CSR is retained.
-    const auto physical_nodes = [&](ID requested)
+    // Tiled cells retain first-occurrence ordering without query-time sets,
+    // vector wrappers or a cell-node CSR. Revisit the borrowed scalar routes;
+    // every range carries its own cell and ordinal and allocates nothing.
+    const auto visit = [](const MultiRegionMesh& mesh, ID cell, const auto& emit)
     {
-        const auto [r, native_cell] = this->native_cell(requested);
-        std::vector<ID> result;
-        std::set<ID> seen;
-        for (auto native : topology(r, [&](const auto& t) { return t.cell_faces(native_cell); }))
+        const auto [r, native_cell] = mesh.native_cell(cell);
+        for (const auto native : mesh.topology(r, [&](const auto& t) { return t.cell_faces(native_cell); }))
         {
             const RegionFace address{r, native};
-            for (auto logical : d_sparse_native->logical_faces.at(address))
+            for (const auto logical : mesh.d_sparse_native->logical(address))
             {
-                const auto& face = d_sparse_native->faces.at(logical);
-                if (second_occurrence(face, address, requested) && !face.second_node_gids.empty())
+                const auto face = mesh.d_sparse_native->face(logical);
+                if (second_occurrence(face, address, cell) && !face.second_node_gids.empty())
                 {
-                    for (auto node : face.second_node_gids)
-                        if (seen.insert(node).second)
-                            result.push_back(node);
+                    for (const auto node : face.second_node_gids)
+                        emit(node);
                 }
                 else
-                    for (auto node : face_nodes(logical))
-                        if (seen.insert(node).second)
-                            result.push_back(node);
-            }
-        }
-        return result;
-    };
-    const auto count = physical_nodes(cell).size();
-    return {this, cell, count, [](const void* p, size_t cell, size_t index) -> ID
-        {
-            const auto& mesh = *static_cast<const MultiRegionMesh*>(p);
-            const auto [r, native_cell] = mesh.native_cell(cell);
-            std::set<ID> seen;
-            for (auto native : mesh.topology(r, [&](const auto& t) { return t.cell_faces(native_cell); }))
-            {
-                const RegionFace address{r, native};
-                for (auto logical : mesh.d_sparse_native->logical_faces.at(address))
                 {
-                    const auto& face = mesh.d_sparse_native->faces.at(logical);
-                    if (second_occurrence(face, address, cell) && !face.second_node_gids.empty())
-                    {
-                        for (auto node : face.second_node_gids)
-                            if (seen.insert(node).second && !index--)
-                                return node;
-                    }
-                    else
-                        for (auto node : mesh.face_nodes(logical))
-                            if (seen.insert(node).second && !index--)
-                                return node;
+                    for (const auto node : mesh.face_nodes(logical))
+                        emit(node);
                 }
             }
-            throw std::out_of_range("Sparse physical cell-node range index out of bounds.");
+        }
+    };
+    std::size_t count = 0, position = 0;
+    visit(*this, cell,
+        [&](ID node)
+        {
+            std::size_t before = 0;
+            bool repeated = false;
+            visit(*this, cell,
+                [&](ID previous)
+                {
+                    if (before < position && previous == node)
+                        repeated = true;
+                    ++before;
+                });
+            count += !repeated;
+            ++position;
+        });
+    return {this, cell, count, [](const void* p, size_t cell, size_t requested) -> ID
+        {
+            const auto& mesh = *static_cast<const MultiRegionMesh*>(p);
+            const auto enumerate = [](const MultiRegionMesh& mesh, ID cell, const auto& emit)
+            {
+                const auto [r, native_cell] = mesh.native_cell(cell);
+                for (const auto native : mesh.topology(r, [&](const auto& t) { return t.cell_faces(native_cell); }))
+                {
+                    const RegionFace address{r, native};
+                    for (const auto logical : mesh.d_sparse_native->logical(address))
+                    {
+                        const auto face = mesh.d_sparse_native->face(logical);
+                        if (second_occurrence(face, address, cell) && !face.second_node_gids.empty())
+                        {
+                            for (const auto node : face.second_node_gids)
+                                emit(node);
+                        }
+                        else
+                        {
+                            for (const auto node : mesh.face_nodes(logical))
+                                emit(node);
+                        }
+                    }
+                }
+            };
+            std::size_t position = 0;
+            ID result = invalid_cell_id();
+            enumerate(mesh, cell,
+                [&](ID node)
+                {
+                    std::size_t before = 0;
+                    bool repeated = false;
+                    enumerate(mesh, cell,
+                        [&](ID previous)
+                        {
+                            if (before < position && previous == node)
+                                repeated = true;
+                            ++before;
+                        });
+                    if (!repeated && !requested--)
+                        result = node;
+                    ++position;
+                });
+            if (result == invalid_cell_id())
+                throw std::out_of_range("Sparse physical cell-node range index out of bounds.");
+            return result;
         }};
 }
+
 EntityRange<MultiRegionMesh::ID> MultiRegionMesh::boundary_face_batch_impl(int boundary) const
 {
     std::size_t count = 0;
     if (d_sparse_native)
-        for (const auto& [id, face] : d_sparse_native->faces)
-            count += face.boundary == boundary;
+        for (std::size_t i = 0; i < d_sparse_native->face_count(); ++i)
+            count += d_sparse_native->face(d_sparse_native->face_gid(i)).boundary == boundary;
     else
         for (ID face = 0; face < num_faces(); ++face)
             count += boundary_id(face) == boundary;
@@ -627,12 +794,12 @@ EntityRange<MultiRegionMesh::ID> MultiRegionMesh::boundary_face_batch_impl(int b
             const int boundary = static_cast<int>(key);
             if (mesh.d_sparse_native)
             {
-                for (const auto& [id, face] : mesh.d_sparse_native->faces)
-                    if (face.boundary == boundary)
-                    {
-                        if (!index--)
-                            return id;
-                    }
+                for (std::size_t i = 0; i < mesh.d_sparse_native->face_count(); ++i)
+                {
+                    const auto id = mesh.d_sparse_native->face_gid(i);
+                    if (mesh.d_sparse_native->face(id).boundary == boundary && !index--)
+                        return id;
+                }
             }
             else
                 for (ID face = 0; face < mesh.num_faces(); ++face)
@@ -647,7 +814,7 @@ EntityRange<MultiRegionMesh::ID> MultiRegionMesh::boundary_face_batch_impl(int b
 real_t MultiRegionMesh::native_flux_orientation(RegionFace native, ID logical) const
 {
     if (d_sparse_native)
-        return d_sparse_native->flux_signs.at({native, logical});
+        return d_sparse_native->sign(native, logical);
     return native_face(logical) == native ? 1.0 : -1.0;
 }
 } // namespace SimpleFluid::Meshes

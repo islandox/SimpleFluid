@@ -1,10 +1,11 @@
 #include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
-#include "geometry/mesh/AMR/AdaptiveSubfaceSnapshot.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/NativeContactFunding.hh"
+#include "geometry/mesh/AMR/NativePublicationSession.hh"
 #include "geometry/mesh/AMR/NativeAdaptivePayloadAccess.hh"
 #include "geometry/mesh/AMR/NativeSourceCoverage.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
+#include "parallel/details/NativePartitionAccess.hh"
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -116,6 +117,21 @@ NativeSourceOwnerStore::input_administration() const noexcept
     static const std::array<PLIC::details::GeometryNativeAdministration, 2> empty;
     return root_ ? root_->input_administration : empty;
 }
+const std::shared_ptr<const NativePublicationIndexes>& NativeSourceOwnerStore::indexes() const noexcept
+{
+    static const std::shared_ptr<const NativePublicationIndexes> empty;
+    return root_ ? root_->indexes : empty;
+}
+const NativeSourceBoundInput& NativeSourceOwnerStore::bound_input() const noexcept
+{
+    static const NativeSourceBoundInput empty;
+    return root_ ? root_->publication_values.input : empty;
+}
+const NativePublicationSourceObservations& NativeSourceOwnerStore::observations() const noexcept
+{
+    static const NativePublicationSourceObservations empty;
+    return root_ ? root_->publication_values.source : empty;
+}
 const std::array<PLIC::details::OwnerManifestPair, 4>& NativeSourceOwnerStore::components() const noexcept
 {
     static const std::array<PLIC::details::OwnerManifestPair, 4> empty;
@@ -150,11 +166,13 @@ PLIC::details::OwnerManifestPair NativeSourceOwnerStore::single(
 NativeSourceOwnerStore NativeSourceOwnerStore::assemble(const NativeSourceOwnerStore& previous,
     std::array<PLIC::details::OwnerManifestPair, 4> components,
     const geometry_detail::NativeConstructionAdmission& admission, PLIC::details::NativeGeometryAccounting* accounting,
+    std::shared_ptr<const NativePublicationIndexes> indexes,
     std::array<PLIC::details::GeometryNativeAdministration, 2> input_administration,
     std::shared_ptr<const NativeSourceCoverage> coverage,
     std::shared_ptr<const AdaptiveSubfaceSnapshot> subfaces,
     std::optional<std::array<PLIC::details::NativeOwnerReceipts, 4>> component_paid,
     std::optional<std::size_t> contact_projected_admission, std::shared_ptr<const void> contact_arena,
+    std::optional<NativeSourcePublicationValues> publication_values,
     std::optional<NativeContactSideIndexes> contact_side_indexes)
 {
     auto tracked = geometry_detail::NativeAllocationEnvelopeAccess::make<Root>(admission);
@@ -167,6 +185,9 @@ NativeSourceOwnerStore NativeSourceOwnerStore::assemble(const NativeSourceOwnerS
         (previous.root_ ? previous.root_->contact_projected_admission : std::nullopt);
     tracked.owner->contact_arena = contact_arena ? std::move(contact_arena) :
         (previous.root_ ? previous.root_->contact_arena : std::shared_ptr<const void>{});
+    tracked.owner->indexes = std::move(indexes);
+    tracked.owner->publication_values = publication_values ? std::move(*publication_values) :
+        (previous.root_ ? previous.root_->publication_values : NativeSourcePublicationValues{});
     tracked.owner->input_administration = std::move(input_administration);
     tracked.owner->coverage = coverage ? std::move(coverage) : previous.coverage();
     tracked.owner->subfaces = subfaces ? std::move(subfaces) : previous.subfaces();
@@ -256,6 +277,24 @@ NativeSourceOwnerStore NativeSourceOwnerStore::assemble(const NativeSourceOwnerS
         project_coverage_descriptor(coverage, ordinary, retain, accounting);
         if (!retain) AdaptiveSubfaceSnapshot::project_owners(previous.subfaces(), ordinary, false);
         if (retain) side_indexes(tracked.owner->contact_side_indexes);
+        NativePublicationSession::project_indexes(retain ? tracked.owner->indexes : previous.indexes(),
+            ordinary, retain, accounting);
+        const auto values = retain ? tracked.owner->publication_values :
+            (previous.root_ ? previous.root_->publication_values : NativeSourcePublicationValues{});
+        if (values.cache_allocation) ordinary.native_fixed(values.cache_allocation, retain, bool(accounting));
+        values.source.project(ordinary, retain);
+        values.broker.project(ordinary, retain, accounting);
+        if (const auto& input = values.input; input.partition)
+        {
+            NativePublicationOwnerGraph::Context context(ordinary, retain, bool(accounting), accounting);
+            geometry_detail::NativePartitionAccess::visit(input.partition, context.sink, ordinary, retain, accounting);
+            if (context.sink.semantic(input.map_token, geometry_detail::NativeConstructorOwnerKind::NativeMesh,
+                    input.map_token_allocation))
+            {
+                context.sink.fixed(input.map_token_allocation);
+                geometry_detail::NativeTpetraMapAdmission::visit(*input.map_token, ordinary, retain, accounting);
+            }
+        }
     }
     if (previous.root_)
         ordinary.native_fixed(previous.root_->allocation, false, bool(accounting));

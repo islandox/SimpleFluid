@@ -2,11 +2,19 @@
  * @brief Private admitted producer of source-cell fragments and sparse shards.
  */
 #pragma once
-#include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
+#include "geometry/mesh/AMR/NativePublicationSession.hh"
+#include "geometry/mesh/NativeSparseFragments.hh"
+#include "geometry/mesh/SparseNativeMesh.hh"
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class NativeSparseAssembler;
-class NativeSourceSubsetCoverage;
+class NativePublicationNumbering;
+struct NativeSparseSealedCell
+{
+    std::uint64_t gid;
+    std::size_t region;
+    NativeSparseSeal seal;
+};
 struct NativeSourceCellFragment
 {
     MultiRegionMesh::Region region;
@@ -28,7 +36,17 @@ public:
         const ExplicitRegionProvider&);
     [[nodiscard]] static const std::shared_ptr<const NativeSourceSubsetCoverage>& source_provider_coverage(
         const std::shared_ptr<const ExplicitRegionProvider>&);
+    static void visit_geometry(const std::shared_ptr<const MultiRegionMesh>&,
+        const geometry_detail::NativeConstructorOwnerSink&,
+        PLIC::details::GeometryOwnerGraphEditor&, bool, PLIC::details::NativeGeometryAccounting*);
     [[nodiscard]] static bool visit_source_provider(
         const std::shared_ptr<const ExplicitRegionProvider>&, const geometry_detail::NativeConstructorOwnerSink&);
+
+private:
+    friend class NativeSparseAssembler;
+    [[nodiscard]] static std::shared_ptr<MultiRegionMesh> make(NativePublicationSession&,
+        std::shared_ptr<const NativePublicationNumbering>, std::shared_ptr<const NativeSparseFragments>,
+        std::shared_ptr<const NativeSparseNumericIndex>, std::span<const NativeSparseSealedCell>,
+        std::uint64_t global_faces, std::uint64_t global_nodes);
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

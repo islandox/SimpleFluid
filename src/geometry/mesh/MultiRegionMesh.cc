@@ -9,6 +9,7 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/mesh/NativeSparseFragments.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -77,6 +78,28 @@ std::array<size_t, 2> StructuredPatchInterface::inverse(std::array<size_t, 2> p)
     std::array<size_t, 2> result;
     for (size_t i = 0; i < 2; ++i) result[permutation[i]] = reversed[i] ? b[i] - 1 - p[i] : p[i];
     return result;
+}
+std::size_t MultiRegionMesh::region_count() const noexcept
+{
+    return d_native_fragments ? d_native_fragments->size() : d_regions.size();
+}
+const MultiRegionMesh::Region& MultiRegionMesh::region(std::size_t ordinal) const
+{
+    return d_native_fragments ? d_native_fragments->region(ordinal) : d_regions.at(ordinal);
+}
+const std::vector<MultiRegionMesh::Region>& MultiRegionMesh::regions() const
+{
+    if (d_native_fragments)
+        std::call_once(d_region_export_once,
+            [&]
+            {
+                std::vector<Region> copy;
+                copy.reserve(region_count());
+                for (std::size_t i = 0; i < region_count(); ++i)
+                    copy.push_back(region(i));
+                d_regions.swap(copy);
+            });
+    return d_regions;
 }
 const RegionLayout& MultiRegionMesh::region_layout(size_t r) const
 {
@@ -157,10 +180,10 @@ MultiRegionMesh::PatchFaceIndex MultiRegionMesh::patch_face_index(const Structur
 }
 void MultiRegionMesh::initialize_interface_directory()
 {
-    d_region_interfaces.resize(d_regions.size());
+    d_region_interfaces.resize(region_count());
     d_removed_patch_index.resize(d_interfaces.size());
-    std::vector<unsigned> removed_sides(d_regions.size());
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    std::vector<unsigned> removed_sides(region_count());
+    for (size_t r = 0; r < region_count(); ++r)
     {
         const auto family = region_layout(r).family;
         d_region_interfaces[r].direct_selection = family == RegionLayout::Family::Rectilinear
@@ -237,7 +260,7 @@ void MultiRegionMesh::initialize_interface_directory()
     {
         d_interface_sides[cursor[r][bucket]++] = {i, first};
     });
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    for (size_t r = 0; r < region_count(); ++r)
     {
         auto& directory = d_region_interfaces[r];
         if (!directory.direct_selection)
@@ -392,11 +415,11 @@ EntityRange<MultiRegionMesh::ID> MultiRegionMesh::logical_faces(RegionFace f) co
 {
     if(d_sparse_native)
     {
-        const auto& row=d_sparse_native->logical_faces.at(f);
+        const auto& row = d_sparse_native->logical(f);
         return {this,encode_native_face(f),row.size(),[](const void* p,size_t key,size_t i)->ID
         {
             const auto& m=*static_cast<const MultiRegionMesh*>(p);
-            return m.d_sparse_native->logical_faces.at(m.decode_native_face(key)).at(i);
+            return m.d_sparse_native->logical(m.decode_native_face(key))[i];
         }};
     }
     const auto refined=refinement(f);
@@ -483,7 +506,7 @@ ID MultiRegionMesh::canonical_face(RegionFace f) const
 {
     if(d_sparse_native)
     {
-        const auto& row=d_sparse_native->logical_faces.at(f);
+        const auto& row = d_sparse_native->logical(f);
         if(row.size()!=1) throw std::invalid_argument("Subdivided sparse native face has multiple logical faces.");
         return row.front();
     }
@@ -495,7 +518,8 @@ ID MultiRegionMesh::canonical_face(RegionFace f) const
 }
 RegionFace MultiRegionMesh::native_face(ID f) const
 {
-    if(d_sparse_native) return d_sparse_native->faces.at(f).native;
+    if (d_sparse_native)
+        return d_sparse_native->face(f).native;
     CHECK_BOUNDS(f, 0, num_faces());
     const size_t r = std::upper_bound(d_faces.begin(), d_faces.end(), f) - d_faces.begin() - 1;
     const ID ordinal = f - d_faces[r];
@@ -529,7 +553,7 @@ std::pair<size_t, ID> MultiRegionMesh::native_cell(ID c) const
 {
     if(d_sparse_native)
     {
-        const auto& cell=d_sparse_native->cells.at(c);
+        const auto& cell = d_sparse_native->cell(c);
         if(!cell.full) throw std::invalid_argument("Metric-only sparse neighbor has no native topology.");
         return {cell.region,cell.native_cell};
     }
@@ -539,13 +563,15 @@ std::pair<size_t, ID> MultiRegionMesh::native_cell(ID c) const
 }
 ID MultiRegionMesh::composite_cell(size_t r, ID c) const
 {
-    if(d_sparse_native) return d_sparse_native->native_cells.at({r,c});
+    if (d_sparse_native)
+        return d_sparse_native->native_cell({r, c});
     CHECK_BOUNDS(c, 0, region_layout(r).cells);
     return d_cells[r] + c;
 }
 void MultiRegionMesh::validate_static() const
 {
-    for (const auto& r : d_regions) std::visit([](const auto& r) { r.validate_static(); }, r);
+    for (std::size_t i = 0; i < region_count(); ++i)
+        std::visit([](const auto& r) { r.validate_static(); }, region(i));
 }
 thread_local const MultiRegionMesh::ExecutionView* MultiRegionMesh::ExecutionView::d_current = nullptr;
 bool MultiRegionMesh::executing_on_this_thread() const noexcept
@@ -559,7 +585,7 @@ MultiRegionMesh::ExecutionView::ExecutionView(const MultiRegionMesh* mesh)
 {
     if (mesh && !mesh->executing_on_this_thread())
     {
-        d_leases.reserve(1 + 4 * mesh->d_regions.size());
+        d_leases.reserve(1 + 4 * mesh->region_count());
         d_leases.push_back(mesh->acquire_geometry_read());
         const auto lock = [&](const auto& provider)
         {
@@ -570,8 +596,14 @@ MultiRegionMesh::ExecutionView::ExecutionView(const MultiRegionMesh* mesh)
             if constexpr (requires { provider.native_topology().acquire_geometry_read(); })
                 d_leases.push_back(provider.native_topology().acquire_geometry_read());
         };
-        for (const auto& region : mesh->d_regions)
-            std::visit([&](const auto& r) { lock(r.topology()); lock(r.geometry()); }, region);
+        for (std::size_t i = 0; i < mesh->region_count(); ++i)
+            std::visit(
+                [&](const auto& r)
+                {
+                    lock(r.topology());
+                    lock(r.geometry());
+                },
+                mesh->region(i));
         mesh->validate_static();
     }
     d_current = this;
@@ -585,9 +617,8 @@ MultiRegionMesh::ResolvedFace MultiRegionMesh::ExecutionView::resolve_face(ID fa
 MultiRegionMesh::ResolvedFace MultiRegionMesh::resolve_retained_face(RegionFace face) const
 {
     return std::visit([&](const auto& region)
-    {
-        return resolve_native_face(face.region, region, face.face, region.topology().neighbor_cell(face.face));
-    }, d_regions[face.region]);
+        { return resolve_native_face(face.region, region, face.face, region.topology().neighbor_cell(face.face)); },
+        region(face.region));
 }
 void MultiRegionMesh::validate_query() const
 {
@@ -610,12 +641,27 @@ void MultiRegionMesh::check_node_id(ID n) const
 }
 real_t MultiRegionMesh::cell_volume_impl(ID c) const
 {
-    if(d_sparse_native){const auto& cell=d_sparse_native->cells.at(c);if(frozen_native()&&cell.full)return axial_scale()*geometry(cell.region,[&](const auto& g){return g.cell_volume(cell.native_cell);});return cell.volume;}
+    if (d_sparse_native)
+    {
+        const auto& cell = d_sparse_native->cell(c);
+        if (frozen_native() && cell.full)
+            return axial_scale() *
+                   geometry(cell.region, [&](const auto& g) { return g.cell_volume(cell.native_cell); });
+        return cell.volume;
+    }
     const auto [r, id] = native_cell(c); return axial_scale() * geometry(r, [&](const auto& g) { return g.cell_volume(id); });
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::cell_centroid_impl(ID c) const
 {
-    if(d_sparse_native){const auto& cell=d_sparse_native->cells.at(c);if(frozen_native()&&cell.full)return transformed_point(geometry(cell.region,[&](const auto& g){return g.cell_centroid(cell.native_cell);}));const auto& p=cell.centroid;return {p[0],p[1],p[2]};}
+    if (d_sparse_native)
+    {
+        const auto& cell = d_sparse_native->cell(c);
+        if (frozen_native() && cell.full)
+            return transformed_point(
+                geometry(cell.region, [&](const auto& g) { return g.cell_centroid(cell.native_cell); }));
+        const auto& p = cell.centroid;
+        return {p[0], p[1], p[2]};
+    }
     const auto [r, id] = native_cell(c); return transformed_point(geometry(r, [&](const auto& g) { return g.cell_centroid(id); }));
 }
 EntityRange<ID> MultiRegionMesh::cell_faces_impl(ID c) const
@@ -640,13 +686,15 @@ EntityRange<ID> MultiRegionMesh::cell_faces_impl(ID c) const
 
 ID MultiRegionMesh::owner_cell_impl(ID f) const
 {
-    if(d_sparse_native) return d_sparse_native->faces.at(f).first;
+    if (d_sparse_native)
+        return d_sparse_native->face(f).first;
     const auto n = native_face(f);
     return composite_cell(n.region, topology(n.region, [&](const auto& t) { return t.owner_cell(n.face); }));
 }
 ID MultiRegionMesh::neighbor_cell_impl(ID f) const
 {
-    if(d_sparse_native) return d_sparse_native->faces.at(f).second;
+    if (d_sparse_native)
+        return d_sparse_native->face(f).second;
     const auto n = native_face(f);
     const auto c = topology(n.region, [&](const auto& t) { return t.neighbor_cell(n.face); });
     if (c != invalid_cell_id()) return composite_cell(n.region, c);
@@ -673,7 +721,7 @@ real_t MultiRegionMesh::face_area_impl(ID f) const
 {
     if(d_sparse_native)
     {
-        const auto& face=d_sparse_native->faces.at(f);
+        const auto& face = d_sparse_native->face(f);
         if(face.override_geometry) return face.override_geometry->area().as_double();
         if(frozen_native())return area_magnitude(transformed_area_vector(geometry(face.native.region,[&](const auto& g){return g.face_area_vector(face.native.face);})));
         return geometry(face.native.region,[&](const auto& g){return g.face_area(face.native.face);});
@@ -686,7 +734,7 @@ MultiRegionMesh::Vec3 MultiRegionMesh::face_centroid_impl(ID f) const
 {
     if(d_sparse_native)
     {
-        const auto& face=d_sparse_native->faces.at(f);
+        const auto& face = d_sparse_native->face(f);
         if(face.override_geometry) return face.override_geometry->centroid();
         const auto center=geometry(face.native.region,[&](const auto& g){return g.face_centroid(face.native.face);});return frozen_native()?transformed_point(center):center;
     }
@@ -696,7 +744,7 @@ MultiRegionMesh::Vec3 MultiRegionMesh::face_normal_impl(ID f) const
 {
     if(d_sparse_native)
     {
-        const auto& face=d_sparse_native->faces.at(f);
+        const auto& face = d_sparse_native->face(f);
         if(face.override_geometry) return face.override_geometry->area_vector()/face.override_geometry->area().as_double();
         auto area=geometry(face.native.region,[&](const auto& g){return g.face_area_vector(face.native.face);});if(frozen_native())area=transformed_area_vector(area);
         return (area/area_magnitude(area))*native_flux_orientation(face.native,f);
@@ -708,7 +756,7 @@ MultiRegionMesh::Vec3 MultiRegionMesh::node_coordinates_impl(ID n) const
 {
     if(d_sparse_native)
     {
-        const auto& node=d_sparse_native->nodes.at(n);
+        const auto& node = d_sparse_native->node(n);
         if(node.native){const auto [r,id]=*node.native;const auto point=geometry(r,[&](const auto& g){return g.node_coordinates(id);});return frozen_native()?transformed_point(point):point;}
         const auto& p=node.introduced_coordinate; return {p[0],p[1],p[2]};
     }
@@ -717,7 +765,8 @@ MultiRegionMesh::Vec3 MultiRegionMesh::node_coordinates_impl(ID n) const
 }
 int MultiRegionMesh::boundary_id_impl(ID f) const
 {
-    if(d_sparse_native) return d_sparse_native->faces.at(f).boundary;
+    if (d_sparse_native)
+        return d_sparse_native->face(f).boundary;
     const auto n = native_face(f);
     const auto id = topology(n.region, [&](const auto& t) { return t.boundary_id(n.face); });
     if (id == invalid_boundary_id || partner(n, true)) return invalid_boundary_id;
@@ -728,21 +777,24 @@ int MultiRegionMesh::boundary_id_impl(ID f) const
 }
 const std::string& MultiRegionMesh::boundary_batch_name_impl(int b) const
 {
-    if(d_sparse_native) return d_sparse_native->boundaries.at(b);
+    if (d_sparse_native)
+        return d_sparse_native->boundary(b);
     for (const auto& entry : d_boundaries) if (entry.id == b) return entry.name;
     throw std::out_of_range("Unknown composite boundary.");
 }
 std::vector<int> MultiRegionMesh::boundary_batch_ids_impl() const
 {
     std::vector<int> ids;
-    if(d_sparse_native){for(const auto& [id,name]:d_sparse_native->boundaries)ids.push_back(id);return ids;}
+    if (d_sparse_native)
+        return d_sparse_native->boundary_ids();
     for (const auto& b : d_boundaries) if (std::find(ids.begin(), ids.end(), b.id) == ids.end()) ids.push_back(b.id);
     return ids;
 }
 int MultiRegionMesh::num_boundary_batches_impl() const noexcept
 {
     int count = 0;
-    if(d_sparse_native)return d_sparse_native->boundaries.size();
+    if (d_sparse_native)
+        return d_sparse_native->boundary_count();
     for (const auto& b : d_boundaries) count = std::max(count, b.id + 1);
     return count;
 }
@@ -751,7 +803,8 @@ MeshUtils::CellType MultiRegionMesh::cell_type(ID c) const
     check_cell_id(c); const auto [r, id] = native_cell(c);
     if(d_sparse_native)
         for(auto face:cell_faces(c))
-            if(d_sparse_native->faces.at(face).cut_incidence)return MeshUtils::CellType::POLYHEDRON;
+            if (d_sparse_native->face(face).cut_incidence)
+                return MeshUtils::CellType::POLYHEDRON;
     return topology(r, [&](const auto& t) { return t.cell_type(id); });
 }
 EntityRange<ID> MultiRegionMesh::cell_nodes(ID c) const
@@ -770,15 +823,18 @@ EntityRange<ID> MultiRegionMesh::face_nodes(ID f) const
     check_face_id(f);
     if(d_sparse_native)
     {
-        const auto& route=d_sparse_native->faces.at(f);
+        const auto& route = d_sparse_native->face(f);
         const auto count=route.override_geometry?route.override_nodes.size():topology(route.native.region,[&](const auto& t){return t.face_nodes(route.native.face).size();});
-        return {this,f,count,[](const void* p,size_t f,size_t i)->ID
-        {
-            const auto& mesh=*static_cast<const MultiRegionMesh*>(p); const auto& route=mesh.d_sparse_native->faces.at(f);
-            if(route.override_geometry)return route.override_nodes.at(i);
-            const auto node=mesh.topology(route.native.region,[&](const auto& t){return t.face_nodes(route.native.face)[i];});
-            return mesh.d_sparse_native->native_nodes.at({route.native.region,node});
-        }};
+        return {this, f, count, [](const void* p, size_t f, size_t i) -> ID
+            {
+                const auto& mesh = *static_cast<const MultiRegionMesh*>(p);
+                const auto& route = mesh.d_sparse_native->face(f);
+                if (route.override_geometry)
+                    return route.override_nodes[i];
+                const auto node = mesh.topology(
+                    route.native.region, [&](const auto& t) { return t.face_nodes(route.native.face)[i]; });
+                return mesh.d_sparse_native->native_node({route.native.region, node});
+            }};
     }
     const auto n = native_face(f);
     return {this, f, topology(n.region, [&](const auto& t) { return t.face_nodes(n.face).size(); }),
@@ -791,8 +847,8 @@ EntityRange<ID> MultiRegionMesh::face_nodes(ID f) const
 
 void MultiRegionMesh::validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation) const
 {
-    if (a.region >= d_regions.size() || b.region >= d_regions.size()
-        || a.face >= region_layout(a.region).faces || b.face >= region_layout(b.region).faces)
+    if (a.region >= region_count() || b.region >= region_count() || a.face >= region_layout(a.region).faces ||
+        b.face >= region_layout(b.region).faces)
         throw std::invalid_argument("Conforming interface requires valid region faces.");
     if (a.region == b.region
         && (a.face == b.face || topology(a.region,[&](const auto& t){return t.owner_cell(a.face);})
@@ -842,14 +898,15 @@ void MultiRegionMesh::validate_pair(RegionFace a, RegionFace b, std::optional<Ve
 
 void MultiRegionMesh::validate_regions() const
 {
-    for(const auto& region:d_regions)
-        if(const auto* explicit_region=std::get_if<DistributedExplicitRegion>(&region);
-            explicit_region && explicit_region->geometry().has_local_certificates())
-            throw std::invalid_argument("Local certified explicit fragments require sparse native assembly.");
+    for (std::size_t region_slot = 0; region_slot < region_count(); ++region_slot)
+        if (const auto& region = this->region(region_slot); true)
+            if (const auto* explicit_region = std::get_if<DistributedExplicitRegion>(&region);
+                explicit_region && explicit_region->geometry().has_local_certificates())
+                throw std::invalid_argument("Local certified explicit fragments require sparse native assembly.");
 
     validate_static();
     std::set<std::string> names;
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    for (size_t r = 0; r < region_count(); ++r)
     {
         if (!names.insert(region_name(r)).second) throw std::invalid_argument("Topology region names must be unique.");
         const auto& l = region_layout(r);
@@ -1009,7 +1066,7 @@ MultiRegionMesh::MultiRegionMesh(std::vector<Region> regions, std::vector<Interf
     try
     {
         if (comm->getSize() > 1)
-            for (size_t r = 0; r < d_regions.size(); ++r)
+            for (size_t r = 0; r < region_count(); ++r)
                 if (region_layout(r).family == RegionLayout::Family::Explicit)
                     throw std::invalid_argument("Composite MPI requires compact implicit regions; partitioned explicit regions are not supported.");
         initialize_regions(tolerance, names);
@@ -1046,8 +1103,9 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
         throw std::invalid_argument("Invalid interface matching tolerance.");
     validate_regions();
     d_explicit.resize(d_interfaces.size());
-    d_native_patch_counts.resize(d_regions.size());
-    std::vector<size_t> component(d_regions.size()); std::iota(component.begin(), component.end(), 0);
+    d_native_patch_counts.resize(region_count());
+    std::vector<size_t> component(region_count());
+    std::iota(component.begin(), component.end(), 0);
     const auto root=[&](size_t r){while(component[r]!=r) r=component[r]; return r;};
     const auto patch_count=[&](size_t r,int boundary)
     {
@@ -1210,7 +1268,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
             throw std::invalid_argument("Self interfaces require a periodic mapping or coincident conforming caps.");
         component[root(first)]=root(second);
     }
-    for(size_t r=1;r<d_regions.size();++r)
+    for (size_t r = 1; r < region_count(); ++r)
         if(root(r)!=root(0)) throw std::invalid_argument("Disconnected composite fluid domains are unsupported.");
     initialize_interface_directory();
     const auto unique_face=[&](RegionFace f)
@@ -1265,7 +1323,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
     }
     d_cells.push_back(0); d_faces.push_back(0); d_nodes.push_back(0); d_native_faces.push_back(0);
     int next_boundary = 0;
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    for (size_t r = 0; r < region_count(); ++r)
     {
         const auto& l = region_layout(r);
         d_cells.push_back(checked_add(d_cells.back(), l.cells));
@@ -1323,7 +1381,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
     d_num_faces = d_num_owned_faces = d_faces.back(); d_num_nodes = d_nodes.back();
     d_indexer = {d_num_cells, d_num_faces, d_num_nodes};
     real_t bottom = std::numeric_limits<real_t>::infinity(), top = -bottom;
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    for (size_t r = 0; r < region_count(); ++r)
         geometry(r, [&](const auto& g)
         {
             const auto bounds = [&](const auto& source)
@@ -1385,7 +1443,7 @@ bool MultiRegionMesh::supports_axial_motion() const noexcept
     if(d_sparse_native)return false;
     if (has_construction())
         return false;
-    for(size_t r=0;r<d_regions.size();++r)
+    for (size_t r = 0; r < region_count(); ++r)
         if(region_layout(r).family==RegionLayout::Family::Explicit) return false;
     for(const auto& interface:d_interfaces)
         if(const auto* s=std::get_if<StructuredPatchInterface>(&interface); s && s->periodic_translation && s->periodic_translation->z!=0)
@@ -1396,7 +1454,7 @@ bool MultiRegionMesh::has_qualified_geometry_interfaces() const noexcept
 {
     const auto constructed = [&](size_t region)
     {
-        if (region >= d_regions.size())
+        if (region >= region_count())
             return true;
         return std::visit(
             [](const auto& r)
@@ -1406,7 +1464,7 @@ bool MultiRegionMesh::has_qualified_geometry_interfaces() const noexcept
                 else
                     return false;
             },
-            d_regions[region]);
+            this->region(region));
     };
     for (const auto& interface : d_interfaces)
     {
@@ -1434,22 +1492,27 @@ bool MultiRegionMesh::has_qualified_geometry_interfaces() const noexcept
 bool MultiRegionMesh::has_construction() const noexcept
 {
     if(d_sparse_native)return true;
-    for(const auto& region:d_regions)
-        if (std::visit(
-                [](const auto& r)
-                {
-                    if constexpr (requires { r.geometry().has_construction(); })
-                        return r.geometry().has_construction();
-                    else
-                        return false;
-                },
-                region))
-            return true;
+    for (std::size_t region_slot = 0; region_slot < region_count(); ++region_slot)
+        if (const auto& region = this->region(region_slot); true)
+            if (std::visit(
+                    [](const auto& r)
+                    {
+                        if constexpr (requires { r.geometry().has_construction(); })
+                            return r.geometry().has_construction();
+                        else
+                            return false;
+                    },
+                    region))
+                return true;
     return false;
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(ID f) const
 {
-    if(d_sparse_native){const auto& p=d_sparse_native->faces.at(f).second_image;return {-p[0],-p[1],-p[2]};}
+    if (d_sparse_native)
+    {
+        const auto& p = d_sparse_native->face(f).second_image;
+        return {-p[0], -p[1], -p[2]};
+    }
     return periodic_translation(native_face(f));
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(RegionFace n) const
@@ -1557,61 +1620,66 @@ MeshStorageReport MultiRegionMesh::storage_report() const
             }
         }
     };
-    for (const auto& region : d_regions) std::visit([&](const auto& r)
-    {
-        count_provider(r.topology()); count_provider(r.geometry());
-        if (topology_seen.insert(r.topology().storage_identity()).second)
-        {
-            auto bytes = r.topology().storage_report().topology;
-            const auto& native = [&]() -> const auto&
+    for (std::size_t region_slot = 0; region_slot < region_count(); ++region_slot)
+        std::visit(
+            [&](const auto& r)
             {
-                if constexpr (requires { r.topology().native(); })
-                    return r.topology().native();
-                else
-                    return r.topology();
-            }();
-            if constexpr (requires { native.base_storage_identity(); })
-            {
-                if (!topology_bases.insert(native.base_storage_identity()).second)
-                    bytes -= native.base_storage_bytes();
-            }
-            result.topology += bytes;
-        }
-        if (geometry_seen.insert(r.geometry().storage_identity()).second)
-        {
-            auto bytes = r.geometry().storage_report().geometry;
-            const auto& native = [&]() -> const auto&
-            {
-                if constexpr (requires { r.geometry().native(); })
-                    return r.geometry().native();
-                else
-                    return r.geometry();
-            }();
-            if constexpr (requires {
-                              native.construction()->base_storage_identity();
-                              native.construction()->axis_values_storage_bytes();
-                          })
-                if (const auto& construction = native.construction())
+                count_provider(r.topology());
+                count_provider(r.geometry());
+                if (topology_seen.insert(r.topology().storage_identity()).second)
                 {
-                    if (!metric_bases.insert(construction->base_storage_identity()).second)
-                        bytes -= construction->base_storage_bytes();
-                    if (!metric_axes.insert(construction->axis_storage_identity()).second)
-                        bytes -= construction->axis_storage_bytes();
-                    else if (!metric_axis_values.insert(construction->axis_values_storage_identity()).second)
-                        bytes -= construction->axis_values_storage_bytes();
+                    auto bytes = r.topology().storage_report().topology;
+                    const auto& native = [&]() -> const auto&
+                    {
+                        if constexpr (requires { r.topology().native(); })
+                            return r.topology().native();
+                        else
+                            return r.topology();
+                    }();
+                    if constexpr (requires { native.base_storage_identity(); })
+                    {
+                        if (!topology_bases.insert(native.base_storage_identity()).second)
+                            bytes -= native.base_storage_bytes();
+                    }
+                    result.topology += bytes;
                 }
-            result.geometry += bytes;
-        }
-    }, region);
+                if (geometry_seen.insert(r.geometry().storage_identity()).second)
+                {
+                    auto bytes = r.geometry().storage_report().geometry;
+                    const auto& native = [&]() -> const auto&
+                    {
+                        if constexpr (requires { r.geometry().native(); })
+                            return r.geometry().native();
+                        else
+                            return r.geometry();
+                    }();
+                    if constexpr (requires {
+                                      native.construction()->base_storage_identity();
+                                      native.construction()->axis_values_storage_bytes();
+                                  })
+                        if (const auto& construction = native.construction())
+                        {
+                            if (!metric_bases.insert(construction->base_storage_identity()).second)
+                                bytes -= construction->base_storage_bytes();
+                            if (!metric_axes.insert(construction->axis_storage_identity()).second)
+                                bytes -= construction->axis_storage_bytes();
+                            else if (!metric_axis_values.insert(construction->axis_values_storage_identity()).second)
+                                bytes -= construction->axis_values_storage_bytes();
+                        }
+                    result.geometry += bytes;
+                }
+            },
+            this->region(region_slot));
     return result;
 }
 std::string MultiRegionMesh::configuration_signature() const
 {
-    if(d_sparse_native)return d_sparse_native->common_signature;
+    if (d_sparse_native)
+        return d_sparse_native->configuration_signature(d_num_cells, d_num_faces, d_num_nodes);
     std::ostringstream out;
     out << std::hexfloat << d_tolerance.absolute_length << ' ' << d_tolerance.relative << ' ';
     const auto values = [&](const auto& range) { out << range.size() << ' '; for (const auto v : range) out << v << ' '; };
-    for (size_t r = 0; r < d_regions.size(); ++r)
+    for (size_t r = 0; r < region_count(); ++r)
     {
         const auto& l = region_layout(r);
         out << std::quoted(region_name(r)) << ' ' << static_cast<int>(l.family) << ' ' << l.cells << ' ' << l.faces << ' ' << l.nodes << ' ';

@@ -4,10 +4,28 @@
 #include "geometry/mesh/AMR/AdaptiveLeafPages.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
+#include "geometry/mesh/AMR/NativePublicationSession.hh"
 #include "geometry/mesh/AMR/NativeSourceCoverage.hh"
 #include <optional>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
+struct NativePublicationIndexes;
+class NativePublicationReceipt;
+struct NativeSourceBoundInput
+{
+    using Map = Teuchos::RCP<const DefaultTpetraTypes::map_type>;
+    std::shared_ptr<const CompositePartition<>> partition;
+    std::shared_ptr<const Map> map_token;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> map_token_allocation;
+};
+struct NativeSourcePublicationValues
+{
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> cache_allocation;
+    std::shared_ptr<const NativePublicationReceipt> receipt;
+    NativeSourceBoundInput input;
+    NativePublicationSourceObservations source;
+    NativeSourceCoverageBroker broker;
+};
 class NativeSourceCoverage;
 class NativeSourceSubsetCoverage;
 class AdaptiveLeafBodyUsage;
@@ -50,12 +68,17 @@ class SIMPLEFLUID_LOCAL NativeSourceOwnerStore
         std::array<PLIC::details::NativeOwnerReceipts, 4> component_paid;
         std::optional<std::size_t> contact_projected_admission;
         std::shared_ptr<const void> contact_arena;
+        std::shared_ptr<const NativePublicationIndexes> indexes;
+        NativeSourcePublicationValues publication_values;
         std::array<PLIC::details::GeometryNativeAdministration, 2> input_administration;
         std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation;
     };
 public:
     [[nodiscard]] const PLIC::details::GeometryOwnerRootBinding& binding() const noexcept { return binding_; }
     [[nodiscard]] const PLIC::details::OwnerManifestPair& owners() const noexcept;
+    [[nodiscard]] const std::shared_ptr<const NativePublicationIndexes>& indexes() const noexcept;
+    [[nodiscard]] const NativeSourceBoundInput& bound_input() const noexcept;
+    [[nodiscard]] const NativePublicationSourceObservations& observations() const noexcept;
     [[nodiscard]] const std::array<PLIC::details::GeometryNativeAdministration, 2>& input_administration() const noexcept;
     [[nodiscard]] const std::shared_ptr<const NativeSourceCoverage>& coverage() const noexcept;
     [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subfaces() const noexcept;
@@ -73,11 +96,13 @@ public:
     [[nodiscard]] static NativeSourceOwnerStore assemble(const NativeSourceOwnerStore& previous,
         std::array<PLIC::details::OwnerManifestPair, 4>, const geometry_detail::NativeConstructionAdmission&,
         PLIC::details::NativeGeometryAccounting* = nullptr,
+        std::shared_ptr<const NativePublicationIndexes> indexes = {},
         std::array<PLIC::details::GeometryNativeAdministration, 2> input_administration = {},
         std::shared_ptr<const NativeSourceCoverage> coverage = {},
         std::shared_ptr<const AdaptiveSubfaceSnapshot> subfaces = {},
         std::optional<std::array<PLIC::details::NativeOwnerReceipts, 4>> component_paid = {},
         std::optional<std::size_t> contact_projected_admission = {}, std::shared_ptr<const void> contact_arena = {},
+        std::optional<NativeSourcePublicationValues> publication_values = {},
         std::optional<NativeContactSideIndexes> contact_side_indexes = {});
     [[nodiscard]] static std::shared_ptr<const NativeSourceCoverage> body_coverage(const AdaptiveLeafBodyUsage&,
         AdaptiveLeafBodyRole, std::shared_ptr<const ContactExternalResidencyLease>,

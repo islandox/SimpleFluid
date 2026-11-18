@@ -37,9 +37,21 @@ private:
  * lifetimes. Borrowed leaves remain valid while that owner is held. */
 class AdaptiveLeafLayout
 {
+    class NativePreparedKey
+    {
+        friend class DistributedAdaptiveHierarchy;
+        NativePreparedKey() = default;
+    public:
+        NativePreparedKey(const NativePreparedKey&) = default;
+    };
 public:
     using const_iterator = adaptive_detail::AdaptiveLeafPages::const_iterator;
 
+    AdaptiveLeafLayout(NativePreparedKey, adaptive_detail::AdaptiveLeafPages pages,
+        std::shared_ptr<const adaptive_detail::ContactExternalResidencyLease> admission)
+        : AdaptiveLeafLayout(std::move(pages), std::move(admission))
+    {
+    }
     AdaptiveLeafLayout(const AdaptiveLeafLayout&) = delete;
     AdaptiveLeafLayout& operator=(const AdaptiveLeafLayout&) = delete;
 

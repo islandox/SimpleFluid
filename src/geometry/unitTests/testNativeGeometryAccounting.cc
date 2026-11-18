@@ -970,7 +970,7 @@ SourceUnionFrame source_union_frame(const SourceUnionFrame& previous, const Phys
     components[0] = source.body.owners();
     SourceUnionFrame result;
     result.store = A::NativeSourceOwnerStore::assemble(previous.store, std::move(components), admission, nullptr,
-        {source.body.administration(), {}}, coverage);
+        {}, {source.body.administration(), {}}, coverage);
     SimpleFluid::PLIC::GeometryAllocationLedger ordinary, bounded;
     std::size_t cursor = 0;
     D::GeometryAllocationOwnerAccess::begin_native_bookkeeping(ordinary, admission, cursor, cap);
@@ -1419,7 +1419,8 @@ TEST(NativeGeometryAccounting, RealIntrinsicAndExternalSubsetCategoriesDeduplica
         }
         std::array<D::OwnerManifestPair, 4> components;
         components[0] = std::move(contact_owners);
-        frame.store = A::NativeSourceOwnerStore::assemble({}, std::move(components), admission, nullptr, {contact->source_administration(), {}}, coverage, {}, std::move(receipts));
+        frame.store = A::NativeSourceOwnerStore::assemble({}, std::move(components), admission, nullptr, {},
+            {contact->source_administration(), {}}, coverage, {}, std::move(receipts));
         {
             SimpleFluid::PLIC::GeometryAllocationLedger ordinary, bounded;
             std::size_t cursor = 0;

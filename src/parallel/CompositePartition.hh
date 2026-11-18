@@ -6,11 +6,13 @@
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "parallel/MPI_interface.hh"
+#include "geometry/details/NativeConstructorOwnerSink.hh"
 #include <span>
 #include <variant>
 
 namespace SimpleFluid
 {
+namespace geometry_detail { class NativePartitionAccess; }
 template<TpetraTypePack Pack> class MeshPartitioner;
 template<TpetraTypePack Pack> class CompositePartition;
 
@@ -141,8 +143,10 @@ public:
     uint64_t collective_identity() const noexcept { return d_collective_id; }
 private:
     friend class MeshPartitioner<Pack>;
+    friend class geometry_detail::NativePartitionAccess;
     friend class CompositePartition<Pack>;
     CompositePartitionPlan() = default;
+    geometry_detail::NativeConstructorStorageOwner d_native_storage;
     std::vector<ID> d_cells, d_faces, d_nodes;
     std::vector<int> d_cell_owners;
     std::vector<CompositeRegionFragment> d_fragments;
@@ -166,7 +170,17 @@ private:
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class CompositePartition
 {
+    class NativePreparedKey
+    {
+        friend class geometry_detail::NativePartitionAccess;
+        NativePreparedKey() = default;
+    public:
+        NativePreparedKey(const NativePreparedKey&) = default;
+    };
 public:
+    CompositePartition(NativePreparedKey, std::shared_ptr<Meshes::MultiRegionMesh> geometry,
+        CompositePartitionPlan<Pack> plan)
+        : CompositePartition(std::move(geometry), std::move(plan)) {}
     /** Collective direct sparse route: no root gather, source merge or global
      * owner array. IDs and full/metric residency are already authority-verified. */
     static CompositePartition from_sparse_native(std::shared_ptr<Meshes::MultiRegionMesh> geometry,
@@ -181,10 +195,12 @@ public:
     }
 private:
     friend class MeshPartitioner<Pack>;
+    friend class geometry_detail::NativePartitionAccess;
     CompositePartition(std::shared_ptr<Meshes::MultiRegionMesh> geometry,
                        CompositePartitionPlan<Pack> plan)
         : d_geometry(std::move(geometry)), d_plan(std::move(plan)),
           d_geometry_epoch(d_geometry->geometry_epoch()) {}
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_allocation;
     std::shared_ptr<Meshes::MultiRegionMesh> d_geometry;
     CompositePartitionPlan<Pack> d_plan;
     uint64_t d_geometry_epoch = 0;

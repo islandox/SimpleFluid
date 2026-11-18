@@ -16,8 +16,7 @@
 #include "DistributedAdaptiveClosureRecords.hh"
 #include "DistributedAdaptiveIncidence.hh"
 #include "IncidencePhysicalOwners.hh"
-#include "AdaptiveSubfaceSnapshot.hh"
-#include "NativeSourceOwnerStore.hh"
+#include "NativeKernelAuthority.hh"
 #include "PersistentContactGroups.hh"
 #include "PersistentContactTraces.hh"
 #include "geometry/PLIC/GeometryIdentityCodec.hh"
@@ -3027,9 +3026,14 @@ void DistributedAdaptiveContactHalo::bootstrap(
 
 void DistributedAdaptiveContactHalo::bootstrap_canonical(
     std::span<const AdaptiveLeaf> owned, const ContactOwnedLeafLookup& lookup,
-    std::shared_ptr<const AdaptiveLeafLayout> layout)
+    std::shared_ptr<const AdaptiveLeafLayout> layout, bool enable_native_source)
 {
     auto& state = *impl_;
+    const bool local_native_source = enable_native_source && layout &&
+        NativeKernelAuthority::supports_source_validation(state.kernel) &&
+        std::all_of(owned.begin(), owned.end(),
+            [&](const auto& leaf) { return NativeKernelAuthority::supports_source_validation(state.kernel, leaf); });
+    const bool native_source = !::SimpleFluid::owner_packet_failure_agreement(*state.comm, !local_native_source);
     collective(*state.comm,
         [&]
         {
@@ -3043,7 +3047,7 @@ void DistributedAdaptiveContactHalo::bootstrap_canonical(
                 state.groups.reset();
                 state.budget.used -= sizeof(Impl::Groups);
                 state.budget.add(sizeof(PersistentContactGroups) + sizeof(ContactPhysicalResidency) + 128);
-                state.physical_owners = std::make_shared<ContactPhysicalResidency>(state.arena);
+                state.physical_owners = std::make_shared<ContactPhysicalResidency>(state.arena, native_source);
                 state.trace_pool.reset();
                 state.persistent_traces.emplace(state.arena, *state.physical_owners);
                 state.persistent_groups = std::make_unique<PersistentContactGroups>(state.arena, *state.physical_owners);

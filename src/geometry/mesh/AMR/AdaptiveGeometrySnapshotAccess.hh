@@ -101,6 +101,11 @@ public:
     static void visit_cache_owner_union(const DistributedAdaptiveHierarchy&,
         const std::function<void(const PLIC::details::geometry_demand::OwnerRecord&)>&,
         PLIC::details::geometry_demand::MetadataSink);
+    /** Quiescent access to the two actual native root slots and native domain
+     * payment facts for an independent cold completeness check. */
+    static void visit_native_cache_bindings(const DistributedAdaptiveHierarchy&,
+        const std::function<void(const PLIC::details::GeometryOwnerRootBinding&)>&,
+        const std::function<void(const PLIC::details::NativePaidExtentCharge&)>&);
 
     static void visit_binding_sources(const AdaptiveGeometrySnapshot&, const std::function<void(const void*)>&);
     /** Borrow the stored payload-only owner set in constant work; excludes the

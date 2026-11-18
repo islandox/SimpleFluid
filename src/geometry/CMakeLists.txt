@@ -1,13 +1,20 @@
 set(SIMPLEFLUID_MESH_SOURCES
+    mesh/AMR/NativePublicationProof.cc
+    mesh/AMR/NativePublicationSession.cc
+    mesh/AMR/NativePublicationView.cc
+    mesh/AMR/NativePublicationOwnerGraph.cc
+    mesh/AMR/NativePublicationNumbering.cc
+    mesh/AMR/NativeSparseAssembler.cc
+    mesh/AMR/NativePublicationOutputGraph.cc
+    mesh/AMR/NativeSourceOwnerStore.cc
     mesh/AMR/NativeSourceCoverage.cc
     mesh/NativeFragmentAccess.cc
+    mesh/NativeFragmentDecodePlan.cc
     mesh/NativeSparseAccess.cc
-    mesh/AMR/NativePublicationOwnerGraph.cc
-    mesh/AMR/NativeSourceOwnerStore.cc
+    details/NativeMeshHandleAccess.cc
+    PLIC/details/NativeConstructionWireAccess.cc
     PLIC/details/NativeGeometryAccounting.cc
     PLIC/details/NativePaidExtent.cc
-    mesh/NativeFragmentDecodePlan.cc
-    PLIC/details/NativeConstructionWireAccess.cc
     mesh/AMR/AdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveTypes.cc
     mesh/AMR/DistributedAdaptivePackets.cc
@@ -175,19 +182,30 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
     # Authenticated native construction/proofs use the original strict arithmetic contract.
     set_source_files_properties(
-        mesh/AMR/NativeSourceCoverage.cc
-        mesh/NativeFragmentAccess.cc
-        mesh/NativeSparseAccess.cc
-        mesh/AMR/DistributedCartesianKernel.cc
+        "${PROJECT_SOURCE_DIR}/src/parallel/details/NativePartitionAccess.cc"
         "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
-        mesh/AMR/NativePublicationOwnerGraph.cc
-        mesh/AMR/NativeSourceOwnerStore.cc
-        PLIC/details/NativeGeometryAccounting.cc
-        PLIC/details/NativePaidExtent.cc
-        mesh/NativeFragmentDecodePlan.cc
-        PLIC/details/NativeConstructionWireAccess.cc
+        mesh/AMR/DistributedCartesianKernel.cc
+        mesh/AMR/AdaptiveProviderKernel.cc
+        mesh/AMR/DistributedAdaptiveNative.cc
+        mesh/MultiRegionMeshSparse.cc
         mesh/RegionProviders.cc
         mesh/OrthogonalCartesian3D.cc
+        mesh/AMR/NativePublicationProof.cc
+        mesh/AMR/NativePublicationSession.cc
+        mesh/AMR/NativePublicationView.cc
+        mesh/AMR/NativePublicationOwnerGraph.cc
+        mesh/AMR/NativePublicationNumbering.cc
+        mesh/AMR/NativeSparseAssembler.cc
+        mesh/AMR/NativePublicationOutputGraph.cc
+        mesh/AMR/NativeSourceOwnerStore.cc
+        mesh/AMR/NativeSourceCoverage.cc
+        mesh/NativeFragmentAccess.cc
+        mesh/NativeFragmentDecodePlan.cc
+        mesh/NativeSparseAccess.cc
+        details/NativeMeshHandleAccess.cc
+        PLIC/details/NativeConstructionWireAccess.cc
+        PLIC/details/NativeGeometryAccounting.cc
+        PLIC/details/NativePaidExtent.cc
         PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-frounding-math;-fno-lto"
@@ -293,16 +311,24 @@ endif()
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    "${PROJECT_SOURCE_DIR}/src/parallel/details/NativePartitionAccess.cc"
+    "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
+    mesh/AMR/NativePublicationProof.cc
+    mesh/AMR/NativePublicationSession.cc
+    mesh/AMR/NativePublicationView.cc
+    mesh/AMR/NativePublicationOwnerGraph.cc
+    mesh/AMR/NativePublicationNumbering.cc
+    mesh/AMR/NativeSparseAssembler.cc
+    mesh/AMR/NativePublicationOutputGraph.cc
+    mesh/AMR/NativeSourceOwnerStore.cc
     mesh/AMR/NativeSourceCoverage.cc
     mesh/NativeFragmentAccess.cc
+    mesh/NativeFragmentDecodePlan.cc
     mesh/NativeSparseAccess.cc
-    "${PROJECT_SOURCE_DIR}/src/parallel/details/NativeTpetraMapAdmission.cc"
-    mesh/AMR/NativePublicationOwnerGraph.cc
-    mesh/AMR/NativeSourceOwnerStore.cc
+    details/NativeMeshHandleAccess.cc
+    PLIC/details/NativeConstructionWireAccess.cc
     PLIC/details/NativeGeometryAccounting.cc
     PLIC/details/NativePaidExtent.cc
-    mesh/NativeFragmentDecodePlan.cc
-    PLIC/details/NativeConstructionWireAccess.cc
     mesh/AMR/AdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveTypes.cc
     mesh/AMR/DistributedAdaptivePackets.cc

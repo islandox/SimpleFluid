@@ -10,7 +10,7 @@
 #include "IncidencePools.hh"
 #include "IncidencePhysicalOwners.hh"
 #include "IncidenceTileDelivery.hh"
-#include "NativeSourceOwnerStore.hh"
+#include "NativeKernelAuthority.hh"
 #include "OwnedSupportMembership.hh"
 #include "PooledLineExchange.hh"
 #include "PooledSupportRegistry.hh"

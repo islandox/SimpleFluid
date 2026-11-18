@@ -2,11 +2,15 @@
  * @brief Detached native Cartesian block recipes and exact local dyadic kernels.
  */
 #pragma once
-#include "geometry/details/NativeAllocationEnvelope.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include <cstddef>
 #include <optional>
+namespace SimpleFluid::geometry_detail
+{
+class NativeConstructionAdmission;
+template<class T> struct NativeTrackedOwner;
+}
 namespace SimpleFluid::Meshes::AMR
 {
 /** Copies only the compact grid description. Cartesian periodic axes retain

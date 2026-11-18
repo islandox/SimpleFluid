@@ -2,11 +2,18 @@
  * @brief Native block grouping, Cartesian dyadic splits and detached coordinates.
  */
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
+#include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
+#include "geometry/PLIC/details/NativeBoxSourceAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/mesh/NativeFragmentAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <charconv>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -121,16 +128,196 @@ ID local_cell(const AMRGrid& grid, const CartesianCellAncestry& cell)
            grid.block_cells[0] *
                (cell.index[1] % grid.block_cells[1] + grid.block_cells[1] * (cell.index[2] % grid.block_cells[2]));
 }
+/** Compare the existing homogeneous native descriptor without constructing an
+ * expected provider, packet, name or axis array. Never trust a supplied recipe
+ * as the expected geometry of its own cell. */
+struct CartesianRecipeCheck
+{
+    std::span<const char> bytes;
+    template<class T> void value(const T& expected)
+    {
+        if (bytes.size() < sizeof(T) || std::memcmp(bytes.data(), &expected, sizeof(T)))
+            throw std::invalid_argument("Cartesian native recipe differs from typed source semantics.");
+        bytes = bytes.subspan(sizeof(T));
+    }
+    void text(std::string_view expected)
+    {
+        value(std::uint64_t(expected.size()));
+        if (bytes.size() < expected.size() || !std::equal(expected.begin(), expected.end(), bytes.begin()))
+            throw std::invalid_argument("Cartesian native recipe label differs from typed source semantics.");
+        bytes = bytes.subspan(expected.size());
+    }
+    void done() const
+    {
+        if (!bytes.empty())
+            throw std::invalid_argument("Cartesian native recipe has trailing bytes.");
+    }
+};
+constexpr std::array<std::string_view, 6> cartesian_names{"xmin", "xmax", "ymin", "ymax", "zmin", "zmax"};
+struct CartesianBlockName
+{
+    std::array<char, 128> bytes{};
+    std::size_t size = 0;
+    explicit CartesianBlockName(const AMRBlock& block)
+    {
+        constexpr std::string_view prefix = "block_";
+        std::copy(prefix.begin(), prefix.end(), bytes.begin());
+        char* cursor = bytes.data() + prefix.size();
+        const auto append = [&](std::uint64_t value, bool separator)
+        {
+            if (separator) *cursor++ = '_';
+            const auto encoded = std::to_chars(cursor, bytes.data() + bytes.size(), value);
+            if (encoded.ec != std::errc{})
+                throw std::invalid_argument("Cartesian block name exceeds its fixed representation.");
+            cursor = encoded.ptr;
+        };
+        append(block.level, false);
+        for (const auto index : block.index) append(index, true);
+        size = static_cast<std::size_t>(cursor - bytes.data());
+    }
+    std::string_view view() const noexcept { return {bytes.data(), size}; }
+};
 class CartesianKernel final : public AdaptiveProviderKernel
 {
     AMRGrid grid_;
 
 public:
     explicit CartesianKernel(AMRGrid grid) : grid_(std::move(grid)) { validate_grid(grid_); }
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink&,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit) const {}
     bool native_cartesian_incidence_grid(AMRGrid& output) const noexcept override
     {
         output = grid_;
         return true;
+    }
+    bool supports_native_source(const AdaptiveLeaf& leaf) const noexcept
+    {
+        return leaf.provider == AdaptiveProviderKind::Cartesian && !leaf.geometry && leaf.surfaces.empty() &&
+               !leaf.factor_recipe && !leaf.join_recipe;
+    }
+    static constexpr bool native_source_publication_ready = true;
+    std::size_t native_source_face_count(const AdaptiveLeaf&) const noexcept { return 6; }
+    AdaptiveCellMetrics validate_native_source(const AdaptiveLeaf& leaf, const NativeFragmentRecord& fragment,
+        const geometry_detail::NativeConstructionAdmission& admission,
+        std::span<adaptive_detail::NativeKernelSourceFace> routes) const
+    {
+        const auto& cell = ancestry(grid_, leaf.key);
+        if (routes.size() != 6 || leaf.provider != AdaptiveProviderKind::Cartesian || leaf.material != grid_.material_id ||
+            leaf.domain.empty() || !leaf.native_recipe || leaf.native_cell != local_cell(grid_, cell) ||
+            leaf.geometry || !leaf.surfaces.empty() || leaf.factor_recipe || leaf.join_recipe)
+            throw std::invalid_argument("Cartesian source requires its original procedural leaf and typed ancestry.");
+        const auto* region = std::get_if<CartesianRegion>(&fragment.region());
+        if (!region || !fragment.allocation() || !fragment.allocation()->authentic_owner(fragment.allocation()))
+            throw std::invalid_argument("Cartesian source lacks its admitted immutable provider.");
+        const auto source_block = block(grid_, cell);
+        const CartesianBlockName name(source_block);
+        const auto& descriptor = *leaf.native_recipe;
+        if (descriptor.kind != NativeFragmentDescriptor::Kind::Cartesian || descriptor.parts.size() != 4)
+            throw std::invalid_argument("Cartesian source has a foreign fragment schema.");
+        for (const auto& part : descriptor.parts)
+            if (!part) throw std::invalid_argument("Cartesian source has a null fragment part.");
+        CartesianRecipeCheck topology{*descriptor.parts[0]};
+        for (const auto count : grid_.block_cells) topology.value(std::uint64_t(count));
+        for (unsigned axis = 0; axis < 3; ++axis) topology.value(std::uint8_t(0));
+        for (const auto label : cartesian_names) topology.text(label);
+        topology.done();
+        CartesianRecipeCheck view{descriptor.view}; view.text(name.view()); view.done();
+        if (region->name() != name.view())
+            throw std::invalid_argument("Cartesian source provider has a foreign block name.");
+        const auto layout = region->layout();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            if (layout.extents[axis] != grid_.block_cells[axis] || layout.periodic[axis] ||
+                region->geometry().cell_edges()[axis].size() != grid_.block_cells[axis] + 1)
+                throw std::invalid_argument("Cartesian source provider has a foreign block layout.");
+            CartesianRecipeCheck coordinates{*descriptor.parts[axis + 1]};
+            coordinates.value(std::uint64_t(grid_.block_cells[axis] + 1));
+            for (ID i = 0; i <= grid_.block_cells[axis]; ++i)
+            {
+                const auto expected = coordinate(grid_, axis, mul(source_block.index[axis], grid_.block_cells[axis]) + i,
+                    source_block.level);
+                coordinates.value(expected);
+                if (std::bit_cast<ID>(region->geometry().cell_edges()[axis][i]) != std::bit_cast<ID>(expected))
+                    throw std::invalid_argument("Cartesian provider axes differ from original source expressions.");
+            }
+            coordinates.done();
+        }
+        for (int boundary = 0; boundary < 6; ++boundary)
+            if (region->topology().boundary_batch_name(boundary) != cartesian_names[boundary])
+                throw std::invalid_argument("Cartesian provider boundary aliases differ from original source.");
+        const auto center = region->geometry().cell_centroid(leaf.native_cell);
+        const AdaptiveCellMetrics metrics{region->geometry().cell_volume(leaf.native_cell), {center.x, center.y, center.z}};
+        const auto bounds = geometry_bounds(leaf);
+        struct Verification
+        {
+            const CartesianRegion& region;
+            const AdaptiveLeaf& leaf;
+            const geometry_detail::NativeConstructionAdmission& admission;
+            std::span<adaptive_detail::NativeKernelSourceFace> routes;
+            AdaptiveCartesianGeometryBounds bounds;
+        } verification{*region, leaf, admission, routes, bounds};
+        adaptive_detail::record_pipeline_work(adaptive_detail::PipelineWork::CellGeometryRequest);
+        PLIC::details::NativeBoxSourceAccess::verify(bounds.lower, bounds.upper, admission, &verification,
+            [](void* raw, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>& canonical)
+            {
+                auto& v = *static_cast<Verification*>(raw);
+                const auto& topology = v.region.topology();
+                const auto& indexer = topology.indexer();
+                const auto location = indexer.cell_id(v.leaf.native_cell);
+                std::array<unsigned, 3> base{location.i, location.j, location.k};
+                if (canonical.num_faces() != 6 || topology.cell_faces(v.leaf.native_cell).size() != 6)
+                    throw std::invalid_argument("Cartesian source has an incomplete original convex shell.");
+                const auto nodes = topology.cell_nodes(v.leaf.native_cell);
+                if (nodes.size() != 8)
+                    throw std::invalid_argument("Cartesian source has an incomplete original corner set.");
+                for (std::size_t corner = 0; corner < 8; ++corner)
+                {
+                    const auto node = indexer.node_ordinal({base[0] + unsigned(corner & 1),
+                        base[1] + unsigned((corner >> 1) & 1), base[2] + unsigned((corner >> 2) & 1)});
+                    if (std::count(nodes.begin(), nodes.end(), node) != 1)
+                        throw std::invalid_argument("Cartesian source corner route is missing or repeated.");
+                    const auto point = v.region.geometry().node_coordinates(node);
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                    {
+                        const auto expected = (corner >> axis) & 1 ? v.bounds.upper[axis] : v.bounds.lower[axis];
+                        if (std::bit_cast<ID>(point.component(axis)) != std::bit_cast<ID>(expected))
+                            throw std::invalid_argument("Cartesian source corner differs from original source bits.");
+                    }
+                }
+                for (std::size_t surface = 0; surface < 6; ++surface)
+                {
+                    auto face_location = base;
+                    const auto axis = surface / 2;
+                    face_location[axis] += surface % 2;
+                    const auto face = indexer.face_ordinal({face_location[0], face_location[1], face_location[2],
+                        static_cast<std::uint8_t>(axis)});
+                    const auto faces = topology.cell_faces(v.leaf.native_cell);
+                    if (std::count(faces.begin(), faces.end(), face) != 1)
+                        throw std::invalid_argument("Cartesian source face route is missing or repeated.");
+                    std::array<PLIC::GeometryPoint, 4> points;
+                    std::size_t count = 0;
+                    for (const auto node : topology.face_nodes(face))
+                    {
+                        if (count >= points.size())
+                            throw std::invalid_argument("Cartesian native source face has excess corners.");
+                        const auto p = v.region.geometry().node_coordinates(node);
+                        points[count++] = {p.x, p.y, p.z};
+                    }
+                    if (count != points.size())
+                        throw std::invalid_argument("Cartesian native source face has missing corners.");
+                    auto native = PLIC::details::NativePlanarOwnerAccess::make(points, v.admission);
+                    const auto normal = v.region.geometry().face_area_vector(face);
+                    const int outward = topology.owner_cell(face) == v.leaf.native_cell ? 1 : -1;
+                    native = PLIC::details::NativePlanarOwnerAccess::oriented_like(native,
+                        {outward * normal.x, outward * normal.y, outward * normal.z}, v.admission);
+                    const auto source = PLIC::details::NativePlanarOwnerAccess::cell_face(canonical, surface, v.admission);
+                    if (!native->contains(*source) || !source->contains(*native) || native->oppositely_oriented(*source))
+                        throw std::invalid_argument("Native Cartesian convex boundary differs from original source.");
+                    v.routes[surface] = {surface, face, outward};
+                }
+            });
+        return metrics;
     }
     void validate(const AdaptiveLeaf& leaf) const override
     {
@@ -498,7 +685,7 @@ std::optional<AdaptiveCartesianGeometryBounds> native_cartesian_geometry_bounds(
 }
 std::shared_ptr<const AdaptiveProviderKernel> cartesian_adaptive_kernel(AMRGrid grid)
 {
-    return std::make_shared<const CartesianKernel>(std::move(grid));
+    return adaptive_detail::NativeKernelAuthority::create<CartesianKernel>(std::move(grid));
 }
 std::shared_ptr<const AdaptiveProviderKernel> adaptive_detail::cartesian_incidence_replay_kernel(AMRGrid grid)
 {

@@ -14,6 +14,7 @@
 #include "utils/export_helper.hh"
 #include "dataclass/TpetraTypes.hh"
 #include "geometry/MeshBinding.hh"
+#include "geometry/details/NativeConstructorOwnerSink.hh"
 #include "geometry/MeshGeometryHandle.hh"
 #include "geometry/MeshTopologyHandle.hh"
 #include "geometry/mesh/DecomposedOrthogonalTopology.hh"
@@ -54,6 +55,7 @@
 
 namespace SimpleFluid
 {
+namespace geometry_detail { class NativeMeshHandleAccess; }
 
 template<TpetraTypePack Pack>
 class MeshReorderingFactory;
@@ -101,6 +103,7 @@ template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
     friend struct detail::MeshTraverseBinding;
+    friend class geometry_detail::NativeMeshHandleAccess;
     friend class MeshReorderingFactory<Pack>;
     template<TpetraTypePack>
     friend class MeshGeometryHandle;
@@ -109,7 +112,15 @@ class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
     template<class PublicMesh, class GeometryMesh>
     friend class detail::TraverseAccess;
 
+    class NativePreparedTag
+    {
+        friend class geometry_detail::NativeMeshHandleAccess;
+        NativePreparedTag() = default;
+    public:
+        NativePreparedTag(const NativePreparedTag&) = default;
+    };
 public:
+    explicit MeshHandle(NativePreparedTag) noexcept {}
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
     using global_ordinal_type = typename Pack::global_ordinal_type;
@@ -1194,6 +1205,13 @@ private:
             static_cast<global_ordinal_type>(geometry_lid));
     }
 
+    // These receipts outlive the concrete storage which they admit.
+    geometry_detail::NativeConstructorStorageOwner d_native_storage;
+    std::shared_ptr<const geometry_detail::NativeRetainedExtent> d_native_boundary_profile;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_boundary_allocation;
+    std::byte d_native_boundary_marker{};
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_allocation;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_binding_allocation;
     bool d_map_indexing = false;
     std::vector<global_ordinal_type> d_node_global_ids;
     bool d_serial_identity = false;

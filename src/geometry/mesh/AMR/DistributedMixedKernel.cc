@@ -3,10 +3,11 @@
  */
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
-#include "geometry/VoFWireProtocol.hh"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -277,6 +278,9 @@ public:
     {
         return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
     }
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink&,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit) const {}
     StaticKernel(std::uint64_t root, std::uint64_t region, std::uint64_t material)
         : root_(root), region_(region), material_(material)
     {
@@ -390,9 +394,13 @@ public:
 };
 class MixedKernel final : public AdaptiveProviderKernel
 {
-    std::map<std::uint64_t, DistributedMixedRoute> routes_;
+    geometry_detail::NativeConstructorStorageOwner native_routes_storage_;
+    using Routes = std::map<std::uint64_t, DistributedMixedRoute, std::less<std::uint64_t>,
+        geometry_detail::NativeStorageAllocator<std::pair<const std::uint64_t, DistributedMixedRoute>>>;
+    Routes routes_;
     std::size_t budget_;
     AdaptiveBytes descriptor_;
+    std::shared_ptr<const geometry_detail::NativeSchemaOwner> native_schema_;
     const DistributedMixedRoute& route(const AdaptiveLeaf& leaf) const
     {
         if (!leaf.join_recipe)
@@ -562,7 +570,44 @@ public:
         }
         descriptor_ = std::move(w.data);
     }
-    AdaptiveBytes descriptor() const override { return descriptor_; }
+    AdaptiveBytes descriptor() const override { return native_schema_ ? native_schema_->descriptor() : descriptor_; }
+    std::shared_ptr<const geometry_detail::NativeSchemaOwner> seal_native_publication_schema(
+        const geometry_detail::NativeConstructionAdmission& admission)
+    {
+        if (native_schema_)
+            throw std::logic_error("Mixed kernel source schema was already sealed.");
+        auto storage = geometry_detail::native_constructor_storage(admission);
+        Routes admitted(std::less<std::uint64_t>{}, Routes::allocator_type(storage.owner));
+        for (const auto& [identity, previous] : routes_)
+        {
+            DistributedMixedRoute route;
+            route.identity = previous.identity;
+            route.original_region = previous.original_region;
+            route.region = previous.region;
+            route.provider = previous.provider;
+            route.kernel = previous.kernel;
+            route.periodic = previous.periodic;
+            storage.owner->copy(route.compact_root_schema, std::span<const char>(previous.compact_root_schema));
+            admitted.emplace(identity, std::move(route));
+        }
+        routes_.swap(admitted);
+        native_routes_storage_ = std::move(storage);
+        native_schema_ = geometry_detail::NativeSchemaOwnerAccess::adopt(std::move(descriptor_), admission);
+        return native_schema_;
+    }
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink& sink,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit identity,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit geometry) const
+    {
+        if (!native_routes_storage_.owner || !native_schema_ || descriptor_.capacity())
+            throw std::logic_error("Mixed source route storage is not sealed.");
+        sink.storage(native_routes_storage_);
+        // The routes map allocator carries one additional real strong edge.
+        sink.storage_reference(native_routes_storage_.owner, native_routes_storage_.envelope);
+        sink.schema(native_schema_);
+        for (const auto& [id, route] : routes_)
+            adaptive_detail::NativeKernelAuthority::visit(route.kernel, sink, identity, geometry);
+    }
     void validate(const AdaptiveLeaf& leaf) const override
     {
         const auto& provider = route(leaf);
@@ -771,7 +816,7 @@ AdaptiveBootstrap detach_static_participant(const MultiRegionMesh::Region& regio
     std::uint64_t physical_region, std::uint64_t material, std::span<const std::uint64_t> owned, AdaptiveBytes domain)
 {
     AdaptiveBootstrap result;
-    result.kernel = std::make_shared<const StaticKernel>(root, physical_region, material);
+    result.kernel = adaptive_detail::NativeKernelAuthority::create<StaticKernel>(root, physical_region, material);
     if (owned.empty())
         return result;
     auto selected = selected_native(region, owned);
@@ -800,6 +845,10 @@ AdaptiveBootstrap detach_static_participant(const MultiRegionMesh::Region& regio
 std::shared_ptr<const AdaptiveProviderKernel> mixed_adaptive_kernel(
     std::vector<DistributedMixedRoute> routes, std::size_t byte_budget)
 {
+    const bool qualified = std::all_of(routes.begin(), routes.end(),
+        [](const auto& route) { return adaptive_detail::NativeKernelAuthority::qualified(route.kernel); });
+    if (qualified)
+        return adaptive_detail::NativeKernelAuthority::create<MixedKernel>(std::move(routes), byte_budget);
     return std::make_shared<const MixedKernel>(std::move(routes), byte_budget);
 }
 } // namespace SimpleFluid::Meshes::AMR

@@ -8,6 +8,22 @@
 namespace SimpleFluid::Meshes::AMR
 {
 struct AMRGrid;
+struct DistributedMixedRoute;
+class AdaptiveProviderKernel;
+struct AdaptiveBootstrap;
+[[nodiscard]] std::shared_ptr<const AdaptiveProviderKernel> cartesian_adaptive_kernel(AMRGrid);
+[[nodiscard]] std::shared_ptr<const AdaptiveProviderKernel> product_adaptive_kernel();
+[[nodiscard]] AdaptiveBootstrap detach_static_participant(const MultiRegionMesh::Region&, std::uint64_t, std::uint64_t,
+    std::uint64_t, std::span<const std::uint64_t>, AdaptiveBytes);
+[[nodiscard]] std::shared_ptr<const AdaptiveProviderKernel> mixed_adaptive_kernel(
+    std::vector<DistributedMixedRoute>, std::size_t);
+namespace adaptive_detail
+{
+class SIMPLEFLUID_LOCAL NativeKernelAuthority;
+class NativePublicationSession;
+class NativeCellSourceProof;
+class NativePublicationTestAccess;
+} // namespace adaptive_detail
 struct AdaptiveSplitResult
 {
     AdaptiveFamily family;
@@ -162,6 +178,10 @@ public:
     {
         return false;
     }
+
+private:
+    friend class adaptive_detail::NativeKernelAuthority;
+    std::shared_ptr<const adaptive_detail::NativeKernelAuthority> native_authority_;
 };
 /** Allocation-free explicit provider capability. A provider label or custom
  * wrapper does not grant this opt-in contract. Virtual dispatch preserves the

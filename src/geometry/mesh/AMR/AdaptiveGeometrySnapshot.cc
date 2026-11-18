@@ -329,13 +329,16 @@ bool AdaptiveGeometrySnapshot::prepare_cartesian_page(const DistributedAdaptiveH
         auto available = std::min(optional_headroom, operation_limit - std::min(used, operation_limit));
         const auto new_owners = PLIC::details::geometry_demand::checked_sum(graph_owners, points);
         const auto frontier = PLIC::details::geometry_demand::checked_sum(
-            PreparedOwnerManifest::metadata_owner_count_bound(payload_owners_[0].owner_count()),
+            payload_owners_[0].metadata_owner_count_bound(),
             PreparedOwnerManifest::metadata_owner_count_bound(
-                PLIC::details::geometry_demand::checked_sum(payload_owners_[0].owner_count(), new_owners)));
+                PLIC::details::geometry_demand::checked_sum(payload_owners_[0].owner_count(), new_owners),
+                payload_owners_[0].typed_owner_count()));
         const auto reserved = publication.bytes ? publication.bytes(publication.context, new_owners, frontier) : 0;
         if (reserved > available)
             return false;
         available -= reserved;
+        // The optional prepared index creates ordinary procedural sources.
+        // Its own owner edit cannot introduce typed dependencies.
         const auto graph_bound = PLIC::details::GeometryOwnerGraphEditor::edit_byte_bound(
             payload_owners_[0], graph_edges + points, graph_owners + points);
         return pool_bound <= available && graph_bound <= available - pool_bound &&
@@ -688,8 +691,10 @@ bool AdaptiveGeometrySnapshot::can_rebind_prepared_slots(
     bytes = G::checked_sum(
         bytes, PLIC::details::GeometryOwnerGraphEditor::edit_byte_bound(payload_owners_[0], edges, keys));
     bytes = G::checked_sum(bytes, PLIC::details::identity_ledger_bookkeeping_bound(owners));
-    const auto frontier = G::checked_sum(Manifest::metadata_owner_count_bound(payload_owners_[0].owner_count()),
-        Manifest::metadata_owner_count_bound(keys));
+    // Both selected slots are procedural. Existing typed pages still travel
+    // with the manifest when its enclosing cache reserves an import.
+    const auto frontier = G::checked_sum(payload_owners_[0].metadata_owner_count_bound(),
+        Manifest::metadata_owner_count_bound(keys, payload_owners_[0].typed_owner_count()));
     const auto reserved = publication.bytes ? publication.bytes(publication.context, owners, frontier) : 0;
     return reserved <= available && bytes <= available - reserved;
 }

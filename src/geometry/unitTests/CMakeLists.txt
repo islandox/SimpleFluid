@@ -79,7 +79,6 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       OR TEST_NAME STREQUAL "testNativeAdmissionLifetime"
       OR TEST_NAME MATCHES "^testNative"
       OR TEST_NAME STREQUAL "testAdmittedProductConstruction"
-      OR TEST_NAME STREQUAL "testNativeScalarPreflight"
       OR TEST_NAME STREQUAL "testCellGeometryView"
       OR TEST_NAME STREQUAL "testGeometryDemandCatalog"
       OR TEST_NAME STREQUAL "testOrdinaryIntersectionScreen"

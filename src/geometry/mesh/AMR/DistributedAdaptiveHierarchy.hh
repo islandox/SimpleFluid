@@ -15,11 +15,13 @@
 namespace SimpleFluid::Meshes::AMR
 {
 class DistributedAdaptiveHierarchy;
+class AdaptiveNativeSchemaView;
 namespace adaptive_detail
 {
 class AdaptiveContactSnapshot;
 class AdaptiveSubfaceSnapshot;
 class DirectoryRegistrationAccess;
+class NativePublicationOperation;
 /** Detached queries for this exact accepted source observation. */
 [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> contact_snapshot(const DistributedAdaptiveHierarchy&);
 [[nodiscard]] std::shared_ptr<const AdaptiveSubfaceSnapshot> subface_snapshot(const DistributedAdaptiveHierarchy&);
@@ -165,6 +167,10 @@ private:
     friend std::vector<AdaptiveFamily> adaptive_detail::product_family_reference(const DistributedAdaptiveHierarchy&);
     friend class adaptive_detail::DirectoryRegistrationAccess;
     friend class adaptive_detail::GeometrySnapshotAccess;
+    friend class adaptive_detail::NativePublicationSession;
+    friend class adaptive_detail::NativePublicationOperation;
+    friend AdaptiveNativeSchemaView native_publication_schema(const DistributedAdaptiveHierarchy&);
+    [[nodiscard]] const std::shared_ptr<const AdaptiveProviderKernel>& native_publication_kernel() const noexcept;
     friend std::shared_ptr<const adaptive_detail::AdaptiveContactSnapshot> adaptive_detail::contact_snapshot(
         const DistributedAdaptiveHierarchy&);
     friend std::shared_ptr<const adaptive_detail::AdaptiveSubfaceSnapshot> adaptive_detail::subface_snapshot(

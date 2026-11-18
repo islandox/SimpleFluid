@@ -1,5 +1,7 @@
 /** Independent concrete allocation and map-profile tests for the private output route. */
-#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/NativePublicationViewData.hh"
 #include "parallel/details/NativeTpetraMapAdmission.hh"
 #include "pipeline_allocation_operators.inc"
 #include "utils/testing_environment.hh"
@@ -21,6 +23,52 @@ struct Trace
     Trace() { pipeline_trace::begin(); }
     ~Trace() { pipeline_trace::recording.store(false); }
 };
+A::AdaptiveCellKey key(std::uint64_t ordinal)
+{
+    return {7, A::ConvexCellAncestry{ordinal, {1, 2, 3, 4, 5, 6}}};
+}
+TEST(NativePublicationOutputAccounting, KeyOnlyCatalogCopiesActualBuffersAndKeepsUnchangedReferences)
+{
+    ASSERT_TRUE(N::native_constructor_capacity_profile_supported());
+    N::NativeConstructionAdmission admission(N::NativeConstructionCounterAccess::create<D::Budget>(32 * 1024 * 1024));
+    D::NativePublicationKeyCatalog first;
+    const auto before = admission.statistics().actual_live;
+    Trace trace;
+    for (std::uint64_t i = 0; i < 193; ++i)
+        first = first.with_key(key(i), admission);
+    const auto* retained = &first.at_ordinal(100);
+    auto second = first.with_key(key(500), admission);
+    auto third = second.without_key(key(20), admission);
+    const auto raw = pipeline_trace::summary();
+    const auto exact = admission.statistics().actual_live - before;
+    pipeline_trace::Pause pause;
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(raw.all_live, exact); // independent global-new census, no production visitor.
+    EXPECT_EQ(&second.at_ordinal(*second.ordinal_of(key(100))), retained);
+    EXPECT_EQ(&third.at_ordinal(*third.ordinal_of(key(100))), retained);
+    EXPECT_EQ(first.size(), 193u);
+    EXPECT_EQ(second.size(), 194u);
+    EXPECT_EQ(third.size(), 193u);
+    EXPECT_FALSE(third.ordinal_of(key(20)));
+    EXPECT_EQ(first.at_ordinal(100), key(100));
+}
+TEST(NativePublicationOutputAccounting, DetachedKeyOwnerExpiresAtItsLastRealCatalogEdge)
+{
+    ASSERT_TRUE(N::native_constructor_capacity_profile_supported());
+    N::NativeConstructionAdmission admission(N::NativeConstructionCounterAccess::create<D::Budget>(1024 * 1024));
+    auto original = key(17);
+    const auto expected = original;
+    auto capsule = D::NativePublicationKeyCatalog::capture(original, admission);
+    std::weak_ptr<const D::NativeRemoteKey> weak = capsule;
+    original = {};
+    EXPECT_EQ(capsule->key(), expected);
+    capsule.reset();
+    EXPECT_TRUE(weak.expired());
+    // The weak target control stays paid until its actual weak lifetime ends.
+    const auto held = admission.statistics().actual_live;
+    weak.reset();
+    EXPECT_LT(admission.statistics().actual_live, held);
+}
 TEST(NativePublicationOutputAccounting, InstalledMapProfileIncludesInclusiveSecondRunAndActualLibraryPeak)
 {
     ASSERT_NO_THROW(Maps::require_profile()); // a required profile cannot pass by skipping.
@@ -113,5 +161,19 @@ TEST(NativePublicationOutputAccounting, ProfileBudgetFailurePrecedesTheFirstLibr
     int one = 1, total = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &one, &total);
     EXPECT_EQ(total, comm->getSize());
+}
+TEST(NativePublicationOutputAccounting, ScalarAndExplicitLibraryUpperRemainVisibleInCompleteReport)
+{
+    D::NativePublicationStorageSummary summary;
+    summary.metadata = 101;
+    summary.physical_geometry = 23;
+    summary.scalar_numeric = 61;
+    summary.library_upper = 79;
+    summary.fixed = 37;
+    const auto report = summary.report();
+    EXPECT_EQ(report.measured_bytes(), 161u);
+    EXPECT_EQ(report.output_only, 61u);
+    EXPECT_EQ(report.required_maps_estimate, 79u);
+    EXPECT_EQ(report.measured_bytes() + report.output_only + report.required_maps_estimate, summary.retained_bytes());
 }
 } // namespace

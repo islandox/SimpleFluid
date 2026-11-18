@@ -9,6 +9,7 @@
 #pragma once
 
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/details/NativeConstructorStorage.hh"
 #include "geometry/mesh/ConservativeInterface.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
@@ -16,16 +17,22 @@
 #include "geometry/mesh/SweptRZRegionProviders.hh"
 #include "io/VTUWriter.hh"
 #include <Teuchos_Comm.hpp>
+#include <mutex>
 #include <optional>
 #include <variant>
 namespace SimpleFluid::Meshes::AMR
 {
 class FrozenNativeAccess;
+namespace adaptive_detail
+{
+class NativeSparseAccess;
+}
 }
 
 namespace SimpleFluid::Meshes
 {
 struct SparseNativeIndex;
+class NativeSparseFragments;
 struct SparseNativeMeshInput;
 class FrozenNativeMeshInput;
 
@@ -246,8 +253,8 @@ public:
         {
             if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
             if(d_mesh->sparse_native())throw std::logic_error("Sparse native regions have no global prefix offsets.");
-            for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
-                std::visit([&](const auto& region) { visitor(r, d_mesh->d_cells[r], region); }, d_mesh->d_regions[r]);
+            for (size_t r = 0; r < d_mesh->region_count(); ++r)
+                std::visit([&](const auto& region) { visitor(r, d_mesh->d_cells[r], region); }, d_mesh->region(r));
         }
         /**
          * @brief Dispatch once per region with composite motion and periodic images.
@@ -260,23 +267,27 @@ public:
         {
             if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
             if(d_mesh->sparse_native())throw std::logic_error("Sparse native regions require explicit ordinal routes.");
-            for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
-                std::visit([&](const auto& region)
-                {
-                    const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh, r, region);
-                    visitor(r, d_mesh->d_cells[r], geometry);
-                }, d_mesh->d_regions[r]);
+            for (size_t r = 0; r < d_mesh->region_count(); ++r)
+                std::visit(
+                    [&](const auto& region)
+                    {
+                        const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh, r, region);
+                        visitor(r, d_mesh->d_cells[r], geometry);
+                    },
+                    d_mesh->region(r));
         }
         /** Rank-local provider dispatch without inventing global region prefixes. */
         template<class Visitor> void visit_sparse_region_geometry(Visitor&& visitor) const
         {
             if(!d_mesh || !d_mesh->sparse_native())throw std::logic_error("Sparse provider dispatch requires a sparse native mesh.");
-            for(size_t r=0;r<d_mesh->d_regions.size();++r)
-                std::visit([&](const auto& region)
-                {
-                    const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh,r,region);
-                    visitor(r,geometry);
-                },d_mesh->d_regions[r]);
+            for (size_t r = 0; r < d_mesh->region_count(); ++r)
+                std::visit(
+                    [&](const auto& region)
+                    {
+                        const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh, r, region);
+                        visitor(r, geometry);
+                    },
+                    d_mesh->region(r));
         }
         ResolvedFace resolve_face(ID face) const;
     private:
@@ -294,13 +305,25 @@ public:
     MultiRegionMesh(std::vector<Region> regions, std::vector<Interface> interfaces,
         Teuchos::RCP<const Teuchos::Comm<int>> comm,
         InterfaceTolerance tolerance = {}, BoundaryNamePolicy names = BoundaryNamePolicy::NamespaceRegions);
+    class NativeConstructionKey
+    {
+        friend class AMR::adaptive_detail::NativeSparseAccess;
+        NativeConstructionKey() = default;
+
+    public:
+        NativeConstructionKey(const NativeConstructionKey&) = default;
+    };
+    explicit MultiRegionMesh(NativeConstructionKey) {}
     MultiRegionMesh(const MultiRegionMesh&) = delete;
     MultiRegionMesh& operator=(const MultiRegionMesh&) = delete;
     MultiRegionMesh(MultiRegionMesh&&) = delete;
     MultiRegionMesh& operator=(MultiRegionMesh&&) = delete;
 
     const Indexer& indexer() const { return d_indexer; }
-    const std::vector<Region>& regions() const { return d_regions; }
+    /** Explicit owning compatibility export; sparse execution borrows region(). */
+    const std::vector<Region>& regions() const;
+    [[nodiscard]] std::size_t region_count() const noexcept;
+    [[nodiscard]] const Region& region(std::size_t) const;
     const std::vector<Interface>& interfaces() const { return d_interfaces; }
     const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept { return d_comm; }
     /** Global catalog counts are retained; explicit geometry queries require local residency. */
@@ -453,7 +476,7 @@ private:
     void initialize_interface_directory();
     std::span<const InterfaceSide> interface_sides(size_t region, size_t bucket) const;
     std::span<const InterfaceSide> structured_interface_sides(RegionFace face) const;
-    const Region& region(size_t r) const { return d_regions.at(r); }
+
     template<class F> decltype(auto) topology(size_t r, F&& f) const
     {
         return std::visit([&](const auto& region) -> decltype(auto) { return f(region.topology()); }, region(r));
@@ -531,12 +554,14 @@ private:
         }
         else if (const auto other = partner({r, face}, true))
         {
-            std::visit([&](const auto& neighbor_region)
-            {
-                const auto cell = neighbor_region.topology().owner_cell(other->face);
-                resolved.neighbor = d_cells[other->region] + cell;
-                resolved.neighbor_centroid = transformed_point(neighbor_region.geometry().cell_centroid(cell));
-            }, d_regions[other->region]);
+            std::visit(
+                [&](const auto& neighbor_region)
+                {
+                    const auto cell = neighbor_region.topology().owner_cell(other->face);
+                    resolved.neighbor = d_cells[other->region] + cell;
+                    resolved.neighbor_centroid = transformed_point(neighbor_region.geometry().cell_centroid(cell));
+                },
+                this->region(other->region));
             shift = periodic_translation(RegionFace{r, face});
         }
         resolved.owner_to_face = resolved.centroid - resolved.owner_centroid;
@@ -552,7 +577,12 @@ private:
     void validate_regions() const;
     void initialize_regions(InterfaceTolerance tolerance, BoundaryNamePolicy names);
 
-    std::vector<Region> d_regions;
+    friend class AMR::adaptive_detail::NativeSparseAccess;
+    std::shared_ptr<const NativeSparseFragments> d_native_fragments;
+    geometry_detail::NativeConstructorStorageOwner d_native_storage;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> d_native_allocation;
+    mutable std::once_flag d_region_export_once;
+    mutable std::vector<Region> d_regions;
     std::vector<Interface> d_interfaces;
     std::vector<ExplicitLookup> d_explicit;
     std::vector<RegionInterfaceDirectory> d_region_interfaces;

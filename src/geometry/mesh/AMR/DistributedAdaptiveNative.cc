@@ -417,3 +417,51 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
     return result;
 }
 } // namespace SimpleFluid::Meshes::AMR
+
+#include "geometry/details/NativeSchemaOwner.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
+#include "geometry/mesh/AMR/NativeSparseAssembler.hh"
+#include "geometry/mesh/AMR/NativePublicationOperation.hh"
+#include "geometry/mesh/AMR/NativePublicationOutputGraph.hh"
+namespace SimpleFluid::Meshes::AMR::adaptive_detail
+{
+AdaptiveNativePublicationView NativeSparseAssembler::compatibility(const DistributedAdaptiveHierarchy& hierarchy,
+    std::span<const char> schema, std::span<const AdaptiveCellKey> additional)
+{
+    // This explicit full-validation boundary retains the original owning
+    // materializer. It makes no incremental metadata or physical-work claim.
+    auto full = assemble_adaptive_native(hierarchy, schema, additional);
+    std::optional<NativePublicationInputs> captured;
+    collective(*hierarchy.communicator(), [&] { captured.emplace(NativePublicationSession::capture(hierarchy)); });
+    const auto& inputs = *captured;
+    std::shared_ptr<NativePublicationViewData> data;
+    collective(*inputs.comm,
+        [&]
+        {
+            Budget budget{inputs.byte_budget};
+            budget.add(sizeof(NativePublicationViewData) + 4 * sizeof(void*));
+            budget.add(full.local_keys.size() * sizeof(NativePublicationKeyRoute));
+            data = std::make_shared<NativePublicationViewData>();
+            budget.add(sizeof(NativePublicationPayload) + 4 * sizeof(void*));
+            data->payload = std::make_shared<NativePublicationPayload>();
+            data->payload->cell_begin = inputs.cell_begin;
+            data->payload->partition = full.partition;
+            data->payload->mesh = full.mesh;
+            data->payload->keys.reserve(full.local_keys.size());
+            for (const auto& [gid, key] : full.local_keys)
+                data->payload->keys.push_back({gid, 0, true});
+            data->compatibility = std::make_shared<const AdaptiveNativePublication>(std::move(full));
+            data->compatibility_resident_bytes = budget.used;
+        });
+    return AdaptiveNativePublicationView(std::move(data));
+}
+} // namespace SimpleFluid::Meshes::AMR::adaptive_detail
+namespace SimpleFluid::Meshes::AMR
+{
+AdaptiveNativePublicationView publish_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
+    std::span<const char> schema, std::span<const AdaptiveCellKey> additional)
+{
+    return adaptive_detail::NativeSparseAssembler::compatibility(hierarchy, schema, additional);
+}
+} // namespace SimpleFluid::Meshes::AMR

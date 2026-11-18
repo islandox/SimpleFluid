@@ -2,7 +2,15 @@
  * @brief Actual-cell convex refinement and exact saved-parent inverse.
  */
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
+#include "geometry/PLIC/PlanarGeometryDeclarations.hh"
+#include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
+#include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/NativeAdaptiveKeyCodec.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
+#include "geometry/mesh/NativeSparseAccess.hh"
+#include "parallel/details/NativeTpetraMapAdmission.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -142,6 +150,9 @@ public:
         if (!depth || depth > 64 || !std::isfinite(quality) || quality < 0)
             throw std::invalid_argument("Invalid convex kernel limits.");
     }
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink&,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit) const {}
     bool supports_leaf_local_repack() const noexcept override { return true; }
     AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
     {
@@ -154,6 +165,93 @@ public:
         w.word(depth_);
         w.word(std::bit_cast<std::uint64_t>(quality_));
         return std::move(w.data);
+    }
+    bool supports_native_source(const AdaptiveLeaf& leaf) const noexcept
+    {
+        return leaf.provider == AdaptiveProviderKind::Polyhedral &&
+            std::holds_alternative<ConvexCellAncestry>(leaf.key.ancestry) && leaf.geometry &&
+            !leaf.native_recipe && !leaf.factor_recipe && !leaf.join_recipe && leaf.native_cell == 0;
+    }
+    std::size_t native_source_face_count(const AdaptiveLeaf& leaf) const { return leaf.geometry->num_faces(); }
+    AdaptiveCellMetrics prepare_native_source(const AdaptiveLeaf& leaf,
+        const geometry_detail::NativeConstructionAdmission& admission) const
+    {
+        using adaptive_detail::NativeAdaptiveKeyCodec;
+        using adaptive_detail::Reader;
+        using Planar = PLIC::details::NativePlanarOwnerAccess;
+        if (!supports_native_source(leaf) || leaf.domain.empty())
+            throw std::invalid_argument("Native convex source requires its original cell and typed ancestry.");
+        const auto& ancestry = std::get<ConvexCellAncestry>(leaf.key.ancestry);
+        if (ancestry.path.size() > depth_ ||
+            std::any_of(ancestry.path.begin(), ancestry.path.end(), [](auto child) { return child > 7; }))
+            throw std::invalid_argument("Invalid native convex source ancestry.");
+        if (ancestry.path.empty())
+        {
+            if (!leaf.parent_family.empty())
+                throw std::invalid_argument("Native convex root cannot have a parent family.");
+        }
+        else
+        {
+            Reader family{leaf.parent_family};
+            if (family.word() != 0x534646414d363031ULL ||
+                family.word() != static_cast<std::uint64_t>(AdaptiveSplit::Isotropic))
+                throw std::invalid_argument("Native convex source has foreign parent-family lineage.");
+            const auto storage = geometry_detail::native_constructor_storage(admission);
+            const auto parent = NativeAdaptiveKeyCodec::decode(family.bytes_view(), storage);
+            family.done();
+            const auto* source = std::get_if<ConvexCellAncestry>(&parent.ancestry);
+            if (!source || parent.region != leaf.key.region || source->root != ancestry.root ||
+                source->path.size() + 1 != ancestry.path.size() ||
+                !std::equal(source->path.begin(), source->path.end(), ancestry.path.begin()))
+                throw std::invalid_argument("Native convex source ancestry differs from its exact parent key.");
+        }
+        const auto count = native_source_face_count(leaf);
+        if (count < 4 || count > PLIC::GeometryLimits{}.maximum_faces || leaf.surfaces.size() != count)
+            throw std::invalid_argument("Native convex source has an incomplete original boundary.");
+        for (std::size_t face = 0; face < count; ++face)
+        {
+            const auto& side = leaf.surfaces[face];
+            if (side.key.empty() || !side.geometry || (side.orientation != 1 && side.orientation != -1) ||
+                (!side.exterior && !side.boundary.empty()) ||
+                (side.require_native_whole_tile && !side.native_whole_geometry))
+                throw std::invalid_argument("Native convex source has invalid original surface provenance.");
+            const auto original = Planar::cell_face(*leaf.geometry, face, admission);
+            const auto same_outward_face = [&](const auto& candidate)
+            {
+                return PLIC::planar_support(*original) == PLIC::planar_support(*candidate) &&
+                    original->contains(*candidate) && candidate->contains(*original) &&
+                    !original->oppositely_oriented(*candidate);
+            };
+            if (!same_outward_face(side.geometry) ||
+                (side.native_whole_geometry && !same_outward_face(side.native_whole_geometry)))
+                throw std::invalid_argument("Native convex source support differs from its original outward face.");
+        }
+        const auto metrics = PLIC::details::NativeCellGeometrySourceAccess::original_convex_metrics(*leaf.geometry);
+        if (!(metrics.volume > 0) || !std::isfinite(metrics.volume))
+            throw std::invalid_argument("Native convex source has invalid original volume.");
+        return {metrics.volume, metrics.centroid};
+    }
+    AdaptiveCellMetrics validate_native_source(const AdaptiveLeaf& leaf, const NativeFragmentRecord& fragment,
+        const geometry_detail::NativeConstructionAdmission&, std::span<adaptive_detail::NativeKernelSourceFace> routes)
+        const
+    {
+        const auto* region = std::get_if<DistributedExplicitRegion>(&fragment.region());
+        if (!region || region->layout().cells != 1 || region->layout().faces != routes.size() ||
+            routes.size() != native_source_face_count(leaf) || &region->geometry() != &region->topology())
+            throw std::invalid_argument("Native convex source has a foreign one-cell fragment.");
+        const auto original = adaptive_detail::NativeSparseAccess::source_provider_geometry(region->geometry());
+        if (original.get() != leaf.geometry.get() || original.owner_before(leaf.geometry) ||
+            leaf.geometry.owner_before(original))
+            throw std::invalid_argument("Native convex fragment has foreign original geometry ownership.");
+        for (std::size_t face = 0; face < routes.size(); ++face)
+        {
+            if (region->topology().owner_cell(face) != 0 ||
+                region->topology().neighbor_cell(face) != MultiRegionMesh::invalid_cell_id())
+                throw std::invalid_argument("Native convex fragment has a foreign original face route.");
+            routes[face] = {face, face, 1};
+        }
+        const auto center = region->geometry().cell_centroid(0);
+        return {region->geometry().cell_volume(0), {center.x, center.y, center.z}};
     }
     void validate(const AdaptiveLeaf& leaf) const override
     {
@@ -233,6 +331,15 @@ public:
 } // namespace
 std::shared_ptr<const AdaptiveProviderKernel> convex_adaptive_kernel(unsigned depth, double quality)
 {
-    return std::make_shared<const ConvexKernel>(depth, quality);
+    return adaptive_detail::NativeKernelAuthority::create<ConvexKernel>(depth, quality);
 }
 } // namespace SimpleFluid::Meshes::AMR
+
+namespace SimpleFluid::Meshes::AMR::adaptive_detail
+{
+bool NativeKernelAuthority::source_profile_supported() noexcept
+{
+    return geometry_detail::native_constructor_capacity_profile_supported() &&
+        geometry_construction_controls().supported && geometry_detail::NativeTpetraMapAdmission::profile_supported();
+}
+} // namespace SimpleFluid::Meshes::AMR::adaptive_detail

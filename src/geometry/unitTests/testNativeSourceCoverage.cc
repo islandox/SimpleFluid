@@ -430,7 +430,8 @@ TEST(NativeSourceCoverage, ClosedSourceRootAndUnionCreditCanonicalPhysicalMember
         floor.lease, native, 1);
     std::array<SimpleFluid::PLIC::details::OwnerManifestPair, 4> components;
     components[0] = source.body.owners();
-    const auto store = D::NativeSourceOwnerStore::assemble({}, std::move(components), native, nullptr, {source.body.administration(), {}}, coverage);
+    const auto store = D::NativeSourceOwnerStore::assemble({}, std::move(components), native, nullptr, {},
+        {source.body.administration(), {}}, coverage);
     EXPECT_NO_THROW(store.require_current());
     for (const auto& row : source.owners)
         EXPECT_TRUE(store.owners().owners[0].admits(0, row.key.kind, row.owner, row.bytes));

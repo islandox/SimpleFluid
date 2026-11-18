@@ -2,7 +2,7 @@
 #include "geometry/mesh/AMR/AdaptiveSubfaceSnapshot.hh"
 #include "geometry/mesh/AMR/ContactPhysicalResidency.hh"
 #include "geometry/mesh/AMR/IdentityPool.hh"
-#include "geometry/mesh/AMR/NativeSourceOwnerStore.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
 #include "pipeline_allocation_operators.inc"
 #include "utils/testing_environment.hh"
 #include <algorithm>
@@ -338,5 +338,28 @@ TEST(NativeContactFunding, SideIndexesAccountForSharedAndReplacedActualMetadata)
     pipeline_trace::recording.store(false);
     EXPECT_FALSE(pipeline_trace::overflow.load());
     EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+}
+TEST(NativeContactFunding, ContactReplayPreAdmitsItsActualCompactKernel)
+{
+    auto arena = std::make_shared<D::Budget>(D::Budget{8 * 1024 * 1024});
+    const geometry_detail::NativeConstructionAdmission admission(
+        geometry_detail::NativeConstructionCounterAccess::create<D::Budget>(
+            arena->limit, 0, D::NativeSourceOwnerStore::mirror(arena)));
+    const auto original = arena->used;
+    pipeline_trace::begin();
+    {
+        const auto replay = D::cartesian_incidence_replay_kernel(Meshes::AMR::AMRGrid{}, admission);
+        const pipeline_trace::Pause pause;
+        const auto actual = pipeline_trace::summary().all_live;
+        EXPECT_TRUE(replay.envelope->shares_control(replay.owner));
+        EXPECT_FALSE(D::NativeKernelAuthority::qualified(replay.owner));
+        EXPECT_GT(actual, 0u);
+        EXPECT_EQ(actual, replay.envelope->fixed_allocation_bytes());
+        EXPECT_EQ(arena->used - original, actual);
+    }
+    pipeline_trace::recording.store(false);
+    EXPECT_FALSE(pipeline_trace::overflow.load());
+    EXPECT_EQ(pipeline_trace::summary().all_live, 0u);
+    EXPECT_EQ(arena->used, original);
 }
 } // namespace

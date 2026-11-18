@@ -2,6 +2,7 @@
 #include "adaptive_storage_test_helpers.hh"
 #include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryOwnerImportAccess.hh"
+#include "geometry/PLIC/details/GeometryOwnerGraph.hh"
 #include "geometry/PLIC/details/GeometryOwnerUnion.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshotAccess.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveContactHalo.hh"
@@ -158,6 +159,187 @@ UnionReconstruction fresh_union(const Hierarchy& source)
     for (const auto& [owner, row] : controls)
         admin += row.admitted;
     return {payload + admin, payload};
+}
+/** Full reference for the native cache. Start from the actual bound snapshot,
+ * source and output root bindings, without using the maintained union rows.
+ * Mutable index pages are inspected only for their own storage extents. */
+struct NativeCacheReference
+{
+    using Charge = P::details::NativePaidExtentCharge;
+    using Observation = P::details::NativeWeakOwnerObservation;
+    using Manifest = P::details::geometry_demand::GeometryOwnerManifest;
+    using MetadataSink = P::details::geometry_demand::MetadataSink;
+    static std::uint8_t external() { return P::details::GeometryOwnerGraphEditor::external_kind(); }
+
+    PhysicalOwners owners, paid;
+    std::map<const void*, std::size_t> root_control_allowance;
+    std::shared_ptr<const void> arena;
+
+    static bool include(PhysicalOwners& rows, std::uint8_t kind,
+        const std::shared_ptr<const void>& owner, std::size_t bytes)
+    {
+        auto [at, inserted] = rows.emplace(PhysicalKey{kind, owner.get()}, PhysicalOwner{owner, bytes});
+        EXPECT_EQ(at->second.bytes, bytes);
+        EXPECT_FALSE(at->second.owner.owner_before(owner));
+        EXPECT_FALSE(owner.owner_before(at->second.owner));
+        return inserted;
+    }
+    void charge(const Charge& claim)
+    {
+        if (!claim.valid() || claim.source_only())
+            return;
+        const auto origin = claim.origin();
+        if (origin.get() == arena.get() && !origin.owner_before(arena) && !arena.owner_before(origin))
+            include(paid, claim.kind(), claim.owner(), claim.bytes());
+    }
+    void state(const std::shared_ptr<const SimpleFluid::geometry_detail::NativeAllocationState>& value)
+    {
+        include(owners, external(), value, value->allocation.bytes);
+        include(owners, external(), value->counter_owner,
+            value->counter_allocations.object.bytes + value->counter_allocations.control.bytes);
+        if (value->mirror.owner)
+            include(owners, external(), value->mirror.owner, value->mirror.owner_proof.bytes());
+    }
+    void fixed(const std::shared_ptr<const SimpleFluid::geometry_detail::NativeAllocationEnvelope>& allocation)
+    {
+        std::size_t bytes = 0;
+        allocation->visit_allocations([&](const auto& extent) { bytes += extent.bytes; });
+        include(owners, external(), allocation, bytes);
+        state(allocation->state());
+    }
+    void weak(const Observation& observation)
+    {
+        if (const auto* envelope = observation.native_envelope())
+            fixed(*envelope);
+        if (const auto* native = observation.native_state())
+            state(*native);
+        if (const auto* scalar = observation.detached_scalar())
+        {
+            include(owners, external(), scalar->owner, scalar->bytes);
+            if (scalar->keeper)
+                include(owners, external(), scalar->keeper, scalar->keeper_bytes);
+        }
+        if (const auto* contact = observation.contact_control_group())
+        {
+            include(owners, external(), contact->owner, contact->bytes);
+            include(owners, external(), contact->keeper, contact->keeper_bytes);
+        }
+    }
+    void financial(const Charge& value)
+    {
+        weak(value.physical_observation());
+        weak(value.financial_observation());
+        value.inspect_financial({this,
+            [](void* raw, auto kind, const auto& owner, auto bytes)
+            { include(static_cast<NativeCacheReference*>(raw)->owners, kind, owner, bytes); },
+            [](void* raw, const auto& allocation) { static_cast<NativeCacheReference*>(raw)->fixed(allocation); },
+            [](void* raw, const auto& storage)
+            {
+                auto& audit = *static_cast<NativeCacheReference*>(raw);
+                audit.fixed(storage.envelope);
+                include(audit.owners, external(), storage.owner, storage.owner->exclusive_bytes());
+            },
+            [](void* raw, const auto& allocation) { static_cast<NativeCacheReference*>(raw)->state(allocation); },
+            nullptr,
+            [](void* raw, const auto& observation) { static_cast<NativeCacheReference*>(raw)->weak(observation); }});
+    }
+    void root(const P::details::GeometryOwnerRootBinding& binding)
+    {
+        if (!binding)
+            return;
+        // Both required native root types account their header through its
+        // native fixed allocation and a zero-byte semantic owner record.
+        include(owners, external(), binding.header(), 0);
+        const MetadataSink metadata{this,
+            [](void* raw, const auto& owner, auto payload, auto admitted)
+            {
+                auto& audit = *static_cast<NativeCacheReference*>(raw);
+                auto [at, inserted] = audit.root_control_allowance.emplace(owner.get(), admitted - payload);
+                EXPECT_EQ(at->second, admitted - payload);
+                include(audit.owners, external(), owner, payload);
+                return inserted;
+            },
+            [](void* raw, const auto& owner, auto bytes)
+            { return include(static_cast<NativeCacheReference*>(raw)->owners, external(), owner, bytes); },
+            [](void* raw, const Charge& value) { static_cast<NativeCacheReference*>(raw)->charge(value); },
+            [](void* raw, const Charge& value) { static_cast<NativeCacheReference*>(raw)->financial(value); }};
+        const Manifest::RecordSink records{this, [](void* raw, const auto& row)
+        { include(static_cast<NativeCacheReference*>(raw)->owners, row.key.kind, row.owner, row.bytes); }};
+        if (const auto* receipts = binding.paid_receipts())
+        {
+            receipts->visit({this, [](void* raw, const Charge& value, auto)
+            { static_cast<NativeCacheReference*>(raw)->charge(value); }});
+            receipts->visit_administration(metadata);
+        }
+        for (const auto& payload : binding.payload().owners)
+            payload.visit_dependencies(metadata, records);
+        if (const auto* group = binding.source_group(); group && group->origin().get() == arena.get() &&
+            !group->origin().owner_before(arena) && !arena.owner_before(group->origin()))
+            group->visit_delta({}, {this, [](void* raw, auto kind, const auto& owner, auto bytes, bool retain)
+            {
+                EXPECT_TRUE(retain);
+                include(static_cast<NativeCacheReference*>(raw)->paid, kind, owner, bytes);
+            }});
+    }
+};
+void expect_native_seal(const Hierarchy& source)
+{
+    using Charge = NativeCacheReference::Charge;
+    NativeCacheReference expected;
+    expected.owners = walked_owners(source);
+    expected.arena = Access::contact_cache(source).allocation_arena();
+    source.visit_geometry_snapshots([&](const auto& snapshot)
+    {
+        Access::visit_owner_manifest_metadata(snapshot, {&expected.root_control_allowance,
+            [](void* raw, const auto& owner, auto payload, auto admitted)
+            {
+                auto& controls = *static_cast<decltype(expected.root_control_allowance)*>(raw);
+                const auto [at, inserted] = controls.emplace(owner.get(), admitted - payload);
+                EXPECT_EQ(at->second, admitted - payload);
+                return inserted;
+            }});
+    });
+    Access::visit_native_cache_bindings(source, [&](const auto& root) { expected.root(root); },
+        [&](const auto& charge) { expected.charge(charge); });
+    PhysicalOwners actual;
+    struct Administration
+    {
+        NativeCacheReference& expected;
+        PhysicalOwners owners;
+    } administration{expected, {}};
+    Access::visit_cache_owner_union(source,
+        [&](const auto& row) { NativeCacheReference::include(actual, row.key.kind, row.owner, row.bytes); },
+        {&administration,
+            [](void* raw, const auto& owner, auto, auto admitted)
+            { return NativeCacheReference::include(static_cast<Administration*>(raw)->owners,
+                NativeCacheReference::external(), owner, admitted); },
+            [](void* raw, const auto& owner, auto bytes)
+            { return NativeCacheReference::include(static_cast<Administration*>(raw)->owners,
+                NativeCacheReference::external(), owner, bytes); },
+            [](void* raw, const Charge& value) { static_cast<Administration*>(raw)->expected.charge(value); },
+            [](void*, const Charge&) {}});
+    ASSERT_EQ(actual.size(), expected.owners.size());
+    std::size_t resident = 0;
+    for (const auto& [key, row] : expected.owners)
+    {
+        const auto found = actual.find(key);
+        ASSERT_NE(found, actual.end());
+        EXPECT_EQ(found->second.bytes, row.bytes);
+        EXPECT_FALSE(found->second.owner.owner_before(row.owner));
+        EXPECT_FALSE(row.owner.owner_before(found->second.owner));
+        resident += row.bytes;
+    }
+    for (const auto& [address, bytes] : expected.root_control_allowance)
+        resident += bytes;
+    for (const auto& [key, row] : administration.owners)
+        if (!expected.owners.contains(key))
+            resident += row.bytes;
+    std::size_t paid = 0;
+    for (const auto& [key, row] : expected.paid)
+        paid += row.bytes;
+    const auto seal = Access::cache_admission_statistics(source);
+    EXPECT_EQ(seal.resident_bytes, resident);
+    EXPECT_EQ(seal.lease_bytes + paid, resident);
 }
 std::size_t walked_payload(const Hierarchy& source)
 {

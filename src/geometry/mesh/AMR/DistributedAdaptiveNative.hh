@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
+#include "geometry/mesh/AMR/NativePublicationView.hh"
 #include "parallel/CompositePartition.hh"
 namespace SimpleFluid::Meshes::AMR
 {

@@ -2,11 +2,12 @@
  * @brief Collective conforming factor adaptation with retained exact constructions.
  */
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/LocalProductAMR.hh"
+#include "geometry/mesh/AMR/NativeKernelAuthority.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
-#include "geometry/VoFWireProtocol.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -2313,6 +2314,10 @@ void merge_pool(Pool& target, const Pool& source)
 class Kernel final : public AdaptiveProviderKernel
 {
 public:
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink&,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit) const {}
+
     AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
     {
         return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
@@ -2640,7 +2645,7 @@ public:
 } // namespace product_detail
 std::shared_ptr<const AdaptiveProviderKernel> product_adaptive_kernel()
 {
-    return std::make_shared<const product_detail::Kernel>();
+    return adaptive_detail::NativeKernelAuthority::create<product_detail::Kernel>();
 }
 AdaptiveLeaf product_support_root(const AdaptiveLeaf& leaf)
 {

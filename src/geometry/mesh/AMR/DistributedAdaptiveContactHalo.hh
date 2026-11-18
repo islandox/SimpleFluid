@@ -274,7 +274,7 @@ public:
         ContactHaloContext, std::size_t caller_live_bytes = 0) const;
     void bootstrap(std::span<const AdaptiveLeaf>, std::vector<ContactIncidenceRow>);
     void bootstrap_canonical(std::span<const AdaptiveLeaf>, const ContactOwnedLeafLookup&,
-        std::shared_ptr<const AdaptiveLeafLayout> = {});
+        std::shared_ptr<const AdaptiveLeafLayout> = {}, bool enable_native_source = true);
     void apply_delta(std::span<const ContactRetiredLeaf>, std::span<const AdaptiveCellKey>, ContactHaloContext,
         const ContactOwnedLeafLookup&);
     [[nodiscard]] Budget& allocation() noexcept;

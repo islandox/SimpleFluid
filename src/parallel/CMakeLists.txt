@@ -1,5 +1,6 @@
 # Mesh partitioning shares the geometry archive and its runtime dependencies.
 set(SIMPLEFLUID_PARALLEL_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/details/NativePartitionAccess.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/details/NativeTpetraMapAdmission.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/SparseOwnerExchange.cc"
     "${CMAKE_CURRENT_SOURCE_DIR}/DistributedCompositePartition.cc"
