@@ -1,7 +1,7 @@
 # ExactGeometry: rational geometry and source authority
 
-Floating-point numerical geometry is the primary VoF choice; its contract lives
-in [general AMR](general_amr.md#floating-point-geometry-and-arithmetic).
+Floating-point numerical geometry is the primary VoF choice; see the
+[general VoF arithmetic policy](general_vof_transport.md#architectural-principles).
 This document owns the rational geometry APIs, certificates and accelerations
 used by explicit [ExactVoF](exact_vof.md) and
 [ExactTransport](exact_transport.md) clients.
@@ -11,7 +11,7 @@ used by explicit [ExactVoF](exact_vof.md) and
 The AMR/native-mesh substrate uses ordinary PLIC geometry and finite coordinate
 packets. It does not require rational construction or membership queries.
 The hierarchy, ancestry, canonical incidence and migration contracts remain in the
-[AMR design](general_amr.md#implemented-certified-geometry-and-sparse-remap).
+[AMR design](general_amr.md#native-hierarchy-and-identities).
 
 Public PLIC headers expose mode-selected cells, faces, measures, complexes and
 sweeps. Rational specializations and their implementation headers reside in

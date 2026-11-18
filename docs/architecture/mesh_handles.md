@@ -73,7 +73,7 @@ borrowed `AssemblyFaceRow` instead of the concrete traversal access type. The
 large transport kernels therefore instantiate once per `(Pack, MeshType)` rather
 than once per concrete geometry backend, while run/category dispatch, ordering,
 boundary slots, orientation specialization, and every provider metric formula
-are preserved. See [mesh traversal](../mesh_traverse.md#stable-assembly-metrics).
+are preserved. See [mesh traversal](../guides/mesh_traverse.md#core-interfaces).
 
 ## Compiled transport entry points
 

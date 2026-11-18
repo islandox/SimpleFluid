@@ -118,7 +118,7 @@ struct MeshToMeshTransferOptions
  * Setup replicates source geometry. Conservative setup uses an XYZ/RZ bounding
  * hierarchy to restrict exact overlap candidates; interpolation searches all
  * donors. Applications use a sparse distributed Tpetra matrix.
- * See docs/mesh_to_mesh_transfer.md for usage and limits.
+ * See docs/guides/mesh_to_mesh_transfer.md for usage and limits.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class MeshToMeshTransfer

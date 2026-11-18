@@ -61,7 +61,7 @@ reference cases. Their provenance and H2 result labels describe those chosen
 materials, not mandatory library species or slots. Numerical verification,
 external comparison and physical validation remain separate claims. See the
 [species contract](../architecture/reacting_species_contract.md),
-[transport guide](../reacting-gas-models.md),
+[transport guide](reacting-gas-models.md),
 [bubble/boiling guide](reacting_bubble_boiling.md) and [roadmap](../../TODO.md).
 
 ## Source ownership and inputs

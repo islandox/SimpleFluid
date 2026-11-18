@@ -66,7 +66,7 @@ when the chosen factorization leaves owners empty.
 Face ownership and flux orientation retain the source owner/neighbor relation. Empty ranks
 retain all boundary names and participate in field, solver and ALE collectives.
 Focused semi-structured geometry, operator, flow and axial-ALE checks are listed
-in [the parallel semi-structured guide](docs/semi_structured_parallel.md).
+in [the parallel semi-structured guide](docs/guides/semi_structured_parallel.md).
 Do not infer qualification of every optional physics combination from mesh
 and operator coverage.
 
@@ -76,7 +76,7 @@ ownership comes from the composite handle. Build collectively on the default
 Tpetra communicator before binding fields. Keep independently sized wall
 rings, fixed Delaunay boundary segments, and one-to-one corner interfaces
 intact; do not normalize polygonal volumes to an analytic annulus. See the
-[annular mesh guide](docs/annular_meshes.md) for options, counts, quality limits,
+[annular mesh guide](docs/guides/annular_meshes.md) for options, counts, quality limits,
 and focused regression commands.
 Collective construction aligns ownership with field maps; retaining the actual polygonal
 geometry preserves conservative interfaces.
@@ -112,7 +112,7 @@ Serial IDs are arithmetic. Decomposed orthogonal and XY/Z geometry lookup uses
 compact local topology; algebraic lookup reuses required Tpetra maps.
 `indexer()` remains an opt-in compatibility allocation. Arbitrary native
 reordering is explicit and retains its permutation; composite reordering is
-currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
+currently rejected. See [region contracts and storage categories](docs/guides/region_meshes.md).
 These choices keep ordinary queries compact and reserve extra connectivity or indexing
 storage for explicit compatibility use.
 
@@ -122,7 +122,7 @@ providers. A transfer captures both geometry epochs and maps; rebuild it after
 motion or rollback. Preserve explicit partial-coverage accounting and the
 intensive/extensive quantity distinction. This spatial utility does not own
 phase occupancy or the coupling schedule. See
-[transfer contracts and limitations](docs/mesh_to_mesh_transfer.md).
+[transfer contracts and limitations](docs/guides/mesh_to_mesh_transfer.md).
 This prevents stale spatial maps and leaves physical occupancy and time scheduling with
 their coupling owners.
 

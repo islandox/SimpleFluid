@@ -44,7 +44,7 @@ stored CRS payload is smaller.
 
 Recorded bounded CPU runs completed initial solves and three updates for all
 four choices at 512 and 1,728 cells, including two/four ranks at the larger size.
-The [backend design](../../architecture/coupled_operator_backends.md#numerical-consistency-and-qualification)
+The [backend design](../../architecture/coupled_operator_backends.md#algebraic-and-boundary-constraints)
 owns numerical support and qualification limits. These observations establish
 neither million-cell/device behavior nor a universal runtime or RSS benefit.
 

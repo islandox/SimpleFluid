@@ -104,7 +104,7 @@ remains deferred in Phase 21.
 
 The foundation is implemented with the verification gaps below. Capability and
 support details live in [README](README.md), [mesh decomposition](docs/architecture/orthogonal_decomposition.md)
-and the [parallel semi-structured guide](docs/semi_structured_parallel.md).
+and the [parallel semi-structured guide](docs/guides/semi_structured_parallel.md).
 
 - [x] Mesh/partition infrastructure, native `MeshHandle`/`FieldStored`, distributed
       fields, VTU/Exodus I/O and configuration utilities.
@@ -128,10 +128,10 @@ and the [parallel semi-structured guide](docs/semi_structured_parallel.md).
       periodic geometry, native diffusion/flow execution, common axial affine
       ALE, annular/swept providers and explicit region partitioning.
 
-Contracts and recorded scope are maintained in [region meshes](docs/region_meshes.md),
-[region execution](docs/region_execution.md), [annular meshes](docs/annular_meshes.md)
-and [composite partitioning](docs/composite_partitioning.md). The
-[scaling guide](docs/region_scaling.md) defines measurement contracts; retained
+Contracts and recorded scope are maintained in [region meshes](docs/guides/region_meshes.md),
+[region execution](docs/guides/region_execution.md), [annular meshes](docs/guides/annular_meshes.md)
+and [composite partitioning](docs/guides/composite_partitioning.md). The
+[scaling guide](docs/verification/region_scaling.md) defines measurement contracts; retained
 local reports under `docs/qualification/` do not establish physical pool-flow
 validation or production scaling. Explicit global constituents remain rejected
 by compact composition; explicit-region source union/graph construction remains
@@ -249,7 +249,7 @@ Physical material and multiphysics qualification remains open in Phase 12.
 
 The [source design](docs/modeling/reacting_gas_sources.md),
 [species contract](docs/architecture/reacting_species_contract.md) and
-[native transport contract](docs/architecture/low_mach_reacting_flow.md#componentwise-transport-consistency)
+[native transport contract](docs/architecture/low_mach_reacting_flow.md#conservative-transport-consistency)
 define units, ownership, support and rejection gates. Manufactured-law checks
 do not calibrate physical chemistry or qualify untested combinations.
 
@@ -361,7 +361,7 @@ reference materials and external-reservoir laws. See
       this does not qualify developed flow, longer runs or MPI application behavior.
 
 See [reacting acceptance gates](docs/modeling/reacting_gas_sources.md#numerical-and-physical-acceptance-gates)
-and [NOX validation scope](docs/architecture/coupled_nonlinear_solver.md#validation-and-remaining-qualification).
+and [NOX validation scope](docs/architecture/coupled_nonlinear_solver.md#integration-principles).
 Skipped or omitted tests are not passes; focused local checks are not full-suite
 or hosted CI results.
 
@@ -412,7 +412,7 @@ carrier, boundary and thermal limits; the standalone scalar utility supplies no 
 - [x] Scalar/vector/tensor cell transfer, MPI donor exchange, supported conservative
       overlaps and explicit coverage/geometry invalidation diagnostics.
 
-See [cell transfer](docs/mesh_to_mesh_transfer.md) and
+See [cell transfer](docs/guides/mesh_to_mesh_transfer.md) and
 [external-host contracts](docs/architecture/external_host_reacting_flow.md).
 Spatially mapped chemistry and a production provider protocol remain open.
 
@@ -477,7 +477,7 @@ this solver contract.
 
 #### Milestone C — feedback and conservative mapping
 
-The reusable [cell-field transfer](docs/mesh_to_mesh_transfer.md) supplies
+The reusable [cell-field transfer](docs/guides/mesh_to_mesh_transfer.md) supplies
 supported geometric overlaps and intensive/extensive inventory reports.
 The remaining tasks below concern phase occupancy, composition, and integrated
 physical closure; generic cell transfer alone does not complete them.
@@ -653,8 +653,8 @@ coverage does not qualify physical flow or production scaling.
 - [x] Immutable hierarchy/trials, certified geometry/remap, XY/Z and convex
       refinement, mixed-region closure and detached distributed migration/balancing.
 
-See [scope and limits](docs/architecture/general_amr.md#qualification-status) and
-[stage acceptance](docs/architecture/general_amr.md#implementation-stages-and-focused-acceptance).
+See [scope and limits](docs/architecture/general_amr.md#integration) and
+[stage acceptance](docs/verification/vof_solver_contracts.md#general-native-amr-and-flow-checks).
 Bounded bootstrap/catalog and seam costs remain; scalable planner storage/RSS,
 sparse ALE and physical-flow qualification are separate gates.
 

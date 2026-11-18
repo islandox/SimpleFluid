@@ -69,5 +69,5 @@ forwarding and variant calls retain runtime coefficient/provider validation.
 Concepts do not change the implementation-provider boundary: supported default
 specializations link to the compiled providers. A custom descriptor, mesh or
 pack may still require the documented `.tcc` implementation at its own
-instantiation site. See [mesh traversal](../mesh_traverse.md) and
-[the Trilinos backend](../trilinos_backend.md).
+instantiation site. See [mesh traversal](../guides/mesh_traverse.md) and
+[the Trilinos backend](../guides/trilinos_backend.md).

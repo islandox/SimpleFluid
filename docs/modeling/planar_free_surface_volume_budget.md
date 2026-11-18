@@ -936,8 +936,8 @@ boiling owner on this supplied-EOS surface path.
 | Headspace/phase change | Vented positive ambient absolute pressure; fixed T or explicit typed external-T participant | Closed/restricted vent ALE, adiabatic headspace-energy claim, standalone boiling/steam transport, fixed-grid finite-vapor reference adapter |
 
 Geometry support is not qualification of every row combination. See
-[XY/Z distribution](../semi_structured_parallel.md) and
-[compact region contracts](../region_meshes.md). Setup and step preflight validate
+[XY/Z distribution](../guides/semi_structured_parallel.md) and
+[compact region contracts](../guides/region_meshes.md). Setup and step preflight validate
 choices collectively, including ranks with no cells/faces; no rank may continue
 with a different model or geometry epoch.
 

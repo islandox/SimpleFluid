@@ -3,9 +3,9 @@
 The active reacting API uses an explicit species catalog, conservative reactions,
 supplied properties and real material inventories. No species name, gas constant,
 reaction yield or source of heat selects chemistry implicitly. See the
-[source contract](modeling/reacting_gas_sources.md), the
-[native flow architecture](architecture/low_mach_reacting_flow.md), and the
-[boiling/thermal ownership guide](modeling/reacting_bubble_boiling.md).
+[source contract](reacting_gas_sources.md), the
+[native flow architecture](../architecture/low_mach_reacting_flow.md), and the
+[boiling/thermal ownership guide](reacting_bubble_boiling.md).
 
 ## Choose the physical owner
 
@@ -173,7 +173,7 @@ Configured local interphase amounts are frozen before caloric pressure recovery.
 Supplied partial-molar enthalpies and their derivatives are reevaluated at each
 pressure-conditioned anchor; kinetics are not reintegrated inside pressure
 roots. The phase-energy owner applies `-p*(Vfinal-Vadv)` once. See
-[pressure-conditioned thermal transfer](architecture/reacting_interphase_thermal.md).
+[pressure-conditioned thermal transfer](../architecture/reacting_interphase_thermal.md).
 
 This native backend is closed and orthogonal, with common phase pressure and
 zero surface tension. It supports common or separate phase temperatures and

@@ -2,7 +2,7 @@
 
 Floating-point arithmetic is the primary VoF choice. The shared
 [transport contract](../architecture/vof_transport.md) defines conservative
-accounting and acceptance; the [general-native FP policy](../architecture/general_amr.md#floating-point-geometry-and-arithmetic)
+accounting and acceptance; the [general-native FP policy](../architecture/general_vof_transport.md#architectural-principles)
 owns its separate mesh support and qualification limits. Optional rational
 APIs are documented under [ExactVoF](../architecture/exact_vof.md).
 

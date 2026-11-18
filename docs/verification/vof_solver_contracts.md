@@ -2,7 +2,7 @@
 
 Floating-point arithmetic is the primary VoF path. This index owns its
 reproducible numerical assertions and focused test entry
-points. The modeling guides and [general AMR design](../architecture/general_amr.md#qualification-status)
+points. The modeling guides and [general AMR design](../architecture/general_amr.md#integration)
 own support and qualification status. Raw commands, source/runtime manifests,
 XML, logs and timing samples belong in local build artifacts. Historical passes
 remain scoped to their recorded source and do not imply a new run after edits.
@@ -75,7 +75,7 @@ It reports measured neighborhood RMS above the existing threshold as model
 quality, and skips a restart driven solely by that threshold. Arithmetic and
 optimizer failures still reject; GeometricFace donor-cell arithmetic recovery
 is disabled for this policy. BoundedCertification/Exact reject the selection.
-See [the PLIC contract](../modeling/plic.md#explicit-ordinary-approximation-admission).
+See [the PLIC contract](../modeling/plic.md#controls-and-defaults).
 
 Focused regressions include `PolyhedralReconstruction.ConservativeApproximation*`,
 `ExactPolyhedralReconstruction.ApproximationPolicyRejectsBeforePureOffsetAdmission`,
@@ -306,7 +306,7 @@ remain visible; consult the design's qualification table before reporting a pass
 
 ## Floating-point acceptance gates
 
-**Status: [ordinary FP is the default and bounded certification is opt-in](../architecture/general_amr.md#floating-point-geometry-and-arithmetic).
+**Status: [ordinary FP is the default and bounded certification is opt-in](../architecture/general_vof_transport.md#architectural-principles).
 The finite modes have focused geometry, reconstruction, arithmetic, projection and remap coverage;
 scoped default-policy flow/accuracy qualification remains open, and performance
 claims have separate conditional gates.** Earlier

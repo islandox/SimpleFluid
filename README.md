@@ -156,7 +156,7 @@ sparse products component by component. Both choices preserve the assembled
 momentum/Schur preconditioners. See the [architecture, supported scope and
 measured tradeoffs](docs/architecture/coupled_operator_backends.md).
 These options do not implement scalar matrix-free transport. The
-[supported-solver qualification contract](docs/architecture/coupled_operator_backends.md#numerical-consistency-and-qualification)
+[supported-solver qualification contract](docs/architecture/coupled_operator_backends.md#algebraic-and-boundary-constraints)
 covers all four coupled choices, both pressure-gradient schemes, mesh families,
 physical-model regressions, and constrained ALE. Coupled MueLu reuse refreshes
 numeric state, and timestepper continuity assembly uses the same interpolation
@@ -206,7 +206,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     serial/MPI ownership through XY graph partitions crossed with Z slabs,
     shared XY reordering, compact local topology, initially contiguous owned
     cell/face Tpetra maps, ghost layers, and axial ALE through `MeshHandle`;
-    see [distribution and support](docs/semi_structured_parallel.md)
+    see [distribution and support](docs/guides/semi_structured_parallel.md)
   - **Compact multi-region** — conforming/coarse-fine composition, including
     distributed extruded and swept R–Z providers with common affine Z motion
   - **Unstructured input** — transient STK/Ioss ingestion of `HEX_8` and
@@ -232,7 +232,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   the former `build()` and `build_empty()` APIs are removed
 - Periodicity uses supported native structured dimensions or declared composite
   interfaces; manual post-construction pairing of imported exterior faces is retired
-- [`AnnularSemiStructuredMeshFactory`](docs/annular_meshes.md) — programmatic
+- [`AnnularSemiStructuredMeshFactory`](docs/guides/annular_meshes.md) — programmatic
   graded annular meshes with independent inner/outer wall rings, Delaunay
   triangular-prism bulk, hex wall layers, and optional swept bottom corners;
   returns a serial/MPI `MultiRegionMesh` with native polygonal volumes
@@ -249,7 +249,7 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   `VectorFaceField` and `BoundaryFaceField` alias default native stored fields;
   field descriptor names must be nonempty, and global operations use native
   algebraic global IDs
-- [`MeshToMeshTransfer`](docs/mesh_to_mesh_transfer.md) — reusable scalar,
+- [`MeshToMeshTransfer`](docs/guides/mesh_to_mesh_transfer.md) — reusable scalar,
   vector, and tensor cell transfer with centroid interpolation or conservative
   supported overlaps, explicit intensive/extensive quantities, partial-coverage
   reports, MPI donor exchange, and geometry-epoch validation
@@ -756,7 +756,7 @@ reevaluate constitutive properties without reintegrating source events.
 The native model uses zero surface tension and does not provide evolving gas
 momentum, a capillary energy equation or general interface dynamics. The weak
 field adapter's carried escape enthalpy/momentum are traces, not conservative
-phase debits. See the [model/API guide](docs/reacting-gas-models.md), the
+phase debits. See the [model/API guide](docs/modeling/reacting-gas-models.md), the
 [thermal-owner guide](docs/modeling/reacting_bubble_boiling.md), and
 [native architecture](docs/architecture/low_mach_reacting_flow.md) for the
 support and rejection matrices. Independent thermal deposition still uses
@@ -826,7 +826,7 @@ arithmetic routes do not establish alternate reacting-flow configurations. The
 geometry/distribution/flow qualification program.
 
 **Within experimental VoF, floating-point arithmetic is the primary design.** Its
-[FP geometry contract](docs/architecture/general_amr.md#floating-point-geometry-and-arithmetic)
+[FP geometry contract](docs/architecture/general_vof_transport.md#architectural-principles)
 uses `ArithmeticMode::Ordinary` by default. `BoundedCertification` retains
 explicit interval certification, and `Exact` selects the separate exact backend;
 there is no automatic fallback. Both finite modes retain independent phase
@@ -880,7 +880,7 @@ Compact implicit regions support MPI ownership, axial affine ALE,
 conforming/coarse-fine seams, and translated periodic patches. Explicit unstructured constituents remain
 serial-only in composites. Implicit traversal uses allocation-free ranges;
 regular interfaces retain descriptor-sized correspondence. See [region mesh contracts,
-example and storage accounting](docs/region_meshes.md).
+example and storage accounting](docs/guides/region_meshes.md).
 
 ## Documentation
 
@@ -888,11 +888,11 @@ example and storage accounting](docs/region_meshes.md).
 | --- | --- |
 | Development, builds, tests, and ABI boundaries | [Maintainer guide](MAINTENANCE.md) and [CMake guide](cmake/README.md) |
 | Typed FVM transport assembly and source migration | [Transport factory contract](docs/architecture/transport_system_factory.md) |
-| External material providers and C ABI | [Material provider guide](docs/material-c-api.md) |
+| External material providers and C ABI | [Material provider guide](docs/guides/material-c-api.md) |
 | Implementation status and remaining acceptance gates | [Roadmap](TODO.md) |
-| Annular wall layers and swept corners | [Annular mesh guide](docs/annular_meshes.md) |
-| Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
-| Conservative cell-field projection | [Mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md) |
+| Annular wall layers and swept corners | [Annular mesh guide](docs/guides/annular_meshes.md) |
+| Region composition, MPI, and ALE | [Region meshes](docs/guides/region_meshes.md) |
+| Conservative cell-field projection | [Mesh-to-mesh transfer](docs/guides/mesh_to_mesh_transfer.md) |
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
 | Deferred uniform-mesh VoF | [Historical guide; backend unavailable in this refactor](docs/modeling/vof.md) |
 | Deferred adaptive VoF | [Historical adaptive guide](docs/modeling/adaptive_vof.md) |

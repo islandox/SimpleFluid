@@ -77,7 +77,7 @@ Multi-config executable paths include the configuration, such as
   the intended tests actually ran with the required number of ranks.
 - Shared-library, visibility, explicit-instantiation, or toolchain changes need
   the relevant ABI/export tests, including `simplefluid_elf_export_boundary`
-  on supported ELF builds. See [docs/trilinos_backend.md](docs/trilinos_backend.md).
+  on supported ELF builds. See [the Trilinos backend guide](docs/guides/trilinos_backend.md).
 - SimpleFluid-side OpenFOAM launchers must source
   `verification/environments.sh`, call `export_build_env`, build through
   `simplefluid_build_target`, and resolve binaries with `simplefluid_executable`.
@@ -91,7 +91,7 @@ Multi-config executable paths include the configuration, such as
   queries, `.ipp` inline/caller-dependent definitions, and compiled `.tcc`/`.cc`
   implementations with supported explicit instantiations. Check the owning
   module before moving definitions; custom template consumers may need their
-  own implementation provider. See [docs/mesh_traverse.md](docs/mesh_traverse.md).
+  own implementation provider. See [the mesh traversal guide](docs/guides/mesh_traverse.md).
 - Keep native `MeshHandle`/`FieldStored` execution native. Preserve legacy
   `Mesh` compatibility and caller object identity where that path is supported.
 - Preserve owned/ghost maps, local/global indexing, canonical face identity,

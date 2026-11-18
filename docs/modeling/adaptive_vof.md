@@ -1,250 +1,47 @@
-# Adaptive Cartesian volume of fluid
+# Adaptive Cartesian Volume of Fluid
 
-Floating-point arithmetic is the primary VoF choice. The shared
-[transport contract](../architecture/vof_transport.md) defines conservative
-accounting and acceptance; the [general-native FP policy](../architecture/general_amr.md#floating-point-geometry-and-arithmetic)
-owns its separate mesh support and qualification limits. Optional rational
-APIs are documented under [ExactVoF](../architecture/exact_vof.md).
+`AdaptiveVoFSolver` extends the source-free, isothermal two-phase model described in the [uniform VoF guide](vof.md) to distributed dyadic Cartesian blocks. It relies on the [general AMR architecture](../architecture/general_amr.md) for mesh hierarchy and partitioning, and the [VoF transport contract](../architecture/vof_transport.md) for conservation guarantees.
 
-`AdaptiveVoFSolver` extends the source-free, isothermal two-phase model in the
-[uniform VoF guide](vof.md) to distributed dyadic Cartesian blocks. It uses the
-native `MultiRegionMesh`, `MeshHandle`, and `FieldStored` path. The adaptive
-backend has its own immutable mesh snapshots; the original uniform solver's
-serial contract remains unchanged.
+## Hierarchy and Face Ownership
 
-## Hierarchy and face ownership
+`Meshes::AMRGrid` defines a Cartesian box, root blocks, cell counts per block, periodicity, and a maximum refinement level.
+- **Refinement Rules:** A maximum level difference of one is enforced between touching blocks (including edges and corners). Refinement replaces one block with eight children; coarsening requires a complete sibling group.
+- **Flux Consistency:** Native canonical fine subfaces tile coarse faces exactly. Coarse cells consume the sum of fine subface fluxes directly without secondary area-fraction scaling. All levels advance with a single shared timestep (no subcycling).
 
-`Meshes::AMRGrid` defines a Cartesian box, the number of root blocks, even cell
-counts per block, periodic directions, and a maximum level. A block at level
-`L` spans one root-block width divided by `2^L`. Refinement replaces one block
-with eight children; coarsening requires the complete sibling group. Persistent
-`AMRBlock` keys identify spatial blocks independently of leaf ordinals and MPI
-ownership. Cell and face ordinals must be reacquired after regridding.
+## Interface Geometry and Transport
 
-The hierarchy enforces a maximum level difference of one between touching
-blocks, including edges and corners. Opposite periodic face partners have equal
-levels. Periodic refinement therefore can refine the opposite boundary too.
-Balance closure can undo a requested coarsening. Native canonical fine subfaces
-tile each coarse face exactly; coarse cells visit all of those subfaces.
-Integrated fluxes are summed with their incidence signs, without multiplying
-them by area fractions a second time.
+`VoF::AdaptiveVoF` reconstructs conservative PLIC planes on local block patches:
+- **Stencils:** Neighbor samples restrict finer cell volumes and prolongate coarser cells into virtual stencils for height-function and PLIC surface-fit curvature evaluations.
+- **Advection:** Each canonical face computes a signed swept gas volume by intersecting the donor PLIC plane with its subface prism. Liquid takes the complementary swept volume.
+- **Compression:** Directional Weymouth–Yue compression uses a frozen indicator whose sum vanishes under the discrete continuity constraint.
 
-Hierarchy and interface descriptions are replicated compact metadata. Solution
-fields have distributed owned maps and sparse halos. Reconstruction builds
-temporary, padded uniform patches only for blocks needed by the rank; it does
-not construct a domain-sized grid at the finest level. An immutable block
-directory restricts overlap searches to intersecting dyadic branches. There is
-no large-scale partition/load-balance performance claim.
+## Flow and Transported Amounts
 
-`CartesianAMR` implements the immutable `AdaptiveHierarchy` seam while retaining
-its Cartesian ancestry and numerical backend. Persistent cell keys carry physical
-region identity and dyadic ancestry; material membership, native fragment ordinal,
-canonical GID and rank-local field order remain separate observations.
+- **Momentum & Pressure:** Momentum uses the same phase face masses as the geometric update. At coarse/fine interfaces, least-squares gradients align adjacent cell-center values to the subface before computing normal differences.
+- **Mobility:** Face mobility is defined as $d / (\rho_o d_o + \rho_n d_n)$, measured normal to the subface, ensuring consistent density-weighted impulses across refinement jumps.
+- **Passive Scalars:** Registered passive amounts travel with their selected carrier's face flux using an implicit donor-concentration equation to maintain positivity even in cells with vanishing phase volume.
 
-`observation()` retains exact hierarchy, topology and partition identities together
-with their generations, the native geometry identity/epoch and communicator.
-`with_partition()` binds a completed, source-matching native `CompositePartition`;
-the completed plan preserves a weak exact origin identity and epoch without
-retaining global planning scratch. `AdaptiveVoF` constructs its handle from that
-partition, and `AdaptiveVoFSolver` construction inherits that native ownership. This changes the ownership
-observation independently of Cartesian topology and ancestry. Constructing a new
-partition does not mutate existing hierarchies, handles or accepted solver state.
-This qualifies hierarchy, native FVM and solver construction bindings; live
-repartition/migration of an existing accepted solver state remains Stage 6.
-Canonical and resident geometry must retain their captured epochs. Resident ALE
-motion rejects subsequent numerical use and new binding, including after rollback
-changes the epoch again; equal restored coordinates do not revive frozen caches.
-`plan_adaptation()` and `apply_adaptation()` pin candidate geometry to the exact
-source observation and reject foreign or stale plans collectively.
+## Conservative Remapping
 
-## Interface geometry and transport
+Regridding intersects old and new leaf cells. Refined gas occupancy is computed from the old PLIC geometry, while restriction sums child gas volumes.
 
-`VoF::AdaptiveVoF` reconstructs conservative PLIC planes on local block patches.
-Neighbor samples restrict finer cell volumes and extend coarser cells. Curvature
-uses geometric coarse-cell prolongation into its virtual stencil, followed by
-the height-function and PLIC surface-fit methods of the uniform backend.
-Physical wall samples use even scalar reflection; this is not a contact-angle
-or wetting model.
+`ConservedQuantity::amount` defines extensive amounts per owned cell, distributed according to their `InventoryCarrier`:
 
-Each owned canonical face computes one signed swept gas volume by intersecting
-the donor PLIC plane with its subface prism. Sparse face exchange gives both
-incident cells the same flux. Liquid takes the complementary swept volume.
-Directional Weymouth--Yue compression uses a frozen indicator; its sum vanishes
-under the accepted discrete continuity constraint. The geometric update rejects
-material bound violations, excessive Courant number, and nonzero wall flux.
-It retains roundoff-sized fraction excursions explicitly.
-
-All levels advance with one shared timestep. The coarse cell directly uses the
-fine subface fluxes, so there is no independent coarse flux to reconcile. Level
-subcycling is not implemented; introducing it requires time-integrated flux
-registers and conservative synchronization before acceptance.
-
-For algorithm background, see the reference implementations of
-[geometric fraction refinement](https://basilisk.fr/src/fractions.h) and
-[split conservative transport](https://basilisk.fr/src/vof.h). These references
-do not qualify this implementation's numerical accuracy.
-
-## Flow and transported amounts
-
-Momentum uses the same gas and liquid face masses as the geometric update.
-Pressure and capillary forces share the same face mobility and reconstructed
-normal gradient. At a coarse/fine subface, adjacent cell centers have different
-transverse coordinates: least-squares gradients align the two values to the
-subface before their normal difference is taken. A symmetric integrated
-two-point pressure matrix supplies defect corrections; acceptance checks the
-actual corrected face divergence, including the pressure gauge cell.
-
-The mobility is `d/(rho_o*d_o + rho_n*d_n)`, where the distances are measured
-normally to the subface. Density-weighted face pressure supplies a shared Gauss
-momentum impulse. These choices recover the uniform solver's force stencil at
-equal spacing and avoid assigning the full liquid-side impulse to a light gas
-cell. Explicit symmetric viscous stress, gravity, and capillarity retain the
-uniform backend's material assumptions. Advection, individual subface swept
-width, capillary and viscous restrictions all constrain the common timestep.
-
-Registered passive amounts travel with their selected carrier's face flux.
-An implicit donor-concentration equation uses final carrier storage plus
-outgoing flux on the diagonal. This handles phase flux passing through cells
-with little initial phase volume while retaining nonnegative amounts. The
-solver checks finite values, positivity and global conservation before
-publication. Signed amounts use a conservation scale formed from absolute
-amounts, so cancellation to zero does not weaken or make the budget singular.
-This passive scheme and upwind momentum are first order; geometric VoF alone
-does not make the complete flow or species discretization second order.
-
-## Conservative remapping
-
-Regridding intersects old and new leaf cells. Refined gas occupancy comes from
-the old PLIC geometry; restriction sums gas volumes. A sparse reverse exchange
-closes each donor's roundoff-sized geometric residual across receiving ranks.
-The correction uses the donor's available gas or liquid capacity and preserves
-even tiny positive inventories. A material geometry mismatch rejects the
-candidate; no post-remap inventory clipping hides a lost budget.
-
-`ConservedQuantity::amount` is an extensive amount per owned cell. Its declared
-`InventoryCarrier` controls how that amount divides among receiver cells:
-
-| Carrier | Remap weight | Example |
+| Carrier | Remap Weight | Example |
 |---|---|---|
-| `BulkVolume` | intersected control volume | A stored bulk extensive tracer |
-| `GasVolume` | intersected PLIC gas volume | Resolved gas moles at uniform intradonor concentration |
-| `LiquidVolume` | complementary liquid volume | Dissolved storage, dispersed number or moles carried in liquid |
-| `MixtureMass` | `rho_l*V_l + rho_g*V_g` | Momentum, or a mixture-specific stored energy |
+| `BulkVolume` | Intersected control volume | Bulk extensive tracer |
+| `GasVolume` | Intersected PLIC gas volume | Resolved gas moles |
+| `LiquidVolume` | Complementary liquid volume | Dissolved species or dispersed bubbles in liquid |
+| `MixtureMass` | $\rho_l V_l + \rho_g V_g$ | Momentum or mixture energy |
 
-Momentum components permit signed amounts. Positive species/population/thermal
-amounts use the nonnegative contract. A nonzero inventory with no donor carrier
-is rejected. Every amount and gas volume must pass a global extensive
-conservation check independent of the flow pressure tolerance. The carrier must
-match the physical storage definition; naming a scalar "energy" does not add a
-temperature equation, EOS, heat transfer, or reaction kinetics.
+All remapped quantities must satisfy global extensive conservation checks independent of the flow solver's tolerances.
 
-## Refinement and coarsening policy
+## Refinement and Coarsening Policy
 
-`refinement_plan()` targets 32 cells across the supplied minimum resolved
-diameter by default. For a 10 mm diameter this gives 0.3125 mm; choosing 24 gives
-about 0.4167 mm. These are initial hydrodynamic resolution targets. Bubble shape,
-rise velocity, wake and mass-transfer convergence require separate studies.
+- **Resolution Targets:** `refinement_plan()` targets 32 cells across the minimum resolved diameter by default.
+- **Protection Zones:** The policy protects all mixed cells and pure-phase jumps with at least a four-cell stencil and a velocity-based motion buffer. High curvature, narrow films, and externally flagged wake regions can also trigger refinement.
+- **Coarsening:** Only complete, uniform pure-phase sibling groups outside protected neighborhoods are eligible for coarsening, preventing the accidental merging of gas components or erasure of interfaces.
 
-The policy protects every mixed cell and detected pure-phase jump, with at
-least four cells of reconstruction stencil and a motion buffer formed from the
-global maximum face speed times the forecast horizon. Large dimensionless
-curvature can trigger further refinement for thin necks. Overlapping interface
-bands also protect narrow intervening films and nearby walls. An externally
-supplied dimensionless wake indicator tags wakes; explicit promotion boxes
-reserve fine neighborhoods for later representation changes. These are mesh
-criteria, not breakup, film-drainage or bubble-birth models.
+## Verification and Scope
 
-Coarsening proposals contain only complete uniform pure-phase siblings outside
-protected neighborhoods. Thus the policy cannot merge distinct gas components
-or erase resolved interfaces by coarsening. Explicit solver coarsening requests
-must pass that protection policy too. If an interface remains above its diameter
-target at the configured maximum level, `RefinementPlan::resolution_limited`
-reports that limitation instead of claiming the resolution target was met.
-
-A plan retains its source hierarchy and exact `source_observation`.
-`AdaptiveVoFSolver::refinement_plan()` additionally retains the accepted publication
-and its independent state/control revision. `regrid(plan)` rejects a replaced
-source observation or a solver-issued plan whose accepted state has changed,
-including reinitialization with identical dimensions on the same mesh. Regenerate
-solver plans after an accepted mutation or restore. A manually assembled
-`RefinementPlan` must set both `source_hierarchy` and `source_observation` from its
-actual source; geometry-only plans do not carry a solver-state revision. The explicit
-`regrid(refine, coarsen, protection, hints)` overload can revalidate forecast,
-wake and promotion guards for a manual request. Its default protection checks
-the current interface and stencil neighborhood; it does not remember hints
-from an earlier query.
-
-## Atomic state and replay
-
-State-changing operations and timestep queries are collective. Cell-array input
-uses owned-cell order. Face arrays use native overlap order, canonical
-owner-outward signs, and authoritative owned-face values; exchange replaces the
-ghost entries. Rank-divergent control input is rejected collectively.
-
-`regrid()` prepares a new immutable hierarchy, remaps the accepted state,
-reconstructs geometry, builds new maps/halos/graphs and native fields, and
-projects the new face flux before publishing the replacement. A rejected
-candidate leaves time, diagnostics, inventories, fields and hierarchy unchanged.
-Topology and partition generations advance with a changed leaf set. External
-mesh transfers and caches must capture the hierarchy identity and these
-generations and rebuild after a change. Borrowed array/field references must be
-reacquired after a successful state change or restore. A separately retained
-mesh shared pointer keeps the old immutable mesh alive; it does not follow the
-replacement mesh.
-
-Accepted-state/control revisions are independent of topology, partition and
-geometry observations. A physical commit can advance the state revision while
-leaving every mesh observation unchanged. Low-Mach trials retain their exact
-source context, accepted publication, state revision and hierarchy observation.
-Their canonical inventories and transport ledgers do not alias mutable solver
-workspaces: a later rejected preview preserves a previously retained valid trial.
-Successful reinitialization invalidates older trials even when geometry is reused.
-
-Immutable reconstruction metadata and communication plans may be shared only
-when the full retained hierarchy observation matches and every rank reports a
-cache hit. Each `AdaptiveVoF` instance keeps private exchange workspaces;
-fraction-dependent reconstruction remains call-local. A native partition binding
-therefore rebuilds geometry/maps while repeated instances on that exact binding
-can share immutable metadata. Existing numerical-operator compatibility and
-physical acceptance checks continue to apply.
-
-One explicit checkpoint can retain the accepted snapshot for replay. Topology
-changes are forbidden until that checkpoint is released. Restoring it restores
-the flow and passive inventories together and permits another trial. Coupled
-controllers should regrid only at accepted coupling boundaries, then acquire
-their next checkpoint. The opt-in [legacy reacting-gas low-Mach controller](reacting_vof.md)
-includes its physical inventories and cumulative ledgers in that transaction.
-An accepted representation conversion retains phase-pressure histories until
-the next physical step; regridding waits until that relaxation succeeds.
-
-## Scope and verification
-
-Cartesian blocks, periodic directions and impermeable slip walls are the
-supported geometry. Prism subdivision, curved vessel boundaries, contact angles,
-and moving mesh/ALE retain their own roadmap gates.
-
-The [general AMR design](../architecture/general_amr.md) describes implemented
-XY/Z, convex-polyhedral and mixed-region adaptation and a separate general-flow
-backend under qualification. The common hierarchy seam and Cartesian adapter
-retain their specialized numerical path; native mesh support alone does not
-qualify the Cartesian transport algorithm on those cells. No additional mesh family gains adaptive VoF
-support through the hierarchy seam.
-[Bidirectional representation trials](bubble_representation.md) have separate
-birth, resolution, component and thermodynamic-history guards.
-Physical gas growth and dissolved transfer use
-the separate [legacy reacting-gas low-Mach mode](reacting_vof.md); the source-free path
-and its passive inventories do not enable those processes.
-
-Focused verification covers hierarchy coverage, conservative transfer,
-coarse/fine interface passage, distributed ownership, pressure/capillary
-behavior and rejected/replayed transactions. The tracked
-[VoF verification contracts](../verification/vof_solver_contracts.md) identify
-reproducible assertions; dated measurements remain local build artifacts.
-
-The [transport and state-ownership contract](../architecture/vof_transport.md)
-defines compatible implicit momentum transport, canonical inventories and cache
-lifetimes. The verification index lists reproducible assertions; local dated
-measurements are not available as tracked qualification reports.
-
-The [general AMR qualification summary](../architecture/general_amr.md#qualification-status)
-lists the focused observation, partition, cache and transaction gates.
+This model supports Cartesian blocks, periodic boundaries, and slip walls. Moving meshes (ALE), prism/polyhedral adaptation, and reacting-gas coupling are covered by separate roadmap stages; see [vof_solver_contracts.md](../verification/vof_solver_contracts.md) for verification targets.

@@ -48,7 +48,7 @@ through the solver API. See [solver phase timings](solver_timings.md) for
   schedule in `MultiphysicsSolverCouplerPlanarALE.tcc`. The top-level coupling diagram shows
   the dispatch boundary instead of compressing that large workflow into the
   fixed-grid multiphysics diagram.
-  See [the coupling design](architecture/multiphysics_solver_coupler.md) for
+  See [the coupling design](../architecture/multiphysics_solver_coupler.md) for
   field ownership and the compatibility API.
 
 ## Maintenance

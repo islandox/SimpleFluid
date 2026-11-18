@@ -1,206 +1,31 @@
-# Piecewise-linear interface reconstruction (PLIC)
+# Piecewise-Linear Interface Reconstruction (PLIC)
 
-The opt-in `measure_only` Ordinary reconstruction path uses original-boundary
-face integration and a safeguarded minority-phase offset solve; see
-[the face transport contract](../architecture/conservative_face_vof.md#measure-only-plic-and-geometric-candidates).
-Its numerical error estimates are not certified bounds. The legacy scalar and
-explicit surface construction paths described below remain available.
+PLIC represents the gas/liquid interface inside a cell as a plane. This guide describes the `PLIC::PolyhedralReconstruction<Mode>` model used by `GeneralVoF` on convex native cells, covering the geometric representation, normal and offset fitting, and acceptance criteria.
 
-Phase samples hold immutable `CellGeometryView<Mode>` values selecting mesh-owned
-geometry snapshots. An Ordinary native Cartesian sample shares immutable source
-coordinates and supports, while other modes and explicit geometry retain their
-required represented geometry and numerical evidence. Routine sample validation,
-occupancy and gradient queries use the view. Geometry-dependent fitting creates
-explicit shells in an invocation-local `CellGeometryOperationWorkspace`; pure
-and gradient-only paths keep preparation lazy. Pure stencil samples remain in
-the original fitting order whenever a mixed target needs the complete fit.
-There is no implicit conversion from a view to a shell. Explicit batch
-materialization preserves range order, admits its output descriptors before
-allocation, and returns no partial output on failure; spent workspace charges
-remain cumulative.
+*(Note: Uniform and adaptive Cartesian backends retain specialized box-based reconstruction; see [vof.md](vof.md) and [adaptive_vof.md](adaptive_vof.md). For architectural integration, see [general_amr.md](../architecture/general_amr.md).)*
 
-PLIC owns generated intersections, cutting surfaces and connectivity, together
-with their numerical certificates and replay records. Native input geometry is
-a shared immutable source body. Retained cuts and numerical rebases reference
-that body without retaining the temporary input-cell implementation. Replay
-uses validated source values and the original plane identities; it does not
-repeat source-construction arithmetic. Raw and imported fallback evaluations
-keep independent lazy moment caches where the original first-query environment
-is part of the numerical contract. Sharing base geometry does not prime a cache
-or change the caller's rounding environment. Initial and expanded catalogs in
-one authenticated constructor retain their established evaluation reuse; this
-does not authorize sharing lazy evaluation state between independent states.
+## Plane Convention and State
 
-Each reconstruction prepares its target boundary once and reuses it across trial
-normals and offset evaluations. Prepared neighbors are constructed only when the
-selected fitting path needs them. Preparation pins immutable geometry and borrows
-its face loops, while retaining normalized coordinates. Anchor and face-seed
-selection use the original local coordinates, without recovering them from the
-normalized representation.
-
-An invocation owns reusable input/output polygon scratch. Capacity follows the
-maximum admitted face degree, with checked room for up to two output vertices per
-input edge. Queries regenerate all plane-dependent intersections and preserve
-contact rules, winding, fan integration and numerical-error accumulation order.
-Separate scratch objects support independent queries on one immutable prepared
-boundary. The existing convenience query allocates its own local scratch.
-These buffers retain the existing preparation accounting boundary; measured live
-capacity is distinct from cumulative geometry admission, whose charges are never
-refunded.
-
-Ordinary swept-volume metric integration retains a separate numerical record for
-each completed source tetrahedron. All four barycentric weights and errors remain
-available; channel-local vertex numbering, face winding, source-face tags and
-ordered integration remain unchanged. Pure channels alias bulk. First-attempt
-exterior-face cancellation and retry integration of the complete closed boundary
-retain their distinct rules, including reference selection and zero-cone tests.
-Compaction performs no determinants, error arithmetic or partial integration, and
-compact records cannot supply construction or replay provenance. Original supports
-remain the inputs to retry reconstruction. Storage observations distinguish the
-simultaneous construction/frozen peak from cumulative admission and process RSS.
-
-
-PLIC represents the gas/liquid interface inside a cell by a plane. This guide
-describes the finite `PLIC::PolyhedralReconstruction<Mode>` used by `GeneralVoF` on
-actual convex native cells. It covers the geometric model, normal and offset
-fits, and their acceptance checks. The [uniform Cartesian](vof.md) and
-[adaptive Cartesian](adaptive_vof.md) backends retain specialized reconstruction
-and directional transport; the algorithm below is the general-native path.
-
-Reconstruction supplies geometry to phase transport and curvature evaluation.
-It does not advance phase inventories, solve momentum, or project pressure.
-Those operations follow the [VoF transport contract](../architecture/vof_transport.md).
-The [general AMR contract](../architecture/general_amr.md) owns mesh support and
-qualification limits. Optional exact arithmetic has its separate
-[ExactVoF contract](../architecture/exact_vof.md).
-
-## Plane convention and state
-
-For a convex cell $K$, the reconstructed gas region is
+For a convex cell $K$, the reconstructed gas region is defined as:
 
 $$
-K_g = K \cap \{\mathbf{x}:\mathbf{n}\cdot(\mathbf{x}-\mathbf{a})\le d\},
-\qquad |\mathbf{n}|=1.
+K_g = K \cap \{\mathbf{x} : \mathbf{n} \cdot (\mathbf{x} - \mathbf{a}) \le d\}, \qquad |\mathbf{n}| = 1
 $$
 
-The normal $\mathbf{n}$ points out of gas into liquid. The anchor $\mathbf{a}$
-and offset $d$ have units of length; volumes have units of length cubed. In
-solver SI units these are metres and cubic metres. The liquid, named `carrier`
-in the reconstruction API, occupies the complementary region. Keeping an
-anchor and a separate signed offset avoids encoding a small cut solely as the
-difference between large global coordinates. Clipping uses the actual cell,
-including its physical centroid and supporting planes, rather than a box
-approximation.
+- **Normal ($\mathbf{n}$):** Points out of the gas phase into the liquid (`carrier`) phase.
+- **Anchor ($\mathbf{a}$) and Offset ($d$):** Have units of length. Maintaining a local anchor and separate signed offset avoids precision loss when representing small cuts in large global coordinates.
+- **Volume Conservation:** The reconstruction fits the smaller physical phase volume ($V_m = \min(V_g, V_l)$) directly, while the dominant phase occupies the complementary geometric volume of the cell.
 
-The reconstruction sample contains geometry and gas/carrier volumes. Direct
-sample validation requires finite, nonnegative phase amounts, positive cell
-volume, and agreement between their sum and the cell volume within the
-implemented input/geometry allowance.
+## Entry and Resolution Admission
 
-`GeneralVoF` retains independent physical gas and carrier inventories. Its
-`reconstruction_sample<Mode>` adapter preserves the smaller physical amount and forms the
-dominant **geometric fitting amount** as represented cell volume minus that
-minority amount. This sample is a geometric view; it does not overwrite either
-physical inventory. Occupancy differences and fit/transfer accounting remain
-part of the surrounding phase-state contract. A fitted plane alone is not a
-certificate of physical phase conservation.
+Before fitting a plane for a mixed cell, the model gathers a local neighbor stencil and evaluates admissibility:
+1. **Geometric Conditioning:** Requires at least four stencil cells and a well-conditioned 3D centroid arrangement.
+2. **Directional Signal:** Phase differences across the stencil must exceed numerical uncertainty.
+3. **Angular Support:** Angular optimization requires sufficient mixed-neighbor support in the tangent plane and adequate majority-phase availability (`minimum_phase_support_fraction`).
 
-## Entry and resolution admission
+If the local stencil is under-resolved or ill-conditioned, the model raises `PolyhedralResolutionRequired` to request mesh refinement rather than producing a degenerate fit.
 
-Before requesting a new fit, `GeneralVoF` validates the cell and can reuse a
-retained finite interface or an explicitly declared pure-phase geometry.
-Declared geometry is distinct from inventory: a declaration does not authorize
-deleting a trace amount. For inferred geometry, an exactly zero phase amount
-selects the pure-cell offset path. A mixed cell gathers neighbors through the
-configured topology support rings and enters reconstruction. Finite reconstruction
-uses a separate, deterministic selection: gather a complete canonical-face first
-ring in persistent-key order and assess its three-dimensional weighted-LS rank and
-infinity-norm condition. The angular-fit branch additionally requires observed
-mixed-neighbor support for both angular directions: project normalized neighbor
-centroid displacements onto the weighted-gradient seed's tangent plane and check
-the two-dimensional Gram matrix against the existing rank and `maximum_condition`
-gates. A neighbor contributes only when both phases are positive, its supplied
-geometry is observed mixed, and its volume-equivalent minority length meets the
-existing `minimum_optimized_phase_length_ratio`. The `GeneralVoF` adapter excludes pure declarations
-and retained pure capsules from that evidence; independent positive traces do
-not invent interface support. The gradient-only exemption remains target-only;
-neighbor eligibility does not delete any fitting sample. The target fixes the offset and adds no
-angular displacement row. Pure neighbors can constrain an explicit plane fit but
-do not prove that the observed interface extends in an independent direction.
-
-The complete retained context establishes majority-phase availability at the
-unchanged `minimum_phase_support_fraction`. Availability is separate from the
-local fitting objective: additional halo cells needed to establish that both phases are
-resolved do not automatically become residual rows. A target with weak phase
-availability throughout its context retains the existing gradient path and
-model bound. A small target keeps its existing exemption.
-
-Select the first complete local ring with usable geometry and, when angular
-fitting is eligible, adequate observed local tangent support. Expand by complete
-rings when geometric coverage, conditioning, or local angular support requires
-it, up to the unchanged configured ring and
-resource limits. The selection performs no clipping and evaluates no plane-model
-residual. Strict transport rejects a deficient final ring with a typed support
-reason. Under Ordinary `ConservativeApproximation`, exhausting angular-support
-rings instead selects the first complete ring with an admitted weighted-gradient
-direction. Successful expanded-ring angular fits remain preferred. This method
-choice precedes clipping, model RMS and optimization; it is not recovery from a
-failed angular solve. Weak-majority and subthreshold-target gradient-only policies
-remain unchanged. A geometry-selected
-ring with ambiguous phase direction also rejects. The complete halo remains available to curvature,
-contact and other non-reconstruction consumers, including remote owners and all
-canonical coarse/fine covering faces; this does not reduce `support_rings`.
-
-`assess_transport_support()` implements this stronger complete-ring caller
-contract. The strict standalone explicit-stencil `reconstruct()` kernel retains its
-separate clipping/optimizer/model-defect contract, including stencils deliberately
-used to demonstrate a one-plane contradiction. Observed tangent support is a
-preflight requirement, not a certificate of subsequent clipped-volume optimizer
-convergence; the existing angular arithmetic, conditioning and convergence gates
-still apply when that method is selected. The practical explicit-stencil kernel
-also applies the support-based method choice. Gradient results report
-`Gradient`, `fit_converged=false`, zero angular iterations and their measured
-neighborhood RMS. Their original direction/conditioning and target-volume gates
-remain required. Angular witness count and condition remain diagnostics;
-infinity denotes a rank-deficient angular Gram matrix, not a failed gradient.
-
-The finite four-argument overloads take `(target, full_context, fitting_cells,
-options)`. The first `fitting_cells` entries of the same context span form the
-objective. All context samples are validated under the existing sample cap;
-only phase-support maxima and angular eligibility use the entire context.
-Gradient estimation, geometry/tangent conditioning, optimizer samples, model
-RMS and diagnostic IDs remain local. `stencil_cells` therefore counts fitting
-rows, while phase-support fractions describe the full context. Outside context
-cannot repair a local missing direction or supply local tangent rows. Legacy
-three-argument calls retain their explicit-stencil and pure-target contracts.
-
-Mixed-cell admission checks the target and stencil before selecting an orientation method:
-
-- At least four stencil cells and a full-rank, sufficiently conditioned
-  three-dimensional centroid arrangement are required.
-- The phase differences must supply a directional signal larger than its
-  propagated numerical uncertainty estimate. A well-conditioned arrangement of
-  identical fractions supplies no direction; normalizing roundoff is insufficient.
-- Majority support is assessed only after directional validity. Each phase
-  reaching `minimum_phase_support_fraction` somewhere in the target-plus-stencil
-  neighborhood makes angular improvement eligible. The default remains `0.5`;
-  absence of a majority sample does not by itself reject a usable gradient.
-- Sample validity, arithmetic compatibility, and stencil-size limits apply.
-
-Insufficient sample count, rank deficiency, excessive conditioning, absent
-directional signal and a rejected selected plane model have distinct assessment
-reasons. They raise `PolyhedralResolutionRequired` without changing the amounts.
-The assessment requests a maximum cell span of half the target's current
-maximum axis span. The caller must refine or recover missing initial geometry
-and reassess; reconstruction does not run an adaptation controller. This is a
-generic refinement hint, not a measured resolution requirement or proof of resolved interface thickness or spatial
-convergence. It never converts a mixed inventory to pure by applying a cutoff.
-
-## Reconstruction flow
-
-The diagram describes a fresh inferred reconstruction; retained interfaces and
-explicit geometry declarations are handled by the caller as described above.
-Input, arithmetic, and work-limit failures can reject at any stage.
+## Reconstruction Workflow
 
 ```mermaid
 flowchart TD
@@ -208,21 +33,20 @@ flowchart TD
     B["Validate sample and controls"]
     C{"Pure cell?"}
     P["Return pure-phase support plane"]
-    D{"Usable gathered 3D stencil<br/>and meaningful direction?"}
-    R["Request refinement / reassessment<br/>Preserve accepted inventories"]
-    E["Weighted least-squares gradient<br/>Supported gas-outward unit normal"]
-    S{"Minority equivalent length<br/>below optimization threshold?"}
-    O["Keep gradient normal<br/>Fit only the target offset"]
-    M{"Majority support permits<br/>angular improvement?"}
-    W["Keep gradient normal<br/>Fit offset and measure neighbor RMS"]
+    D{"Usable 3D stencil and<br/>meaningful direction?"}
+    R["Request refinement / reassessment"]
+    E["Weighted least-squares gradient<br/>for initial unit normal"]
+    S{"Minority length ratio<br/>below threshold?"}
+    O["Keep gradient normal<br/>Fit target offset only"]
+    M{"Majority support permits<br/>angular optimization?"}
+    W["Keep gradient normal<br/>Fit offset and measure RMS"]
     F["Fit target offset for current normal<br/>Clip stencil cells and form residuals"]
-    G["Perturb normal in two tangent directions<br/>Refit offset at every evaluation"]
-    H["Build angular Gauss-Newton system<br/>Check conditioning and observability"]
-    I{"Small residual OR<br/>resolved small angular step?"}
-    J["Backtracking line search<br/>Require a smaller squared residual"]
-    K{"Measured model RMS<br/>within reference threshold?"}
-    Q{"Explicit Ordinary<br/>ConservativeApproximation?"}
-    L["Return plane and fit diagnostics"]
+    G["Perturb normal in tangent directions<br/>Build Gauss-Newton / curvature step"]
+    I{"Converged?"}
+    J["Backtracking / dogleg line search"]
+    K{"Model RMS within<br/>threshold?"}
+    Q{"ConservativeApproximation<br/>policy active?"}
+    L["Return plane and diagnostics"]
     X["Reject reconstruction"]
 
     A --> B --> C
@@ -233,472 +57,88 @@ flowchart TD
     S -- Yes --> O --> L
     S -- No --> M
     M -- No --> W --> K
-    M -- Yes --> F --> G --> H --> I
-    H -- Singular or unobservable --> X
+    M -- Yes --> F --> G --> I
     I -- No --> J
-    J -- Improved normal --> F
-    J -- No improvement or exhausted budget --> X
+    J -- Improved --> F
+    J -- Stalled / Exhausted --> X
     I -- Yes --> K
     K -- Yes --> L
     K -- No --> Q
     Q -- No --> R
-    Q -- Yes, record AboveThreshold --> L
+    Q -- Yes --> L
 ```
 
-### Initial normal and angular objective
+### 1. Initial Normal and Small-Phase Policy
 
-Let $\alpha_i=V_{g,i}/(V_{g,i}+V_{l,i})$ be the independently supplied sample
-fraction and $\mathbf{r}_i=(\mathbf{x}_i-\mathbf{x}_0)/h$ the centroid displacement
-normalized by the target's largest span. The initial direction solves
+Let $\alpha_i$ be the minority phase fraction in cell $i$, and $\mathbf{r}_i = (\mathbf{x}_i - \mathbf{x}_0)/h$ be the normalized centroid displacement. The initial normal $\mathbf{n}_0$ is obtained via weighted least-squares:
 
 $$
-\left(\sum_i\frac{\mathbf{r}_i\mathbf{r}_i^T}{|\mathbf{r}_i|^2}\right)\mathbf{q}
-=-\sum_i\frac{\mathbf{r}_i(\alpha_i-\alpha_0)}{|\mathbf{r}_i|^2},
-\qquad \mathbf{n}_0=\frac{\mathbf{q}}{|\mathbf{q}|}.
+\left(\sum_i \frac{\mathbf{r}_i \mathbf{r}_i^T}{|\mathbf{r}_i|^2}\right)\mathbf{q} = -\sum_i \frac{\mathbf{r}_i(\alpha_i - \alpha_0)}{|\mathbf{r}_i|^2}, \qquad \mathbf{n}_0 = \frac{\mathbf{q}}{|\mathbf{q}|}
 $$
 
-The minus sign gives the gas-outward convention. The finite implementation selects the
-target's smaller phase for the whole solve, reversing the carrier-gradient sign
-so it never recovers a tiny carrier signal by subtracting gas fractions near one.
-It assembles in wider finite arithmetic and estimates fraction, assembly and solve
-roundoff. The matrix infinity-norm condition and propagated gradient uncertainty
-are separate diagnostics; the dimensionless Euclidean gradient strength must
-exceed the uncertainty estimate. These estimates are not geometric certificates
-or bounds on interface-orientation accuracy. There is no arbitrary-axis fallback.
+**Small-Phase Policy:** If the characteristic minority length ratio $\ell_m / h_K = \sqrt[3]{\min(V_g, V_l) / V_K}$ is below `minimum_optimized_phase_length_ratio`, angular optimization is skipped. The solver retains the gradient normal $\mathbf{n}_0$ and fits only the target offset.
 
-The provisional small-phase policy uses volume-equivalent characteristic lengths:
+### 2. Angular Optimization
+
+When eligible, the normal is refined by minimizing the squared volume residuals across the neighbor stencil:
 
 $$
-\ell_m=\sqrt[3]{\min(V_g,V_l)},\qquad h_K=\sqrt[3]{V_K},\qquad
-\ell_m/h_K < \texttt{minimum\_optimized\_phase\_length\_ratio}.
+r_i(\mathbf{n}) = \frac{\widehat{V}_{m_i, i}(\mathbf{n}, d(\mathbf{n})) - V_{m_i, i}}{V_i}, \qquad J(\mathbf{n}) = \sum_i r_i(\mathbf{n})^2
 $$
 
-The default ratio is `0.05`; it is a configurable modeling choice, not a measured
-interface thickness or a certified resolution bound. It is invariant under unit
-scaling and exchanging the phase labels. Values in `[0,1]` are accepted; zero
-explicitly disables this exclusion. Equality receives no small-phase exclusion;
-angular improvement still requires the finite majority-support eligibility.
+- For each candidate normal $\mathbf{n}$, the target offset $d(\mathbf{n})$ is re-solved exactly on the target cell.
+- The optimizer Perturbs $\mathbf{n}$ along two orthogonal tangent directions to form a 2D Gauss-Newton step (supplemented by dogleg trust-region and curvature directions when necessary).
+- Under the default `RequireModelAgreement` policy, the final converged plane must satisfy `maximum_model_residual`; otherwise, refinement is requested. Under the opt-in `ConservativeApproximation` policy, high-RMS stationary fits are admitted with quality telemetry recorded.
 
-Below the threshold, the supported gradient determines the orientation. Only the
-target-cell offset is fitted: no neighboring-cell volume objective, angular
-iterations or plane-model RMS gate is evaluated. The original target minority
-volume accuracy and offset-work limits still apply. An unresolved offset rejects;
-the policy neither deletes a phase inventory nor declares a mixed cell pure.
-Ordinary, BoundedCertification and explicit Exact reconstruction share this
-orientation-selection policy while retaining their separate arithmetic and support
-contracts. The finite tiny-phase branch depends on directional validity and the
-existing size threshold, not on majority eligibility. It does not claim that the
-neighborhood is accurately represented by its plane. Other finite mixed cells
-with weak majority support retain the gradient, strictly fit the target offset,
-and evaluate neighboring-volume RMS against `maximum_model_residual`, using the
-explicit model-admission policy below. Eligible
-cells initialize the angular fit below. A later angular or arithmetic failure
-never automatically selects the gradient fallback.
+### 3. Inner Plane-Offset Solve
 
-`PolyhedralReconstructionResult<Mode>::orientation_method` distinguishes `Gradient`,
-`AngularVolumeFit` and `SuppliedNormal`. Gradient results report zero angular
-iterations and leave `fit_converged` false because no angular optimizer ran.
-`stencil_volume_residual_measured` distinguishes an evaluated residual from the
-unmeasured zero on the tiny-phase branch. Moderate weak-support gradients publish
-their measured RMS; angular fits and measured supplied-plane paths set the same
-flag. The flag survives plane exchange and transfer. A large RMS for a gradient
-plane shows poor agreement for that selected plane, not that every possible
-orientation is incompatible.
-Target-volume residual diagnostics remain available on every fitted-offset path.
-
-For each candidate normal, the inner solve fits the target offset anew. That
-same anchored plane is then applied to each stencil cell. For cell $i$, select
-its smaller sample phase $m_i$ (gas on a tie) and define
-
-$$
-r_i(\mathbf{n})=
-\frac{\widehat V_{m_i,i}(\mathbf{n},d(\mathbf{n}))-V_{m_i,i}}{V_i},
-\qquad J(\mathbf{n})=\sum_i r_i(\mathbf{n})^2.
-$$
-
-The target cell supplies the offset constraint; the neighboring cells supply
-the angular objective. Each neighbor can select a different minority phase.
-Residuals are normalized by that neighbor's full cell volume.
-
-Ordinary boundary-measure search conditions this objective on the target-volume
-constraint. A permitted represented-offset error can otherwise change the raw
-objective more than a remaining angular improvement. Let $e_t$ be the measured
-target minority-volume residual, $A_t,A_i$ the plane-section areas, and $s_j$ be
-`+1` for a gas minority and `-1` for a carrier minority. Angular search uses
-
-$$
-\widetilde r_i = r_i - \frac{s_i s_t A_i e_t}{V_i A_t}.
-$$
-
-These are first-order residuals at the locally corrected target offset. Both
-the comparison merit $J_{\mathrm{search}}=\sum_i\widetilde r_i^2$ and its
-finite-difference derivative vector use them; other paths retain $J$.
-The target plane, phase inventories, reported RMS, residual convergence gate
-and final model bound still use the original measured volumes. No tolerance
-or work cap changes. Section areas come from the same clipping query without
-additional clips or polygon buffers; unresolved sensitivities reject.
-This local correction is not an exact volume evaluation across a clipping
-contact. BoundedCertification and Exact retain their existing search metrics.
-
-The optimizer constructs two tangent directions at the current unit normal.
-Centered perturbations of size `1e-4` estimate derivatives of the residual
-vector, including a fresh offset solve at every perturbed direction. A
-two-variable Gauss-Newton system gives the proposed angular step. Singular,
-ill-conditioned, or unobservable orientation systems reject.
-
-After those checks, finite angular convergence requires either the stencil RMS
-residual to meet `fit_tolerance` or a resolved proposed step, including its
-probe-consistency estimate below, to meet `orientation_tolerance`. Otherwise,
-a line search tries scales from `1` down to
-`1/128` by successive halving, renormalizes the candidate normal, and accepts
-only a strict decrease in the comparison merit. When the qualified Gauss-Newton step exceeds one,
-those eight values instead bound a dogleg trial between the Cauchy and
-Gauss-Newton steps. Each smaller radius recomputes the direction from the same
-qualified normal equations. This prevents a poorly directed, oversized step
-from exhausting the search without testing useful local directions.
-
-Required qualification retains the arithmetic retry scales `1e-4`, `5e-5`
-and `2.5e-5`. A valid required qualification can request further single-scale
-quartets when the search stalls, the correction is smaller than the probe,
-or a nonzero-residual angular convergence claim needs verification. At most
-ten halvings of `1e-4` are available, all charged to the existing clip budget.
-The actual probe scale controls the unchanged signal and conditioning gates.
-This refinement handles both smooth derivative bias and probes that cross a
-nearby clipping breakpoint; it does not select a scale from the measured RMS.
-
-For successive correction vectors $s_k$, define
-$d_k=\lVert s_k-s_{k-1}\rVert$ and $e_k=\max(d_k,d_{k-1})$.
-Nonzero-residual angular convergence requires at least three successful scales,
-$e_k\leq\frac14\max(\texttt{orientation\_tolerance},\lVert s_k\rVert)$,
-and $\lVert s_k\rVert+e_k\leq\texttt{orientation\_tolerance}$.
-Agreement is absolute at the requested resolution: differencing noise need
-not decrease monotonically with probe size. This is a numerical consistency
-estimate, not a certified bound on the exact derivative. Small residuals still
-require the original observable-current-normal check. A failed finer arithmetic
-probe cannot certify stationarity from the coarse estimate. It may retain a
-strictly decreasing, observable trial; unresolved refinement without such a
-trial rejects as arithmetic failure. Fatal rank, conditioning and resource
-failures propagate. A stalled line search alone never establishes convergence.
-
-If the qualified Gauss-Newton linear model can already fit the residual vector
-within `fit_tolerance`, its direction remains authoritative for that iteration.
-This protects consistent, nearly zero-residual solves from slower curvature
-steps. Otherwise, a nonconverged qualified normal may compute a residual-curvature
-Newton direction at its current probe scale. Four diagonal probes supplement the
-existing axial probes to estimate $J_r^T J_r+\sum_i r_i\nabla^2 r_i$.
-The optional Hessian must be positive definite, satisfy the existing condition
-bound, and give a descent step no larger than one in tangent coordinates. The
-same dyadic radii from `1` to `1/128` backtrack that direction before Gauss-Newton
-fallback: a positive local Hessian does not ensure full-step descent across
-clipping events. Every candidate still refits the strict target volume, requires
-observable angular support and charges the shared clip allowance. Only strict objective
-decrease accepts that trial; recoverable arithmetic or nondecrease leaves the
-ordinary search available. An improving trial must also satisfy the unchanged
-observability and conditioning gates before becoming the current iterate; a
-trial failing those gates leaves backtracking available. An initially or
-currently unobservable normal still rejects. These extra probes consume the same
-clip budget. Fatal geometry errors still propagate. Accepted trials are
-qualified again on the next outer iteration: the original Gauss-Newton step,
-not a shortened trial step, governs convergence and reported evidence.
-
-A finite negative-curvature estimate can instead supply a bounded search
-direction without inverting the indefinite Hessian. Its absolute spectral
-condition must satisfy the same `maximum_condition`. The most-negative
-eigenvector is oriented consistently with descent and phase reversal, then
-tested at the existing radii `1` through `1/128`. Strict search-merit decrease
-and the original trial observability checks remain necessary. Recoverable
-arithmetic or unobservable trials try smaller radii; fatal errors propagate.
-Unsuccessful trials retain the qualified Gauss–Newton search. This avoids slow
-first-order progress near a saddle without adding iterations, probe scales, or
-clip capacity. The positive-definite Newton and consistent-linearized-fit
-branches retain their existing rules.
-
-The context/prefix Ordinary boundary-measure entry also permits one bounded
-restart when a qualified stationary angular solution fails the raw model bound.
-Its predeclared seed bank consists of minority caps at the original target
-faces: the gas normal is opposite the outward face normal for a gas minority,
-and aligned for a carrier minority. Equal phase amounts include both directions.
-Each seed uses the same target-volume constraint and local fitting rows. The
-best observable seed must strictly improve the constrained search merit before
-it can initialize the secondary solve. A seed's model RMS alone never admits it.
-Both solves and seed qualification share the original total iteration and clip
-budgets; the secondary solve must reach the same angular, target-volume and raw
-model gates. Missing direction, current unobservability, nonstationarity and
-work exhaustion do not trigger this restart. Legacy three-argument, bounded,
-exact and constructive-measure paths retain one initialization.
-
-Every probe and optional trial shares the original clip budget; the iteration
-and resource caps are unchanged. Exhausting those scales or the iteration
-budget rejects the fit.
-The nominal squared-residual merit retains wide search residuals and uses
-compensated accumulation before strict comparison. The derivative vector remains
-binary64. This avoids premature narrowing of near-equal objective totals; it
-does not relax stationarity or provide additional significand bits on platforms
-where `long double` equals `double`.
-`PolyhedralFitFailure` retains stencil IDs, final/best normal, RMS, angular step,
-finite-difference scale, condition, iterations and clip counts. Nonstationarity
-does not establish plane-model incompatibility. Collective diagnostics label it
-as an optimizer failure and preserve the typed local cause on failing ranks.
-On iteration exhaustion, the retained normal/RMS can include the last accepted
-trial while the step and probe scale describe its preceding qualification.
-Compare derivatives at the same frozen normal when diagnosing that failure.
-The best entry follows search merit, with raw measured RMS at that plane rather
-than the minimum raw RMS of all trials. If a restart scan fails, best diagnostics
-may identify a qualified lower-merit seed; that seed remains unqualified for
-publication until angular convergence and the final gates succeed.
-
-Under the default `PlicModelPolicy::RequireModelAgreement`, a converged optimizer
-must also satisfy `maximum_model_residual`. Curved
-interfaces can have a nonzero plane-model defect even at an angular optimum.
-Exceeding this separate bound produces an `UnresolvedPlaneModel` refinement
-request. Optimizer convergence therefore does not establish adequate spatial
-resolution.
-
-### Explicit Ordinary approximation admission
-
-`PlicModelPolicy::ConservativeApproximation` is an opt-in Ordinary reconstruction
-policy, selected through `GeneralVoFOptions::reconstruction.model_policy` for
-transport. BoundedCertification and Exact reject this policy, including pure
-inputs and empty owners. The strict policy and `SweptPartition` remain defaults.
-
-The approximation policy retains geometry validity, deterministic support and
-meaningful direction, conditioning/observability, strict target-cell minority
-volume accuracy, and every work/resource limit. An eligible angular solve must
-actually converge. Nonstationarity, exhaustion, unobservability and arithmetic
-failures still reject; no failed solve becomes a gradient or donor fallback.
-The supported-gradient branch, including the explicit angular-support method
-choice above, retains `fit_converged=false` because
-only its target offset is solved. Its already-admitted orientation and volume
-requirements still apply. The small-phase exclusion remains unmeasured and does
-not acquire a fabricated zero-error quality claim.
-
-A large measured neighborhood RMS is then a quality outcome, not a transport
-rejection. `maximum_model_residual` remains its reference threshold. The
-`PolyhedralReconstructionResult<Mode>` records `model_policy` and `model_quality` separately from
-support assessment and optimizer status; quality is `NotMeasured`,
-`WithinThreshold` or `AboveThreshold`. All measured values remain available.
-The model-triggered face-seed restart is disabled for this policy: a qualified
-stationary approximation is returned without searching solely to cross the
-reference threshold. This can select a different valid local optimum from the
-strict policy; neither policy establishes a global minimum or motion accuracy.
-
-Policy and quality survive authenticated controls, plane exchange, owner caches
-and ownership migration. Rank-divergent policies reject collectively; retained
-planes cannot bypass the state's immutable policy or diagnostic consistency.
-Actual regridding retains policy and reconstructs the new target as before.
-Owner-call diagnostics count measured and above-threshold returns and retain
-the worst residual, cell identity, orientation method and convergence status;
-these are call counts, not distinct-cell population counts.
-
-`GeneralVoFTransportDiagnostics::reconstruction_quality` separately summarizes
-the actual transport plane catalog: one entry per deduplicated GeometricFace
-donor, or per requested SweptPartition plane including imports. Catalog reuse
-does not cause another fit; imported entries may repeat across ranks. Unmeasured
-entries remain distinct from measured zero residuals. Under the approximation
-policy, GeometricFace propagates reconstruction and face-integration arithmetic
-failures instead of selecting its legacy donor-cell recovery. The strict policy's
-existing explicitly diagnosed recovery behavior is unchanged.
-
-Conservative shared face transport, limiting, independent gas/carrier inventories,
-occupancy and transactional publication remain separate mandatory gates.
-The selected reconstruction policy is propagated consistently to full-support
-surface reconstruction; capillary support, witness, coherence, radius and
-conditioning gates remain unchanged. Transport evidence does not qualify
-curvature, pressure balance or capillary continuation.
-
-Approximation-policy Q2 runs retain the original cases, endpoints, Courants,
-oracles, shape/centroid limits and mesh/time convergence studies. They are
-separately labeled policy candidates. Historical strict-policy failures remain
-failures, and a completed conservative horizon alone does not establish accuracy.
-
-A finite rectangle illustrates why support selection precedes the objective:
-a target cut by one physical edge can have a two-ring halo spanning other
-rectangle edges. A converged excessive residual on that broad halo diagnoses
-that selected neighborhood model; it is not proof that the target itself
-requires multiple planes. The complete first-ring policy retains the unchanged
-`0.2` model-defect bound under strict admission and the same quality reference
-under approximation admission. The genuine single-interface closed-shear fixture and
-finite-rectangle `PlanarPatch` stress case have independent polygon oracles and
-remain distinct verification problems.
-
-Transport's observed mixed-neighbor tangent check also applies the existing
-`minimum_optimized_phase_length_ratio` to each neighbor before counting its
-direction as angular support. A neighbor below that scale retains both physical
-inventories, its truthful mixed declaration, and its residual in the selected
-fitting objective. Its centroid direction alone cannot certify information that
-the same small-phase policy does not support for optimizing its own orientation.
-Insufficient eligible directions cause deterministic complete-ring expansion
-before model residuals are measured. Equality remains eligible and zero disables
-this restriction. This is a declared conservative support rule, not a certificate
-of clipped-volume conditioning; the optimizer's original conditioning and
-convergence gates remain necessary.
-
-### Inner plane-offset solve
-
-For a given normal, the target is the smaller of the sample gas and carrier
-volumes, $V_m$. The fit uses this phase directly to avoid judging a small
-minority cut solely through the dominant phase's volume.
+For a fixed normal $\mathbf{n}$, the offset $d$ is found by matching the target cell's minority volume $V_m$:
 
 ```mermaid
 flowchart TD
     A["Given normal and target cell"]
-    B["Normalize normal and select minority phase<br/>Choose support anchor and offset bracket"]
-    C["Cube-root fraction estimate<br/>Use midpoint if estimate is outside bracket"]
-    D["Clip actual convex cell<br/>Measure both phase volumes"]
-    E{"Minority-volume error<br/>within target allowance?"}
-    F["Return fitted offset and signed residual"]
-    G{"Residual determines<br/>the monotone bracket side?"}
-    H["Shrink bracket and try midpoint"]
+    B["Select minority phase<br/>Establish support anchor and bracket"]
+    C["Initial cube-root fraction estimate"]
+    D["Clip convex cell and measure volume"]
+    E{"Error within<br/>volume_tolerance?"}
+    F["Return fitted offset"]
+    H["Update bracket and bisect / Newton step"]
     R["Reject unresolved fit"]
 
     A --> B --> C --> D --> E
     E -- Yes --> F
-    E -- No --> G
-    G -- Yes --> H
-    H -- Progress and budget remain --> D
-    H -- Adjacent offsets or exhausted budget --> R
-    G -- No --> R
+    E -- No --> H
+    H -- Budget remains --> D
+    H -- Exhausted --> R
 ```
 
-The anchor is chosen near the appropriate extreme projected vertex. A full
-support query establishes the offset bracket; the chosen anchor does not imply
-that either bracket endpoint is exactly zero. The initial estimate uses the
-cube root of $V_m/V_K$ measured from the gas-minimum or carrier-maximum side.
-Subsequent steps bisect the bracket. Increasing the offset increases gas volume
-and decreases carrier volume, so the residual-to-bracket update depends on
-which phase is fitted.
-
-In ordinary arithmetic, offset acceptance is
+Acceptance requires:
 
 $$
-|\widehat V_m-V_m|\le
-\texttt{volume\_tolerance}\,V_m.
+|\widehat{V}_m - V_m| \le \texttt{volume\_tolerance} \cdot V_m
 $$
 
-This is a relative **minority-volume** requirement, separate from the
-dimensionless stencil residual. The best evaluated offset is retained. Failure
-to establish the tolerance before the bracket loses representable progress or
-the work budget expires rejects reconstruction. Pure cells instead return the
-appropriate support endpoint without a mixed-cell volume iteration.
+## Controls and Defaults
 
-## Arithmetic and controls
-
-`ArithmeticMode::Ordinary` is the general-VoF default. It uses represented scalar
-residuals. `BoundedCertification` is explicit opt-in: target acceptance includes
-the residual uncertainty, bracket updates require an enclosure wholly on one
-side of zero, and RMS acceptance includes the propagated residual bounds. The
-angular search uses nominal squared residuals for improvement. Certification
-failure does not switch arithmetic policy or relax physical tolerances.
-
-The caller selects a mode at the VoF operation boundary and supplies
-`PolyhedralPhaseSample<Mode>` to the compiled `PolyhedralReconstruction<Mode>` entries.
-Target and stencil geometry retain that type throughout offset and normal
-fitting. The former runtime sample and reconstruction overloads are removed;
-geometry operations cannot re-enter runtime selection during a fit.
-
-Defaults in `PolyhedralReconstructionOptions` are:
+Key parameters in `PolyhedralReconstructionOptions`:
 
 | Control | Default | Meaning |
 | --- | --- | --- |
-| `volume_tolerance` | `8e-15` | Relative target minority-volume allowance |
+| `volume_tolerance` | `8e-15` | Relative target minority-volume tolerance |
 | `fit_tolerance` | `2e-9` | Dimensionless stencil RMS convergence threshold |
 | `orientation_tolerance` | `2e-8` | Tangent-step norm convergence threshold |
-| `model_policy` | `RequireModelAgreement` | Strict model admission; Ordinary may explicitly select `ConservativeApproximation` |
-| `maximum_model_residual` | `0.2` | Strict admission threshold or approximation-quality reference for measured stencil RMS |
-| `minimum_phase_support_fraction` | `0.5` | Majority-support eligibility for angular improvement after directional admission |
-| `minimum_optimized_phase_length_ratio` | `0.05` | Below this volume-equivalent length ratio, use the supported gradient without angular fitting |
-| `maximum_condition` | `1e8` | Conditioning limit for normal estimation and angular fitting |
-| `maximum_offset_iterations` | `192` | Iteration cap per target-offset fit |
-| `maximum_fit_iterations` | `24` | Outer angular iteration cap |
-| `maximum_stencil_cells` | `128` | Reconstruction stencil-size cap |
-| `maximum_clip_evaluations` | `32768` | Shared target/stencil evaluation cap for one reconstruction |
+| `model_policy` | `RequireModelAgreement` | Strict model admission (`ConservativeApproximation` is opt-in) |
+| `maximum_model_residual` | `0.2` | Stencil RMS threshold for model agreement |
+| `minimum_phase_support_fraction` | `0.5` | Majority-support threshold for enabling angular optimization |
+| `minimum_optimized_phase_length_ratio` | `0.05` | Characteristic length ratio below which gradient normal is kept |
+| `maximum_condition` | `1e8` | Conditioning limit for linear/angular systems |
+| `maximum_offset_iterations` | `192` | Iteration cap per target-offset solve |
+| `maximum_fit_iterations` | `24` | Outer angular optimization iteration cap |
+| `maximum_stencil_cells` | `128` | Stencil size cap |
 
-The finite initial linear solve uses `||A||inf * ||inverse(A)||inf` and a
-directional-signal uncertainty check; the angular system uses its eigenvalue
-ratio and separate observability check. Geometry
-operations and the enclosing `GeneralVoF` transaction also impose their own
-resource limits. These caps are failure conditions, not permissions to discard
-phase amounts or return an unconverged fit.
+## Implementation References
 
-## Result, integration, and limitations
-
-`PolyhedralInterface` contains only the represented gas halfspace and pure-phase
-flags. `PolyhedralReconstructionResult<Mode>` retains that geometry in `.geometry`
-alongside the reconstruction evidence and diagnostics. Its single
-`GeometryValue<Mode>` target-volume difference has the selected backend's
-meaning: Ordinary stores a nominal residual, BoundedCertification also stores
-its enclosure radius, and Exact stores a published enclosure plus `exact_nonzero`.
-The Exact view is not the kernel's retained rational scalar. The separate
-numerical-error estimate has numerical meaning only for Ordinary.
-
-The independently reported `target_volume_residual` keeps its existing producer
-semantics. In particular, a declared-pure cell can report a positive minority
-amount while its signed target-volume difference is negative. These fields are
-not collapsed into one value. Geometry-only phase, clipping, and curvature
-consumers accept the smaller interface; owner caches, retained results, and
-migration keep the full reconstruction record. Runtime-selected GeneralVoF
-storage uses `DynamicPolyhedralReconstructionResult`, a variant of the three
-typed results, with mode dispatch at the boundary.
-
-The shared reconstruction codec explicitly records arithmetic mode and native
-scalar profile before decoding a body. It transports every concrete result
-field, including the full resolution assessment, through the same implementation
-for GeneralVoF exchange and Exact phase transfer. No availability flags are added.
-Default or neutral diagnostics retain their producer-defined meaning; carrying
-a default `Admitted` resolution reason does not establish that an assessment ran.
-Gradient and supplied-normal records still do not claim angular convergence.
-
-Native residual/error values use lossless sign, exponent, and significand words
-rather than raw `long double` storage. This preserves supported native precision,
-subnormals, and signed zero without serializing ABI padding. The natural C++
-header has zeroed, checked padding and a checked mode-dependent body length.
-Decoding rejects wrong modes/profiles, noncanonical scalar encodings, malformed
-booleans/enums, negative enclosure radii, and overflowing count fields before
-publishing the record. The reconstruction record is version 3, Exact working and
-source capsules are version 8, and capillary-plane exchange is version 6. Previous
-affected records require regeneration and communicating consumers must be rebuilt.
-
-`solve_offset` validates a supplied normal's numerical volume fit; it does not
-perform the neighborhood support and angular-model admission of `reconstruct`.
-A successful offset solve alone does not qualify an interface representation.
-
-GeneralVoF reconstructs on cell owners and imports owner planes for halo use.
-The transport operation uses these labels to split geometric transfers, then
-checks donor availability, recipient occupancy, and independent phase
-conservation. Reconstruction failure propagates through the collective trial;
-the accepted state remains unchanged. No reconstruction retry, automatic
-refinement, or timestep subcycling occurs inside this kernel.
-
-One plane per cell cannot encode arbitrary disconnected subcell interfaces or
-unresolved thin films. This fit does not prescribe contact angles or evaluate
-curvature; those require separate models and stencils. Component acceptance
-does not establish full-flow accuracy, production-scale performance, or
-physical application validation. Spatial and temporal convergence remain
-separate qualification tasks.
-
-## Implementation and verification map
-
-- [Public samples, options and results](../../src/geometry/PLIC/PolyhedralReconstruction.hh)
-  define the fixed-mode reconstruction interfaces.
-- [Finite reconstruction kernels](../../src/geometry/PLIC/details/PolyhedralReconstruction.tcc)
-  implement support admission, offset fitting and angular optimization.
-- [GeneralVoF state integration](../../src/FVM/details/GeneralVoFState.cc)
-  owns geometric fitting samples, stencil assembly, retained interfaces and
-  owner-plane imports.
-- [Reconstruction tests](../../src/FVM/unitTests/testPolyhedralReconstruction.cc)
-  cover finite mode entries, minority-volume fits, support/model gates,
-  refinement requests, scaling, conditioning and rejection without inventory
-  mutation. The owning target is `testPolyhedralReconstruction`, registered by
-  [FVM test CMake](../../src/FVM/unitTests/CMakeLists.txt).
-- [VoF verification contracts](../verification/vof_solver_contracts.md) describe
-  broader numerical acceptance requirements. Source coverage and successful
-  local fits do not substitute for those gates.
-
-
-Cell-partition certification distinguishes source-support identity from physical
-coplanarity. Independently constructed faces can carry different source recipes
-on the same represented plane. Those faces share a proof group only after the
-existing exact coplanarity predicate succeeds; every tested vertex consumes the
-pair-work cap. Exact oriented boundary cancellation and the independent volume
-and local first-moment gates still apply. A gap or overlap below the metric
-allowance remains a rejection.
+- **Interfaces & Options:** `src/geometry/PLIC/PolyhedralReconstruction.hh`
+- **Reconstruction Kernels:** `src/geometry/PLIC/details/PolyhedralReconstruction.tcc`
+- **VoF State Integration:** `src/FVM/details/GeneralVoFState.cc`
+- **Unit Tests:** `src/FVM/unitTests/testPolyhedralReconstruction.cc`

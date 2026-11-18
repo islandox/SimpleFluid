@@ -1,88 +1,27 @@
-# Reacting species and thermodynamics contract
+# Reacting Species and Thermodynamics Contract
 
-The reacting implementation uses `Reacting::SpeciesCatalog` and
-`ReactionMechanism` as immutable shared definitions. A species has a stable ID,
-molar mass, elemental composition, and allowed phases. Ordered schema fingerprints
-protect field layouts, source packets, checkpoints, and MPI configuration;
-matching vector lengths or revision numbers alone are insufficient.
+The reacting framework relies on `SpeciesCatalog` and `ReactionMechanism` as immutable shared definitions. These definitions govern the configuration fingerprints that protect field layouts, source packets, and checkpoint integrity.
 
-## Inventories and accepted source packets
+## Extensive Inventories and Source Packets
 
-`CellSpeciesState` stores extensive moles per cell in liquid, dissolved, resolved
-gas, and named dispersed populations. Liquid and dissolved compartments share one
-physical solution volume and caloric state. A population owns a separate bubble
-count; its composition is the full species vector. No name or catalog index is
-reserved for hydrogen, an inert gas, a donor, or a solvent.
+- **State Ownership:** `CellSpeciesState` stores extensive moles per cell across liquid, dissolved, resolved gas, and dispersed populations.
+- **Inventory Basis:** Liquid and dissolved compartments share a common physical solution volume and caloric state.
+- **Source Ledger:** `SpeciesSourceLedger` tracks accepted integrated events. All chemistry evaluations and physical transfers start from a synchronized accepted state; retrying an interval must not accumulate sources or corrupt history.
+- **Balance Checks:** The framework rejects joint donor overdraw, inconsistent mass/elemental balances, and nonfinite budgets during reaction advancements.
 
-Supplied chemistry evaluates rates with an explicit volume basis or supplies
-integrated reaction extents. `advance_reactions` uses the same finite inventories
-for every reaction and transfer. It rejects joint donor overdraw, invalid schemas,
-nonfinite budgets, and inconsistent elemental or mass balances. It does not
-provide a stiff chemistry mechanism. External material packets declare their
-reservoir, species amounts, energy, and momentum. Independent signed external
-heat remains separate from reaction and transported material energy.
+## Thermodynamic Ownership
 
-`SpeciesSourceLedger` records the accepted integrated events. Preview/corrector
-work starts from the same accepted state; retrying an interval cannot accumulate
-sources or publish history. A caller commits fields and model ledgers together.
+- **Provider Interface:** `MixtureThermodynamics` provides composition-dependent density, energy, enthalpy, and transport coefficients. The framework assumes EOS providers expose consistent fugacity or chemical-potential closures.
+- **Energy Conventions:** All phases and source mechanisms must adhere to a single `EnergyConvention`. Formation energy defined in the caloric EOS must not be double-counted as reaction heat.
+- **Temperature Ownership:** By default, a common temperature is assumed. Separate phase temperatures (e.g., liquid vs. gas) require explicit phase-energy ownership. Empty phases must possess zero volume, species, and energy, with no fictitious material properties.
 
-## Thermodynamic ownership
+## Solver Adapters and Adaptations
 
-`MixtureThermodynamics` supplies composition-dependent density, internal energy,
-enthalpy, thermodynamic derivatives, and transport coefficients in SI units.
-Gas providers expose species fugacities or a chemical-potential closure. Built-in
-ideal-mixture and supplied linear-liquid helpers share the same provider interface;
-no nonideal correlation is inferred from a species name.
+- **Field Adapters:** Adapters convert schema-indexed molar concentrations into extensive mass inventories. They must ensure that extensive phase transport is performed once and is consistent with the global continuity gate.
+- **Source Integration:** The controller manages chemistry and source callbacks. All source stages must start from the same accepted state, ensuring that transported inventories are correctly mapped to thermodynamic states before reaction rates are evaluated.
+- **Distribution:** Distributed field allocation, schema fingerprints, and MPI configuration metadata must be synchronized across all ranks before any source-stage callback invocation.
 
-Every participating phase and source mechanism uses one `EnergyConvention`.
-Formation energy in the caloric EOS must not also enter as reaction heat.
-Sensible-energy storage uses the explicitly supplied reaction heat. Interphase
-material carries its declared enthalpy once; additional conductive exchange is
-paired between phases. Pressure-volume work belongs to the flow transaction.
+## Numerical Acceptance
 
-Common temperature is the default. Separate liquid, resolved-gas, and population
-temperatures require explicit phase-energy ownership, including cross-phase
-chemistry allocation. A disappearing phase must have zero species, number,
-volume, and internal energy. An empty phase has no fictitious density, heat
-capacity, or temperature. Only explicitly bounded operand cancellation may clear
-an empty-phase energy residual; physical heat cannot repair a failed budget.
-
-## Field and solver adapters
-
-`ReactingGasModel` stores schema-indexed molar concentrations per current bulk
-volume. Its intensive-to-extensive conversion applies the control volume once.
-Its model-owned liquid mass and pure-liquid density derive from all solution
-species and their EOS. `LiquidMassInventory::initializeFromSpecies` binds a
-cellwise reporting follower to these fields. `previewSpeciesMass` consumes the
-already transported mass and independent source/outflow budgets; it cannot
-transport that inventory a second time. Its trial density stays private until
-commit, and ALE previews use accepted-old and trial-new volumes.
-
-The Boussinesq controller consumes the accepted species thermal source once and
-refreshes derived thermodynamic properties after temperature advancement without
-re-evaluating chemistry. This backend retains the sensible-temperature and
-Boussinesq approximations. Formation-energy storage requires the conservative
-low-Mach backend. Typed reacting free-surface integration consumes the exact accepted event and
-liquid transport receipts; see [the surface contract](reacting_species_surface.md).
-The field adapter's general bulk-mixture diffusion remains gated. Native ordered
-face transport and local interphase thermal stages have their own conservative
-owners and support limits; component kernels do not enable every combination.
-
-Experimental VoF solvers can be built explicitly for source-free development.
-The reacting VoF coupler remains excluded until it migrates to the shared
-species/source configuration boundary. Source-free finite geometry/flow tests
-do not qualify multispecies reacting-VoF execution. Shared geometric and
-finite-volume utilities remain available independently.
-
-## Distributed and numerical acceptance
-
-Configuration presence, schema, population layout, and collective control-flow
-metadata agree before distributed field allocation. Ranks without owned cells
-participate in the same validation and collective sequence. Rank-local provider
-failure rejects the complete transaction. Accepted physical inventories,
-geometry, time, and diagnostic histories survive failed attempts unchanged.
-
-Mass, species, energy, and occupancy gates use physical quantities independently
-of linear solver tolerances. Tiny occupied phases do not inherit unit-sized
-absolute tolerance floors. Numerical verification exercises supplied manufactured
-closures; it does not establish experimental validation of a reacting fluid.
+- **Independence:** Physical conservation gates (mass, species, energy) are enforced independently of linear solver tolerances.
+- **Verification:** Numerical verification must be performed against manufactured closures. The framework does not infer experimental physical validation from a successful numerical integration of a prescribed reaction mechanism.

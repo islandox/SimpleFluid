@@ -4,7 +4,7 @@ Chemical gas production and solvent/vapor phase change have distinct material
 and energy events. Neither heat deposition nor a scalar void increment defines
 a reaction. The generic species API requires an explicit catalog, conservative
 mechanism and supplied material laws; see
-[the reacting model guide](../reacting-gas-models.md) and
+[the reacting model guide](reacting-gas-models.md) and
 [the source contract](reacting_gas_sources.md).
 
 ## Select one thermal owner

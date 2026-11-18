@@ -2,7 +2,7 @@
 
 Floating-point arithmetic is the primary VoF choice. Use the
 [default VoF contract](vof_transport.md) and
-[FP geometry policy](general_amr.md#floating-point-geometry-and-arithmetic)
+[FP geometry policy](general_vof_transport.md#architectural-principles)
 for ordinary development and qualification. ExactVoF names this documentation
 family; it does not introduce a new C++ class or change the default policy.
 
