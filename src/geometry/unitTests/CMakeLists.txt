@@ -102,6 +102,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   elseif(TEST_NAME STREQUAL "testNativePublicationProducer")
     simplefluid_discover_tests(${TEST_NAME}
         TEST_FILTER "NativePublicationProducer.*")
+  elseif(TEST_NAME STREQUAL "testNativeProductPublication")
+    simplefluid_discover_tests(${TEST_NAME}
+        TEST_FILTER "NativeProductPublication.*")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -452,6 +455,18 @@ foreach(_publication_ranks IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME NativePublicationProducer_${_publication_ranks}procs
     TARGET testNativePublicationProducer PROCS ${_publication_ranks}
     ARGS "--gtest_filter=NativePublicationProducerMPI.CartesianRemoteReuseRefinementMigrationAndEmptyOwners"
+    LABELS "mpi;amr;native;publication;empty_rank" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME NativeProductPublication_${_publication_ranks}procs
+    TARGET testNativeProductPublication PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativeProductPublicationMPI.*"
+    LABELS "mpi;amr;native;publication;empty_rank" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME NativeStaticMixedPublication_${_publication_ranks}procs
+    TARGET testNativeStaticMixedPublication PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativeStaticMixedPublication.*"
+    LABELS "mpi;amr;native;publication;empty_rank" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME NativeConvexPublication_${_publication_ranks}procs
+    TARGET testNativeConvexPublication PROCS ${_publication_ranks}
+    ARGS "--gtest_filter=NativeConvexPublication.*"
     LABELS "mpi;amr;native;publication;empty_rank" TIMEOUT 300)
   simplefluid_add_mpi_test(NAME NativePublicationOutputAccounting_${_publication_ranks}procs
     TARGET testNativePublicationOutputAccounting PROCS ${_publication_ranks}

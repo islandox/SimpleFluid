@@ -19,7 +19,10 @@ template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool part
         reject("vertex/face cap exhausted.");
     active_work->charge(1, sizeof(MomentCache));
     if (!poly.moment_cache)
+    {
+        NativeSplitCppProfile::combined<MomentCache>();
         poly.moment_cache = std::make_shared<MomentCache>();
+    }
     if (!poly.buffers_prepaid)
     {
         active_work->charge(poly.vertices.capacity(), sizeof(Vertex));
@@ -31,13 +34,18 @@ template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool part
     // A populated cache has a completed once_flag and cannot be cleared in
     // place. Only a unique, never-prepared cache is reusable by a fresh draft.
     if (!poly.moment_cache || poly.moment_cache.use_count() != 1 || poly.moment_cache->integrals)
+    {
+        NativeSplitCppProfile::combined<MomentCache>();
         poly.moment_cache = std::make_shared<MomentCache>();
+    }
     poly.volume = StorageScalar{};
     active_work->charge(1, sizeof(PointExportCache));
+    NativeSplitCppProfile::combined<PointExportCache>();
     poly.point_export_cache = std::make_shared<PointExportCache>();
     if (std::fegetenv(&poly.point_export_cache->environment) != 0)
         reject("cannot capture global-coordinate arithmetic environment.");
     active_work->charge(poly.vertices.size(), sizeof(DynamicStoredPointRef));
+    NativeSplitCppProfile::request(poly.vertices.size(), sizeof(DynamicStoredPointRef));
     poly.point_export_cache->vertex_provenance.resize(poly.vertices.size());
     if (poly.point_export_cache->vertex_provenance.capacity() > poly.vertices.size())
         active_work->charge(poly.point_export_cache->vertex_provenance.capacity() - poly.vertices.size(),
@@ -67,6 +75,7 @@ template<ArithmeticMode Mode> void prepare_finish(DraftGeometry& poly, bool part
             if (!retained_planes.contains(plane))
             {
                 active_work->charge(1, sizeof(PlanePtr) + 4 * sizeof(void*));
+                NativeSplitCppProfile::node<PlanePtr>();
                 retained_planes.insert(plane);
             }
     for (const auto& plane : retained_planes)
@@ -117,6 +126,8 @@ template<ArithmeticMode Mode> void validate_connected_boundary(std::size_t verte
     static_assert(Mode == kernel_mode);
     active_work->charge(vertex_count, sizeof(char));
     active_work->charge(faces.size(), sizeof(std::vector<std::size_t>) + sizeof(char));
+    NativeSplitCppProfile::request(vertex_count, sizeof(char));
+    NativeSplitCppProfile::request(faces.size(), sizeof(std::vector<std::size_t>) + sizeof(char));
     std::vector<char> vertices_used(vertex_count, false), reached(faces.size(), false);
     std::vector<std::vector<std::size_t>> adjacent(faces.size());
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> first_face;
@@ -126,15 +137,19 @@ template<ArithmeticMode Mode> void validate_connected_boundary(std::size_t verte
             const auto a = faces[f][i], b = faces[f][(i + 1) % faces[f].size()];
             vertices_used.at(a) = true;
             const std::pair<std::size_t, std::size_t> edge{std::min(a, b), std::max(a, b)};
+            NativeSplitCppProfile::node<decltype(first_face)::value_type>();
             auto [position, inserted] = first_face.emplace(edge, f);
             if (!inserted)
             {
+                NativeSplitCppProfile::next(adjacent[f]);
                 adjacent[f].push_back(position->second);
+                NativeSplitCppProfile::next(adjacent[position->second]);
                 adjacent[position->second].push_back(f);
             }
         }
     if (std::find(vertices_used.begin(), vertices_used.end(), false) != vertices_used.end())
         reject("shell contains unused vertices.");
+    NativeSplitCppProfile::request(1, sizeof(std::size_t));
     std::vector<std::size_t> pending{0};
     reached.front() = true;
     for (std::size_t i = 0; i < pending.size(); ++i)
@@ -142,6 +157,7 @@ template<ArithmeticMode Mode> void validate_connected_boundary(std::size_t verte
             if (!reached[neighbor])
             {
                 reached[neighbor] = true;
+                NativeSplitCppProfile::next(pending);
                 pending.push_back(neighbor);
             }
     if (pending.size() != faces.size())

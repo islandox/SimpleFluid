@@ -1146,6 +1146,40 @@ std::vector<OrdinaryFacePtr> subtract_planar_faces<ArithmeticMode::Ordinary>(
         result.push_back(OrdinaryFace::from_retained_support(p, source.impl_->normal, *source.impl_->support));
     return result;
 }
+geometry_detail::NativeAdministrationVector<OrdinaryFacePtr> details::NativePlanarOwnerAccess::subtract(
+    const Face& source, std::span<const Pointer> removed, const geometry_detail::NativeConstructionAdmission& admission)
+{
+    using geometry_detail::NativeAdministrationAllocator;
+    using geometry_detail::NativeAdministrationVector;
+    using Loop = NativeAdministrationVector<on::WidePoint>;
+    const auto& state = admission.state();
+    NativeAdministrationVector<Loop> remains{NativeAdministrationAllocator<Loop>(state)};
+    remains.emplace_back(source.points().begin(), source.points().end(), NativeAdministrationAllocator<on::WidePoint>(state));
+    for (const auto& face : removed)
+    {
+        if (!face || (*source.impl_->support != *face->impl_->support && !coplanar(source.points(), face->points())))
+            on::reject("native face subtraction has foreign support.");
+        NativeAdministrationVector<Loop> next{NativeAdministrationAllocator<Loop>(state)};
+        const auto& clip = face->points();
+        const auto normal = on::polygon_vector(clip);
+        for (auto& poly : remains)
+            for (std::size_t edge = 0; edge < clip.size() && !poly.empty(); ++edge)
+            {
+                const auto& from = clip[edge];
+                const auto& to = clip[(edge + 1) % clip.size()];
+                auto outside = clip_loop_storage(poly, from, to, normal, false);
+                if (!outside.empty())
+                    next.push_back(std::move(outside));
+                poly = clip_loop_storage(poly, from, to, normal, true);
+            }
+        remains = std::move(next);
+    }
+    NativeAdministrationVector<Pointer> result{NativeAdministrationAllocator<Pointer>(state)};
+    result.reserve(remains.size());
+    for (const auto& loop : remains)
+        result.push_back(retained(loop, source.impl_->normal, *source.impl_->support, admission));
+    return result;
+}
 EdgePointIndex<ArithmeticMode::Ordinary>::EdgePointIndex(std::span<const OrdinaryPoint> points)
 {
     auto impl = std::make_shared<Impl>();
@@ -1362,7 +1396,13 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
         reject("invalid finite cell partition request.");
     constexpr std::size_t byte_cap = 64 * 1024 * 1024, pair_cap = 262144;
     std::size_t bytes = 0, pairs = 0;
+    using Profile = details::ordinary_kernel::NativeSplitCppProfile;
+    std::optional<geometry_detail::NativeConstructionAdmission> admission;
+    if (Profile::active())
+        admission.emplace(Profile::admission());
     GeometryAllocationLedger allocations;
+    if (admission)
+        details::GeometryAllocationOwnerAccess::begin_native_bookkeeping(allocations, *admission, bytes, byte_cap);
     const auto charge = [&](std::size_t n, std::size_t size)
     {
         if (size && n > (byte_cap - bytes) / size)
@@ -1376,7 +1416,8 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
     {
         for (std::size_t f = 0; f < cell.num_faces(); ++f)
         {
-            auto face = cell.face_geometry(f);
+            auto face = admission ? details::NativePlanarOwnerAccess::cell_face(cell, f, *admission)
+                                  : cell.face_geometry(f);
             auto support = planar_support<ArithmeticMode::Ordinary>(*face);
             charge(1, sizeof(std::pair<FacePtr, int>) + 4 * sizeof(void*));
             allocations.retain(support, bytes, byte_cap);
@@ -1400,8 +1441,12 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
                     }
                 }
                 if (group == groups.end())
+                {
+                    Profile::node<decltype(groups)::value_type>();
                     group = groups.try_emplace(std::move(support)).first;
+                }
             }
+            Profile::next(group->second);
             group->second.emplace_back(std::move(face), sign);
         }
     };
@@ -1421,7 +1466,15 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
         for (const auto& [face, sign] : faces)
         {
             charge(face->points().size(), sizeof(WidePoint) + 4 * sizeof(void*));
-            vertices.insert(face->points().begin(), face->points().end());
+            if (Profile::active())
+                for (const auto& point : face->points())
+                {
+                    if (!vertices.contains(point))
+                        Profile::node<WidePoint>();
+                    vertices.insert(point);
+                }
+            else
+                vertices.insert(face->points().begin(), face->points().end());
         }
         std::map<Edge, std::int64_t> chain;
         for (const auto& [face, sign] : faces)
@@ -1436,6 +1489,8 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
                         axis = d;
                 charge(vertices.size(), sizeof(WidePoint));
                 std::vector<WidePoint> edge_points;
+                if (Profile::active())
+                    Profile::reserve(edge_points, vertices.size());
                 for (const auto& p : vertices)
                 {
                     if (++pairs > pair_cap)
@@ -1454,7 +1509,10 @@ void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>& 
                     const auto& q = edge_points[i];
                     const Edge edge = p < q ? Edge{p, q} : Edge{q, p};
                     if (!chain.contains(edge))
+                    {
                         charge(1, sizeof(Edge) + sizeof(std::int64_t) + 4 * sizeof(void*));
+                        Profile::node<decltype(chain)::value_type>();
+                    }
                     chain[edge] += p < q ? sign : -sign;
                 }
             }

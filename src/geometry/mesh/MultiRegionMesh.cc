@@ -9,11 +9,13 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/mesh/NativeSparseAccess.hh"
 #include "geometry/mesh/NativeSparseFragments.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
+#include <cfenv>
 #include <cmath>
 #include <iomanip>
 #include <numeric>
@@ -746,8 +748,26 @@ MultiRegionMesh::Vec3 MultiRegionMesh::face_normal_impl(ID f) const
     {
         const auto& face = d_sparse_native->face(f);
         if(face.override_geometry) return face.override_geometry->area_vector()/face.override_geometry->area().as_double();
-        auto area=geometry(face.native.region,[&](const auto& g){return g.face_area_vector(face.native.face);});if(frozen_native())area=transformed_area_vector(area);
-        return (area/area_magnitude(area))*native_flux_orientation(face.native,f);
+        auto area = geometry(face.native.region, [&](const auto& g) { return g.face_area_vector(face.native.face); });
+        if (frozen_native())
+            area = transformed_area_vector(area);
+        const auto sign = native_flux_orientation(face.native, f);
+        auto normal = (area / area_magnitude(area)) * sign;
+        if (sign < 0 && d_sparse_native->numeric && (area.x == 0 || area.y == 0 || area.z == 0) &&
+            std::fegetround() == FE_TONEAREST)
+        {
+            const auto* explicit_region = std::get_if<DistributedExplicitRegion>(&region(face.native.region));
+            if (explicit_region &&
+                AMR::adaptive_detail::NativeSparseAccess::source_provider_geometry(explicit_region->geometry()))
+            {
+                // The canonical planar polygon accumulates exact zero from +0
+                // under round-to-nearest, independent of the winding.
+                if (area.x == 0) normal.x = 0;
+                if (area.y == 0) normal.y = 0;
+                if (area.z == 0) normal.z = 0;
+            }
+        }
+        return normal;
     }
     const auto n = native_face(f); const auto vector = transformed_area_vector(geometry(n.region, [&](const auto& g) { return g.face_area_vector(n.face); }));
     return vector / area_magnitude(vector);

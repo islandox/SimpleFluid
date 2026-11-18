@@ -534,6 +534,8 @@ private:
     [[nodiscard]] ConvexGeometryPtr<Mode> with_native_supports(
         std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>>) const
         requires(Mode == ArithmeticMode::Ordinary);
+    [[nodiscard]] SIMPLEFLUID_LOCAL std::vector<ConvexOctantPiece<Mode>> split_aabb_midpoints_impl(double) const
+        requires(Mode == ArithmeticMode::Ordinary);
     explicit ConvexCellGeometry(DynamicConvexGeometryPtr);
     DynamicConvexGeometryPtr geometry_;
 };

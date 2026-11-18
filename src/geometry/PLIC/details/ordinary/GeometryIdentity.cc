@@ -642,6 +642,12 @@ std::size_t ordinary_native::source_support_exact_allocation_bound(std::size_t p
     return ordinary_native::encoding_add(ordinary_native::encoding_add(payload,
         geometry_identity_backing_allocation_bound()), sizeof(const GeometryIdentityBacking*));
 }
+std::size_t ordinary_native::input_support_exact_allocation_bound()
+{
+    ordinary_native::require_encoding_capacity_profile();
+    return ordinary_native::encoding_add(ordinary_native::encoding_add(std::max(sizeof(Axis), sizeof(Input)),
+        geometry_identity_backing_allocation_bound()), sizeof(const GeometryIdentityBacking*));
+}
 PlaneSupportIdentity<ArithmeticMode::Ordinary> GeometryIdentityAccess::support_axis(
     std::uint64_t axis, long double location)
 {

@@ -373,6 +373,19 @@ std::size_t ExtrudedConstruction<ArithmeticMode::Ordinary>::first_layer() const 
     return impl_->begin;
 }
 
+details::ExtrudedConstructionAccess::CellFactors details::ExtrudedConstructionAccess::cell_factors(
+    const Construction& construction, std::size_t cell)
+{
+    const auto& impl = *construction.impl_;
+    if (cell >= impl.topology->layout().cells)
+        throw std::invalid_argument("Product factor observation has a foreign cell ordinal.");
+    const auto id = impl.topology->indexer().cell_id(cell);
+    const auto first = impl.begin + id.k;
+    return {impl.base->points, impl.base->active, impl.base->edge_supports,
+        {impl.axis->values->z.at(impl.axis->zactive.at(first)),
+            impl.axis->values->z.at(impl.axis->zactive.at(first + 1))}};
+}
+
 double ExtrudedConstruction<ArithmeticMode::Ordinary>::cell_volume(std::size_t cell) const
 {
     auto id = impl_->topology->indexer().cell_id(cell);

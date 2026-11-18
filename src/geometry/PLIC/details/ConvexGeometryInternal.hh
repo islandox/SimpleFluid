@@ -15,6 +15,7 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/OriginalSupportAuthority.hh"
 #include "geometry/PLIC/details/PointSnapshot.hh"
+#include "geometry/PLIC/details/ordinary/NativeSplitCppProfile.hh"
 #include <algorithm>
 #include <atomic>
 #include <bit>

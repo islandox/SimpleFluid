@@ -2,7 +2,9 @@
  * @brief Ordinary convex clipping with retained topology and construction provenance.
  */
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/GeometryAllocationOwnerAccess.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/ordinary/NativeSplitCppProfile.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <exception>
 #include <sstream>
@@ -454,6 +456,11 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
 {
     static_assert(Mode == kernel_mode);
     Operation scope(impl_->limits);
+    // Source-identity recovery can retain actual supports before any draft
+    // reaches prepare_finish. Start the authentic numerical ledger here.
+    if (NativeSplitCppProfile::active() && !GeometryAllocationOwnerAccess::native_state(active_work->allocations))
+        GeometryAllocationOwnerAccess::begin_native_bookkeeping(active_work->allocations,
+            NativeSplitCppProfile::admission(), active_work->bytes, active_work->limits.byte_budget);
     if (!nonzero<Mode>(point<Mode>(input.normal)))
         reject("clipping requires a nonzero plane normal.");
     // Reuse the original, oriented source expression, never a comparison of
@@ -474,11 +481,14 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
     if (impl_->frame.origin != input.anchor)
     {
         active_work->charge(geometry_metadata_copy_bytes<Mode>(*impl_), 1);
+        NativeSplitCppProfile::request(impl_->vertices.size(), sizeof(FrozenVertex<Mode>));
+        NativeSplitCppProfile::combined<Impl>();
         auto rebased = std::make_shared<Impl>(*impl_);
         retain_rebase_export(impl_, *rebased);
         rebased->frame.origin = input.anchor;
         rebased->construction = construction_rebase(construction_source<Mode>(impl_), input);
         active_work->charge(1, sizeof(MomentCache));
+        NativeSplitCppProfile::combined<MomentCache>();
         rebased->moment_cache = std::make_shared<MomentCache>();
         for (auto& vertex : rebased->vertices)
             vertex.coordinates = transform<Mode>(vertex.coordinates, impl_->frame, rebased->frame);
@@ -487,12 +497,15 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
         return GeometryKernel<Mode>(std::move(rebased)).clip(input, measure_section);
     }
     active_work->charge(1, sizeof(Plane));
+    NativeSplitCppProfile::combined<Plane>();
     auto plane = std::make_shared<Plane>();
     plane->frame = impl_->frame;
     plane->normal = point<Mode>(input.normal);
     plane->anchor = scaled<Mode>(point<Mode>(input.anchor) - point<Mode>(impl_->frame.origin), -impl_->frame.exponent);
     plane->offset = scaled<Mode>(Scalar(input.offset), -impl_->frame.exponent);
     plane->input = input;
+    if (NativeSplitCppProfile::active())
+        NativeSplitCppProfile::request(1, details::ordinary_native::input_support_exact_allocation_bound());
     plane->native_support = details::ordinary_native::make_input_support(input.normal, input.anchor, input.offset);
     return clip_plane(CutPlaneDescriptor<Mode>(std::move(plane), 1, impl_->limits), 0, measure_section);
 }
@@ -538,6 +551,31 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
     const auto& plane = support.plane;
     std::vector<Scalar> distances;
     std::vector<int> signs;
+    using Profile = NativeSplitCppProfile;
+    if (Profile::active())
+    {
+        Profile::reserve(distances, impl_->vertices.size());
+        Profile::reserve(signs, impl_->vertices.size());
+    }
+    const auto add_neighbor = [](auto& adjacency, std::size_t vertex, std::size_t neighbor)
+    {
+        if (!Profile::active())
+        {
+            adjacency[vertex].insert(neighbor);
+            return;
+        }
+        auto at = adjacency.find(vertex);
+        if (at == adjacency.end())
+        {
+            Profile::node<typename std::remove_reference_t<decltype(adjacency)>::value_type>();
+            at = adjacency.try_emplace(vertex).first;
+        }
+        if (!at->second.contains(neighbor))
+        {
+            Profile::node<std::size_t>();
+            at->second.insert(neighbor);
+        }
+    };
     bool negative = false, positive = false;
     for (const auto& vertex : impl_->vertices)
     {
@@ -563,7 +601,19 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                 for (std::size_t i = 0; i < face.size(); ++i)
                 {
                     const auto a = face[i], b = face[(i + 1) % face.size()];
-                    contact_edges[std::minmax(a, b)] += a < b ? 1 : -1;
+                    const std::pair key{std::min(a, b), std::max(a, b)};
+                    if (!Profile::active())
+                    {
+                        contact_edges[key] += a < b ? 1 : -1;
+                        continue;
+                    }
+                    auto found = contact_edges.find(key);
+                    if (found == contact_edges.end())
+                    {
+                        Profile::node<typename decltype(contact_edges)::value_type>();
+                        found = contact_edges.try_emplace(key).first;
+                    }
+                    found->second += a < b ? 1 : -1;
                 }
         std::map<std::size_t, std::set<std::size_t>> boundary;
         for (const auto& [edge, coefficient] : contact_edges)
@@ -571,8 +621,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             {
                 if (std::abs(coefficient) != 1)
                     reject("support section has repeated oriented boundary coverage.");
-                boundary[edge.first].insert(edge.second);
-                boundary[edge.second].insert(edge.first);
+                add_neighbor(boundary, edge.first, edge.second);
+                add_neighbor(boundary, edge.second, edge.first);
             }
         if (!boundary.empty())
         {
@@ -581,11 +631,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                     reject("support section is not a closed boundary.");
             const auto first = boundary.begin()->first;
             auto previous = first, current = *boundary.at(first).begin();
+            Profile::next(contact);
             contact.push_back(first);
             while (current != first)
             {
                 if (contact.size() >= boundary.size())
                     reject("support section boundary repeats a vertex.");
+                Profile::next(contact);
                 contact.push_back(current);
                 const auto& next = boundary.at(current);
                 const auto following = *next.begin() == previous ? *next.rbegin() : *next.begin();
@@ -598,10 +650,14 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         if (contact.empty())
             for (std::size_t i = 0; i < signs.size(); ++i)
                 if (signs[i] == 0)
+                {
+                    Profile::next(contact);
                     contact.push_back(i);
+                }
         if (measure_section)
             result.section = section<Mode>(*impl_, impl_->vertices, contact);
         active_work->charge(1, sizeof(DynamicConvexGeometry));
+        Profile::separately_controlled<DynamicConvexGeometry>();
         auto self = DynamicConvexGeometryPtr(new DynamicConvexGeometry(impl_));
         if (!positive)
             result.inside = self;
@@ -654,6 +710,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                 if (aligned.empty())
                 {
                     active_work->charge(impl_->vertices.size(), sizeof(Point));
+                    Profile::request(impl_->vertices.size(), sizeof(Point));
                     aligned.reserve(impl_->vertices.size());
                     for (const auto& vertex : impl_->vertices)
                         aligned.push_back(vertex.coordinates);
@@ -688,7 +745,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         DynamicClipResult result;
         result.section.area = bounded<Mode>(Scalar{});
         result.section.centroid = bounded<Mode>(Point{StorageScalar(0), StorageScalar(0), StorageScalar(0)});
-        PointSnapshotBuilder<Mode> points;
+        PointSnapshotBuilder<Mode> points(Profile::point_requests());
         std::vector<Vertex> vertices = draft_vertices<Mode>(*impl_);
         import_vertex_provenance(vertices, impl_->point_context.get(), points);
         points.retain_context(plane->point_context);
@@ -703,7 +760,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                 // as indexed incidences, but deliberately omit those local tokens.
                 if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), plane) ==
                     vertices[i].incident.end())
+                {
+                    Profile::next(vertices[i].incident);
                     vertices[i].incident.push_back(plane);
+                }
                 for (const auto& key : resolve_authorities(plane->point_context, plane->authorities))
                     if (std::find(resolve_authorities(points.context(), vertices[i].authorities).begin(),
                             resolve_authorities(points.context(), vertices[i].authorities).end(),
@@ -738,9 +798,15 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             }
             for (const auto& p : vertices[a].incident)
                 if (incident<Mode>(vertices[b], p, points.context()))
+                {
+                    Profile::next(vertex.incident);
                     vertex.incident.push_back(p);
+                }
             if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
+            {
+                Profile::next(vertex.incident);
                 vertex.incident.push_back(plane);
+            }
             for (const auto& key : resolve_authorities(points.context(), vertices[a].authorities))
                 if (std::find(resolve_authorities(points.context(), vertices[b].authorities).begin(),
                         resolve_authorities(points.context(), vertices[b].authorities).end(),
@@ -770,19 +836,25 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                     for (const auto& support : vertex.incident)
                         if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), support) ==
                             vertices[i].incident.end())
+                        {
+                            Profile::next(vertices[i].incident);
                             vertices[i].incident.push_back(support);
+                        }
                     for (const auto& authority : resolve_authorities(points.context(), vertex.authorities))
                         if (std::find(resolve_authorities(points.context(), vertices[i].authorities).begin(),
                                 resolve_authorities(points.context(), vertices[i].authorities).end(),
                                 authority) == resolve_authorities(points.context(), vertices[i].authorities).end())
                             append_admitted_authority(vertices[i].authorities, authority, points);
+                    Profile::node<typename decltype(crossings)::value_type>();
                     crossings.emplace(key, i);
                     return i;
                 }
             if (vertices.size() >= impl_->limits.maximum_vertices)
                 reject("intersection vertex cap exhausted.");
             const auto index = vertices.size();
+            Profile::next(vertices);
             vertices.push_back(std::move(vertex));
+            Profile::node<typename decltype(crossings)::value_type>();
             crossings.emplace(key, index);
             return index;
         };
@@ -804,9 +876,15 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                 {
                     const auto a = face[i], b = face[(i + 1) % face.size()];
                     if (outside ? signs[a] >= 0 : signs[a] <= 0)
+                    {
+                        Profile::next(loop);
                         loop.push_back(a);
+                    }
                     if (signs[a] * signs[b] < 0)
+                    {
+                        Profile::next(loop);
                         loop.push_back(crossing(a, b));
+                    }
                 }
                 // Only repeated references are removed. Keep all established edge
                 // subdivisions, including collinear ones, conforming across faces.
@@ -820,7 +898,10 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                     // or more propagated collinear vertices. It is not a positive
                     // area output face; the retained adjacent face contributes the
                     // same authenticated edge chain to the cap.
+                    Profile::next(output_faces[outside]);
+                    Profile::request(loop.size(), sizeof(Face::value_type));
                     output_faces[outside].push_back(loop);
+                    Profile::next(output_surfaces[outside]);
                     output_surfaces[outside].push_back(impl_->surfaces[f]);
                     if (!outside)
                         for (std::size_t i = 0; i < loop.size(); ++i)
@@ -836,6 +917,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                                 {
                                     active_work->charge(
                                         1, sizeof(typename decltype(cap_edges)::value_type) + 4 * sizeof(void*));
+                                    Profile::node<typename decltype(cap_edges)::value_type>();
                                     edge = cap_edges.emplace(key, CapEdge{}).first;
                                 }
                                 if (++edge->second.occurrences > 2)
@@ -859,8 +941,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             if (std::abs(incidence.orientation) != 1)
                 reject("section edge has invalid oriented boundary coverage.");
             const auto [a, b] = edge;
-            adjacency[a].insert(b);
-            adjacency[b].insert(a);
+            add_neighbor(adjacency, a, b);
+            add_neighbor(adjacency, b, a);
         }
         if (adjacency.size() < 3)
             reject("positive complementary cut has no closed section.");
@@ -870,11 +952,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         Face cap;
         const auto first = adjacency.begin()->first;
         std::size_t previous = first, current = *adjacency.at(first).begin();
+        Profile::next(cap);
         cap.push_back(first);
         while (current != first)
         {
             if (cap.size() >= adjacency.size())
                 reject("section cycle repeats a vertex.");
+            Profile::next(cap);
             cap.push_back(current);
             const auto& neighbors = adjacency.at(current);
             const auto next = *neighbors.begin() == previous ? *neighbors.rbegin() : *neighbors.begin();
@@ -902,24 +986,32 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             reject("section boundary has inconsistent directed winding.");
         if (same_direction)
             std::reverse(cap.begin(), cap.end());
+        Profile::next(output_faces[0]);
+        Profile::request(cap.size(), sizeof(Face::value_type));
         output_faces[0].push_back(cap);
+        Profile::next(output_surfaces[0]);
         output_surfaces[0].push_back(support);
         if (construct_outside)
         {
+            Profile::request(cap.size(), sizeof(Face::value_type));
             auto outside_cap = cap;
             std::reverse(outside_cap.begin(), outside_cap.end());
+            Profile::next(output_faces[1]);
             output_faces[1].push_back(std::move(outside_cap));
+            Profile::next(output_surfaces[1]);
             output_surfaces[1].push_back({plane, -support.orientation});
         }
         // Charge immutable proof nodes and geometry wrappers as well as the shell
         // payload charged by finish<Mode>(). Private partition clips have no outer FVM
         // wrapper allocator to account for discarded temporary children.
         active_work->charge(1, sizeof(Split));
+        Profile::combined<Split>();
         auto split = std::make_shared<Split>();
         split->parent = impl_->ancestry;
         if (impl_->ancestry->depth == std::numeric_limits<std::size_t>::max())
             reject("construction ancestry depth overflows.");
         active_work->charge(1, sizeof(GeometryClipConstruction));
+        Profile::combined<GeometryClipConstruction>();
         auto construction = std::make_shared<GeometryClipConstruction>();
         construction->parent = construction_source<Mode>(impl_);
         if (descriptor.owner)
@@ -932,6 +1024,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         construction->construct_outside = construct_outside;
         construction->partition_proof = partition_proof;
         active_work->charge(plane->source_vertices.size(), sizeof(DynamicStoredPointRef));
+        Profile::request(plane->source_vertices.size(), sizeof(DynamicStoredPointRef));
         construction->retained_points.reserve(plane->source_vertices.size());
         if (construction->retained_points.capacity() > plane->source_vertices.size())
             active_work->charge(construction->retained_points.capacity() - plane->source_vertices.size(),
@@ -955,6 +1048,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             {
                 // Work is cumulative: a replacement allocation is charged in full.
                 active_work->charge(count, sizeof(Value));
+                Profile::request(count, sizeof(Value));
                 buffer.reserve(count);
                 if (buffer.capacity() > count)
                     active_work->charge(buffer.capacity() - count, sizeof(Value));
@@ -972,6 +1066,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
             const auto draft_child = [&](unsigned outside)
             {
                 active_work->charge(1, sizeof(DraftGeometry) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
+                Profile::combined<DraftGeometry>();
+                Profile::combined<Ancestry>();
                 auto poly = std::make_shared<DraftGeometry>();
                 poly->point_context = point_context;
                 poly->frame = frame;
@@ -993,6 +1089,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                     if (used[i])
                     {
                         old_to_new[i] = poly->vertices.size();
+                        Profile::next(poly->vertices);
+                        Profile::request(vertices[i].incident.size(), sizeof(PlanePtr));
                         poly->vertices.push_back(vertices[i]);
                     }
                 poly->faces = std::move(output_faces[outside]);
@@ -1033,6 +1131,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
                     if (found == edges.end())
                     {
                         active_work->charge(1, sizeof(typename decltype(edges)::value_type) + 4 * sizeof(void*));
+                        Profile::node<typename decltype(edges)::value_type>();
                         found = edges.emplace(edge, CapEdge{}).first;
                     }
                     if (++found->second.occurrences > 2)
@@ -1212,9 +1311,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_plane(const CutPlaneDescriptor<Mode
         for (std::size_t side = 0; side < drafts.size(); ++side)
             if (drafts[side])
                 frozen[side] = freeze_geometry<Mode>(std::move(*drafts[side]));
+        Profile::separately_controlled<DynamicConvexGeometry>();
         result.inside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(frozen[0])));
         if (construct_outside)
+        {
+            Profile::separately_controlled<DynamicConvexGeometry>();
             result.outside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(frozen[1])));
+        }
         return result;
     };
     if (aligned_frame.origin != impl_->frame.origin)

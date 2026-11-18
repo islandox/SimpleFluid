@@ -106,10 +106,11 @@ class AdaptiveFamilyLayout
         }
         return {page, ordinal};
     }
-    [[nodiscard]] const Row* record(const AdaptiveBytes& key) const noexcept
+    [[nodiscard]] const Row* record(std::span<const char> key) const noexcept
     {
-        const auto* found = Primary::lower_bound(primary_, [&](const Row& row) { return row->value.key < key; });
-        return found && (*found)->value.key == key ? found : nullptr;
+        const auto* found = Primary::lower_bound(primary_,
+            [&](const Row& row) { return std::ranges::lexicographical_compare(row->value.key, key); });
+        return found && std::ranges::equal((*found)->value.key, key) ? found : nullptr;
     }
 
 public:
@@ -167,6 +168,10 @@ public:
     [[nodiscard]] bool empty() const noexcept { return !primary_; }
     [[nodiscard]] bool contains(const AdaptiveBytes& key) const noexcept { return record(key) != nullptr; }
     [[nodiscard]] std::optional<AdaptiveFamilyView> find(const AdaptiveBytes& key) const noexcept
+    {
+        return find(std::span<const char>(key));
+    }
+    [[nodiscard]] std::optional<AdaptiveFamilyView> find(std::span<const char> key) const noexcept
     {
         if (const auto* found = record(key))
             return view((*found)->value);

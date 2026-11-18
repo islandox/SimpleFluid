@@ -69,6 +69,7 @@ public:
         std::span<const AdaptiveCellKey> inserted, ContactHaloContext next, const OwnedLeafLookup&, bool keep_identity = true);
     [[nodiscard]] const ContactHaloStatistics& statistics() const noexcept;
     [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subface_snapshot() const noexcept;
+    [[nodiscard]] std::uint64_t transaction_watermark() const noexcept;
     void complete_native_subface_rebind(ContactHaloContext);
     void transfer_subface_inherited_scope(ContactExternalResidencyLease&);
     [[nodiscard]] bool admits_inherited_point_scope(std::uint64_t scope, std::size_t bytes) const noexcept;

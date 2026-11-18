@@ -194,6 +194,7 @@ void GeometryAllocationLedger::begin_admission(std::size_t& used, std::size_t li
         if (sizeof(Impl) > limit - used)
             allocation_detail::exhausted("Geometry allocation ledger byte budget is exhausted.");
         used += sizeof(Impl);
+        details::ordinary_kernel::NativeSplitCppProfile::request(1, sizeof(Impl));
         impl_ = decltype(impl_)(new Impl(), ImplDelete{});
         impl_->bookkeeping = sizeof(Impl);
         impl_->last_counter = used;

@@ -91,12 +91,12 @@ bool NativeSparseAccess::visit_source_provider(const std::shared_ptr<const Expli
     if (!provider || !provider->d_native_source)
         throw std::invalid_argument("Explicit provider is not an admitted single-source native fragment.");
     geometry_detail::NativeConstructorOwnerSink::require_envelope(provider->d_native_allocation, provider);
-    if (!sink.edge(provider, Kind::NativeMesh, 0))
+    if (!sink.semantic(provider, Kind::NativeMesh, provider->d_native_allocation))
         return false;
     sink.fixed(provider->d_native_allocation);
     const auto& source = provider->d_native_source;
     geometry_detail::NativeConstructorOwnerSink::require_envelope(source->allocation, source);
-    if (sink.edge(source, Kind::Topology, 0))
+    if (sink.semantic(source, Kind::Topology, source->allocation))
     {
         sink.fixed(source->allocation);
         sink.storage(source->metadata);
@@ -137,6 +137,7 @@ std::shared_ptr<MultiRegionMesh> NativeSparseAccess::make(NativePublicationSessi
     strictly_sorted(numeric->flux_signs, [](const auto& r) { return std::pair{r.native, r.gid}; });
     strictly_sorted(numeric->boundaries, [](const auto& r) { return r.first; });
     auto index = geometry_detail::NativeAllocationEnvelopeAccess::make<SparseNativeIndex>(admission);
+    index.owner->provenance = NativeSparseProof{inputs.lineage, session.issuance_};
     index.owner->numeric = numeric;
     index.owner->allocation = index.envelope;
     index.owner->schema_owner = NativeKernelAuthority::schema_observation(inputs.kernel);
@@ -269,6 +270,23 @@ std::shared_ptr<MultiRegionMesh> NativeSparseAccess::make(NativePublicationSessi
     }
     result.validate_static();
     return std::move(mesh.owner);
+}
+
+std::optional<NativeSparseProof> NativeSparseAccess::output_provenance(
+    const std::shared_ptr<const MultiRegionMesh>& mesh)
+{
+    if (!mesh || !mesh->d_sparse_native) return {};
+    const auto& index = mesh->d_sparse_native;
+    const auto* proof = std::get_if<NativeSparseProof>(&index->provenance);
+    if (!index->allocation && (!proof || (!proof->lineage[0] && !proof->lineage[1] && !proof->publication)))
+        return {};
+    using Sink = geometry_detail::NativeConstructorOwnerSink;
+    Sink::require_envelope(index->allocation, index);
+    Sink::require_envelope(mesh->d_native_allocation, mesh);
+    if (!proof || !proof->lineage[0] || !proof->lineage[1] || !proof->publication ||
+        index->allocation->state() != mesh->d_native_allocation->state())
+        throw std::invalid_argument("Sparse output lacks its original admitted publication provenance.");
+    return *proof;
 }
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail
 

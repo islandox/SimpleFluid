@@ -56,5 +56,15 @@ public:
         budget.add(bytes * multiplier_);
         retain(budget, PLIC::planar_support<ArithmeticMode::Ordinary>(face));
     }
+    /** Decoded native faces carry separate exact wrapper, storage and control
+     * extents. Charge their typed owner graph before moving the records. */
+    void retain_planar(Budget& budget, const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face)
+    {
+        const auto available = (budget.limit - budget.used) / multiplier_;
+        const auto limit = native_limit_ ? native_limit_ : charged_ + available;
+        const auto before = charged_;
+        allocations_.retain_planar_face(face, charged_, limit);
+        budget.add((charged_ - before) * multiplier_);
+    }
 };
 } // namespace SimpleFluid::Meshes::AMR::adaptive_detail

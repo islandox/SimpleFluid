@@ -8,6 +8,15 @@ class SIMPLEFLUID_LOCAL ExtrudedConstructionAccess
 {
 public:
     using Construction = ExtrudedConstruction<ArithmeticMode::Ordinary>;
+    /** Borrow the original wide Product factors without creating a cell shell or rounding coordinates. */
+    struct CellFactors
+    {
+        std::span<const std::array<long double, 3>> base_points;
+        std::span<const std::size_t> base_selection;
+        std::span<const PlaneSupportIdentity<ArithmeticMode::Ordinary>> side_supports;
+        std::array<long double, 2> axial;
+    };
+    [[nodiscard]] static CellFactors cell_factors(const Construction&, std::size_t);
     [[nodiscard]] static PlanarFacePtr<ArithmeticMode::Ordinary> face(
         const Construction&, std::size_t, const geometry_detail::NativeConstructionAdmission&);
     static std::shared_ptr<const Construction> decode(std::shared_ptr<const Meshes::ExtrudedTopology>,

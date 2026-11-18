@@ -13,11 +13,13 @@ namespace SimpleFluid::PLIC::details
 std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Source value)
 {
     active_work->charge(1, sizeof(GeometryConstruction));
+    ordinary_kernel::NativeSplitCppProfile::combined<const GeometryConstruction>();
     return std::make_shared<const GeometryConstruction>(std::move(value));
 }
 std::shared_ptr<const GeometryConstruction> construction_node(GeometryConstruction::Clip value)
 {
     active_work->charge(1, sizeof(GeometryConstruction));
+    ordinary_kernel::NativeSplitCppProfile::combined<const GeometryConstruction>();
     return std::make_shared<const GeometryConstruction>(std::move(value));
 }
 std::shared_ptr<const GeometryConstruction> construction_native(NativeGeometryConstruction value)
@@ -83,6 +85,8 @@ std::shared_ptr<const GeometryConstruction> construction_rebase(
 {
     // Charge the node and its exclusive rare payload before either allocation.
     active_work->charge(1, sizeof(GeometryConstruction) + sizeof(GeometryConstruction::Rebase));
+    ordinary_kernel::NativeSplitCppProfile::request(1, sizeof(GeometryConstruction::Rebase));
+    ordinary_kernel::NativeSplitCppProfile::combined<const GeometryConstruction>();
     auto payload = std::make_unique<const GeometryConstruction::Rebase>(
         GeometryConstruction::Rebase{std::move(parent), input});
     return std::make_shared<const GeometryConstruction>(std::move(payload));

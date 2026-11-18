@@ -3,7 +3,6 @@
 #include "geometry/mesh/NativeSparseAccess.hh"
 #include "parallel/NativePacketAdmission.hh"
 #include <algorithm>
-#include <atomic>
 namespace SimpleFluid::geometry_detail
 {
 namespace
@@ -55,6 +54,9 @@ NativePartitionAccess::Result NativePartitionAccess::make(
             if (!session.qualified() || !geometry || !geometry->sparse_native() ||
                 geometry->communicator().getRawPtr() != comm.getRawPtr())
                 throw std::invalid_argument("Native partition requires this Session's current sparse geometry.");
+            const auto provenance = Meshes::AMR::adaptive_detail::NativeSparseAccess::output_provenance(geometry);
+            if (!provenance || provenance->lineage != input.lineage || provenance->publication != session.issuance_)
+                throw std::invalid_argument("Native partition has foreign sparse publication provenance.");
             geometry->validate_static();
             if (owned.size() != input.layout->size())
                 throw std::invalid_argument("Native partition owned count differs from the sealed layout.");
@@ -140,6 +142,7 @@ NativePartitionAccess::Result NativePartitionAccess::make(
             plan.d_global_cells = geometry->num_cells();
             plan.d_global_faces = geometry->num_faces();
             plan.d_global_nodes = geometry->num_nodes();
+            plan.d_collective_id = session.issuance_;
             plan.d_comm = comm;
             plan.d_source = geometry;
             plan.d_source_epoch = geometry->geometry_epoch();
@@ -172,10 +175,6 @@ NativePartitionAccess::Result NativePartitionAccess::make(
             allocation = std::move(wrapper.envelope);
             partition->d_native_allocation = allocation;
         });
-    static std::atomic<ID> next{1};
-    ID identity = comm->getRank() == 0 ? next.fetch_add(1) : 0;
-    owner_packet_broadcast_identity(*comm, identity);
-    partition->d_plan.d_collective_id = identity;
     auto accepted_map = NativeTpetraMapAdmission::construct(*prepared, owned_gids, sum, comm);
     collective(*comm,
         [&]
@@ -193,6 +192,14 @@ std::shared_ptr<const NativeAllocationEnvelope> NativePartitionAccess::allocatio
     if (!partition) return {};
     const auto& value = partition->d_native_allocation;
     return value && value->authentic_owner(value) && value->matches(partition) ? value : nullptr;
+}
+std::shared_ptr<const NativeAllocationEnvelope> NativePartitionAccess::checked_allocation(
+    const std::shared_ptr<const CompositePartition<>>& partition)
+{
+    const auto value = allocation(partition);
+    if (!value && partition && partition->d_native_allocation)
+        throw std::invalid_argument("Native binding has a foreign partition shared control.");
+    return value;
 }
 void NativePartitionAccess::visit(const std::shared_ptr<const CompositePartition<>>& partition,
     const NativeConstructorOwnerSink& sink, PLIC::details::GeometryOwnerGraphEditor& graph, bool retain,

@@ -147,6 +147,13 @@ public:
         }
         return topology(detach(source.d_topology, admission).with_layers(layers), combined, admission);
     }
+
+    static std::shared_ptr<const ExtrudedTopology> product_view(const ExtrudedTopology& source, unsigned layers,
+        std::span<const AliasView> aliases, const geometry_detail::NativeConstructionAdmission& admission)
+    {
+        // A Product view provides the complete alias table for the new run.
+        return topology(detach(source.d_topology, admission).with_layers(layers), aliases, admission);
+    }
     static std::shared_ptr<const ExtrudedGeometry> geometry(std::shared_ptr<const ExtrudedTopology> topology,
         std::span<const MeshUtils::Vec3> nodes, std::span<const real_t> z,
         const geometry_detail::NativeConstructionAdmission& admission)
@@ -173,7 +180,7 @@ public:
         return std::move(tracked.owner);
     }
     static std::shared_ptr<const ExtrudedTopology> decode_base(std::span<const char> packet, unsigned layers,
-        const geometry_detail::NativeConstructionAdmission& admission)
+        const geometry_detail::NativeConstructionAdmission& admission, std::span<const AliasView> aliases = {})
     {
         struct Reader
         {
@@ -234,7 +241,7 @@ public:
             boundaries.push_back(std::move(edge));
         }
         if (reader.cursor != packet.size()) throw std::invalid_argument("Trailing shared topology packet bytes.");
-        return topology(make(static_cast<unsigned>(nodes), loops, layers, boundaries, admission), {}, admission);
+        return topology(make(static_cast<unsigned>(nodes), loops, layers, boundaries, admission), aliases, admission);
     }
 
     /** Canonical comparison writes directly into an existing descriptor span;

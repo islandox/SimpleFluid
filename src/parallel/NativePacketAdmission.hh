@@ -5,7 +5,9 @@
 #include <Teuchos_DefaultMpiComm.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <limits>
 #include <utility>
 namespace SimpleFluid
@@ -47,6 +49,45 @@ inline void owner_packet_broadcast_words(const Teuchos::Comm<int>& comm, int roo
 #endif
     if (dynamic_cast<const Teuchos::SerialComm<int>*>(&comm)) return;
     comm.broadcast(root, static_cast<int>(values.size_bytes()), reinterpret_cast<char*>(values.data()));
+}
+inline std::uint64_t owner_packet_next_sequence(std::atomic<std::uint64_t>& counter, std::uint64_t floor) noexcept
+{
+    auto previous = counter.load();
+    for (;;)
+    {
+        const auto lower = std::max(previous, floor);
+        if (lower == std::numeric_limits<std::uint64_t>::max()) return 0;
+        if (counter.compare_exchange_weak(previous, lower + 1)) return lower + 1;
+    }
+}
+/** Issue from the rank-zero lineage clock after all ranks agree on the
+ * independent-source namespace and its exact accepted sequence floor. */
+inline std::uint64_t owner_packet_issue_after(const Teuchos::Comm<int>& comm,
+    std::atomic<std::uint64_t>& counter, std::uint64_t local_floor, const std::array<std::uint64_t, 2>& lineage)
+{
+    // MAX on a word's complement recovers the MIN of the original word.
+    // Settle the namespace and floor in the same fixed-width reduction.
+    const std::array local{local_floor, lineage[0], lineage[1], ~lineage[0], ~lineage[1]};
+    auto agreed = local;
+#ifdef HAVE_TEUCHOS_MPI
+    if (const auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(&comm))
+    {
+        if (MPI_Allreduce(local.data(), agreed.data(), static_cast<int>(local.size()), MPI_UINT64_T, MPI_MAX,
+                *mpi->getRawMpiComm()) != MPI_SUCCESS)
+            throw std::invalid_argument("Native transaction lineage agreement failed.");
+    }
+    else
+#endif
+    if (!dynamic_cast<const Teuchos::SerialComm<int>*>(&comm))
+        Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, static_cast<int>(local.size()), local.data(), agreed.data());
+    if (!agreed[1] || !agreed[2] || agreed[1] != ~agreed[3] || agreed[2] != ~agreed[4])
+        throw std::invalid_argument("Native transaction lineage differs across ranks.");
+
+    auto issued = comm.getRank() == 0 ? owner_packet_next_sequence(counter, agreed[0]) : std::uint64_t{0};
+    owner_packet_broadcast_words(comm, 0, std::span(&issued, 1));
+    if (!issued)
+        throw std::overflow_error("Distributed transaction identity exhausted.");
+    return issued;
 }
 /** Integer numbering agreement; no floating-point reduction order changes. */
 inline std::pair<std::uint64_t, std::uint64_t> owner_packet_entity_range(
@@ -98,20 +139,6 @@ inline void owner_packet_partition_counts(const Teuchos::Comm<int>& comm,
         throw std::invalid_argument("Native partition profile requires the actual MPI or serial communicator.");
     global_counts = local_counts;
     inclusive = maximum = local_counts[0];
-}
-inline void owner_packet_broadcast_identity(const Teuchos::Comm<int>& comm, std::uint64_t& identity)
-{
-#ifdef HAVE_TEUCHOS_MPI
-    if (const auto* mpi = dynamic_cast<const Teuchos::MpiComm<int>*>(&comm))
-    {
-        const MPI_Comm raw = *mpi->getRawMpiComm();
-        if (MPI_Bcast(&identity, 1, MPI_UINT64_T, 0, raw) != MPI_SUCCESS)
-            throw std::invalid_argument("Native partition identity collective failed.");
-        return;
-    }
-#endif
-    if (!dynamic_cast<const Teuchos::SerialComm<int>*>(&comm))
-        throw std::invalid_argument("Native partition profile requires the actual MPI or serial communicator.");
 }
 namespace native_packet_detail
 {

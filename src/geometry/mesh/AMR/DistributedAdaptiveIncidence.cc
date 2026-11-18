@@ -469,7 +469,8 @@ struct DistributedAdaptiveIncidenceSession::Impl
           physical_residency(source.physical_residency
                                  ? make_residency(lease, keeper, std::move(physical), source.physical_residency.get())
                                  : nullptr),
-          point_arena((source.native_source_protocol || source.pools.points.source() || source.owned.source())
+          point_arena((source.native_source_protocol || source.pools.points.source() || source.owned.source() ||
+                          (source.point_arena && source.point_arena->native_index))
                           ? make_point_arena()
                           : nullptr),
           source_manifests(source.source_manifests), pools(source.pools, b, i, keeper, point_arena),
@@ -3182,6 +3183,10 @@ IncidenceDelta DistributedAdaptiveIncidenceSession::apply_delta(std::span<const 
 const std::shared_ptr<const AdaptiveSubfaceSnapshot>& DistributedAdaptiveIncidenceSession::subface_snapshot() const noexcept
 {
     return impl_->subfaces;
+}
+std::uint64_t DistributedAdaptiveIncidenceSession::transaction_watermark() const noexcept
+{
+    return impl_->context.transaction;
 }
 void DistributedAdaptiveIncidenceSession::complete_native_subface_rebind(ContactHaloContext context)
 {

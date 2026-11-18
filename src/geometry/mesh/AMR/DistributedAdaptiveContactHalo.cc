@@ -2659,6 +2659,13 @@ const std::shared_ptr<const AdaptiveSubfaceSnapshot>& DistributedAdaptiveContact
     return state.incidence->subface_snapshot();
 }
 
+std::uint64_t DistributedAdaptiveContactHalo::transaction_watermark() const noexcept
+{
+    const auto& state = *impl_;
+    return state.incidence ? std::max(state.context.transaction, state.incidence->transaction_watermark())
+                           : state.context.transaction;
+}
+
 void DistributedAdaptiveContactHalo::for_each_incidence_row(
     const std::function<void(const ContactIncidenceRow&)>& visitor) const
 {

@@ -523,7 +523,7 @@ void NativeLegacyCartesianAccess::visit(const std::shared_ptr<const Native>& own
     Sink::require_envelope(owner->d_allocation_envelope, owner);
     if (!owner->d_storage.owner || !owner->d_topology.d_storage.owner || owner->d_topology.d_allocation_envelope)
         throw std::invalid_argument("Legacy Cartesian requires admitted inline topology and metric storage.");
-    if (!sink.edge(owner, geometry_detail::NativeConstructorOwnerKind::NativeMesh, 0))
+    if (!sink.semantic(owner, geometry_detail::NativeConstructorOwnerKind::NativeMesh, owner->d_allocation_envelope))
         return;
     sink.fixed(owner->d_allocation_envelope);
     sink.storage(owner->d_storage);
@@ -536,7 +536,7 @@ void NativeLegacyCartesianAccess::visit_provider(const std::shared_ptr<const Pro
     if (!owner)
         return;
     Sink::require_envelope(owner->d_native_allocation, owner);
-    if (!sink.edge(owner, geometry_detail::NativeConstructorOwnerKind::Geometry, 0))
+    if (!sink.semantic(owner, geometry_detail::NativeConstructorOwnerKind::Geometry, owner->d_native_allocation))
         return;
     sink.fixed(owner->d_native_allocation);
     visit(owner->d_mesh, sink);

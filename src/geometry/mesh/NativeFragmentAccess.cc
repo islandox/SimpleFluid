@@ -218,6 +218,24 @@ std::shared_ptr<const NativeFragmentDescriptor> NativeFragmentAccess::extract(
 std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize(
     const std::shared_ptr<const NativeFragmentDescriptor>& descriptor, const Admission& admission)
 {
+    return materialize(descriptor, admission, nullptr, nullptr);
+}
+std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize_product_view(
+    const std::shared_ptr<const NativeFragmentDescriptor>& descriptor, const NativeFragmentDescriptor& prior_descriptor,
+    const NativeFragmentRecord& prior_fragment, const Admission& admission)
+{
+    const auto& allocation = prior_fragment.allocation();
+    if (!descriptor || descriptor->kind != NativeFragmentDescriptor::Kind::ConstructedProduct ||
+        prior_descriptor.kind != descriptor->kind || prior_descriptor.parts.size() != 4 || !allocation ||
+        !allocation->authentic_owner(allocation) || !allocation->object_alive() ||
+        allocation->observed_target_address() != &prior_fragment)
+        throw std::invalid_argument("Product successor requires an exact prior admitted fragment.");
+    return materialize(descriptor, admission, &prior_descriptor, &prior_fragment);
+}
+std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize(
+    const std::shared_ptr<const NativeFragmentDescriptor>& descriptor, const Admission& admission,
+    const NativeFragmentDescriptor* prior_descriptor, const NativeFragmentRecord* prior_fragment)
+{
     if (auto existing = find(descriptor, AMR::geometry_construction_controls()))
         return existing;
     if (!descriptor)
@@ -279,8 +297,6 @@ std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize(
     {
         const auto plan = NativeFragmentDecodePlan::scan(descriptor);
         const auto layers = view.value<std::uint64_t>();
-        auto topology =
-            details::NativeTopologyAccess::decode_base(*descriptor->parts[0], static_cast<unsigned>(layers), admission);
         std::vector<details::NativeTopologyAccess::AliasView> aliases;
         const auto n = view.count(2 * sizeof(std::uint64_t));
         scratch_storage.owner->reserve(aliases, n);
@@ -289,12 +305,33 @@ std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize(
             const auto from = view.text(), to = view.text();
             aliases.emplace_back(from, to);
         }
-        topology =
-            details::NativeTopologyAccess::with_layers(*topology, static_cast<unsigned>(layers), aliases, admission);
         const auto run = view.packet();
         view.finish();
+        const auto* prior = prior_fragment ? std::get_if<ExtrudedRegion>(&prior_fragment->region()) : nullptr;
+        const auto same_part = [&](std::size_t part)
+        {
+            if (!prior || !prior_descriptor) return false;
+            const auto& old = prior_descriptor->parts[part];
+            const auto& current = descriptor->parts[part];
+            return old && old.get() == current.get() && !old.owner_before(current) && !current.owner_before(old);
+        };
+        const bool share_topology = same_part(0);
+        using Construction = PLIC::details::ExtrudedConstructionAccess::Construction;
+        std::shared_ptr<const Construction> base_anchor, values_anchor, selection_anchor;
+        if (share_topology && same_part(1)) base_anchor = prior->geometry().construction();
+        if (same_part(2))
+        {
+            values_anchor = prior->geometry().construction();
+            if (same_part(3)) selection_anchor = values_anchor;
+        }
+        auto topology = share_topology
+            ? details::NativeTopologyAccess::product_view(prior->topology(), static_cast<unsigned>(layers), aliases,
+                  admission)
+            : details::NativeTopologyAccess::decode_base(*descriptor->parts[0], static_cast<unsigned>(layers), admission,
+                  aliases);
         auto construction = PLIC::details::ExtrudedConstructionAccess::decode_parts(
-            topology, *descriptor->parts[1], *descriptor->parts[2], *descriptor->parts[3], run, admission);
+            topology, *descriptor->parts[1], *descriptor->parts[2], *descriptor->parts[3], run, admission,
+            std::move(base_anchor), std::move(values_anchor), std::move(selection_anchor));
         auto geometry = details::NativeTopologyAccess::geometry(topology, std::move(construction), admission);
         if (!plan.matches(descriptor))
             throw std::invalid_argument("Native descriptor changed during Product decode.");
@@ -363,6 +400,9 @@ std::shared_ptr<const NativeFragmentRecord> NativeFragmentAccess::materialize(
         if (tag == 8)
         {
             auto construction = PLIC::details::ExtrudedConstructionAccess::decode(topology, input.packet(), admission);
+            if (!std::ranges::equal(construction->display_points_ref(), nodes) ||
+                !std::ranges::equal(construction->z_view(), layers))
+                throw std::invalid_argument("Legacy extrusion display coordinates differ from the exact construction.");
             geometry = details::NativeTopologyAccess::geometry(topology, std::move(construction), admission);
         }
         else
@@ -458,8 +498,17 @@ void NativeFragmentAccess::visit(const std::shared_ptr<const NativeFragmentRecor
                 details::NativeLegacyCartesianAccess::visit_region(region, sink);
             else if constexpr (std::is_same_v<R, NativeIsoRegion<SemiStructuredXY_Z>>)
             {
-                details::NativeProviderOwnerAccess::native(region.d_topology->d_mesh, sink);
-                details::NativeProviderOwnerAccess::native(region.d_geometry->d_mesh, sink);
+                const auto provider = [&](const auto& owner)
+                {
+                    using Kind = geometry_detail::NativeConstructorOwnerKind;
+                    geometry_detail::NativeConstructorOwnerSink::require_envelope(owner->d_native_allocation, owner);
+                    if (!sink.semantic(owner, Kind::Geometry, owner->d_native_allocation))
+                        return;
+                    sink.fixed(owner->d_native_allocation);
+                    details::NativeProviderOwnerAccess::native(owner->d_mesh, sink);
+                };
+                provider(region.d_topology);
+                provider(region.d_geometry);
             }
             else if constexpr (std::is_same_v<R, DistributedExplicitRegion>)
             {

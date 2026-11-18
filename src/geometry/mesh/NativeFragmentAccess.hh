@@ -77,6 +77,11 @@ public:
         const std::shared_ptr<const NativeFragmentDescriptor>&, AMR::GeometryConstructionControls);
     [[nodiscard]] static std::shared_ptr<const NativeFragmentRecord> materialize(
         const std::shared_ptr<const NativeFragmentDescriptor>&, const Admission&);
+    /** Reuse immutable Product constructor components from the actual prior
+     * admitted source. The successor still needs independent route authority. */
+    [[nodiscard]] static std::shared_ptr<const NativeFragmentRecord> materialize_product_view(
+        const std::shared_ptr<const NativeFragmentDescriptor>&, const NativeFragmentDescriptor& prior_descriptor,
+        const NativeFragmentRecord& prior_fragment, const Admission&);
     /** Owner-local normalization only: complete parts/view bytes must agree.
      * Public decoder output cannot manufacture a matching source origin. */
     [[nodiscard]] static std::shared_ptr<const NativeFragmentDescriptor> rebind(
@@ -100,6 +105,9 @@ public:
 
 private:
     friend class AMR::adaptive_detail::NativePublicationSession;
+    static std::shared_ptr<const NativeFragmentRecord> materialize(
+        const std::shared_ptr<const NativeFragmentDescriptor>&, const Admission&, const NativeFragmentDescriptor*,
+        const NativeFragmentRecord*);
     static std::shared_ptr<const NativeFragmentDescriptor> bind(const std::shared_ptr<const NativeFragmentDescriptor>&,
         std::shared_ptr<const NativeFragmentRecord>, const Admission&);
     static std::shared_ptr<const NativeFragmentRecord> freeze(

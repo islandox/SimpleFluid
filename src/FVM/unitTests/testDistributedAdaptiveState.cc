@@ -3,9 +3,11 @@
  */
 #include "FVM/DistributedAdaptiveState.hh"
 #include "FVM/Operators.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 #include "geometry/unitTests/mixed_amr_helpers.hh"
+#include "geometry/unitTests/polyhedral_amr_helpers.hh"
 #include "parallel/unitTests/frozen_native_helpers.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
@@ -352,6 +354,105 @@ TEST(DistributedAdaptiveState, RemapNoOpMigrationAndQualifiedReconstructionKeepS
     EXPECT_EQ(coarsened->hierarchy()->global_cells(), 8u);
     EXPECT_EQ(source->hierarchy()->global_cells(), 8u);
 }
+TEST(DistributedAdaptiveState, NoOpPlansConsumeOneLineageClockAcrossFvmAndDirectCalls)
+{
+    const auto source = state(false);
+    const auto& hierarchy = *source->hierarchy();
+    const auto comm = hierarchy.communicator();
+    const auto before = hierarchy.observation();
+    const auto direct = hierarchy.plan_adaptation({});
+
+    // The FVM method issues its own hierarchy plan from the same bound data.
+    // It keeps that private plan internal and returns the unchanged state.
+    const auto fvm = source->apply(source->plan_adaptation({}));
+    EXPECT_EQ(fvm->hierarchy(), source->hierarchy());
+    std::vector<int> destinations(hierarchy.owned_leaves().size(), comm->getRank());
+    const auto sibling = hierarchy.plan_migration(destinations);
+    EXPECT_EQ(sibling.collective_identity() - direct.collective_identity(), 2u);
+    EXPECT_EQ(hierarchy.observation(), before);
+
+    if (comm->getSize() > 1)
+        EXPECT_THROW((void) hierarchy.apply(comm->getRank() == 0 ? direct : sibling), std::invalid_argument);
+    EXPECT_EQ(hierarchy.apply(direct)->observation(), before);
+    EXPECT_EQ(hierarchy.apply(sibling)->observation(), before);
+}
+TEST(DistributedAdaptiveState, FvmAndDirectNativeResultsHaveDistinctCollectiveBindings)
+{
+    namespace A = ::SimpleFluid::Meshes::AMR;
+    const auto hierarchy = detached();
+    const auto comm = hierarchy->communicator();
+    const auto observation = hierarchy->observation();
+    const auto before_fvm = hierarchy->plan_adaptation({});
+    const auto order = keys(*hierarchy);
+    const DistributedAdaptiveState fvm(hierarchy, order, frames(*hierarchy, order, false));
+    const auto fvm_partition = fvm.hierarchy()->native_partition();
+    ASSERT_TRUE(fvm_partition);
+    const auto fvm_map = fvm.mesh()->owned_cell_map();
+    EXPECT_EQ(fvm_partition->plan().collective_identity(), before_fvm.collective_identity() + 1);
+
+    const auto before_direct = hierarchy->plan_adaptation({});
+    const auto direct = A::publish_adaptive_native(*hierarchy, A::native_publication_schema(*hierarchy));
+    const auto direct_map = direct.mesh()->owned_cell_map();
+    EXPECT_EQ(direct.partition()->plan().collective_identity(), before_direct.collective_identity() + 1);
+    EXPECT_NE(fvm_partition->plan().collective_identity(), direct.partition()->plan().collective_identity());
+    EXPECT_TRUE(std::ranges::equal(fvm_partition->plan().owned_cells(), direct.partition()->plan().owned_cells()));
+    EXPECT_EQ(hierarchy->with_partition(direct.partition(), direct_map.create_weak())->native_partition(),
+        direct.partition());
+    EXPECT_EQ(fvm.mesh()->num_owned_cells(), hierarchy->owned_leaves().size());
+
+    const std::shared_ptr<const CompositePartition<>> foreign(direct.partition().get(), [](const auto*) {});
+    EXPECT_EQ(foreign.get(), direct.partition().get());
+    EXPECT_TRUE(foreign.owner_before(direct.partition()) || direct.partition().owner_before(foreign));
+    try
+    {
+        (void) hierarchy->with_partition(foreign, direct_map);
+        ADD_FAILURE() << "Native binding accepted a partition under a different shared control.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_STREQ(error.what(), "Native binding has a foreign partition shared control.");
+    }
+
+    using Map = DefaultTpetraTypes::map_type;
+    // Neither qualified result can retain this independent map. The bound
+    // state must own the resource after the test releases its original pin.
+    auto separate = std::make_unique<Map>(direct_map->getGlobalNumElements(), direct_map->getLocalNumElements(),
+        direct_map->getIndexBase(), comm);
+    {
+        const auto nonowning = Teuchos::rcp(separate.get(), false);
+        EXPECT_FALSE(nonowning.has_ownership());
+        EXPECT_THROW((void) hierarchy->with_partition(direct.partition(), nonowning), std::invalid_argument);
+    }
+    Teuchos::RCP<const Map> independent = Teuchos::rcp(separate.release());
+    const auto weak = independent.create_weak();
+    const auto* address = independent.getRawPtr();
+    auto rebound = hierarchy->with_partition(direct.partition(), weak);
+    independent = Teuchos::null;
+    EXPECT_TRUE(weak.is_valid_ptr());
+    EXPECT_TRUE(rebound->geometry_unchanged());
+    EXPECT_EQ(rebound->observation().partition_identity.get(), address);
+    rebound.reset();
+    EXPECT_FALSE(weak.is_valid_ptr());
+
+    if (comm->getSize() > 1)
+    {
+        const bool selected_fvm = comm->getRank() == 0;
+        EXPECT_THROW((void) hierarchy->with_partition(selected_fvm ? fvm_partition : direct.partition(),
+                         selected_fvm ? fvm_map : direct_map),
+            std::invalid_argument);
+
+        const Teuchos::RCP<const Map> copy = Teuchos::rcp(new Map(direct_map->getGlobalNumElements(),
+            direct_map->getLocalNumElements(), direct_map->getIndexBase(), comm));
+        ASSERT_FALSE(copy.shares_resource(direct_map));
+        EXPECT_THROW((void) hierarchy->with_partition(direct.partition(), selected_fvm ? copy : direct_map),
+            std::invalid_argument);
+        const std::shared_ptr<const CompositePartition<>> missing;
+        EXPECT_THROW((void) hierarchy->with_partition(selected_fvm ? missing : direct.partition(), direct_map),
+            std::invalid_argument);
+    }
+    EXPECT_EQ(hierarchy->observation(), observation);
+    EXPECT_EQ(hierarchy->with_partition(direct.partition(), direct_map)->native_partition(), direct.partition());
+}
 TEST(DistributedAdaptiveState, InvalidPhysicalPlanesPairsAndRankLocalPayloadLimitsRejectWithoutPublication)
 {
     auto accepted = state();
@@ -508,6 +609,45 @@ TEST(DistributedAdaptiveState, CallerDeclaredExtraFullGhostKeysImportActualNamed
     }
     EXPECT_EQ(snapshot.mesh()->connectivity_storage_bytes(), 0u);
 }
+TEST(DistributedAdaptiveState, ConvexQualifiedSourceSurvivesRealCrossImageRefinementAndOperators)
+{
+    namespace A = SimpleFluid::Meshes::AMR;
+    const auto comm = Tpetra::getDefaultComm();
+    const A::PolyhedralAMR source(test::polyhedral_grid());
+    const std::array<std::uint64_t, 2> roots{0, 1};
+    const auto owned = comm->getRank() == 0 ? std::span<const std::uint64_t>(roots) : std::span<const std::uint64_t>{};
+    auto input = source.detach_owned(owned, {'q', 'u', 'a', 'l', 'i', 'f', 'i', 'e', 'd'});
+    auto hierarchy = std::make_shared<const A::DistributedAdaptiveHierarchy>(
+        std::move(input.owned), std::move(input.families), std::move(input.kernel), comm);
+    const auto qualified = [&](const DistributedAdaptiveState& state)
+    {
+        const auto& geometry = *state.hierarchy()->native_partition()->geometry();
+        for (std::size_t row = 0; row < state.mesh()->num_owned_cells(); ++row)
+        {
+            const auto gid = state.mesh()->cell_global_id(row);
+            const auto leaf = state.hierarchy()->owned_leaves().at(state.owned_order()[row]);
+            const auto [region, local] = geometry.native_cell(gid);
+            EXPECT_EQ(geometry.region_layout(region).cells, 1u);
+            EXPECT_EQ(local, 0u);
+            const auto admitted = geometry.certified_sparse_provider_cell_geometry(gid);
+            EXPECT_EQ(admitted, leaf.geometry);
+            EXPECT_FALSE(admitted.owner_before(leaf.geometry) || leaf.geometry.owner_before(admitted));
+        }
+    };
+    const auto order = keys(*hierarchy);
+    const DistributedAdaptiveState accepted(hierarchy, order, frames(*hierarchy, order, false));
+    qualified(accepted);
+    std::vector<A::AdaptiveMark> marks;
+    for (const auto& row : accepted.hierarchy()->owned_leaves())
+        if (std::get<A::ConvexCellAncestry>(row.key.ancestry).root == 0)
+            marks.push_back({row.key, A::AdaptiveSplit::Isotropic});
+    const auto plan = accepted.plan_adaptation(marks);
+    const auto edited = accepted.apply(plan);
+    EXPECT_GT(edited->hierarchy()->global_cells(), accepted.hierarchy()->global_cells());
+    qualified(*edited);
+    operators(*edited);
+}
+
 TEST(DistributedAdaptiveState, MixedUnequalNativeSeamMigratesRemapsAndRestoresPolyhedralFamily)
 {
     auto comm = Tpetra::getDefaultComm();

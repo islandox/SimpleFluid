@@ -7,6 +7,7 @@
 #include "geometry/details/NativeSchemaOwner.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
+#include <array>
 #include <map>
 #include <span>
 #include <variant>
@@ -165,6 +166,8 @@ static_assert(std::is_trivially_copyable_v<NativeSparseSignRoute>);
 static_assert(std::is_trivially_copyable_v<NativeSparseBoundaryRoute>);
 struct NativeSparseProof
 {
+    std::array<std::uint64_t, 2> lineage{};
+    std::uint64_t publication = 0;
 };
 struct FrozenSourceCopyProof {std::shared_ptr<const void> accepted_source;};
 /** Private implementation detail exposed here for compiled sparse dispatch.

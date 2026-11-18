@@ -5,6 +5,7 @@ template<class Value> void reserve_topology(std::vector<Value>& values, std::siz
     if (count > values.max_size())
         throw GeometryError(GeometryErrorCode::ResourceLimit, "Frozen topology vector size overflows.");
     active_work->charge(count, sizeof(Value));
+    ordinary_kernel::NativeSplitCppProfile::request(count, sizeof(Value));
     values.reserve(count);
     if (values.capacity() > count)
         active_work->charge(values.capacity() - count, sizeof(Value));
@@ -24,6 +25,7 @@ std::shared_ptr<GeometryStorage<Mode>> freeze_geometry(GeometryDraft<Mode>&& dra
             return;
         // Identity is the actual plane object, never numerical coefficients or a source authority.
         active_work->charge(1, sizeof(typename decltype(slots)::value_type) + 4 * sizeof(void*));
+        ordinary_kernel::NativeSplitCppProfile::template node<typename decltype(slots)::value_type>();
         slots.emplace(plane.get(), slots.size());
     };
     for (const auto& vertex : draft.vertices)
@@ -48,6 +50,7 @@ std::shared_ptr<GeometryStorage<Mode>> freeze_geometry(GeometryDraft<Mode>&& dra
     counts.planes = slots.size();
     const bool compact = compact_topology(counts, force_wide);
     active_work->charge(1, sizeof(FrozenTopology<Mode>));
+    ordinary_kernel::NativeSplitCppProfile::template combined<FrozenTopology<Mode>>();
     auto topology = std::make_shared<FrozenTopology<Mode>>();
     reserve_topology(topology->planes, counts.planes);
     topology->planes.resize(counts.planes);
@@ -100,6 +103,7 @@ std::shared_ptr<GeometryStorage<Mode>> freeze_geometry(GeometryDraft<Mode>&& dra
         vertices.push_back(std::move(vertex));
     }
     active_work->charge(1, sizeof(GeometryStorage<Mode>));
+    ordinary_kernel::NativeSplitCppProfile::template combined<GeometryStorage<Mode>>();
     auto result = std::make_shared<GeometryStorage<Mode>>(
         std::move(static_cast<GeometryMetadata<Mode>&>(draft)), std::move(topology), std::move(vertices));
     return result;

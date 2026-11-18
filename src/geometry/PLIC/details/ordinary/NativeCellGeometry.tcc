@@ -13,6 +13,7 @@
 #include "geometry/PLIC/details/GeometryAllocationLedgerInternal.hh"
 #include "geometry/PLIC/details/CanonicalExportCoordinates.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
+#include "geometry/PLIC/details/ordinary/NativeSplitCppProfile.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
 #include <array>
@@ -997,6 +998,8 @@ ConvexGeometryPtr<ArithmeticMode::Ordinary> details::NativeCellCodecAccess::deco
     using Cell = ConvexCellGeometry<M>;
     if (details::active_work)
         throw std::invalid_argument("Native certificate admission requires a fresh numerical operation.");
+    // This codec independently precharges all verifier allocations below.
+    const details::ordinary_kernel::NativeSplitCppProfile::Suspension detached_constructor;
     const auto plan = native_cell_detail::decode_cpp_plan(packet, byte_budget);
     // Keep every original verifier allocation inside this finite closed phase.
     // None of its opaque owners is allowed to escape the deep admitted copy.
@@ -1337,12 +1340,48 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::with_native_supports(
     return result;
 }
 
+void details::NativeCellCodecAccess::with_split_profile(
+    const geometry_detail::NativeConstructionAdmission& admission, void* context, void (*build)(void*))
+{
+    geometry_detail::NativeConstructorStorage::require_profile();
+    if (!build)
+        throw std::invalid_argument("Ordinary split profile needs its concrete producer.");
+    const details::ordinary_kernel::NativeSplitCppProfile phase(admission);
+    build(context);
+}
+bool details::NativeCellCodecAccess::split_profile_active() noexcept
+{
+    return ordinary_kernel::NativeSplitCppProfile::active();
+}
+geometry_detail::NativeConstructionAdmission details::NativeCellCodecAccess::split_profile_admission()
+{
+    return ordinary_kernel::NativeSplitCppProfile::admission();
+}
+void details::NativeCellCodecAccess::charge_split_profile_request(std::size_t count, std::size_t width)
+{
+    ordinary_kernel::NativeSplitCppProfile::request(count, width);
+}
+std::vector<ConvexOctantPiece<ArithmeticMode::Ordinary>> details::NativeCellCodecAccess::profiled_octants(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell, double minimum)
+{
+    if (!details::ordinary_kernel::NativeSplitCppProfile::active())
+        throw std::invalid_argument("Ordinary split has no active producer-image profile.");
+    return cell.split_aabb_midpoints_impl(minimum);
+}
 template<ArithmeticMode Mode>
 std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoints(double minimum) const
     requires(Mode == ArithmeticMode::Ordinary)
 {
+    return split_aabb_midpoints_impl(minimum);
+}
+template<ArithmeticMode Mode>
+std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoints_impl(double minimum) const
+    requires(Mode == ArithmeticMode::Ordinary)
+{
     if (!std::isfinite(minimum) || minimum < 0)
         details::reject(Mode, "invalid finite split quality bound.");
+    using Profile = details::ordinary_kernel::NativeSplitCppProfile;
+    Profile::request(vertex_count(), sizeof(DynamicPoint) + sizeof(Point<Mode>));
     const auto p = local_points();
     std::array<long double, 3> lo = p.front().value, hi = lo;
     for (const auto& v : p)
@@ -1360,18 +1399,46 @@ std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoi
             details::reject(Mode, "finite split midpoint is not interior.");
     }
     const auto root = details::checked_geometry_storage<Mode>(geometry_->impl_);
+    const auto wrap = [](DynamicConvexGeometryPtr geometry) -> ConvexGeometryPtr<Mode>
+    {
+        if (!Profile::active())
+            return from_dynamic(std::move(geometry));
+        if (!geometry)
+            return {};
+        details::Operation scope(geometry->impl_->limits);
+        details::active_work->charge(1, sizeof(ConvexCellGeometry));
+        Profile::separately_controlled<ConvexCellGeometry>();
+        return ConvexGeometryPtr<Mode>(new ConvexCellGeometry(std::move(geometry)));
+    };
     std::vector<ConvexOctantPiece<Mode>> output;
     std::vector<ConvexGeometryPtr<Mode>> pieces;
+    if (Profile::active())
+    {
+        Profile::reserve(output, 8);
+        Profile::reserve(pieces, 8);
+    }
     for (unsigned octant = 0; octant < 8; ++octant)
     {
-        auto child = from_dynamic(geometry_);
+        auto child = wrap(geometry_);
         for (std::size_t a = 0; a < 3 && child; ++a)
         {
             GeometryHalfspace plane;
             plane.anchor = origin();
             plane.normal[a] = ((octant >> a) & 1) ? -1 : 1;
             plane.offset = plane.normal[a] * mid[a];
-            child = child->clip(plane, false).inside;
+            if (Profile::active())
+            {
+                const auto& shape = child->geometry_->impl_;
+                details::Operation scope(shape->limits);
+                const auto clipped = details::ordinary_kernel::GeometryKernel<Mode>(shape).clip(plane, false);
+                child = wrap(clipped.inside);
+                // Preserve the public clip's logical work gate for both
+                // sides. Only the selected side needs a concrete wrapper.
+                if (clipped.outside)
+                    details::active_work->charge(1, sizeof(ConvexCellGeometry));
+            }
+            else
+                child = child->clip(plane, false).inside;
         }
         if (!child)
             continue;
@@ -1379,6 +1446,8 @@ std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoi
             details::reject(Mode, "positive finite child violates scaled-volume quality.");
         const auto stored = details::checked_geometry_storage<Mode>(child->geometry_->impl_);
         std::vector<ConvexFaceOrigin> origins;
+        if (Profile::active())
+            Profile::reserve(origins, stored->surfaces.size());
         for (const auto& surface : stored->surfaces)
         {
             bool found = false;
@@ -1407,7 +1476,13 @@ std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoi
         pieces.push_back(child);
         output.push_back({octant, std::move(child), std::move(origins)});
     }
-    certify_partition(pieces);
+    if (Profile::active())
+    {
+        details::Operation scope(geometry_->impl_->limits);
+        details::ordinary_native::certify_cell_partition(*this, pieces, 8e-15);
+    }
+    else
+        certify_partition(pieces);
     return output;
 }
 } // namespace SimpleFluid::PLIC

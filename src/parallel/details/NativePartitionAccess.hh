@@ -24,6 +24,10 @@ public:
         std::shared_ptr<Meshes::MultiRegionMesh>, std::span<const std::uint64_t>, std::span<const std::uint64_t>);
     [[nodiscard]] static std::shared_ptr<const NativeAllocationEnvelope> allocation(
         const std::shared_ptr<const CompositePartition<>>&) noexcept;
+    /** Compatibility wrappers have no envelope. An installed envelope must
+     * authenticate the partition's actual shared control. */
+    [[nodiscard]] static std::shared_ptr<const NativeAllocationEnvelope> checked_allocation(
+        const std::shared_ptr<const CompositePartition<>>&);
     static void visit(const std::shared_ptr<const CompositePartition<>>&, const NativeConstructorOwnerSink&,
         PLIC::details::GeometryOwnerGraphEditor&, bool, PLIC::details::NativeGeometryAccounting*);
 };

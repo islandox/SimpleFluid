@@ -6,6 +6,7 @@
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <map>
+#include <string>
 #include <tuple>
 namespace SimpleFluid::test
 {
@@ -61,6 +62,25 @@ inline SP<const Meshes::MultiRegionMesh> polyhedral_tetrahedron()
         boundaries.push_back({untagged.face_nodes(f), 0, "wall"});
     return std::make_shared<Meshes::MultiRegionMesh>(std::vector<Meshes::MultiRegionMesh::Region>{Meshes::native_region(
                                                          "tetra", std::make_shared<U>(nodes, cells, boundaries))},
+        std::vector<Meshes::MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
+}
+/** Unit cube clipped to x + y + z <= 1.25, with seven positive AABB octants. */
+inline SP<const Meshes::MultiRegionMesh> polyhedral_truncated_cube(const std::string& label = "wall")
+{
+    using U = Meshes::UnstructuredMesh;
+    Arr<MeshUtils::Vec3> nodes{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, .25, 0}, {.25, 1, 0},
+        {1, 0, .25}, {.25, 0, 1}, {0, 1, .25}, {0, .25, 1}};
+    U::CellDefinition cell;
+    cell.type = MeshUtils::CellType::POLYHEDRON;
+    cell.face_node_ids = {{0, 2, 5, 4, 1}, {0, 1, 6, 7, 3}, {0, 3, 9, 8, 2}, {1, 4, 6},
+        {2, 8, 5}, {3, 7, 9}, {4, 5, 8, 9, 7, 6}};
+    Arr<U::CellDefinition> cells{std::move(cell)};
+    const U untagged(nodes, cells);
+    Arr<U::BoundaryFaceDefinition> boundaries;
+    for (std::size_t face = 0; face < untagged.num_faces(); ++face)
+        boundaries.push_back({untagged.face_nodes(face), 0, label});
+    return std::make_shared<Meshes::MultiRegionMesh>(std::vector<Meshes::MultiRegionMesh::Region>{Meshes::native_region(
+                                                         "truncated_cube", std::make_shared<U>(nodes, cells, boundaries))},
         std::vector<Meshes::MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
 }
 inline SimpleFluid::Meshes::AMR::PolyhedralAMRGrid polyhedral_grid(

@@ -151,6 +151,7 @@ inline void require_encoding_capacity_profile()
 /** All allocation requests in the source-support branch: real payload,
  * backing/control, canonical hash pointer scratch and optional polygon copy. */
 [[nodiscard]] std::size_t source_support_exact_allocation_bound(std::size_t points, bool known_axis = false);
+[[nodiscard]] std::size_t input_support_exact_allocation_bound();
 [[nodiscard]] std::size_t fallback_face_allocation_bound(std::size_t points);
 inline std::size_t encoding_add(std::size_t first, std::size_t second)
 {
@@ -340,7 +341,7 @@ namespace SimpleFluid::PLIC
 template<ArithmeticMode> class ConvexCellGeometry;
 namespace details::ordinary_native
 {
-void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>&,
+SIMPLEFLUID_LOCAL void certify_cell_partition(const ConvexCellGeometry<ArithmeticMode::Ordinary>&,
     std::span<const std::shared_ptr<const ConvexCellGeometry<ArithmeticMode::Ordinary>>>, double relative_budget);
 }
 } // namespace SimpleFluid::PLIC

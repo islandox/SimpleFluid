@@ -3,12 +3,19 @@
  */
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
 #include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/PLIC/details/ExtrudedConstructionAccess.hh"
+#include "geometry/PLIC/details/GeometryIdentityAccess.hh"
+#include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/VoFWireProtocol.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/NativeKernelAuthority.hh"
+#include "geometry/mesh/AMR/NativeAdaptiveKeyCodec.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/mesh/NativeFragmentAccess.hh"
+#include "geometry/mesh/NativeSparseAccess.hh"
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <set>
 namespace SimpleFluid::Meshes::AMR
@@ -122,6 +129,85 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
 }
 namespace
 {
+using Planar = PLIC::details::NativePlanarOwnerAccess;
+using Admission = geometry_detail::NativeConstructionAdmission;
+using Face = PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>;
+using SourceFace = adaptive_detail::NativeKernelSourceFace;
+
+constexpr std::uint64_t static_face_tag = 0x5346534641434536ULL;
+
+bool static_source_recipe(const NativeFragmentDescriptor& recipe) noexcept
+{
+    using Kind = NativeFragmentDescriptor::Kind;
+    if (recipe.kind == Kind::Cartesian || recipe.kind == Kind::ConstructedProduct)
+        return recipe.parts.size() == 4 &&
+               std::all_of(recipe.parts.begin(), recipe.parts.end(), [](const auto& part) { return bool(part); });
+    if (recipe.kind != Kind::LegacyProcedural || recipe.parts.size() != 1 || !recipe.parts[0] ||
+        recipe.parts[0]->size() < sizeof(std::uint32_t))
+        return false;
+    std::uint32_t tag;
+    std::memcpy(&tag, recipe.parts[0]->data(), sizeof(tag));
+    return tag == 1 || tag == 2 || tag == 5 || tag == 8;
+}
+
+bool same_static_recipe(const NativeFragmentDescriptor& original, const NativeFragmentDescriptor& current)
+{
+    return &original == &current ||
+           (original.kind == current.kind && original.view == current.view &&
+               original.parts.size() == current.parts.size() &&
+               std::equal(original.parts.begin(), original.parts.end(), current.parts.begin(),
+                   [](const auto& first, const auto& second)
+                   { return first == second || (first && second && *first == *second); }));
+}
+
+bool same_outward_face(const Face& first, const Face& second)
+{
+    if (!first || !second || first->oppositely_oriented(*second) ||
+        PLIC::planar_support(*first) != PLIC::planar_support(*second))
+        return false;
+    const auto& a = first->points();
+    const auto& b = second->points();
+    return std::is_permutation(a.begin(), a.end(), b.begin(), b.end(), [](const auto& p, const auto& q)
+        {
+            using Identity = PLIC::details::GeometryIdentityAccess;
+            return Identity::point(p) == Identity::point(q);
+        });
+}
+
+template<class R> Face admitted_outward_face(const R& region, std::uint64_t face, int sign,
+    const geometry_detail::NativeConstructorStorageOwner& scratch)
+{
+    const auto& geometry = region.geometry();
+    const auto& admission = scratch.owner->admission();
+    Face certificate;
+    using Region = std::decay_t<R>;
+    if constexpr (std::is_same_v<Region, ExtrudedRegion>)
+    {
+        if (geometry.construction())
+            certificate = PLIC::details::ExtrudedConstructionAccess::face(*geometry.construction(), face, admission);
+    }
+    else if constexpr (std::is_same_v<Region, DistributedExplicitRegion>)
+    {
+        if (auto original = adaptive_detail::NativeSparseAccess::source_provider_geometry(geometry))
+            certificate = Planar::cell_face(*original, face, admission);
+    }
+    if (certificate)
+        return sign > 0 ? certificate : Planar::reversed(*certificate, admission);
+    const auto nodes = region.topology().face_nodes(face);
+    if (nodes.size() < 3 || nodes.size() > PLIC::GeometryLimits{}.maximum_vertices)
+        throw std::invalid_argument("Stationary native face exceeds the planar vertex bounds.");
+    std::vector<PLIC::GeometryPoint> points;
+    scratch.owner->reserve(points, nodes.size());
+    for (auto node : nodes)
+    {
+        const auto point = geometry.node_coordinates(node);
+        points.push_back({point.x, point.y, point.z});
+    }
+    const auto area = geometry.face_area_vector(face);
+    return Planar::oriented_like(Planar::make(points, admission), {sign * area.x, sign * area.y, sign * area.z},
+        admission);
+}
+
 PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> native_certificate(
     const MultiRegionMesh::Region& region, std::uint64_t face)
 {
@@ -272,17 +358,22 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
 class StaticKernel final : public AdaptiveProviderKernel
 {
     std::uint64_t root_, region_, material_;
+    std::shared_ptr<const NativeFragmentDescriptor> root_recipe_;
 
 public:
     AdaptiveContactCapabilities contact_capabilities(const AdaptiveLeaf&) const override
     {
         return {AdaptiveContactNormalization::PhysicalIdentity, false, false};
     }
-    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink&,
-        adaptive_detail::NativeKernelAuthority::IdentityVisit,
-        adaptive_detail::NativeKernelAuthority::GeometryVisit) const {}
-    StaticKernel(std::uint64_t root, std::uint64_t region, std::uint64_t material)
-        : root_(root), region_(region), material_(material)
+    void visit_native_publication_children(const geometry_detail::NativeConstructorOwnerSink& sink,
+        adaptive_detail::NativeKernelAuthority::IdentityVisit identity,
+        adaptive_detail::NativeKernelAuthority::GeometryVisit geometry) const
+    {
+        NativeFragmentAccess::visit_descriptor(root_recipe_, sink, identity, geometry);
+    }
+    StaticKernel(std::uint64_t root, std::uint64_t region, std::uint64_t material,
+        std::shared_ptr<const NativeFragmentDescriptor> recipe)
+        : root_(root), region_(region), material_(material), root_recipe_(std::move(recipe))
     {
     }
     AdaptiveBytes descriptor() const override
@@ -293,6 +384,73 @@ public:
         w.word(region_);
         w.word(material_);
         return std::move(w.data);
+    }
+    static constexpr bool native_source_publication_ready = true;
+    static constexpr bool native_source_explicit_body_intake = true;
+    bool supports_native_source(const AdaptiveLeaf& leaf) const noexcept
+    {
+        return root_recipe_ && static_source_recipe(*root_recipe_) && leaf.native_recipe &&
+               static_source_recipe(*leaf.native_recipe) && leaf.provider == AdaptiveProviderKind::Static &&
+               std::holds_alternative<StaticCellAncestry>(leaf.key.ancestry) && leaf.geometry &&
+               !leaf.factor_recipe && !leaf.join_recipe;
+    }
+    std::size_t native_source_face_count(const AdaptiveLeaf& leaf) const { return leaf.geometry->num_faces(); }
+    AdaptiveCellMetrics validate_native_source(const AdaptiveLeaf& leaf, const NativeFragmentRecord& fragment,
+        const Admission& admission, std::span<SourceFace> routes) const
+    {
+        const auto& key = std::get<StaticCellAncestry>(leaf.key.ancestry);
+        if (!supports_native_source(leaf) || key.provider_root != root_ || leaf.key.region != region_ ||
+            leaf.material != material_ || key.native_cell != leaf.native_cell || leaf.domain.empty() ||
+            !leaf.parent_family.empty() || !same_static_recipe(*root_recipe_, *leaf.native_recipe) ||
+            routes.size() != leaf.surfaces.size() || routes.size() != leaf.geometry->num_faces())
+            throw std::invalid_argument("Stationary native source differs from its exact detached root membership.");
+        const auto scratch = geometry_detail::native_constructor_storage(admission);
+        std::vector<Face> shell;
+        scratch.owner->reserve(shell, routes.size());
+        for (std::size_t i = 0; i < routes.size(); ++i)
+            shell.push_back(Planar::cell_face(*leaf.geometry, i, admission));
+        return std::visit(
+            [&](const auto& region)
+            {
+                const auto& topology = region.topology();
+                if (leaf.native_cell >= region.layout().cells)
+                    throw std::invalid_argument("Stationary native ordinal exceeds the exact detached root.");
+                const auto faces = topology.cell_faces(leaf.native_cell);
+                if (faces.size() != routes.size())
+                    throw std::invalid_argument("Stationary native source has an incomplete original shell.");
+                for (std::size_t surface = 0; surface < routes.size(); ++surface)
+                {
+                    const auto face = faces[surface];
+                    const auto owner = topology.owner_cell(face);
+                    const auto neighbor = topology.neighbor_cell(face);
+                    if (owner != leaf.native_cell && neighbor != leaf.native_cell)
+                        throw std::invalid_argument("Stationary source has a foreign native incidence.");
+                    const int sign = owner == leaf.native_cell ? 1 : -1;
+                    const bool exterior = neighbor == UnstructuredMesh::invalid_ordinal;
+                    const auto boundary = topology.boundary_id(face);
+                    const std::string_view name = exterior && boundary != UnstructuredMesh::invalid_boundary_id
+                        ? topology.boundary_batch_name(boundary) : std::string_view{};
+                    const auto& use = leaf.surfaces[surface];
+                    Reader support{use.key};
+                    if (support.word() != static_face_tag || support.word() != root_ || support.word() != face)
+                        throw std::invalid_argument("Stationary source has a foreign original face support.");
+                    support.done();
+                    const auto original = admitted_outward_face(region, face, sign, scratch);
+                    if (use.native_face != face || use.orientation != sign || use.exterior != exterior ||
+                        use.boundary != name || !use.authority_image.is_zero() || !use.require_native_whole_tile ||
+                        !same_outward_face(original, use.geometry) || !same_outward_face(original, use.native_whole_geometry))
+                        throw std::invalid_argument("Stationary surface differs from its original native face.");
+                    const auto match = std::find_if(shell.begin(), shell.end(),
+                        [&](const auto& side) { return same_outward_face(original, side); });
+                    if (match == shell.end())
+                        throw std::invalid_argument("Stationary source has a foreign exact convex shell.");
+                    match->reset();
+                    routes[surface] = {surface, face, sign};
+                }
+                const auto center = region.geometry().cell_centroid(leaf.native_cell);
+                return AdaptiveCellMetrics{region.geometry().cell_volume(leaf.native_cell), {center.x, center.y, center.z}};
+            },
+            fragment.region());
     }
     void validate(const AdaptiveLeaf& leaf) const override
     {
@@ -319,7 +477,7 @@ public:
                 {
                     AdaptiveSurface use;
                     Writer w;
-                    w.word(0x5346534641434536ULL);
+                    w.word(static_face_tag);
                     w.word(root_);
                     w.word(face);
                     use.key = std::move(w.data);
@@ -368,6 +526,13 @@ public:
     bool supports_leaf_local_repack() const noexcept override { return true; }
     std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
     {
+        if (root_recipe_ && static_source_recipe(*root_recipe_))
+        {
+            for (const auto& leaf : leaves)
+                if (!leaf.native_recipe || !same_static_recipe(*root_recipe_, *leaf.native_recipe))
+                    throw std::invalid_argument("Stationary repack changed the detached root recipe.");
+            return {leaves.begin(), leaves.end()};
+        }
         std::map<AdaptiveBytes, std::vector<const AdaptiveLeaf*>> groups;
         for (const auto& leaf : leaves)
             groups[encode_native_fragment_descriptor(*leaf.native_recipe)].push_back(&leaf);
@@ -392,6 +557,8 @@ public:
         return result;
     }
 };
+} // namespace
+
 class MixedKernel final : public AdaptiveProviderKernel
 {
     geometry_detail::NativeConstructorStorageOwner native_routes_storage_;
@@ -401,21 +568,85 @@ class MixedKernel final : public AdaptiveProviderKernel
     std::size_t budget_;
     AdaptiveBytes descriptor_;
     std::shared_ptr<const geometry_detail::NativeSchemaOwner> native_schema_;
+    using Authority = adaptive_detail::NativeKernelAuthority;
+
+    const DistributedMixedRoute& checked_route(const AdaptiveLeaf& leaf, std::uint64_t identity) const
+    {
+        const auto it = routes_.find(identity);
+        if (it == routes_.end() || it->second.provider != leaf.provider || it->second.region != leaf.key.region)
+            throw std::invalid_argument("Mixed leaf route differs from typed root membership.");
+        return it->second;
+    }
+    Reader native_capsule(const AdaptiveLeaf& leaf) const
+    {
+        if (!leaf.join_recipe || leaf.join_recipe->size() > budget_)
+            throw std::invalid_argument("Detached mixed leaf lacks its bounded local join capsule.");
+        Reader reader{*leaf.join_recipe};
+        packet_codec::read_header(reader, packet_codec::Family::MixedJoin, 6, packet_codec::Record::Value);
+        return reader;
+    }
     const DistributedMixedRoute& route(const AdaptiveLeaf& leaf) const
     {
         if (!leaf.join_recipe)
             throw std::invalid_argument("Detached mixed leaf lacks its local join capsule.");
         const auto capsule = decode_join_capsule(*leaf.join_recipe, budget_);
-        const auto it = routes_.find(capsule.route);
-        if (it == routes_.end() || it->second.provider != leaf.provider || it->second.region != leaf.key.region)
-            throw std::invalid_argument("Mixed leaf route differs from typed root membership.");
-        return it->second;
+        return checked_route(leaf, capsule.route);
     }
     AdaptiveLeaf original(const AdaptiveLeaf& leaf) const
     {
         auto raw = leaf;
         raw.key.region = route(leaf).original_region;
         raw.join_recipe.reset();
+        return raw;
+    }
+    static AdaptiveLeaf native_original(const AdaptiveLeaf& leaf, const DistributedMixedRoute& route,
+        const geometry_detail::NativeConstructorStorageOwner& storage)
+    {
+        using adaptive_detail::NativeAdaptiveKeyCodec;
+        AdaptiveLeaf raw;
+        raw.key = NativeAdaptiveKeyCodec::copy(leaf.key, storage);
+        raw.key.region = route.original_region;
+        storage.owner->copy(raw.domain, std::span<const char>(leaf.domain));
+        raw.material = leaf.material;
+        raw.revision = leaf.revision;
+        raw.provider = leaf.provider;
+        raw.geometry = leaf.geometry;
+        raw.native_recipe = leaf.native_recipe;
+        raw.native_cell = leaf.native_cell;
+        raw.factor_recipe = leaf.factor_recipe;
+        raw.work = leaf.work;
+        storage.owner->reserve(raw.surfaces, leaf.surfaces.size());
+        for (const auto& surface : leaf.surfaces)
+        {
+            auto& copy = raw.surfaces.emplace_back();
+            storage.owner->copy(copy.key, std::span<const char>(surface.key));
+            storage.owner->string(copy.boundary, surface.boundary);
+            copy.geometry = surface.geometry;
+            copy.orientation = surface.orientation;
+            copy.exterior = surface.exterior;
+            copy.native_face = surface.native_face;
+            copy.authority_image = surface.authority_image;
+            copy.require_native_whole_tile = surface.require_native_whole_tile;
+            copy.native_whole_geometry = surface.native_whole_geometry;
+        }
+        if (!leaf.parent_family.empty())
+        {
+            Reader family{leaf.parent_family};
+            const auto tag = family.word();
+            const auto split = family.word();
+            auto parent = NativeAdaptiveKeyCodec::decode(family.bytes_view(), storage);
+            family.done();
+            if (tag != 0x534646414d363031ULL || parent.region != route.region ||
+                split > static_cast<std::uint64_t>(AdaptiveSplit::Axial))
+                throw std::invalid_argument("Mixed original parent family differs from its typed route.");
+            parent.region = route.original_region;
+            Writer encoded;
+            storage.owner->reserve(encoded.data, leaf.parent_family.size());
+            encoded.word(tag);
+            encoded.word(split);
+            NativeAdaptiveKeyCodec::write(encoded, parent);
+            raw.parent_family = std::move(encoded.data);
+        }
         return raw;
     }
     AdaptiveCellKey global(const DistributedMixedRoute& route, AdaptiveCellKey key) const
@@ -544,6 +775,190 @@ class MixedKernel final : public AdaptiveProviderKernel
     }
 
 public:
+    static constexpr bool native_source_publication_ready = true;
+    static constexpr bool native_source_explicit_body_intake = true;
+    bool supports_native_source(const AdaptiveLeaf& leaf) const noexcept
+    {
+        try
+        {
+            auto reader = native_capsule(leaf);
+            const auto& provider = checked_route(leaf, reader.word());
+            if (!Authority::supports_original_source_validation(provider.kernel) || provider.periodic)
+                return false;
+            switch (leaf.provider)
+            {
+            case AdaptiveProviderKind::Cartesian:
+                return leaf.native_recipe && !leaf.geometry && leaf.surfaces.empty() && !leaf.factor_recipe;
+            case AdaptiveProviderKind::Product:
+                return leaf.native_recipe && leaf.factor_recipe && !leaf.geometry && leaf.surfaces.empty();
+            case AdaptiveProviderKind::Polyhedral:
+                return leaf.geometry && !leaf.native_recipe && !leaf.factor_recipe;
+            case AdaptiveProviderKind::Static:
+                return leaf.geometry && leaf.native_recipe && !leaf.factor_recipe &&
+                       static_source_recipe(*leaf.native_recipe);
+            }
+        }
+        catch (const std::invalid_argument&)
+        {
+            return false;
+        }
+        return false;
+    }
+    AdaptiveCellMetrics prepare_native_source(const AdaptiveLeaf& leaf, const Admission& admission) const
+    {
+        auto reader = native_capsule(leaf);
+        const auto& provider = checked_route(leaf, reader.word());
+        const auto scratch = geometry_detail::native_constructor_storage(admission);
+        const auto raw = native_original(leaf, provider, scratch);
+        return Authority::prepare_source(provider.kernel, raw, admission);
+    }
+    AdaptiveCellMetrics collect_native_source(const AdaptiveLeaf& leaf, const NativeFragmentRecord& fragment,
+        const Admission& admission, const geometry_detail::NativeConstructorStorageOwner& output,
+        std::vector<SourceFace>& routes) const
+    {
+        auto reader = native_capsule(leaf);
+        const auto& provider = checked_route(leaf, reader.word());
+        const auto scratch = geometry_detail::native_constructor_storage(admission);
+        const auto raw = native_original(leaf, provider, scratch);
+        const auto count = Authority::source_face_count(provider.kernel, raw, fragment);
+        struct OriginalSupport
+        {
+            AdaptiveBytes key;
+            bool exterior = false;
+        };
+        struct OriginalFaces
+        {
+            const geometry_detail::NativeConstructorStorageOwner& storage;
+            std::vector<OriginalSupport> supports;
+        } originals{scratch, {}};
+        scratch.owner->reserve(originals.supports, count);
+        originals.supports.resize(count);
+        std::vector<SourceFace> native_routes;
+        scratch.owner->reserve(native_routes, count);
+        native_routes.resize(count);
+        const auto metrics = Authority::validate_source(provider.kernel, raw, fragment, admission, native_routes,
+            &originals, [](void* context, std::size_t surface, std::span<const char> key, bool exterior)
+            {
+                auto& values = *static_cast<OriginalFaces*>(context);
+                if (surface >= values.supports.size() || key.empty() || !values.supports[surface].key.empty())
+                    throw std::invalid_argument("Mixed child supplied a missing or repeated original support.");
+                auto& support = values.supports[surface];
+                values.storage.owner->copy(support.key, key);
+                support.exterior = exterior;
+            });
+        struct Selection
+        {
+            std::span<const char> original, destination;
+            Face geometry;
+        };
+        const auto read_selections = [&](bool joined)
+        {
+            const auto size = reader.word();
+            if (size > (reader.data.size() - reader.offset) / (3 * sizeof(std::uint64_t)))
+                throw std::invalid_argument("Mixed native source has an invalid root selection count.");
+            geometry_detail::NativeConstructorVector<Selection> selections(admission.allocator<Selection>());
+            for (std::size_t i = 0; i < size; ++i)
+            {
+                const auto original = reader.bytes_view();
+                const auto second = reader.bytes_view();
+                const auto third = reader.bytes_view();
+                if (original.empty() || (joined && second.empty()))
+                    throw std::invalid_argument("Mixed native source lacks original-root selection provenance.");
+                if (std::none_of(originals.supports.begin(), originals.supports.end(),
+                        [&](const auto& support) { return std::ranges::equal(support.key, original); }))
+                    continue; // This active descendant does not use that original root support.
+                const auto destination = joined ? second : third;
+                auto geometry = Planar::decode(joined ? third : second, budget_, admission);
+                if (std::any_of(selections.begin(), selections.end(), [&](const auto& other)
+                        {
+                            return std::ranges::equal(other.original, original) &&
+                                   std::ranges::equal(other.destination, destination) &&
+                                   other.geometry->equivalent(*geometry);
+                        }))
+                    throw std::invalid_argument("Mixed native source repeats an original-root selection.");
+                selections.push_back({original, destination, std::move(geometry)});
+            }
+            return selections;
+        };
+        const auto joined = read_selections(true);
+        const auto boundary = read_selections(false);
+        reader.done();
+        geometry_detail::NativeConstructorVector<SourceFace> mapped_routes(admission.allocator<SourceFace>());
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const auto& route = native_routes[index];
+            const auto& support = originals.supports[index];
+            if (route.surface != index || (route.outward_sign != 1 && route.outward_sign != -1) || support.key.empty())
+                throw std::invalid_argument("Mixed child did not certify the original surface route.");
+            const auto phase = geometry_detail::native_constructor_storage(admission);
+            const auto source = !raw.surfaces.empty() ? raw.surfaces[index].geometry :
+                std::visit([&](const auto& region)
+                    { return admitted_outward_face(region, route.native_face, route.outward_sign, phase); }, fragment.region());
+            if (!source)
+                throw std::invalid_argument("Mixed child original support lacks its exact physical loop.");
+            geometry_detail::NativeConstructorVector<Face> covered(admission.allocator<Face>());
+            geometry_detail::NativeConstructorVector<std::span<const char>> destinations(
+                admission.allocator<std::span<const char>>());
+            geometry_detail::NativeConstructorVector<Face> complete(admission.allocator<Face>());
+            const auto append = [&](const Face& face)
+            {
+                if (mapped_routes.size() == PLIC::GeometryLimits{}.maximum_faces)
+                    throw std::invalid_argument("Mixed native source exceeds the supported mapped face bound.");
+                mapped_routes.push_back({mapped_routes.size(), route.native_face, route.outward_sign});
+                complete.push_back(face);
+            };
+            for (const auto& alias : joined)
+            {
+                if (!std::ranges::equal(alias.original, support.key))
+                    continue;
+                if (PLIC::planar_support(*source) != PLIC::planar_support(*alias.geometry))
+                    throw std::invalid_argument("Mixed native join selection changed its original support plane.");
+                const auto piece = Planar::intersection(*source, *alias.geometry, admission);
+                if (!piece)
+                    continue;
+                bool duplicate = false;
+                for (std::size_t previous = 0; previous < covered.size(); ++previous)
+                    if (Planar::intersection(*covered[previous], *piece, admission))
+                    {
+                        if (std::ranges::equal(alias.destination, destinations[previous]) &&
+                            covered[previous]->equivalent(*piece))
+                        {
+                            duplicate = true;
+                            break;
+                        }
+                        throw std::invalid_argument("Mixed native join selections overlap inconsistently.");
+                    }
+                if (!duplicate)
+                {
+                    covered.push_back(piece);
+                    destinations.push_back(alias.destination);
+                    append(piece);
+                }
+            }
+            const auto visit_remainder = [&](const Face& remainder)
+            {
+                if (!support.exterior)
+                {
+                    append(remainder);
+                    return;
+                }
+                const auto begin = complete.size();
+                for (const auto& alias : boundary)
+                    if (std::ranges::equal(alias.original, support.key))
+                        if (const auto piece = Planar::intersection(*remainder, *alias.geometry, admission))
+                            append(piece);
+                Planar::certify_partition(*remainder, std::span<const Face>(complete).subspan(begin), admission);
+            };
+            if (covered.empty())
+                visit_remainder(source);
+            else
+                for (const auto& remainder : Planar::subtract(*source, covered, admission))
+                    visit_remainder(remainder);
+            Planar::certify_partition(*source, complete, admission);
+        }
+        output.owner->copy(routes, std::span<const SourceFace>(mapped_routes));
+        return metrics;
+    }
     MixedKernel(std::vector<DistributedMixedRoute> routes, std::size_t budget) : budget_(budget)
     {
         if (!budget || routes.empty())
@@ -734,6 +1149,72 @@ public:
             encode_adaptive_key(*std::min_element(result.family.children.begin(), result.family.children.end()));
         return result;
     }
+    void validate_profiled_source_parent(const AdaptiveLeaf& leaf, const Admission& admission) const
+    {
+        auto reader = native_capsule(leaf);
+        const auto& provider = checked_route(leaf, reader.word());
+        const auto storage = geometry_detail::native_constructor_storage(admission);
+        const auto raw = native_original(leaf, provider, storage);
+        (void) Authority::prepare_source(provider.kernel, raw, admission);
+    }
+    void profiled_source_split(const AdaptiveLeaf& leaf, AdaptiveSplit split, const Admission& admission,
+        void* context, Authority::SplitVisit visit) const
+    {
+        auto reader = native_capsule(leaf);
+        const auto& provider = checked_route(leaf, reader.word());
+        const auto storage = geometry_detail::native_constructor_storage(admission);
+        const auto raw = native_original(leaf, provider, storage);
+        struct Route
+        {
+            const AdaptiveLeaf& source;
+            const AdaptiveLeaf& original;
+            AdaptiveSplit split;
+            const geometry_detail::NativeConstructorStorageOwner& storage;
+            void* context;
+            Authority::SplitVisit visit;
+        } route{leaf, raw, split, storage, context, visit};
+        Authority::profiled_source_split(provider.kernel, raw, split, admission, &route,
+            [](void* context, AdaptiveSplitResult&& child)
+            {
+                using adaptive_detail::NativeAdaptiveKeyCodec;
+                auto& binding = *static_cast<Route*>(context);
+                const auto& original = binding.original;
+                const auto& source = binding.source;
+                const auto replace = [](AdaptiveBytes& field, std::span<const char> value)
+                {
+                    if (field.size() != value.size())
+                        throw std::invalid_argument("Mixed source split changed its canonical key extent.");
+                    std::copy(value.begin(), value.end(), field.begin());
+                };
+                if (child.family.parent.key != original.key || child.children.size() != child.family.children.size())
+                    throw std::invalid_argument("Mixed source split has foreign original child membership.");
+                child.family.parent.key.region = source.key.region;
+                child.family.parent.join_recipe = source.join_recipe;
+                replace(child.family.parent.parent_family, source.parent_family);
+                Writer key;
+                binding.storage.owner->reserve(key.data, child.family.key.size());
+                key.word(0x534646414d363031ULL);
+                key.word(static_cast<std::uint64_t>(binding.split));
+                NativeAdaptiveKeyCodec::write(key, source.key);
+                replace(child.family.key, key.data);
+                for (std::size_t i = 0; i < child.children.size(); ++i)
+                {
+                    auto& row = child.children[i];
+                    auto& saved = child.family.children[i];
+                    if (row.key.region != original.key.region || row.key != saved)
+                        throw std::invalid_argument("Mixed source split changed an original child key.");
+                    saved.region = row.key.region = source.key.region;
+                    row.join_recipe = source.join_recipe;
+                    replace(row.parent_family, key.data);
+                }
+                if (child.family.children.empty())
+                    throw std::invalid_argument("Mixed source split returned no original children.");
+                const auto& anchor = *std::min_element(child.family.children.begin(), child.family.children.end());
+                const auto encoded = NativeAdaptiveKeyCodec::encode(anchor, binding.storage);
+                replace(child.family.anchor, encoded);
+                binding.visit(binding.context, std::move(child));
+            });
+    }
     std::vector<AdaptiveFamily> ancestry_families(const AdaptiveLeaf& leaf) const override
     {
         const auto& provider = route(leaf);
@@ -811,17 +1292,25 @@ public:
         return result;
     }
 };
-} // namespace
 AdaptiveBootstrap detach_static_participant(const MultiRegionMesh::Region& region, std::uint64_t root,
     std::uint64_t physical_region, std::uint64_t material, std::span<const std::uint64_t> owned, AdaptiveBytes domain)
 {
     AdaptiveBootstrap result;
-    result.kernel = adaptive_detail::NativeKernelAuthority::create<StaticKernel>(root, physical_region, material);
-    if (owned.empty())
-        return result;
-    auto selected = selected_native(region, owned);
     NativeFragmentCache cache;
-    auto recipe = extract_native_fragment(selected, cache);
+    std::shared_ptr<const NativeFragmentDescriptor> recipe;
+    const bool procedural = std::holds_alternative<CartesianRegion>(region) ||
+        std::holds_alternative<NativeIsoRegion<OrthogonalCartesian3D>>(region) ||
+        std::holds_alternative<NativeIsoRegion<SemiStructuredXY_Z>>(region) ||
+        std::holds_alternative<ExtrudedRegion>(region);
+    // An initially empty participant can later receive original ordinals
+    // during migration. Its closed root is the same detached procedural
+    // descriptor from which nonempty ranks construct their leaves.
+    if (procedural)
+        recipe = extract_native_fragment(region, cache);
+    else if (!owned.empty())
+        recipe = extract_native_fragment(selected_native(region, owned), cache);
+    result.kernel =
+        adaptive_detail::NativeKernelAuthority::create<StaticKernel>(root, physical_region, material, recipe);
     std::set<std::uint64_t> unique;
     for (auto cell : owned)
     {

@@ -180,6 +180,25 @@ struct CartesianBlockName
 class CartesianKernel final : public AdaptiveProviderKernel
 {
     AMRGrid grid_;
+    void write_surface_key(adaptive_detail::Writer& writer, const AdaptiveLeaf& leaf,
+        const CartesianCellAncestry& cell, std::size_t axis, ID plane) const
+    {
+        unsigned level = cell.level;
+        while (level && plane % 2 == 0)
+        {
+            plane /= 2;
+            --level;
+        }
+        writer.word(0x5346434152543631ULL);
+        writer.bytes(leaf.domain);
+        writer.word(grid_.region_id);
+        writer.word(axis);
+        writer.word(level);
+        writer.word(plane);
+        for (std::size_t a = 0; a < 3; ++a)
+            if (a != axis)
+                writer.word(cell.index[a] / scale(cell.level - level));
+    }
 
 public:
     explicit CartesianKernel(AMRGrid grid) : grid_(std::move(grid)) { validate_grid(grid_); }
@@ -200,7 +219,8 @@ public:
     std::size_t native_source_face_count(const AdaptiveLeaf&) const noexcept { return 6; }
     AdaptiveCellMetrics validate_native_source(const AdaptiveLeaf& leaf, const NativeFragmentRecord& fragment,
         const geometry_detail::NativeConstructionAdmission& admission,
-        std::span<adaptive_detail::NativeKernelSourceFace> routes) const
+        std::span<adaptive_detail::NativeKernelSourceFace> routes, void* context = nullptr,
+        adaptive_detail::NativeKernelAuthority::SupportVisit support = nullptr) const
     {
         const auto& cell = ancestry(grid_, leaf.key);
         if (routes.size() != 6 || leaf.provider != AdaptiveProviderKind::Cartesian || leaf.material != grid_.material_id ||
@@ -317,6 +337,23 @@ public:
                     v.routes[surface] = {surface, face, outward};
                 }
             });
+        if (support)
+        {
+            const auto scratch = geometry_detail::native_constructor_storage(admission);
+            adaptive_detail::Writer writer;
+            scratch.owner->reserve(writer.data, capacity_add(64, leaf.domain.size()));
+            for (std::size_t surface = 0; surface < routes.size(); ++surface)
+            {
+                const auto axis = surface / 2;
+                const auto boundary = cell.index[axis] + surface % 2;
+                const auto domain_cells = mul(mul(grid_.root_blocks[axis], grid_.block_cells[axis]), scale(cell.level));
+                const bool wrap = grid_.periodic[axis] && boundary == domain_cells;
+                const bool exterior = !grid_.periodic[axis] && (boundary == 0 || boundary == domain_cells);
+                writer.data.clear();
+                write_surface_key(writer, leaf, cell, axis, wrap ? 0 : boundary);
+                support(context, surface, writer.data, exterior);
+            }
+        }
         return metrics;
     }
     void validate(const AdaptiveLeaf& leaf) const override
@@ -519,26 +556,12 @@ public:
                 from[axis] = root_upper[axis];
                 surface.authority_image = PLIC::displacement<ArithmeticMode::Ordinary>(from, lower);
             }
-            unsigned level = cell.level;
-            while (level && plane % 2 == 0)
-            {
-                plane /= 2;
-                --level;
-            }
             adaptive_detail::Writer w;
             const auto key_capacity = capacity_add(64, leaf.domain.size());
             w.data.reserve(key_capacity);
             if (bounded_capacity && w.data.capacity() != key_capacity)
                 throw std::invalid_argument("Cartesian surface key capacity differs from admission.");
-            w.word(0x5346434152543631ULL);
-            w.bytes(leaf.domain);
-            w.word(grid_.region_id);
-            w.word(axis);
-            w.word(level);
-            w.word(plane);
-            for (std::size_t a = 0; a < 3; ++a)
-                if (a != axis)
-                    w.word(cell.index[a] / scale(cell.level - level));
+            write_surface_key(w, leaf, cell, axis, plane);
             surface.key = std::move(w.data);
             surface.exterior = !grid_.periodic[axis] && (boundary == 0 || boundary == domain_cells);
             if (surface.exterior)

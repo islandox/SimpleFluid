@@ -209,6 +209,8 @@ ConvexGeometryPtr<Mode> ConvexCellGeometry<Mode>::from_dynamic(DynamicConvexGeom
     details::require_mode(geometry->arithmetic_mode(), Mode);
     details::Operation scope(geometry->impl_->limits);
     details::active_work->charge(1, sizeof(ConvexCellGeometry));
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        details::ordinary_kernel::NativeSplitCppProfile::separately_controlled<ConvexCellGeometry>();
     return ConvexGeometryPtr<Mode>(new ConvexCellGeometry(std::move(geometry)));
 }
 template<ArithmeticMode Mode>

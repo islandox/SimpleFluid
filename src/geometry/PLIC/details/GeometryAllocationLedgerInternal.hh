@@ -409,7 +409,11 @@ public:
     { return tracker_ ? tracker_->state : nullptr; }
     [[nodiscard]] T* allocate(std::size_t count)
     {
-        if (!tracker_ || !tracker_->state) return std::allocator<T>{}.allocate(count);
+        if (!tracker_ || !tracker_->state)
+        {
+            details::ordinary_kernel::NativeSplitCppProfile::request(count, sizeof(T));
+            return std::allocator<T>{}.allocate(count);
+        }
         constexpr auto alignment = std::max(alignof(T), alignof(NativeLedgerAllocationTracker::Allocation));
         constexpr auto prefix = (sizeof(NativeLedgerAllocationTracker::Allocation) + alignment - 1) / alignment * alignment;
         const auto bytes = allocation_detail::add(prefix, allocation_detail::product(count, sizeof(T)));

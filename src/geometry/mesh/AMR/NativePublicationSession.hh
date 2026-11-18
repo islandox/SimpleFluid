@@ -8,6 +8,8 @@
 #include "geometry/mesh/AMR/NativePublicationViewData.hh"
 #include "geometry/mesh/NativeFragmentAccess.hh"
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <mutex>
 namespace SimpleFluid::Meshes::AMR
 {
@@ -218,7 +220,7 @@ struct SIMPLEFLUID_LOCAL NativePublicationCache
     mutable std::mutex mutex;
     std::shared_ptr<const NativePublicationIndexes> indexes;
     std::shared_ptr<const NativePublicationReceipt> receipt;
-    std::uint64_t revision = 0;
+    std::uint64_t revision = 0, last_issuance = 0;
     const NativePublicationOperation* commit_token = nullptr;
     std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> allocation;
 };
@@ -240,6 +242,9 @@ struct SIMPLEFLUID_LOCAL NativePublicationInputs
     std::shared_ptr<const NativeSourceCoverage> source_coverage;
     NativePublicationSourceObservations fixed_observations;
     std::shared_ptr<const void> ownership_owner;
+    std::array<std::uint64_t, 2> lineage{};
+    std::shared_ptr<std::atomic<std::uint64_t>> lineage_clock;
+    std::shared_ptr<const geometry_detail::NativeAllocationEnvelope> lineage_clock_allocation;
 };
 struct NativeDirectoryLookup;
 class NativeSourceCoverage;
@@ -319,8 +324,7 @@ public:
     /** B calls this after building all output arrays, native providers, actual
      * map and partition. Stage can throw; commit after collective agreement is
      * a no-throw transfer into the source cache. */
-    void stage_result(std::shared_ptr<NativePublicationViewData>, Teuchos::RCP<const DefaultTpetraTypes::map_type>,
-        std::uint64_t collective_identity);
+    void stage_result(std::shared_ptr<NativePublicationViewData>, Teuchos::RCP<const DefaultTpetraTypes::map_type>);
     void commit() noexcept;
     [[nodiscard]] AdaptiveNativePublicationView view() const;
     [[nodiscard]] static bool receipt_matches(const NativePublicationInputs&,
@@ -330,6 +334,7 @@ private:
     friend class NativePublicationOperation;
     friend class NativePublicationExchange;
     friend class NativeSparseAccess;
+    friend class ::SimpleFluid::geometry_detail::NativePartitionAccess;
     void commit_locked() noexcept;
     [[nodiscard]] std::shared_ptr<const NativeSourceSubsetCoverage> retain_source_subset(
         const PLIC::details::OwnerManifestPair&, const PLIC::details::NativeOwnerReceipts&);

@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/PLIC/PlanarGeometryDeclarations.hh"
+#include "geometry/PLIC/details/NativeCellCodecAccess.hh"
 #include "geometry/PLIC/details/NativeCellGeometrySourceAccess.hh"
 #include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveGeometrySnapshot.hh"
@@ -18,6 +19,17 @@
 #include <set>
 namespace SimpleFluid::Meshes::AMR
 {
+namespace
+{
+using CellCodec = PLIC::details::NativeCellCodecAccess;
+
+void profile_convex_surface_copy(const AdaptiveSurface& value)
+{
+    CellCodec::charge_split_profile_request(value.key.size(), sizeof(char));
+    if (value.boundary.size() > std::string{}.capacity())
+        CellCodec::charge_split_profile_request(value.boundary.size() + 1, sizeof(char));
+}
+} // namespace
 AdaptiveLeaf AdaptiveProviderKernel::compact_native_materialize(const AdaptiveLeaf&) const
 {
     throw std::invalid_argument("Provider has no bounded compact native materialization.");
@@ -25,8 +37,11 @@ AdaptiveLeaf AdaptiveProviderKernel::compact_native_materialize(const AdaptiveLe
 AdaptiveBytes adaptive_family_key(const AdaptiveCellKey& parent, AdaptiveSplit split)
 {
     adaptive_detail::Writer w;
+    if (CellCodec::split_profile_active())
+        CellCodec::reserve_split_profile(w.data, 3 * sizeof(std::uint64_t) + encoded_adaptive_key_size(parent));
     w.word(0x534646414d363031ULL);
     w.word(std::uint64_t(split));
+    CellCodec::charge_split_profile_request(encoded_adaptive_key_size(parent), sizeof(char));
     w.bytes(encode_adaptive_key(parent));
     return std::move(w.data);
 }
@@ -145,6 +160,8 @@ class ConvexKernel final : public AdaptiveProviderKernel
     double quality_;
 
 public:
+    static constexpr bool native_source_publication_ready = true;
+    static constexpr bool native_source_explicit_body_intake = true;
     ConvexKernel(unsigned depth, double quality) : depth_(depth), quality_(quality)
     {
         if (!depth || depth > 64 || !std::isfinite(quality) || quality < 0)
@@ -282,50 +299,119 @@ public:
             std::any_of(ancestry->path.begin(), ancestry->path.end(), [](auto child) { return child > 7; }) ||
             parent.revision == std::numeric_limits<std::uint64_t>::max())
             throw std::invalid_argument("Unsupported or depth-limited convex split.");
+        if (CellCodec::split_profile_active())
+        {
+            CellCodec::charge_split_profile_request(parent.surfaces.size(), sizeof(AdaptiveSurface));
+            for (const auto& side : parent.surfaces)
+                profile_convex_surface_copy(side);
+        }
         const auto parent_surfaces = surfaces(parent);
         AdaptiveSplitResult result;
         result.family.key = adaptive_family_key(parent.key, kind);
+        if (CellCodec::split_profile_active())
+        {
+            CellCodec::charge_split_profile_request(ancestry->path.size(), sizeof(std::uint64_t));
+            CellCodec::charge_split_profile_request(parent.domain.size() + parent.parent_family.size(), sizeof(char));
+            CellCodec::charge_split_profile_request(parent.surfaces.size(), sizeof(AdaptiveSurface));
+            for (const auto& side : parent.surfaces)
+                profile_convex_surface_copy(side);
+        }
         result.family.parent = parent;
         result.family.split = kind;
         result.family.revision = parent.revision;
-        for (const auto& piece : geometry(parent)->split_aabb_midpoints(quality_))
+        const auto original = geometry(parent);
+        const auto pieces = CellCodec::split_profile_active()
+            ? CellCodec::profiled_octants(*original, quality_)
+            : original->split_aabb_midpoints(quality_);
+        if (CellCodec::split_profile_active())
+        {
+            CellCodec::reserve_split_profile(result.children, pieces.size());
+            CellCodec::reserve_split_profile(result.family.children, pieces.size());
+        }
+        for (const auto& piece : pieces)
         {
             AdaptiveLeaf child;
+            CellCodec::charge_split_profile_request(parent.domain.size(), sizeof(char));
             child.domain = parent.domain;
+            CellCodec::charge_split_profile_request(ancestry->path.size(), sizeof(std::uint64_t));
             child.key = parent.key;
-            std::get<ConvexCellAncestry>(child.key.ancestry).path.push_back(piece.octant);
+            auto& path = std::get<ConvexCellAncestry>(child.key.ancestry).path;
+            CellCodec::reserve_next_split_profile(path);
+            path.push_back(piece.octant);
             child.provider = parent.provider;
             child.material = parent.material;
             child.geometry = piece.geometry;
             child.revision = parent.revision + 1;
+            CellCodec::charge_split_profile_request(result.family.key.size(), sizeof(char));
             child.parent_family = result.family.key;
             child.work = parent.work;
+            if (CellCodec::split_profile_active())
+                CellCodec::reserve_split_profile(child.surfaces, piece.face_origins.size());
             for (std::size_t f = 0; f < piece.face_origins.size(); ++f)
             {
                 const auto origin = piece.face_origins[f];
-                AdaptiveSurface use;
-                if (origin.kind == PLIC::ConvexFaceOrigin::Kind::ParentFace)
-                    use = parent_surfaces.at(origin.index);
-                else
+                auto use = [&]
                 {
+                    if (origin.kind == PLIC::ConvexFaceOrigin::Kind::ParentFace)
+                    {
+                        const auto& inherited = parent_surfaces.at(origin.index);
+                        if (CellCodec::split_profile_active())
+                            profile_convex_surface_copy(inherited);
+                        return AdaptiveSurface(inherited);
+                    }
+                    AdaptiveSurface cut;
                     adaptive_detail::Writer w;
+                    if (CellCodec::split_profile_active())
+                        CellCodec::reserve_split_profile(w.data, 3 * sizeof(std::uint64_t) + encoded_adaptive_key_size(parent.key));
                     w.word(0x5346435554363031ULL);
+                    CellCodec::charge_split_profile_request(encoded_adaptive_key_size(parent.key), sizeof(char));
                     w.bytes(encode_adaptive_key(parent.key));
                     w.word(origin.index);
-                    use.key = std::move(w.data);
-                    use.orientation = (piece.octant & (1U << origin.index)) ? -1 : 1;
-                }
-                use.geometry = piece.geometry->face_geometry(f);
+                    cut.key = std::move(w.data);
+                    cut.orientation = (piece.octant & (1U << origin.index)) ? -1 : 1;
+                    return cut;
+                }();
+                use.geometry = CellCodec::split_profile_active()
+                    ? PLIC::details::NativePlanarOwnerAccess::cell_face(*piece.geometry, f, CellCodec::split_profile_admission())
+                    : piece.geometry->face_geometry(f);
                 child.surfaces.push_back(std::move(use));
             }
+            CellCodec::reserve_next_split_profile(result.family.children);
+            CellCodec::charge_split_profile_request(path.size(), sizeof(std::uint64_t));
             result.family.children.push_back(child.key);
+            CellCodec::reserve_next_split_profile(result.children);
             result.children.push_back(std::move(child));
         }
         if (result.children.empty())
             throw std::invalid_argument("Actual convex split has no positive child.");
-        result.family.anchor =
-            encode_adaptive_key(*std::min_element(result.family.children.begin(), result.family.children.end()));
+        const auto& anchor = *std::min_element(result.family.children.begin(), result.family.children.end());
+        CellCodec::charge_split_profile_request(encoded_adaptive_key_size(anchor), sizeof(char));
+        result.family.anchor = encode_adaptive_key(anchor);
         return result;
+    }
+    void profiled_source_split(const AdaptiveLeaf& leaf, AdaptiveSplit split,
+        const geometry_detail::NativeConstructionAdmission& admission, void* context,
+        adaptive_detail::NativeKernelAuthority::SplitVisit visit) const
+    {
+        struct Build
+        {
+            const ConvexKernel& kernel;
+            const AdaptiveLeaf& leaf;
+            AdaptiveSplit split;
+            void* context;
+            adaptive_detail::NativeKernelAuthority::SplitVisit visit;
+        } build{*this, leaf, split, context, visit};
+        CellCodec::with_split_profile(admission, &build, [](void* raw)
+        {
+            auto& values = *static_cast<Build*>(raw);
+            auto subdivided = values.kernel.split(values.leaf, values.split);
+            values.visit(values.context, std::move(subdivided));
+        });
+    }
+    void validate_profiled_source_parent(
+        const AdaptiveLeaf& leaf, const geometry_detail::NativeConstructionAdmission& admission) const
+    {
+        (void) prepare_native_source(leaf, admission);
     }
 };
 } // namespace

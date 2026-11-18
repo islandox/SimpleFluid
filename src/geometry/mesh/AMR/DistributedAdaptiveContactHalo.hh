@@ -294,6 +294,7 @@ public:
      * Synchronous and local. The callback must keep the halo quiescent. */
     void visit_closed_contacts(const AdaptiveCellKey&, const ContactWitnessVisitor&) const;
     [[nodiscard]] const std::shared_ptr<const AdaptiveSubfaceSnapshot>& subface_snapshot() const;
+    [[nodiscard]] std::uint64_t transaction_watermark() const noexcept;
     /** Freeze after closure with the pinned layout or a hierarchy-issued
      * transition that supplies all replacement leaf pages. */
     [[nodiscard]] std::shared_ptr<const AdaptiveContactSnapshot> seal_contacts(

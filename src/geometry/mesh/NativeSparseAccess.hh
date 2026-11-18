@@ -5,6 +5,7 @@
 #include "geometry/mesh/AMR/NativePublicationSession.hh"
 #include "geometry/mesh/NativeSparseFragments.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
+#include <optional>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 class NativeSparseAssembler;
@@ -41,6 +42,9 @@ public:
         PLIC::details::GeometryOwnerGraphEditor&, bool, PLIC::details::NativeGeometryAccounting*);
     [[nodiscard]] static bool visit_source_provider(
         const std::shared_ptr<const ExplicitRegionProvider>&, const geometry_detail::NativeConstructorOwnerSink&);
+    /** Only the actual admitted sparse mesh and index can name an issuance. */
+    [[nodiscard]] static std::optional<NativeSparseProof> output_provenance(
+        const std::shared_ptr<const MultiRegionMesh>&);
 
 private:
     friend class NativeSparseAssembler;

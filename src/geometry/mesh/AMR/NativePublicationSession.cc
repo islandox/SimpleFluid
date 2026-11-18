@@ -1,10 +1,12 @@
 #include "geometry/mesh/AMR/NativePublicationSession.hh"
+#include "geometry/PLIC/details/ExtrudedConstructionAccess.hh"
 #include "geometry/PLIC/details/GeometryIdentityAccess.hh"
 #include "geometry/PLIC/details/NativePlanarOwnerAccess.hh"
 #include "geometry/mesh/AMR/AdaptiveBoundaryProof.hh"
 #include "geometry/mesh/AMR/AdaptivePipelineAudit.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveIdentityBudget.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/NativePublicationOwnerGraph.hh"
 #include "geometry/mesh/AMR/NativePublicationOutputGraph.hh"
 #include "geometry/mesh/AMR/NativeSourceCoverage.hh"
@@ -15,7 +17,6 @@
 #include "geometry/mesh/NativeSparseAccess.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
-#include <atomic>
 #include <bit>
 #include <limits>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
@@ -42,23 +43,6 @@ bool same_double(double a, double b) noexcept
 {
     return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b);
 }
-std::uint64_t issuance(const Teuchos::Comm<int>& comm)
-{
-    static std::atomic<std::uint64_t> next{1};
-    std::uint64_t value = 0;
-    collective(comm,
-        [&]
-        {
-            if (comm.getRank() == 0)
-            {
-                value = next.fetch_add(1);
-                if (!value || value == std::numeric_limits<std::uint64_t>::max())
-                    throw std::invalid_argument("Native ticket issuance overflow.");
-            }
-        });
-    ::SimpleFluid::owner_packet_broadcast_words(comm, 0, std::span(&value, 1));
-    return value;
-}
 Face native_face(const MultiRegionMesh::Region& region, std::uint64_t face,
     const geometry_detail::NativeConstructorStorageOwner& scratch)
 {
@@ -70,6 +54,9 @@ Face native_face(const MultiRegionMesh::Region& region, std::uint64_t face,
             if constexpr (std::is_same_v<std::decay_t<decltype(provider)>, DistributedExplicitRegion>)
                 if (const auto source = NativeSparseAccess::source_provider_geometry(geometry))
                     return Planar::cell_face(*source, face, admission);
+            if constexpr (std::is_same_v<std::decay_t<decltype(provider)>, ExtrudedRegion>)
+                if (const auto& construction = geometry.construction())
+                    return PLIC::details::ExtrudedConstructionAccess::face(*construction, face, admission);
             if constexpr (requires { geometry.certified_face_geometry(face); })
                 if (auto exact = geometry.certified_face_geometry(face))
                     return exact;
@@ -190,6 +177,7 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::copy_cache(
         // Immutable values are shared; the new controller has its own mutex,
         // revision/token and current-result receipt. No predecessor is held.
         cache->indexes = source->indexes;
+        cache->last_issuance = source->last_issuance;
     }
     return cache;
 }
@@ -222,17 +210,22 @@ NativePublicationSession::NativePublicationSession(NativePublicationInputs input
 {
     if (inputs_.comm.is_null())
         throw std::invalid_argument("Incomplete private native publication communicator.");
+    std::uint64_t accepted_issuance = 0;
     collective(*inputs_.comm,
         [&]
         {
             if (!inputs_.layout || !inputs_.kernel || !inputs_.cache || !inputs_.subfaces)
                 throw std::invalid_argument("Incomplete private native publication inputs.");
+            const auto& lineage = inputs_.lineage_clock_allocation;
+            if (!lineage || !lineage->authentic_owner(lineage) || !lineage->matches(inputs_.lineage_clock))
+                throw std::invalid_argument("Native publication lacks its exact lineage clock control.");
             if (accounting_ && accounting_->admission().state() != admission_.state())
                 throw std::invalid_argument("Native session has a foreign operation accounting domain.");
             {
                 const std::lock_guard lock(inputs_.cache->mutex);
                 indexes_ = inputs_.cache->indexes;
                 cache_revision_ = inputs_.cache->revision;
+                accepted_issuance = inputs_.cache->last_issuance;
             }
             if (!indexes_)
             {
@@ -246,7 +239,8 @@ NativePublicationSession::NativePublicationSession(NativePublicationInputs input
             if (indexes_->owned_keys.size() != inputs_.layout->size())
                 throw std::invalid_argument("Native source indexes have stale owned key membership.");
         });
-    issuance_ = issuance(*inputs_.comm);
+    issuance_ = ::SimpleFluid::owner_packet_issue_after(
+        *inputs_.comm, *inputs_.lineage_clock, accepted_issuance, inputs_.lineage);
 }
 std::shared_ptr<const NativeSourceSubsetCoverage> NativePublicationSession::retain_source_subset(
     const PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>& geometry)
@@ -459,6 +453,9 @@ void NativePublicationSession::recheck(const DistributedAdaptiveHierarchy& hiera
         !same_control(current.observation.topology_identity, inputs_.observation.topology_identity) ||
         !same_control(current.observation.partition_identity, inputs_.observation.partition_identity) ||
         !same_control(current.ownership_owner, inputs_.ownership_owner) ||
+        current.lineage != inputs_.lineage ||
+        !same_control(current.lineage_clock, inputs_.lineage_clock) ||
+        !same_control(current.lineage_clock_allocation, inputs_.lineage_clock_allocation) ||
         !current.comm.shares_resource(inputs_.comm) || current.comm.getRawPtr() != inputs_.comm.getRawPtr() ||
         geometry_construction_controls() != inputs_.subfaces->controls())
         throw std::invalid_argument("Native source changed during publication.");
@@ -496,15 +493,22 @@ std::shared_ptr<const NativeCellSourceProof> NativePublicationSession::source_im
     if (!controls.supported)
         throw std::invalid_argument("Unsupported native source construction controls.");
     const auto authority = NativeKernelAuthority::observation(inputs_.kernel).lock();
+    std::shared_ptr<const NativeCellSourceProof> rebound_from;
     if (const auto previous = indexes_->find(leaf.key))
     {
         const auto& proof = previous->source;
         if (proof && proof->allocation_ && proof->allocation_->authentic_owner(proof->allocation_) &&
-            proof->allocation_->matches(proof) && proof->binding_->matches(leaf) && proof->controls_ == controls &&
+            proof->allocation_->matches(proof) && proof->controls_ == controls &&
             same_control(proof->authority_.lock(), authority) &&
             ((remote_ticket && proof->ticket_ == *remote_ticket) ||
                 (!remote_ticket && proof->ticket_.issuer == inputs_.comm->getRank())))
-            return proof;
+        {
+            if (proof->binding_->matches(leaf)) return proof;
+            if (!remote_ticket && proof->fragment_ && proof->binding_->matches(proof->source()) &&
+                product_native_repack_candidate(proof->source(), leaf) &&
+                NativeKernelAuthority::can_rebind_source(inputs_.kernel, proof->source(), leaf))
+                rebound_from = proof;
+        }
     }
     if (accounting_ && !NativeKernelAuthority::supports_source_validation(inputs_.kernel, leaf))
         throw std::invalid_argument("Native operation requires an admitted source verifier for this exact leaf.");
@@ -534,26 +538,37 @@ std::shared_ptr<const NativeCellSourceProof> NativePublicationSession::source_im
         else
         {
             const auto prior_fragment = find_fragment(*indexes_, leaf.native_recipe);
-            proof.fragment_ = prior_fragment && prior_fragment->controls == controls
-                                  ? prior_fragment->fragment
-                                  : NativeFragmentAccess::materialize(leaf.native_recipe, admission_);
+            if (prior_fragment && prior_fragment->controls == controls)
+                proof.fragment_ = prior_fragment->fragment;
+            else if (rebound_from)
+                proof.fragment_ = NativeFragmentAccess::materialize_product_view(leaf.native_recipe,
+                    *rebound_from->source().native_recipe, *rebound_from->fragment_, admission_);
+            else
+                proof.fragment_ = NativeFragmentAccess::materialize(leaf.native_recipe, admission_);
         }
         if (numerical_verifier)
         {
             const auto& allocation = proof.fragment_->allocation();
             if (!allocation || !allocation->authentic_owner(allocation) || !allocation->matches(proof.fragment_))
                 throw std::invalid_argument("Native source validator has a foreign fragment control.");
-            const auto count = NativeKernelAuthority::source_face_count(inputs_.kernel, leaf);
-            proof.metadata_.owner->reserve(proof.faces_, count);
-            proof.faces_.resize(count);
-            const auto metrics =
-                NativeKernelAuthority::validate_source(inputs_.kernel, leaf, *proof.fragment_, admission_, proof.faces_);
+            bool rebound = false;
+            if (rebound_from)
+            {
+                const auto count = NativeKernelAuthority::source_face_count(inputs_.kernel, leaf, *proof.fragment_);
+                proof.metadata_.owner->reserve(proof.faces_, count);
+                proof.faces_.resize(count);
+                rebound = NativeKernelAuthority::rebind_source(inputs_.kernel, rebound_from->source(),
+                    *rebound_from->fragment_, rebound_from->faces_, leaf, *proof.fragment_, proof.faces_, admission_);
+                if (!rebound) proof.metadata_.owner->reset_buffer(proof.faces_);
+            }
+            const auto metrics = rebound ? rebound_from->metrics_ : NativeKernelAuthority::collect_source(
+                inputs_.kernel, leaf, *proof.fragment_, admission_, proof.metadata_, proof.faces_);
             if (leaf.provider == AdaptiveProviderKind::Polyhedral &&
                 (!same_double(metrics.volume, proof.metrics_.volume) ||
                     !std::equal(metrics.centroid.begin(), metrics.centroid.end(), proof.metrics_.centroid.begin(), same_double)))
                 throw std::invalid_argument("Native cell provider metrics differ from its verified original source.");
             proof.metrics_ = metrics;
-            for (std::size_t surface = 0; surface < count; ++surface)
+            for (std::size_t surface = 0; surface < proof.faces_.size(); ++surface)
             {
                 const auto& route = proof.faces_[surface];
                 if (route.surface != surface || (route.outward_sign != 1 && route.outward_sign != -1))
@@ -770,6 +785,7 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::edited(
     {
         const std::lock_guard lock(source->mutex);
         result->indexes = source->indexes;
+        result->last_issuance = source->last_issuance;
     }
     if (!result->indexes || edits.empty())
         return result;
@@ -789,6 +805,18 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::edited(
         if (const auto old = next.owner->find(edit.key))
         {
             const auto key = *old;
+            if (held && edit.leaf && old->source->binding().matches(old->source->source()) &&
+                product_native_repack_candidate(old->source->source(), *edit.leaf))
+            {
+                // This row remains an old-address source only. Current incidence
+                // can reuse it strictly through the exact source binding check.
+                if (!old->source->binding().matches(*edit.leaf) && old->incidence)
+                {
+                    const NativePublicationIndexRow detached{old->source, {}};
+                    next.owner->sources = editor.edit(next.owner->sources, key, &detached, true);
+                }
+                continue;
+            }
             edit_fragment(*next.owner, *old->source, false, admission);
             next.owner->sources = editor.edit(next.owner->sources, key, nullptr, true);
         }
@@ -797,7 +825,7 @@ std::shared_ptr<NativePublicationCache> NativePublicationSession::edited(
     return result;
 }
 void NativePublicationSession::stage_result(std::shared_ptr<NativePublicationViewData> result,
-    Teuchos::RCP<const DefaultTpetraTypes::map_type> map, std::uint64_t collective_identity)
+    Teuchos::RCP<const DefaultTpetraTypes::map_type> map)
 {
     if (!result || !result->payload || !result->payload->partition || !result->payload->mesh ||
         map.is_null() || map->getComm().getRawPtr() != inputs_.comm.getRawPtr() ||
@@ -805,10 +833,13 @@ void NativePublicationSession::stage_result(std::shared_ptr<NativePublicationVie
         !result->payload->partition->geometry_unchanged() || !result->payload->partition->geometry()->sparse_native() ||
         !result->payload->partition->plan().communicator().shares_resource(inputs_.comm) ||
         result->payload->partition->plan().communicator().getRawPtr() != inputs_.comm.getRawPtr() ||
-        !collective_identity || result->payload->partition->plan().collective_identity() != collective_identity ||
+        !issuance_ || result->payload->partition->plan().collective_identity() != issuance_ ||
         !result->payload->mesh->owned_cell_map().shares_resource(map) ||
         result->payload->mesh->owned_cell_map().getRawPtr() != map.getRawPtr())
         throw std::invalid_argument("Incomplete exact native publication result.");
+    const auto provenance = NativeSparseAccess::output_provenance(result->payload->partition->geometry());
+    if (!provenance || provenance->lineage != inputs_.lineage || provenance->publication != issuance_)
+        throw std::invalid_argument("Native publication result does not belong to its issuing session.");
     if (result->payload->owned.size() != inputs_.layout->size() ||
         result->payload->cell_begin != inputs_.cell_begin || !same_control(result->payload->remote.root_, indexes_->remote.root_) ||
         result->payload->keys.size() != inputs_.layout->size() + result->payload->remote.size())
@@ -853,7 +884,7 @@ void NativePublicationSession::stage_result(std::shared_ptr<NativePublicationVie
     value.source_native_geometry = inputs_.observation.native_geometry;
     value.source_ownership_address = inputs_.observation.partition_identity.get();
     value.output_geometry = result->payload->partition->geometry()->geometry_epoch();
-    value.transaction = collective_identity;
+    value.transaction = issuance_;
     value.cell_begin = inputs_.cell_begin;
     value.cells = inputs_.global_cells;
     value.faces = result->payload->partition->plan().global_faces();
@@ -866,10 +897,11 @@ void NativePublicationSession::stage_result(std::shared_ptr<NativePublicationVie
 void NativePublicationSession::commit_locked() noexcept
 {
     if (!result_ || !receipt_ || inputs_.cache->revision != cache_revision_ ||
-        cache_revision_ == std::numeric_limits<std::uint64_t>::max())
+        cache_revision_ == std::numeric_limits<std::uint64_t>::max() || issuance_ <= inputs_.cache->last_issuance)
         std::terminate();
     inputs_.cache->indexes = indexes_;
     inputs_.cache->receipt = receipt_;
+    inputs_.cache->last_issuance = issuance_;
     ++inputs_.cache->revision;
 }
 void NativePublicationSession::commit() noexcept
@@ -921,6 +953,9 @@ bool NativePublicationSession::receipt_matches(const NativePublicationInputs& in
         receipt->output_geometry != partition->geometry()->geometry_epoch() ||
         receipt->transaction != partition->plan().collective_identity() ||
         receipt->faces != partition->plan().global_faces() || receipt->nodes != partition->plan().global_nodes())
+        return false;
+    const auto provenance = NativeSparseAccess::output_provenance(partition->geometry());
+    if (!provenance || provenance->lineage != inputs.lineage || provenance->publication != receipt->transaction)
         return false;
     const auto result = receipt->result.lock();
     return receipt->view.matches_live(result) && result->payload && result->payload->owned.size() == inputs.layout->size() &&
